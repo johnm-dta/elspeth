@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Mapping
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Literal
@@ -12,6 +13,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, SecretBytes, ValidationInfo, field_validator, model_validator
 
 from elspeth.contracts.auth import AuthProviderType
+from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
 from elspeth.core.config import PayloadStoreSettings
 from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 from elspeth.telemetry.resource_identity import is_aws_ecs_name, is_aws_resource_label, is_aws_task_revision, is_release_identity
@@ -20,6 +22,7 @@ from elspeth.web.auth.urls import (
     validate_oidc_browser_origins,
     validate_oidc_issuer,
 )
+from elspeth.web.plugin_policy.profiles import WebLLMProfileSettings, validate_profile_alias
 from elspeth.web.validation import (
     SERVER_SECRET_RESERVED_PREFIX,
     is_reserved_server_secret_name,
@@ -235,6 +238,18 @@ class WebSettings(BaseModel):
         "AZURE_API_KEY",
         "AZURE_CONTENT_SAFETY_KEY",
     )
+    # Universal web plugin policy.  These user-facing Pydantic values are
+    # converted immediately to RuntimeWebPluginConfig before consumption.
+    plugin_allowlist: tuple[str, ...] = ()
+    plugin_preferences: Mapping[PluginCapability, tuple[str, ...]] = Field(default_factory=dict)
+    plugin_control_modes: Mapping[PluginCapability, ControlMode] = Field(
+        default_factory=lambda: {
+            PluginCapability.PROMPT_SHIELD: ControlMode.RECOMMEND,
+            PluginCapability.CONTENT_SAFETY: ControlMode.RECOMMEND,
+        }
+    )
+    llm_profiles: Mapping[str, WebLLMProfileSettings] = Field(default_factory=dict)
+    tutorial_llm_profile: str | None = None
     orphan_run_max_age_seconds: int = Field(default=3600, ge=60)
     orphan_run_check_interval_seconds: int = Field(default=300, ge=30)
 
@@ -526,6 +541,21 @@ class WebSettings(BaseModel):
         if reserved:
             raise ValueError(f"server_secret_allowlist entries must not start with {SERVER_SECRET_RESERVED_PREFIX}: {sorted(reserved)}")
         return validated
+
+    @field_validator("llm_profiles")
+    @classmethod
+    def _validate_llm_profile_aliases(cls, value: Mapping[str, WebLLMProfileSettings]) -> Mapping[str, WebLLMProfileSettings]:
+        for alias in value:
+            validate_profile_alias(alias)
+        return value
+
+    @model_validator(mode="after")
+    def _validate_tutorial_profile_alias(self) -> WebSettings:
+        if self.tutorial_llm_profile is not None:
+            validate_profile_alias(self.tutorial_llm_profile)
+            if self.tutorial_llm_profile not in self.llm_profiles:
+                raise ValueError("tutorial_llm_profile must name a configured LLM profile")
+        return self
 
     @field_validator("operator_telemetry_service_name")
     @classmethod

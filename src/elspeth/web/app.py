@@ -635,7 +635,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 # Fields that accept JSON-encoded collection values from environment variables.
 # Add any new tuple-typed WebSettings fields here so _settings_from_env()
 # JSON-decodes them.  Scalar fields (str, int, float, Path) are handled by Pydantic.
-_JSON_COLLECTION_FIELDS: frozenset[str] = frozenset({"cors_origins", "server_secret_allowlist", "oidc_authorization_allowed_origins"})
+_JSON_COLLECTION_FIELDS: frozenset[str] = frozenset(
+    {"cors_origins", "server_secret_allowlist", "oidc_authorization_allowed_origins", "plugin_allowlist"}
+)
+_JSON_OBJECT_FIELDS: frozenset[str] = frozenset({"plugin_preferences", "plugin_control_modes", "llm_profiles"})
 
 
 def _settings_from_env() -> WebSettings:
@@ -660,7 +663,7 @@ def _settings_from_env() -> WebSettings:
             field_name = key[len(prefix) :].lower()
             if field_name not in WebSettings.model_fields:
                 raise RuntimeError(f"Unknown ELSPETH_WEB__ setting: {key}")
-            if field_name in _JSON_COLLECTION_FIELDS:
+            if field_name in _JSON_COLLECTION_FIELDS | _JSON_OBJECT_FIELDS:
                 # These fields are tuple-typed on WebSettings; the env-var
                 # convention is a JSON-encoded array. A non-JSON value cannot
                 # become a valid collection, so falling back to the raw string
@@ -671,10 +674,16 @@ def _settings_from_env() -> WebSettings:
                 try:
                     parsed = json.loads(value)
                 except (json.JSONDecodeError, ValueError):
-                    raise RuntimeError(
-                        f"ELSPETH_WEB__{field_name.upper()} must be valid JSON array for collection-typed settings."
-                    ) from None
-                kwargs[field_name] = tuple(parsed) if isinstance(parsed, list) else parsed
+                    expected = "array" if field_name in _JSON_COLLECTION_FIELDS else "object"
+                    raise RuntimeError(f"ELSPETH_WEB__{field_name.upper()} must be valid JSON {expected}.") from None
+                if field_name in _JSON_COLLECTION_FIELDS:
+                    if not isinstance(parsed, list):
+                        raise RuntimeError(f"ELSPETH_WEB__{field_name.upper()} must be valid JSON array.")
+                    kwargs[field_name] = tuple(parsed)
+                else:
+                    if not isinstance(parsed, dict):
+                        raise RuntimeError(f"ELSPETH_WEB__{field_name.upper()} must be valid JSON object.")
+                    kwargs[field_name] = parsed
             elif value == "null":
                 kwargs[field_name] = None
             else:
@@ -685,7 +694,17 @@ def _settings_from_env() -> WebSettings:
     # Mypy can't see through Pydantic's pre-validators, so the **kwargs
     # widening is reported as a type error here. The cast is safe because
     # Pydantic raises ``ValidationError`` on any mismatch at runtime.
-    return WebSettings(**kwargs)  # type: ignore[arg-type]
+    try:
+        return WebSettings(**kwargs)  # type: ignore[arg-type]
+    except ValidationError as error:
+        policy_fields = {"plugin_allowlist", "plugin_preferences", "plugin_control_modes", "llm_profiles", "tutorial_llm_profile"}
+        safe_paths = {
+            str(item) for detail in error.errors(include_input=False) for item in detail.get("loc", ()) if isinstance(item, (str, int))
+        }
+        if policy_fields & safe_paths:
+            rendered_paths = ", ".join(sorted(safe_paths))
+            raise RuntimeError(f"Invalid ELSPETH_WEB__ plugin policy setting at: {rendered_paths}") from None
+        raise
 
 
 class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
@@ -991,6 +1010,15 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
 
     # --- Catalog ---
     app.state.catalog_service = create_catalog_service()
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+    from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
+    from elspeth.web.plugin_policy.profiles import RuntimeWebPluginConfig
+
+    app.state.runtime_web_plugin_config = RuntimeWebPluginConfig.from_settings(settings)
+    app.state.web_plugin_policy = compile_web_plugin_policy(
+        registry=get_shared_plugin_manager(),
+        settings=app.state.runtime_web_plugin_config,
+    )
     app.include_router(
         catalog_router,
         prefix="/api/catalog",

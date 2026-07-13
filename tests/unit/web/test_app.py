@@ -28,6 +28,7 @@ from structlog.testing import capture_logs
 
 import elspeth.web.app as app_module
 from elspeth.contracts import RunStatus
+from elspeth.contracts.plugin_capabilities import PluginCapability
 from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.web.app import (
@@ -1504,6 +1505,35 @@ class TestSettingsFromEnv:
         monkeypatch.setenv("ELSPETH_WEB__SERVER_SECRET_ALLOWLIST", '["MY_KEY"]')
         settings = _settings_from_env()
         assert settings.server_secret_allowlist == ("MY_KEY",)
+
+    def test_plugin_policy_mappings_from_json(self, monkeypatch) -> None:
+        monkeypatch.setenv("ELSPETH_WEB__PLUGIN_ALLOWLIST", '["sink:database"]')
+        monkeypatch.setenv("ELSPETH_WEB__PLUGIN_PREFERENCES", '{"prompt_shield": ["transform:azure_prompt_shield"]}')
+        monkeypatch.setenv("ELSPETH_WEB__PLUGIN_CONTROL_MODES", '{"prompt_shield": "recommend"}')
+        monkeypatch.setenv(
+            "ELSPETH_WEB__LLM_PROFILES",
+            '{"tutorial": {"provider": "bedrock", "model": "bedrock/anthropic.claude-3-haiku-20240307-v1:0"}}',
+        )
+        monkeypatch.setenv("ELSPETH_WEB__TUTORIAL_LLM_PROFILE", "tutorial")
+
+        settings = _settings_from_env()
+
+        assert settings.plugin_allowlist == ("sink:database",)
+        assert tuple(settings.plugin_preferences[PluginCapability.PROMPT_SHIELD]) == ("transform:azure_prompt_shield",)
+        assert settings.llm_profiles["tutorial"].provider == "bedrock"
+
+    def test_plugin_profile_env_error_does_not_echo_private_marker(self, monkeypatch) -> None:
+        marker = "PRIVATE_PROFILE_BINDING_MARKER"
+        monkeypatch.setenv(
+            "ELSPETH_WEB__LLM_PROFILES",
+            '{"tutorial": {"provider": "openrouter", "model": "openai/gpt-5-mini", '
+            f'"credential_scope": "server", "credential_ref": "{marker}", "base_url": "https://marker.invalid"}}',
+        )
+
+        with pytest.raises(RuntimeError) as exc_info:
+            _settings_from_env()
+
+        assert marker not in str(exc_info.value)
 
     def test_oidc_authorization_allowed_origins_from_json(self, monkeypatch) -> None:
         monkeypatch.setenv(

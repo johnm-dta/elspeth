@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from elspeth.plugins.infrastructure.manager import PluginManager
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.service import CatalogServiceImpl
 from elspeth.web.composer.state import (
     CompositionState,
@@ -30,10 +31,13 @@ from elspeth.web.composer.tools import (
     _execute_patch_source_options,
     _execute_set_source,
     _execute_set_source_from_blob,
-    execute_tool,
+)
+from elspeth.web.composer.tools import (
+    execute_tool as _execute_tool,
 )
 from elspeth.web.composer.tools._common import ToolContext
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 
 def _catalog() -> CatalogServiceImpl:
@@ -43,7 +47,28 @@ def _catalog() -> CatalogServiceImpl:
 
 
 def _ctx() -> ToolContext:
-    return ToolContext(catalog=_catalog())
+    catalog = _catalog()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return ToolContext(
+        catalog=PolicyCatalogView.for_trained_operator(catalog, snapshot),
+        plugin_snapshot=snapshot,
+    )
+
+
+def execute_tool(
+    tool_name: str,
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogServiceImpl,
+) -> Any:
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return _execute_tool(
+        tool_name,
+        arguments,
+        state,
+        PolicyCatalogView.for_trained_operator(catalog, snapshot),
+        plugin_snapshot=snapshot,
+    )
 
 
 def _empty_state() -> CompositionState:

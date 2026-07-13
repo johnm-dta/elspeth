@@ -232,6 +232,26 @@ async function installTutorialRoutes(
           composer_provider: "test",
           composer_reason: null,
           composer_missing_keys: [],
+          composer_timeout_seconds: 180,
+          tutorial_ready: true,
+          tutorial_reason: null,
+          plugin_policy_readiness: {
+            tutorial_ready: true,
+            rows: [
+              "policy_compilation",
+              "required_core",
+              "local_capability_configuration",
+              "live_health",
+              "tutorial_profile",
+              "tutorial_required_control_coverage",
+            ].map((id) => ({
+              id,
+              label: id,
+              status: "ok",
+              summary: "Ready for the tutorial fixture.",
+              detail: null,
+            })),
+          },
         },
       });
       return;

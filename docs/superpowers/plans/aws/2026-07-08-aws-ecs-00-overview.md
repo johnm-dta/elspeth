@@ -57,7 +57,7 @@ extras `postgres` and `aws`.
 | 13 | `…-13-cognito-authorization-origin.md` | Authorization code + S256 PKCE for the browser public client; exact operator-declared HTTPS authorization/token origin; explicit Cognito `client_id` access-token validation; one-use expiring callback transaction | 01 · shared signed-tier/Wardline verification baseline |
 | 14 | `…-14-cloudwatch-operator-telemetry.md` | Mandatory AWS web telemetry overlay over generic OTLP; delivery/resource/status hardening; web OTLP metrics; CloudWatch Agent, dashboards/alarms, and Landscape-correlated acceptance | 13 · shared signed-tier/Wardline verification baseline |
 | 15A | `…-15a-text-sink.md` | Strict resumable `sink:text`; completes CSV/JSON/text source/sink core; collision, rollback, artifact, catalog, and round-trip proof | shared signed-tier/Wardline verification baseline |
-| 15B | `…-15b-universal-web-plugin-policy.md` | Core-only web policy; kind-qualified allowlist; LLM/operator profiles; typed capabilities; one request snapshot across catalog, authoring, import, validation, runtime, frontend, readiness, and Landscape evidence; CLI unaffected | 15A · 05 · 08A · 09 · 11 · 14 |
+| 15B | `…-15b-universal-web-plugin-policy.md` | Core-only web policy; kind-qualified allowlist; LLM/operator profiles; typed capabilities; one request snapshot across catalog, authoring, import, validation, runtime, frontend, readiness, and Landscape epoch-23 evidence; five-configuration parity/property/AST acceptance seal; CLI unaffected | 15A · 05 · 08A · 09 · 11 · 14 |
 | 15C | `…-15c-bedrock-guardrail-shields.md` | Model-independent Bedrock prompt/content transforms; strict task-role `ApplyGuardrail`; opaque profiles; detect-only blocking; thin 15B integration; reusable live proof | 15B · 06 |
 
 ## Filigree execution graph
@@ -143,7 +143,12 @@ wait for later plugin registrations. `filigree plan elspeth-6343920a47
   and 14 are integrated; this makes it the integration owner for final
   readiness, guarded Landscape, telemetry, LLM/profile, and authoring-gate
   surfaces. Plan 15C starts after 15B and 06 and remains a thin Bedrock
-  implementation over the universal policy.
+  implementation over the universal policy. It registers through 15B's generic
+  capability/profile seams and must not reintroduce provider-specific web
+  enablement flags or a second availability path. Plan 10 consumes the sealed
+  15B operator contract from `docs/reference/configuration.md`, including the
+  restart requirement, tutorial launch recheck, and Landscape epoch-23
+  compatibility boundary.
   Plan 10 starts last, only after every implementation
   slice in 01–09, 11, 13–14, and 15A–15C is done; the Filigree edges enforce this. Its
   Task 0 records that clean integrated pre-Plan-10 SHA as the only eligible

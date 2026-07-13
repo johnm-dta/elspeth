@@ -37,6 +37,17 @@ never text-merges or independently reconstructs `uv.lock`.
 
 **Deviations:** the brief's `web` extra is `webui` in `pyproject.toml:152`; used throughout. The shared GHCR/ACR image's default (`--extra all`, `Dockerfile:52,60`) stays unchanged — Azure Container Apps' Ansible deploy pulls that image (`docs/runbooks/ansible-ubuntu-deployment.md:2271`) and needs its Azure plugin pack. Production extras become an opt-in `INSTALL_EXTRAS` build arg for a lean ECS image instead, matching the spec's `webui,llm,aws,postgres` example.
 
+**Plan 15B handoff:** bind the rollback baseline only after the complete 15B
+acceptance commit is present. The image must preserve the core-only default,
+kind-qualified optional allowlist, ordered capability preferences, opaque LLM
+profiles, tutorial readiness/typed-409 launch gate, and Landscape epoch-23
+`run_web_plugin_policy` evidence. ECS task configuration supplies the JSON
+`ELSPETH_WEB__PLUGIN_*` and `ELSPETH_WEB__LLM_PROFILES` values documented in
+`docs/reference/configuration.md`; changing them requires a new task rollout.
+The rollback candidate must understand epoch 23 and the same profile/policy
+schema. Do not qualify an epoch-22 image after the database has been recreated
+at epoch 23.
+
 **Global Constraints (spec §Packaging, §ECS Probe Wiring, §Local State And Auth, §Bedrock LLM Readiness):**
 - "a production install with only production extras, for example web, llm, aws, and postgres. Dev and test dependencies, including testcontainers, should not be required in the final runtime image."
 - "The existing non-root runtime user remains required. AWS credentials should be provided by ECS task roles and Secrets Manager injection, not baked into the image or command line."

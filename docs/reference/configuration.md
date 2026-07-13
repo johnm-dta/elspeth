@@ -91,11 +91,83 @@ Nested environment variables use double underscore: `ELSPETH_LANDSCAPE__URL`.
 
 ## Web Plugin Policy
 
-The web service applies an operator-owned plugin policy in addition to the
-pipeline schema above. `WebSettings.plugin_allowlist` authorizes optional web
-plugins; the built-in web plugins remain available without appearing in that
-allowlist. Kind-qualified IDs such as `source:csv`, `transform:llm`, and
-`sink:database` prevent same-name plugins from being confused across roles.
+The web service compiles one operator-owned plugin policy at startup. Its
+required authorization set is:
+
+- sources: `source:csv`, `source:json`, `source:text`
+- transforms: `transform:field_mapper`, `transform:llm`,
+  `transform:web_scrape`
+- sinks: `sink:csv`, `sink:json`, `sink:text`
+
+The operator-profiled LLM is request-available only when that principal has at
+least one usable configured profile. Missing LLM or tutorial credentials do
+not hide CSV/JSON/text authoring.
+
+Authorize every optional web plugin with its kind-qualified ID in
+`plugin_allowlist`. An installed plugin that is absent from this list remains
+available to CLI and batch runs but is hidden from every web discovery,
+authoring, import, validation, and execution surface.
+
+### Environment configuration
+
+Collection and mapping values use JSON. This example enables the Azure prompt
+and output controls, requires both controls, and selects a keyless Bedrock
+profile for the tutorial:
+
+```bash
+ELSPETH_WEB__PLUGIN_ALLOWLIST='["transform:azure_prompt_shield","transform:azure_content_safety"]'
+ELSPETH_WEB__PLUGIN_PREFERENCES='{"prompt_shield":["transform:azure_prompt_shield"],"content_safety":["transform:azure_content_safety"]}'
+ELSPETH_WEB__PLUGIN_CONTROL_MODES='{"prompt_shield":"required","content_safety":"required"}'
+ELSPETH_WEB__LLM_PROFILES='{"tutorial":{"provider":"bedrock","model":"bedrock/anthropic.claude-3-haiku-20240307-v1:0","region_name":"ap-southeast-2"}}'
+ELSPETH_WEB__TUTORIAL_LLM_PROFILE='tutorial'
+```
+
+Preference arrays are ordered. When a capability has multiple authorized
+implementations, list every implementation exactly once in the desired order.
+`required` mode blocks a pipeline unless the selected implementation is
+available and covers every applicable path. `recommend` mode keeps the
+control advisory.
+
+An OpenRouter or Azure LLM profile must declare `credential_scope` and an
+operator-owned `credential_ref`. A server-scoped profile resolves only through
+the server store; a user-scoped profile resolves only through that principal's
+store. Web-authored pipeline state stores the opaque profile alias, not the
+provider, model, endpoint, or credential binding.
+
+### Startup, restart, and remediation
+
+Restart the web service after changing the allowlist, preferences, control
+modes, profile definitions, or tutorial profile. The process policy is frozen
+after startup; secret availability is recomputed per principal and again before
+execution.
+
+Startup fails with a sanitized configuration error when the core is missing,
+an ID is malformed or duplicated, an authorized plugin is not installed or
+locally usable, a required capability has no implementation, a preference
+order is incomplete, or an authorized plugin lacks canonical version/hash
+identity. Correct the named setting or plugin ID and restart; the error does
+not echo raw JSON or private profile bindings.
+
+Saved states that reference a now-disabled plugin remain readable and
+exportable in their authored form. Remove or replace each component using the
+web repair action before validation or execution. The server does not fetch a
+hidden plugin schema and does not silently re-enable the component.
+
+### Readiness and audit evidence
+
+`GET /api/system/status` exposes separate sanitized rows for policy
+compilation, required core, local capability configuration, live provider
+health, tutorial profile configuration, and tutorial required-control
+coverage. A missing tutorial profile disables the tutorial without hiding
+ordinary CSV/JSON/text authoring. The authenticated launch path rechecks the
+principal's profile credential and the complete tutorial candidate immediately
+before creating a run; a failed check returns a typed HTTP 409.
+
+Every web run records the policy hash, principal snapshot hash, authorized and
+available IDs, selected implementations, safe profile aliases, plugin code
+identities, and closed decision codes in Landscape epoch 23. Readiness,
+errors, logs, telemetry, persisted state, and exports omit private profile
+bindings.
 
 Every validation or execution request receives a principal-scoped availability
 snapshot. Execution freezes one fresh snapshot before creating the run, and

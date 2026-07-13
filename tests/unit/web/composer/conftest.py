@@ -83,6 +83,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.pool import StaticPool
 
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer import tools as tools_module
@@ -104,6 +105,7 @@ from elspeth.web.composer.service import ComposerAvailability, ComposerServiceIm
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools._common import ToolContext
 from elspeth.web.config import WebSettings
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -516,7 +518,12 @@ def tool_context() -> ToolContext:
     (data_dir, secret_service, etc.).
     """
 
-    return ToolContext(catalog=_mock_catalog())
+    catalog = _mock_catalog()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return ToolContext(
+        catalog=PolicyCatalogView.for_trained_operator(catalog, snapshot),
+        plugin_snapshot=snapshot,
+    )
 
 
 @pytest.fixture
@@ -529,9 +536,13 @@ def make_tool_context() -> Any:
     """
 
     def _factory(**overrides: Any) -> ToolContext:
-        kwargs: dict[str, Any] = {"catalog": _mock_catalog()}
-        kwargs.update(overrides)
-        return ToolContext(**kwargs)
+        catalog = overrides.pop("catalog", _mock_catalog())
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+        return ToolContext(
+            catalog=PolicyCatalogView.for_trained_operator(catalog, snapshot),
+            plugin_snapshot=snapshot,
+            **overrides,
+        )
 
     return _factory
 

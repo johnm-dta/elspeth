@@ -556,11 +556,18 @@ def _build_composer(
     from unittest.mock import MagicMock
 
     from elspeth.web.catalog.protocol import CatalogService
+    from elspeth.web.catalog.schemas import PluginSummary
     from elspeth.web.config import WebSettings
 
     catalog = MagicMock(spec=CatalogService)
-    catalog.list_sources.return_value = []
-    catalog.list_transforms.return_value = []
+    catalog.list_sources.return_value = [
+        PluginSummary(name="null", description="Null source", plugin_type="source", config_fields=[]),
+    ]
+    catalog.list_transforms.return_value = [
+        PluginSummary(name="llm", description="LLM transform", plugin_type="transform", config_fields=[]),
+        PluginSummary(name="field_mapper", description="Field mapper", plugin_type="transform", config_fields=[]),
+        PluginSummary(name="web_scrape", description="Web scrape", plugin_type="transform", config_fields=[]),
+    ]
     catalog.list_sinks.return_value = []
     settings = WebSettings(
         data_dir=tmp_path,

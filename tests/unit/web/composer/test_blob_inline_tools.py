@@ -11,6 +11,7 @@ from uuid import UUID
 import pytest
 
 from elspeth.contracts.blobs_inline import is_widened_blob_ref
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.state import (
@@ -20,8 +21,10 @@ from elspeth.web.composer.state import (
     PipelineMetadata,
     SourceSpec,
 )
-from elspeth.web.composer.tools import ToolResult, execute_tool, get_tool_definitions
+from elspeth.web.composer.tools import ToolResult, get_tool_definitions
+from elspeth.web.composer.tools import execute_tool as _execute_tool
 from elspeth.web.composer.yaml_generator import generate_pipeline_dict
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.provider_config_policy import AWS_S3_ENDPOINT_URL_POLICY_ERROR
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
@@ -161,6 +164,25 @@ class _Catalog:
 
 def _catalog() -> CatalogService:
     return cast(CatalogService, _Catalog())
+
+
+def execute_tool(
+    tool_name: str,
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    **kwargs: Any,
+) -> ToolResult:
+    """Invoke the strict dispatcher with an explicit trained-operator snapshot."""
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return _execute_tool(
+        tool_name,
+        arguments,
+        state,
+        PolicyCatalogView.for_trained_operator(catalog, snapshot),
+        plugin_snapshot=snapshot,
+        **kwargs,
+    )
 
 
 @pytest.fixture()

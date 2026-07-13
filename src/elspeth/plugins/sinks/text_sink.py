@@ -65,7 +65,7 @@ class TextSink(BaseSink):
     name = "text"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:485dfdac600b33e0"
+    source_file_hash: str | None = "sha256:b55378fec74817c6"
     config_model = TextSinkConfig
     supports_resume = True
 
@@ -171,13 +171,17 @@ class TextSink(BaseSink):
 
     def _replace_with_bytes(self, staged: bytes) -> ArtifactDescriptor:
         self._claim_write_target()
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        base = self._path.read_bytes() if self._write_has_committed else b""
-        temp_fd, temp_name = tempfile.mkstemp(prefix=f".{self._path.name}.", suffix=".tmp", dir=self._path.parent)
-        temp_path = Path(temp_name)
+        temp_fd: int | None = None
+        temp_path: Path | None = None
         replaced = False
         try:
-            with os.fdopen(temp_fd, "wb") as stream:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            base = self._path.read_bytes() if self._write_has_committed else b""
+            temp_fd, temp_name = tempfile.mkstemp(prefix=f".{self._path.name}.", suffix=".tmp", dir=self._path.parent)
+            temp_path = Path(temp_name)
+            stream = os.fdopen(temp_fd, "wb")
+            temp_fd = None  # fdopen transferred ownership to stream.
+            with stream:
                 stream.write(base)
                 stream.write(staged)
                 self._sync_stream(stream)
@@ -196,10 +200,14 @@ class TextSink(BaseSink):
                 size_bytes=candidate_stat.st_size,
             )
         except BaseException:
-            if not replaced and temp_path.exists():
-                temp_path.unlink()
-            if not replaced:
-                self._remove_owned_reservation()
+            try:
+                if temp_fd is not None:
+                    os.close(temp_fd)
+                if not replaced and temp_path is not None and temp_path.exists():
+                    temp_path.unlink()
+            finally:
+                if not replaced:
+                    self._remove_owned_reservation()
             raise
 
     def _append_bytes(self, staged: bytes) -> ArtifactDescriptor:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -380,6 +381,85 @@ def test_exclusive_reservation_is_removed_after_precommit_failure(tmp_path: Path
         sink.write([{"line_text": "new"}], _sink_context())
 
     assert not path.exists()
+
+
+def test_exclusive_reservation_is_removed_when_temp_creation_fails_and_retry_is_safe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "out.txt"
+    sink = inject_write_failure(TextSink(_config(path, collision_policy="fail_if_exists")))
+    real_mkstemp = tempfile.mkstemp
+
+    def fail_mkstemp(*args: object, **kwargs: object) -> tuple[int, str]:
+        del args, kwargs
+        raise OSError("temp creation failed")
+
+    monkeypatch.setattr("elspeth.plugins.sinks.text_sink.tempfile.mkstemp", fail_mkstemp)
+    with pytest.raises(OSError, match="temp creation failed"):
+        sink.write([{"line_text": "first"}], _sink_context())
+
+    assert not path.exists()
+    assert sink._reservation_owned is False
+    assert sink._write_target_claimed is False
+
+    monkeypatch.setattr("elspeth.plugins.sinks.text_sink.tempfile.mkstemp", real_mkstemp)
+    sink.write([{"line_text": "retry"}], _sink_context())
+    assert path.read_bytes() == b"retry\n"
+
+
+def test_fdopen_failure_closes_raw_temp_fd_cleans_claim_and_allows_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "out.txt"
+    sink = inject_write_failure(TextSink(_config(path, collision_policy="fail_if_exists")))
+    captured: dict[str, object] = {}
+    real_mkstemp = tempfile.mkstemp
+    real_fdopen = os.fdopen
+
+    def capture_mkstemp(*args: object, **kwargs: object) -> tuple[int, str]:
+        fd, name = real_mkstemp(*args, **kwargs)  # type: ignore[arg-type]
+        captured.update(fd=fd, name=name)
+        return fd, name
+
+    def fail_fdopen(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise OSError("fdopen failed")
+
+    monkeypatch.setattr("elspeth.plugins.sinks.text_sink.tempfile.mkstemp", capture_mkstemp)
+    monkeypatch.setattr("elspeth.plugins.sinks.text_sink.os.fdopen", fail_fdopen)
+    with pytest.raises(OSError, match="fdopen failed"):
+        sink.write([{"line_text": "first"}], _sink_context())
+
+    with pytest.raises(OSError):
+        os.fstat(captured["fd"])  # type: ignore[arg-type]
+    assert not Path(captured["name"]).exists()  # type: ignore[arg-type]
+    assert not path.exists()
+    assert sink._reservation_owned is False
+    assert sink._write_target_claimed is False
+
+    monkeypatch.setattr("elspeth.plugins.sinks.text_sink.os.fdopen", real_fdopen)
+    sink.write([{"line_text": "retry"}], _sink_context())
+    assert path.read_bytes() == b"retry\n"
+
+
+def test_temp_creation_failure_never_removes_unowned_preexisting_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "out.txt"
+    path.write_bytes(b"preexisting\n")
+    sink = inject_write_failure(TextSink(_config(path)))
+
+    monkeypatch.setattr(
+        "elspeth.plugins.sinks.text_sink.tempfile.mkstemp",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("temp creation failed")),
+    )
+    with pytest.raises(OSError, match="temp creation failed"):
+        sink.write([{"line_text": "new"}], _sink_context())
+
+    assert path.read_bytes() == b"preexisting\n"
 
 
 def test_write_mode_post_replace_failure_keeps_committed_new_target(tmp_path: Path) -> None:

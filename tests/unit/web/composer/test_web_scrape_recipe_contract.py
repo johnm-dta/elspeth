@@ -6,7 +6,7 @@ warning IS present (elspeth-abb2cb0931 is a conditional 'restore once plugins
 gate on secret availability' ticket, NOT a licence to hide the signal).
 
 The state-builder routes through ``apply_recipe`` (not ``_build_web_scrape_recipe``
-directly) so the optional ``provider`` / ``rating_template`` / ``output_path``
+directly) so the optional ``rating_template`` / ``output_path``
 slot defaults are injected — mirroring ``TestWebScrapeRecipeBuild._build`` in
 ``test_recipes.py``. Calling ``_build_web_scrape_recipe`` on the raw slots would
 KeyError because those defaults are applied by ``validate_slots``.
@@ -34,8 +34,7 @@ from elspeth.web.interpretation_state import (
 _SLOTS = {
     "source_blob_id": "a1b2c3d4-0000-0000-0000-0000000000aa",
     "source_plugin": "json",
-    "model": "anthropic/claude-sonnet-4.6",
-    "api_key_secret": "OPENROUTER_API_KEY",
+    "profile": "tutorial-default",
     "abuse_contact": "web-scrape-contact@dta.gov.au",
     "scraping_reason": "Tutorial exercise: fetch public pages for rating",
     "output_path": "outputs/ratings.jsonl",
@@ -61,8 +60,8 @@ def _node_from_args(node_args: dict[str, Any]) -> NodeSpec:
 
 
 def _state_from_recipe() -> CompositionState:
-    # apply_recipe runs validate_slots, which injects the provider /
-    # rating_template / output_path defaults the builder reads.
+    # apply_recipe runs validate_slots, which injects the rating_template /
+    # output_path defaults the builder reads.
     args = apply_recipe("web-scrape-llm-rate-jsonl", _SLOTS)
     src = args["source"]
     source = SourceSpec(

@@ -45,6 +45,29 @@ def _make_tutorial_settings(data_dir: Path, **overrides: Any) -> WebSettings:
     return WebSettings(**values)
 
 
+def test_tutorial_recipe_authors_only_opaque_llm_profile() -> None:
+    from elspeth.web.composer.recipes import apply_recipe, get_recipe
+
+    recipe = get_recipe("web-scrape-llm-rate-jsonl")
+    assert recipe is not None
+    assert "profile" in recipe.slots
+    assert {"provider", "model", "api_key_secret"}.isdisjoint(recipe.slots)
+
+    candidate = apply_recipe(
+        recipe.name,
+        {
+            "source_blob_id": "11111111-1111-1111-1111-111111111111",
+            "source_plugin": "json",
+            "profile": "tutorial-default",
+            "abuse_contact": "noreply@example.test",
+            "scraping_reason": "First-run tutorial",
+        },
+    )
+    llm_options = candidate["nodes"][1]["options"]
+    assert llm_options["profile"] == "tutorial-default"
+    assert {"provider", "model", "api_key", "api_key_secret"}.isdisjoint(llm_options)
+
+
 @pytest.mark.asyncio
 async def test_failed_live_tutorial_run_response_omits_raw_run_error(tmp_path: Path) -> None:
     run_id = uuid4()

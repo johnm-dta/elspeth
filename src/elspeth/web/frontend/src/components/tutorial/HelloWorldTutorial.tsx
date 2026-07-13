@@ -24,6 +24,8 @@ import { HELLO_WORLD_PENDING_SESSION_TITLE } from "./copy";
 interface HelloWorldTutorialProps {
   composerAvailable?: boolean;
   composerUnavailableReason?: string | null;
+  tutorialReady?: boolean;
+  tutorialUnavailableReason?: string | null;
 }
 
 /**
@@ -45,6 +47,8 @@ function initTutorialStateFromPreferences(): ReturnType<typeof resumeTutorialSta
 export function HelloWorldTutorial({
   composerAvailable = true,
   composerUnavailableReason = null,
+  tutorialReady = true,
+  tutorialUnavailableReason = null,
 }: HelloWorldTutorialProps): JSX.Element {
   const [state, dispatch] = useReducer(
     tutorialReducer,
@@ -196,8 +200,14 @@ export function HelloWorldTutorial({
   // POST /guided/start so the backend orphan-cleanup scan (which matches the
   // exact pending title) catches sessions abandoned mid-tutorial.
   const onStart = async (): Promise<void> => {
-    if (!composerAvailable) {
-      setStartError(tutorialComposerUnavailableMessage(composerUnavailableReason));
+    if (!composerAvailable || !tutorialReady) {
+      setStartError(
+        tutorialComposerUnavailableMessage(
+          !composerAvailable
+            ? composerUnavailableReason
+            : tutorialUnavailableReason,
+        ),
+      );
       return;
     }
     guidedStartupExitRequestedRef.current = false;
@@ -415,11 +425,15 @@ export function HelloWorldTutorial({
           <TutorialTurn1Welcome
             onStart={() => void onStart()}
             onSkip={onSkip}
-            startDisabled={!composerAvailable}
+            startDisabled={!composerAvailable || !tutorialReady}
             startDisabledReason={
-              composerAvailable
+              composerAvailable && tutorialReady
                 ? null
-                : tutorialComposerUnavailableMessage(composerUnavailableReason)
+                : tutorialComposerUnavailableMessage(
+                    !composerAvailable
+                      ? composerUnavailableReason
+                      : tutorialUnavailableReason,
+                  )
             }
           />
         </>

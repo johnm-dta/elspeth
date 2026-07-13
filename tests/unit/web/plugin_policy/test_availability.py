@@ -76,6 +76,28 @@ def test_bedrock_profile_is_locally_available_without_secret() -> None:
     assert dict(snapshot.selected_profile_aliases)[PluginId("transform", "llm")] == "task-role"
 
 
+def test_configured_tutorial_profile_is_the_selected_usable_alias() -> None:
+    snapshot = _build(
+        _settings(
+            llm_profiles={
+                "alpha": {
+                    "provider": "bedrock",
+                    "model": "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+                },
+                "tutorial": {
+                    "provider": "bedrock",
+                    "model": "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+                },
+            },
+            tutorial_llm_profile="tutorial",
+        )
+    )
+
+    llm_id = PluginId("transform", "llm")
+    assert dict(snapshot.usable_profile_aliases)[llm_id] == ("tutorial", "alpha")
+    assert dict(snapshot.selected_profile_aliases)[llm_id] == "tutorial"
+
+
 def test_user_secret_can_narrow_but_never_expand_policy() -> None:
     snapshot = _build(
         _settings(),

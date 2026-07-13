@@ -64,7 +64,7 @@ from elspeth.web.composer.tools._common import (
     _plugin_policy_failure,
     _prevalidate_sink,
     _prevalidate_source,
-    _prevalidate_transform,
+    _prevalidate_transform_for_context,
     _resolver_owned_interpretation_requirement_error,
     _runtime_owned_llm_option_error,
     _semantic_contracts_payload,
@@ -504,7 +504,7 @@ def _execute_set_pipeline(
                 plugin=node_plugin,
                 options=node_options,
             )
-            node_prevalidation = _prevalidate_transform(node_plugin, review_options)
+            node_prevalidation = _prevalidate_transform_for_context(context, node_plugin, review_options)
             if node_prevalidation is not None:
                 return _failure_result(state, f"Node '{node_id}': {node_prevalidation}")
 

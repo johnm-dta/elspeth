@@ -621,23 +621,9 @@ _RECIPE_WEB_SCRAPE_SLOTS: Final[dict[str, SlotSpec]] = {
         slot_type="str",
         description="Resolved URL-row source plugin carried from match_recipe; must be 'json' or 'csv'. Direct apply callers pass the materialised source plugin explicitly.",
     ),
-    "model": SlotSpec(
+    "profile": SlotSpec(
         slot_type="str",
-        description="LLM model identifier (e.g., 'anthropic/claude-sonnet-4.6'); use list_models to discover",
-    ),
-    "api_key_secret": SlotSpec(
-        slot_type="str",
-        description=(
-            "Name of an inventory secret to wire into the LLM 'api_key' option as "
-            "a deferred {secret_ref} marker. Discover names via list_secret_refs; "
-            "verify with validate_secret_ref. Literal credential strings are rejected."
-        ),
-    ),
-    "provider": SlotSpec(
-        slot_type="str",
-        required=False,
-        default="openrouter",
-        description="LLM provider — only 'openrouter' is wired by this recipe (Azure needs deployment_name/endpoint, which the recipe does not provide)",
+        description="Opaque operator-approved LLM profile alias",
     ),
     "rating_template": SlotSpec(
         slot_type="str",
@@ -703,7 +689,6 @@ def _build_web_scrape_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
     (elspeth-abb2cb0931); the existing medium-severity prompt-shield advisory
     is left to fire from validate() — the recipe MUST NOT suppress it.
     """
-    _require_openrouter_provider(slots)
     # Function-level imports: recipes.py is imported by recipe_match.py and the
     # tools plane; hoisting these to module scope risks a circular import.
     from elspeth.contracts.composer_interpretation import InterpretationKind
@@ -773,9 +758,7 @@ def _build_web_scrape_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
                 "on_success": "rated",
                 "on_error": "discard",
                 "options": {
-                    "provider": slots["provider"],
-                    "model": slots["model"],
-                    "api_key": {"secret_ref": slots["api_key_secret"]},
+                    "profile": slots["profile"],
                     "prompt_template": slots["rating_template"],
                     "response_field": "rating",
                     "schema": {"mode": "observed"},

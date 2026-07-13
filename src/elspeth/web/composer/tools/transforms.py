@@ -37,7 +37,7 @@ from elspeth.web.composer.tools._common import (
     _mutation_result,
     _options_with_default_llm_reviews,
     _plugin_policy_failure,
-    _prevalidate_transform,
+    _prevalidate_transform_for_context,
     _runtime_owned_llm_option_error,
     _validate_aggregation_trigger,
     _validate_mutation_arguments,
@@ -526,7 +526,7 @@ def _execute_upsert_node(
             plugin=plugin,
             options=node_options,
         )
-        prevalidation_error = _prevalidate_transform(plugin, review_options)
+        prevalidation_error = _prevalidate_transform_for_context(context, plugin, review_options)
         if prevalidation_error is not None:
             return _failure_result(state, prevalidation_error)
 
@@ -866,7 +866,7 @@ def _execute_patch_node_options(
         return credential_error
 
     if current.node_type in ("transform", "aggregation") and current.plugin is not None:
-        prevalidation_error = _prevalidate_transform(current.plugin, new_options)
+        prevalidation_error = _prevalidate_transform_for_context(context, current.plugin, new_options)
         if prevalidation_error is not None:
             return _failure_result(state, prevalidation_error)
 

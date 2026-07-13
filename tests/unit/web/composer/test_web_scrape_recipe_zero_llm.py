@@ -9,8 +9,8 @@ recipe-build path itself is provider-free: building the set_pipeline args and
 validating the slots calls the LLM zero times. The llm node IS present in the
 COMPOSED pipeline (it runs at RUN time, never at compose time).
 
-_SLOTS carries provider + rating_template + allowed_hosts explicitly because
-``_build_web_scrape_recipe`` reads ``slots["provider"]`` /
+_SLOTS carries profile + rating_template + allowed_hosts explicitly because
+``_build_web_scrape_recipe`` reads ``slots["profile"]`` /
 ``slots["rating_template"]`` / ``slots["allowed_hosts"]`` directly; those keys
 are only injected by ``validate_slots`` when the build is reached through
 ``apply_recipe``. Passing them explicitly keeps the direct-build test honest
@@ -27,9 +27,7 @@ from elspeth.web.composer.recipes import _build_web_scrape_recipe, apply_recipe
 _SLOTS = {
     "source_blob_id": str(uuid4()),
     "source_plugin": "json",
-    "model": "anthropic/claude-sonnet-4.6",
-    "api_key_secret": "OPENROUTER_API_KEY",
-    "provider": "openrouter",
+    "profile": "tutorial-default",
     "rating_template": "Rate this page from 1-10:\n\n{{ row['content'] }}",
     "abuse_contact": "web-scrape-contact@dta.gov.au",
     "scraping_reason": "Tutorial exercise: fetch public pages for rating",

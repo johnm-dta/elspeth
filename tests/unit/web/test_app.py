@@ -510,6 +510,41 @@ class TestSystemStatusEndpoint:
         assert response.status_code == 200
         assert response.json()["composer_timeout_seconds"] == 300.0
 
+    def test_reports_separate_plugin_policy_rows_and_missing_tutorial_profile(self, tmp_path) -> None:
+        app = create_app(_settings(tmp_path))
+        response = TestClient(app).get("/api/system/status")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["tutorial_ready"] is False
+        assert [row["id"] for row in body["plugin_policy_readiness"]["rows"]] == [
+            "policy_compilation",
+            "required_core",
+            "local_capability_configuration",
+            "live_health",
+            "tutorial_profile",
+            "tutorial_required_control_coverage",
+        ]
+
+    def test_configured_keyless_tutorial_profile_is_boot_ready(self, tmp_path) -> None:
+        app = create_app(
+            _settings(
+                tmp_path,
+                llm_profiles={
+                    "tutorial-default": {
+                        "provider": "bedrock",
+                        "model": "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+                        "region_name": "ap-southeast-2",
+                    }
+                },
+                tutorial_llm_profile="tutorial-default",
+            )
+        )
+        response = TestClient(app).get("/api/system/status")
+
+        assert response.status_code == 200
+        assert response.json()["tutorial_ready"] is True
+
 
 class TestMetricsEndpoint:
     """Tests for GET /metrics (Prometheus scrape endpoint)."""

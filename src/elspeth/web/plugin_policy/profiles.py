@@ -98,17 +98,17 @@ class RuntimeWebLLMProfile:
     @classmethod
     def from_settings(cls, alias: str, settings: WebLLMProfileSettings) -> RuntimeWebLLMProfile:
         validate_profile_alias(alias)
-        options = tuple(
-            (name, value)
-            for name, value in (
-                ("region_name", settings.region_name),
+        provider_fields = {
+            "bedrock": (("region_name", settings.region_name),),
+            "azure": (
                 ("endpoint", settings.endpoint),
                 ("deployment_name", settings.deployment_name),
                 ("api_version", settings.api_version),
-                ("timeout_seconds", settings.timeout_seconds),
-                ("max_tokens", settings.max_tokens),
-            )
-            if value is not None
+            ),
+            "openrouter": (("timeout_seconds", settings.timeout_seconds),),
+        }
+        options = tuple(
+            (name, value) for name, value in (*provider_fields[settings.provider], ("max_tokens", settings.max_tokens)) if value is not None
         )
         return cls(
             alias=alias,
@@ -220,8 +220,17 @@ _LLM_PRIVATE_OPTIONS = frozenset(
 
 
 class _LLMProfileResolver:
-    def __init__(self, profiles: tuple[tuple[str, RuntimeWebLLMProfile], ...]) -> None:
+    def __init__(
+        self,
+        profiles: tuple[tuple[str, RuntimeWebLLMProfile], ...],
+        *,
+        preferred_alias: str | None,
+    ) -> None:
         self._profiles = dict(profiles)
+        aliases = tuple(self._profiles)
+        self._ordered_aliases = (
+            (preferred_alias, *(alias for alias in aliases if alias != preferred_alias)) if preferred_alias in self._profiles else aliases
+        )
 
     def public_schema(self, full_schema: PluginSchemaInfo, available_aliases: tuple[str, ...]) -> PluginSchemaInfo:
         from elspeth.web.catalog.schemas import PluginSchemaInfo
@@ -315,7 +324,8 @@ class _LLMProfileResolver:
         inventory: ProfileCredentialInventory,
     ) -> tuple[ProfileAvailability, ...]:
         result: list[ProfileAvailability] = []
-        for alias, profile in sorted(self._profiles.items()):
+        for alias in self._ordered_aliases:
+            profile = self._profiles[alias]
             if profile.credential_scope is None:
                 result.append(ProfileAvailability(alias=alias, credential_scope=None, usable=True))
                 continue
@@ -361,7 +371,10 @@ class OperatorProfileRegistry:
 
         self._policy = policy
         self._resolvers: dict[PluginId, OperatorProfileResolver] = {
-            PluginId("transform", "llm"): _LLMProfileResolver(settings.llm_profiles)
+            PluginId("transform", "llm"): _LLMProfileResolver(
+                settings.llm_profiles,
+                preferred_alias=settings.tutorial_llm_profile,
+            )
         }
 
     def public_schema(

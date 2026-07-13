@@ -920,6 +920,9 @@ export interface SystemStatus {
   composer_provider: string | null;
   composer_reason: string | null;
   composer_missing_keys: string[];
+  plugin_policy_readiness?: PluginPolicyReadinessSnapshot;
+  tutorial_ready?: boolean;
+  tutorial_reason?: string | null;
   /**
    * The backend's configured compose wall clock
    * (ELSPETH_WEB__COMPOSER_TIMEOUT_SECONDS). The SPA derives its compose
@@ -928,6 +931,27 @@ export interface SystemStatus {
    * server always sends it.
    */
   composer_timeout_seconds?: number;
+}
+
+export type PluginPolicyReadinessRowId =
+  | "policy_compilation"
+  | "required_core"
+  | "local_capability_configuration"
+  | "live_health"
+  | "tutorial_profile"
+  | "tutorial_required_control_coverage";
+
+export interface PluginPolicyReadinessRow {
+  id: PluginPolicyReadinessRowId;
+  label: string;
+  status: "ok" | "warning" | "error" | "not_applicable";
+  summary: string;
+  detail: string | null;
+}
+
+export interface PluginPolicyReadinessSnapshot {
+  rows: readonly PluginPolicyReadinessRow[];
+  tutorial_ready: boolean;
 }
 
 // ── Blob Manager ────────────────────────────────────────────────────────────
@@ -1043,6 +1067,7 @@ export interface AuditReadinessSnapshot {
   checked_at: string;
   rows: readonly ReadinessRow[];
   validation_result: ValidationResult;
+  plugin_policy_readiness?: PluginPolicyReadinessSnapshot | null;
 }
 
 export interface AuditReadinessExplain {

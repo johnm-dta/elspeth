@@ -259,6 +259,24 @@ describe("HelloWorldTutorial staged flow", () => {
     expect(api.createSession).not.toHaveBeenCalled();
   });
 
+  it("keeps ordinary authoring reachable while a missing tutorial profile disables only tutorial start", async () => {
+    const api = await import("@/api/client");
+    render(
+      <HelloWorldTutorial
+        composerAvailable={true}
+        tutorialReady={false}
+        tutorialUnavailableReason="Tutorial LLM profile is not configured"
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Let's go" })).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Tutorial LLM profile is not configured",
+    );
+    expect(screen.getByRole("button", { name: "Skip the tutorial" })).toBeEnabled();
+    expect(api.createSession).not.toHaveBeenCalled();
+  });
+
   // Relocated from the old big-bang test: TutorialTurn4Run dedups the run
   // request under StrictMode's double-invoke. This is the only coverage of
   // that behaviour, so it rides along with HelloWorldTutorial's suite rather

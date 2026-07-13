@@ -611,8 +611,7 @@ class TestWebScrapeRecipeBuild:
     _SLOTS: ClassVar[dict[str, str]] = {
         "source_blob_id": str(uuid4()),
         "source_plugin": "json",
-        "model": "anthropic/claude-sonnet-4.6",
-        "api_key_secret": "OPENROUTER_API_KEY",
+        "profile": "tutorial-default",
         "abuse_contact": "web-scrape-contact@dta.gov.au",
         "scraping_reason": "Tutorial exercise: fetch public pages for rating",
         "output_path": "outputs/ratings.jsonl",
@@ -1730,8 +1729,7 @@ class TestRecipeProviderGuard:
     }
     _WEB_SCRAPE_SLOTS: ClassVar[dict] = {
         "source_plugin": "json",
-        "model": "anthropic/claude-sonnet-4.6",
-        "api_key_secret": "OPENROUTER_API_KEY",
+        "profile": "tutorial-default",
         "abuse_contact": "noreply@dta.gov.au",
         "scraping_reason": "DTA technical demonstration",
     }
@@ -1751,17 +1749,18 @@ class TestRecipeProviderGuard:
         llm_node = next(node for node in args["nodes"] if node["plugin"] == "llm")
         assert llm_node["options"]["provider"] == "openrouter"
 
-    def test_web_scrape_recipe_rejects_azure_provider(self) -> None:
-        with pytest.raises(RecipeValidationError, match="only 'openrouter'"):
+    def test_web_scrape_recipe_rejects_raw_provider_binding(self) -> None:
+        with pytest.raises(RecipeValidationError, match=r"does not accept slot.*provider"):
             apply_recipe(
                 "web-scrape-llm-rate-jsonl",
                 {"source_blob_id": str(uuid4()), **self._WEB_SCRAPE_SLOTS, "provider": "azure"},
             )
 
-    def test_web_scrape_recipe_builds_with_openrouter(self) -> None:
+    def test_web_scrape_recipe_builds_with_opaque_profile(self) -> None:
         args = apply_recipe(
             "web-scrape-llm-rate-jsonl",
-            {"source_blob_id": str(uuid4()), **self._WEB_SCRAPE_SLOTS, "provider": "openrouter"},
+            {"source_blob_id": str(uuid4()), **self._WEB_SCRAPE_SLOTS},
         )
         llm_node = next(node for node in args["nodes"] if node["plugin"] == "llm")
-        assert llm_node["options"]["provider"] == "openrouter"
+        assert llm_node["options"]["profile"] == "tutorial-default"
+        assert {"provider", "model", "api_key", "api_key_secret"}.isdisjoint(llm_node["options"])

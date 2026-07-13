@@ -14,9 +14,7 @@ from elspeth.web.composer.recipes import get_recipe, validate_slots
 _BASE_SLOTS = {
     "source_blob_id": "00000000-0000-0000-0000-000000000001",
     "source_plugin": "json",
-    "model": "anthropic/claude-sonnet-4.6",
-    "api_key_secret": "OPENROUTER_API_KEY",
-    "provider": "openrouter",
+    "profile": "tutorial-default",
     "rating_template": "Extract fields and return JSON.",
     "abuse_contact": "noreply@dta.gov.au",
     "scraping_reason": "DTA technical demonstration",

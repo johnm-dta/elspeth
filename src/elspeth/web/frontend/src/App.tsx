@@ -524,6 +524,8 @@ function App() {
             key={tutorialResetEpoch}
             composerAvailable={systemStatus?.composer_available ?? true}
             composerUnavailableReason={systemStatus?.composer_reason ?? null}
+            tutorialReady={systemStatus?.tutorial_ready ?? true}
+            tutorialUnavailableReason={systemStatus?.tutorial_reason ?? null}
           />
         ) : showEmptyLanding ? (
           <div className="app-main" role="main">

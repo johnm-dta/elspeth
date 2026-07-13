@@ -47,7 +47,7 @@ from elspeth.plugins.transforms.llm.model_catalog import (
     read_openrouter_catalog_snapshot_id,
 )
 from elspeth.web.audit_readiness.routes import create_audit_readiness_router
-from elspeth.web.audit_readiness.service import ReadinessService
+from elspeth.web.audit_readiness.service import ReadinessService, build_boot_plugin_policy_readiness
 from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.auth.local import LocalAuthProvider
 from elspeth.web.auth.middleware import get_current_user
@@ -448,6 +448,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         session_service=session_service,
         scoped_secret_resolver=app.state.scoped_secret_resolver,
         settings=settings,
+        web_plugin_policy=app.state.web_plugin_policy,
+        plugin_snapshot_factory=app.state.plugin_snapshot_factory.for_user_id,
+        operator_profile_registry=app.state.operator_profile_registry,
+        tutorial_profile=settings.tutorial_llm_profile,
     )
 
     # ShareableReviewService — Phase 6A completion gestures.
@@ -1411,12 +1415,20 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     @app.get("/api/system/status")
     async def system_status() -> dict[str, object]:
         composer = app.state.composer_availability
+        plugin_policy_readiness = build_boot_plugin_policy_readiness(
+            policy=app.state.web_plugin_policy,
+            settings=app.state.runtime_web_plugin_config,
+        )
+        tutorial_profile_row = next(row for row in plugin_policy_readiness.rows if row.id == "tutorial_profile")
         return {
             "composer_available": composer.available,
             "composer_model": composer.model,
             "composer_provider": composer.provider,
             "composer_reason": composer.reason,
             "composer_missing_keys": list(composer.missing_keys),
+            "plugin_policy_readiness": plugin_policy_readiness.model_dump(mode="json"),
+            "tutorial_ready": plugin_policy_readiness.tutorial_ready,
+            "tutorial_reason": None if plugin_policy_readiness.tutorial_ready else tutorial_profile_row.summary,
             # The SPA derives its compose abort ceiling from this at boot:
             # client cap = wall clock + client grace, keeping the backend's
             # structured 422 ahead of the client abort for ANY configured

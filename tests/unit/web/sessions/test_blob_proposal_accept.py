@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import threading
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 import structlog
@@ -18,7 +19,10 @@ from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.service import BlobServiceImpl
 from elspeth.web.composer.progress import ComposerProgressRegistry
 from elspeth.web.config import WebSettings
+from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.sessions.routes import create_session_router
@@ -26,11 +30,6 @@ from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
-
-
-class _CatalogServiceFake:
-    def post_call_hints(self, **_kwargs: object) -> tuple[object, ...]:
-        return ()
 
 
 class _ExecutionServiceFake:
@@ -78,7 +77,11 @@ def _make_app(tmp_path: Path, user_id: str = "alice") -> tuple[FastAPI, SessionS
         composer_rate_limit_per_minute=10,
         shareable_link_signing_key=SecretBytes(b"\x00" * 32),
     )
-    app.state.catalog_service = _CatalogServiceFake()
+    catalog = create_catalog_service()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    app.state.catalog_service = catalog
+    app.state.operator_profile_registry = MagicMock(spec=OperatorProfileRegistry)
+    app.state.plugin_snapshot_factory = lambda _user: snapshot
     app.state.composer_service = None
     app.state.rate_limiter = ComposerRateLimiter(limit=100)
     app.state.execution_service = _ExecutionServiceFake()

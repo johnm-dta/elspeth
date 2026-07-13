@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol, cast
 
 from elspeth.contracts.enums import Determinism
 from elspeth.contracts.plugin_capabilities import ControlRole, PluginCapability
@@ -12,6 +12,17 @@ from elspeth.plugins.infrastructure.manager import PluginNotFoundError, get_shar
 from elspeth.web.composer.state import CompositionState, NodeSpec
 
 _NON_PRODUCED_ROUTE_TARGETS = frozenset({"discard", "fork", "stop"})
+
+
+class _ControlEffectEvaluator(Protocol):
+    @classmethod
+    def is_effective_blocking_control(
+        cls,
+        *,
+        capability: PluginCapability,
+        role: ControlRole,
+        options: Mapping[str, object],
+    ) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,15 +83,19 @@ def node_has_blocking_control(
     role: ControlRole,
 ) -> bool:
     """Credit only registered typed blocking controls with effective config."""
-    if node.plugin is None or node.options.get("detect_only") is True:
+    if node.plugin is None:
         return False
     try:
-        plugin_cls = get_shared_plugin_manager().get_transform_by_name(node.plugin)
+        plugin_cls = cast(
+            "type[_ControlEffectEvaluator]",
+            get_shared_plugin_manager().get_transform_by_name(node.plugin),
+        )
     except PluginNotFoundError:
         return False
-    return any(
-        declaration.capability is capability and declaration.control_role is role and declaration.blocks_positive_detection
-        for declaration in plugin_cls.policy_capabilities
+    return plugin_cls.is_effective_blocking_control(
+        capability=capability,
+        role=role,
+        options=node.options,
     )
 
 

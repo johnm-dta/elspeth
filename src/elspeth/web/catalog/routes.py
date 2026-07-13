@@ -39,9 +39,15 @@ def _get_catalog(request: Request, user: UserIdentity) -> tuple[PolicyCatalogVie
 
 
 def _set_private_headers(response: Response, snapshot: PluginAvailabilitySnapshot) -> None:
-    response.headers["Cache-Control"] = "private, no-store"
-    response.headers["Vary"] = "Authorization, Cookie"
-    response.headers["X-ELSPETH-Plugin-Snapshot"] = snapshot.snapshot_hash
+    response.headers.update(_private_headers(snapshot))
+
+
+def _private_headers(snapshot: PluginAvailabilitySnapshot) -> dict[str, str]:
+    return {
+        "Cache-Control": "private, no-store",
+        "Vary": "Authorization, Cookie",
+        "X-ELSPETH-Plugin-Snapshot": snapshot.snapshot_hash,
+    }
 
 
 @catalog_router.get("/sources", response_model=list[PluginSummary])
@@ -95,6 +101,7 @@ async def get_policy(
         for declaration in summary.policy_capabilities:
             grouped.setdefault(declaration.capability, []).append(plugin_id)
     return PluginPolicyResponse(
+        principal_scope=snapshot.principal_scope,
         snapshot_fingerprint=snapshot.snapshot_hash,
         policy_hash=snapshot.policy_hash,
         available_plugin_ids=tuple(sorted(map(str, snapshot.available))),
@@ -128,10 +135,14 @@ async def get_schema(
             status_code=404,
             detail=f"Unknown plugin type: {plugin_type}. Must be one of: {sorted(_PLURAL_TO_SINGULAR)}",
         )
+    catalog, snapshot = _get_catalog(request, user)
     try:
-        catalog, snapshot = _get_catalog(request, user)
         result = catalog.get_schema(singular, name)
         _set_private_headers(response, snapshot)
         return result
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail="plugin_not_enabled") from exc
+        raise HTTPException(
+            status_code=404,
+            detail="plugin_not_enabled",
+            headers=_private_headers(snapshot),
+        ) from exc

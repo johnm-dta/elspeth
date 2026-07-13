@@ -625,7 +625,7 @@ def composer_service_with_real_sessions(tmp_path: Path) -> ComposerServiceImpl:
     """Return ``ComposerServiceImpl`` wired to a real SQLite sessions service."""
 
     sessions_service = build_test_sessions_service(data_dir=tmp_path)
-    service = ComposerServiceImpl(
+    service = ComposerServiceImpl.for_trained_operator(
         catalog=_mock_catalog(),
         settings=_make_settings(tmp_path),
         sessions_service=sessions_service,
@@ -637,7 +637,7 @@ def composer_service_with_real_sessions(tmp_path: Path) -> ComposerServiceImpl:
 def composer_service_without_sessions_service(tmp_path: Path) -> ComposerServiceImpl:
     """Return ``ComposerServiceImpl`` without ``sessions_service`` wired."""
 
-    return ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings(tmp_path))
+    return ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=_make_settings(tmp_path))
 
 
 @pytest.fixture

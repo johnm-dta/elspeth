@@ -244,7 +244,7 @@ class TestUnknownToolNameComposeLoopAuditShape:
         """
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # Turn 1: LLM emits a hallucinated (unknown) tool name.

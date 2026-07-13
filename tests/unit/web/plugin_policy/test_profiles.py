@@ -71,6 +71,40 @@ def test_runtime_conversion_is_frozen_and_canonical() -> None:
         runtime.tutorial_llm_profile = "changed"  # type: ignore[misc]
 
 
+def test_profile_reprs_hide_provider_and_provider_specific_settings() -> None:
+    settings = _settings(
+        llm_profiles={
+            "private-binding": {
+                "provider": "azure",
+                "model": "PRIVATE_MODEL_MARKER",
+                "credential_scope": "server",
+                "credential_ref": "PRIVATE_CREDENTIAL_MARKER",
+                "endpoint": "https://private-endpoint-marker.example.com",
+                "deployment_name": "PRIVATE_DEPLOYMENT_MARKER",
+                "api_version": "PRIVATE_API_VERSION_MARKER",
+                "timeout_seconds": 47.25,
+                "max_tokens": 12345,
+            }
+        }
+    )
+
+    settings_repr = repr(settings.llm_profiles["private-binding"])
+    runtime_repr = repr(RuntimeWebPluginConfig.from_settings(settings).llm_profiles[0][1])
+
+    for marker in (
+        "azure",
+        "PRIVATE_MODEL_MARKER",
+        "PRIVATE_CREDENTIAL_MARKER",
+        "private-endpoint-marker",
+        "PRIVATE_DEPLOYMENT_MARKER",
+        "PRIVATE_API_VERSION_MARKER",
+        "47.25",
+        "12345",
+    ):
+        assert marker not in settings_repr
+        assert marker not in runtime_repr
+
+
 def test_profile_aliases_are_opaque_canonical_identifiers() -> None:
     with pytest.raises(ValidationError):
         _settings(
@@ -142,7 +176,10 @@ def test_profile_lowering_splits_executable_and_audit_safe_options() -> None:
 
     assert lowered.executable_options["provider"] == "openrouter"
     assert lowered.executable_options["model"] == "openai/gpt-5-mini"
-    assert lowered.executable_options["api_key"] == {"secret_ref": "OPENROUTER_API_KEY"}
+    assert lowered.executable_options["api_key"] == {
+        "secret_ref": "OPENROUTER_API_KEY",
+        "secret_scope": "server",
+    }
     assert lowered.audit_safe_options == {
         "profile": "tutorial",
         "prompt_template": "Summarise {{ row }}",

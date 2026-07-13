@@ -26,8 +26,9 @@ const SOURCE = {
   audit_characteristics: [],
 };
 
-function policy(snapshotFingerprint: string) {
+function policy(snapshotFingerprint: string, principalScope = "local:alice") {
   return {
+    principal_scope: principalScope,
     snapshot_fingerprint: snapshotFingerprint,
     policy_hash: "policy-1",
     available_plugin_ids: ["source:csv"],
@@ -35,6 +36,10 @@ function policy(snapshotFingerprint: string) {
     selections: [],
     control_modes: [],
   };
+}
+
+function snapshot<T>(data: T, fingerprint: string) {
+  return { data, snapshotFingerprint: fingerprint };
 }
 
 function deferred<T>() {
@@ -48,21 +53,30 @@ function deferred<T>() {
 describe("pluginCatalogStore", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(api.listSources).mockResolvedValue([SOURCE]);
-    vi.mocked(api.listTransforms).mockResolvedValue([]);
-    vi.mocked(api.listSinks).mockResolvedValue([]);
-    vi.mocked(api.getPluginSchema).mockResolvedValue({
+    vi.mocked(api.listSources).mockResolvedValue(snapshot([SOURCE], "a"));
+    vi.mocked(api.listTransforms).mockResolvedValue(snapshot([], "a"));
+    vi.mocked(api.listSinks).mockResolvedValue(snapshot([], "a"));
+    vi.mocked(api.getPluginSchema).mockResolvedValue(snapshot({
       name: "csv",
       plugin_type: "source",
       description: "CSV source",
       json_schema: { type: "object" },
-    });
+    }, "a"));
   });
 
   it("never reuses a catalog across principal or snapshot fingerprints", async () => {
     vi.mocked(api.fetchPluginPolicy)
-      .mockResolvedValueOnce(policy("a"))
-      .mockResolvedValueOnce(policy("b"));
+      .mockResolvedValueOnce(snapshot(policy("a", "local:alice"), "a"))
+      .mockResolvedValueOnce(snapshot(policy("b", "oidc:alice"), "b"));
+    vi.mocked(api.listSources)
+      .mockResolvedValueOnce(snapshot([SOURCE], "a"))
+      .mockResolvedValueOnce(snapshot([SOURCE], "b"));
+    vi.mocked(api.listTransforms)
+      .mockResolvedValueOnce(snapshot([], "a"))
+      .mockResolvedValueOnce(snapshot([], "b"));
+    vi.mocked(api.listSinks)
+      .mockResolvedValueOnce(snapshot([], "a"))
+      .mockResolvedValueOnce(snapshot([], "b"));
     const store = createPluginCatalogStore();
 
     await store.getState().load({ principal: "local:alice", fingerprint: "a" });
@@ -76,8 +90,23 @@ describe("pluginCatalogStore", () => {
 
   it("discards list and schema caches when the fingerprint changes", async () => {
     vi.mocked(api.fetchPluginPolicy)
-      .mockResolvedValueOnce(policy("a"))
-      .mockResolvedValueOnce(policy("b"));
+      .mockResolvedValueOnce(snapshot(policy("a"), "a"))
+      .mockResolvedValueOnce(snapshot(policy("b"), "b"));
+    vi.mocked(api.listSources)
+      .mockResolvedValueOnce(snapshot([SOURCE], "a"))
+      .mockResolvedValueOnce(snapshot([SOURCE], "b"));
+    vi.mocked(api.listTransforms)
+      .mockResolvedValueOnce(snapshot([], "a"))
+      .mockResolvedValueOnce(snapshot([], "b"));
+    vi.mocked(api.listSinks)
+      .mockResolvedValueOnce(snapshot([], "a"))
+      .mockResolvedValueOnce(snapshot([], "b"));
+    vi.mocked(api.getPluginSchema).mockResolvedValueOnce(snapshot({
+      name: "csv",
+      plugin_type: "source",
+      description: "CSV source",
+      json_schema: { type: "object" },
+    }, "a"));
     const store = createPluginCatalogStore();
     await store.getState().load({ principal: "local:alice", fingerprint: "a" });
     await store.getState().loadSchema("source", "csv");
@@ -92,9 +121,9 @@ describe("pluginCatalogStore", () => {
   });
 
   it("clears stale aliases immediately and refetches policy after secret invalidation", async () => {
-    const refreshed = deferred<ReturnType<typeof policy>>();
+    const refreshed = deferred<{ data: ReturnType<typeof policy>; snapshotFingerprint: string }>();
     vi.mocked(api.fetchPluginPolicy)
-      .mockResolvedValueOnce(policy("a"))
+      .mockResolvedValueOnce(snapshot(policy("a"), "a"))
       .mockReturnValueOnce(refreshed.promise);
     const store = createPluginCatalogStore();
     await store.getState().load({ principal: "local:alice", fingerprint: "a" });
@@ -104,26 +133,115 @@ describe("pluginCatalogStore", () => {
     expect(store.getState().key).toBeNull();
     expect(store.getState().sources).toBeNull();
     expect(store.getState().isLoading).toBe(true);
-    refreshed.resolve(policy("b"));
+    vi.mocked(api.listSources).mockResolvedValueOnce(snapshot([SOURCE], "b"));
+    vi.mocked(api.listTransforms).mockResolvedValueOnce(snapshot([], "b"));
+    vi.mocked(api.listSinks).mockResolvedValueOnce(snapshot([], "b"));
+    refreshed.resolve(snapshot(policy("b"), "b"));
     await vi.waitFor(() => expect(store.getState().key).toBe("local:alice:b"));
     expect(api.fetchPluginPolicy).toHaveBeenCalledTimes(2);
     store.getState().dispose();
   });
 
   it("ignores a late response from the previous principal", async () => {
-    const alicePolicy = deferred<ReturnType<typeof policy>>();
+    const alicePolicy = deferred<{ data: ReturnType<typeof policy>; snapshotFingerprint: string }>();
     vi.mocked(api.fetchPluginPolicy)
       .mockReturnValueOnce(alicePolicy.promise)
-      .mockResolvedValueOnce(policy("bob"));
+      .mockResolvedValueOnce(snapshot(policy("bob", "local:bob"), "bob"));
+    vi.mocked(api.listSources).mockResolvedValueOnce(snapshot([SOURCE], "bob"));
+    vi.mocked(api.listTransforms).mockResolvedValueOnce(snapshot([], "bob"));
+    vi.mocked(api.listSinks).mockResolvedValueOnce(snapshot([], "bob"));
     const store = createPluginCatalogStore();
 
     const aliceLoad = store.getState().load({ principal: "local:alice" });
     const bobLoad = store.getState().load({ principal: "local:bob" });
     await bobLoad;
-    alicePolicy.resolve(policy("alice"));
+    alicePolicy.resolve(snapshot(policy("alice", "local:alice"), "alice"));
     await aliceLoad;
 
     expect(store.getState().key).toBe("local:bob:bob");
+    store.getState().dispose();
+  });
+
+  it("restarts when policy A is followed by catalog list responses from snapshot B", async () => {
+    vi.mocked(api.fetchPluginPolicy)
+      .mockResolvedValueOnce(snapshot(policy("a"), "a") as never)
+      .mockResolvedValueOnce(snapshot(policy("b"), "b") as never);
+    vi.mocked(api.listSources)
+      .mockResolvedValueOnce(snapshot([SOURCE], "b") as never)
+      .mockResolvedValueOnce(snapshot([SOURCE], "b") as never);
+    vi.mocked(api.listTransforms)
+      .mockResolvedValueOnce(snapshot([], "b") as never)
+      .mockResolvedValueOnce(snapshot([], "b") as never);
+    vi.mocked(api.listSinks)
+      .mockResolvedValueOnce(snapshot([], "b") as never)
+      .mockResolvedValueOnce(snapshot([], "b") as never);
+    const store = createPluginCatalogStore();
+
+    await store.getState().load({ principal: "bootstrap:alice" });
+
+    expect(api.fetchPluginPolicy).toHaveBeenCalledTimes(2);
+    expect(store.getState().key).toBe("local:alice:b");
+    expect(store.getState().sources).toEqual([SOURCE]);
+    store.getState().dispose();
+  });
+
+  it("restarts and re-owns a schema response when snapshot changes during the request", async () => {
+    vi.mocked(api.fetchPluginPolicy)
+      .mockResolvedValueOnce(snapshot(policy("a"), "a") as never)
+      .mockResolvedValueOnce(snapshot(policy("b"), "b") as never);
+    vi.mocked(api.listSources)
+      .mockResolvedValueOnce(snapshot([SOURCE], "a") as never)
+      .mockResolvedValueOnce(snapshot([SOURCE], "b") as never);
+    vi.mocked(api.listTransforms)
+      .mockResolvedValueOnce(snapshot([], "a") as never)
+      .mockResolvedValueOnce(snapshot([], "b") as never);
+    vi.mocked(api.listSinks)
+      .mockResolvedValueOnce(snapshot([], "a") as never)
+      .mockResolvedValueOnce(snapshot([], "b") as never);
+    vi.mocked(api.getPluginSchema).mockResolvedValueOnce(snapshot({
+      name: "csv",
+      plugin_type: "source",
+      description: "CSV source",
+      json_schema: { type: "object" },
+    }, "b") as never);
+    const store = createPluginCatalogStore();
+    await store.getState().load({ principal: "bootstrap:alice" });
+
+    await store.getState().loadSchema("source", "csv");
+
+    expect(api.fetchPluginPolicy).toHaveBeenCalledTimes(2);
+    expect(store.getState().key).toBe("local:alice:b");
+    expect(store.getState().schemas["source:csv"]).toBeDefined();
+    store.getState().dispose();
+  });
+
+  it("restarts when an A-enabled schema becomes disabled under snapshot B", async () => {
+    vi.mocked(api.fetchPluginPolicy)
+      .mockResolvedValueOnce(snapshot(policy("a"), "a"))
+      .mockResolvedValueOnce(snapshot(policy("b"), "b"));
+    vi.mocked(api.listSources)
+      .mockResolvedValueOnce(snapshot([SOURCE], "a"))
+      .mockResolvedValueOnce(snapshot([], "b"));
+    vi.mocked(api.listTransforms)
+      .mockResolvedValueOnce(snapshot([], "a"))
+      .mockResolvedValueOnce(snapshot([], "b"));
+    vi.mocked(api.listSinks)
+      .mockResolvedValueOnce(snapshot([], "a"))
+      .mockResolvedValueOnce(snapshot([], "b"));
+    vi.mocked(api.getPluginSchema).mockRejectedValueOnce({
+      status: 404,
+      detail: "plugin_not_enabled",
+      snapshot_fingerprint: "b",
+    });
+    const store = createPluginCatalogStore();
+    await store.getState().load({ principal: "bootstrap:alice" });
+
+    await store.getState().loadSchema("source", "csv");
+
+    expect(api.fetchPluginPolicy).toHaveBeenCalledTimes(2);
+    expect(store.getState().key).toBe("local:alice:b");
+    expect(store.getState().schemas["source:csv"]).toBeUndefined();
+    expect(store.getState().schemaErrors["source:csv"]).toBeUndefined();
     store.getState().dispose();
   });
 });

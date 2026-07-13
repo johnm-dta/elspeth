@@ -336,6 +336,7 @@ export type PluginPolicyCapability = "llm" | "prompt_shield" | "content_safety";
 export type PluginPolicyControlMode = "recommend" | "required";
 
 export interface PluginPolicyResponse {
+  principal_scope: string;
   snapshot_fingerprint: string;
   policy_hash: string;
   available_plugin_ids: string[];
@@ -351,6 +352,11 @@ export interface PluginPolicyResponse {
     capability: PluginPolicyCapability;
     mode: PluginPolicyControlMode;
   }>;
+}
+
+export interface PluginSnapshotResponse<T> {
+  data: T;
+  snapshotFingerprint: string;
 }
 
 export type PluginPolicyUnavailableReason =
@@ -912,6 +918,7 @@ export interface ApiError {
   provider_detail?: string;
   provider_status_code?: number;
   validation_errors?: ValidationError[];
+  snapshot_fingerprint?: string;
 }
 
 export interface SystemStatus {

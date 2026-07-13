@@ -1,5 +1,5 @@
 """Walker tests for ``_CHECK_VALUE_SOURCE_COMPLIANCE`` step in
-``validate_pipeline``.
+``validate_pipeline_for_trained_operator``.
 
 The walker is also exercised at the L2 layer
 (``engine.orchestrator.preflight.validate_value_source_compliance``);
@@ -41,7 +41,7 @@ from elspeth.web.execution.validation import (
     _CHECK_GRAPH,
     _CHECK_PLUGINS,
     _CHECK_VALUE_SOURCE_COMPLIANCE,
-    validate_pipeline,
+    validate_pipeline_for_trained_operator,
 )
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
 
@@ -265,7 +265,7 @@ class TestWalkerL2Direct:
 
 
 class TestWalkerInValidatePipeline:
-    """End-to-end through ``validate_pipeline`` — the composer entry path.
+    """End-to-end through ``validate_pipeline_for_trained_operator`` — the composer entry path.
 
     Mocks at the same boundary as the surrounding tests in
     ``test_validation.py`` (load_settings, instantiate_runtime_plugins,
@@ -276,7 +276,7 @@ class TestWalkerInValidatePipeline:
 
     def test_value_source_failure_short_circuits_with_skipped_downstream(self) -> None:
         """When ``instantiate_runtime_plugins`` raises ``ValueSourceValidationError``
-        (the walker rejected a declared value), validate_pipeline reports
+        (the walker rejected a declared value), validate_pipeline_for_trained_operator reports
         PLUGINS as passed and VALUE_SOURCE as failed, with downstream checks
         skipped via cascade. The exception is raised from inside
         ``instantiate_plugins_from_config`` which is the single source of
@@ -312,7 +312,7 @@ class TestWalkerInValidatePipeline:
                 new=raise_value_source_error,
             ),
         ):
-            result = validate_pipeline(state, settings, yaml_gen, plugin_snapshot=_value_source_test_snapshot())
+            result = validate_pipeline_for_trained_operator(state, settings, yaml_gen, plugin_snapshot=_value_source_test_snapshot())
 
         assert result.is_valid is False
         check_by_name = {c.name: c for c in result.checks}
@@ -344,7 +344,7 @@ class TestWalkerInValidatePipeline:
             patch("elspeth.web.execution.validation.build_runtime_graph", new=_build_runtime_graph),
             patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config", new=_assemble_and_validate_pipeline_config),
         ):
-            result = validate_pipeline(state, settings, yaml_gen, plugin_snapshot=_value_source_test_snapshot())
+            result = validate_pipeline_for_trained_operator(state, settings, yaml_gen, plugin_snapshot=_value_source_test_snapshot())
 
         assert result.is_valid is True
         check_by_name = {c.name: c for c in result.checks}

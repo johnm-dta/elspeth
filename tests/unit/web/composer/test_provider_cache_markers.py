@@ -222,7 +222,7 @@ class TestToolListOrderIsCacheKeyContract:
 
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
 
         defn_names = [d["name"] for d in get_tool_definitions()]
         tool_names = [t["function"]["name"] for t in service._get_litellm_tools()]
@@ -294,7 +294,7 @@ class TestCacheMarkersWiredAtCallSite:
 
         catalog = _mock_catalog()
         settings = _make_settings(composer_model="anthropic/claude-sonnet-4.5")
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         # Bypass availability check (no real Anthropic API key needed).
         service._availability = ComposerAvailability(available=True, model=service._model, provider="test")
         state = _empty_state()
@@ -365,7 +365,7 @@ class TestCacheMarkersWiredAtCallSite:
         catalog = _mock_catalog()
         # Default _make_settings model is gpt-5.5 (OpenAI-shape).
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         service._availability = ComposerAvailability(available=True, model=service._model, provider="test")
         state = _empty_state()
         captured: dict[str, Any] = {}

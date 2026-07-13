@@ -107,7 +107,7 @@ def _make_guided_app(
         },
     )
     catalog = create_catalog_service()
-    composer_service = ComposerServiceImpl(
+    composer_service = ComposerServiceImpl.for_trained_operator(
         catalog=catalog,
         settings=settings,
         sessions_service=session_service,

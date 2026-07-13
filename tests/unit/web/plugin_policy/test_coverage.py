@@ -201,3 +201,19 @@ def test_content_safety_fan_out_passes_when_each_sink_path_is_controlled() -> No
 
 def test_content_safety_unknown_downstream_fails_safe() -> None:
     assert control_coverage_findings(_state(_llm(on_success="missing")), PluginCapability.CONTENT_SAFETY)
+
+
+def test_content_safety_no_op_thresholds_do_not_receive_blocking_coverage_credit() -> None:
+    no_op = _safety("safety", "safe_in", "main")
+    no_op = replace(
+        no_op,
+        options={
+            "detect_only": False,
+            "thresholds": {"hate": 6, "violence": 6, "sexual": 6, "self_harm": 6},
+        },
+    )
+
+    assert control_coverage_findings(
+        _state(_llm(on_success="safe_in"), no_op),
+        PluginCapability.CONTENT_SAFETY,
+    )

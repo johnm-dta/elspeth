@@ -8,6 +8,8 @@ import json
 from typing import TYPE_CHECKING, Protocol
 
 from elspeth.contracts.plugin_capabilities import PluginCapability, WebConfigAuthority
+from elspeth.contracts.secrets import SecretsError
+from elspeth.core.security.secret_loader import SecretNotFoundError
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.plugin_policy.models import (
@@ -56,12 +58,14 @@ def _binding_fingerprint(
     generation_key: bytes,
     principal_scope: str,
     aliases: tuple[tuple[PluginId, tuple[str, ...]], ...],
+    profile_bindings: tuple[tuple[PluginId, str, str, str], ...],
     available: frozenset[PluginId],
 ) -> str:
     payload = json.dumps(
         {
             "principal_scope": principal_scope,
             "aliases": [(str(plugin_id), list(values)) for plugin_id, values in aliases],
+            "profile_bindings": [(str(plugin_id), alias, scope, generation) for plugin_id, alias, scope, generation in profile_bindings],
             "available": sorted(map(str, available)),
         },
         sort_keys=True,
@@ -85,6 +89,7 @@ def build_plugin_snapshot(
     unavailable: list[PluginAvailability] = []
     usable_profile_aliases: list[tuple[PluginId, tuple[str, ...]]] = []
     selected_profile_aliases: list[tuple[PluginId, str | None]] = []
+    profile_bindings: list[tuple[PluginId, str, str, str]] = []
 
     for plugin_id in sorted(policy.authorized):
         summary = catalog_items.get(plugin_id)
@@ -98,6 +103,23 @@ def build_plugin_snapshot(
                 inventory=secret_inventory,
             )
             aliases = tuple(item.alias for item in profile_states if item.usable)
+            for profile_state in profile_states:
+                if not profile_state.usable or profile_state.credential_scope is None or profile_state.generation is None:
+                    continue
+                generation_token = hmac.new(
+                    generation_key,
+                    json.dumps(
+                        {
+                            "scope": profile_state.credential_scope,
+                            "alias": profile_state.alias,
+                            "generation": profile_state.generation,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode(),
+                    hashlib.sha256,
+                ).hexdigest()
+                profile_bindings.append((plugin_id, profile_state.alias, profile_state.credential_scope, generation_token))
             usable_profile_aliases.append((plugin_id, aliases))
             selected_profile_aliases.append((plugin_id, aliases[0] if aliases else None))
             if not aliases:
@@ -128,6 +150,7 @@ def build_plugin_snapshot(
         generation_key=generation_key,
         principal_scope=principal_scope,
         aliases=alias_tuple,
+        profile_bindings=tuple(sorted(profile_bindings)),
         available=available_frozen,
     )
     return PluginAvailabilitySnapshot.create(
@@ -167,6 +190,25 @@ class _BoundSecretInventory:
 
     def has_ref(self, principal: str, name: str) -> bool:
         return self._service.has_ref(self._user_id, name, auth_provider_type=self._auth_provider)
+
+    def server_generation(self, name: str) -> str | None:
+        if not self._server_store.has_secret(name):
+            return None
+        try:
+            _value, ref = self._server_store.get_secret(name)
+        except (SecretsError, SecretNotFoundError):
+            return None
+        return ref.fingerprint
+
+    def user_generation(self, principal: str, name: str) -> str | None:
+        del principal
+        if not self._user_store.has_secret(name, user_id=self._user_id, auth_provider_type=self._auth_provider):
+            return None
+        try:
+            _value, ref = self._user_store.get_secret(name, user_id=self._user_id, auth_provider_type=self._auth_provider)
+        except (SecretsError, SecretNotFoundError):
+            return None
+        return ref.fingerprint
 
 
 class RequestPluginSnapshotFactory:

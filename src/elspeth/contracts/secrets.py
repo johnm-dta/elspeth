@@ -215,3 +215,10 @@ class WebSecretResolver(Protocol):
         ...
 
     def resolve(self, user_id: str, name: str) -> ResolvedSecret | None: ...
+
+
+@runtime_checkable
+class ScopedWebSecretResolver(WebSecretResolver, Protocol):
+    """Web resolver that can honour an operator-pinned credential scope."""
+
+    def resolve_scoped(self, user_id: str, name: str, scope: SecretScope) -> ResolvedSecret | None: ...

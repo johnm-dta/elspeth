@@ -189,7 +189,7 @@ async def _run_envelope(script: Sequence[ScriptedTurn], *, user_message: str = "
     """
     catalog = _mock_catalog()
     settings = _make_settings()
-    service = ComposerServiceImpl(catalog=catalog, settings=settings)
+    service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
     state = _empty_state()
 
     responses = [_build_scripted_response(turn) for turn in script]

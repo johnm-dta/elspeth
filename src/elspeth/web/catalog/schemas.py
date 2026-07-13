@@ -136,6 +136,7 @@ class PluginPolicyControlMode(_StrictResponse):
 
 
 class PluginPolicyResponse(_StrictResponse):
+    principal_scope: str
     snapshot_fingerprint: str
     policy_hash: str
     available_plugin_ids: tuple[str, ...]

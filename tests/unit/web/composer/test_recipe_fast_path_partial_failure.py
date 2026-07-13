@@ -82,7 +82,7 @@ def _make_settings() -> WebSettings:
 
 
 def _make_service() -> ComposerServiceImpl:
-    return ComposerServiceImpl(
+    return ComposerServiceImpl.for_trained_operator(
         catalog=_mock_catalog(),
         settings=_make_settings(),
         session_engine=MagicMock(spec=Engine),

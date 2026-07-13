@@ -2,6 +2,7 @@ import { create, type StoreApi, type UseBoundStore } from "zustand";
 
 import * as api from "@/api/client";
 import type {
+  ApiError,
   PluginPolicyResponse,
   PluginSchemaInfo,
   PluginSummary,
@@ -115,47 +116,70 @@ export function createPluginCatalogStore(): PluginCatalogStore {
 
       const promise = (async () => {
         try {
-          const policy = await api.fetchPluginPolicy();
-          if (requestGeneration !== generation) return;
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            const policyResponse = await api.fetchPluginPolicy();
+            if (requestGeneration !== generation) return;
+            const policy = policyResponse.data;
+            if (policyResponse.snapshotFingerprint !== policy.snapshot_fingerprint) {
+              continue;
+            }
 
-          const nextKey = catalogKey(principal, policy.snapshot_fingerprint);
-          const afterPolicy = get();
-          if (
-            !force &&
-            afterPolicy.key === nextKey &&
-            afterPolicy.sources !== null &&
-            afterPolicy.transforms !== null &&
-            afterPolicy.sinks !== null
-          ) {
-            set({ policy, isLoading: false, error: null });
+            const canonicalPrincipal = policy.principal_scope;
+            const nextKey = catalogKey(
+              canonicalPrincipal,
+              policy.snapshot_fingerprint,
+            );
+            const afterPolicy = get();
+            if (
+              !force &&
+              afterPolicy.key === nextKey &&
+              afterPolicy.sources !== null &&
+              afterPolicy.transforms !== null &&
+              afterPolicy.sinks !== null
+            ) {
+              set({ policy, isLoading: false, error: null });
+              return;
+            }
+
+            set({
+              key: nextKey,
+              principal: canonicalPrincipal,
+              fingerprint: policy.snapshot_fingerprint,
+              policy,
+              sources: null,
+              transforms: null,
+              sinks: null,
+              schemas: {},
+              schemaLoading: {},
+              schemaErrors: {},
+              isLoading: true,
+              error: null,
+            });
+
+            const [sources, transforms, sinks] = await Promise.all([
+              api.listSources(),
+              api.listTransforms(),
+              api.listSinks(),
+            ]);
+            if (requestGeneration !== generation) return;
+            const fingerprints = [
+              sources.snapshotFingerprint,
+              transforms.snapshotFingerprint,
+              sinks.snapshotFingerprint,
+            ];
+            if (fingerprints.some((value) => value !== policy.snapshot_fingerprint)) {
+              continue;
+            }
+            set({
+              sources: sources.data,
+              transforms: transforms.data,
+              sinks: sinks.data,
+              isLoading: false,
+              error: null,
+            });
             return;
           }
-
-          // The current response proves the old snapshot stale. Clear both
-          // list and schema caches before requesting the new lists so no old
-          // profile alias can render while the refresh is pending.
-          set({
-            key: nextKey,
-            principal,
-            fingerprint: policy.snapshot_fingerprint,
-            policy,
-            sources: null,
-            transforms: null,
-            sinks: null,
-            schemas: {},
-            schemaLoading: {},
-            schemaErrors: {},
-            isLoading: true,
-            error: null,
-          });
-
-          const [sources, transforms, sinks] = await Promise.all([
-            api.listSources(),
-            api.listTransforms(),
-            api.listSinks(),
-          ]);
-          if (requestGeneration !== generation) return;
-          set({ sources, transforms, sinks, isLoading: false, error: null });
+          throw new Error("Plugin catalog snapshot changed repeatedly while loading.");
         } catch {
           if (requestGeneration !== generation) return;
           set({
@@ -193,13 +217,25 @@ export function createPluginCatalogStore(): PluginCatalogStore {
       try {
         const schema = await api.getPluginSchema(kind, name);
         if (get().key !== owningCatalogKey) return;
+        if (schema.snapshotFingerprint !== state.fingerprint) {
+          await get().load({ principal: state.principal!, force: true });
+          if (get().fingerprint !== schema.snapshotFingerprint) return;
+        }
         set((latest) => ({
-          schemas: { ...latest.schemas, [cacheKey]: schema },
+          schemas: { ...latest.schemas, [cacheKey]: schema.data },
           schemaLoading: { ...latest.schemaLoading, [cacheKey]: false },
           schemaErrors: { ...latest.schemaErrors, [cacheKey]: false },
         }));
-      } catch {
+      } catch (error) {
         if (get().key !== owningCatalogKey) return;
+        const responseFingerprint = (error as ApiError).snapshot_fingerprint;
+        if (
+          responseFingerprint !== undefined &&
+          responseFingerprint !== state.fingerprint
+        ) {
+          await get().load({ principal: state.principal!, force: true });
+          return;
+        }
         set((latest) => ({
           schemaLoading: { ...latest.schemaLoading, [cacheKey]: false },
           schemaErrors: { ...latest.schemaErrors, [cacheKey]: true },

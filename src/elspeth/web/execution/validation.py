@@ -799,13 +799,13 @@ def validate_pipeline(
     settings: ValidationSettings,
     yaml_generator: YamlGenerator,
     *,
+    plugin_snapshot: PluginAvailabilitySnapshot,
+    profile_registry: OperatorProfileRegistry | None,
     secret_service: WebSecretResolver | None = None,
     user_id: str | None = None,
     blob_get_metadata: Callable[[UUID], BlobRecord | None] | None = None,
     allow_pending_interpretation_placeholders: bool = False,
     session_id: str | None = None,
-    plugin_snapshot: PluginAvailabilitySnapshot | None = None,
-    profile_registry: OperatorProfileRegistry | None = None,
 ) -> ValidationResult:
     """Dry-run validation through the real engine code path.
 
@@ -898,10 +898,6 @@ def validate_pipeline(
     # Policy checks deliberately precede path, YAML, and runtime construction.
     # The authored state remains audit-safe; only the in-memory copy returned
     # by policy validation contains private operator-profile bindings.
-    if plugin_snapshot is None:
-        from elspeth.web.dependencies import create_catalog_service
-
-        plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
     policy_result = validate_plugin_policy(
         state,
         snapshot=plugin_snapshot,
@@ -2296,4 +2292,27 @@ def validate_pipeline(
         warnings=graph_warnings,
         readiness=_execution_ready(),
         semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+    )
+
+
+def validate_pipeline_for_trained_operator(
+    state: CompositionState,
+    settings: ValidationSettings,
+    yaml_generator: YamlGenerator,
+    **kwargs: Any,
+) -> ValidationResult:
+    """Explicit non-web validation root preserving CLI and local-tool neutrality."""
+    from elspeth.web.dependencies import create_catalog_service
+
+    plugin_snapshot = kwargs.pop("plugin_snapshot", None)
+    if plugin_snapshot is None:
+        plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+    profile_registry = kwargs.pop("profile_registry", None)
+    return validate_pipeline(
+        state,
+        settings,
+        yaml_generator,
+        plugin_snapshot=plugin_snapshot,
+        profile_registry=profile_registry,
+        **kwargs,
     )

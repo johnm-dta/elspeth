@@ -163,23 +163,9 @@ _RECIPE1_SLOTS: Final[dict[str, SlotSpec]] = {
         slot_type="str",
         description="Jinja2 template for the LLM prompt; reference row fields as {{ row['col'] }}",
     ),
-    "model": SlotSpec(
+    "profile": SlotSpec(
         slot_type="str",
-        description="LLM model identifier (e.g., 'anthropic/claude-sonnet-4.6'); use list_models to discover",
-    ),
-    "api_key_secret": SlotSpec(
-        slot_type="str",
-        description=(
-            "Name of an inventory secret to wire into the LLM 'api_key' option as "
-            "a deferred {secret_ref} marker. Discover names via list_secret_refs; "
-            "verify with validate_secret_ref. Literal credential strings are rejected."
-        ),
-    ),
-    "provider": SlotSpec(
-        slot_type="str",
-        required=False,
-        default="openrouter",
-        description="LLM provider — only 'openrouter' is wired by this recipe (Azure needs deployment_name/endpoint, which the recipe does not provide)",
+        description="Opaque operator-approved LLM profile alias from the public llm schema",
     ),
     "label_field": SlotSpec(
         slot_type="str",
@@ -209,28 +195,8 @@ _RECIPE1_SLOTS: Final[dict[str, SlotSpec]] = {
 }
 
 
-def _require_openrouter_provider(slots: Mapping[str, Any]) -> None:
-    """These recipes wire only the OpenRouter LLM provider.
-
-    The ``provider`` slot once advertised ``'azure'`` too, but the recipes emit
-    only ``provider``/``model``/``api_key`` — never the ``deployment_name`` +
-    ``endpoint`` that ``AzureOpenAIConfig`` requires, and ``validate_slots``
-    rejects extra slots, so an Azure selection cannot materialise a valid
-    pipeline. Fail loud and early with an actionable message rather than deep in
-    config validation with an opaque "missing Azure fields" error.
-    """
-    provider = slots["provider"]
-    if provider != "openrouter":
-        raise RecipeValidationError(
-            f"recipe provider {provider!r} is not supported — this recipe wires only 'openrouter'. "
-            "For Azure OpenAI, compose the pipeline directly (an llm node with provider='azure', "
-            "deployment_name and endpoint) rather than via apply_pipeline_recipe."
-        )
-
-
 def _build_classify_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
     """Build set_pipeline args for the classify-rows-llm-jsonl recipe."""
-    _require_openrouter_provider(slots)
     # ``blob_id`` is a TOP-LEVEL key of ``source`` (sibling of ``options``),
     # NOT a member of ``options``. ``_execute_set_pipeline`` reads it via
     # ``src_args.get("blob_id")`` and feeds it to ``_resolve_source_blob``,
@@ -259,9 +225,7 @@ def _build_classify_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
                 "on_success": "labelled",
                 "on_error": "discard",
                 "options": {
-                    "provider": slots["provider"],
-                    "model": slots["model"],
-                    "api_key": {"secret_ref": slots["api_key_secret"]},
+                    "profile": slots["profile"],
                     "prompt_template": slots["classifier_template"],
                     "response_field": slots["label_field"],
                     "schema": {"mode": "observed"},
@@ -909,6 +873,11 @@ def unavailable_recipe_plugin(
             raise RecipeValidationError("recipe source_plugin must be a registered source plugin id") from exc
         if selected_source not in snapshot.available:
             return selected_source
+    if raw_slots is not None and isinstance(raw_slots.get("profile"), str):
+        llm_id = PluginId("transform", "llm")
+        aliases_by_plugin = dict(snapshot.usable_profile_aliases)
+        if llm_id in aliases_by_plugin and raw_slots["profile"] not in aliases_by_plugin[llm_id]:
+            return llm_id
     for alternatives in recipe.alternative_plugin_groups:
         if alternatives.isdisjoint(snapshot.available):
             return min(alternatives)
@@ -927,6 +896,11 @@ def list_recipes(snapshot: PluginAvailabilitySnapshot) -> list[dict[str, Any]]:
                     "required": s.required,
                     "default": s.default,
                     "description": s.description,
+                    **(
+                        {"choices": list(dict(snapshot.usable_profile_aliases).get(PluginId("transform", "llm"), ()))}
+                        if slot_name == "profile"
+                        else {}
+                    ),
                 }
                 for slot_name, s in spec.slots.items()
             },

@@ -45,7 +45,12 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.contracts.errors import FrameworkBugError
-from elspeth.contracts.plugin_capabilities import CapabilityDeclaration, WebConfigAuthority
+from elspeth.contracts.plugin_capabilities import (
+    CapabilityDeclaration,
+    ControlRole,
+    PluginCapability,
+    WebConfigAuthority,
+)
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 
 if TYPE_CHECKING:
@@ -191,6 +196,7 @@ class BaseTransform(ABC):
     capability_tags: tuple[str, ...] = ()
     web_config_authority: WebConfigAuthority = WebConfigAuthority.USER_CONFIGURABLE
     policy_capabilities: frozenset[CapabilityDeclaration] = frozenset()
+
     """Short lowercase tags that drive catalog filter chips and fuzzy
     search. Examples: ("csv", "file", "batch") for csv_source;
     ("http", "network", "scraping") for a web-scrape transform. Tags
@@ -246,6 +252,22 @@ class BaseTransform(ABC):
     the field requires some available secret, but the plugin has no canonical
     inventory name.
     """
+
+    @classmethod
+    def is_effective_blocking_control(
+        cls,
+        *,
+        capability: PluginCapability,
+        role: ControlRole,
+        options: Mapping[str, object],
+    ) -> bool:
+        """Evaluate whether this concrete config can enforce a declared control."""
+        if options.get("detect_only") is True:
+            return False
+        return any(
+            declaration.capability is capability and declaration.control_role is role and declaration.blocks_positive_detection
+            for declaration in cls.policy_capabilities
+        )
 
     # Config model — each subclass sets this to its Pydantic config class.
     # get_config_model() is the public API; override it for dynamic dispatch

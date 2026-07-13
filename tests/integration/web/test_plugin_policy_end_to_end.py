@@ -10,8 +10,11 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import sqlalchemy as sa
 
 from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
+from elspeth.core.secrets import resolve_secret_refs
+from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginKind, PluginSchemaInfo, PluginSummary
@@ -19,11 +22,18 @@ from elspeth.web.composer.prompts import build_context_string
 from elspeth.web.composer.recipes import get_recipe, list_recipes
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools._common import ToolContext
+from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.service import _build_web_plugin_policy_evidence
+from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
-from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
 from elspeth.web.plugin_policy.validation import validate_plugin_policy
+from elspeth.web.secrets.server_store import ServerSecretStore
+from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
+from elspeth.web.secrets.user_store import UserSecretStore
+from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.schema import initialize_session_schema
 
 _ROOT = Path(__file__).resolve().parents[3]
 _CORE_IDS = frozenset(
@@ -241,3 +251,72 @@ def test_web_dispatch_policy_context_has_no_allow_all_defaults() -> None:
     parameters = inspect.signature(ToolContext).parameters
     assert parameters["catalog"].default is inspect.Parameter.empty
     assert parameters["plugin_snapshot"].default is inspect.Parameter.empty
+
+
+def test_web_services_and_validation_require_explicit_policy_context() -> None:
+    from elspeth.web.composer.service import ComposerServiceImpl
+    from elspeth.web.execution.service import ExecutionServiceImpl
+    from elspeth.web.execution.validation import validate_pipeline
+
+    execution = inspect.signature(ExecutionServiceImpl).parameters
+    composer = inspect.signature(ComposerServiceImpl).parameters
+    validation = inspect.signature(validate_pipeline).parameters
+
+    for parameters in (execution, composer):
+        assert parameters["plugin_snapshot_factory"].default is inspect.Parameter.empty
+        assert parameters["operator_profile_registry"].default is inspect.Parameter.empty
+    assert validation["plugin_snapshot"].default is inspect.Parameter.empty
+    assert validation["profile_registry"].default is inspect.Parameter.empty
+
+
+def test_server_profile_scope_survives_lowering_and_same_name_user_shadow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "profile-scope-test-fingerprint-key")
+    monkeypatch.setenv("SHARED_LLM_KEY", "server-value")
+    engine: sa.engine.Engine = create_session_engine("sqlite:///:memory:")
+    initialize_session_schema(engine)
+    user_store = UserSecretStore(engine=engine, master_key="profile-scope-test-master-key")
+    user_store.set_secret(
+        "SHARED_LLM_KEY",
+        value="user-value",
+        user_id="alice",
+        auth_provider_type="local",
+    )
+    server_store = ServerSecretStore(("SHARED_LLM_KEY",))
+    service = WebSecretService(user_store=user_store, server_store=server_store)
+    resolver = ScopedSecretResolver(service, "local")
+    settings = WebSettings(
+        composer_max_composition_turns=4,
+        composer_max_discovery_turns=4,
+        composer_timeout_seconds=60,
+        composer_rate_limit_per_minute=20,
+        shareable_link_signing_key=b"0123456789abcdef0123456789abcdef",
+        llm_profiles={
+            "server-profile": {
+                "provider": "openrouter",
+                "model": "openai/gpt-5-mini",
+                "credential_scope": "server",
+                "credential_ref": "SHARED_LLM_KEY",
+            }
+        },
+    )
+    runtime = RuntimeWebPluginConfig.from_settings(settings)
+    policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+    profiles = OperatorProfileRegistry(policy=policy, settings=runtime)
+    lowered = profiles.lower_options(
+        PluginId("transform", "llm"),
+        alias="server-profile",
+        safe_options={"prompt_template": "{{ row }}", "schema": {"mode": "observed"}},
+    )
+
+    resolved, evidence = resolve_secret_refs(
+        {"options": dict(lowered.executable_options)},
+        resolver,
+        "alice",
+    )
+    _server_value, server_ref = server_store.get_secret("SHARED_LLM_KEY")
+
+    assert resolved["options"]["api_key"] == "server-value"
+    assert evidence[0].scope == "server"
+    assert evidence[0].fingerprint == server_ref.fingerprint

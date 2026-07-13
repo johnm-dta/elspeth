@@ -35,16 +35,16 @@ class WebLLMProfileSettings(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
-    provider: str
+    provider: str = Field(repr=False)
     model: str = Field(min_length=1, max_length=512, repr=False)
     credential_scope: CredentialScope | None = Field(default=None, repr=False)
     credential_ref: str | None = Field(default=None, repr=False)
-    region_name: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    region_name: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", repr=False)
     endpoint: str | None = Field(default=None, repr=False)
     deployment_name: str | None = Field(default=None, min_length=1, max_length=256, repr=False)
-    api_version: str | None = Field(default=None, min_length=1, max_length=64)
-    timeout_seconds: float = Field(default=60.0, gt=0, le=300)
-    max_tokens: int | None = Field(default=None, gt=0, le=131072)
+    api_version: str | None = Field(default=None, min_length=1, max_length=64, repr=False)
+    timeout_seconds: float = Field(default=60.0, gt=0, le=300, repr=False)
+    max_tokens: int | None = Field(default=None, gt=0, le=131072, repr=False)
 
     @model_validator(mode="after")
     def _validate_provider_binding(self) -> WebLLMProfileSettings:
@@ -89,7 +89,7 @@ class WebLLMProfileSettings(BaseModel):
 @dataclass(frozen=True, slots=True)
 class RuntimeWebLLMProfile:
     alias: str
-    provider: str
+    provider: str = field(repr=False)
     model: str = field(repr=False)
     credential_scope: CredentialScope | None = field(default=None, repr=False)
     credential_ref: str | None = field(default=None, repr=False)
@@ -155,6 +155,7 @@ class ProfileAvailability:
     credential_scope: CredentialScope | None
     usable: bool
     reason: ProfileUnavailableReason | None = None
+    generation: str | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +174,10 @@ class ProfileCredentialInventory(Protocol):
     def has_server_ref(self, name: str) -> bool: ...
 
     def has_user_ref(self, principal: str, name: str) -> bool: ...
+
+    def server_generation(self, name: str) -> str | None: ...
+
+    def user_generation(self, principal: str, name: str) -> str | None: ...
 
 
 class OperatorProfileResolver(Protocol):
@@ -311,7 +316,11 @@ class _LLMProfileResolver:
         executable["model"] = profile.model
         executable.update(profile.provider_options)
         if profile.credential_ref is not None:
-            executable["api_key"] = {"secret_ref": profile.credential_ref}
+            assert profile.credential_scope is not None
+            executable["api_key"] = {
+                "secret_ref": profile.credential_ref,
+                "secret_scope": profile.credential_scope,
+            }
         audit_safe = {"profile": alias, **safe_options}
         return LoweredPluginConfig(
             executable_options=MappingProxyType(executable),
@@ -330,17 +339,19 @@ class _LLMProfileResolver:
                 result.append(ProfileAvailability(alias=alias, credential_scope=None, usable=True))
                 continue
             assert profile.credential_ref is not None
-            usable = (
-                inventory.has_server_ref(profile.credential_ref)
+            generation = (
+                inventory.server_generation(profile.credential_ref)
                 if profile.credential_scope == "server"
-                else inventory.has_user_ref(principal, profile.credential_ref)
+                else inventory.user_generation(principal, profile.credential_ref)
             )
+            usable = generation is not None
             result.append(
                 ProfileAvailability(
                     alias=alias,
                     credential_scope=profile.credential_scope,
                     usable=usable,
                     reason=None if usable else ProfileUnavailableReason.CREDENTIAL_MISSING,
+                    generation=generation,
                 )
             )
         return tuple(result)

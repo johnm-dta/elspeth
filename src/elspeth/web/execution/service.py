@@ -336,9 +336,9 @@ class ExecutionServiceImpl:
         telemetry: _SessionsTelemetry,
         blob_service: BlobServiceProtocol | None = None,
         secret_service: WebSecretResolver | None = None,
-        plugin_snapshot_factory: Callable[[str], PluginAvailabilitySnapshot] | None = None,
-        operator_profile_registry: OperatorProfileRegistry | None = None,
-        web_plugin_policy: WebPluginPolicy | None = None,
+        plugin_snapshot_factory: Callable[[str], PluginAvailabilitySnapshot] | None,
+        operator_profile_registry: OperatorProfileRegistry | None,
+        web_plugin_policy: WebPluginPolicy | None,
     ) -> None:
         self._loop = loop
         self._broadcaster = broadcaster
@@ -358,6 +358,7 @@ class ExecutionServiceImpl:
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._shutdown_events: dict[str, threading.Event] = {}
         self._shutdown_events_lock = threading.Lock()
+
         # Per-session asyncio lock to prevent TOCTOU on the active-run check.
         # Keyed by session_id string; lazily created, cleaned up on session
         # deletion via cleanup_session_lock().
@@ -371,6 +372,16 @@ class ExecutionServiceImpl:
         # dropping the audit field.
         self._openrouter_catalog_sha256: str | None = None
         self._openrouter_catalog_source: str | None = None
+
+    @classmethod
+    def for_trained_operator(cls, **kwargs: Any) -> ExecutionServiceImpl:
+        """Explicit non-web composition root with unrestricted local policy context."""
+        return cls(
+            plugin_snapshot_factory=None,
+            operator_profile_registry=None,
+            web_plugin_policy=None,
+            **kwargs,
+        )
 
     def set_openrouter_catalog_snapshot(self, *, sha256: str, source: str) -> None:
         """Record the boot-time OpenRouter catalog snapshot id.
@@ -1026,7 +1037,9 @@ class ExecutionServiceImpl:
         if self._plugin_snapshot_factory is not None and user_id is None:
             raise RuntimeError("Authenticated user_id is required for web plugin policy validation.")
         if self._plugin_snapshot_factory is None:
-            plugin_snapshot = None
+            from elspeth.web.dependencies import create_catalog_service
+
+            plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
         else:
             assert user_id is not None
             plugin_snapshot = self._plugin_snapshot_factory(user_id)

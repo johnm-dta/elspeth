@@ -25,7 +25,7 @@ from elspeth.web.execution.preflight import (
     instantiate_runtime_plugins,
     make_policy_bound_sink_factory,
 )
-from elspeth.web.execution.validation import validate_pipeline
+from elspeth.web.execution.validation import validate_pipeline_for_trained_operator
 from elspeth.web.plugin_policy.models import (
     PluginAvailability,
     PluginAvailabilitySnapshot,
@@ -307,7 +307,7 @@ async def test_run_sync_in_worker_preserves_preflight_mode_for_plugin_constructo
     """Constructors see preflight mode through the production worker path.
 
     This pins the runtime contract, not the ContextVar implementation detail:
-    validate_pipeline() may run in a ThreadPoolExecutor via run_sync_in_worker(),
+    validate_pipeline_for_trained_operator() may run in a ThreadPoolExecutor via run_sync_in_worker(),
     and constructors must still observe preflight mode inside that worker.
     """
     observed: list[tuple[str, bool]] = []
@@ -326,7 +326,7 @@ async def test_run_sync_in_worker_preserves_preflight_mode_for_plugin_constructo
     monkeypatch.setattr(CSVSink, "__init__", sink_init)
 
     result = await run_sync_in_worker(
-        validate_pipeline,
+        validate_pipeline_for_trained_operator,
         _csv_worker_probe_state(tmp_path),
         _web_settings(tmp_path),
         yaml_generator,
@@ -337,7 +337,9 @@ async def test_run_sync_in_worker_preserves_preflight_mode_for_plugin_constructo
 
 
 def test_validate_pipeline_rejects_chroma_persist_directory_outside_data_dir(tmp_path: Path) -> None:
-    result = validate_pipeline(_chroma_persist_outside_data_dir_state(tmp_path), _web_settings(tmp_path), yaml_generator)
+    result = validate_pipeline_for_trained_operator(
+        _chroma_persist_outside_data_dir_state(tmp_path), _web_settings(tmp_path), yaml_generator
+    )
 
     assert result.is_valid is False
     assert result.checks[0].name == "path_allowlist"

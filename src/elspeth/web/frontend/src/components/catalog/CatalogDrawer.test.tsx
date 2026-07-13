@@ -9,60 +9,76 @@ import { useSessionStore } from "@/stores/sessionStore";
 
 vi.mock("@/api/client", () => ({
   fetchPluginPolicy: vi.fn().mockResolvedValue({
-    snapshot_fingerprint: "catalog-test-snapshot",
-    policy_hash: "catalog-test-policy",
-    available_plugin_ids: ["source:csv", "transform:uppercase", "sink:json"],
-    capability_groups: [],
-    selections: [],
-    control_modes: [],
+    data: {
+      principal_scope: "local:alice",
+      snapshot_fingerprint: "catalog-test-snapshot",
+      policy_hash: "catalog-test-policy",
+      available_plugin_ids: ["source:csv", "transform:uppercase", "sink:json"],
+      capability_groups: [],
+      selections: [],
+      control_modes: [],
+    },
+    snapshotFingerprint: "catalog-test-snapshot",
   }),
-  listSources: vi.fn().mockResolvedValue([
-    {
+  listSources: vi.fn().mockResolvedValue({
+    data: [
+      {
+        name: "csv",
+        plugin_type: "source",
+        description: "CSV file source",
+        config_fields: [],
+        usage_when_to_use: null,
+        usage_when_not_to_use: null,
+        example_use: null,
+        capability_tags: [],
+        audit_characteristics: [],
+      },
+    ],
+    snapshotFingerprint: "catalog-test-snapshot",
+  }),
+  listTransforms: vi.fn().mockResolvedValue({
+    data: [
+      {
+        name: "uppercase",
+        plugin_type: "transform",
+        description: "Uppercase transform",
+        config_fields: [],
+        usage_when_to_use: null,
+        usage_when_not_to_use: null,
+        example_use: null,
+        capability_tags: [],
+        audit_characteristics: [],
+      },
+    ],
+    snapshotFingerprint: "catalog-test-snapshot",
+  }),
+  listSinks: vi.fn().mockResolvedValue({
+    data: [
+      {
+        name: "json",
+        plugin_type: "sink",
+        description: "JSON file sink",
+        config_fields: [],
+        usage_when_to_use: null,
+        usage_when_not_to_use: null,
+        example_use: null,
+        capability_tags: [],
+        audit_characteristics: [],
+      },
+    ],
+    snapshotFingerprint: "catalog-test-snapshot",
+  }),
+  getPluginSchema: vi.fn().mockResolvedValue({
+    data: {
       name: "csv",
       plugin_type: "source",
       description: "CSV file source",
-      config_fields: [],
-      usage_when_to_use: null,
-      usage_when_not_to_use: null,
-      example_use: null,
-      capability_tags: [],
-      audit_characteristics: [],
+      json_schema: {
+        properties: { path: { type: "string", description: "File path" } },
+        required: ["path"],
+      },
     },
-  ]),
-  listTransforms: vi.fn().mockResolvedValue([
-    {
-      name: "uppercase",
-      plugin_type: "transform",
-      description: "Uppercase transform",
-      config_fields: [],
-      usage_when_to_use: null,
-      usage_when_not_to_use: null,
-      example_use: null,
-      capability_tags: [],
-      audit_characteristics: [],
-    },
-  ]),
-  listSinks: vi.fn().mockResolvedValue([
-    {
-      name: "json",
-      plugin_type: "sink",
-      description: "JSON file sink",
-      config_fields: [],
-      usage_when_to_use: null,
-      usage_when_not_to_use: null,
-      example_use: null,
-      capability_tags: [],
-      audit_characteristics: [],
-    },
-  ]),
-  getPluginSchema: vi.fn().mockResolvedValue({
-    name: "csv",
-    plugin_type: "source",
-    description: "CSV file source",
-    json_schema: {
-      properties: { path: { type: "string", description: "File path" } },
-      required: ["path"],
-    },
+    snapshotFingerprint: "catalog-test-snapshot",
   }),
 }));
 
@@ -194,19 +210,22 @@ describe("CatalogDrawer", () => {
   it("retries catalog loading inline after an initial fetch failure", async () => {
     vi.mocked(listSources)
       .mockRejectedValueOnce(new Error("catalog unavailable"))
-      .mockResolvedValueOnce([
-        {
-          name: "csv",
-          plugin_type: "source",
-          description: "CSV file source",
-          config_fields: [],
-          usage_when_to_use: null,
-          usage_when_not_to_use: null,
-          example_use: null,
-          capability_tags: [],
-          audit_characteristics: [],
-        },
-      ]);
+      .mockResolvedValueOnce({
+        data: [
+          {
+            name: "csv",
+            plugin_type: "source",
+            description: "CSV file source",
+            config_fields: [],
+            usage_when_to_use: null,
+            usage_when_not_to_use: null,
+            example_use: null,
+            capability_tags: [],
+            audit_characteristics: [],
+          },
+        ],
+        snapshotFingerprint: "catalog-test-snapshot",
+      });
     render(<CatalogDrawer isOpen={true} onClose={vi.fn()} />);
     const user = userEvent.setup();
 
@@ -321,9 +340,18 @@ describe("CatalogDrawer — Phase 7B reshape", () => {
   beforeEach(() => {
     usePluginCatalogStore.getState().clear();
     useSessionStore.setState({ compositionState: null } as never);
-    vi.mocked(api.listSources).mockResolvedValue([csv, azure] as never);
-    vi.mocked(api.listTransforms).mockResolvedValue([] as never);
-    vi.mocked(api.listSinks).mockResolvedValue([] as never);
+    vi.mocked(api.listSources).mockResolvedValue({
+      data: [csv, azure],
+      snapshotFingerprint: "catalog-test-snapshot",
+    } as never);
+    vi.mocked(api.listTransforms).mockResolvedValue({
+      data: [],
+      snapshotFingerprint: "catalog-test-snapshot",
+    } as never);
+    vi.mocked(api.listSinks).mockResolvedValue({
+      data: [],
+      snapshotFingerprint: "catalog-test-snapshot",
+    } as never);
   });
 
   it("renders InlineChatSourceEntry as the first row of the Sources tab", async () => {
@@ -409,19 +437,22 @@ describe("CatalogDrawer — Phase 7B reshape", () => {
   it("filter state is per-tab — switching tabs does not carry filters over", async () => {
     // Regression guard for the cross-tab UX trap. An active capability
     // filter on Sources must NOT silently filter Transforms on tab switch.
-    vi.mocked(api.listTransforms).mockResolvedValue([
-      {
-        name: "uppercase",
-        plugin_type: "transform",
-        description: "Uppercase strings.",
-        config_fields: [],
-        usage_when_to_use: null,
-        usage_when_not_to_use: null,
-        example_use: null,
-        capability_tags: ["string"],
-        audit_characteristics: ["deterministic"],
-      },
-    ] as never);
+    vi.mocked(api.listTransforms).mockResolvedValue({
+      data: [
+        {
+          name: "uppercase",
+          plugin_type: "transform",
+          description: "Uppercase strings.",
+          config_fields: [],
+          usage_when_to_use: null,
+          usage_when_not_to_use: null,
+          example_use: null,
+          capability_tags: ["string"],
+          audit_characteristics: ["deterministic"],
+        },
+      ],
+      snapshotFingerprint: "catalog-test-snapshot",
+    } as never);
     render(<CatalogDrawer isOpen onClose={() => {}} />);
     await waitFor(() => expect(screen.getByText("azure_blob")).toBeInTheDocument());
 
@@ -457,7 +488,10 @@ describe("CatalogDrawer — Phase 7B reshape", () => {
 
   it("shows 'No plugins available.' (not the filter variant) when no filters are active and the list is empty", async () => {
     // B3 regression gate: empty-state message with no active filters.
-    vi.mocked(api.listSources).mockResolvedValue([] as never);
+    vi.mocked(api.listSources).mockResolvedValue({
+      data: [],
+      snapshotFingerprint: "catalog-test-snapshot",
+    } as never);
     render(<CatalogDrawer isOpen onClose={() => {}} />);
     const empty = await screen.findByText("No plugins available.");
     // M05 (WCAG 4.1.3): announced through a polite live region.

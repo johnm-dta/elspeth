@@ -154,7 +154,7 @@ def make_service() -> object:
     """Return a zero-arg factory producing a wired ``ComposerServiceImpl``."""
 
     def _factory() -> ComposerServiceImpl:
-        return ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+        return ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=_make_settings())
 
     return _factory
 
@@ -1048,7 +1048,7 @@ def test_summary_with_many_large_prompts_stays_under_char_cap():
         version=2,
     )
 
-    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=settings)
+    service = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=settings)
     args = service._build_checkpoint_arguments(phase="end", state=state)
     total_chars = len(_build_advisor_user_message(args))
     assert total_chars < char_cap, f"{total_chars} >= {char_cap}; no headroom"

@@ -15,16 +15,20 @@ const UNTAGGED = { name: "passthrough", capability_tags: [] } as any;
 
 function _stubCatalog(transforms: any[], sources: any[] = [], sinks: any[] = []) {
   vi.spyOn(apiClient, "fetchPluginPolicy").mockResolvedValue({
-    snapshot_fingerprint: "narrative-snapshot",
-    policy_hash: "narrative-policy",
-    available_plugin_ids: [],
-    capability_groups: [],
-    selections: [],
-    control_modes: [],
+    data: {
+      principal_scope: "local:alice",
+      snapshot_fingerprint: "narrative-snapshot",
+      policy_hash: "narrative-policy",
+      available_plugin_ids: [],
+      capability_groups: [],
+      selections: [],
+      control_modes: [],
+    },
+    snapshotFingerprint: "narrative-snapshot",
   });
-  vi.spyOn(apiClient, "listTransforms").mockResolvedValue(transforms);
-  vi.spyOn(apiClient, "listSources").mockResolvedValue(sources);
-  vi.spyOn(apiClient, "listSinks").mockResolvedValue(sinks);
+  vi.spyOn(apiClient, "listTransforms").mockResolvedValue({ data: transforms, snapshotFingerprint: "narrative-snapshot" });
+  vi.spyOn(apiClient, "listSources").mockResolvedValue({ data: sources, snapshotFingerprint: "narrative-snapshot" });
+  vi.spyOn(apiClient, "listSinks").mockResolvedValue({ data: sinks, snapshotFingerprint: "narrative-snapshot" });
 }
 
 function _setComposition(state: any) {
@@ -125,8 +129,8 @@ describe("useNarrativeMode", () => {
 
   it("falls back to narrativeMode=false when the catalog fetch fails", async () => {
     vi.spyOn(apiClient, "listTransforms").mockRejectedValue(new Error("network"));
-    vi.spyOn(apiClient, "listSources").mockResolvedValue([]);
-    vi.spyOn(apiClient, "listSinks").mockResolvedValue([]);
+    vi.spyOn(apiClient, "listSources").mockResolvedValue({ data: [], snapshotFingerprint: "narrative-snapshot" });
+    vi.spyOn(apiClient, "listSinks").mockResolvedValue({ data: [], snapshotFingerprint: "narrative-snapshot" });
     _setComposition({
       sources: {},
       nodes: [{ id: "n1", node_type: "transform", plugin: "anything", input: "src", on_success: null, on_error: null, options: {} }],

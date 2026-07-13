@@ -449,7 +449,7 @@ def service(
 ) -> Iterator[ExecutionServiceImpl]:
     # AC #17: All Run CRUD goes through SessionService — no direct DB access.
     yaml_generator = _YamlGeneratorStub()
-    svc = ExecutionServiceImpl(
+    svc = ExecutionServiceImpl.for_trained_operator(
         loop=mock_loop,
         broadcaster=broadcaster,
         settings=mock_settings,
@@ -4753,7 +4753,7 @@ class TestB8AsyncBridging:
     ) -> None:
         """_call_async() schedules coroutine and returns its result."""
         mock_loop = MagicMock(spec=asyncio.AbstractEventLoop)
-        svc = ExecutionServiceImpl(
+        svc = ExecutionServiceImpl.for_trained_operator(
             loop=mock_loop,
             broadcaster=broadcaster,
             settings=mock_settings,
@@ -4782,7 +4782,7 @@ class TestB8AsyncBridging:
     ) -> None:
         """If the coroutine raises, _call_async re-raises from future.result()."""
         mock_loop = MagicMock(spec=asyncio.AbstractEventLoop)
-        svc = ExecutionServiceImpl(
+        svc = ExecutionServiceImpl.for_trained_operator(
             loop=mock_loop,
             broadcaster=broadcaster,
             settings=mock_settings,
@@ -4809,7 +4809,7 @@ class TestB8AsyncBridging:
     ) -> None:
         """R6 fix: _call_async raises TimeoutError after 30s, preventing deadlock."""
         mock_loop = MagicMock(spec=asyncio.AbstractEventLoop)
-        svc = ExecutionServiceImpl(
+        svc = ExecutionServiceImpl.for_trained_operator(
             loop=mock_loop,
             broadcaster=broadcaster,
             settings=mock_settings,
@@ -4840,7 +4840,7 @@ class TestAsyncShutdown:
     ) -> None:
         """Regression: draining the executor must not strand worker _call_async calls."""
         loop = asyncio.get_running_loop()
-        svc = ExecutionServiceImpl(
+        svc = ExecutionServiceImpl.for_trained_operator(
             loop=loop,
             broadcaster=ProgressBroadcaster(loop),
             settings=mock_settings,
@@ -4953,7 +4953,7 @@ class TestVerifyRunOwnership:
         settings.landscape_url = "sqlite:///test.db"
         settings.payload_store_path = Path("/tmp/test")
 
-        svc = ExecutionServiceImpl(
+        svc = ExecutionServiceImpl.for_trained_operator(
             loop=mock_loop,
             broadcaster=broadcaster,
             settings=settings,
@@ -6389,7 +6389,7 @@ class TestFinalizeOutputBlobsCatchWidening:
     def _make_service_with_blob(
         self, blob_service: BlobServiceProtocol, mock_settings: MagicMock, mock_session_service: MagicMock
     ) -> ExecutionServiceImpl:
-        svc = ExecutionServiceImpl(
+        svc = ExecutionServiceImpl.for_trained_operator(
             loop=MagicMock(spec=asyncio.AbstractEventLoop),
             broadcaster=MagicMock(spec=ProgressBroadcaster),
             settings=mock_settings,
@@ -6509,7 +6509,7 @@ class TestTerminalOrderingInvariant:
         blob_service = _blob_service_stub()
         blob_service.finalize_run_output_blobs.side_effect = BlobNotFoundError("blob-vanished")
 
-        svc = ExecutionServiceImpl(
+        svc = ExecutionServiceImpl.for_trained_operator(
             loop=MagicMock(spec=asyncio.AbstractEventLoop),
             broadcaster=mock_broadcaster,
             settings=mock_settings,
@@ -6577,7 +6577,7 @@ class TestTerminalOrderingInvariant:
         mock_session_service.update_run_status.side_effect = _selective_update
         mock_session_service.get_run.return_value = _run_record_stub(status="cancelled")
 
-        svc = ExecutionServiceImpl(
+        svc = ExecutionServiceImpl.for_trained_operator(
             loop=MagicMock(spec=asyncio.AbstractEventLoop),
             broadcaster=mock_broadcaster,
             settings=mock_settings,

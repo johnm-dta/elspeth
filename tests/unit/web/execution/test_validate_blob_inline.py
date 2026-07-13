@@ -22,7 +22,7 @@ from elspeth.web.composer.state import CompositionState, NodeSpec, OutputSpec, P
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.service import ExecutionServiceImpl
-from elspeth.web.execution.validation import validate_pipeline
+from elspeth.web.execution.validation import validate_pipeline_for_trained_operator
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
@@ -152,7 +152,7 @@ class _UnusedSessionService:
 
 
 def test_validate_returns_structured_violation_for_missing_inline_blob(tmp_path: Path) -> None:
-    result = validate_pipeline(
+    result = validate_pipeline_for_trained_operator(
         _state_with_inline_prompt(tmp_path),
         SimpleNamespace(data_dir=tmp_path),
         composer_yaml_generator,
@@ -167,7 +167,7 @@ def test_validate_returns_structured_violation_for_missing_inline_blob(tmp_path:
 
 
 def test_validate_blob_inline_failure_has_no_duplicate_check_results(tmp_path: Path) -> None:
-    result = validate_pipeline(
+    result = validate_pipeline_for_trained_operator(
         _state_with_inline_prompt(tmp_path),
         SimpleNamespace(data_dir=tmp_path),
         composer_yaml_generator,
@@ -215,7 +215,7 @@ def test_validate_substitutes_ready_inline_blob_marker_before_settings_load(
     mock_graph = MagicMock(spec=ExecutionGraph)
     mock_build_graph.return_value = mock_graph
 
-    result = validate_pipeline(
+    result = validate_pipeline_for_trained_operator(
         _state_with_inline_prompt(tmp_path),
         SimpleNamespace(data_dir=tmp_path),
         composer_yaml_generator,
@@ -233,7 +233,7 @@ def test_validate_substitutes_ready_inline_blob_marker_before_settings_load(
 async def test_execution_service_validate_state_passes_blob_metadata_bridge(tmp_path: Path) -> None:
     blob_service = _BlobMetadataService(record=None)
     loop = asyncio.get_running_loop()
-    service = ExecutionServiceImpl(
+    service = ExecutionServiceImpl.for_trained_operator(
         loop=loop,
         broadcaster=ProgressBroadcaster(loop),
         settings=WebSettings(
@@ -265,7 +265,7 @@ async def test_execution_service_validate_state_treats_cross_session_inline_blob
     other_session_id = uuid4()
     blob_service = _BlobMetadataService(record=_ready_blob_record(session_id=other_session_id))
     loop = asyncio.get_running_loop()
-    service = ExecutionServiceImpl(
+    service = ExecutionServiceImpl.for_trained_operator(
         loop=loop,
         broadcaster=ProgressBroadcaster(loop),
         settings=WebSettings(

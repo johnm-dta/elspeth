@@ -25,6 +25,7 @@ import type {
   PluginSchemaInfo,
   PluginPolicyFinding,
   PluginPolicyResponse,
+  PluginSnapshotResponse,
   PluginSummary,
   Run,
   RunDiagnostics,
@@ -253,6 +254,8 @@ export async function parseResponse<T>(
       provider_detail: providerDetail,
       provider_status_code: providerStatusCode,
       validation_errors: validationErrors,
+      snapshot_fingerprint:
+        response.headers.get("X-ELSPETH-Plugin-Snapshot") ?? undefined,
     };
     throw error;
   }
@@ -946,37 +949,50 @@ export async function importCompositionYaml(
 
 // ── Plugin Catalog ──────────────────────────────────────────────────────────
 
+async function parsePluginSnapshotResponse<T>(
+  response: Response,
+): Promise<PluginSnapshotResponse<T>> {
+  const data = await parseResponse<T>(response);
+  const snapshotFingerprint = response.headers.get(
+    "X-ELSPETH-Plugin-Snapshot",
+  );
+  if (snapshotFingerprint === null || snapshotFingerprint === "") {
+    throw new Error("Plugin catalog response omitted its snapshot fingerprint.");
+  }
+  return { data, snapshotFingerprint };
+}
+
 /** Fetch the current principal's immutable plugin-policy snapshot metadata. */
-export async function fetchPluginPolicy(): Promise<PluginPolicyResponse> {
+export async function fetchPluginPolicy(): Promise<PluginSnapshotResponse<PluginPolicyResponse>> {
   const response = await fetch("/api/catalog/policy", {
     headers: authHeaders(),
     cache: "no-store",
   });
-  return parseResponse<PluginPolicyResponse>(response);
+  return parsePluginSnapshotResponse<PluginPolicyResponse>(response);
 }
 
 /** List available source plugins. */
-export async function listSources(): Promise<PluginSummary[]> {
+export async function listSources(): Promise<PluginSnapshotResponse<PluginSummary[]>> {
   const response = await fetch("/api/catalog/sources", {
     headers: authHeaders(),
   });
-  return parseResponse<PluginSummary[]>(response);
+  return parsePluginSnapshotResponse<PluginSummary[]>(response);
 }
 
 /** List available transform plugins. */
-export async function listTransforms(): Promise<PluginSummary[]> {
+export async function listTransforms(): Promise<PluginSnapshotResponse<PluginSummary[]>> {
   const response = await fetch("/api/catalog/transforms", {
     headers: authHeaders(),
   });
-  return parseResponse<PluginSummary[]>(response);
+  return parsePluginSnapshotResponse<PluginSummary[]>(response);
 }
 
 /** List available sink plugins. */
-export async function listSinks(): Promise<PluginSummary[]> {
+export async function listSinks(): Promise<PluginSnapshotResponse<PluginSummary[]>> {
   const response = await fetch("/api/catalog/sinks", {
     headers: authHeaders(),
   });
-  return parseResponse<PluginSummary[]>(response);
+  return parsePluginSnapshotResponse<PluginSummary[]>(response);
 }
 
 /**
@@ -987,7 +1003,7 @@ export async function listSinks(): Promise<PluginSummary[]> {
 export async function getPluginSchema(
   pluginType: "source" | "transform" | "sink",
   pluginName: string,
-): Promise<PluginSchemaInfo> {
+): Promise<PluginSnapshotResponse<PluginSchemaInfo>> {
   // REST URL uses plural path segments; the route handler translates
   // plural -> singular before calling CatalogService.
   const pluralType = `${pluginType}s`;
@@ -995,7 +1011,7 @@ export async function getPluginSchema(
     `/api/catalog/${pluralType}/${pluginName}/schema`,
     { headers: authHeaders() },
   );
-  return parseResponse<PluginSchemaInfo>(response);
+  return parsePluginSnapshotResponse<PluginSchemaInfo>(response);
 }
 
 // ── Validation & Execution ──────────────────────────────────────────────────

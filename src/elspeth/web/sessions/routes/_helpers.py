@@ -1256,6 +1256,9 @@ async def _runtime_preflight_for_state(
     user_id: str | None,
     session_id: str | UUID,
 ) -> ValidationResult:
+    from elspeth.web.dependencies import create_catalog_service
+
+    plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
     return await asyncio.wait_for(
         run_sync_in_worker(
             validate_pipeline,
@@ -1265,6 +1268,8 @@ async def _runtime_preflight_for_state(
             secret_service=secret_service,
             user_id=user_id,
             session_id=str(session_id),
+            plugin_snapshot=plugin_snapshot,
+            profile_registry=None,
         ),
         timeout=settings.composer_runtime_preflight_timeout_seconds,
     )

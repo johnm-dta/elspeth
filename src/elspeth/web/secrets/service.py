@@ -14,6 +14,7 @@ from elspeth.contracts.secrets import (
     ResolvedSecret,
     SecretDecryptionError,
     SecretInventoryItem,
+    SecretScope,
 )
 from elspeth.core.security.secret_loader import SecretNotFoundError
 from elspeth.web.secrets.server_store import ServerSecretStore
@@ -214,6 +215,32 @@ class WebSecretService:
         except SecretNotFoundError:
             return None
 
+    def resolve_scoped(
+        self,
+        user_id: str,
+        name: str,
+        scope: SecretScope,
+        *,
+        auth_provider_type: AuthProviderType,
+    ) -> ResolvedSecret | None:
+        """Resolve from exactly the operator-selected store without shadowing."""
+        try:
+            if scope == "user":
+                value, ref = self._user_store.get_secret(name, user_id=user_id, auth_provider_type=auth_provider_type)
+                return ResolvedSecret(name=name, value=value, scope="user", fingerprint=ref.fingerprint)
+            if scope == "server":
+                value, ref = self._server_store.get_secret(name)
+                return ResolvedSecret(name=name, value=value, scope="server", fingerprint=ref.fingerprint)
+            return None
+        except FingerprintKeyMissingError:
+            _log_fingerprint_missing_rate_limited()
+            return None
+        except SecretDecryptionError:
+            _log_secret_decryption_rate_limited()
+            return None
+        except SecretNotFoundError:
+            return None
+
     def check_user_ref_resolvable(
         self,
         user_id: str,
@@ -317,3 +344,6 @@ class ScopedSecretResolver:
 
     def resolve(self, user_id: str, name: str) -> ResolvedSecret | None:
         return self._service.resolve(user_id, name, auth_provider_type=self._auth_provider_type)
+
+    def resolve_scoped(self, user_id: str, name: str, scope: SecretScope) -> ResolvedSecret | None:
+        return self._service.resolve_scoped(user_id, name, scope, auth_provider_type=self._auth_provider_type)

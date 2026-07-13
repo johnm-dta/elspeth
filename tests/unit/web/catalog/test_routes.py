@@ -54,6 +54,12 @@ def client(catalog: CatalogServiceImpl) -> TestClient:
         def has_ref(self, principal: str, name: str) -> bool:
             return False
 
+        def server_generation(self, name: str) -> str | None:
+            return None
+
+        def user_generation(self, principal: str, name: str) -> str | None:
+            return None
+
     app.state.web_plugin_policy = policy
     app.state.operator_profile_registry = profiles
     app.state.plugin_snapshot_factory = lambda user: build_plugin_snapshot(
@@ -191,6 +197,9 @@ class TestGetSchema:
         resp = client.get("/api/catalog/sources/null/schema")
         assert resp.status_code == 404
         assert resp.json()["detail"] == "plugin_not_enabled"
+        assert resp.headers["cache-control"] == "private, no-store"
+        assert resp.headers["vary"] == "Authorization, Cookie"
+        assert resp.headers["x-elspeth-plugin-snapshot"]
 
     def test_unknown_type_returns_404(self, client: TestClient) -> None:
         resp = client.get("/api/catalog/widgets/csv/schema")

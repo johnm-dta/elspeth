@@ -578,7 +578,7 @@ def _build_composer(
         composer_model="anthropic/claude-opus-4-7",
         shareable_link_signing_key=b"\x00" * 32,
     )
-    return ComposerServiceImpl(
+    return ComposerServiceImpl.for_trained_operator(
         catalog=catalog,
         settings=settings,
         sessions_service=sessions_service,

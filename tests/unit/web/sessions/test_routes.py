@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 import structlog
@@ -564,7 +564,9 @@ def _install_restricted_plugin_policy(app: FastAPI, *hidden: PluginId) -> Plugin
         binding_generation_fingerprint="session-route-policy-generation",
     )
     app.state.catalog_service = catalog
-    app.state.operator_profile_registry = MagicMock(spec=OperatorProfileRegistry)
+    profile_registry = MagicMock(spec=OperatorProfileRegistry)
+    profile_registry.public_schema.side_effect = lambda _plugin_id, full_schema, *, available_aliases: full_schema
+    app.state.operator_profile_registry = profile_registry
     app.state.plugin_snapshot_factory = lambda _user: snapshot
     return snapshot
 
@@ -3657,8 +3659,32 @@ class TestMessageRoutes:
             name="csv",
             plugin_type="source",
             description="CSV source",
-            json_schema={"title": "CSV", "type": "object", "properties": {}},
-            knob_schema={"fields": []},
+            json_schema={
+                "title": "CSV",
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "schema": {"type": "object"},
+                },
+            },
+            knob_schema={
+                "fields": [
+                    {
+                        "name": "path",
+                        "label": "Path",
+                        "kind": "text",
+                        "required": True,
+                        "nullable": False,
+                    },
+                    {
+                        "name": "schema",
+                        "label": "Schema",
+                        "kind": "json-object",
+                        "required": True,
+                        "nullable": False,
+                    },
+                ]
+            },
         )
         app.state.catalog_service = catalog
         app.state.blob_service = MagicMock(spec=BlobServiceProtocol)
@@ -8159,6 +8185,8 @@ async def test_runtime_preflight_for_state_threads_session_id_to_validate_pipeli
             "secret_service": None,
             "user_id": "alice",
             "session_id": "session-123",
+            "plugin_snapshot": ANY,
+            "profile_registry": None,
         }
     ]
 

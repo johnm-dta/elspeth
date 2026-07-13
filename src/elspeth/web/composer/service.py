@@ -835,8 +835,8 @@ class ComposerServiceImpl:
         session_engine: Engine | None = None,
         secret_service: WebSecretResolver | None = None,
         runtime_preflight_coordinator: RuntimePreflightCoordinator | None = None,
-        plugin_snapshot_factory: Callable[[str], PluginAvailabilitySnapshot] | None = None,
-        operator_profile_registry: OperatorProfileRegistry | None = None,
+        plugin_snapshot_factory: Callable[[str], PluginAvailabilitySnapshot] | None,
+        operator_profile_registry: OperatorProfileRegistry | None,
     ) -> None:
         self._catalog = catalog
         self._sessions_service = sessions_service
@@ -905,6 +905,22 @@ class ComposerServiceImpl:
         # Concurrency: a single session is driven serially through one
         # compose() call at a time; a plain dict is sufficient.
         self._schemas_loaded_by_session: dict[str, set[tuple[str, str]]] = {}
+
+    @classmethod
+    def for_trained_operator(
+        cls,
+        catalog: CatalogService,
+        settings: ComposerSettings,
+        **kwargs: Any,
+    ) -> ComposerServiceImpl:
+        """Explicit non-web composition root with unrestricted local catalog access."""
+        return cls(
+            catalog=catalog,
+            settings=settings,
+            plugin_snapshot_factory=None,
+            operator_profile_registry=None,
+            **kwargs,
+        )
 
     def _plugin_policy_context(
         self,

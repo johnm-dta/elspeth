@@ -12,6 +12,7 @@ Uses BaseAzureSafetyTransform for shared batch infrastructure.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, TypedDict
 
 from pydantic import BaseModel, Field
@@ -138,6 +139,25 @@ class AzureContentSafety(BaseAzureSafetyTransform):
             )
         }
     )
+
+    @classmethod
+    def is_effective_blocking_control(
+        cls,
+        *,
+        capability: PluginCapability,
+        role: ControlRole,
+        options: Mapping[str, object],
+    ) -> bool:
+        if not super().is_effective_blocking_control(capability=capability, role=role, options=options):
+            return False
+        thresholds = options.get("thresholds")
+        if not isinstance(thresholds, Mapping):
+            return True
+        values = tuple(thresholds.get(category) for category in ("hate", "violence", "sexual", "self_harm"))
+        # Runtime flags only severities strictly above the configured threshold;
+        # Azure's closed 0..6 response range makes four sixes a no-op.
+        return not all(type(value) is int and value >= 6 for value in values)
+
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
     source_file_hash: str | None = "sha256:5ff60945bf07a9b1"

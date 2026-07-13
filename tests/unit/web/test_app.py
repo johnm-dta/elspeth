@@ -16,7 +16,7 @@ from uuid import uuid4
 import httpx
 import pytest
 from pydantic import SecretBytes, ValidationError
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import CompileError, OperationalError
 from starlette.requests import Request
@@ -953,6 +953,46 @@ class TestLifespanShutdown:
 
         assert fake_execution_service.shutdown_calls == 1
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("deployment_target", "expected_create_tables"), [("default", True), ("aws-ecs", False)])
+    async def test_lifespan_forwards_orphan_reconciliation_schema_creation_policy(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        deployment_target: str,
+        expected_create_tables: bool,
+    ) -> None:
+        base_dir = tmp_path / deployment_target / "base"
+        app = create_app(_settings(base_dir, composer_boot_probe_enabled=False))
+        if deployment_target == "aws-ecs":
+            app.state.settings = _aws_settings(
+                tmp_path / deployment_target / "runtime",
+                composer_boot_probe_enabled=False,
+            )
+
+        one_shot_calls: list[bool] = []
+        periodic_calls: list[bool] = []
+        periodic_started = asyncio.Event()
+
+        def finalize(_url: str, _runs: list[RunRecord], *, create_tables: bool) -> int:
+            one_shot_calls.append(create_tables)
+            return 0
+
+        async def periodic(*_args: object, create_tables: bool, **_kwargs: object) -> None:
+            periodic_calls.append(create_tables)
+            periodic_started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(app_module, "_finalize_orphaned_landscape_runs", finalize)
+        monkeypatch.setattr(app_module, "_periodic_orphan_cleanup", periodic)
+
+        with patch("httpx.AsyncClient", return_value=_StaticAsyncClient([])):
+            async with lifespan(app):
+                await asyncio.wait_for(periodic_started.wait(), timeout=5.0)
+
+        assert one_shot_calls == [expected_create_tables]
+        assert periodic_calls == [expected_create_tables]
+
 
 class TestSettingsFromEnv:
     """Tests for _settings_from_env() environment variable parsing."""
@@ -1241,6 +1281,54 @@ class TestPeriodicOrphanCleanup:
         assert "SELECT * FROM runs" not in str(event)
 
     @pytest.mark.asyncio
+    async def test_schema_compatibility_failure_is_redacted_and_loop_retries(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        sentinel = "opaque-schema-secret SELECT raw_schema FROM forbidden"
+        recovered = asyncio.Event()
+        finalize_calls: list[bool] = []
+
+        class _RecordSessionService:
+            async def cancel_all_orphaned_run_records(self, **_kwargs: object) -> list[RunRecord]:
+                return []
+
+        def finalize(_url: str, _runs: list[RunRecord], *, create_tables: bool) -> int:
+            finalize_calls.append(create_tables)
+            if len(finalize_calls) == 1:
+                raise SchemaCompatibilityError(sentinel)
+            recovered.set()
+            return 0
+
+        monkeypatch.setattr(app_module, "_finalize_orphaned_landscape_runs", finalize)
+        telemetry = build_sessions_telemetry()
+        with capture_logs() as logs:
+            task = asyncio.create_task(
+                _periodic_orphan_cleanup(
+                    _RecordSessionService(),  # type: ignore[arg-type]
+                    _RecordingExecutionService(),
+                    telemetry,
+                    interval_seconds=0,
+                    max_age_seconds=3600,
+                    landscape_url="postgresql://runtime@db/landscape",
+                    create_tables=False,
+                )
+            )
+            try:
+                await asyncio.wait_for(recovered.wait(), timeout=5.0)
+            finally:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+        assert finalize_calls[:2] == [False, False]
+        failures = [entry for entry in logs if entry.get("event") == "periodic_orphan_cleanup_failed"]
+        assert len(failures) == 1
+        assert failures[0]["exc_class"] == "SchemaCompatibilityError"
+        assert "exc_info" not in failures[0]
+        assert sentinel not in repr(failures[0])
+
+    @pytest.mark.asyncio
     async def test_cancellation_is_clean(self) -> None:
         """Task cancellation doesn't raise or leave dangling state."""
         session_service = _RecordingSessionService(cancel_result=0)
@@ -1385,6 +1473,40 @@ class TestOrphanLandscapeReconciliation:
         assert run is not None
         assert run.status == RunStatus.INTERRUPTED
         assert run.completed_at is not None
+
+    def test_validate_only_reconciliation_rejects_fresh_database_without_creating_tables(self, tmp_path: Path) -> None:
+        database_path = tmp_path / "fresh-landscape.db"
+        landscape_url = f"sqlite:///{database_path}"
+        cancelled_run = RunRecord(
+            id=uuid4(),
+            session_id=uuid4(),
+            state_id=uuid4(),
+            status="cancelled",
+            started_at=datetime.now(tz=UTC),
+            finished_at=datetime.now(tz=UTC),
+            rows_processed=0,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            error="orphaned",
+            landscape_run_id="lscp-missing-schema",
+            pipeline_yaml=None,
+        )
+
+        with pytest.raises(SchemaCompatibilityError):
+            app_module._finalize_orphaned_landscape_runs(
+                landscape_url,
+                [cancelled_run],
+                create_tables=False,
+            )
+
+        engine = create_engine(landscape_url)
+        try:
+            assert inspect(engine).get_table_names() == []
+        finally:
+            engine.dispose()
 
 
 class TestDataDirCreation:

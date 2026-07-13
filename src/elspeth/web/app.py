@@ -38,7 +38,7 @@ from elspeth.contracts.secrets import (
     FingerprintKeyMissingError,
     SecretDecryptionError,
 )
-from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.plugins.transforms.llm.model_catalog import (
@@ -167,7 +167,12 @@ def _parse_worker_count(raw_value: str, *, signal_name: str) -> int:
         ) from exc
 
 
-def _finalize_orphaned_landscape_runs(landscape_url: str, cancelled_runs: list[RunRecord]) -> int:
+def _finalize_orphaned_landscape_runs(
+    landscape_url: str,
+    cancelled_runs: list[RunRecord],
+    *,
+    create_tables: bool = True,
+) -> int:
     """Mark Landscape rows interrupted for session runs cancelled as orphans."""
     landscape_run_ids: list[str] = []
     seen: set[str] = set()
@@ -181,7 +186,7 @@ def _finalize_orphaned_landscape_runs(landscape_url: str, cancelled_runs: list[R
         return 0
 
     finalized = 0
-    with LandscapeDB.from_url(landscape_url) as landscape_db:
+    with LandscapeDB.from_url(landscape_url, create_tables=create_tables) as landscape_db:
         lifecycle = RecorderFactory(landscape_db).run_lifecycle
         for landscape_run_id in landscape_run_ids:
             landscape_run = lifecycle.get_run(landscape_run_id)
@@ -204,6 +209,7 @@ async def _periodic_orphan_cleanup(
     interval_seconds: int,
     max_age_seconds: int,
     landscape_url: str | None = None,
+    create_tables: bool = True,
 ) -> None:
     """Background task that periodically cancels orphaned runs.
 
@@ -236,14 +242,18 @@ async def _periodic_orphan_cleanup(
                     exclude_run_ids=live_run_ids,
                     reason="Orphaned by periodic cleanup — no active executor thread",
                 )
-                _finalize_orphaned_landscape_runs(landscape_url, cancelled_runs)
+                _finalize_orphaned_landscape_runs(
+                    landscape_url,
+                    cancelled_runs,
+                    create_tables=create_tables,
+                )
                 cancelled = len(cancelled_runs)
             if cancelled:
                 telemetry.orphaned_runs_cancelled_total.add(
                     cancelled,
                     attributes={"source": "periodic", "excluded_live_runs": len(live_run_ids)},
                 )
-        except (SQLAlchemyError, OSError) as cleanup_exc:
+        except (SQLAlchemyError, OSError, SchemaCompatibilityError) as cleanup_exc:
             # Narrow catch — only recoverable audit/IO failures are
             # absorbed so the loop retries on the next interval.
             # SQLAlchemyError covers DB-layer transients raised from
@@ -295,11 +305,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Single-process server: every non-terminal run is orphaned after restart.
     # No age filter — cancel ALL pending/running runs immediately.
     settings: WebSettings = app.state.settings
+    create_landscape_tables = settings.deployment_target != DEPLOYMENT_TARGET_AWS_ECS
     session_service = app.state.session_service
     cancelled_runs = await session_service.cancel_all_orphaned_run_records(
         reason="Orphaned by server restart — no active process",
     )
-    _finalize_orphaned_landscape_runs(settings.get_landscape_url(), cancelled_runs)
+    _finalize_orphaned_landscape_runs(
+        settings.get_landscape_url(),
+        cancelled_runs,
+        create_tables=create_landscape_tables,
+    )
     cancelled = len(cancelled_runs)
     if cancelled:
         app.state.sessions_telemetry.orphaned_runs_cancelled_total.add(
@@ -525,6 +540,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             interval_seconds=settings.orphan_run_check_interval_seconds,
             max_age_seconds=settings.orphan_run_max_age_seconds,
             landscape_url=settings.get_landscape_url(),
+            create_tables=create_landscape_tables,
         )
     )
 

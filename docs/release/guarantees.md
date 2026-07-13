@@ -1,11 +1,11 @@
 # What ELSPETH Guarantees
 
-> **LAYERED ASSURANCE APPENDIX — RC-3 contract language with RC-5.2, RC-6, and 0.7.0 context.**
-> §1 through §6 preserve the RC-3 guarantees as originally drafted (3 March 2026) because downstream engineering and audit references cite that wording. §7 has been amended to reflect that the **no-multi-user / no-access-control** disclaimer is no longer true as of RC-4 and RC-5. §11 through §14 document RC-5.2 guarantees for authentication, secret references, multi-user sessions, and composer authoring. §15 documents RC-6 guarantees for multi-source execution and durable token scheduling; §7.1's "single-threaded in RC-3" statement is amended to scope it to RC-3 history. The 0.7.0 release keeps this appendix as the current assurance baseline while adding LLM-primary guided authoring and document-ingestion surfaces documented in the changelog and Composer guide. Read this as a versioned assurance appendix, not as marketing copy.
+> **LAYERED ASSURANCE APPENDIX — RC-3 contract language with RC-5.2, RC-6, and AWS ECS context.**
+> §1 through §6 preserve the RC-3 guarantees as originally drafted (3 March 2026) because downstream engineering and audit references cite that wording. §7 has been amended to reflect that the **no-multi-user / no-access-control** disclaimer is no longer true as of RC-4 and RC-5. §11 through §14 document RC-5.2 guarantees for authentication, secret references, multi-user sessions, and composer authoring. §15 documents RC-6 guarantees for multi-source execution and durable token scheduling; §7.1's "single-threaded in RC-3" statement is amended to scope it to RC-3 history. §16 adds the 0.7.1 AWS ECS operator-telemetry authority and outage boundary. Read this as a versioned assurance appendix, not as marketing copy.
 
-**Versions:** RC-3 (§1–§10) + RC-5.2 additions (§11–§14) + RC-6 additions (§15) + 0.7.0 context
+**Versions:** RC-3 (§1–§10) + RC-5.2 additions (§11–§14) + RC-6 additions (§15) + AWS ECS operator telemetry (§16) + 0.7.0 context
 **Original date:** 3 March 2026 (§1–§10)
-**Refreshed:** 19 May 2026 (§7 amendment; §11–§14 additions); 10 June 2026 (§7.1 amendment; §15 addition); 8 July 2026 (0.7.0 context refresh)
+**Refreshed:** 19 May 2026 (§7 amendment; §11–§14 additions); 10 June 2026 (§7.1 amendment; §15 addition); 8 July 2026 (0.7.0 context refresh); 13 July 2026 (§16 addition)
 **Audience:** Users, integrators, auditors, and assurance staff evaluating contractual claims
 **Register:** Technical / contractual
 
@@ -306,6 +306,7 @@ This contract is versioned with the software.
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 0.7.1 (§16 addition) | July 2026 | AWS ECS operator telemetry keeps Landscape authoritative, fixes web OTLP routing to the task-local collector, restricts dimensions, and makes collector loss observable but best effort. |
 | RC-6 (§15 addition) | June 2026 | §15 Multi-source execution and token scheduling guarantees. §7.1 amended — "single-threaded in RC-3" scoped to RC-3 history; current concurrency posture (single leader plus claim-only follower workers per ADR-030, overlapping token lifecycles, sequential cross-source ingest) stated explicitly. |
 | RC-5.2 (§11–§14 additions) | May 2026 | §11 Authentication and identity guarantees; §12 Secret-reference handling; §13 Multi-user session; §14 Composer authoring. §7.2 amended — "ELSPETH is not multi-user" disclaimer no longer accurate; replaced with organisational-policy boundary statement. |
 | RC-3 | Feb 2026 | Declarative DAG wiring, graceful shutdown, DROP-mode handling, gate plugin removal, telemetry hardening, test suite v2 migration |
@@ -529,6 +530,38 @@ This is the audit-primacy rule from §7 applied to the session subsystem: a muta
 - **No cross-source joining at ingest.** Queue fan-in nodes coordinate scheduling only; they do not merge row data or join source schemas.
 
 ---
+
+## 16. AWS ECS OPERATOR TELEMETRY (0.7.1)
+
+### 16.1 Audit authority is unchanged
+
+**Promise:** Landscape remains the permanent, authoritative record of every
+pipeline run. ELSPETH records the auditable event before attempting its
+operational telemetry counterpart. A CloudWatch or X-Ray receipt is never
+evidence of lineage, replayability, a business decision, or a successful
+Landscape write.
+
+### 16.2 AWS telemetry routing is operator-owned
+
+**Promise:** In AWS ECS web mode, uploaded pipeline telemetry routing is
+replaced by one enabled generic OTLP exporter to the fixed task-local receiver.
+Headers are empty, delivery is best effort, and only lifecycle or rows
+granularity is accepted. The CloudWatch Agent sidecar—not ELSPETH—uses the ECS
+task role/default credential chain to deliver metrics and traces.
+
+The authenticated Prometheus endpoint remains available. CloudWatch metric
+dimensions are restricted to bounded deployment identity and closed
+operational enums; user, session, run, row, token, content, URL, exception,
+request, account, and task identities are excluded.
+
+### 16.3 Telemetry loss cannot rewrite audited work
+
+**Promise:** A collector outage may degrade dashboards and alarms, but it does
+not fail or roll back business processing whose Landscape writes succeeded.
+Exporter failures, drops, stale delivery, and collector unavailability are
+observable as bounded aggregate health. ELSPETH does not guarantee that the
+best-effort CloudWatch/X-Ray copy is complete; investigations return to
+Landscape for authoritative facts.
 
 ## Closing
 

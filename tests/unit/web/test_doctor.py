@@ -7,17 +7,25 @@ import stat
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
+from elspeth.core.landscape.database import SchemaCompatibilityError
 from elspeth.web.config import WebSettings
 from elspeth.web.deployment_contract import ContractCheck
 from elspeth.web.doctor import (
+    _initialize_database,
+    _inspect_database,
     collect_checks,
+    database_target_check,
     plugin_and_dependency_checks,
     probe_directory_writable,
     sanitize_error,
+    schema_check,
 )
+from elspeth.web.schema_probe import SchemaInitBusyError, SchemaLockCleanupError, SchemaState
+from elspeth.web.sessions.schema import SessionSchemaError
 
 
 def _settings(tmp_path: Path, **overrides: Any) -> WebSettings:
@@ -393,3 +401,492 @@ def test_payload_contract_rejects_same_mode_bits_as_doctor(tmp_path: Path) -> No
         FilesystemPayloadStore(payload)
     check = _by_name(collect_checks(_settings(tmp_path, payload_store_path=payload)))["payload_store_writable"]
     assert check.ok is False
+
+
+@pytest.mark.parametrize(
+    ("session_url", "landscape_url"),
+    [
+        (
+            "postgresql+psycopg://gate_user:gate_password@gate-host/gate_database",
+            "postgresql+psycopg://gate_user:gate_password@gate-host/gate_database",
+        ),
+        (
+            "postgresql+psycopg://gate_user:gate_password@gate-host/gate_database",
+            "postgresql+psycopg://gate_user:gate_password@gate-host/gate_database?options=-cstatement_timeout%3D10",
+        ),
+        (
+            "postgresql+psycopg://gate_user:gate_password@gate-host/gate_database?options=-csearch_path%3Dsame_schema",
+            "postgresql+psycopg://gate_user:gate_password@gate-host/gate_database?options=-csearch_path%3Dsame_schema",
+        ),
+    ],
+)
+def test_database_target_gate_fails_closed_and_redacts_target_material(session_url: str, landscape_url: str) -> None:
+    check = database_target_check(session_url, landscape_url)
+
+    assert check.ok is False
+    assert check.name == "separate_db_targets"
+    for fragment in ("gate_user", "gate_password", "gate-host", "gate_database", "same_schema", "statement_timeout"):
+        assert fragment not in check.detail
+
+
+def test_database_target_gate_accepts_distinct_explicit_schemas_in_same_database() -> None:
+    check = database_target_check(
+        "postgresql+psycopg://user:password@host/shared?options=-csearch_path%3Dsessions",
+        "postgresql+psycopg://user:password@host/shared?options=-csearch_path%3Dlandscape",
+    )
+
+    assert check == ContractCheck("separate_db_targets", True, "session and Landscape targets are provably distinct")
+
+
+def _patch_auxiliary_checks_green(monkeypatch: pytest.MonkeyPatch) -> None:
+    import elspeth.web.doctor as doctor
+
+    monkeypatch.setattr(
+        doctor,
+        "probe_directory_writable",
+        lambda label, _path: ContractCheck(f"{label}_writable", True, f"{label} ready"),
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_probe_payload_store",
+        lambda _path: ContractCheck("payload_store_writable", True, "payload_store ready"),
+    )
+    monkeypatch.setattr(
+        doctor,
+        "plugin_and_dependency_checks",
+        lambda: [
+            ContractCheck(name, True, "ready")
+            for name in (
+                "aws_s3_plugin",
+                "bedrock_provider",
+                "aws_operator_telemetry",
+                "bedrock_guardrail_plugins",
+                "psycopg_dependency",
+                "boto3_dependency",
+                "ijson_dependency",
+                "jinja2_dependency",
+            )
+        ],
+    )
+
+
+def test_failing_target_gate_prevents_engine_probe_and_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import elspeth.web.doctor as doctor
+
+    _patch_auxiliary_checks_green(monkeypatch)
+    shared = "postgresql+psycopg://user:password@host/shared"
+    settings = _settings(tmp_path, session_db_url=shared, landscape_url=shared)
+    monkeypatch.setattr(doctor, "_inspect_database", MagicMock(side_effect=AssertionError("must not inspect")))
+    monkeypatch.setattr(doctor, "_initialize_database", MagicMock(side_effect=AssertionError("must not initialize")))
+
+    checks = _by_name(collect_checks(settings, init_schema=True))
+
+    assert checks["separate_db_targets"].ok is False
+    assert checks["session_schema"].ok is False
+    assert checks["landscape_schema"].ok is False
+    doctor._inspect_database.assert_not_called()
+    doctor._initialize_database.assert_not_called()
+
+
+def test_bad_url_contract_prevents_target_comparison_and_all_database_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import elspeth.web.doctor as doctor
+
+    _patch_auxiliary_checks_green(monkeypatch)
+    settings = _settings(tmp_path, session_db_url="sqlite:///forbidden.db")
+    monkeypatch.setattr(doctor, "database_target_check", MagicMock(side_effect=AssertionError("must not compare")))
+    monkeypatch.setattr(doctor, "_inspect_database", MagicMock(side_effect=AssertionError("must not inspect")))
+
+    checks = _by_name(collect_checks(settings))
+
+    assert checks["session_db_url"].ok is False
+    assert checks["separate_db_targets"].ok is False
+    doctor.database_target_check.assert_not_called()
+    doctor._inspect_database.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("label", "state", "ok", "detail"),
+    [
+        ("session_schema", SchemaState.CURRENT, True, "current"),
+        ("session_schema", SchemaState.MISSING, False, "missing; rerun with --init-schema"),
+        (
+            "session_schema",
+            SchemaState.STALE,
+            False,
+            "stale; drop and recreate the session database, then rerun doctor",
+        ),
+        ("landscape_schema", SchemaState.CURRENT, True, "current"),
+        ("landscape_schema", SchemaState.MISSING, False, "missing; rerun with --init-schema"),
+        ("landscape_schema", SchemaState.PARTIAL, False, "partial; rerun with --init-schema"),
+        (
+            "landscape_schema",
+            SchemaState.STALE,
+            False,
+            "stale; drop and recreate the Landscape database, then rerun doctor",
+        ),
+    ],
+)
+def test_schema_state_details_are_static(label: str, state: SchemaState, ok: bool, detail: str) -> None:
+    assert schema_check(label, state) == ContractCheck(label, ok, detail)
+
+
+def _engine_with_connection() -> tuple[MagicMock, MagicMock]:
+    engine = MagicMock()
+    connection = MagicMock()
+    context = MagicMock()
+    context.__enter__.return_value = connection
+    context.__exit__.return_value = False
+    engine.connect.return_value = context
+    return engine, connection
+
+
+@pytest.mark.parametrize("label", ["session_schema", "landscape_schema"])
+def test_inspect_database_forwards_pool_and_timeout_and_uses_one_connection(
+    label: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import elspeth.web.doctor as doctor
+
+    engine, connection = _engine_with_connection()
+    session_factory = MagicMock(return_value=engine)
+    landscape_factory = MagicMock(return_value=engine)
+    monkeypatch.setattr(doctor, "create_session_engine", session_factory)
+    monkeypatch.setattr(doctor, "create_engine", landscape_factory)
+    probe = MagicMock(return_value=SchemaState.CURRENT)
+    raw_url = "postgresql+psycopg://user:password@host/database"
+
+    state, check = _inspect_database(label, raw_url, probe)
+
+    assert state is SchemaState.CURRENT
+    assert check == ContractCheck(label, True, "current")
+    expected_kwargs = {
+        "connect_args": {"connect_timeout": 10},
+        "pool_size": 5,
+        "max_overflow": 5,
+        "pool_pre_ping": True,
+    }
+    expected_factory = session_factory if label == "session_schema" else landscape_factory
+    expected_factory.assert_called_once_with(raw_url, **expected_kwargs)
+    (landscape_factory if label == "session_schema" else session_factory).assert_not_called()
+    probe.assert_called_once_with(connection)
+    assert str(connection.execute.call_args.args[0]) == "SELECT 1"
+    engine.dispose.assert_called_once_with()
+
+
+@pytest.mark.parametrize("failure_site", ["connect", "probe"])
+def test_inspect_database_disposes_after_connection_and_probe_failures(
+    failure_site: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import elspeth.web.doctor as doctor
+
+    engine, _connection = _engine_with_connection()
+    if failure_site == "connect":
+        engine.connect.return_value.__enter__.side_effect = RuntimeError(
+            "postgresql://user:secret@private/db"  # secret-scan: allow-this-line
+        )
+    probe = MagicMock(
+        side_effect=(
+            RuntimeError("postgresql://user:secret@private/db")  # secret-scan: allow-this-line
+            if failure_site == "probe"
+            else None
+        ),
+        return_value=SchemaState.CURRENT,
+    )
+    monkeypatch.setattr(doctor, "create_session_engine", MagicMock(return_value=engine))
+
+    state, check = _inspect_database(
+        "session_schema",
+        "postgresql+psycopg://user:password@host/database",
+        probe,
+    )
+
+    assert state is None
+    assert check.ok is False
+    assert "secret" not in check.detail
+    assert "private" not in check.detail
+    engine.dispose.assert_called_once_with()
+
+
+def test_initialize_database_runs_initializer_then_final_probe_on_new_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import elspeth.web.doctor as doctor
+
+    engine, connection = _engine_with_connection()
+    monkeypatch.setattr(doctor, "create_session_engine", MagicMock(return_value=engine))
+    initializer = MagicMock()
+    probe = MagicMock(return_value=SchemaState.CURRENT)
+
+    check = _initialize_database(
+        "session_schema",
+        "postgresql+psycopg://user:password@host/database",
+        probe,
+        initializer,
+    )
+
+    assert check == ContractCheck(
+        "session_schema",
+        True,
+        "current; initialization completed or was already completed",
+    )
+    initializer.assert_called_once_with(engine)
+    probe.assert_called_once_with(connection)
+    assert str(connection.execute.call_args.args[0]) == "SELECT 1"
+    engine.dispose.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("error", "detail"),
+    [
+        (
+            SchemaInitBusyError("secret busy cause"),
+            "another schema initialization is in progress; wait for it to finish and rerun",
+        ),
+        (
+            SchemaLockCleanupError("secret cleanup cause"),
+            "initialization may have completed but lock cleanup was not verified; investigate the database connection and rerun",
+        ),
+        (
+            SessionSchemaError("secret compatibility cause"),
+            "stale; drop and recreate the session database, then rerun doctor",
+        ),
+        (
+            SchemaCompatibilityError("secret compatibility cause"),
+            "stale; drop and recreate the session database, then rerun doctor",
+        ),
+        (RuntimeError("secret operational cause"), "session schema initialization failed (RuntimeError)"),
+    ],
+)
+def test_initialize_database_catches_named_failures_redacts_and_disposes(
+    error: Exception,
+    detail: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import elspeth.web.doctor as doctor
+
+    engine, _connection = _engine_with_connection()
+    monkeypatch.setattr(doctor, "create_session_engine", MagicMock(return_value=engine))
+
+    check = _initialize_database(
+        "session_schema",
+        "postgresql+psycopg://user:password@host/database",
+        MagicMock(return_value=SchemaState.CURRENT),
+        MagicMock(side_effect=error),
+    )
+
+    assert check == ContractCheck("session_schema", False, detail)
+    assert "secret" not in check.detail
+    engine.dispose.assert_called_once_with()
+
+
+def test_initialize_database_disposes_when_final_probe_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    import elspeth.web.doctor as doctor
+
+    engine, _connection = _engine_with_connection()
+    monkeypatch.setattr(doctor, "create_session_engine", MagicMock(return_value=engine))
+
+    check = _initialize_database(
+        "session_schema",
+        "postgresql+psycopg://user:password@host/database",
+        MagicMock(side_effect=RuntimeError("private URL and credentials")),
+        MagicMock(),
+    )
+
+    assert check == ContractCheck("session_schema", False, "session schema initialization failed (RuntimeError)")
+    engine.dispose.assert_called_once_with()
+
+
+def _patch_database_states(
+    monkeypatch: pytest.MonkeyPatch,
+    session: SchemaState | None,
+    landscape: SchemaState | None,
+    events: list[str],
+) -> None:
+    import elspeth.web.doctor as doctor
+
+    def inspect(label: str, _url: str, _probe: object) -> tuple[SchemaState | None, ContractCheck]:
+        events.append(f"inspect:{label}")
+        state = session if label == "session_schema" else landscape
+        if state is None:
+            return None, ContractCheck(label, False, f"{label} connection failed (RuntimeError)")
+        return state, schema_check(label, state)
+
+    monkeypatch.setattr(doctor, "_inspect_database", inspect)
+
+
+def test_init_mode_inspects_both_before_initializing_both_repairable_targets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import elspeth.web.doctor as doctor
+
+    events: list[str] = []
+    _patch_auxiliary_checks_green(monkeypatch)
+    _patch_database_states(monkeypatch, SchemaState.MISSING, SchemaState.PARTIAL, events)
+
+    def initialize(label: str, _url: str, _probe: object, _init: object) -> ContractCheck:
+        events.append(f"init:{label}")
+        return ContractCheck(label, True, "current; initialization completed or was already completed")
+
+    monkeypatch.setattr(doctor, "_initialize_database", initialize)
+
+    checks = _by_name(collect_checks(_settings(tmp_path), init_schema=True))
+
+    assert checks["session_schema"].ok is True
+    assert checks["landscape_schema"].ok is True
+    assert events == [
+        "inspect:session_schema",
+        "inspect:landscape_schema",
+        "init:session_schema",
+        "init:landscape_schema",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("session", "landscape"),
+    [
+        (SchemaState.MISSING, SchemaState.STALE),
+        (SchemaState.MISSING, None),
+    ],
+)
+def test_stale_or_connection_failure_on_one_target_initializes_neither(
+    session: SchemaState,
+    landscape: SchemaState | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import elspeth.web.doctor as doctor
+
+    events: list[str] = []
+    _patch_auxiliary_checks_green(monkeypatch)
+    _patch_database_states(monkeypatch, session, landscape, events)
+    initializer = MagicMock(side_effect=AssertionError("must not initialize"))
+    monkeypatch.setattr(doctor, "_initialize_database", initializer)
+
+    checks = _by_name(collect_checks(_settings(tmp_path), init_schema=True))
+
+    assert checks["session_schema"].ok is False
+    assert "complete preflight failed" in checks["session_schema"].detail
+    initializer.assert_not_called()
+    assert events == ["inspect:session_schema", "inspect:landscape_schema"]
+
+
+@pytest.mark.parametrize("failed_kind", ["filesystem", "dependency", "plugin"])
+def test_any_auxiliary_preflight_failure_blocks_all_initializers(
+    failed_kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import elspeth.web.doctor as doctor
+
+    events: list[str] = []
+    _patch_auxiliary_checks_green(monkeypatch)
+    _patch_database_states(monkeypatch, SchemaState.MISSING, SchemaState.PARTIAL, events)
+    if failed_kind == "filesystem":
+        monkeypatch.setattr(
+            doctor,
+            "probe_directory_writable",
+            lambda label, _path: ContractCheck(f"{label}_writable", label != "data_dir", "static result"),
+        )
+    else:
+        failed_name = "boto3_dependency" if failed_kind == "dependency" else "aws_s3_plugin"
+        monkeypatch.setattr(
+            doctor,
+            "plugin_and_dependency_checks",
+            lambda: [
+                ContractCheck(name, name != failed_name, "static result")
+                for name in (
+                    "aws_s3_plugin",
+                    "bedrock_provider",
+                    "aws_operator_telemetry",
+                    "bedrock_guardrail_plugins",
+                    "psycopg_dependency",
+                    "boto3_dependency",
+                    "ijson_dependency",
+                    "jinja2_dependency",
+                )
+            ],
+        )
+    initializer = MagicMock(side_effect=AssertionError("must not initialize"))
+    monkeypatch.setattr(doctor, "_initialize_database", initializer)
+
+    checks = _by_name(collect_checks(_settings(tmp_path), init_schema=True))
+
+    assert checks["session_schema"].ok is False
+    assert checks["landscape_schema"].ok is False
+    initializer.assert_not_called()
+
+
+def test_one_current_target_initializes_only_other_repairable_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import elspeth.web.doctor as doctor
+
+    events: list[str] = []
+    _patch_auxiliary_checks_green(monkeypatch)
+    _patch_database_states(monkeypatch, SchemaState.CURRENT, SchemaState.MISSING, events)
+
+    def initialize(label: str, _url: str, _probe: object, _init: object) -> ContractCheck:
+        events.append(f"init:{label}")
+        return ContractCheck(label, True, "current; initialization completed or was already completed")
+
+    monkeypatch.setattr(doctor, "_initialize_database", initialize)
+
+    checks = _by_name(collect_checks(_settings(tmp_path), init_schema=True))
+
+    assert checks["session_schema"] == ContractCheck("session_schema", True, "current")
+    assert checks["landscape_schema"].ok is True
+    assert events[-1] == "init:landscape_schema"
+    assert "init:session_schema" not in events
+
+
+def test_first_init_success_and_second_failure_are_reported_truthfully(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import elspeth.web.doctor as doctor
+
+    events: list[str] = []
+    _patch_auxiliary_checks_green(monkeypatch)
+    _patch_database_states(monkeypatch, SchemaState.MISSING, SchemaState.PARTIAL, events)
+
+    def initialize(label: str, _url: str, _probe: object, _init: object) -> ContractCheck:
+        events.append(f"init:{label}")
+        if label == "landscape_schema":
+            return ContractCheck(label, False, "Landscape schema initialization failed (RuntimeError)")
+        return ContractCheck(label, True, "current; initialization completed or was already completed")
+
+    monkeypatch.setattr(doctor, "_initialize_database", initialize)
+
+    checks = _by_name(collect_checks(_settings(tmp_path), init_schema=True))
+
+    assert checks["session_schema"].ok is True
+    assert checks["landscape_schema"].ok is False
+    assert events[-2:] == ["init:session_schema", "init:landscape_schema"]
+
+
+def test_task2_order_remains_exact_and_unique_after_database_inspection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+    _patch_auxiliary_checks_green(monkeypatch)
+    _patch_database_states(monkeypatch, SchemaState.CURRENT, SchemaState.CURRENT, events)
+
+    names = [check.name for check in collect_checks(_settings(tmp_path))]
+
+    assert names == [
+        "deployment_target",
+        "session_db_url",
+        "landscape_url",
+        "data_dir",
+        "payload_store_path",
+        "host",
+        "secret_key",
+        "shareable_link_signing_key",
+        "separate_db_targets",
+        "data_dir_writable",
+        "payload_store_writable",
+        "blob_writable",
+        "aws_s3_plugin",
+        "bedrock_provider",
+        "aws_operator_telemetry",
+        "bedrock_guardrail_plugins",
+        "psycopg_dependency",
+        "boto3_dependency",
+        "ijson_dependency",
+        "jinja2_dependency",
+        "session_schema",
+        "landscape_schema",
+    ]
+    assert len(names) == len(set(names))

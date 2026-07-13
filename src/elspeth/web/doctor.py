@@ -12,12 +12,31 @@ import importlib
 import os
 import stat
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
+from sqlalchemy import Connection, Engine, create_engine, text
+from sqlalchemy.engine import make_url
+
+from elspeth.core.landscape.database import SchemaCompatibilityError
 from elspeth.web.config import WebSettings
 from elspeth.web.deployment_contract import ContractCheck, validate_aws_ecs_settings
 from elspeth.web.paths import allowed_source_directories
+from elspeth.web.schema_probe import (
+    DatabaseTargetConflictError,
+    SchemaInitBusyError,
+    SchemaLockCleanupError,
+    SchemaState,
+    init_landscape_schema,
+    init_session_schema,
+    postgres_engine_kwargs,
+    probe_landscape_schema,
+    probe_session_schema,
+    require_distinct_postgres_targets,
+)
+from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.schema import SessionSchemaError
 
 _PROBE_SENTINEL = b"elspeth-doctor-probe"
 
@@ -207,17 +226,158 @@ def plugin_and_dependency_checks() -> list[ContractCheck]:
     ]
 
 
-def collect_checks(settings: WebSettings, *, init_schema: bool = False) -> list[ContractCheck]:
-    """Collect the complete ordered Task 1 report without persistent state."""
-    del init_schema  # Task 2 gives this flag its sole mutating behavior.
-    checks = list(validate_aws_ecs_settings(settings))
-    checks.append(
-        ContractCheck(
+def database_target_check(session_url: str | None, landscape_url: str | None) -> ContractCheck:
+    """Prove the two PostgreSQL URLs resolve to distinct logical targets."""
+    try:
+        require_distinct_postgres_targets(session_url, landscape_url)  # type: ignore[arg-type]
+    except DatabaseTargetConflictError:
+        return ContractCheck(
             "separate_db_targets",
             False,
-            "database target comparison is not implemented until Plan 03 Task 2",
+            "session and Landscape PostgreSQL targets must be provably distinct",
         )
-    )
+    return ContractCheck("separate_db_targets", True, "session and Landscape targets are provably distinct")
+
+
+def schema_check(label: str, state: SchemaState) -> ContractCheck:
+    """Render one schema state using static, redacted guidance."""
+    if state is SchemaState.CURRENT:
+        return ContractCheck(label, True, "current")
+    if state is SchemaState.MISSING:
+        return ContractCheck(label, False, "missing; rerun with --init-schema")
+    if state is SchemaState.PARTIAL and label == "landscape_schema":
+        return ContractCheck(label, False, "partial; rerun with --init-schema")
+    database = "session" if label == "session_schema" else "Landscape"
+    return ContractCheck(label, False, f"stale; drop and recreate the {database} database, then rerun doctor")
+
+
+def _human_schema_label(label: str) -> str:
+    return "session schema" if label == "session_schema" else "Landscape schema"
+
+
+def _build_engine(label: str, raw_url: str) -> Engine:
+    parsed = make_url(raw_url)
+    kwargs: dict[str, Any] = dict(postgres_engine_kwargs(raw_url))
+    if parsed.drivername.split("+", 1)[0] == "postgresql":
+        kwargs["connect_args"] = {"connect_timeout": 10}
+    if label == "session_schema":
+        return create_session_engine(raw_url, **kwargs)
+    if label == "landscape_schema":
+        return create_engine(raw_url, **kwargs)
+    raise ValueError("unknown doctor schema label")
+
+
+def _inspect_database(
+    label: str,
+    raw_url: str,
+    probe_fn: Callable[[Engine | Connection], SchemaState],
+) -> tuple[SchemaState | None, ContractCheck]:
+    """Inspect connectivity and schema state through one one-shot engine."""
+    engine: Engine | None = None
+    result: tuple[SchemaState | None, ContractCheck]
+    try:
+        engine = _build_engine(label, raw_url)
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+            state = probe_fn(connection)
+        result = (state, schema_check(label, state))
+    except (SessionSchemaError, SchemaCompatibilityError):
+        result = (SchemaState.STALE, schema_check(label, SchemaState.STALE))
+    except Exception as exc:
+        result = (
+            None,
+            ContractCheck(label, False, sanitize_error(f"{_human_schema_label(label)} inspection failed", exc)),
+        )
+    finally:
+        if engine is not None:
+            try:
+                engine.dispose()
+            except Exception as exc:
+                result = (
+                    None,
+                    ContractCheck(
+                        label,
+                        False,
+                        sanitize_error(f"{_human_schema_label(label)} engine disposal failed", exc),
+                    ),
+                )
+    return result
+
+
+def _initialize_database(
+    label: str,
+    raw_url: str,
+    probe_fn: Callable[[Engine | Connection], SchemaState],
+    init_fn: Callable[[Engine], None],
+) -> ContractCheck:
+    """Initialize one eligible schema and independently verify it afterward."""
+    engine: Engine | None = None
+    result: ContractCheck
+    try:
+        engine = _build_engine(label, raw_url)
+        init_fn(engine)
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+            final_state = probe_fn(connection)
+        if final_state is SchemaState.CURRENT:
+            result = ContractCheck(
+                label,
+                True,
+                "current; initialization completed or was already completed",
+            )
+        else:
+            result = ContractCheck(
+                label,
+                False,
+                f"{_human_schema_label(label)} final verification did not report current",
+            )
+    except SchemaInitBusyError:
+        result = ContractCheck(
+            label,
+            False,
+            "another schema initialization is in progress; wait for it to finish and rerun",
+        )
+    except SchemaLockCleanupError:
+        result = ContractCheck(
+            label,
+            False,
+            "initialization may have completed but lock cleanup was not verified; investigate the database connection and rerun",
+        )
+    except (SessionSchemaError, SchemaCompatibilityError):
+        result = schema_check(label, SchemaState.STALE)
+    except Exception as exc:
+        result = ContractCheck(
+            label,
+            False,
+            sanitize_error(f"{_human_schema_label(label)} initialization failed", exc),
+        )
+    finally:
+        if engine is not None:
+            try:
+                engine.dispose()
+            except Exception as exc:
+                result = ContractCheck(
+                    label,
+                    False,
+                    sanitize_error(f"{_human_schema_label(label)} engine disposal failed", exc),
+                )
+    return result
+
+
+def collect_checks(settings: WebSettings, *, init_schema: bool = False) -> list[ContractCheck]:
+    """Collect the ordered report and optionally initialize eligible schemas."""
+    checks = list(validate_aws_ecs_settings(settings))
+    by_name = {check.name: check for check in checks}
+    url_eligible = by_name["session_db_url"].ok and by_name["landscape_url"].ok
+    if url_eligible:
+        target_check = database_target_check(settings.session_db_url, settings.landscape_url)
+    else:
+        target_check = ContractCheck(
+            "separate_db_targets",
+            False,
+            "database target comparison was not attempted because the database URL contract failed",
+        )
+    checks.append(target_check)
     checks.extend(
         [
             probe_directory_writable("data_dir", settings.data_dir),
@@ -226,10 +386,57 @@ def collect_checks(settings: WebSettings, *, init_schema: bool = False) -> list[
         ]
     )
     checks.extend(plugin_and_dependency_checks())
-    checks.extend(
-        [
-            ContractCheck("session_schema", False, "session schema inspection is not implemented until Plan 03 Task 2"),
-            ContractCheck("landscape_schema", False, "Landscape schema inspection is not implemented until Plan 03 Task 2"),
-        ]
+
+    database_prerequisites_pass = url_eligible and by_name["deployment_target"].ok and target_check.ok
+    if not database_prerequisites_pass:
+        blocked_detail = "schema inspection was not attempted because the AWS ECS database prerequisites failed"
+        checks.extend(
+            [
+                ContractCheck("session_schema", False, blocked_detail),
+                ContractCheck("landscape_schema", False, blocked_detail),
+            ]
+        )
+        return checks
+
+    session_url = cast(str, settings.session_db_url)
+    landscape_url = cast(str, settings.landscape_url)
+    session_state, session_result = _inspect_database("session_schema", session_url, probe_session_schema)
+    landscape_state, landscape_result = _inspect_database("landscape_schema", landscape_url, probe_landscape_schema)
+
+    if not init_schema:
+        checks.extend([session_result, landscape_result])
+        return checks
+
+    session_repairable = session_state is SchemaState.MISSING
+    landscape_repairable = landscape_state in (SchemaState.MISSING, SchemaState.PARTIAL)
+    states_eligible = session_state in (SchemaState.MISSING, SchemaState.CURRENT) and landscape_state in (
+        SchemaState.MISSING,
+        SchemaState.PARTIAL,
+        SchemaState.CURRENT,
     )
+    complete_preflight_passed = all(check.ok for check in checks) and states_eligible
+    if not complete_preflight_passed:
+        blocked_init_detail = "not initialized because the complete preflight failed"
+        if session_repairable:
+            session_result = ContractCheck("session_schema", False, blocked_init_detail)
+        if landscape_repairable:
+            landscape_result = ContractCheck("landscape_schema", False, blocked_init_detail)
+        checks.extend([session_result, landscape_result])
+        return checks
+
+    if session_repairable:
+        session_result = _initialize_database(
+            "session_schema",
+            session_url,
+            probe_session_schema,
+            init_session_schema,
+        )
+    if landscape_repairable:
+        landscape_result = _initialize_database(
+            "landscape_schema",
+            landscape_url,
+            probe_landscape_schema,
+            init_landscape_schema,
+        )
+    checks.extend([session_result, landscape_result])
     return checks

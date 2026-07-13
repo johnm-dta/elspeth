@@ -132,3 +132,39 @@ def test_init_schema_flag_is_propagated(monkeypatch: pytest.MonkeyPatch, init_sc
 
     assert result.exit_code == 0
     assert observed == [init_schema]
+
+
+@pytest.mark.parametrize(
+    ("detail", "raw_cause"),
+    [
+        (
+            "another schema initialization is in progress; wait for it to finish and rerun",
+            "private busy-lock cause",
+        ),
+        (
+            "initialization may have completed but lock cleanup was not verified; investigate the database connection and rerun",
+            "private cleanup cause",
+        ),
+    ],
+)
+def test_lock_domain_failures_render_complete_redacted_json(
+    detail: str,
+    raw_cause: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checks = [
+        ContractCheck("deployment_target", True, "ready"),
+        ContractCheck("session_schema", False, detail),
+        ContractCheck("landscape_schema", True, "current"),
+    ]
+    _patch_doctor(monkeypatch, checks)
+
+    result = runner.invoke(app, ["--no-dotenv", "doctor", "aws-ecs", "--init-schema", "--json"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == [
+        {"name": "deployment_target", "ok": True, "detail": "ready"},
+        {"name": "session_schema", "ok": False, "detail": detail},
+        {"name": "landscape_schema", "ok": True, "detail": "current"},
+    ]
+    assert raw_cause not in result.output

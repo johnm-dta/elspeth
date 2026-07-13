@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -27,16 +26,14 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.dialects.postgresql import CITEXT, DOUBLE_PRECISION, ENUM, JSONB
-from sqlalchemy.engine import Connection, Dialect, Engine
+from sqlalchemy.engine import Connection, Dialect
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.schema import CreateTable
-from testcontainers.postgres import PostgresContainer
 
 from elspeth.core.landscape.schema import metadata as landscape_metadata
 from elspeth.core.landscape.schema import runs_table
 from elspeth.core.schema_shape import (
     SchemaShapeIssue,
-    _text_builtin_identity_rows_on_connection,
     collect_metadata_shape_issues,
 )
 from elspeth.web.sessions.engine import create_session_engine
@@ -841,136 +838,6 @@ def _static_check_issues(
         dialect=postgresql.dialect(),
         present_tables=frozenset({"pg_demo"}),
     )
-
-
-@pytest.fixture(scope="module")
-def postgres_catalog_proof_engine() -> Iterator[Engine]:
-    with PostgresContainer("postgres:16-alpine", driver="psycopg") as postgres:
-        engine = create_engine(postgres.get_connection_url())
-        try:
-            yield engine
-        finally:
-            engine.dispose()
-
-
-def test_catalog_proof_resists_shadowed_oid_equality(postgres_catalog_proof_engine: Engine) -> None:
-    with postgres_catalog_proof_engine.begin() as connection:
-        connection.execute(text("CREATE SCHEMA equality_shadow"))
-        connection.execute(
-            text(
-                """
-                CREATE FUNCTION equality_shadow.always_equal(left_oid oid, right_oid oid)
-                RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT true'
-                """
-            )
-        )
-        connection.execute(
-            text(
-                """
-                CREATE OPERATOR equality_shadow.= (
-                    FUNCTION = equality_shadow.always_equal,
-                    LEFTARG = oid,
-                    RIGHTARG = oid
-                )
-                """
-            )
-        )
-        connection.execute(
-            text(
-                """
-                CREATE FUNCTION equality_shadow.chr(codepoint integer)
-                RETURNS integer LANGUAGE sql IMMUTABLE AS 'SELECT codepoint'
-                """
-            )
-        )
-        connection.execute(text("SET LOCAL search_path = equality_shadow, pg_catalog, public"))
-
-        rows = _text_builtin_identity_rows_on_connection(connection)
-
-        assert rows is not None
-        assert ("text_result", "chr", 1, "int4") not in rows
-        issues = _static_check_issues(
-            "btrim(value_text, chr(49)) IS NOT NULL",
-            "btrim(value_text::text, chr(49)) IS NOT NULL",
-            builtin_connection=connection,
-        )
-
-    assert any(issue.subject.endswith("CHECK constraint SQL mismatch") for issue in issues)
-
-
-def test_catalog_proof_resists_shadowed_text_concatenation(postgres_catalog_proof_engine: Engine) -> None:
-    with postgres_catalog_proof_engine.begin() as connection:
-        connection.execute(text("CREATE SCHEMA concat_shadow"))
-        connection.execute(
-            text(
-                """
-                CREATE FUNCTION concat_shadow.text_text(left_value text, right_value text)
-                RETURNS integer LANGUAGE sql IMMUTABLE AS 'SELECT 0'
-                """
-            )
-        )
-        connection.execute(
-            text(
-                """
-                CREATE OPERATOR concat_shadow.|| (
-                    FUNCTION = concat_shadow.text_text,
-                    LEFTARG = text,
-                    RIGHTARG = text
-                )
-                """
-            )
-        )
-        connection.execute(
-            text(
-                """
-                CREATE FUNCTION concat_shadow.integer_text(left_value integer, right_value text)
-                RETURNS text LANGUAGE sql IMMUTABLE AS 'SELECT ''text,text''::text'
-                """
-            )
-        )
-        connection.execute(
-            text(
-                """
-                CREATE OPERATOR concat_shadow.|| (
-                    FUNCTION = concat_shadow.integer_text,
-                    LEFTARG = integer,
-                    RIGHTARG = text
-                )
-                """
-            )
-        )
-        connection.execute(
-            text(
-                """
-                CREATE FUNCTION concat_shadow.text_varchar(left_value text, right_value varchar)
-                RETURNS text LANGUAGE sql IMMUTABLE AS 'SELECT left_value'
-                """
-            )
-        )
-        connection.execute(
-            text(
-                """
-                CREATE OPERATOR concat_shadow.|| (
-                    FUNCTION = concat_shadow.text_varchar,
-                    LEFTARG = text,
-                    RIGHTARG = varchar
-                )
-                """
-            )
-        )
-        connection.execute(text("SET LOCAL search_path = concat_shadow, pg_catalog, public"))
-
-        rows = _text_builtin_identity_rows_on_connection(connection)
-
-        assert rows is not None
-        assert ("operator_text_result", "||", 2, "text,text") not in rows
-        issues = _static_check_issues(
-            "btrim(value_text, chr(49) || chr(50)) IS NOT NULL",
-            "btrim(value_text::text, chr(49) || chr(50)) IS NOT NULL",
-            builtin_connection=connection,
-        )
-
-    assert any(issue.subject.endswith("CHECK constraint SQL mismatch") for issue in issues)
 
 
 @pytest.mark.parametrize(

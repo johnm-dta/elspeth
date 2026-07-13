@@ -3,11 +3,15 @@ import { parseDocument } from "yaml";
 import * as api from "@/api/client";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
-import { OPEN_IMPORT_YAML_MODAL_EVENT } from "@/lib/composer-events";
+import {
+  OPEN_CATALOG_EVENT,
+  OPEN_IMPORT_YAML_MODAL_EVENT,
+} from "@/lib/composer-events";
+import { PREFILL_CHAT_INPUT_EVENT } from "@/components/catalog/PluginCard";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import type { BlobMetadata } from "@/types/api";
-import type { ApiError } from "@/types/index";
+import type { ApiError, PluginPolicyFinding } from "@/types/index";
 import { hasCompositionContent } from "@/utils/compositionState";
 import { plural } from "@/utils/plural";
 
@@ -93,6 +97,21 @@ interface ImportSuccessInfo {
   version: number;
   isValid: boolean;
   validationErrors: string[];
+  pluginPolicyFindings: PluginPolicyFinding[];
+}
+
+function unavailableReasonLabel(reason: PluginPolicyFinding["reason_code"]): string {
+  return {
+    plugin_not_enabled: "Not enabled",
+    plugin_not_installed: "Not installed",
+    plugin_unavailable: "Unavailable",
+    credential_unavailable: "Credential unavailable",
+    profile_unavailable: "Profile unavailable",
+  }[reason];
+}
+
+function pluginKind(pluginId: string): string {
+  return pluginId.split(":", 1)[0] || "plugin";
 }
 
 type ImportPhase = "draft" | "confirming" | "submitting" | "success";
@@ -824,6 +843,7 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
         version: result.version,
         isValid: result.is_valid,
         validationErrors: result.validation_errors ?? [],
+        pluginPolicyFindings: result.plugin_policy_findings ?? [],
       });
       setPhase("success");
       // Reuse the existing session-load refetch to sync the full canonical
@@ -842,6 +862,20 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
       setError(describeImportError(err as ApiError));
       setPhase("draft");
     }
+  }
+
+  function requestDisabledComponentRemoval(finding: PluginPolicyFinding): void {
+    window.dispatchEvent(
+      new CustomEvent(PREFILL_CHAT_INPUT_EVENT, {
+        detail: `Remove disabled component ${finding.component_id} (${finding.plugin_id}) from this pipeline.`,
+      }),
+    );
+    onClose();
+  }
+
+  function requestDisabledComponentReplacement(): void {
+    onClose();
+    window.dispatchEvent(new CustomEvent(OPEN_CATALOG_EVENT));
   }
 
   function handleSubmitClick(): void {
@@ -1005,6 +1039,52 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
                     </ul>
                   )}
                 </div>
+              )}
+              {successInfo.pluginPolicyFindings.length > 0 && (
+                <section
+                  role="region"
+                  aria-labelledby="import-disabled-components-title"
+                  className="validation-banner validation-banner-fail"
+                >
+                  <div
+                    id="import-disabled-components-title"
+                    className="validation-banner-fail-title"
+                  >
+                    Unavailable saved components
+                  </div>
+                  <ul className="validation-banner-fail-list">
+                    {successInfo.pluginPolicyFindings.map((finding) => (
+                      <li
+                        key={`${finding.component_id}:${finding.plugin_id}`}
+                        className="validation-banner-error-item"
+                      >
+                        <div>
+                          <strong>{finding.component_id}</strong>{" "}
+                          <code>{finding.plugin_id}</code> —{" "}
+                          {unavailableReasonLabel(finding.reason_code)}
+                        </div>
+                        <div className="import-yaml-actions">
+                          <button
+                            type="button"
+                            className="btn btn-small"
+                            aria-label={`Remove disabled component ${finding.component_id} (${finding.plugin_id})`}
+                            onClick={() => requestDisabledComponentRemoval(finding)}
+                          >
+                            Remove
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-small"
+                            aria-label={`Replace disabled component ${finding.component_id} (${finding.plugin_id}) with an available ${pluginKind(finding.plugin_id)}`}
+                            onClick={requestDisabledComponentReplacement}
+                          >
+                            Replace
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
               )}
               <div className="import-yaml-actions">
                 <button ref={successCloseRef} type="button" className="btn btn-primary" onClick={onClose}>

@@ -3,8 +3,19 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { CatalogDrawer } from "./CatalogDrawer";
 import * as api from "@/api/client";
+import { useAuthStore } from "@/stores/authStore";
+import { usePluginCatalogStore } from "@/stores/pluginCatalogStore";
+import { useSessionStore } from "@/stores/sessionStore";
 
 vi.mock("@/api/client", () => ({
+  fetchPluginPolicy: vi.fn().mockResolvedValue({
+    snapshot_fingerprint: "catalog-test-snapshot",
+    policy_hash: "catalog-test-policy",
+    available_plugin_ids: ["source:csv", "transform:uppercase", "sink:json"],
+    capability_groups: [],
+    selections: [],
+    control_modes: [],
+  }),
   listSources: vi.fn().mockResolvedValue([
     {
       name: "csv",
@@ -61,6 +72,19 @@ import { listSources, listTransforms, listSinks } from "@/api/client";
 describe("CatalogDrawer", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    usePluginCatalogStore.getState().clear();
+    useAuthStore.setState({
+      token: "catalog-test-token",
+      user: {
+        user_id: "alice",
+        username: "alice",
+        display_name: "Alice",
+        email: null,
+        groups: [],
+      },
+      isLoading: false,
+    });
+    useSessionStore.setState({ compositionState: null } as never);
   });
 
   it("renders nothing when closed", () => {
@@ -220,6 +244,54 @@ describe("CatalogDrawer", () => {
     await user.click(backdrop);
     expect(onClose).toHaveBeenCalled();
   });
+
+  it("renders disabled saved components with keyboard and screen-reader repair actions", async () => {
+    useSessionStore.setState({
+      compositionState: {
+        id: "state-1",
+        version: 1,
+        sources: {},
+        nodes: [],
+        edges: [],
+        outputs: [],
+        metadata: { name: "Saved pipeline", description: null },
+        plugin_policy_findings: [
+          {
+            component_id: "legacy_transform",
+            plugin_id: "transform:legacy_llm",
+            reason_code: "plugin_not_enabled",
+            snapshot_fingerprint: "current-snapshot",
+          },
+        ],
+      },
+    } as never);
+    const onClose = vi.fn();
+    render(<CatalogDrawer isOpen onClose={onClose} />);
+
+    const repairRegion = await screen.findByRole("region", {
+      name: /unavailable saved components/i,
+    });
+    expect(repairRegion).toHaveTextContent("legacy_transform");
+    expect(repairRegion).toHaveTextContent("transform:legacy_llm");
+    expect(repairRegion).toHaveTextContent("Not enabled");
+    expect(
+      screen.getByRole("button", {
+        name: /remove disabled component legacy_transform.*transform:legacy_llm/i,
+      }),
+    ).toBeInTheDocument();
+
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: /replace disabled component legacy_transform.*available transform/i,
+      }),
+    );
+
+    expect(screen.getByRole("tab", { name: "Transforms" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(api.getPluginSchema).not.toHaveBeenCalled();
+  });
 });
 
 const csv = {
@@ -247,6 +319,8 @@ const azure = {
 
 describe("CatalogDrawer — Phase 7B reshape", () => {
   beforeEach(() => {
+    usePluginCatalogStore.getState().clear();
+    useSessionStore.setState({ compositionState: null } as never);
     vi.mocked(api.listSources).mockResolvedValue([csv, azure] as never);
     vi.mocked(api.listTransforms).mockResolvedValue([] as never);
     vi.mocked(api.listSinks).mockResolvedValue([] as never);
@@ -444,6 +518,10 @@ describe("CatalogDrawer — Phase 7B reshape", () => {
 });
 
 describe("CatalogDrawer — Alt+1-3 tab shortcuts", () => {
+  beforeEach(() => {
+    usePluginCatalogStore.getState().clear();
+    useSessionStore.setState({ compositionState: null } as never);
+  });
   it("Alt+1 switches to the Sources tab", async () => {
     render(<CatalogDrawer isOpen onClose={() => {}} />);
     await waitFor(() => expect(screen.getByRole("tab", { name: /sources/i })).toBeInTheDocument());

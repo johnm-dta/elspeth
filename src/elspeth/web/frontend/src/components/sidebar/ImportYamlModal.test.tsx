@@ -33,6 +33,7 @@ vi.mock("@/api/client", () => ({
   importCompositionYaml: vi.fn(),
   listBlobs: vi.fn(),
   uploadBlob: vi.fn(),
+  getPluginSchema: vi.fn(),
 }));
 
 function nonEmptyState(): CompositionState {
@@ -1001,6 +1002,46 @@ describe("ImportYamlModal", () => {
     expect(
       screen.getByText(/is not ready to run\.$/),
     ).toBeInTheDocument();
+  });
+
+  it("renders sanitized disabled-component repair actions without fetching private schema", async () => {
+    useSessionStore.setState({ compositionState: emptyState() } as never);
+    vi.mocked(api.importCompositionYaml).mockResolvedValue({
+      id: "state-disabled",
+      version: 6,
+      is_valid: false,
+      validation_errors: ["A saved component is unavailable."],
+      plugin_policy_findings: [
+        {
+          component_id: "legacy_output",
+          plugin_id: "sink:database",
+          reason_code: "credential_unavailable",
+          snapshot_fingerprint: "current-snapshot",
+        },
+      ],
+    });
+
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml();
+    await clickImport();
+
+    const repairRegion = await screen.findByRole("region", {
+      name: /unavailable saved components/i,
+    });
+    expect(repairRegion).toHaveTextContent("legacy_output");
+    expect(repairRegion).toHaveTextContent("sink:database");
+    expect(repairRegion).toHaveTextContent("Credential unavailable");
+    expect(
+      screen.getByRole("button", {
+        name: /remove disabled component legacy_output.*sink:database/i,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: /replace disabled component legacy_output.*available sink/i,
+      }),
+    ).toBeInTheDocument();
+    expect(api.getPluginSchema).not.toHaveBeenCalled();
   });
 
   // ── Error classes ────────────────────────────────────────────────────────

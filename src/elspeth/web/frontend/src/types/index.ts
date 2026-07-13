@@ -181,6 +181,7 @@ export interface CompositionState {
   validation_errors?: string[];
   validation_warnings?: ValidationEntryDTO[];
   validation_suggestions?: ValidationEntryDTO[];
+  plugin_policy_findings?: PluginPolicyFinding[];
 }
 
 /** A version history entry for CompositionState. */
@@ -329,6 +330,42 @@ export interface PluginSchemaInfo {
   plugin_type: "source" | "transform" | "sink";
   description: string;
   json_schema: Record<string, unknown>;
+}
+
+export type PluginPolicyCapability = "llm" | "prompt_shield" | "content_safety";
+export type PluginPolicyControlMode = "recommend" | "required";
+
+export interface PluginPolicyResponse {
+  snapshot_fingerprint: string;
+  policy_hash: string;
+  available_plugin_ids: string[];
+  capability_groups: Array<{
+    capability: PluginPolicyCapability;
+    available_plugin_ids: string[];
+  }>;
+  selections: Array<{
+    capability: PluginPolicyCapability;
+    plugin_id: string | null;
+  }>;
+  control_modes: Array<{
+    capability: PluginPolicyCapability;
+    mode: PluginPolicyControlMode;
+  }>;
+}
+
+export type PluginPolicyUnavailableReason =
+  | "plugin_not_enabled"
+  | "plugin_not_installed"
+  | "plugin_unavailable"
+  | "credential_unavailable"
+  | "profile_unavailable";
+
+/** Sanitized current-policy finding for a persisted component. */
+export interface PluginPolicyFinding {
+  component_id: string;
+  plugin_id: string;
+  reason_code: PluginPolicyUnavailableReason;
+  snapshot_fingerprint: string;
 }
 
 // ── Validation ──────────────────────────────────────────────────────────────

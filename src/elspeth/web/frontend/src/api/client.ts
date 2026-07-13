@@ -23,6 +23,8 @@ import type {
   CancelRunResponse,
   InlineSourceProvenance,
   PluginSchemaInfo,
+  PluginPolicyFinding,
+  PluginPolicyResponse,
   PluginSummary,
   Run,
   RunDiagnostics,
@@ -914,6 +916,7 @@ export interface ImportedCompositionState {
   version: number;
   is_valid: boolean;
   validation_errors: string[] | null;
+  plugin_policy_findings?: PluginPolicyFinding[];
 }
 
 /**
@@ -942,6 +945,15 @@ export async function importCompositionYaml(
 }
 
 // ── Plugin Catalog ──────────────────────────────────────────────────────────
+
+/** Fetch the current principal's immutable plugin-policy snapshot metadata. */
+export async function fetchPluginPolicy(): Promise<PluginPolicyResponse> {
+  const response = await fetch("/api/catalog/policy", {
+    headers: authHeaders(),
+    cache: "no-store",
+  });
+  return parseResponse<PluginPolicyResponse>(response);
+}
 
 /** List available source plugins. */
 export async function listSources(): Promise<PluginSummary[]> {
@@ -1328,6 +1340,13 @@ export async function deleteBlob(
 
 // ── Secrets ────────────────────────────────────────────────────────────────
 
+export const PLUGIN_CATALOG_INVALIDATED_EVENT =
+  "elspeth:plugin-catalog-invalidated";
+
+function emitPluginCatalogInvalidation(): void {
+  window.dispatchEvent(new Event(PLUGIN_CATALOG_INVALIDATED_EVENT));
+}
+
 /** List all available secret references (no values). */
 export async function listSecrets(): Promise<SecretInventoryItem[]> {
   const response = await fetch("/api/secrets", { headers: authHeaders() });
@@ -1344,7 +1363,9 @@ export async function createSecret(
     headers: authHeaders("application/json"),
     body: JSON.stringify({ name, value }),
   });
-  return parseResponse<{ name: string; scope: string; available: boolean }>(response);
+  const created = await parseResponse<{ name: string; scope: string; available: boolean }>(response);
+  emitPluginCatalogInvalidation();
+  return created;
 }
 
 /** Delete a user-scoped secret. */
@@ -1356,6 +1377,7 @@ export async function deleteSecret(name: string): Promise<void> {
   if (!response.ok) {
     await parseResponse<never>(response);
   }
+  emitPluginCatalogInvalidation();
 }
 
 // ── Interpretation events (Phase 5b) ───────────────────────────────────────

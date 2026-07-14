@@ -240,7 +240,8 @@ def test_foreign_target_is_stale_and_nonmutating(postgres_engine: Engine, kind: 
 
 
 def test_session_partial_schema_is_stale_and_nonmutating(postgres_engine: Engine) -> None:
-    session_metadata.tables["sessions"].create(postgres_engine)
+    with postgres_engine.begin() as conn:
+        conn.exec_driver_sql("CREATE TABLE sessions (id VARCHAR PRIMARY KEY)")
     before = inspect(postgres_engine).get_table_names()
     assert probe_session_schema(postgres_engine) is SchemaState.STALE
     with pytest.raises(SessionSchemaError):

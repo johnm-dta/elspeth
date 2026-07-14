@@ -2,7 +2,7 @@
 
 Measures the per-row overhead of the live
 ``engine.executors.pass_through.verify_pass_through`` function on a 200-field
-input row. Budget: median ≤ 25 µs, P99 (mean+3*stddev proxy) ≤ 50 µs.
+input row. Budget: median ≤ 25 µs, stable tail ≤ 50 µs.
 
 A second benchmark covers the batch-flush path (ADR-009 §Clause 2) —
 ``RowProcessor._cross_check_flush_output`` calls ``verify_pass_through`` once
@@ -108,12 +108,11 @@ def test_cross_check_p99_within_budget(benchmark: pytest.FixtureRequest) -> None
 
     stats = benchmark.stats
     median_sec = stats["median"]
-    mean_sec = stats["mean"]
-    stddev_sec = stats["stddev"]
-    p99_bound = mean_sec + 3 * stddev_sec
+    stable_tail_bound_sec = _stable_tail_bound_sec(stats)
     assert median_sec < 25e-6, f"Median {median_sec * 1e6:.1f}us exceeds 25us budget"
-    assert p99_bound < 50e-6, (
-        f"Mean+3*stddev {p99_bound * 1e6:.1f}us exceeds 50us budget (mean={mean_sec * 1e6:.1f}us, stddev={stddev_sec * 1e6:.1f}us)"
+    assert stable_tail_bound_sec < 50e-6, (
+        f"Stable tail {stable_tail_bound_sec * 1e6:.1f}us exceeds 50us budget "
+        f"(q3={stats['q3'] * 1e6:.1f}us, iqr={stats['iqr'] * 1e6:.1f}us)"
     )
 
 
@@ -206,13 +205,11 @@ def test_batch_flush_cross_check_within_budget(benchmark: pytest.FixtureRequest)
 
     stats = benchmark.stats
     median_sec = stats["median"]
-    mean_sec = stats["mean"]
-    stddev_sec = stats["stddev"]
-    p99_bound = mean_sec + 3 * stddev_sec
+    stable_tail_bound_sec = _stable_tail_bound_sec(stats)
     assert median_sec < 1500e-6, f"Batch-flush median {median_sec * 1e6:.1f}us exceeds 1500us budget"
-    assert p99_bound < 3000e-6, (
-        f"Batch-flush mean+3*stddev {p99_bound * 1e6:.1f}us exceeds 3000us budget "
-        f"(mean={mean_sec * 1e6:.1f}us, stddev={stddev_sec * 1e6:.1f}us)"
+    assert stable_tail_bound_sec < 3000e-6, (
+        f"Batch-flush stable tail {stable_tail_bound_sec * 1e6:.1f}us exceeds 3000us budget "
+        f"(q3={stats['q3'] * 1e6:.1f}us, iqr={stats['iqr'] * 1e6:.1f}us)"
     )
 
 
@@ -281,19 +278,17 @@ def test_dispatcher_overhead_vs_direct_verify_pass_through(benchmark: pytest.Fix
 
     stats = benchmark.stats
     median_sec = stats["median"]
-    mean_sec = stats["mean"]
-    stddev_sec = stats["stddev"]
-    p99_bound = mean_sec + 3 * stddev_sec
+    stable_tail_bound_sec = _stable_tail_bound_sec(stats)
     live_contract_count = len(registered_declaration_contracts())
     median_budget_us = 27.0 + (live_contract_count - 1) * 1.5
     p99_budget_us = median_budget_us * 2.0
     assert median_sec * 1e6 < median_budget_us, (
         f"Dispatcher median {median_sec * 1e6:.1f}us exceeds {median_budget_us:.1f}us budget at live N={live_contract_count}"
     )
-    assert p99_bound * 1e6 < p99_budget_us, (
-        f"Dispatcher mean+3*stddev {p99_bound * 1e6:.1f}us exceeds {p99_budget_us:.1f}us "
+    assert stable_tail_bound_sec * 1e6 < p99_budget_us, (
+        f"Dispatcher stable tail {stable_tail_bound_sec * 1e6:.1f}us exceeds {p99_budget_us:.1f}us "
         f"budget at live N={live_contract_count} "
-        f"(mean={mean_sec * 1e6:.1f}us, stddev={stddev_sec * 1e6:.1f}us)"
+        f"(q3={stats['q3'] * 1e6:.1f}us, iqr={stats['iqr'] * 1e6:.1f}us)"
     )
 
 

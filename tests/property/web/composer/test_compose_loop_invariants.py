@@ -195,7 +195,7 @@ def _make_harness(tmp_path: Path, *, session_state: SessionState = "empty") -> _
     with engine.begin() as conn:
         _make_session(conn, session_id=session_id, user_id=EVAL_USER_ID)
         conn.execute(text("UPDATE sessions SET trust_mode = 'auto_commit' WHERE id = :session_id"), {"session_id": session_id})
-    service = ComposerServiceImpl(
+    service = ComposerServiceImpl.for_trained_operator(
         catalog=_mock_catalog(),
         settings=_web_settings(data_dir),
         sessions_service=sessions_service,

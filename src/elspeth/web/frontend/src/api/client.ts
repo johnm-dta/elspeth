@@ -107,6 +107,19 @@ function firstDefined<T>(primary: T | undefined, secondary: T | undefined): T | 
   return primary !== undefined ? primary : secondary;
 }
 
+function optionalResponseHeader(response: Response, name: string): string | undefined {
+  const headers = (response as unknown as { headers?: unknown }).headers;
+  if (typeof headers !== "object" || headers === null) {
+    return undefined;
+  }
+  const getHeader = (headers as { get?: unknown }).get;
+  if (typeof getHeader !== "function") {
+    return undefined;
+  }
+  const value = getHeader.call(headers, name) as unknown;
+  return typeof value === "string" ? value : undefined;
+}
+
 /**
  * Parse a response. Throws ApiError for non-2xx status codes.
  *
@@ -254,8 +267,10 @@ export async function parseResponse<T>(
       provider_detail: providerDetail,
       provider_status_code: providerStatusCode,
       validation_errors: validationErrors,
-      snapshot_fingerprint:
-        response.headers.get("X-ELSPETH-Plugin-Snapshot") ?? undefined,
+      snapshot_fingerprint: optionalResponseHeader(
+        response,
+        "X-ELSPETH-Plugin-Snapshot",
+      ),
     };
     throw error;
   }

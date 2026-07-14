@@ -42,7 +42,7 @@ from elspeth.web.interpretation_state import PROMPT_SHIELD_AVAILABLE_DRAFT, PROM
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.plugin_policy.availability import build_plugin_snapshot
 from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
-from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
+from elspeth.web.plugin_policy.profiles import LocalRequirementResult, OperatorProfileRegistry, RuntimeWebPluginConfig
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -149,6 +149,10 @@ def _make_guided_app(
 
         def profile_availability(self, plugin_id, *, principal, inventory):
             return base_profiles.profile_availability(plugin_id, principal=principal, inventory=inventory)
+
+        def check_local_requirements(self, plugin_id, alias):
+            del plugin_id, alias
+            return LocalRequirementResult(available=True)
 
     class _SnapshotInventory:
         def has_server_ref(self, name: str) -> bool:

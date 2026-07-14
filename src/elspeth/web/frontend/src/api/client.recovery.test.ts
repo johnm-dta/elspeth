@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchRecoveryTranscript, sendMessage } from "./client";
+import { fetchRecoveryTranscript, parseResponse, sendMessage } from "./client";
 import type { ApiError, CompositionState } from "@/types/api";
 
 function makePartialState(): CompositionState {
@@ -30,6 +30,32 @@ describe("api/client recovery contracts", () => {
 
   afterEach(() => {
     fetchSpy.mockRestore();
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["nonconforming", {}],
+  ])("omits snapshot metadata when response headers are %s", async (_label, headers) => {
+    const response = {
+      ok: false,
+      status: 500,
+      statusText: "Internal Server Error",
+      json: async () => ({ detail: "compose failed" }),
+      ...(headers === undefined ? {} : { headers }),
+    } as unknown as Response;
+
+    let error: ApiError | undefined;
+    try {
+      await parseResponse(response);
+    } catch (err) {
+      error = err as ApiError;
+    }
+
+    expect(error).toMatchObject({
+      status: 500,
+      detail: "compose failed",
+      snapshot_fingerprint: undefined,
+    });
   });
 
   it("preserves top-level composer recovery fields on ApiError", async () => {

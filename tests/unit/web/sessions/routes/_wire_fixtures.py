@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.guided.profile import WorkflowProfile
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
 from elspeth.web.composer.guided.state_machine import (
@@ -25,6 +26,15 @@ from elspeth.web.composer.state import (
     PipelineMetadata,
     SourceSpec,
 )
+from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+
+
+def make_trained_plugin_policy_context() -> tuple[PolicyCatalogView, PluginAvailabilitySnapshot]:
+    """Build the explicit unrestricted policy boundary for direct dispatcher tests."""
+    catalog = create_catalog_service()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return PolicyCatalogView.for_trained_operator(catalog, snapshot), snapshot
 
 
 def _valid_state() -> CompositionState:

@@ -17,7 +17,9 @@ from elspeth.web.composer.guided.signoff import (
 from elspeth.web.composer.guided.state_machine import GuidedSession, TerminalKind
 from elspeth.web.composer.service import AdvisorCheckpointVerdict, _advisor_signoff_blocked_validation
 from elspeth.web.sessions.routes._helpers import _dispatch_guided_respond
-from tests.unit.web.sessions.routes._wire_fixtures import make_wire_ready_session_and_state
+from tests.unit.web.sessions.routes._wire_fixtures import make_trained_plugin_policy_context, make_wire_ready_session_and_state
+
+_POLICY_CATALOG, _PLUGIN_SNAPSHOT = make_trained_plugin_policy_context()
 
 # The live profile now uses terminal advisor sign-off; tutorial remains the
 # explicit demo bypass. These sign-off-audit tests use a synthetic advisor-ON
@@ -135,7 +137,8 @@ async def _dispatch(
         current_step=GuidedStep.STEP_4_WIRE,
         current_turn_type=TurnType.CONFIRM_WIRING,
         turn_response=turn_response,
-        catalog=_CatalogPlaceholder(),
+        catalog=_POLICY_CATALOG,
+        plugin_snapshot=_PLUGIN_SNAPSHOT,
         recorder=recorder,
         user_id="u1",
         data_dir=None,

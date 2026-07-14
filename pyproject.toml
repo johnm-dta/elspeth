@@ -453,6 +453,7 @@ markers = [
     "chaosllm: Configure ChaosLLM server for the test (preset=None, **kwargs)",
     "testcontainer: marks tests requiring Docker via testcontainers-python (deselect with '-m \"not testcontainer\"')",
     "fingerprint_baseline: Plan A baseline capture/verify across all elspeth-lints rules",
+    "live_aws: marks opt-in tests that call live AWS services with operator-approved fixtures",
 ]
 # Load .env file for integration tests (API keys)
 env_files = [".env"]

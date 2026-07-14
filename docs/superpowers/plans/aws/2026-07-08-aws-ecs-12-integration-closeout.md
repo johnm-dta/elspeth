@@ -1040,8 +1040,11 @@ AWS stderr. The same rule applies through Task 8 cleanup.
 
 - [ ] Prove the reusable Bedrock Guardrail lane with Plan 15C's exact marker
   contract before candidate-task adaptation. Supply only the approved opaque
-  profile aliases and operator-owned fixture references through the protected
-  environment, then run:
+  profile aliases and operator-owned fixture values through the protected
+  environment names pinned by Plan 10
+  (`ELSPETH_LIVE_BEDROCK_{PROMPT,CONTENT}_PROFILE_ALIAS`,
+  `ELSPETH_LIVE_BEDROCK_{PROMPT,CONTENT}_{SAFE,BLOCKED}_TEXT`, and
+  `ELSPETH_LIVE_BEDROCK_{PROMPT,CONTENT}_EXPECTED_VERSION`), then run:
 
   ```bash
   export ELSPETH_RUN_LIVE_BEDROCK_GUARDRAILS=1
@@ -1058,6 +1061,9 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   bounded sanitized receipt/hash. Any skip, deselection, raw binding/text, or
   policy-version mismatch is BLOCKED/NO-GO. This controller proof does not
   replace the per-candidate `verify-bedrock-guardrails` ECS-Exec proof below.
+  Plan 12 owns both executions, Landscape/telemetry correlation, cleanup, and
+  GO/NO-GO; Plan 15C supplies the reusable checker and bounded receipt but does
+  not claim live ECS acceptance.
 
 - [ ] Also prove the runtime credential path from **each healthy candidate ECS
   task**. Resolve its exact task ARN and use ECS Exec to run

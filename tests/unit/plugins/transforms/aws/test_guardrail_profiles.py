@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import builtins
+import importlib
 
 import pytest
 from pydantic import ValidationError
@@ -60,14 +60,14 @@ def test_profile_contains_no_credentials_or_endpoint_fields() -> None:
 
 def test_local_requirement_check_is_lazy_and_offline(monkeypatch: pytest.MonkeyPatch) -> None:
     profile = _profile()
-    real_import = builtins.__import__
+    real_import = importlib.import_module
     imported: list[str] = []
 
-    def tracking_import(name: str, *args: object, **kwargs: object) -> object:
+    def tracking_import(name: str, package: str | None = None) -> object:
         imported.append(name)
-        return real_import(name, *args, **kwargs)
+        return real_import(name, package)
 
-    monkeypatch.setattr(builtins, "__import__", tracking_import)
+    monkeypatch.setattr(importlib, "import_module", tracking_import)
     result = profile.check_local_requirements()
 
     assert result.available is True

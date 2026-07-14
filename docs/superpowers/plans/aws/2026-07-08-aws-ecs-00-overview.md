@@ -145,7 +145,11 @@ wait for later plugin registrations. `filigree plan elspeth-6343920a47
   surfaces. Plan 15C starts after 15B and 06 and remains a thin Bedrock
   implementation over the universal policy. It registers through 15B's generic
   capability/profile seams and must not reintroduce provider-specific web
-  enablement flags or a second availability path. Plan 10 consumes the sealed
+  enablement flags or a second availability path. Its reusable live checker is
+  a handoff, not an ECS acceptance claim: Plan 10 adapts it into image,
+  task-role/IAM, task-definition, acceptance-command, and runbook surfaces;
+  Plan 12 executes it per candidate, correlates Landscape/telemetry evidence,
+  owns cleanup, and decides GO/NO-GO. Plan 10 consumes the sealed
   15B operator contract from `docs/reference/configuration.md`, including the
   restart requirement, tutorial launch recheck, and Landscape epoch-23
   compatibility boundary.

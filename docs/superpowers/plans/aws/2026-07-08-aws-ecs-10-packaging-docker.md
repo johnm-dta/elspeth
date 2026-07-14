@@ -515,12 +515,22 @@ state from inside the running task. It is not an HTTP endpoint and exposes no
   marker `live_aws`, env gate
   `ELSPETH_RUN_LIVE_BEDROCK_GUARDRAILS=1`, and command
   `uv run --extra aws pytest tests/integration/plugins/transforms/aws/test_bedrock_guardrails_live.py -m live_aws -q -rs`.
+  The protected environment also supplies the application-owned
+  `ELSPETH_WEB__PLUGIN_ALLOWLIST` and
+  `ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES`, plus
+  `ELSPETH_LIVE_BEDROCK_{PROMPT,CONTENT}_PROFILE_ALIAS`,
+  `ELSPETH_LIVE_BEDROCK_{PROMPT,CONTENT}_{SAFE,BLOCKED}_TEXT`, and
+  `ELSPETH_LIVE_BEDROCK_{PROMPT,CONTENT}_EXPECTED_VERSION`. Values are never
+  copied into command arguments, receipts, logs, or evidence.
   The test must fail (not skip) when the env gate is set but an approved
   alias/fixture/policy input is absent. Unit tests pin this command and the
   acceptance subcommand to the same reusable checker. The runbook captures
   output through the protected wrapper, requires a non-zero passed count, and
   rejects the words `skipped` or `deselected`; `pytest -rs` reporting alone is
-  not a zero-skip assertion. Plan 12 executes both.
+  not a zero-skip assertion. Adapt the Plan 15C callable directly rather than
+  forking its request/parser/receipt logic. Plan 10 owns the acceptance-module,
+  task-role/IAM, image, task-definition, and runbook integration; Plan 12
+  executes both proofs and owns the verdict.
 - [ ] Implement `verify-operator-telemetry`. Emit a uniquely hashed web metric,
   run one lifecycle-only pipeline, then use bounded AWS API polling to locate
   the metric and `RunStarted`/`RunFinished` trace for the exact run correlation.

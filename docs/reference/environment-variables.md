@@ -353,7 +353,7 @@ docker run --rm \
   -e DATABASE_URL="sqlite:////app/data/audit.db" \
   -v elspeth-data:/app/data \
   -v $(pwd)/config:/app/config:ro \
-  ghcr.io/johnm-dta/elspeth:v0.7.0 \
+  ghcr.io/johnm-dta/elspeth:v0.7.1 \
   run --settings /app/config/pipeline.yaml --execute
 ```
 

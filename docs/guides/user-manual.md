@@ -333,10 +333,10 @@ elspeth health --json
 ```json
 {
   "status": "healthy",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "commit": "abc123f",
   "checks": {
-    "version": {"status": "ok", "value": "0.7.0"},
+    "version": {"status": "ok", "value": "0.7.1"},
     "python": {"status": "ok", "value": "3.13.1"},
     "database": {"status": "ok", "value": "connected"},
     "plugins": {"status": "ok", "value": "6 sources, 19 transforms, 6 sinks"}
@@ -494,7 +494,7 @@ elspeth web
 Then open the URL printed on the console (typically <http://localhost:8765>).
 
 When you create a new session, the composer starts in **Guided Mode** unless
-your Composer preference says otherwise. In 0.7.0 guided mode is LLM-primary:
+your Composer preference says otherwise. In 0.7.1 guided mode is LLM-primary:
 the browser sends the operator's stage instruction to `/guided/chat`, and the
 server applies the model's proposed source, sink, transform, or wiring change to
 the in-progress pipeline only after validation.

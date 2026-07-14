@@ -2,20 +2,26 @@
 
 Use this runbook when a web session schema-bootstrap change requires deleting or archiving a stale `sessions.db`. Historically the session database was reset in isolation from the Landscape audit database, payload storage, blobs, and Filigree tracker data. **From the Phase 4 hello-world tutorial schema cutover onward, any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must reset the session DB and Landscape audit DB together.** Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
 
-## Current Landscape Cutover: epoch 23
+## Current Cutover: 0.7.1 (session epoch 27 and Landscape epoch 23)
 
-The universal web plugin-policy candidate advances `SQLITE_SCHEMA_EPOCH` from
-22 to 23 and adds `run_web_plugin_policy`. This table is optional per run but
-required in the schema: web runs receive one policy-evidence row atomically
-with the run, attribution, and leader records; CLI runs receive none.
+0.7.1 advances `SESSION_SCHEMA_EPOCH` from 26 to 27 so
+`user_preferences.freeform_intro_dismissed_at` can persist the account-wide
+freeform-primer preference. The universal web plugin-policy work also advances
+`SQLITE_SCHEMA_EPOCH` from 22 to 23 and adds `run_web_plugin_policy`. This
+table is optional per run but required in the schema: web runs receive one
+policy-evidence row atomically with the run, attribution, and leader records;
+CLI runs receive none.
 
-This is not an in-place migration. Any existing pre-23 SQLite database or
-non-empty PostgreSQL Landscape missing `run_web_plugin_policy` is stale.
-Validate-only startup and doctor must leave it unchanged. The database
-operator must decide and approve archive/export where retention applies,
-stop all writers, drop/recreate the Landscape database or schema, and perform
-fresh owner initialization. The runtime role remains DML-only. Do not use
-`create_all`, `--init-schema`, or a code rollback as a repair mechanism.
+This is a two-database cutover, not an in-place migration. Archive and recreate
+the session database and its sidecars under the service-stop procedure below.
+Any existing pre-23 SQLite Landscape database or non-empty PostgreSQL
+Landscape missing `run_web_plugin_policy` is stale. Validate-only startup and
+doctor must leave it unchanged. The database operator must decide and approve
+archive/export where retention applies, stop all writers, drop/recreate the
+Landscape database or schema, and perform fresh owner initialization. The
+runtime role remains DML-only. Do not use `create_all`, `--init-schema`, or a
+code rollback as a repair mechanism. `auth.db` is a separate file and is not
+reset.
 
 The release/schema compatibility record for every candidate using this shape
 must state: candidate git SHA and immutable image/task-definition identity;
@@ -27,6 +33,9 @@ and epochs; forward and backward compatibility decisions; and an explicit
 with a freshly recreated epoch-23 database, so rollback is `no` unless a later
 approved record proves otherwise. Plans 10 and 12 must cite this epoch-23
 record when binding candidate and rollback decisions.
+
+Deployments crossing the 0.7.0 boundary from an older release must also account
+for the historical epoch-21 to epoch-22 Landscape reset described below.
 
 ## Historical Cutover: 0.7.0 (two-DB reset)
 

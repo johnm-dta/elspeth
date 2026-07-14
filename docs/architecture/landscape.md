@@ -1,6 +1,6 @@
 # Landscape System Architecture
 
-Current as of 2026-07-08 for the 0.7.0 release line.
+Current as of 2026-07-14 for the 0.7.1 release line.
 
 Landscape is ELSPETH's audit database and lineage read model. It records run
 configuration, source rows, DAG nodes and edges, token lineage, node execution
@@ -99,11 +99,11 @@ that refer to that file are historical snapshots.
 
 ## Table Groups
 
-The current schema defines 29 tables:
+The current schema defines 30 tables:
 
 | Group | Tables |
 |-------|--------|
-| Run metadata | `runs`, `run_attributions`, `auth_events`, `preflight_results`, `secret_resolutions` |
+| Run metadata | `runs`, `run_attributions`, `auth_events`, `preflight_results`, `secret_resolutions`, `run_web_plugin_policy` |
 | Multi-source ingestion (ADR-025) | `run_sources` |
 | Static graph | `nodes`, `edges` |
 | Data flow | `rows`, `tokens`, `token_parents`, `token_outcomes` |

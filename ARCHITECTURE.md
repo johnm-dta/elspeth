@@ -2,8 +2,8 @@
 
 C4 model documentation for the ELSPETH auditable pipeline framework.
 
-**Last Updated:** 2026-07-08 (synchronized with 0.7.0 release line)
-**Framework Version:** 0.7.0 (package metadata aligned at 0.7.0)
+**Last Updated:** 2026-07-14 (synchronized with 0.7.1 release line)
+**Framework Version:** 0.7.1 (package metadata aligned at 0.7.1)
 **Status:** Pre-release
 
 ---
@@ -162,7 +162,7 @@ C4Container
 | **Rate Limiting** | pyrate-limiter | ~300 | External call throttling with persistence |
 | **Core** | Python | ~5,000 | Config, canonical JSON, DAG package, payload store |
 | **Contracts** | Python | ~8,300 | Shared dataclasses, enums, protocols (leaf module) |
-| **Audit DB** | SQLite/SQLCipher/PostgreSQL | — | Complete audit trail storage (29 tables; SQLite schema epoch 22) |
+| **Audit DB** | SQLite/SQLCipher/PostgreSQL | — | Complete audit trail storage (30 tables; SQLite schema epoch 23) |
 | **Payload Store** | Filesystem | — | Content-addressable blob storage with retention |
 
 **Total Production LOC:** ~173,900 (447 Python files in `src/elspeth/`; frontend TSX/CSS not included) | **Total Test LOC:** ~448,300 (1,095 Python files) | **Test Ratio:** 2.6:1
@@ -263,7 +263,7 @@ C4Component
 | **DataFlowRepository** | `data_flow_repository.py` | ~1,430 | Rows, tokens, calls, artifacts, validation/transform errors |
 | **QueryRepository** | `query_repository.py` | ~530 | `explain()`, row data retrieval, lineage queries |
 | **LandscapeDB** | `database.py` | ~500 | Connection management, schema validation, SQLCipher support |
-| **Schema** | `schema.py` | ~520 | SQLAlchemy table definitions (29 tables; SQLite schema epoch 22) |
+| **Schema** | `schema.py` | ~520 | SQLAlchemy table definitions (30 tables; SQLite schema epoch 23) |
 | **Model Loaders** | `model_loaders.py` | ~600 | Row→Object conversion with Tier 1 validation |
 | **Lineage** | `lineage.py` | ~235 | `explain()` queries for complete lineage |
 | **Exporter** | `exporter.py` | ~594 | Audit data export (JSON, CSV) |
@@ -271,10 +271,10 @@ C4Component
 | **Journal** | `journal.py` | ~286 | JSONL change journaling backup stream |
 | **Reproducibility** | `reproducibility.py` | ~147 | Grade computation (FULL → ATTRIBUTABLE_ONLY) |
 
-### Audit Trail Tables (29 Total)
+### Audit Trail Tables (30 Total)
 
 ```
-runs (run lifecycle) → run_attributions / preflight_results / run_sources
+runs (run lifecycle) → run_attributions / preflight_results / run_sources / run_web_plugin_policy
   ↓
 nodes (DAG nodes) → edges (DAG edges)
   ↓
@@ -1029,7 +1029,7 @@ ongoing CI enforcement.
 - Subsystems: 11 major (20+ including sub-components)
 - Plugins: registry-discovered via `discover_all_plugins()` — the same code path as `elspeth plugins list`
 - ADRs: 30+ accepted records (excluding the 000 template)
-- Status: Pre-release (0.7.0)
+- Status: Pre-release (0.7.1)
 
 All diagrams use Mermaid syntax for version control compatibility.
 

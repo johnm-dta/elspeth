@@ -4,6 +4,61 @@ All notable changes to ELSPETH are documented here.
 
 ---
 
+## 0.7.1 - 2026-07-14 (Composer reliability and structural queue authoring)
+
+This release makes complex pipelines easier to author and the web Composer
+safer to operate. Structural queues are now first-class Composer nodes, so
+multiple upstream routes can feed one downstream step without merging their
+records. Guided/freeform transitions, run inspection, and the empty-state
+guidance have also been tightened around the way operators use the Composer in
+practice.
+
+The web session database resets on upgrade: `SESSION_SCHEMA_EPOCH` advances
+from 26 to 27 to persist account-wide dismissal of the new freeform
+introduction. The integrated AWS runtime-readiness candidate also advances the
+Landscape audit schema from `SQLITE_SCHEMA_EPOCH` 22 to 23 for immutable web
+plugin-policy evidence, so both databases require the documented cutover.
+
+### Added
+
+- **First-class structural queues in the Composer** — freeform mutation tools,
+  Composer validation, the graph, and type badges now share one queue contract.
+  A queue accepts records from multiple upstream routes, keeps them separate,
+  and feeds exactly one ordinary downstream node.
+- **A dismissible freeform pipeline primer** — the empty Composer now explains
+  sources, transforms, sinks, gates, forks, coalesces, aggregates, queues, and
+  expands in operator language before asking for an outcome. Dismissal is
+  stored in the user's Composer preferences.
+
+### Changed
+
+- **YAML import has a clearer preflight and upload-binding flow** — the import
+  surface checks YAML structure before submission, previews component counts,
+  and lets operators bind file-based source paths to uploaded blobs. Replacing
+  a pipeline preserves the prior version in history, and imported LLM
+  pipelines surface their interpretation reviews before execution.
+- **Guided and freeform mode transitions are explicit and recoverable** — a
+  worked freeform session can start a fresh guided wizard, tutorial exit leads
+  cleanly to freeform, completed guided sessions can be reopened, and guided
+  completion keeps validation visible before a run.
+- **Composer inspection is clearer** — run history uses stable run numbers,
+  timestamps, and statuses; output previews share horizontally scrollable
+  table and structured-JSON components; server-side paths no longer appear as
+  user-facing output labels; and theme controls are available in Composer
+  preferences.
+
+### Fixed
+
+- **Aborted Composer turns no longer leave zombie work or stale state** — both
+  freeform and guided cancellation now propagate through tool dispatch, wait
+  for the in-flight turn to settle, and resynchronise from durable session
+  state. Generation fences prevent an older poller from overwriting a newer
+  session view.
+- **Composer startup now fails closed until runtime timing is ready** — message
+  submission stays gated until the backend-derived timeout configuration is
+  available, with a bounded stuck-state diagnostic instead of allowing a
+  bootstrap race to strand a turn.
+
 ## 0.7.0 - 2026-07-09 (LLM-primary guided pipeline creation)
 
 Guided pipeline creation becomes LLM-primary. The guided composer is

@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-ELSPETH is currently on the `0.7.0` release line. Security
+ELSPETH is currently on the `0.7.1` release line. Security
 fixes are prioritised against the current release branch and `main`.
 Older release snapshots are retained for provenance, but are not
 maintained as separately supported long-term release lines.
@@ -24,7 +24,7 @@ Preferred disclosure path:
 3. If no private route is available, open a public issue that says only
    "Security disclosure path requested" and includes no exploit detail.
 
-As of 0.7.0, a dedicated public security mailbox has not yet been published in
+As of 0.7.1, a dedicated public security mailbox has not yet been published in
 this repository. Publishing or enabling a permanent private disclosure channel
 remains a public-release readiness item.
 

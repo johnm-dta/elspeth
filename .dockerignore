@@ -32,6 +32,12 @@ env/
 # JavaScript dependency trees are generated from package-lock.json inside Docker.
 **/node_modules/
 
+# Frontend unit-test sources are not part of the production SPA bundle. Keeping
+# them out of the Docker context also isolates the image build from unrelated
+# test-only type fixtures while application source remains fully typechecked.
+src/elspeth/web/frontend/src/**/*.test.ts
+src/elspeth/web/frontend/src/**/*.test.tsx
+
 # IDE and editor files
 .idea/
 .vscode/

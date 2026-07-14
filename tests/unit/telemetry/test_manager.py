@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from opentelemetry.sdk.trace.export import SpanExportResult
 
+from elspeth.contracts.call_data import RawCallPayload
 from elspeth.contracts.config.defaults import INTERNAL_DEFAULTS
 from elspeth.contracts.enums import (
     BackpressureMode,
@@ -87,6 +88,8 @@ def _external_call_event() -> ExternalCallCompleted:
         status=CallStatus.SUCCESS,
         latency_ms=50.0,
         state_id="s1",
+        request_payload=RawCallPayload({"operation": "apply_guardrail", "target_fingerprint": "abc123"}),
+        response_payload=RawCallPayload({"status": "safe", "request_id_present": True}),
     )
 
 
@@ -188,6 +191,20 @@ class TestHandleEventBasic:
             _wait_for_processing(manager)
             assert len(exporter.events) == 1
             assert isinstance(exporter.events[0], RunStarted)
+        finally:
+            manager.close()
+
+    def test_bounded_external_call_payload_reaches_exporter_unchanged(self) -> None:
+        config = MockTelemetryConfig(granularity=TelemetryGranularity.FULL)
+        exporter = TelemetryTestExporter()
+        manager = TelemetryManager(config, exporters=[exporter])
+        try:
+            event = _external_call_event()
+            manager.handle_event(event)
+            _wait_for_processing(manager)
+            assert exporter.events == [event]
+            assert event.request_payload is not None
+            assert event.request_payload.to_dict() == {"operation": "apply_guardrail", "target_fingerprint": "abc123"}
         finally:
             manager.close()
 

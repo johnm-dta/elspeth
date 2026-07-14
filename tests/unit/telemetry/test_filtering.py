@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from elspeth.contracts.call_data import RawCallPayload
 from elspeth.contracts.enums import (
     CallStatus,
     CallType,
@@ -127,6 +128,8 @@ def _external_call() -> ExternalCallCompleted:
         status=CallStatus.SUCCESS,
         latency_ms=50.0,
         state_id="state-1",
+        request_payload=RawCallPayload({"operation": "apply_guardrail"}),
+        response_payload=RawCallPayload({"status": "blocked", "matched_filters": ("PROMPT_ATTACK",)}),
     )
 
 
@@ -238,3 +241,12 @@ class TestExternalCallEventsFullOnly:
 
     def test_external_call_emits_at_full(self) -> None:
         assert should_emit(_external_call(), FULL) is True
+
+    def test_bedrock_external_call_payload_serializes_without_provider_text(self) -> None:
+        attributes = serialize_event_attributes(_external_call())
+        rendered = repr(attributes)
+
+        assert "apply_guardrail" in rendered
+        assert "PROMPT_ATTACK" in rendered
+        assert "guardrail_identifier" not in rendered
+        assert "provider_output" not in rendered

@@ -286,7 +286,7 @@ def _get_base_classes() -> dict[str, type]:
 # See "System Operations (NOT Plugins)" section in the plugin protocol.
 PLUGIN_SCAN_CONFIG: dict[str, list[str]] = {
     "sources": ["sources"],
-    "transforms": ["transforms", "transforms/azure", "transforms/llm", "transforms/rag"],
+    "transforms": ["transforms", "transforms/aws", "transforms/azure", "transforms/llm", "transforms/rag"],
     "sinks": ["sinks"],
 }
 

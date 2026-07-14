@@ -643,9 +643,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 # Add any new tuple-typed WebSettings fields here so _settings_from_env()
 # JSON-decodes them.  Scalar fields (str, int, float, Path) are handled by Pydantic.
 _JSON_COLLECTION_FIELDS: frozenset[str] = frozenset(
-    {"cors_origins", "server_secret_allowlist", "oidc_authorization_allowed_origins", "plugin_allowlist"}
+    {"cors_origins", "server_secret_allowlist", "oidc_authorization_allowed_origins", "plugin_allowlist", "bedrock_guardrail_profiles"}
 )
-_JSON_OBJECT_FIELDS: frozenset[str] = frozenset({"plugin_preferences", "plugin_control_modes", "llm_profiles"})
+_JSON_OBJECT_FIELDS: frozenset[str] = frozenset(
+    {"plugin_preferences", "plugin_control_modes", "llm_profiles", "bedrock_guardrail_default_profiles"}
+)
 
 
 def _settings_from_env() -> WebSettings:
@@ -704,7 +706,15 @@ def _settings_from_env() -> WebSettings:
     try:
         return WebSettings(**kwargs)  # type: ignore[arg-type]
     except ValidationError as error:
-        policy_fields = {"plugin_allowlist", "plugin_preferences", "plugin_control_modes", "llm_profiles", "tutorial_llm_profile"}
+        policy_fields = {
+            "plugin_allowlist",
+            "plugin_preferences",
+            "plugin_control_modes",
+            "llm_profiles",
+            "tutorial_llm_profile",
+            "bedrock_guardrail_profiles",
+            "bedrock_guardrail_default_profiles",
+        }
         safe_paths = {
             str(item) for detail in error.errors(include_input=False) for item in detail.get("loc", ()) if isinstance(item, (str, int))
         }

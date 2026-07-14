@@ -102,7 +102,9 @@ def build_plugin_snapshot(
                 principal=principal_scope,
                 inventory=secret_inventory,
             )
-            aliases = tuple(item.alias for item in profile_states if item.usable)
+            aliases = tuple(
+                item.alias for item in profile_states if item.usable and profiles.check_local_requirements(plugin_id, item.alias).available
+            )
             for profile_state in profile_states:
                 if not profile_state.usable or profile_state.credential_scope is None or profile_state.generation is None:
                     continue

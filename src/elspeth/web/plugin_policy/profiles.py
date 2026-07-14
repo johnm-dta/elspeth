@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
+from elspeth.plugins.transforms.aws.guardrail_profiles import BedrockGuardrailProfileSettings
 
 if TYPE_CHECKING:
     from elspeth.web.catalog.schemas import PluginSchemaInfo
@@ -127,6 +128,8 @@ class RuntimeWebPluginConfig:
     plugin_control_modes: tuple[tuple[PluginCapability, ControlMode], ...]
     llm_profiles: tuple[tuple[str, RuntimeWebLLMProfile], ...] = field(repr=False)
     tutorial_llm_profile: str | None
+    bedrock_guardrail_profiles: tuple[BedrockGuardrailProfileSettings, ...] = field(repr=False)
+    bedrock_guardrail_default_profiles: tuple[tuple[str, str], ...]
 
     @classmethod
     def from_settings(cls, settings: WebSettings) -> RuntimeWebPluginConfig:
@@ -141,6 +144,8 @@ class RuntimeWebPluginConfig:
                 (alias, RuntimeWebLLMProfile.from_settings(alias, profile)) for alias, profile in sorted(settings.llm_profiles.items())
             ),
             tutorial_llm_profile=settings.tutorial_llm_profile,
+            bedrock_guardrail_profiles=tuple(sorted(settings.bedrock_guardrail_profiles, key=lambda profile: profile.alias)),
+            bedrock_guardrail_default_profiles=tuple(sorted(settings.bedrock_guardrail_default_profiles.items())),
         )
 
 
@@ -360,6 +365,118 @@ class _LLMProfileResolver:
         return LocalRequirementResult(available=alias in self._profiles)
 
 
+_BEDROCK_PRIVATE_OPTIONS = frozenset(
+    {
+        "guardrail_identifier",
+        "guardrail_version",
+        "region",
+        "endpoint",
+        "endpoint_url",
+        "credential",
+        "credentials",
+        "access_key",
+        "secret_key",
+        "session_token",
+        "environment",
+        "environment_marker",
+    }
+)
+
+
+class _BedrockGuardrailProfileResolver:
+    def __init__(self, profiles: tuple[BedrockGuardrailProfileSettings, ...], *, default_alias: str | None) -> None:
+        self._profiles = {profile.alias: profile for profile in profiles}
+        aliases = tuple(self._profiles)
+        self._ordered_aliases = (
+            (default_alias, *(alias for alias in aliases if alias != default_alias)) if default_alias in self._profiles else aliases
+        )
+
+    def public_schema(self, full_schema: PluginSchemaInfo, available_aliases: tuple[str, ...]) -> PluginSchemaInfo:
+        from elspeth.web.catalog.schemas import PluginSchemaInfo
+
+        safe_names = ("fields", "schema") if full_schema.name == "aws_bedrock_prompt_shield" else ("fields", "schema", "source")
+        full_properties = full_schema.json_schema.get("properties", {})
+        safe_properties: dict[str, Any] = {
+            "profile": {
+                "type": "string",
+                "enum": list(available_aliases),
+                "description": "Operator-approved Bedrock Guardrail profile alias",
+            }
+        }
+        if isinstance(full_properties, dict):
+            for name in safe_names:
+                value = full_properties.get(name)
+                if isinstance(value, dict):
+                    safe_properties[name] = deepcopy(value)
+        required = ["profile", "fields", "schema"]
+        public_json_schema: dict[str, Any] = {
+            "type": "object",
+            "properties": safe_properties,
+            "required": required,
+            "additionalProperties": False,
+        }
+        fields = [
+            {
+                "name": name,
+                "type": "string" if name == "profile" else str(schema.get("type", "object")),
+                "required": name in required,
+                "description": schema.get("description"),
+                **({"choices": list(available_aliases)} if name == "profile" else {}),
+            }
+            for name, schema in safe_properties.items()
+        ]
+        return PluginSchemaInfo(
+            name=full_schema.name,
+            plugin_type=full_schema.plugin_type,
+            description=full_schema.description,
+            json_schema=public_json_schema,
+            knob_schema={"fields": fields},
+            composer_hints=full_schema.composer_hints,
+            secret_requirements=(),
+            web_config_authority=full_schema.web_config_authority,
+            policy_capabilities=full_schema.policy_capabilities,
+        )
+
+    def lower_options(self, alias: str, safe_options: dict[str, object]) -> LoweredPluginConfig:
+        if set(safe_options) & _BEDROCK_PRIVATE_OPTIONS:
+            raise ValueError("private_profile_option")
+        try:
+            profile = self._profiles[alias]
+        except KeyError:
+            raise ValueError("profile_unavailable") from None
+        allowed = {"fields", "schema"}
+        if profile.plugin == "aws_bedrock_content_safety":
+            allowed.add("source")
+        if set(safe_options) - allowed:
+            raise ValueError("private_profile_option")
+        executable = dict(safe_options)
+        executable.update(
+            {
+                "guardrail_identifier": profile.guardrail_identifier,
+                "guardrail_version": profile.guardrail_version,
+                "region": profile.region,
+            }
+        )
+        return LoweredPluginConfig(
+            executable_options=MappingProxyType(executable),
+            audit_safe_options=MappingProxyType({"profile": alias, **safe_options}),
+        )
+
+    def profile_availability(
+        self,
+        principal: str,
+        inventory: ProfileCredentialInventory,
+    ) -> tuple[ProfileAvailability, ...]:
+        del principal, inventory
+        return tuple(ProfileAvailability(alias=alias, credential_scope=None, usable=True) for alias in self._ordered_aliases)
+
+    def check_local_requirements(self, alias: str) -> LocalRequirementResult:
+        profile = self._profiles.get(alias)
+        if profile is None or not profile.check_local_requirements().available:
+            return LocalRequirementResult(available=False, reason=ProfileUnavailableReason.LOCAL_REQUIREMENT_MISSING)
+        return LocalRequirementResult(available=True)
+
+
 def _schema_refs(value: object) -> set[str]:
     refs: set[str] = set()
     if isinstance(value, dict):
@@ -387,6 +504,14 @@ class OperatorProfileRegistry:
                 preferred_alias=settings.tutorial_llm_profile,
             )
         }
+        defaults = dict(settings.bedrock_guardrail_default_profiles)
+        for plugin_name in ("aws_bedrock_prompt_shield", "aws_bedrock_content_safety"):
+            plugin_profiles = tuple(profile for profile in settings.bedrock_guardrail_profiles if profile.plugin == plugin_name)
+            if plugin_profiles:
+                self._resolvers[PluginId("transform", plugin_name)] = _BedrockGuardrailProfileResolver(
+                    plugin_profiles,
+                    default_alias=defaults.get(plugin_name),
+                )
 
     def public_schema(
         self,

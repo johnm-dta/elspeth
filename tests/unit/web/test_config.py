@@ -39,6 +39,27 @@ class TestWebSettingsValidation:
                 composer_expose_provder_errors=True,  # type: ignore[call-arg]
             )
 
+    def test_bedrock_guardrail_settings_round_trip_without_repr_leak(self) -> None:
+        settings = WebSettings(
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+            bedrock_guardrail_profiles=(
+                {
+                    "alias": "prompt-default",
+                    "plugin": "aws_bedrock_prompt_shield",
+                    "guardrail_identifier": "privateguardrail",
+                    "guardrail_version": "7",
+                    "region": "us-east-1",
+                },
+            ),
+        )
+
+        assert settings.bedrock_guardrail_profiles[0].alias == "prompt-default"
+        assert "privateguardrail" not in repr(settings)
+
     def test_invalid_auth_provider_rejected(self) -> None:
         with pytest.raises(ValueError):
             WebSettings(

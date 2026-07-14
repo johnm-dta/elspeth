@@ -5,7 +5,9 @@ from dataclasses import FrozenInstanceError
 import pytest
 from pydantic import ValidationError
 
+from elspeth.contracts.plugin_capabilities import WebConfigAuthority
 from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+from elspeth.web.catalog.schemas import PluginSchemaInfo
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
@@ -124,10 +126,139 @@ def test_runtime_conversion_consumes_every_universal_setting_field() -> None:
         "plugin_control_modes",
         "llm_profiles",
         "tutorial_llm_profile",
+        "bedrock_guardrail_profiles",
+        "bedrock_guardrail_default_profiles",
     }
     runtime_fields = set(RuntimeWebPluginConfig.__dataclass_fields__)
 
     assert settings_fields == runtime_fields
+
+
+def test_bedrock_profiles_require_explicit_default_when_plugin_has_multiple_profiles() -> None:
+    profiles = (
+        {
+            "alias": "first",
+            "plugin": "aws_bedrock_prompt_shield",
+            "guardrail_identifier": "firstguardrail",
+            "guardrail_version": "1",
+            "region": "us-east-1",
+        },
+        {
+            "alias": "second",
+            "plugin": "aws_bedrock_prompt_shield",
+            "guardrail_identifier": "secondguardrail",
+            "guardrail_version": "2",
+            "region": "us-east-1",
+        },
+    )
+
+    with pytest.raises(ValidationError):
+        _settings(bedrock_guardrail_profiles=profiles)
+
+    settings = _settings(
+        bedrock_guardrail_profiles=profiles,
+        bedrock_guardrail_default_profiles={"aws_bedrock_prompt_shield": "second"},
+    )
+    assert settings.bedrock_guardrail_default_profiles["aws_bedrock_prompt_shield"] == "second"
+
+
+def test_bedrock_profile_aliases_are_unique_across_plugins() -> None:
+    shared = {
+        "alias": "shared",
+        "guardrail_identifier": "privateguardrail",
+        "guardrail_version": "1",
+        "region": "us-east-1",
+    }
+    with pytest.raises(ValidationError):
+        _settings(
+            bedrock_guardrail_profiles=(
+                {**shared, "plugin": "aws_bedrock_prompt_shield"},
+                {**shared, "plugin": "aws_bedrock_content_safety"},
+            )
+        )
+
+
+def test_bedrock_profile_resolver_exposes_only_alias_and_safe_options() -> None:
+    runtime = RuntimeWebPluginConfig.from_settings(
+        _settings(
+            bedrock_guardrail_profiles=(
+                {
+                    "alias": "prompt-default",
+                    "plugin": "aws_bedrock_prompt_shield",
+                    "guardrail_identifier": "privateguardrail",
+                    "guardrail_version": "7",
+                    "region": "us-east-1",
+                },
+            ),
+        )
+    )
+    policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+    registry = OperatorProfileRegistry(policy=policy, settings=runtime)
+    plugin_id = PluginId("transform", "aws_bedrock_prompt_shield")
+    full = PluginSchemaInfo(
+        name="aws_bedrock_prompt_shield",
+        plugin_type="transform",
+        description="test schema",
+        json_schema={
+            "type": "object",
+            "properties": {
+                "guardrail_identifier": {"type": "string"},
+                "guardrail_version": {"type": "string"},
+                "region": {"type": "string"},
+                "fields": {"type": "array", "items": {"type": "string"}},
+                "schema": {"type": "object"},
+            },
+            "required": ["guardrail_identifier", "guardrail_version", "region", "fields", "schema"],
+            "additionalProperties": False,
+        },
+        knob_schema={"fields": []},
+        web_config_authority=WebConfigAuthority.OPERATOR_PROFILED,
+    )
+
+    public = registry.public_schema(plugin_id, full, available_aliases=("prompt-default",))
+    rendered = public.model_dump_json()
+    assert '"profile"' in rendered
+    assert '"fields"' in rendered
+    assert '"schema"' in rendered
+    for private in ("guardrail_identifier", "guardrail_version", "region", "endpoint", "credential"):
+        assert private not in rendered
+
+    lowered = registry.lower_options(
+        plugin_id,
+        alias="prompt-default",
+        safe_options={"fields": ["prompt"], "schema": {"mode": "observed"}},
+    )
+    assert lowered.audit_safe_options == {
+        "profile": "prompt-default",
+        "fields": ["prompt"],
+        "schema": {"mode": "observed"},
+    }
+    assert lowered.executable_options["guardrail_identifier"] == "privateguardrail"
+
+
+def test_bedrock_profile_resolver_rejects_private_or_mixed_options() -> None:
+    runtime = RuntimeWebPluginConfig.from_settings(
+        _settings(
+            bedrock_guardrail_profiles=(
+                {
+                    "alias": "prompt-default",
+                    "plugin": "aws_bedrock_prompt_shield",
+                    "guardrail_identifier": "privateguardrail",
+                    "guardrail_version": "7",
+                    "region": "us-east-1",
+                },
+            ),
+        )
+    )
+    policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+    registry = OperatorProfileRegistry(policy=policy, settings=runtime)
+
+    with pytest.raises(ValueError, match="private_profile_option"):
+        registry.lower_options(
+            PluginId("transform", "aws_bedrock_prompt_shield"),
+            alias="prompt-default",
+            safe_options={"fields": ["prompt"], "guardrail_identifier": "attacker"},
+        )
 
 
 def _profile_registry() -> OperatorProfileRegistry:

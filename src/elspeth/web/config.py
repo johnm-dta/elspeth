@@ -16,6 +16,10 @@ from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
 from elspeth.core.config import PayloadStoreSettings
 from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
+from elspeth.plugins.transforms.aws.guardrail_profiles import (
+    BEDROCK_GUARDRAIL_PLUGIN_IDS,
+    BedrockGuardrailProfileSettings,
+)
 from elspeth.telemetry.resource_identity import is_aws_ecs_name, is_aws_resource_label, is_aws_task_revision, is_release_identity
 from elspeth.web.auth.urls import (
     validate_oidc_browser_endpoints,
@@ -250,6 +254,8 @@ class WebSettings(BaseModel):
     )
     llm_profiles: Mapping[str, WebLLMProfileSettings] = Field(default_factory=dict)
     tutorial_llm_profile: str | None = None
+    bedrock_guardrail_profiles: tuple[BedrockGuardrailProfileSettings, ...] = ()
+    bedrock_guardrail_default_profiles: Mapping[str, str] = Field(default_factory=dict)
     orphan_run_max_age_seconds: int = Field(default=3600, ge=60)
     orphan_run_check_interval_seconds: int = Field(default=300, ge=30)
 
@@ -555,6 +561,28 @@ class WebSettings(BaseModel):
             validate_profile_alias(self.tutorial_llm_profile)
             if self.tutorial_llm_profile not in self.llm_profiles:
                 raise ValueError("tutorial_llm_profile must name a configured LLM profile")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_bedrock_guardrail_profiles(self) -> WebSettings:
+        by_alias: dict[str, BedrockGuardrailProfileSettings] = {}
+        by_plugin: dict[str, list[BedrockGuardrailProfileSettings]] = {plugin: [] for plugin in BEDROCK_GUARDRAIL_PLUGIN_IDS}
+        for profile in self.bedrock_guardrail_profiles:
+            if profile.alias in by_alias:
+                raise ValueError("Bedrock Guardrail profile aliases must be unique")
+            by_alias[profile.alias] = profile
+            by_plugin[profile.plugin].append(profile)
+
+        unknown_defaults = set(self.bedrock_guardrail_default_profiles) - set(BEDROCK_GUARDRAIL_PLUGIN_IDS)
+        if unknown_defaults:
+            raise ValueError("Bedrock Guardrail default profile names an unknown plugin")
+        for plugin, profiles in by_plugin.items():
+            default_alias = self.bedrock_guardrail_default_profiles.get(plugin)
+            aliases = {profile.alias for profile in profiles}
+            if len(profiles) > 1 and default_alias is None:
+                raise ValueError("multiple Bedrock Guardrail profiles require an explicit plugin default")
+            if default_alias is not None and default_alias not in aliases:
+                raise ValueError("Bedrock Guardrail default profile must name a profile for the same plugin")
         return self
 
     @field_validator("operator_telemetry_service_name")

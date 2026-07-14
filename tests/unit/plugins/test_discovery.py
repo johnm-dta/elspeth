@@ -847,7 +847,7 @@ class TestDualSysModulesRegistration:
         # Ensure neither name exists before discovery
         sys.modules.pop(canonical, None)
         sys.modules.pop(synthetic, None)
-        if hasattr(parent, child_name):
+        if child_name in vars(parent):
             delattr(parent, child_name)
 
         try:

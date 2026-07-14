@@ -548,7 +548,7 @@ class TestAWSS3SourceRegistrationAndParsing:
         from elspeth.web.composer.state import CompositionState, OutputSpec, PipelineMetadata, SourceSpec
         from elspeth.web.config import WebSettings
         from elspeth.web.execution.protocol import YamlGenerator
-        from elspeth.web.execution.validation import validate_pipeline
+        from elspeth.web.execution.validation import validate_pipeline_for_trained_operator
 
         state = CompositionState(
             source=SourceSpec(
@@ -577,7 +577,7 @@ class TestAWSS3SourceRegistrationAndParsing:
             patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as load_settings,
             patch("elspeth.web.execution.validation.instantiate_runtime_plugins") as instantiate,
         ):
-            result = validate_pipeline(state, settings, yaml_generator)
+            result = validate_pipeline_for_trained_operator(state, settings, yaml_generator)
         check = next(check for check in result.checks if check.name == "aws_s3_endpoint_url_policy")
         assert check.passed is False
         assert result.errors[0].error_code == "aws_s3_endpoint_url_not_allowed"
@@ -594,7 +594,7 @@ class TestAWSS3SourceRegistrationAndParsing:
         from elspeth.web.composer.state import CompositionState, OutputSpec, PipelineMetadata, SourceSpec
         from elspeth.web.config import WebSettings
         from elspeth.web.execution.protocol import YamlGenerator
-        from elspeth.web.execution.validation import validate_pipeline
+        from elspeth.web.execution.validation import validate_pipeline_for_trained_operator
 
         state = CompositionState(
             source=SourceSpec(
@@ -620,7 +620,7 @@ class TestAWSS3SourceRegistrationAndParsing:
         yaml_generator = MagicMock(spec=YamlGenerator)
         yaml_generator.generate_yaml.return_value = "sources: {}\nsinks: {}\n"
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string", side_effect=ValueError("stop")):
-            result = validate_pipeline(state, settings, yaml_generator)
+            result = validate_pipeline_for_trained_operator(state, settings, yaml_generator)
         check = next(check for check in result.checks if check.name == "aws_s3_endpoint_url_policy")
         assert check.passed is True
 

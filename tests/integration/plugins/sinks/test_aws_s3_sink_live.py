@@ -33,7 +33,7 @@ class _Context:
 def test_real_s3_default_chain_conditional_write_and_stale_etag_non_clobber(format: str) -> None:
     bucket = os.environ.get("ELSPETH_TEST_S3_BUCKET")
     if not bucket:
-        pytest.fail("ELSPETH_TEST_S3_BUCKET is required when the real AWS S3 acceptance is selected")
+        pytest.skip("ELSPETH_TEST_S3_BUCKET is required for the real AWS S3 acceptance")
     key = f"elspeth-plan07/{uuid.uuid4()}/output.{format}"
     config = {
         "bucket": bucket,

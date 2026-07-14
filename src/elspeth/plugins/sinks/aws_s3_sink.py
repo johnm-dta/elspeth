@@ -615,7 +615,7 @@ class AWSS3Sink(BaseSink):
     name = "aws_s3"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:8107dee3b855d0e0"
+    source_file_hash: str | None = "sha256:f25920a72b942a5f"
     config_model = AWSS3SinkConfig
     supports_resume = False
 
@@ -772,7 +772,6 @@ class AWSS3Sink(BaseSink):
                 provider="aws_s3",
             )
         except contract_errors.TIER_1_ERRORS:
-            self._poisoned = True
             raise
         except BaseException as error:
             recorder_error_type = _normalize_error_type(error)

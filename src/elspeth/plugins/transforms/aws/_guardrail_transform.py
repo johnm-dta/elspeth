@@ -39,10 +39,24 @@ class BedrockGuardrailTransformConfig(TransformDataConfig):
     _component_type_exempt: ClassVar[bool] = True
     model_config: ClassVar[ConfigDict] = ConfigDict(**TransformDataConfig.model_config, hide_input_in_errors=True)
 
-    guardrail_identifier: str = Field(min_length=1, max_length=2048, repr=False)
-    guardrail_version: str = Field(min_length=1, max_length=32, repr=False)
-    region: str = Field(min_length=1, max_length=64, repr=False)
-    fields: list[str] = Field(min_length=1, max_length=32)
+    guardrail_identifier: str = Field(
+        min_length=1,
+        max_length=2048,
+        repr=False,
+        description="Operator-installed Bedrock Guardrail identifier or ARN.",
+    )
+    guardrail_version: str = Field(
+        min_length=1,
+        max_length=32,
+        repr=False,
+        description="Published Bedrock Guardrail version used for evaluation.",
+    )
+    region: str = Field(min_length=1, max_length=64, repr=False, description="AWS region containing the Guardrail.")
+    fields: list[str] = Field(
+        min_length=1,
+        max_length=32,
+        description="Input row fields whose text is evaluated by the Guardrail.",
+    )
 
     @field_validator("guardrail_identifier")
     @classmethod

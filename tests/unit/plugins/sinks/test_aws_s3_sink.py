@@ -780,7 +780,7 @@ class TestAWSS3SinkRuntime:
         from elspeth.web.composer.state import CompositionState, OutputSpec, PipelineMetadata, SourceSpec
         from elspeth.web.config import WebSettings
         from elspeth.web.execution.protocol import YamlGenerator
-        from elspeth.web.execution.validation import validate_pipeline
+        from elspeth.web.execution.validation import validate_pipeline_for_trained_operator
 
         source_path = tmp_path / "blobs" / "input.csv"
         source_path.parent.mkdir()
@@ -824,7 +824,7 @@ class TestAWSS3SinkRuntime:
             patch("elspeth.web.execution.validation.load_settings_from_yaml_string", side_effect=ValueError("stop")) as load,
             patch("elspeth.web.execution.validation.instantiate_runtime_plugins") as instantiate,
         ):
-            result = validate_pipeline(state, settings, yaml_generator)
+            result = validate_pipeline_for_trained_operator(state, settings, yaml_generator)
         check = next(check for check in result.checks if check.name == "aws_s3_endpoint_url_policy")
         assert check.passed is expected_passed
         if expected_passed:

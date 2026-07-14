@@ -131,8 +131,8 @@ def observed_agg_example_dir(tmp_path: Path) -> Path:
     """Variant using `mode: observed` on the aggregation.
 
     This intentionally omits the replicated input fields from the aggregation's
-    explicit schema. The pipeline should now fail DAG-time validation unless
-    the config truthfully declares those preserved fields.
+    explicit schema. BatchReplicate truthfully declares pass-through behaviour,
+    so the DAG combines predecessor guarantees with its ``copy_index`` field.
     """
     example_src = Path("examples/deaggregation")
     example_dst = tmp_path / "deaggregation_observed"
@@ -199,26 +199,26 @@ landscape:
     return example_dst
 
 
-class TestDeaggregationObservedAggregationRequiresExplicitSchema:
-    """Observed-mode BatchReplicate must not inherit undeclared fields."""
+class TestDeaggregationObservedAggregationPreservesInputContract:
+    """BatchReplicate's pass-through contract preserves observed input fields."""
 
-    def test_observed_aggregation_plus_batch_replicate_is_rejected(self, observed_agg_example_dir: Path) -> None:
-        """Observed-mode config must not validate via BatchReplicate inheritance."""
+    def test_observed_aggregation_plus_batch_replicate_is_accepted(self, observed_agg_example_dir: Path) -> None:
+        """Observed-mode output combines the declared copy index with preserved input fields."""
         from elspeth.cli_helpers import instantiate_plugins_from_config
         from elspeth.core.config import load_settings
-        from elspeth.core.dag import ExecutionGraph, GraphValidationError
+        from elspeth.core.dag import ExecutionGraph
 
         config = load_settings(observed_agg_example_dir / "settings.yaml")
         plugins = instantiate_plugins_from_config(config)
 
-        with pytest.raises(GraphValidationError, match=r"does not guarantee"):
-            graph = ExecutionGraph.from_plugin_instances(
-                sources=plugins.sources,
-                source_settings_map=plugins.source_settings_map,
-                transforms=plugins.transforms,
-                sinks=plugins.sinks,
-                aggregations=plugins.aggregations,
-                gates=list(config.gates),
-                coalesce_settings=list(config.coalesce) if config.coalesce else None,
-            )
-            graph.validate_edge_compatibility()
+        graph = ExecutionGraph.from_plugin_instances(
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
+            transforms=plugins.transforms,
+            sinks=plugins.sinks,
+            aggregations=plugins.aggregations,
+            gates=list(config.gates),
+            coalesce_settings=list(config.coalesce) if config.coalesce else None,
+        )
+
+        graph.validate_edge_compatibility()

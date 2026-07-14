@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Literal
 
+from pydantic import Field
+
 from elspeth.contracts import Determinism
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.plugin_capabilities import CapabilityDeclaration, ControlRole, PluginCapability, WebConfigAuthority
@@ -15,7 +17,10 @@ from elspeth.plugins.transforms.aws.guardrails_client import HARMFUL_CONTENT_FIL
 class AWSBedrockContentSafetyConfig(BedrockGuardrailTransformConfig):
     """Explicit CLI configuration for harmful-content checks."""
 
-    source: Literal["INPUT", "OUTPUT"] = "OUTPUT"
+    source: Literal["INPUT", "OUTPUT"] = Field(
+        default="OUTPUT",
+        description="Bedrock Guardrail assessment direction for the selected fields.",
+    )
 
 
 class AWSBedrockContentSafety(BedrockGuardrailTransformBase):
@@ -34,7 +39,7 @@ class AWSBedrockContentSafety(BedrockGuardrailTransformBase):
         }
     )
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:128a78cb29177e65"
+    source_file_hash: str | None = "sha256:6f796eb6a8db2678"
     config_model = AWSBedrockContentSafetyConfig
     _required_filters = HARMFUL_CONTENT_FILTERS
     _detected_reason = "content_safety_violation"

@@ -28,8 +28,14 @@ class TextSinkConfig(LocalFileSinkConfig):
     """Configuration for one-field, line-oriented text output."""
 
     field: str = Field(description="String field written as one line per row.")
-    encoding: Literal["utf-8", "ascii", "latin-1", "cp1252"] = Field(default="utf-8")
-    mode: Literal["write", "append"] = Field(default="write")
+    encoding: Literal["utf-8", "ascii", "latin-1", "cp1252"] = Field(
+        default="utf-8",
+        description="Character encoding used for every emitted line.",
+    )
+    mode: Literal["write", "append"] = Field(
+        default="write",
+        description="Write a new output or append lines to an existing output.",
+    )
 
     @field_validator("field")
     @classmethod
@@ -65,7 +71,7 @@ class TextSink(BaseSink):
     name = "text"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:b55378fec74817c6"
+    source_file_hash: str | None = "sha256:8d595e1faa8de040"
     config_model = TextSinkConfig
     supports_resume = True
 

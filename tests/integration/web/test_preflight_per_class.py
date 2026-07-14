@@ -81,7 +81,7 @@ def _execution_service(
     tmp_path: Path,
     session_service: SessionServiceImpl,
 ) -> ExecutionServiceImpl:
-    return ExecutionServiceImpl(
+    return ExecutionServiceImpl.for_trained_operator(
         loop=loop,
         broadcaster=ProgressBroadcaster(loop),
         settings=_settings(tmp_path),

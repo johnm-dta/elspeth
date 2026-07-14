@@ -311,7 +311,12 @@ class TestCsvClassifierScenario:
 
         catalog = _real_catalog()
         settings = _make_settings(tmp_path)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings, sessions_service=sessions_service, session_engine=engine)
+        service = ComposerServiceImpl.for_trained_operator(
+            catalog=catalog,
+            settings=settings,
+            sessions_service=sessions_service,
+            session_engine=engine,
+        )
 
         # Turn 1: blocking pipeline — fixed schema declaring only ticket_id,
         # omitting the other four observed columns. on_validation_failure=
@@ -508,7 +513,12 @@ class TestNumericGateScenario:
 
         catalog = _real_catalog()
         settings = _make_settings(tmp_path)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings, sessions_service=sessions_service, session_engine=engine)
+        service = ComposerServiceImpl.for_trained_operator(
+            catalog=catalog,
+            settings=settings,
+            sessions_service=sessions_service,
+            session_engine=engine,
+        )
 
         # Single-turn build: type_coerce on price + gate + two outputs.
         turn1 = _llm_response(
@@ -627,7 +637,12 @@ class TestNumericGateScenario:
 
         catalog = _real_catalog()
         settings = _make_settings(tmp_path)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings, sessions_service=sessions_service, session_engine=engine)
+        service = ComposerServiceImpl.for_trained_operator(
+            catalog=catalog,
+            settings=settings,
+            sessions_service=sessions_service,
+            session_engine=engine,
+        )
 
         # Turn 1: structurally valid but runtime-broken pipeline — observed
         # CSV values are raw strings, so the direct numeric gate would fail
@@ -823,7 +838,12 @@ class TestUrlTextSmokeScenario:
 
         catalog = _real_catalog()
         settings = _make_settings(tmp_path)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings, sessions_service=sessions_service, session_engine=engine)
+        service = ComposerServiceImpl.for_trained_operator(
+            catalog=catalog,
+            settings=settings,
+            sessions_service=sessions_service,
+            session_engine=engine,
+        )
 
         # Turn 1: blocking pipeline — text source whose blob content is a
         # URL, but no web_scrape transform downstream. The URL string
@@ -1066,7 +1086,12 @@ class TestPreflightRepairContinue:
 
         catalog = _real_catalog()
         settings = _make_settings(tmp_path)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings, sessions_service=sessions_service, session_engine=engine)
+        service = ComposerServiceImpl.for_trained_operator(
+            catalog=catalog,
+            settings=settings,
+            sessions_service=sessions_service,
+            session_engine=engine,
+        )
 
         # Turn 1: build a structurally valid pipeline whose sink path is a
         # placeholder -> content-aware preflight is INVALID.

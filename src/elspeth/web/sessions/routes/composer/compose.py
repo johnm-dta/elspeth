@@ -44,6 +44,7 @@ from .._helpers import (
     _publish_progress,
     _record_composer_request_terminal,
     _record_composer_runtime_preflight_telemetry,
+    _request_plugin_policy_context,
     _safe_frame_strings,
     _state_data_from_composer_state,
     _state_from_record,
@@ -87,6 +88,8 @@ async def recompose(
     session = await _verify_session_ownership(session_id, user, request)
     service: SessionServiceProtocol = request.app.state.session_service
     settings = request.app.state.settings
+    _policy_catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
+    profile_registry = request.app.state.operator_profile_registry
     compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session.id))
     async with compose_lock:
         # Load current state
@@ -195,6 +198,8 @@ async def recompose(
                     pre_send_state_id,
                     settings=settings,
                     secret_service=request.app.state.scoped_secret_resolver,
+                    plugin_snapshot=plugin_snapshot,
+                    profile_registry=profile_registry,
                 )
                 raise HTTPException(status_code=422, detail=response_body) from exc
             except LiteLLMAuthError as exc:
@@ -307,6 +312,8 @@ async def recompose(
                     pre_send_state_id,
                     settings=settings,
                     secret_service=request.app.state.scoped_secret_resolver,
+                    plugin_snapshot=plugin_snapshot,
+                    profile_registry=profile_registry,
                 )
                 await _publish_progress(
                     progress_registry,
@@ -357,6 +364,8 @@ async def recompose(
                     pre_send_state_id,
                     settings=settings,
                     secret_service=request.app.state.scoped_secret_resolver,
+                    plugin_snapshot=plugin_snapshot,
+                    profile_registry=profile_registry,
                 )
                 raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
             except ComposerServiceError as exc:
@@ -436,6 +445,8 @@ async def recompose(
                         secret_service=request.app.state.scoped_secret_resolver,
                         user_id=str(user.user_id),
                         session_id=session.id,
+                        plugin_snapshot=plugin_snapshot,
+                        profile_registry=profile_registry,
                         runtime_preflight=result.runtime_preflight,
                         preflight_exception_policy="raise",
                         initial_version=state.version,
@@ -471,6 +482,8 @@ async def recompose(
                         pre_send_state_id,
                         settings=settings,
                         secret_service=request.app.state.scoped_secret_resolver,
+                        plugin_snapshot=plugin_snapshot,
+                        profile_registry=profile_registry,
                     )
                     raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
                 await _publish_progress(

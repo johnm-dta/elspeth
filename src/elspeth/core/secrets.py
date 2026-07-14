@@ -112,7 +112,7 @@ def resolve_secret_refs(
     return result, resolutions
 
 
-def _is_secret_ref(value: Any) -> tuple[str, SecretScope | None] | None:
+def parse_secret_ref_marker(value: Any) -> tuple[str, SecretScope | None] | None:
     """Return the typed deferred-secret marker, if *value* is exactly one."""
     if isinstance(value, Mapping) and set(value) in ({"secret_ref"}, {"secret_ref", "secret_scope"}):
         ref = value["secret_ref"]
@@ -156,13 +156,13 @@ def _walk_redact(obj: Any) -> None:
     """
     if isinstance(obj, Mapping):
         for key in list(obj.keys()):
-            if _is_secret_ref(obj[key]) is not None:
+            if parse_secret_ref_marker(obj[key]) is not None:
                 obj[key] = SECRET_REF_VALIDATION_PLACEHOLDER  # type: ignore[index]  # safe: deepcopy produces dict
             else:
                 _walk_redact(obj[key])
     elif isinstance(obj, list):
         for i, item in enumerate(obj):
-            if _is_secret_ref(item) is not None:
+            if parse_secret_ref_marker(item) is not None:
                 obj[i] = SECRET_REF_VALIDATION_PLACEHOLDER
             else:
                 _walk_redact(item)
@@ -188,7 +188,7 @@ def secret_env_ref_name(value: Any, env_ref_names: Collection[str]) -> str | Non
 
 def is_secret_ref_marker(value: Any) -> bool:
     """Return True when value is exactly a wired ``{"secret_ref": NAME}`` marker."""
-    return _is_secret_ref(value) is not None
+    return parse_secret_ref_marker(value) is not None
 
 
 def is_wired_secret_value(value: Any, env_ref_names: Collection[str] = frozenset()) -> bool:
@@ -293,7 +293,7 @@ def _collect_disallowed_secret_ref_markers(
     path: tuple[str, ...],
     violations: list[SecretRefPlacementViolation],
 ) -> None:
-    marker = _is_secret_ref(obj)
+    marker = parse_secret_ref_marker(obj)
     ref_name = marker[0] if marker is not None else _is_secret_env_ref(obj, env_ref_names)
     if ref_name is not None:
         field_name = path[-1] if path else ""
@@ -343,7 +343,7 @@ def _walk(
     """
     if isinstance(obj, Mapping):
         for key in list(obj.keys()):
-            marker = _is_secret_ref(obj[key])
+            marker = parse_secret_ref_marker(obj[key])
             ref_name = marker[0] if marker is not None else _is_secret_env_ref(obj[key], env_ref_names)
             if ref_name is not None:
                 resolved = _resolve_marker(resolver, user_id, ref_name, None if marker is None else marker[1])
@@ -356,7 +356,7 @@ def _walk(
                 _walk(obj[key], resolver, user_id, resolutions, missing, env_ref_names)
     elif isinstance(obj, list):
         for i, item in enumerate(obj):
-            marker = _is_secret_ref(item)
+            marker = parse_secret_ref_marker(item)
             ref_name = marker[0] if marker is not None else _is_secret_env_ref(item, env_ref_names)
             if ref_name is not None:
                 resolved = _resolve_marker(resolver, user_id, ref_name, None if marker is None else marker[1])

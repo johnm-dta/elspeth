@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 import sqlalchemy as sa
 
+from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
 from elspeth.core.secrets import resolve_secret_refs
 from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
@@ -20,11 +21,13 @@ from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginKind, PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.prompts import build_context_string
 from elspeth.web.composer.recipes import get_recipe, list_recipes
-from elspeth.web.composer.state import CompositionState, PipelineMetadata
+from elspeth.web.composer.state import CompositionState, NodeSpec, OutputSpec, PipelineMetadata, SourceSpec
 from elspeth.web.composer.tools._common import ToolContext
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.service import _build_web_plugin_policy_evidence
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
+from elspeth.web.plugin_policy.availability import RequestPluginSnapshotFactory
 from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
 from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
@@ -269,6 +272,75 @@ def test_web_services_and_validation_require_explicit_policy_context() -> None:
     assert validation["profile_registry"].default is inspect.Parameter.empty
 
 
+def test_web_services_reject_explicit_none_policy_context() -> None:
+    from elspeth.web.composer.service import ComposerServiceImpl
+    from elspeth.web.execution.service import ExecutionServiceImpl
+
+    with pytest.raises(TypeError, match="plugin_snapshot_factory"):
+        ComposerServiceImpl(
+            catalog=MagicMock(spec=CatalogService),
+            settings=MagicMock(),
+            plugin_snapshot_factory=None,
+            operator_profile_registry=MagicMock(spec=OperatorProfileRegistry),
+        )
+    with pytest.raises(TypeError, match="operator_profile_registry"):
+        ComposerServiceImpl(
+            catalog=MagicMock(spec=CatalogService),
+            settings=MagicMock(),
+            plugin_snapshot_factory=MagicMock(),
+            operator_profile_registry=None,
+        )
+    with pytest.raises(TypeError, match="plugin_snapshot_factory"):
+        ExecutionServiceImpl(
+            loop=MagicMock(),
+            broadcaster=MagicMock(),
+            settings=MagicMock(),
+            session_service=MagicMock(),
+            yaml_generator=MagicMock(),
+            telemetry=MagicMock(),
+            plugin_snapshot_factory=None,
+            operator_profile_registry=MagicMock(spec=OperatorProfileRegistry),
+            web_plugin_policy=MagicMock(),
+        )
+    with pytest.raises(TypeError, match="operator_profile_registry"):
+        ExecutionServiceImpl(
+            loop=MagicMock(),
+            broadcaster=MagicMock(),
+            settings=MagicMock(),
+            session_service=MagicMock(),
+            yaml_generator=MagicMock(),
+            telemetry=MagicMock(),
+            plugin_snapshot_factory=MagicMock(),
+            operator_profile_registry=None,
+            web_plugin_policy=MagicMock(),
+        )
+    with pytest.raises(TypeError, match="web_plugin_policy"):
+        ExecutionServiceImpl(
+            loop=MagicMock(),
+            broadcaster=MagicMock(),
+            settings=MagicMock(),
+            session_service=MagicMock(),
+            yaml_generator=MagicMock(),
+            telemetry=MagicMock(),
+            plugin_snapshot_factory=MagicMock(),
+            operator_profile_registry=MagicMock(spec=OperatorProfileRegistry),
+            web_plugin_policy=None,
+        )
+
+
+def test_web_tree_has_no_trained_operator_service_roots_or_calls() -> None:
+    """HTTP composition roots must never opt into the named non-web mode."""
+    offenders: list[str] = []
+    request_root = _ROOT / "src/elspeth/web/sessions"
+    paths = [*request_root.rglob("*.py"), _ROOT / "src/elspeth/web/app.py"]
+    for path in paths:
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "for_trained_operator":
+                offenders.append(f"{path.relative_to(_ROOT)}:{node.lineno}")
+    assert offenders == []
+
+
 def test_server_profile_scope_survives_lowering_and_same_name_user_shadow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -320,3 +392,182 @@ def test_server_profile_scope_survives_lowering_and_same_name_user_shadow(
     assert resolved["options"]["api_key"] == "server-value"
     assert evidence[0].scope == "server"
     assert evidence[0].fingerprint == server_ref.fingerprint
+
+
+def test_validate_pipeline_resolves_server_profile_before_plugin_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from elspeth.web.composer import yaml_generator
+    from elspeth.web.execution import validation as validation_module
+
+    monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "profile-validation-fingerprint-key")
+    monkeypatch.setenv("SHARED_LLM_KEY", "server-value")
+    engine: sa.engine.Engine = create_session_engine("sqlite:///:memory:")
+    initialize_session_schema(engine)
+    user_store = UserSecretStore(engine=engine, master_key="profile-validation-master-key")
+    user_store.set_secret(
+        "SHARED_LLM_KEY",
+        value="user-value",
+        user_id="alice",
+        auth_provider_type="local",
+    )
+    server_store = ServerSecretStore(("SHARED_LLM_KEY",))
+    service = WebSecretService(user_store=user_store, server_store=server_store)
+    delegate = ScopedSecretResolver(service, "local")
+    settings = WebSettings(
+        data_dir=tmp_path,
+        composer_max_composition_turns=4,
+        composer_max_discovery_turns=4,
+        composer_timeout_seconds=60,
+        composer_rate_limit_per_minute=20,
+        shareable_link_signing_key=b"0123456789abcdef0123456789abcdef",
+        llm_profiles={
+            "server-profile": {
+                "provider": "openrouter",
+                "model": "openai/gpt-5-mini",
+                "credential_scope": "server",
+                "credential_ref": "SHARED_LLM_KEY",
+            }
+        },
+    )
+    runtime = RuntimeWebPluginConfig.from_settings(settings)
+    policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+    profiles = OperatorProfileRegistry(policy=policy, settings=runtime)
+    catalog = create_catalog_service()
+    snapshot = RequestPluginSnapshotFactory(
+        policy=policy,
+        catalog=catalog,
+        profiles=profiles,
+        auth_provider="local",
+        secret_service=service,
+        server_store=server_store,
+        user_store=user_store,
+        generation_key=b"profile-validation-generation-key",
+    ).for_user_id("alice")
+
+    scoped_resolutions = []
+    generic_resolution_names: list[str] = []
+
+    class _RecordingResolver:
+        def list_refs(self, user_id: str):
+            return delegate.list_refs(user_id)
+
+        def has_ref(self, user_id: str, name: str) -> bool:
+            generic_resolution_names.append(name)
+            return delegate.has_ref(user_id, name)
+
+        def resolve(self, user_id: str, name: str):
+            generic_resolution_names.append(name)
+            return delegate.resolve(user_id, name)
+
+        def resolve_scoped(self, user_id: str, name: str, scope: str):
+            resolved = delegate.resolve_scoped(user_id, name, scope)
+            if resolved is not None:
+                scoped_resolutions.append(resolved)
+            return resolved
+
+    input_path = tmp_path / "blobs" / "input.csv"
+    input_path.parent.mkdir(parents=True)
+    input_path.write_text("customer\nAlice\n")
+    state = CompositionState(
+        source=SourceSpec(
+            plugin="csv",
+            on_success="rows",
+            options={"path": str(input_path), "schema": {"mode": "fixed", "fields": ["customer: str"]}},
+            on_validation_failure="discard",
+        ),
+        nodes=(
+            NodeSpec(
+                id="classifier",
+                node_type="transform",
+                plugin="llm",
+                input="rows",
+                on_success="labelled",
+                on_error="discard",
+                options={
+                    "profile": "server-profile",
+                    "prompt_template": "Classify {{ row['customer'] }}",
+                    "response_field": "classification",
+                    "schema": {"mode": "observed", "fields": None},
+                    "required_input_fields": ["customer"],
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": "prompt_template_review:classifier",
+                            "kind": "llm_prompt_template",
+                            "user_term": "llm_prompt_template:classifier",
+                            "status": "resolved",
+                            "draft": "Classify {{ row['customer'] }}",
+                            "event_id": "evt-prompt",
+                            "accepted_value": "Classify {{ row['customer'] }}",
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": stable_hash("Classify {{ row['customer'] }}"),
+                        },
+                        {
+                            "id": "model_choice_review:classifier",
+                            "kind": "llm_model_choice",
+                            "user_term": "llm_model_choice:classifier",
+                            "status": "resolved",
+                            "draft": "openai/gpt-5-mini",
+                            "event_id": "evt-model",
+                            "accepted_value": "openai/gpt-5-mini",
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": stable_hash("openai/gpt-5-mini"),
+                        },
+                    ],
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(
+            OutputSpec(
+                name="labelled",
+                plugin="json",
+                options={
+                    "path": "outputs/classified.jsonl",
+                    "format": "jsonl",
+                    "schema": {"mode": "observed", "fields": None},
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+                on_write_failure="discard",
+            ),
+        ),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+    original_constructor = validation_module.instantiate_runtime_plugins
+    constructor_api_keys: list[object] = []
+
+    def _capture_constructor(runtime_settings, *, plugin_snapshot):
+        constructor_api_keys.append(runtime_settings.transforms[0].options["api_key"])
+        assert scoped_resolutions
+        return original_constructor(runtime_settings, plugin_snapshot=plugin_snapshot)
+
+    monkeypatch.setattr(validation_module, "instantiate_runtime_plugins", _capture_constructor)
+
+    result = validation_module.validate_pipeline(
+        state,
+        settings,
+        yaml_generator,
+        plugin_snapshot=snapshot,
+        profile_registry=profiles,
+        secret_service=_RecordingResolver(),
+        user_id="alice",
+        session_id="session-profile-validation",
+    )
+    _server_value, server_ref = server_store.get_secret("SHARED_LLM_KEY")
+
+    assert result.is_valid, result.errors
+    assert constructor_api_keys == ["server-value"]
+    assert generic_resolution_names == []
+    assert scoped_resolutions
+    assert {item.scope for item in scoped_resolutions} == {"server"}
+    assert {item.value for item in scoped_resolutions} == {"server-value"}
+    assert {item.fingerprint for item in scoped_resolutions} == {server_ref.fingerprint}

@@ -228,7 +228,7 @@ def _build_classify_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
                     "profile": slots["profile"],
                     "prompt_template": slots["classifier_template"],
                     "response_field": slots["label_field"],
-                    "schema": {"mode": "observed"},
+                    "schema": {"mode": "observed", "fields": None},
                     "required_input_fields": required_input_fields,
                 },
             }

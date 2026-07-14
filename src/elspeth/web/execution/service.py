@@ -307,6 +307,9 @@ def _partial_completion_message(
 # from catching exceptions raised here.
 
 
+_TRAINED_OPERATOR_COMPOSITION_ROOT = object()
+
+
 class ExecutionServiceImpl:
     """Pipeline execution service with ThreadPoolExecutor backend.
 
@@ -339,7 +342,15 @@ class ExecutionServiceImpl:
         plugin_snapshot_factory: Callable[[str], PluginAvailabilitySnapshot] | None,
         operator_profile_registry: OperatorProfileRegistry | None,
         web_plugin_policy: WebPluginPolicy | None,
+        _composition_root: object | None = None,
     ) -> None:
+        trained_operator_mode = _composition_root is _TRAINED_OPERATOR_COMPOSITION_ROOT
+        if plugin_snapshot_factory is None:
+            raise TypeError("plugin_snapshot_factory must be provided")
+        if operator_profile_registry is None and not trained_operator_mode:
+            raise TypeError("operator_profile_registry must be provided")
+        if web_plugin_policy is None and not trained_operator_mode:
+            raise TypeError("web_plugin_policy must be provided")
         self._loop = loop
         self._broadcaster = broadcaster
         self._settings = settings
@@ -351,6 +362,7 @@ class ExecutionServiceImpl:
         self._plugin_snapshot_factory = plugin_snapshot_factory
         self._operator_profile_registry = operator_profile_registry
         self._web_plugin_policy = web_plugin_policy
+        self._trained_operator_mode = trained_operator_mode
         # AC #17: No run_repository — all Run CRUD delegates to SessionService
         # via create_run(), update_run_status(), get_active_run(), get_run().
         # R6 expanded params: landscape_run_id, pipeline_yaml, rows_processed,
@@ -376,12 +388,24 @@ class ExecutionServiceImpl:
     @classmethod
     def for_trained_operator(cls, **kwargs: Any) -> ExecutionServiceImpl:
         """Explicit non-web composition root with unrestricted local policy context."""
+        from elspeth.web.dependencies import create_catalog_service
+
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
         return cls(
-            plugin_snapshot_factory=None,
+            plugin_snapshot_factory=lambda _user_id: snapshot,
             operator_profile_registry=None,
             web_plugin_policy=None,
+            _composition_root=_TRAINED_OPERATOR_COMPOSITION_ROOT,
             **kwargs,
         )
+
+    def _plugin_snapshot_for_user(self, user_id: str | None, *, operation: str) -> PluginAvailabilitySnapshot:
+        """Resolve policy context without treating missing wiring as a mode switch."""
+        if user_id is None:
+            if not self._trained_operator_mode:
+                raise RuntimeError(f"Authenticated user_id is required for web plugin policy {operation}.")
+            user_id = "trained-operator"
+        return self._plugin_snapshot_factory(user_id)
 
     def set_openrouter_catalog_snapshot(self, *, sha256: str, source: str) -> None:
         """Record the boot-time OpenRouter catalog snapshot id.
@@ -726,15 +750,7 @@ class ExecutionServiceImpl:
         # runtime-only by design. Local import mirrors the /validate path (W18 load-order).
         from elspeth.web.execution.validation import validate_pipeline
 
-        if self._plugin_snapshot_factory is not None and user_id is None:
-            raise RuntimeError("Authenticated user_id is required for web plugin policy execution.")
-        if self._plugin_snapshot_factory is None:
-            from elspeth.web.dependencies import create_catalog_service
-
-            plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
-        else:
-            assert user_id is not None
-            plugin_snapshot = self._plugin_snapshot_factory(user_id)
+        plugin_snapshot = self._plugin_snapshot_for_user(user_id, operation="execution")
 
         preflight_result = validate_pipeline(
             composition_state,
@@ -1034,15 +1050,7 @@ class ExecutionServiceImpl:
 
         from elspeth.web.execution.validation import validate_pipeline
 
-        if self._plugin_snapshot_factory is not None and user_id is None:
-            raise RuntimeError("Authenticated user_id is required for web plugin policy validation.")
-        if self._plugin_snapshot_factory is None:
-            from elspeth.web.dependencies import create_catalog_service
-
-            plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
-        else:
-            assert user_id is not None
-            plugin_snapshot = self._plugin_snapshot_factory(user_id)
+        plugin_snapshot = self._plugin_snapshot_for_user(user_id, operation="validation")
 
         def _blob_get_metadata(blob_id: UUID) -> BlobRecord | None:
             if self._blob_service is None:
@@ -1213,9 +1221,9 @@ class ExecutionServiceImpl:
             # Resolved values exist only in this thread's local memory — the
             # original pipeline_yaml (persisted in the Run record) is untouched.
             if frozen_run_settings is None:
-                from elspeth.web.dependencies import create_catalog_service
-
-                plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+                if not self._trained_operator_mode:
+                    raise RuntimeError("Web execution requires frozen request policy settings")
+                plugin_snapshot = self._plugin_snapshot_for_user(None, operation="execution")
                 executable_config: dict[str, Any] | None = None
                 audit_safe_config: dict[str, Any] | None = None
             else:

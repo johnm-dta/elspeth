@@ -683,6 +683,7 @@ class _TerminalNoToolAdvisorGateOutcome:
 # termination path runs — preventing indefinite spin against a model that
 # refuses to apply the suggested repair.
 _MAX_REPAIR_TURNS: Final[int] = 2
+_TRAINED_OPERATOR_COMPOSITION_ROOT = object()
 
 
 def _proof_repair_is_applicable(state: CompositionState) -> bool:
@@ -837,7 +838,13 @@ class ComposerServiceImpl:
         runtime_preflight_coordinator: RuntimePreflightCoordinator | None = None,
         plugin_snapshot_factory: Callable[[str], PluginAvailabilitySnapshot] | None,
         operator_profile_registry: OperatorProfileRegistry | None,
+        _composition_root: object | None = None,
     ) -> None:
+        trained_operator_mode = _composition_root is _TRAINED_OPERATOR_COMPOSITION_ROOT
+        if plugin_snapshot_factory is None:
+            raise TypeError("plugin_snapshot_factory must be provided")
+        if operator_profile_registry is None and not trained_operator_mode:
+            raise TypeError("operator_profile_registry must be provided")
         self._catalog = catalog
         self._sessions_service = sessions_service
         self._model = settings.composer_model
@@ -849,6 +856,7 @@ class ComposerServiceImpl:
         self._secret_service = secret_service
         self._plugin_snapshot_factory = plugin_snapshot_factory
         self._operator_profile_registry = operator_profile_registry
+        self._trained_operator_mode = trained_operator_mode
         self._settings = settings
         self._runtime_preflight_timeout_seconds = settings.composer_runtime_preflight_timeout_seconds
         self._runtime_preflight_coordinator = runtime_preflight_coordinator or RuntimePreflightCoordinator()
@@ -914,11 +922,13 @@ class ComposerServiceImpl:
         **kwargs: Any,
     ) -> ComposerServiceImpl:
         """Explicit non-web composition root with unrestricted local catalog access."""
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
         return cls(
             catalog=catalog,
             settings=settings,
-            plugin_snapshot_factory=None,
+            plugin_snapshot_factory=lambda _user_id: snapshot,
             operator_profile_registry=None,
+            _composition_root=_TRAINED_OPERATOR_COMPOSITION_ROOT,
             **kwargs,
         )
 
@@ -927,8 +937,8 @@ class ComposerServiceImpl:
         user_id: str | None,
     ) -> tuple[PluginAvailabilitySnapshot, PolicyCatalogView]:
         """Build one immutable policy context for a complete compose call."""
-        if self._plugin_snapshot_factory is None:
-            snapshot = PluginAvailabilitySnapshot.for_trained_operator(self._catalog)
+        if self._trained_operator_mode:
+            snapshot = self._plugin_snapshot_factory(user_id or "trained-operator")
             return snapshot, PolicyCatalogView.for_trained_operator(self._catalog, snapshot)
         if user_id is None:
             raise ComposerServiceError("Authenticated plugin policy context is required.")

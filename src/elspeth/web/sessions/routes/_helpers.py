@@ -150,6 +150,7 @@ from elspeth.web.execution.schemas import RunAccounting, RunStatusResponse, Vali
 from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter, get_rate_limiter
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 from elspeth.web.sessions._auto_title import maybe_auto_title_session
 from elspeth.web.sessions._guided_solve_chain import solve_chain_with_auto_drop
 from elspeth.web.sessions._guided_step_chat import (
@@ -1255,10 +1256,9 @@ async def _runtime_preflight_for_state(
     secret_service: Any | None,
     user_id: str | None,
     session_id: str | UUID,
+    plugin_snapshot: PluginAvailabilitySnapshot,
+    profile_registry: OperatorProfileRegistry,
 ) -> ValidationResult:
-    from elspeth.web.dependencies import create_catalog_service
-
-    plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
     return await asyncio.wait_for(
         run_sync_in_worker(
             validate_pipeline,
@@ -1269,7 +1269,7 @@ async def _runtime_preflight_for_state(
             user_id=user_id,
             session_id=str(session_id),
             plugin_snapshot=plugin_snapshot,
-            profile_registry=None,
+            profile_registry=profile_registry,
         ),
         timeout=settings.composer_runtime_preflight_timeout_seconds,
     )
@@ -1835,6 +1835,8 @@ async def _state_data_from_composer_state(
     secret_service: Any | None,
     user_id: str | None,
     session_id: str | UUID,
+    plugin_snapshot: PluginAvailabilitySnapshot,
+    profile_registry: OperatorProfileRegistry,
     runtime_preflight: _RuntimePreflightOutcome,
     preflight_exception_policy: _PreflightExceptionPolicy,
     initial_version: int | None,
@@ -1868,6 +1870,8 @@ async def _state_data_from_composer_state(
                 secret_service=secret_service,
                 user_id=user_id,
                 session_id=session_id,
+                plugin_snapshot=plugin_snapshot,
+                profile_registry=profile_registry,
             )
         except Exception as exc:
             # Telemetry MUST fire on both policy branches. Emitting before
@@ -1982,6 +1986,8 @@ async def _handle_convergence_error(
     llm_composition_state_id: UUID | None,
     settings: Any,
     secret_service: Any | None,
+    plugin_snapshot: PluginAvailabilitySnapshot,
+    profile_registry: OperatorProfileRegistry,
 ) -> dict[str, object]:
     """Build 422 response body and persist partial state for convergence errors.
 
@@ -2059,6 +2065,8 @@ async def _handle_convergence_error(
                 secret_service=secret_service,
                 user_id=user_id,
                 session_id=session_id,
+                plugin_snapshot=plugin_snapshot,
+                profile_registry=profile_registry,
                 runtime_preflight=None,
                 preflight_exception_policy="persist_invalid",
                 initial_version=None,
@@ -2130,6 +2138,8 @@ async def _handle_plugin_crash(
     llm_composition_state_id: UUID | None,
     settings: Any,
     secret_service: Any | None,
+    plugin_snapshot: PluginAvailabilitySnapshot,
+    profile_registry: OperatorProfileRegistry,
 ) -> dict[str, object]:
     """Build 500 response body and persist partial state for plugin crashes.
 
@@ -2203,6 +2213,8 @@ async def _handle_plugin_crash(
                 secret_service=secret_service,
                 user_id=user_id,
                 session_id=session_id,
+                plugin_snapshot=plugin_snapshot,
+                profile_registry=profile_registry,
                 runtime_preflight=None,
                 preflight_exception_policy="persist_invalid",
                 initial_version=None,
@@ -2286,6 +2298,8 @@ async def _handle_runtime_preflight_failure(
     llm_composition_state_id: UUID | None,
     settings: Any,
     secret_service: Any | None,
+    plugin_snapshot: PluginAvailabilitySnapshot,
+    profile_registry: OperatorProfileRegistry,
 ) -> dict[str, object]:
     """Build 500 response body and persist partial state for runtime-preflight failures.
 
@@ -2438,6 +2452,8 @@ async def _handle_runtime_preflight_failure(
                 secret_service=secret_service,
                 user_id=user_id,
                 session_id=session_id,
+                plugin_snapshot=plugin_snapshot,
+                profile_registry=profile_registry,
                 runtime_preflight=None,
                 preflight_exception_policy="persist_invalid",
                 initial_version=None,

@@ -2821,11 +2821,14 @@ class TestCollectSecretRefs:
         assert _collect_secret_refs({}) == []
 
     def test_single_secret_ref(self) -> None:
-        assert _collect_secret_refs({"secret_ref": "API_KEY"}) == ["API_KEY"]
+        assert _collect_secret_refs({"secret_ref": "API_KEY"}) == [("API_KEY", None)]
+
+    def test_scoped_secret_ref(self) -> None:
+        assert _collect_secret_refs({"secret_ref": "API_KEY", "secret_scope": "server"}) == [("API_KEY", "server")]
 
     def test_nested_secret_ref(self) -> None:
         data = {"sources": {"primary": {"options": {"api_key": {"secret_ref": "MY_KEY"}}}}}
-        assert _collect_secret_refs(data) == ["MY_KEY"]
+        assert _collect_secret_refs(data) == [("MY_KEY", None)]
 
     def test_multiple_refs(self) -> None:
         data = {
@@ -2833,11 +2836,11 @@ class TestCollectSecretRefs:
             "db": {"password": {"secret_ref": "DB_PASS"}},
         }
         refs = _collect_secret_refs(data)
-        assert sorted(refs) == ["DB_PASS", "TOKEN"]
+        assert sorted(refs) == [("DB_PASS", None), ("TOKEN", None)]
 
     def test_list_with_refs(self) -> None:
         data = [{"secret_ref": "A"}, {"secret_ref": "B"}]
-        assert _collect_secret_refs(data) == ["A", "B"]
+        assert _collect_secret_refs(data) == [("A", None), ("B", None)]
 
     def test_non_secret_dict(self) -> None:
         data = {"secret_ref": "KEY", "extra": "field"}  # len > 1, not a secret ref
@@ -2848,7 +2851,7 @@ class TestCollectSecretRefs:
         from types import MappingProxyType
 
         data = MappingProxyType({"api_key": MappingProxyType({"secret_ref": "KEY"})})
-        assert _collect_secret_refs(data) == ["KEY"]
+        assert _collect_secret_refs(data) == [("KEY", None)]
 
 
 class TestValidatePipelineSecretRefs:

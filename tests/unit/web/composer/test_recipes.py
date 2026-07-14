@@ -20,8 +20,10 @@ from typing import ClassVar
 from uuid import uuid4
 
 import pytest
+from jsonschema import Draft202012Validator
 
 import elspeth.web.composer.recipes as recipes_module
+from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 from elspeth.web.composer.recipes import (
     RecipeSpec,
     RecipeValidationError,
@@ -31,8 +33,11 @@ from elspeth.web.composer.recipes import (
     list_recipes,
     recipe_catalog_content_hash,
 )
+from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
 
 # --------------------------------------------------------------------------
 # Registry surface
@@ -378,6 +383,36 @@ class TestClassifyRecipe:
         llm = next(n for n in result["nodes"] if n["plugin"] == "llm")
         assert llm["options"]["prompt_template"] == "Classify {{ row['subject'] }}"
         assert llm["options"]["response_field"] == "urgency"
+
+    def test_llm_options_satisfy_public_operator_profile_schema(self) -> None:
+        result = self._apply()
+        llm = next(node for node in result["nodes"] if node["plugin"] == "llm")
+        settings = WebSettings(
+            composer_max_composition_turns=4,
+            composer_max_discovery_turns=4,
+            composer_timeout_seconds=60,
+            composer_rate_limit_per_minute=20,
+            shareable_link_signing_key=b"0123456789abcdef0123456789abcdef",
+            llm_profiles={
+                "tutorial": {
+                    "provider": "bedrock",
+                    "model": "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+                }
+            },
+        )
+        runtime = RuntimeWebPluginConfig.from_settings(settings)
+        policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+        profiles = OperatorProfileRegistry(policy=policy, settings=runtime)
+        public_schema = profiles.public_schema(
+            PluginId("transform", "llm"),
+            create_catalog_service().get_schema("transform", "llm"),
+            available_aliases=("tutorial",),
+        ).json_schema
+
+        errors = list(Draft202012Validator(public_schema).iter_errors(llm["options"]))
+
+        assert errors == []
+        assert llm["options"]["schema"] == {"mode": "observed", "fields": None}
 
     def test_output_is_jsonl(self) -> None:
         result = self._apply(output_path="outputs/tickets.jsonl")
@@ -1124,7 +1159,7 @@ class TestApplyRecipeEndToEnd:
         assert classifier.options["profile"] == "tutorial-default"
         assert {"provider", "model", "api_key", "api_key_secret"}.isdisjoint(classifier.options)
         # Schema option flows through prevalidation and is durable.
-        assert classifier.options["schema"] == {"mode": "observed"}
+        assert classifier.options["schema"] == {"mode": "observed", "fields": None}
 
     def test_threshold_recipe_passes_set_pipeline_prevalidation_and_drives_proof_step(self, _seeded) -> None:
         """The threshold recipe must:

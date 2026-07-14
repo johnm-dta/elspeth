@@ -33,7 +33,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.blobs import BlobRecord
 from elspeth.contracts.blobs_inline import BlobInlineValidationViolation
-from elspeth.contracts.secrets import SecretRefPlacementViolation, WebSecretResolver
+from elspeth.contracts.secrets import ScopedWebSecretResolver, SecretRefPlacementViolation, SecretScope, WebSecretResolver
 from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.blobs_inline import (
     BLOB_INLINE_AGGREGATE_BYTE_CAP,
@@ -46,6 +46,7 @@ from elspeth.core.dag.models import EdgeContractError, GraphValidationError, Gra
 from elspeth.core.secrets import (
     collect_credential_field_violations,
     collect_disallowed_secret_ref_markers,
+    parse_secret_ref_marker,
     redact_secret_refs_for_validation,
     resolve_secret_refs,
     secret_env_ref_name,
@@ -667,15 +668,14 @@ def _find_identity_node_advisories(state: CompositionState) -> list[_IdentityFin
     return findings
 
 
-def _collect_secret_refs(obj: Any, env_ref_names: set[str] | None = None) -> list[str]:
-    """Walk a nested dict/list/Mapping structure and collect all secret_ref names."""
-    refs: list[str] = []
+def _collect_secret_refs(obj: Any, env_ref_names: set[str] | None = None) -> list[tuple[str, SecretScope | None]]:
+    """Collect deferred-secret names together with their requested scope."""
+    refs: list[tuple[str, SecretScope | None]] = []
     if isinstance(obj, Mapping):
-        if len(obj) == 1 and "secret_ref" in obj:
-            ref = obj["secret_ref"]
-            if isinstance(ref, str):
-                refs.append(ref)
-                return refs
+        marker = parse_secret_ref_marker(obj)
+        if marker is not None:
+            refs.append(marker)
+            return refs
         for v in obj.values():
             refs.extend(_collect_secret_refs(v, env_ref_names))
     elif isinstance(obj, (list, tuple)):
@@ -684,8 +684,22 @@ def _collect_secret_refs(obj: Any, env_ref_names: set[str] | None = None) -> lis
     else:
         ref = secret_env_ref_name(obj, env_ref_names or frozenset())
         if ref is not None:
-            refs.append(ref)
+            refs.append((ref, None))
     return refs
+
+
+def _secret_ref_exists(
+    secret_service: WebSecretResolver,
+    user_id: str,
+    secret_ref: tuple[str, SecretScope | None],
+) -> bool:
+    """Check a deferred reference without discarding an explicit scope."""
+    name, scope = secret_ref
+    if scope is None:
+        return secret_service.has_ref(user_id, name)
+    if not isinstance(secret_service, ScopedWebSecretResolver):
+        raise TypeError("Scoped secret marker requires a ScopedWebSecretResolver")
+    return secret_service.resolve_scoped(user_id, name, scope) is not None
 
 
 def _blob_inline_component_id(field_path: str) -> str | None:
@@ -1183,7 +1197,7 @@ def validate_pipeline(
     # with the runtime fingerprinting code path.  Reusing it here keeps
     # validate-time and runtime in lock-step — divergence would re-open the
     # parity gap this issue was filed to close.
-    all_refs: list[str] = []
+    all_refs: list[tuple[str, SecretScope | None]] = []
     env_ref_names: set[str] = set()
     fabricated_components: list[tuple[str | None, str | None, list[str]]] = []
     disallowed_secret_ref_components: list[tuple[str | None, str, str, list[SecretRefPlacementViolation]]] = []
@@ -1229,7 +1243,7 @@ def validate_pipeline(
             if disallowed:
                 disallowed_secret_ref_components.append((output.name, "sink", output.plugin, disallowed))
 
-        missing_refs = [ref for ref in all_refs if not secret_service.has_ref(user_id, ref)]
+        missing_refs = [ref[0] for ref in all_refs if not _secret_ref_exists(secret_service, user_id, ref)]
         if missing_refs or fabricated_components or disallowed_secret_ref_components:
             detail_parts: list[str] = []
             if missing_refs:

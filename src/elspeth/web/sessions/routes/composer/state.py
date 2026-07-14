@@ -556,6 +556,8 @@ async def import_state_yaml(
             secret_service=request.app.state.scoped_secret_resolver,
             user_id=str(user.user_id),
             session_id=session.id,
+            plugin_snapshot=plugin_snapshot,
+            profile_registry=request.app.state.operator_profile_registry,
             runtime_preflight=None,
             preflight_exception_policy="persist_invalid",
             initial_version=imported_state.version,
@@ -730,6 +732,8 @@ async def seed_state_for_e2e(
             secret_service=request.app.state.scoped_secret_resolver,
             user_id=str(user.user_id),
             session_id=session.id,
+            plugin_snapshot=plugin_snapshot,
+            profile_registry=request.app.state.operator_profile_registry,
             runtime_preflight=None,
             preflight_exception_policy="persist_invalid",
             initial_version=seeded_state.version,
@@ -773,6 +777,7 @@ async def _require_yaml_export_preflight(
     *,
     request: Request,
     session_id: UUID,
+    plugin_snapshot: PluginAvailabilitySnapshot,
 ) -> None:
     """Keep the existing export preflight for currently available states."""
     try:
@@ -782,6 +787,8 @@ async def _require_yaml_export_preflight(
             secret_service=None,
             user_id=None,
             session_id=session_id,
+            plugin_snapshot=plugin_snapshot,
+            profile_registry=request.app.state.operator_profile_registry,
         )
     except (
         TimeoutError,
@@ -834,12 +841,17 @@ async def get_state_yaml(
     if state_record is None:
         raise HTTPException(status_code=404, detail="No composition state exists")
     state = _state_from_record(state_record)
-    policy_catalog, _snapshot = _request_plugin_policy_context(request, user)
+    policy_catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
     # Historical states must remain exportable in their authored, public form
     # even when a component is no longer enabled.  Do not instantiate or lower
     # such a component merely to serialize it for repair elsewhere.
     if not _composition_plugin_policy_findings(state, policy_catalog):
-        await _require_yaml_export_preflight(state, request=request, session_id=session.id)
+        await _require_yaml_export_preflight(
+            state,
+            request=request,
+            session_id=session.id,
+            plugin_snapshot=plugin_snapshot,
+        )
     # elspeth-b5ee205720: reconstitute blob_ref for guided blob-backed sources
     # (stripped from committed options; retained only in the GuidedSession
     # snapshot) so BOTH export egress channels below — the public-YAML storage-path

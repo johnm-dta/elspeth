@@ -32,18 +32,16 @@ from elspeth.contracts.plugin_capabilities import PluginCapability
 from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.web.app import (
-    _JSON_COLLECTION_FIELDS,
     _BodySizeLimitMiddleware,
     _BrowserDocumentHeadersMiddleware,
     _periodic_orphan_cleanup,
-    _settings_from_env,
     create_app,
     lifespan,
 )
 from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.aws_ecs_startup import AwsEcsSchemaNotReadyError, AwsEcsStartupContractError
 from elspeth.web.composer.boot_probe import ComposerBootConfigError
-from elspeth.web.config import WebSettings
+from elspeth.web.config import _JSON_COLLECTION_FIELDS, WebSettings, settings_from_env
 from elspeth.web.dependencies import get_settings
 from elspeth.web.readiness import READINESS_CHECK_NAMES, ReadinessCache, ReadinessCheck, ReadinessProbeRunner, ReadinessReport
 from elspeth.web.sessions.protocol import (
@@ -1472,11 +1470,11 @@ class TestLifespanShutdown:
 
 
 class TestSettingsFromEnv:
-    """Tests for _settings_from_env() environment variable parsing."""
+    """Tests for settings_from_env() environment variable parsing."""
 
     @pytest.fixture(autouse=True)
     def _set_composer_env(self, monkeypatch) -> None:
-        """Provide required composer fields via env vars for _settings_from_env()."""
+        """Provide required composer fields via env vars for settings_from_env()."""
         monkeypatch.setenv("ELSPETH_WEB__COMPOSER_MAX_COMPOSITION_TURNS", "15")
         monkeypatch.setenv("ELSPETH_WEB__COMPOSER_MAX_DISCOVERY_TURNS", "10")
         monkeypatch.setenv("ELSPETH_WEB__COMPOSER_TIMEOUT_SECONDS", "85.0")
@@ -1498,7 +1496,7 @@ class TestSettingsFromEnv:
     def test_parses_json_tuple_values(self, monkeypatch) -> None:
         """JSON-encoded lists are converted to tuples for tuple-typed fields."""
         monkeypatch.setenv("ELSPETH_WEB__CORS_ORIGINS", '["https://app.example.com"]')
-        settings = _settings_from_env()
+        settings = settings_from_env()
         assert settings.cors_origins == ("https://app.example.com",)
 
     def test_parses_json_list_with_multiple_items(self, monkeypatch) -> None:
@@ -1506,12 +1504,12 @@ class TestSettingsFromEnv:
             "ELSPETH_WEB__CORS_ORIGINS",
             '["https://a.example.com", "https://b.example.com"]',
         )
-        settings = _settings_from_env()
+        settings = settings_from_env()
         assert settings.cors_origins == ("https://a.example.com", "https://b.example.com")
 
     def test_plain_string_passes_through(self, monkeypatch) -> None:
         monkeypatch.setenv("ELSPETH_WEB__HOST", "127.0.0.1")
-        settings = _settings_from_env()
+        settings = settings_from_env()
         assert settings.host == "127.0.0.1"
 
     def test_reads_aws_ecs_deployment_fields_as_explicitly_set(self, tmp_path, monkeypatch) -> None:
@@ -1523,7 +1521,7 @@ class TestSettingsFromEnv:
         monkeypatch.setenv("ELSPETH_WEB__DATA_DIR", str(data_dir))
         monkeypatch.setenv("ELSPETH_WEB__PAYLOAD_STORE_PATH", str(payload_store_path))
 
-        settings = _settings_from_env()
+        settings = settings_from_env()
 
         assert settings.deployment_target == "aws-ecs"
         assert settings.data_dir == data_dir.resolve()
@@ -1532,13 +1530,13 @@ class TestSettingsFromEnv:
 
     def test_json_integer_parsed(self, monkeypatch) -> None:
         monkeypatch.setenv("ELSPETH_WEB__PORT", "9090")
-        settings = _settings_from_env()
+        settings = settings_from_env()
         assert settings.port == 9090
         assert isinstance(settings.port, int)
 
     def test_server_secret_allowlist_from_json(self, monkeypatch) -> None:
         monkeypatch.setenv("ELSPETH_WEB__SERVER_SECRET_ALLOWLIST", '["MY_KEY"]')
-        settings = _settings_from_env()
+        settings = settings_from_env()
         assert settings.server_secret_allowlist == ("MY_KEY",)
 
     def test_plugin_policy_mappings_from_json(self, monkeypatch) -> None:
@@ -1551,7 +1549,7 @@ class TestSettingsFromEnv:
         )
         monkeypatch.setenv("ELSPETH_WEB__TUTORIAL_LLM_PROFILE", "tutorial")
 
-        settings = _settings_from_env()
+        settings = settings_from_env()
 
         assert settings.plugin_allowlist == ("sink:database",)
         assert tuple(settings.plugin_preferences[PluginCapability.PROMPT_SHIELD]) == ("transform:azure_prompt_shield",)
@@ -1566,7 +1564,7 @@ class TestSettingsFromEnv:
         )
 
         with pytest.raises(RuntimeError) as exc_info:
-            _settings_from_env()
+            settings_from_env()
 
         assert marker not in str(exc_info.value)
 
@@ -1579,14 +1577,14 @@ class TestSettingsFromEnv:
         monkeypatch.setenv("ELSPETH_WEB__OIDC_ISSUER", "https://issuer.example.com")
         monkeypatch.setenv("ELSPETH_WEB__OIDC_AUDIENCE", "audience")
         monkeypatch.setenv("ELSPETH_WEB__OIDC_CLIENT_ID", "client")
-        settings = _settings_from_env()
+        settings = settings_from_env()
         assert settings.oidc_authorization_allowed_origins == ("https://login.example.com",)
 
     @pytest.mark.parametrize("raw", ["not-json", "null", "{}", '"string"', "[1]", '["https://a.example", null]'])
     def test_oidc_authorization_allowed_origins_rejects_bad_json_without_echo(self, monkeypatch, raw: str) -> None:
         monkeypatch.setenv("ELSPETH_WEB__OIDC_AUTHORIZATION_ALLOWED_ORIGINS", raw)
         with pytest.raises((RuntimeError, ValidationError)) as raised:
-            _settings_from_env()
+            settings_from_env()
         rendered = str(raised.value)
         assert "oidc_authorization_allowed_origins" in rendered.lower()
         assert raw not in rendered
@@ -1602,19 +1600,19 @@ class TestSettingsFromEnv:
     def test_server_secret_allowlist_rejects_malformed_names(self, monkeypatch, raw_allowlist: str, match: str) -> None:
         monkeypatch.setenv("ELSPETH_WEB__SERVER_SECRET_ALLOWLIST", raw_allowlist)
         with pytest.raises(ValidationError, match=match):
-            _settings_from_env()
+            settings_from_env()
 
     def test_secret_key_numeric_string_preserved(self, monkeypatch) -> None:
         """A string field set to a numeric value must stay str, not become int."""
         monkeypatch.setenv("ELSPETH_WEB__SECRET_KEY", "12345")
-        settings = _settings_from_env()
+        settings = settings_from_env()
         assert settings.secret_key == "12345"
         assert isinstance(settings.secret_key, str)
 
     def test_secret_key_bool_string_preserved(self, monkeypatch) -> None:
         """'true' must stay str, not become bool(True)."""
         monkeypatch.setenv("ELSPETH_WEB__SECRET_KEY", "true")
-        settings = _settings_from_env()
+        settings = settings_from_env()
         assert settings.secret_key == "true"
         assert isinstance(settings.secret_key, str)
 
@@ -1622,24 +1620,24 @@ class TestSettingsFromEnv:
         """'null' → None for all fields; Pydantic rejects None for non-nullable str."""
         monkeypatch.setenv("ELSPETH_WEB__SECRET_KEY", "null")
         with pytest.raises(ValidationError, match="secret_key"):
-            _settings_from_env()
+            settings_from_env()
 
     def test_nullable_field_null_becomes_none(self, monkeypatch) -> None:
         """'null' → None for nullable fields, enabling default fallback."""
         monkeypatch.setenv("ELSPETH_WEB__OIDC_AUTHORIZATION_ENDPOINT", "null")
-        settings = _settings_from_env()
+        settings = settings_from_env()
         assert settings.oidc_authorization_endpoint is None
 
     def test_nullable_db_url_null_becomes_none(self, monkeypatch) -> None:
         """'null' → None for landscape_url, so get_landscape_url() uses the default."""
         monkeypatch.setenv("ELSPETH_WEB__LANDSCAPE_URL", "null")
-        settings = _settings_from_env()
+        settings = settings_from_env()
         assert settings.landscape_url is None
 
     def test_port_string_coerced_by_pydantic(self, monkeypatch) -> None:
         """Numeric string for int field is coerced by Pydantic, not json.loads."""
         monkeypatch.setenv("ELSPETH_WEB__PORT", "9090")
-        settings = _settings_from_env()
+        settings = settings_from_env()
         assert settings.port == 9090
         assert isinstance(settings.port, int)
 
@@ -1647,7 +1645,7 @@ class TestSettingsFromEnv:
         monkeypatch.setenv("ELSPETH_WEB__COMPOSER_EXPOSE_PROVDER_ERRORS", "true")
 
         with pytest.raises(RuntimeError, match="ELSPETH_WEB__COMPOSER_EXPOSE_PROVDER_ERRORS"):
-            _settings_from_env()
+            settings_from_env()
 
 
 class TestJsonCollectionFieldsSync:
@@ -1661,7 +1659,7 @@ class TestJsonCollectionFieldsSync:
         missing = tuple_fields - _JSON_COLLECTION_FIELDS
         assert not missing, (
             f"Tuple-typed WebSettings fields missing from _JSON_COLLECTION_FIELDS: {missing}. "
-            f"Add them so _settings_from_env() JSON-decodes them from env vars."
+            f"Add them so settings_from_env() JSON-decodes them from env vars."
         )
 
     def test_no_non_tuple_fields_in_allowlist(self) -> None:

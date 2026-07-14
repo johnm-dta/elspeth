@@ -92,27 +92,430 @@ umask 077
 export AWS_PAGER=""
 export AWS_CLI_CONNECT_TIMEOUT=5
 export AWS_CLI_READ_TIMEOUT=30
+export ELSPETH_COMMAND_OUTPUT_LIMIT_BYTES=2097152
+export ELSPETH_AWS_CALL_CEILING_SECONDS=60
+export ELSPETH_TERRAFORM_CALL_CEILING_SECONDS=900
+export ELSPETH_CLEANUP_RESERVE_SECONDS=5400
 
-aws_capture() {
-  local stdout_file stderr_file status
-  stdout_file=$(mktemp)
-  stderr_file=$(mktemp)
-  chmod 600 "$stdout_file" "$stderr_file"
-  if "$@" >"$stdout_file" 2>"$stderr_file"; then
-    cat "$stdout_file"
-    rm -f "$stdout_file" "$stderr_file"
+protected_timeout_seconds() {
+  local kind="$1" ceiling deadline now_epoch deadline_epoch remaining reserve refresh_file
+  if test "$kind" = terraform; then
+    ceiling="${ELSPETH_TERRAFORM_CALL_CEILING_SECONDS:?set Terraform call ceiling}"
+  else
+    ceiling="${ELSPETH_AWS_CALL_CEILING_SECONDS:?set AWS call ceiling}"
+  fi
+  test "$ceiling" -gt 0 2>/dev/null || {
+    printf '%s\n' 'command_timeout_invalid' >&2
+    return 1
+  }
+  deadline="${ACCEPTANCE_TEARDOWN_DEADLINE_UTC:-}"
+  if test "${ELSPETH_CLEANUP_MODE:-0}" = 1 && test -n "$deadline" && test -z "${EMERGENCY_CLEANUP_DEADLINE_UTC:-}"; then
+    now_epoch=$(date -u +%s)
+    deadline_epoch=$(date -u -d "$deadline" +%s 2>/dev/null) || {
+      printf '%s\n' 'command_deadline_invalid' >&2
+      return 1
+    }
+    if test "$now_epoch" -ge "$deadline_epoch"; then
+      test -n "${CONTROL_MANIFEST:-}" || {
+        printf '%s\n' 'cleanup_control_manifest_missing' >&2
+        return 1
+      }
+      refresh_file=$(mktemp -p /tmp elspeth-cleanup-timeout.XXXXXX) || return 1
+      chmod 600 "$refresh_file" || { rm -f -- "$refresh_file"; return 1; }
+      if ! uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest load-cleanup \
+          --file "$CONTROL_MANIFEST" --shell-assignments >"$refresh_file"; then
+        rm -f -- "$refresh_file"
+        return 1
+      fi
+      . "$refresh_file"
+      rm -f -- "$refresh_file"
+    fi
+  fi
+  if test "${ELSPETH_CLEANUP_MODE:-0}" = 1 && test -n "${EMERGENCY_CLEANUP_DEADLINE_UTC:-}"; then
+    deadline="$EMERGENCY_CLEANUP_DEADLINE_UTC"
+  fi
+  if test -z "$deadline"; then
+    printf '%s\n' "$ceiling"
     return 0
   fi
-  status=$?
-  rm -f "$stdout_file" "$stderr_file"
-  printf '%s\n' 'aws_command_failed' >&2
-  return "$status"
+  now_epoch=$(date -u +%s)
+  deadline_epoch=$(date -u -d "$deadline" +%s 2>/dev/null) || {
+    printf '%s\n' 'command_deadline_invalid' >&2
+    return 1
+  }
+  remaining=$((deadline_epoch - now_epoch))
+  if test "$kind" = terraform && test "${ELSPETH_CLEANUP_MODE:-0}" != 1; then
+    reserve="${ELSPETH_CLEANUP_RESERVE_SECONDS:?set cleanup reserve}"
+    test "$reserve" -ge 0 2>/dev/null || {
+      printf '%s\n' 'command_timeout_invalid' >&2
+      return 1
+    }
+    remaining=$((remaining - reserve))
+  fi
+  test "$remaining" -gt 0 || {
+    printf '%s\n' 'command_deadline_exhausted' >&2
+    return 1
+  }
+  if test "$remaining" -lt "$ceiling"; then
+    printf '%s\n' "$remaining"
+  else
+    printf '%s\n' "$ceiling"
+  fi
 }
+
+aws_capture() (
+  local stdout_file stderr_file status stdout_size stderr_size timeout_seconds
+  test "${1:-}" = aws || {
+    printf '%s\n' 'aws_command_invalid' >&2
+    exit 1
+  }
+  stdout_file=$(mktemp)
+  stderr_file=$(mktemp)
+  trap 'rm -f -- "$stdout_file" "$stderr_file"' EXIT HUP INT TERM
+  chmod 600 "$stdout_file" "$stderr_file"
+  timeout_seconds=$(protected_timeout_seconds aws) || exit 1
+  if (ulimit -f 4096; timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" "$@" \
+      --cli-connect-timeout "$AWS_CLI_CONNECT_TIMEOUT" --cli-read-timeout "$AWS_CLI_READ_TIMEOUT") \
+      >"$stdout_file" 2>"$stderr_file"; then
+    status=0
+  else
+    status=$?
+  fi
+  stdout_size=$(stat -c %s "$stdout_file")
+  stderr_size=$(stat -c %s "$stderr_file")
+  if test "$stdout_size" -gt "$ELSPETH_COMMAND_OUTPUT_LIMIT_BYTES" || test "$stderr_size" -gt "$ELSPETH_COMMAND_OUTPUT_LIMIT_BYTES"; then
+    printf '%s\n' 'aws_command_output_too_large' >&2
+    exit 1
+  fi
+  test "$status" -eq 0 || {
+    printf '%s\n' 'aws_command_failed' >&2
+    exit "$status"
+  }
+  cat "$stdout_file"
+)
+
+aws_ecr_login() (
+  local registry="$1" region="$2" aws_stderr docker_stderr status aws_size docker_size timeout_seconds
+  [[ "$registry" =~ ^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$ ]] || {
+    printf '%s\n' 'ecr_login_input_invalid' >&2
+    exit 1
+  }
+  [[ "$region" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]] || {
+    printf '%s\n' 'ecr_login_input_invalid' >&2
+    exit 1
+  }
+  aws_stderr=$(mktemp)
+  docker_stderr=$(mktemp)
+  trap 'rm -f -- "$aws_stderr" "$docker_stderr"' EXIT HUP INT TERM
+  chmod 600 "$aws_stderr" "$docker_stderr"
+  timeout_seconds=$(protected_timeout_seconds aws) || exit 1
+  if (
+    set -o pipefail
+    ulimit -f 4096
+    timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" aws ecr get-login-password --region "$region" \
+      --cli-connect-timeout "$AWS_CLI_CONNECT_TIMEOUT" --cli-read-timeout "$AWS_CLI_READ_TIMEOUT" 2>"$aws_stderr" |
+      timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" docker login --username AWS --password-stdin "$registry" \
+        >/dev/null 2>"$docker_stderr"
+  ); then
+    status=0
+  else
+    status=$?
+  fi
+  aws_size=$(stat -c %s "$aws_stderr")
+  docker_size=$(stat -c %s "$docker_stderr")
+  if test "$aws_size" -gt "$ELSPETH_COMMAND_OUTPUT_LIMIT_BYTES" || test "$docker_size" -gt "$ELSPETH_COMMAND_OUTPUT_LIMIT_BYTES"; then
+    printf '%s\n' 'ecr_login_output_too_large' >&2
+    exit 1
+  fi
+  test "$status" -eq 0 || {
+    printf '%s\n' 'ecr_login_failed' >&2
+    exit "$status"
+  }
+)
+
+terraform_capture() (
+  local stdout_file stderr_file status stdout_size stderr_size timeout_seconds
+  stdout_file=$(mktemp)
+  stderr_file=$(mktemp)
+  trap 'rm -f -- "$stdout_file" "$stderr_file"' EXIT HUP INT TERM
+  chmod 600 "$stdout_file" "$stderr_file"
+  timeout_seconds=$(protected_timeout_seconds terraform) || exit 1
+  if (ulimit -f 4096; timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" terraform "$@") \
+    >"$stdout_file" 2>"$stderr_file"; then
+    status=0
+  else
+    status=$?
+  fi
+  stdout_size=$(stat -c %s "$stdout_file")
+  stderr_size=$(stat -c %s "$stderr_file")
+  if test "$stdout_size" -gt "$ELSPETH_COMMAND_OUTPUT_LIMIT_BYTES" || test "$stderr_size" -gt "$ELSPETH_COMMAND_OUTPUT_LIMIT_BYTES"; then
+    printf '%s\n' 'terraform_command_output_too_large' >&2
+    exit 1
+  fi
+  test "$status" -eq 0 || {
+    printf '%s\n' 'terraform_command_failed' >&2
+    exit "$status"
+  }
+  cat "$stdout_file"
+)
+
+verify_tf_binding() (
+  local scenario_id="$1" directory="$2" vars_file="$3" expected_hash="$4" binding_file="$5"
+  local binding_hash repository_commit lock_hash vars_hash terraform_json terraform_version workspace git_status
+  local backend_metadata backend_key_hash
+  case "$scenario_id" in A|B) ;; *) printf '%s\n' 'terraform_binding_invalid' >&2; exit 1 ;; esac
+  [[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]] || {
+    printf '%s\n' 'terraform_binding_invalid' >&2
+    exit 1
+  }
+  test ! -L "$directory" && test -d "$directory" && test ! -L "$vars_file" && test -f "$vars_file" || {
+    printf '%s\n' 'terraform_binding_file_invalid' >&2
+    exit 1
+  }
+  test ! -L "$binding_file" && test -f "$binding_file" || {
+    printf '%s\n' 'terraform_binding_file_invalid' >&2
+    exit 1
+  }
+  test "$(stat -c %u "$binding_file")" = "$(id -u)" && test "$(stat -c %a "$binding_file")" = 600 || {
+    printf '%s\n' 'terraform_binding_file_invalid' >&2
+    exit 1
+  }
+  test "$(stat -c %s "$binding_file")" -le 65536 || {
+    printf '%s\n' 'terraform_binding_file_invalid' >&2
+    exit 1
+  }
+  jq -e --arg run "$ACCEPTANCE_RUN_ID" --arg scenario "$scenario_id" '
+    type == "object" and
+    keys == ["acceptance_run_id","aws_account_id","aws_region","backend_encrypted","backend_locked","backend_state_key_sha256","backend_type","repository_commit","scenario_id","schema","terraform_lock_sha256","terraform_version","vars_sha256","workspace"] and
+    .schema == "elspeth.aws-ecs-tf-binding.v1" and
+    .acceptance_run_id == $run and .scenario_id == $scenario and
+    (.repository_commit | test("^[0-9a-f]{40}$")) and
+    (.terraform_lock_sha256 | test("^[0-9a-f]{64}$")) and
+    (.vars_sha256 | test("^[0-9a-f]{64}$")) and
+    (.backend_state_key_sha256 | test("^[0-9a-f]{64}$")) and
+    .backend_type == "s3" and .backend_encrypted == true and .backend_locked == true and
+    (.terraform_version | type == "string" and length > 0 and length <= 64) and
+    (.workspace | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,89}$")) and
+    (.aws_account_id | test("^[0-9]{12}$")) and
+    (.aws_region | test("^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$"))
+  ' "$binding_file" >/dev/null 2>/dev/null || {
+    printf '%s\n' 'terraform_binding_schema_invalid' >&2
+    exit 1
+  }
+  binding_hash=$(jq -cS . "$binding_file" 2>/dev/null | sha256sum | awk '{print $1}') || {
+    printf '%s\n' 'terraform_binding_hash_invalid' >&2
+    exit 1
+  }
+  test "$binding_hash" = "$expected_hash" || {
+    printf '%s\n' 'terraform_binding_hash_mismatch' >&2
+    exit 1
+  }
+  git_status=$(git -C "$directory" status --porcelain=v1 --untracked-files=all 2>/dev/null) || {
+    printf '%s\n' 'terraform_repository_invalid' >&2
+    exit 1
+  }
+  test -z "$git_status" || {
+    printf '%s\n' 'terraform_repository_dirty' >&2
+    exit 1
+  }
+  repository_commit=$(git -C "$directory" rev-parse --verify HEAD 2>/dev/null) || {
+    printf '%s\n' 'terraform_repository_invalid' >&2
+    exit 1
+  }
+  test -f "$directory/.terraform.lock.hcl" || {
+    printf '%s\n' 'terraform_lock_missing' >&2
+    exit 1
+  }
+  lock_hash=$(sha256sum "$directory/.terraform.lock.hcl" 2>/dev/null | awk '{print $1}') || {
+    printf '%s\n' 'terraform_lock_invalid' >&2
+    exit 1
+  }
+  vars_hash=$(sha256sum "$vars_file" 2>/dev/null | awk '{print $1}') || {
+    printf '%s\n' 'terraform_vars_invalid' >&2
+    exit 1
+  }
+  terraform_json=$(terraform_capture -chdir="$directory" version -json) || exit 1
+  terraform_version=$(jq -er '.terraform_version | select(type == "string")' <<<"$terraform_json" 2>/dev/null) || {
+    printf '%s\n' 'terraform_version_invalid' >&2
+    exit 1
+  }
+  workspace=$(terraform_capture -chdir="$directory" workspace show) || exit 1
+  [[ "$workspace" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,89}$ ]] || {
+    printf '%s\n' 'terraform_workspace_invalid' >&2
+      exit 1
+    }
+  backend_metadata="$directory/.terraform/terraform.tfstate"
+  test ! -L "$backend_metadata" && test -f "$backend_metadata" && test "$(stat -c %s "$backend_metadata")" -le 1048576 || {
+    printf '%s\n' 'terraform_backend_metadata_invalid' >&2
+    exit 1
+  }
+  jq -e --arg region "$AWS_REGION" '
+    .backend.type == "s3" and
+    .backend.config.region == $region and
+    (.backend.config.encrypt == true or .backend.config.encrypt == "true") and
+    ((.backend.config.use_lockfile == true or .backend.config.use_lockfile == "true") or
+     (.backend.config.dynamodb_table | type == "string" and length > 0)) and
+    (.backend.config.key | type == "string" and length > 0)
+  ' "$backend_metadata" >/dev/null 2>/dev/null || {
+    printf '%s\n' 'terraform_backend_live_mismatch' >&2
+    exit 1
+  }
+  backend_key_hash=$(jq -jr '.backend.config.key' "$backend_metadata" 2>/dev/null | sha256sum | awk '{print $1}') || {
+    printf '%s\n' 'terraform_backend_live_mismatch' >&2
+    exit 1
+  }
+  jq -e \
+    --arg commit "$repository_commit" --arg lock "$lock_hash" --arg vars "$vars_hash" \
+    --arg version "$terraform_version" --arg workspace "$workspace" \
+    --arg account "$AWS_ACCOUNT_ID" --arg region "$AWS_REGION" --arg backend_key_hash "$backend_key_hash" '
+      .repository_commit == $commit and .terraform_lock_sha256 == $lock and
+      .vars_sha256 == $vars and .terraform_version == $version and
+      .workspace == $workspace and .aws_account_id == $account and .aws_region == $region and
+      .backend_state_key_sha256 == $backend_key_hash
+    ' "$binding_file" >/dev/null 2>/dev/null || {
+      printf '%s\n' 'terraform_binding_live_mismatch' >&2
+      exit 1
+    }
+)
 ```
 
 A plain `aws ... | sanitize-evidence` pipe is forbidden because AWS stderr
-would bypass the projector. The Task 3 version also caps both channels at 2
-MiB and enforces the control-manifest deadline plus a per-call cleanup ceiling.
+would bypass the projector. The wrappers cap each captured channel at 2 MiB,
+delete protected buffers on success, failure, signal, or timeout, and enforce
+the control-manifest deadline plus a per-call ceiling. `aws_ecr_login` is the
+only secret-output exception: the ECR password exists only in its pipe to
+`docker login --password-stdin`.
+
+Before control-manifest initialization, prepare distinct owner-only mode-0600
+`SCENARIO_A_TF_BINDING_FILE` and `SCENARIO_B_TF_BINDING_FILE` documents. Each
+uses schema `elspeth.aws-ecs-tf-binding.v1` and the exact closed fields enforced
+by `verify_tf_binding`: run/scenario, clean repository commit, Terraform lock
+hash/version, `s3` backend with encryption and locking asserted, hashed state
+key, workspace, account/region, and vars hash. Its canonical sorted JSON hash
+is the scenario's `SCENARIO_*_TF_BINDING_SHA`; the receipt stays outside the
+IaC worktree so the clean-tree check remains meaningful.
+
+### Closed lifecycle helper wrappers
+
+Define these wrappers before the first Terraform plan, receipt, scenario load,
+or cleanup call. The acceptance module validates the mode-0600 control
+manifest and emits only hashes or its closed shell-assignment allowlist.
+The manifest schema is `elspeth.aws-ecs-control-manifest.v4`; it preserves
+each scenario's original pre-apply path/hash separately from the resolved
+resource inventory and binds post-observation retained evidence independently.
+`ELSPETH_ACCEPTANCE_APPROVAL_KEYRING` names a mode-0600 protected JSON document
+with schema `elspeth.aws-ecs-approval-keyring.v1` and a non-empty `keys` map of
+approved key IDs to raw 32-byte Ed25519 public keys encoded as unpadded
+base64url. Approval files carry the matching key ID and unpadded base64url
+signature; absent, malformed, unknown, expired, or invalid authority fails
+closed. The manifest retains the protected approval path, hash, and expiry and
+reopens them through `approval-require-current` immediately before both apply
+and destroy use, and again when an approved apply is recorded; verification
+performed before expiry cannot authorize later use after expiry.
+
+Each protected scenario inventory uses
+`elspeth.aws-ecs-scenario-inventory.v4` and binds the run ID, candidate SHA,
+account, region, scenario ID, Terraform binding, and the closed `values`
+assignment set, including the protected binding-receipt path. The initial
+immutable `preapply` document leaves provider-generated identities empty; a
+different immutable `resolved` document is bound after apply through
+`control-manifest bind-scenario` only after plan, exact apply, and no-op
+receipts are present. The bind happens for Scenario A before Scenario B begins,
+preserves the pre-apply document, and rejects deterministic identity changes;
+ordinary scenario loads reject an unresolved inventory. Its additional closed
+`orphan_sweep` object records
+`tag_key: ACCEPTANCE_RUN_ID`, a non-secret cleanup owner, ECS task-definition
+families, listener ARNs, DB instance identifiers, EFS creation tokens/file
+systems/access points, secret IDs, log groups, dashboard/alarm names, X-Ray
+group/sampling-rule names, EventBridge rule/target identities, owned Bedrock
+Guardrail identifiers/versions, the Cognito subject and pool-ownership flag,
+and the pre-mutation Transaction Search state hash. Exact retained CloudWatch
+metric queries and X-Ray trace IDs do not exist at resource-bind time; after
+Task 7, bind them once in a separate mode-0600
+`elspeth.aws-ecs-retained-evidence.v1` receipt with per-scenario counts.
+Omitted fields, duplicate identities, count/identity disagreement, drift from
+either pre-mutation hash, or a foreign run/scenario fail closed.
+
+```bash
+persist_sanitized_receipt() {
+  local scenario_id="$1" kind="$2" subject_id="$3" receipt_source="$4"
+  if test -f "$receipt_source" && test ! -L "$receipt_source"; then
+    uv run --frozen python -m elspeth.web.aws_ecs_acceptance receipt-store \
+      --file "$CONTROL_MANIFEST" \
+      --scenario-id "$scenario_id" \
+      --kind "$kind" \
+      --subject-id "$subject_id" \
+      --receipt-file "$receipt_source"
+  else
+    printf '%s' "$receipt_source" | \
+      uv run --frozen python -m elspeth.web.aws_ecs_acceptance receipt-store \
+        --file "$CONTROL_MANIFEST" \
+        --scenario-id "$scenario_id" \
+        --kind "$kind" \
+        --subject-id "$subject_id" \
+        --receipt-stdin
+  fi
+}
+
+require_signed_tf_plan_approval() {
+  local scenario_id="$1" receipt_hash="$2"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance approval-verify \
+    --file "$CONTROL_MANIFEST" \
+    --scenario-id "$scenario_id" \
+    --kind terraform-plan \
+    --plan-receipt-hash "$receipt_hash" \
+    --approval-file "$TERRAFORM_PLAN_APPROVAL_FILE"
+}
+
+require_signed_tf_destroy_approval() {
+  local scenario_id="$1" receipt_hash="$2"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance approval-verify \
+    --file "$CONTROL_MANIFEST" \
+    --scenario-id "$scenario_id" \
+    --kind terraform-destroy-plan \
+    --plan-receipt-hash "$receipt_hash" \
+    --approval-file "$TERRAFORM_DESTROY_APPROVAL_FILE"
+}
+
+load_scenario() {
+  local scenario_id="$1" assignments
+  unset ACTIVE_SCENARIO_ID ACCEPTANCE_RUN_ID DEPLOYMENT_MODE TARGET_PLATFORM \
+    AWS_REGION ECS_CLUSTER ECS_SERVICE WEB_CONTAINER_NAME TARGET_GROUP_ARN \
+    ALB_BASE_URL ALB_ARN CANDIDATE_TASK_DEFINITION DOCTOR_TASK_DEFINITION \
+    DOCTOR_CONTAINER_NAME DOCTOR_NETWORK_CONFIGURATION \
+    PAYLOAD_VERIFIER_TASK_DEFINITION LOCAL_AUTH_VERIFIER_TASK_DEFINITION \
+    ROLLBACK_DOCTOR_TASK_DEFINITION WEB_LOG_GROUP WEB_LOG_STREAM_PREFIX \
+    DOCTOR_LOG_GROUP DOCTOR_LOG_STREAM_PREFIX ECS_DEPLOYMENT_EVENT_RULE \
+    ECS_DEPLOYMENT_EVENT_TARGET_ID ECS_DEPLOYMENT_EVENT_LOG_GROUP \
+    PREVIOUS_TASK_DEFINITION FIRST_DEPLOY_LISTENER_RULE_ARN \
+    FIRST_DEPLOY_FORWARD_ACTIONS FIRST_DEPLOY_DISABLED_ACTIONS \
+    COGNITO_USER_POOL_ID DB_CLUSTER_IDENTIFIER ELSPETH_TEST_S3_BUCKET \
+    OIDC_EXPECTED_ISSUER OIDC_EXPECTED_AUDIENCE \
+    OIDC_EXPECTED_AUTHORIZATION_ORIGIN OIDC_EXPECTED_AUDIENCE_CLAIM \
+    SCENARIO_TF_DIR SCENARIO_TF_VARS SCENARIO_TF_BINDING_SHA \
+    SCENARIO_TF_BINDING_FILE
+  assignments=$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance scenario-load \
+    --file "$CONTROL_MANIFEST" --scenario-id "$scenario_id" --shell-assignments)
+  eval "$assignments"
+}
+
+run_orphan_sweep() {
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance orphan-sweep \
+    --file "$CONTROL_MANIFEST" --acceptance-run-id "$ACCEPTANCE_RUN_ID"
+}
+
+finalize_cleanup_evidence() {
+  local phase="$1"
+  if test "$phase" = commit; then
+    uv run --frozen python -m elspeth.web.aws_ecs_acceptance cleanup-evidence-finalize \
+      --file "$CONTROL_MANIFEST" --ledger "$GATE_LEDGER" \
+      --phase commit --clear-cleanup-required
+  else
+    uv run --frozen python -m elspeth.web.aws_ecs_acceptance cleanup-evidence-finalize \
+      --file "$CONTROL_MANIFEST" --ledger "$GATE_LEDGER" --phase prepare
+  fi
+}
+```
 
 ## Authentication and secret injection
 
@@ -142,22 +545,26 @@ protected capture wrapper and project only booleans and counts:
 COGNITO_CLIENT_JSON=$(aws_capture aws cognito-idp describe-user-pool-client \
   --user-pool-id "$COGNITO_USER_POOL_ID" \
   --client-id "$OIDC_EXPECTED_AUDIENCE" \
+  --query "UserPoolClient.{clientId:ClientId,allowedOAuthFlowsUserPoolClient:AllowedOAuthFlowsUserPoolClient,allowedOAuthFlows:AllowedOAuthFlows,allowedOAuthScopes:AllowedOAuthScopes,callbackURLs:CallbackURLs,hasClientSecret:contains(keys(@), 'ClientSecret')}" \
   --output json)
 
-jq -e --arg origin "$ALB_BASE_URL" '
-  .UserPoolClient as $c
-  | ($c.ClientSecret // "") == ""
-  and $c.AllowedOAuthFlowsUserPoolClient == true
-  and ($c.AllowedOAuthFlows | index("code") != null)
-  and ($c.AllowedOAuthFlows | index("implicit") == null)
-  and (["openid", "profile", "email"] - $c.AllowedOAuthScopes | length == 0)
-  and ($c.CallbackURLs | index($origin) != null)
+OIDC_REDIRECT_URI="${ALB_BASE_URL}/"
+jq -e --arg callback "$OIDC_REDIRECT_URI" '
+  keys == ["allowedOAuthFlows","allowedOAuthFlowsUserPoolClient","allowedOAuthScopes","callbackURLs","clientId","hasClientSecret"]
+  and .hasClientSecret == false
+  and .allowedOAuthFlowsUserPoolClient == true
+  and (.allowedOAuthFlows | index("code") != null)
+  and (.allowedOAuthFlows | index("implicit") == null)
+  and (["openid", "profile", "email"] - .allowedOAuthScopes | length == 0)
+  and (.callbackURLs | index($callback) != null)
 ' <<<"$COGNITO_CLIENT_JSON" >/dev/null
 unset COGNITO_CLIENT_JSON
 ```
 
 `ALB_BASE_URL` is an exact HTTPS origin with no path, query, fragment, or
-trailing slash. ELSPETH disables Uvicorn's raw request-line access logger so
+trailing slash. `OIDC_REDIRECT_URI` is the exact slash-bearing root URL the
+frontend sends during authorization and token exchange. ELSPETH disables
+Uvicorn's raw request-line access logger so
 the PKCE callback code is not logged. If ALB access logging is enabled, its
 short retention and access policy must be separately approved because those
 logs retain callback codes even though PKCE prevents redemption without the
@@ -169,6 +576,55 @@ Local auth (`auth_provider=local`) is an explicit single-task option. Mount
 local-auth verifier opens `auth.db` read-only only after traffic is fixed at
 503 and desired count is zero. A third `auth.db` reminder: never inspect it
 through root-running ECS Exec beside uvicorn.
+
+### Real-browser OIDC evidence
+
+Install Chromium through the frontend lock before any AWS mutation, and prove
+the dedicated configuration discovers exactly one test without credentials:
+
+```bash
+npm --prefix src/elspeth/web/frontend ci
+npm --prefix src/elspeth/web/frontend exec -- playwright install chromium
+OIDC_LIST_OUTPUT=$(npm --prefix src/elspeth/web/frontend run test:e2e:oidc -- --list)
+grep -Fq '[chromium] aws-ecs-oidc.staging.spec.ts' <<<"$OIDC_LIST_OUTPUT"
+test "$(grep -Fc '[chromium] aws-ecs-oidc.staging.spec.ts' <<<"$OIDC_LIST_OUTPUT")" = 1
+```
+
+The live runner accepts credentials only through the existing environment,
+uses no storage state, screenshot, trace, video, or secondary reporter, and
+writes one owner-only evidence document only after the created session is
+deleted successfully:
+
+```bash
+OIDC_EVIDENCE_DIR=$(mktemp -d -p /tmp elspeth-oidc.XXXXXX)
+chmod 700 "$OIDC_EVIDENCE_DIR"
+uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+  --file "$CONTROL_MANIFEST" --oidc-evidence-dir "$OIDC_EVIDENCE_DIR"
+
+run_oidc_evidence() {
+  local phase="$1"
+  STAGING_BASE_URL="$ALB_BASE_URL" \
+  OIDC_TEST_USERNAME="$OIDC_TEST_USERNAME" \
+  OIDC_TEST_PASSWORD="$OIDC_TEST_PASSWORD" \
+  OIDC_EXPECTED_ISSUER="$OIDC_EXPECTED_ISSUER" \
+  OIDC_EXPECTED_AUDIENCE="$OIDC_EXPECTED_AUDIENCE" \
+  OIDC_EXPECTED_AUTHORIZATION_ORIGIN="$OIDC_EXPECTED_AUTHORIZATION_ORIGIN" \
+  OIDC_EXPECTED_AUDIENCE_CLAIM="$OIDC_EXPECTED_AUDIENCE_CLAIM" \
+  OIDC_EVIDENCE_PHASE="$phase" \
+  OIDC_EVIDENCE_FILE="$OIDC_EVIDENCE_DIR/$phase.json" \
+    npm --prefix src/elspeth/web/frontend run test:e2e:oidc
+  test "$(stat -c '%a' "$OIDC_EVIDENCE_DIR/$phase.json")" = 600
+}
+```
+
+Run exactly `previous-before-candidate`, `candidate-initial`,
+`previous-after-rollback`, and `candidate-after-redeploy`. Each JSON document
+contains only `phase`, `timestamp`, `issuer`, `authorization_origin`,
+`audience_claim`, `audience`, `subject_sha256`, `auth_me_status: 200`,
+`session_create_status: 201`, `session_read_status: 200`,
+`session_delete_status: 204`, and `session_round_trip: true`. It never contains a token,
+authorization code, verifier, credential, callback URL/query/fragment,
+cookie, header, page HTML, or artifact path.
 
 ## ECS probe wiring
 
@@ -407,7 +863,9 @@ the entrypoint below:
         {"name": "ELSPETH_WEB__OPERATOR_TELEMETRY_ECS_CLUSTER", "value": "${ECS_CLUSTER_NAME}"},
         {"name": "ELSPETH_WEB__OPERATOR_TELEMETRY_ECS_SERVICE", "value": "${ECS_SERVICE_NAME}"},
         {"name": "ELSPETH_WEB__OPERATOR_TELEMETRY_TASK_DEFINITION_FAMILY", "value": "${ECS_TASK_DEFINITION_FAMILY}"},
-        {"name": "ELSPETH_WEB__OPERATOR_TELEMETRY_TASK_DEFINITION_REVISION", "value": "${ECS_TASK_DEFINITION_REVISION}"}
+        {"name": "ELSPETH_WEB__OPERATOR_TELEMETRY_TASK_DEFINITION_REVISION", "value": "${ECS_TASK_DEFINITION_REVISION}"},
+        {"name": "ELSPETH_ACCEPTANCE_CANDIDATE_SHA", "value": "${CANDIDATE_SHA}"},
+        {"name": "ELSPETH_ACCEPTANCE_SCENARIO_ID", "value": "${SCENARIO_ID}"}
       ]
     }
   ]
@@ -776,6 +1234,137 @@ ready_status=$(curl --connect-timeout 5 --max-time 10 --max-redirs 0 \
 jq -e '.ready == true' "$ready_body" >/dev/null
 ```
 
+#### Persistence, replacement, task-role, and local-auth sequence
+
+Run these checks in this order; a later check never substitutes for an earlier
+one:
+
+1. In the disposable local-auth scenario, capture one fixed pipeline through
+   the public API into a protected state file.
+2. Force a distinct candidate deployment and prove the old task was replaced.
+3. Re-authenticate from a fresh process and run `verify-api` against that same
+   protected state without mutating the session.
+4. Start the explicit `1000:1000` one-shot payload verifier with the candidate
+   digest and the same PostgreSQL/EFS settings; do not use root-running ECS
+   Exec for this proof.
+5. From every contributing healthy candidate task, use ECS Exec for the S3,
+   Bedrock, Guardrail, and operator-telemetry checks and locally extract the
+   one sanitized receipt sentinel.
+6. Drain traffic to fixed 503, scale the service to zero, then start the
+   explicit `1000:1000` local-auth verifier against the same EFS mount.
+
+```bash
+ACCEPTANCE_STATE=$(mktemp -p /tmp elspeth-aws-ecs-state.XXXXXX)
+rm -f "$ACCEPTANCE_STATE"
+uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+  --file "$CONTROL_MANIFEST" --acceptance-state-path "$ACCEPTANCE_STATE"
+ELSPETH_ACCEPTANCE_REGISTER=1 \
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance capture \
+    --state-file "$ACCEPTANCE_STATE"
+LANDSCAPE_RUN_ID=$(jq -er '.landscape_run_id' "$ACCEPTANCE_STATE")
+
+PRE_REPLACEMENT_TASK_ARN="$CANDIDATE_TASK_ARN"
+aws_capture aws ecs update-service \
+  --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+  --task-definition "$CANDIDATE_TASK_DEFINITION" --desired-count 1 \
+  --force-new-deployment \
+  --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
+  >/dev/null
+aws_capture aws ecs wait services-stable \
+  --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
+CANDIDATE_TASK_ARN=$(aws_capture aws ecs list-tasks \
+  --cluster "$ECS_CLUSTER" --service-name "$ECS_SERVICE" \
+  --desired-status RUNNING --query 'taskArns[0]' --output text)
+test "$CANDIDATE_TASK_ARN" != "$PRE_REPLACEMENT_TASK_ARN"
+
+uv run --frozen python -m elspeth.web.aws_ecs_acceptance verify-api \
+  --state-file "$ACCEPTANCE_STATE"
+
+PAYLOAD_OVERRIDES=$(jq -cn --arg name "$WEB_CONTAINER_NAME" --arg run "$LANDSCAPE_RUN_ID" \
+  '{containerOverrides:[{name:$name,command:["python","-m","elspeth.web.aws_ecs_acceptance","verify-payloads","--landscape-run-id",$run]}]}')
+PAYLOAD_TASK=$(aws_capture aws ecs run-task \
+  --cluster "$ECS_CLUSTER" --task-definition "$PAYLOAD_VERIFIER_TASK_DEFINITION" \
+  --launch-type FARGATE --network-configuration "$DOCTOR_NETWORK_CONFIGURATION" \
+  --count 1 --overrides "$PAYLOAD_OVERRIDES" --query 'tasks[0].taskArn' --output text)
+aws_capture aws ecs wait tasks-stopped --cluster "$ECS_CLUSTER" --tasks "$PAYLOAD_TASK" >/dev/null
+aws_capture aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$PAYLOAD_TASK" \
+  | jq -e '(.failures | length) == 0 and (.tasks | length) == 1 and all(.tasks[0].containers[] | select(.essential == true); .exitCode == 0)' >/dev/null
+
+run_candidate_role_check() {
+  local task_arn="$1" check="$2" phase="${3:-}" stream receipt_file command
+  case "$phase" in
+    "") command="python -m elspeth.web.aws_ecs_acceptance $check" ;;
+    positive|outage)
+      test "$check" = verify-operator-telemetry || return 64
+      command="python -m elspeth.web.aws_ecs_acceptance $check --phase $phase"
+      ;;
+    *) return 64 ;;
+  esac
+  stream=$(aws_capture aws ecs execute-command \
+    --cluster "$ECS_CLUSTER" --task "$task_arn" --container "$WEB_CONTAINER_NAME" \
+    --interactive --command "$command")
+  receipt_file=$(mktemp -p /tmp elspeth-exec-receipt.XXXXXX)
+  chmod 600 "$receipt_file"
+  printf '%s' "$stream" | uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+    extract-exec-receipt --check "$check" --candidate-sha "$CANDIDATE_SHA" \
+    --task-arn "$task_arn" --scenario-id "$ACTIVE_SCENARIO_ID" >"$receipt_file"
+  unset stream
+  persist_sanitized_receipt "$ACTIVE_SCENARIO_ID" "$check" "$task_arn" "$receipt_file"
+  rm -f "$receipt_file"
+}
+
+run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-s3
+run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-bedrock
+run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-bedrock-guardrails
+run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-operator-telemetry positive
+
+# Run once in Scenario A after the complete positive role-check pass.
+aws_capture aws ecs execute-command \
+  --cluster "$ECS_CLUSTER" --task "$CANDIDATE_TASK_ARN" \
+  --container cloudwatch-agent --interactive \
+  --command "/bin/sh -c 'kill -TERM 1'" >/dev/null
+run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-operator-telemetry outage
+OUTAGE_TASK_ARN="$CANDIDATE_TASK_ARN"
+aws_capture aws ecs update-service \
+  --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+  --task-definition "$CANDIDATE_TASK_DEFINITION" --desired-count 1 \
+  --force-new-deployment \
+  --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
+  >/dev/null
+aws_capture aws ecs wait services-stable \
+  --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
+CANDIDATE_TASK_ARN=$(aws_capture aws ecs list-tasks \
+  --cluster "$ECS_CLUSTER" --service-name "$ECS_SERVICE" \
+  --desired-status RUNNING --query 'taskArns[0]' --output text)
+test -n "$CANDIDATE_TASK_ARN" && test "$CANDIDATE_TASK_ARN" != None
+test "$CANDIDATE_TASK_ARN" != "$OUTAGE_TASK_ARN"
+run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-operator-telemetry positive
+
+aws_capture aws elbv2 modify-rule --rule-arn "$FIRST_DEPLOY_LISTENER_RULE_ARN" \
+  --actions "$FIRST_DEPLOY_DISABLED_ACTIONS" >/dev/null
+aws_capture aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+  --desired-count 0 \
+  --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
+  >/dev/null
+aws_capture aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
+LOCAL_AUTH_OVERRIDES=$(jq -cn --arg name "$WEB_CONTAINER_NAME" \
+  '{containerOverrides:[{name:$name,command:["python","-m","elspeth.web.aws_ecs_acceptance","verify-local-auth"]}]}')
+LOCAL_AUTH_TASK=$(aws_capture aws ecs run-task \
+  --cluster "$ECS_CLUSTER" --task-definition "$LOCAL_AUTH_VERIFIER_TASK_DEFINITION" \
+  --launch-type FARGATE --network-configuration "$DOCTOR_NETWORK_CONFIGURATION" \
+  --count 1 --overrides "$LOCAL_AUTH_OVERRIDES" --query 'tasks[0].taskArn' --output text)
+aws_capture aws ecs wait tasks-stopped --cluster "$ECS_CLUSTER" --tasks "$LOCAL_AUTH_TASK" >/dev/null
+aws_capture aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$LOCAL_AUTH_TASK" \
+  | jq -e '(.failures | length) == 0 and (.tasks | length) == 1 and all(.tasks[0].containers[] | select(.essential == true); .exitCode == 0)' >/dev/null
+```
+
+Both one-shot definitions set task-level `user: "1000:1000"`, explicitly
+override the image entrypoint, use the candidate digest, and reuse the exact
+approved EFS access point and database settings. The role-check transport
+requires the Session Manager plugin, running `ExecuteCommandAgent`, and only
+the module's single bounded receipt sentinel; interactive output is never
+echoed or retained.
+
 ### 6. Observe for ten minutes
 
 Set `ACCEPTANCE_START_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)` immediately after
@@ -906,12 +1495,14 @@ On success, failure, interruption, or timeout:
 6. Clear `CLEANUP_REQUIRED=0` only after all independent surfaces pass.
 
 ```bash
-python -m elspeth.web.aws_ecs_acceptance orphan-sweep \
-  --control-manifest "$CONTROL_MANIFEST" \
-  --scenario all \
-  >"$SANITIZED_ORPHAN_RECEIPT"
+run_orphan_sweep >"$SANITIZED_ORPHAN_RECEIPT"
 
-python -m elspeth.web.aws_ecs_acceptance control-manifest validate \
+finalize_cleanup_evidence prepare
+# Remove only the approved local evidence paths after durable export and the
+# prepared receipt have both succeeded, then checkpoint local_evidence.
+finalize_cleanup_evidence commit
+
+uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest validate \
   --file "$CONTROL_MANIFEST" \
   --cleanup-only \
   --require-cleanup-cleared

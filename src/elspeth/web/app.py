@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
-import json
 import os
 import sys
 import time
@@ -73,7 +72,7 @@ from elspeth.web.composer.progress import ComposerProgressRegistry
 from elspeth.web.composer.service import ComposerServiceImpl
 from elspeth.web.composer.tutorial_abandon_routes import create_tutorial_abandon_router
 from elspeth.web.composer.tutorial_run_routes import create_tutorial_run_router
-from elspeth.web.config import WebSettings, _allow_insecure_test_keys
+from elspeth.web.config import WebSettings, _allow_insecure_test_keys, settings_from_env
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.deployment_contract import DEPLOYMENT_TARGET_AWS_ECS
 from elspeth.web.execution.progress import ProgressBroadcaster
@@ -639,91 +638,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.session_engine.dispose()
 
 
-# Fields that accept JSON-encoded collection values from environment variables.
-# Add any new tuple-typed WebSettings fields here so _settings_from_env()
-# JSON-decodes them.  Scalar fields (str, int, float, Path) are handled by Pydantic.
-_JSON_COLLECTION_FIELDS: frozenset[str] = frozenset(
-    {"cors_origins", "server_secret_allowlist", "oidc_authorization_allowed_origins", "plugin_allowlist", "bedrock_guardrail_profiles"}
-)
-_JSON_OBJECT_FIELDS: frozenset[str] = frozenset(
-    {"plugin_preferences", "plugin_control_modes", "llm_profiles", "bedrock_guardrail_default_profiles"}
-)
-
-
-def _settings_from_env() -> WebSettings:
-    """Construct WebSettings from ELSPETH_WEB__* environment variables.
-
-    Called when create_app() is invoked without explicit settings (e.g.,
-    by uvicorn's factory protocol).  The CLI sets these env vars before
-    calling uvicorn.run().
-
-    Collection-typed fields are JSON-decoded via ``_JSON_COLLECTION_FIELDS``.
-    The JSON literal ``null`` is decoded to ``None`` for all fields — this is
-    the env-var convention for "clear this optional setting."  Pydantic rejects
-    ``None`` for non-nullable fields. Unknown setting names are rejected before
-    model construction so deployment typos fail startup with the original
-    environment variable name. All other scalar values pass as raw strings; Pydantic coerces
-    str→int, str→float, str→Path automatically.
-    """
-    kwargs: dict[str, object] = {}
-    prefix = "ELSPETH_WEB__"
-    for key, value in os.environ.items():
-        if key.startswith(prefix):
-            field_name = key[len(prefix) :].lower()
-            if field_name not in WebSettings.model_fields:
-                raise RuntimeError(f"Unknown ELSPETH_WEB__ setting: {key}")
-            if field_name in _JSON_COLLECTION_FIELDS | _JSON_OBJECT_FIELDS:
-                # These fields are tuple-typed on WebSettings; the env-var
-                # convention is a JSON-encoded array. A non-JSON value cannot
-                # become a valid collection, so falling back to the raw string
-                # would only defer to a confusing downstream Pydantic
-                # "not a valid tuple" error. Per the web trust model, malformed
-                # startup config is a hard failure — refuse to start with a
-                # message that names the offending variable.
-                try:
-                    parsed = json.loads(value)
-                except (json.JSONDecodeError, ValueError):
-                    expected = "array" if field_name in _JSON_COLLECTION_FIELDS else "object"
-                    raise RuntimeError(f"ELSPETH_WEB__{field_name.upper()} must be valid JSON {expected}.") from None
-                if field_name in _JSON_COLLECTION_FIELDS:
-                    if not isinstance(parsed, list):
-                        raise RuntimeError(f"ELSPETH_WEB__{field_name.upper()} must be valid JSON array.")
-                    kwargs[field_name] = tuple(parsed)
-                else:
-                    if not isinstance(parsed, dict):
-                        raise RuntimeError(f"ELSPETH_WEB__{field_name.upper()} must be valid JSON object.")
-                    kwargs[field_name] = parsed
-            elif value == "null":
-                kwargs[field_name] = None
-            else:
-                kwargs[field_name] = value
-    # DC-2 FIX-L: ``shareable_link_signing_key`` is typed ``SecretBytes`` on
-    # the model, but the env-var ingest path passes a str (base64-encoded)
-    # which a ``mode="before"`` validator on the field decodes to bytes.
-    # Mypy can't see through Pydantic's pre-validators, so the **kwargs
-    # widening is reported as a type error here. The cast is safe because
-    # Pydantic raises ``ValidationError`` on any mismatch at runtime.
-    try:
-        return WebSettings(**kwargs)  # type: ignore[arg-type]
-    except ValidationError as error:
-        policy_fields = {
-            "plugin_allowlist",
-            "plugin_preferences",
-            "plugin_control_modes",
-            "llm_profiles",
-            "tutorial_llm_profile",
-            "bedrock_guardrail_profiles",
-            "bedrock_guardrail_default_profiles",
-        }
-        safe_paths = {
-            str(item) for detail in error.errors(include_input=False) for item in detail.get("loc", ()) if isinstance(item, (str, int))
-        }
-        if policy_fields & safe_paths:
-            rendered_paths = ", ".join(sorted(safe_paths))
-            raise RuntimeError(f"Invalid ELSPETH_WEB__ plugin policy setting at: {rendered_paths}") from None
-        raise
-
-
 class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
     """Reject request bodies declaring Content-Length > 10 MB with HTTP 413.
 
@@ -830,7 +744,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         Configured FastAPI instance with CORS middleware and health endpoint.
     """
     if settings is None:
-        settings = _settings_from_env()
+        settings = settings_from_env()
 
     # Reject an incomplete AWS deployment policy before installing the
     # process-global provider. A failed first create_app() must not strand a

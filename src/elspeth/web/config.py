@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from collections.abc import Mapping
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, SecretBytes, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretBytes, ValidationError, ValidationInfo, field_validator, model_validator
 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
@@ -853,3 +854,69 @@ class WebSettings(BaseModel):
             return self.session_db_url
         db_path = self.data_dir / "sessions.db"
         return f"sqlite:///{db_path}"
+
+
+# Fields that accept JSON-encoded collection values from environment variables.
+# Add new tuple-typed WebSettings fields here so settings_from_env() decodes
+# them. Scalar fields are handled by Pydantic.
+_JSON_COLLECTION_FIELDS: frozenset[str] = frozenset(
+    {"cors_origins", "server_secret_allowlist", "oidc_authorization_allowed_origins", "plugin_allowlist", "bedrock_guardrail_profiles"}
+)
+_JSON_OBJECT_FIELDS: frozenset[str] = frozenset(
+    {"plugin_preferences", "plugin_control_modes", "llm_profiles", "bedrock_guardrail_default_profiles"}
+)
+
+
+def settings_from_env() -> WebSettings:
+    """Construct :class:`WebSettings` from ``ELSPETH_WEB__*`` variables.
+
+    Collection fields use JSON arrays/objects, the literal ``null`` clears an
+    optional scalar, unknown fields fail with their original environment name,
+    and policy-validation failures never echo raw operator input.
+    """
+    kwargs: dict[str, object] = {}
+    prefix = "ELSPETH_WEB__"
+    for key, value in os.environ.items():
+        if not key.startswith(prefix):
+            continue
+        field_name = key[len(prefix) :].lower()
+        if field_name not in WebSettings.model_fields:
+            raise RuntimeError(f"Unknown ELSPETH_WEB__ setting: {key}")
+        if field_name in _JSON_COLLECTION_FIELDS | _JSON_OBJECT_FIELDS:
+            try:
+                parsed = json.loads(value)
+            except (json.JSONDecodeError, ValueError):
+                expected = "array" if field_name in _JSON_COLLECTION_FIELDS else "object"
+                raise RuntimeError(f"ELSPETH_WEB__{field_name.upper()} must be valid JSON {expected}.") from None
+            if field_name in _JSON_COLLECTION_FIELDS:
+                if not isinstance(parsed, list):
+                    raise RuntimeError(f"ELSPETH_WEB__{field_name.upper()} must be valid JSON array.")
+                kwargs[field_name] = tuple(parsed)
+            else:
+                if not isinstance(parsed, dict):
+                    raise RuntimeError(f"ELSPETH_WEB__{field_name.upper()} must be valid JSON object.")
+                kwargs[field_name] = parsed
+        elif value == "null":
+            kwargs[field_name] = None
+        else:
+            kwargs[field_name] = value
+
+    try:
+        return WebSettings(**kwargs)  # type: ignore[arg-type]
+    except ValidationError as error:
+        policy_fields = {
+            "plugin_allowlist",
+            "plugin_preferences",
+            "plugin_control_modes",
+            "llm_profiles",
+            "tutorial_llm_profile",
+            "bedrock_guardrail_profiles",
+            "bedrock_guardrail_default_profiles",
+        }
+        safe_paths = {
+            str(item) for detail in error.errors(include_input=False) for item in detail.get("loc", ()) if isinstance(item, (str, int))
+        }
+        if policy_fields & safe_paths:
+            rendered_paths = ", ".join(sorted(safe_paths))
+            raise RuntimeError(f"Invalid ELSPETH_WEB__ plugin policy setting at: {rendered_paths}") from None
+        raise

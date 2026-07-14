@@ -518,6 +518,14 @@ class _BedrockGuardrailProfileResolver:
             return LocalRequirementResult(available=False, reason=ProfileUnavailableReason.LOCAL_REQUIREMENT_MISSING)
         return LocalRequirementResult(available=True)
 
+    def approved_profile(self, alias: str) -> BedrockGuardrailProfileSettings:
+        """Return one exact frozen operator binding for an already-authorized plugin."""
+
+        try:
+            return self._profiles[alias]
+        except KeyError:
+            raise ValueError("profile_unavailable") from None
+
 
 def _schema_refs(value: object) -> set[str]:
     refs: set[str] = set()
@@ -599,3 +607,18 @@ class OperatorProfileRegistry:
         except KeyError:
             return LocalRequirementResult(available=False, reason=ProfileUnavailableReason.LOCAL_REQUIREMENT_MISSING)
         return resolver.check_local_requirements(alias)
+
+    def approved_bedrock_guardrail_profile(
+        self,
+        plugin_id: PluginId,
+        *,
+        alias: str,
+    ) -> BedrockGuardrailProfileSettings:
+        """Resolve one authorized opaque alias to its frozen private binding."""
+
+        if plugin_id not in self._policy.authorized:
+            raise ValueError("profile_unavailable")
+        resolver = self._resolvers.get(plugin_id)
+        if not isinstance(resolver, _BedrockGuardrailProfileResolver):
+            raise ValueError("profile_unavailable")
+        return resolver.approved_profile(alias)

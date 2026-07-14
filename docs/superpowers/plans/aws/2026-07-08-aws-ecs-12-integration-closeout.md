@@ -132,8 +132,28 @@ then may issue GO and close Plan 12.
   ```bash
   export GATE_LEDGER="${GATE_LEDGER:?set approved durable mode-0600 ledger path}"
   uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger init --file "$GATE_LEDGER" --branch feat/aws-ecs-program --starting-sha "$(git rev-parse HEAD)"
-  uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger record --file "$GATE_LEDGER" --check-id task1.clean-start --exit-status 0 --receipt-hash "$(printf '%s' clean-start | sha256sum | awk '{print $1}')"
+  record_gate_check() {
+      local check_id="$1" exit_status="$2" receipt_hash="$3"
+      uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger record \
+        --file "$GATE_LEDGER" --check-id "$check_id" \
+        --candidate-sha "$(git rev-parse HEAD)" --exit-status "$exit_status" \
+        --receipt-hash "$receipt_hash"
+  }
+  record_gate_check task1.check01 0 "$(printf '%s' clean-start | sha256sum | awk '{print $1}')"
   ```
+
+  The stable check-ID ledger is exhaustive and ordinal: Task 1 uses
+  `task1.check01`–`task1.check13`; Task 2 `task2.check01`–`task2.check08`;
+  Task 3 `task3.check01`–`task3.check07`; Task 4 `task4.check01`–`task4.check02`;
+  Task 5 `task5.check01`–`task5.check10`; Task 6 `task6.check01`–`task6.check06`;
+  Task 7 `task7.check01`–`task7.check30`; and Task 8
+  `task8.check01`–`task8.check05`. Record an immutable ledger row only after
+  its resumable checkbox succeeds. Failed cleanup attempts remain in protected
+  `cleanup_states` and `verdict_failures` and are retried; they never consume a
+  row that a later successful retry cannot replace. The cleanup finalizer owns
+  and idempotently writes `task8.check05`; callers record through
+  `task8.check04`. Finalization rejects any missing ID, so prose completion
+  cannot substitute for a recorded check.
 
   **Expected result:** a fresh-process ledger validation succeeds. An existing
   ledger is accepted only through its exact-owner resume validation; never
@@ -227,12 +247,20 @@ then may issue GO and close Plan 12.
 - [ ] Capture the candidate commit for the final evidence record:
 
   ```bash
-  git rev-parse HEAD
+  export CANDIDATE_SHA="$(git rev-parse HEAD)"
+  TASK1_CANDIDATE_RECEIPT_HASH="$(printf '%s' "$CANDIDATE_SHA" | sha256sum | awk '{print $1}')"
+  record_gate_check task1.check13 0 "$TASK1_CANDIDATE_RECEIPT_HASH"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger bind-candidate \
+    --file "$GATE_LEDGER" --candidate-sha "$CANDIDATE_SHA"
   ```
 
   **Expected result:** one 40-character commit SHA. Every later task must run
   against this SHA unless a failure causes a repair and full restart.
-  Bind that SHA into the protected gate ledger; subsequent records reject any
+  This candidate-capture block is the sole writer of `task1.check13`; do not
+  emit a second generic row for the same checkbox.
+  The atomic `bind-candidate` step accepts only the exact all-zero ordinal
+  `task1.check01` through `task1.check13` prefix and binds that SHA plus the
+  fixed count of 13 into the protected gate ledger; subsequent records reject any
   different worktree HEAD. Any code, documentation, lockfile, or generated-file
   change after this point invalidates every candidate receipt and restarts this
   plan from Task 1; evidence from different SHAs may never be combined.
@@ -708,7 +736,7 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   doctor/verifier tasks, and Plan 11's short-lived per-auth-event Landscape
   engines at the configured auth rate/concurrency limit for the exact one-task
   service, with an explicit numeric safety margin. During each observation
-  window, call `aws_capture cloudwatch get-metric-statistics` for namespace
+  window, call `aws_capture aws cloudwatch get-metric-statistics` for namespace
   `AWS/RDS`, metric `DatabaseConnections`, the exact
   `DBClusterIdentifier` dimension, 60-second period, and `Maximum`, bounded by
   that scenario's observation timestamps. Project the successful JSON in
@@ -719,7 +747,8 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   NO-GO. Do not persist raw CloudWatch JSON or describe the per-event auth
   engines as sharing the long-lived pool.
   Before provisioning, record `SCENARIO_A_TF_DIR`, `SCENARIO_A_TF_VARS`,
-  `SCENARIO_B_TF_DIR`, `SCENARIO_B_TF_VARS`, each external IaC repository's
+  `SCENARIO_A_TF_BINDING_FILE`, `SCENARIO_B_TF_DIR`, `SCENARIO_B_TF_VARS`,
+  `SCENARIO_B_TF_BINDING_FILE`, each external IaC repository's
   clean 40-character commit, `.terraform.lock.hcl` hash, Terraform version,
   backend type plus hashed state key, workspace, AWS account/region, and a
   combined binding hash over those non-secret identities and the vars-file
@@ -753,6 +782,9 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   export CONTROL_MANIFEST="${CONTROL_MANIFEST:?set approved durable mode-0600 control-manifest path}"
   export SCENARIO_A_INVENTORY="${SCENARIO_A_INVENTORY:?set closed sanitized Scenario A inventory path}"
   export SCENARIO_B_INVENTORY="${SCENARIO_B_INVENTORY:?set closed sanitized Scenario B inventory path}"
+  export SCENARIO_A_TF_BINDING_FILE="${SCENARIO_A_TF_BINDING_FILE:?set protected Scenario A binding receipt}"
+  export SCENARIO_B_TF_BINDING_FILE="${SCENARIO_B_TF_BINDING_FILE:?set protected Scenario B binding receipt}"
+  export EVIDENCE_DESTINATION_SHA256="${EVIDENCE_DESTINATION_SHA256:?set approved sanitized evidence destination hash}"
   uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest init \
       --file "$CONTROL_MANIFEST" \
       --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
@@ -765,6 +797,7 @@ AWS stderr. The same rule applies through Task 8 cleanup.
       --scenario-b-inventory "$SCENARIO_B_INVENTORY" \
       --scenario-a-tf-binding "$SCENARIO_A_TF_BINDING_SHA" \
       --scenario-b-tf-binding "$SCENARIO_B_TF_BINDING_SHA" \
+      --evidence-destination-sha256 "$EVIDENCE_DESTINATION_SHA256" \
       --gate-ledger "$GATE_LEDGER" \
       --teardown-deadline-utc "$ACCEPTANCE_TEARDOWN_DEADLINE_UTC"
   uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest validate --file "$CONTROL_MANIFEST" --acceptance-run-id "$ACCEPTANCE_RUN_ID" --candidate-sha "$CANDIDATE_SHA"
@@ -774,8 +807,28 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   uses `validate` rather than replacement. A fresh process can load both
   isolated inventories and every cleanup identity without shell history.
 
-  The scenario inventories are closed documents, not a shared mutable variable
-  bag. Define `load_scenario A|B` to clear all generic scenario variables,
+  The control manifest is a closed `elspeth.aws-ecs-control-manifest.v4`
+  document. The scenario inventories are closed
+  `elspeth.aws-ecs-scenario-inventory.v4` documents with an explicit
+  `preapply` or `resolved` phase, not a shared mutable variable bag. The
+  control manifest is initialized from distinct immutable `preapply`
+  inventories before mutation; provider-generated ARNs, URLs, Cognito IDs,
+  and action JSON must be empty in that phase. After each successful apply and
+  its exact no-op proof, the owner writes a new mode-0600 `resolved` inventory
+  and atomically binds its different path and hash with `control-manifest
+  bind-scenario` before beginning the other scenario. The transition reopens
+  and preserves the pre-apply path/hash and rejects changes to deterministic
+  identities. In
+  addition to the exact assignment values, each includes Plan 10's
+  complete closed resource `orphan_sweep` identities for ECS task-definition families,
+  ALB listeners, Aurora instances, EFS, secrets, logs, dashboards/alarms,
+  X-Ray, EventBridge, owned Guardrails, Cognito subject/pool ownership, and the
+  pre-mutation Transaction Search state hash. Every deterministic cleanup
+  identity is present in the preserved pre-apply document; only explicitly
+  provider-generated IDs may be added by the resolved document. Exact retained
+  metric queries and trace IDs are bound later in the one-way protected
+  `elspeth.aws-ecs-retained-evidence.v1` receipt after Task 7 creates them.
+  Define `load_scenario A|B` to clear all generic scenario variables,
   load exactly one inventory through `control-manifest`, validate every ARN
   and resource against both `ACCEPTANCE_RUN_ID` and the scenario ID, and stamp
   that ID into every receipt. Invoke it before every generic
@@ -789,7 +842,7 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   capture_connection_budget() {
       local cluster_id="$1" start_utc="$2" end_utc="$3" max_connections="$4" approved_budget="$5" safety_margin="$6"
       local raw="" receipt=""
-      raw="$(aws_capture cloudwatch get-metric-statistics --region "$AWS_REGION" --namespace AWS/RDS --metric-name DatabaseConnections --dimensions "Name=DBClusterIdentifier,Value=$cluster_id" --start-time "$start_utc" --end-time "$end_utc" --period 60 --statistics Maximum --output json)"
+      raw="$(aws_capture aws cloudwatch get-metric-statistics --region "$AWS_REGION" --namespace AWS/RDS --metric-name DatabaseConnections --dimensions "Name=DBClusterIdentifier,Value=$cluster_id" --start-time "$start_utc" --end-time "$end_utc" --period 60 --statistics Maximum --output json)"
       receipt="$(jq -ce --arg cluster_hash "$(printf '%s' "$cluster_id" | sha256sum | awk '{print $1}')" --argjson max "$max_connections" --argjson budget "$approved_budget" --argjson margin "$safety_margin" '
           [.Datapoints[] | {timestamp:.Timestamp,count:.Maximum}] as $points
           | ($points | length) > 0
@@ -820,8 +873,8 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   ```bash
   set -Eeuo pipefail
   CANDIDATE_SHA="$(git rev-parse HEAD)"
-  test "$(aws_capture sts get-caller-identity --query Account --output text)" = "$AWS_ACCOUNT_ID"
-  REPOSITORY_IDENTITY="$(aws_capture ecr describe-repositories --region "$AWS_REGION" --repository-names "$ECR_REPOSITORY" --query 'repositories[0].{registryId:registryId,repositoryUri:repositoryUri}' --output json)"
+  test "$(aws_capture aws sts get-caller-identity --query Account --output text)" = "$AWS_ACCOUNT_ID"
+  REPOSITORY_IDENTITY="$(aws_capture aws ecr describe-repositories --region "$AWS_REGION" --repository-names "$ECR_REPOSITORY" --query 'repositories[0].{registryId:registryId,repositoryUri:repositoryUri}' --output json)"
   jq -e --arg account "$AWS_ACCOUNT_ID" --arg uri "$ECR_REGISTRY/$ECR_REPOSITORY" '.registryId == $account and .repositoryUri == $uri' <<<"$REPOSITORY_IDENTITY" >/dev/null
   test -n "${ROLLBACK_BASELINE_SHA:-}"
   test "$ROLLBACK_BASELINE_SHA" != "$CANDIDATE_SHA"
@@ -842,11 +895,11 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   ROLLBACK_BASELINE_TAG="acceptance-${ACCEPTANCE_RUN_ID}-baseline-${ROLLBACK_BASELINE_SHA}"
   CANDIDATE_TAG="acceptance-${ACCEPTANCE_RUN_ID}-0.7.1-${CANDIDATE_SHA}"
   for tag in "$ROLLBACK_BASELINE_TAG" "$CANDIDATE_TAG"; do
-      listing="$(aws_capture ecr list-images --region "$AWS_REGION" --repository-name "$ECR_REPOSITORY" --filter tagStatus=TAGGED --output json)"
+      listing="$(aws_capture aws ecr list-images --region "$AWS_REGION" --repository-name "$ECR_REPOSITORY" --filter tagStatus=TAGGED --output json)"
       jq -e --arg tag "$tag" '[.imageIds[] | select(.imageTag == $tag)] | length == 0' <<<"$listing" >/dev/null
   done
 
-  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update --file "$CONTROL_MANIFEST" --cleanup-required true --ecr-baseline-tag "$ROLLBACK_BASELINE_TAG" --ecr-candidate-tag "$CANDIDATE_TAG"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update --file "$CONTROL_MANIFEST" --cleanup-required true --ecr-registry "$ECR_REGISTRY" --ecr-repository "$ECR_REPOSITORY" --ecr-baseline-tag "$ROLLBACK_BASELINE_TAG" --ecr-candidate-tag "$CANDIDATE_TAG"
   CLEANUP_REQUIRED=1
   (
       export DOCKER_CONFIG="$(mktemp -d)"
@@ -859,8 +912,8 @@ AWS stderr. The same rule applies through Task 8 cleanup.
       docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$CANDIDATE_TAG"
       docker logout "$ECR_REGISTRY"
   )
-  ROLLBACK_BASELINE_DIGEST="$(aws_capture ecr describe-images --region "$AWS_REGION" --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$ROLLBACK_BASELINE_TAG" --query 'imageDetails[0].imageDigest' --output text)"
-  IMAGE_DIGEST="$(aws_capture ecr describe-images --region "$AWS_REGION" --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$CANDIDATE_TAG" --query 'imageDetails[0].imageDigest' --output text)"
+  ROLLBACK_BASELINE_DIGEST="$(aws_capture aws ecr describe-images --region "$AWS_REGION" --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$ROLLBACK_BASELINE_TAG" --query 'imageDetails[0].imageDigest' --output text)"
+  IMAGE_DIGEST="$(aws_capture aws ecr describe-images --region "$AWS_REGION" --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$CANDIDATE_TAG" --query 'imageDetails[0].imageDigest' --output text)"
   test -n "$ROLLBACK_BASELINE_DIGEST" && test "$ROLLBACK_BASELINE_DIGEST" != "None"
   test -n "$IMAGE_DIGEST" && test "$IMAGE_DIGEST" != "None"
   ROLLBACK_BASELINE_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY@$ROLLBACK_BASELINE_DIGEST"
@@ -887,27 +940,20 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   TF_PLAN_DIR="$(mktemp -d -p /tmp elspeth-tf-plans.XXXXXX)"
   chmod 700 "$TF_PLAN_DIR"
   trap 'rm -rf -- "$TF_PLAN_DIR"' EXIT
-  run_acceptance_tf_bounded() {
-      local seconds=""
-      seconds="$(uv run --frozen python -c 'import sys; from datetime import datetime,timedelta,timezone; d=datetime.fromisoformat(sys.argv[1].replace("Z","+00:00"))-timedelta(minutes=90); remaining=max(0,int((d-datetime.now(timezone.utc)).total_seconds())); print(min(1200,remaining))' "$ACCEPTANCE_TEARDOWN_DEADLINE_UTC")"
-      test "$seconds" -gt 0 || return 124
-      timeout --foreground "${seconds}s" "$@"
-  }
-
   plan_and_apply_scenario() {
-      local name="$1" scenario_id="$2" dir="$3" vars="$4" expected_binding="$5"
+      local name="$1" scenario_id="$2" dir="$3" vars="$4" expected_binding="$5" binding_file="$6"
       local plan="$TF_PLAN_DIR/$name.tfplan" receipt="$TF_PLAN_DIR/$name.plan.receipt.json"
-      local plan_sha="" durable_receipt="" approval_receipt=""
-      verify_tf_binding "$scenario_id" "$dir" "$vars" "$expected_binding"
-      run_acceptance_tf_bounded terraform -chdir="$dir" init -input=false -lock-timeout=5m
-      run_acceptance_tf_bounded terraform -chdir="$dir" validate
-      run_acceptance_tf_bounded terraform -chdir="$dir" plan -input=false -lock-timeout=5m \
+      local plan_sha="" noop_plan_sha="" durable_receipt="" approval_receipt="" resolved_inventory="$7"
+      terraform_capture -chdir="$dir" init -input=false -lock-timeout=5m >/dev/null
+      verify_tf_binding "$scenario_id" "$dir" "$vars" "$expected_binding" "$binding_file"
+      terraform_capture -chdir="$dir" validate >/dev/null
+      terraform_capture -chdir="$dir" plan -input=false -lock-timeout=5m \
           -var-file="$vars" \
           -var="acceptance_run_id=$ACCEPTANCE_RUN_ID" \
           -var="scenario_id=$scenario_id" \
           -var="candidate_image=$CANDIDATE_IMAGE" \
           -var="rollback_baseline_image=$ROLLBACK_BASELINE_IMAGE" \
-          -out="$plan"
+          -out="$plan" >/dev/null
       chmod 600 "$plan"
       terraform_capture -chdir="$dir" show -json "$plan" | \
           uv run --frozen python -m elspeth.web.aws_ecs_acceptance sanitize-evidence --kind terraform-plan >"$receipt"
@@ -916,28 +962,38 @@ AWS stderr. The same rule applies through Task 8 cleanup.
       durable_receipt="$(persist_sanitized_receipt "$scenario_id" terraform-plan "$plan_sha" "$receipt")"
       approval_receipt="$(require_signed_tf_plan_approval "$scenario_id" "$durable_receipt")"
       uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update --file "$CONTROL_MANIFEST" --terraform-plan-receipt "$scenario_id:$plan_sha:$durable_receipt:$approval_receipt"
-      run_acceptance_tf_bounded terraform -chdir="$dir" apply -input=false -lock-timeout=5m "$plan"
+      uv run --frozen python -m elspeth.web.aws_ecs_acceptance approval-require-current \
+        --file "$CONTROL_MANIFEST" --scenario-id "$scenario_id" --kind terraform-plan \
+        --plan-receipt-hash "$durable_receipt" --approval-hash "$approval_receipt"
+      terraform_capture -chdir="$dir" apply -input=false -lock-timeout=5m "$plan" >/dev/null
       rm -f -- "$plan" "$receipt"
-      uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update --file "$CONTROL_MANIFEST" --terraform-applied "$scenario_id"
+      uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update --file "$CONTROL_MANIFEST" --terraform-applied "$scenario_id:$plan_sha:$durable_receipt:$approval_receipt"
       plan="$TF_PLAN_DIR/$name.noop.tfplan"
       receipt="$TF_PLAN_DIR/$name.noop.receipt.json"
-      run_acceptance_tf_bounded terraform -chdir="$dir" plan -input=false -lock-timeout=5m -detailed-exitcode \
+      terraform_capture -chdir="$dir" plan -input=false -lock-timeout=5m -detailed-exitcode \
           -var-file="$vars" \
           -var="acceptance_run_id=$ACCEPTANCE_RUN_ID" \
           -var="scenario_id=$scenario_id" \
           -var="candidate_image=$CANDIDATE_IMAGE" \
           -var="rollback_baseline_image=$ROLLBACK_BASELINE_IMAGE" \
-          -out="$plan"
+          -out="$plan" >/dev/null
       chmod 600 "$plan"
       terraform_capture -chdir="$dir" show -json "$plan" | \
           uv run --frozen python -m elspeth.web.aws_ecs_acceptance sanitize-evidence --kind terraform-plan >"$receipt"
-      durable_receipt="$(persist_sanitized_receipt "$scenario_id" terraform-noop "$(sha256sum "$plan" | awk '{print $1}')" "$receipt")"
-      uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update --file "$CONTROL_MANIFEST" --terraform-noop-receipt "$scenario_id:$durable_receipt"
+      noop_plan_sha="$(sha256sum "$plan" | awk '{print $1}')"
+      durable_receipt="$(persist_sanitized_receipt "$scenario_id" terraform-noop "$noop_plan_sha" "$receipt")"
+      uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update --file "$CONTROL_MANIFEST" --terraform-noop-receipt "$scenario_id:$noop_plan_sha:$durable_receipt"
       rm -f -- "$plan" "$receipt"
+      uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest bind-scenario \
+        --file "$CONTROL_MANIFEST" --scenario-id "$scenario_id" --inventory "$resolved_inventory"
   }
 
-  plan_and_apply_scenario scenario_a A "$SCENARIO_A_TF_DIR" "$SCENARIO_A_TF_VARS" "$SCENARIO_A_TF_BINDING_SHA"
-  plan_and_apply_scenario scenario_b B "$SCENARIO_B_TF_DIR" "$SCENARIO_B_TF_VARS" "$SCENARIO_B_TF_BINDING_SHA"
+  export SCENARIO_A_RESOLVED_INVENTORY="${SCENARIO_A_RESOLVED_INVENTORY:?set new protected post-apply Scenario A inventory path}"
+  export SCENARIO_B_RESOLVED_INVENTORY="${SCENARIO_B_RESOLVED_INVENTORY:?set new protected post-apply Scenario B inventory path}"
+  plan_and_apply_scenario scenario_a A "$SCENARIO_A_TF_DIR" "$SCENARIO_A_TF_VARS" "$SCENARIO_A_TF_BINDING_SHA" "$SCENARIO_A_TF_BINDING_FILE" "$SCENARIO_A_RESOLVED_INVENTORY"
+  plan_and_apply_scenario scenario_b B "$SCENARIO_B_TF_DIR" "$SCENARIO_B_TF_VARS" "$SCENARIO_B_TF_BINDING_SHA" "$SCENARIO_B_TF_BINDING_FILE" "$SCENARIO_B_RESOLVED_INVENTORY"
+  load_scenario A
+  load_scenario B
   ```
 
   `terraform plan -out` files can contain cleartext sensitive values. They
@@ -963,6 +1019,11 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   session-token, profile, role, or endpoint override in environment/secrets/
   command, and every secret-backed ELSPETH setting present only in
   `containerDefinitions[].secrets`. Require web/payload/local-auth verifier
+  definitions to contain the exact non-secret values
+  `ELSPETH_ACCEPTANCE_CANDIDATE_SHA=$CANDIDATE_SHA` and
+  `ELSPETH_ACCEPTANCE_SCENARIO_ID=$SCENARIO_ID`; a caller-supplied task ARN is
+  forbidden because the in-task receipt resolves it only from ECS v4 metadata.
+  Require web/payload/local-auth verifier
   database secret references to resolve, under database-operator attestation,
   to a DML-only runtime PostgreSQL principal with no schema CREATE or ownership;
   require init-capable candidate/rollback doctor definitions to use a distinct
@@ -1085,16 +1146,28 @@ AWS stderr. The same rule applies through Task 8 cleanup.
 
   ```bash
   run_candidate_role_check() {
-      local task_arn="$1" check="$2" stream="" receipt=""
+      local task_arn="$1" check="$2" phase="${3:-}" stream="" receipt_file="" command="" task_hash=""
       case "$check" in
         verify-s3|verify-bedrock|verify-bedrock-guardrails|verify-operator-telemetry) ;;
         *) return 64 ;;
       esac
-      stream="$(aws_capture ecs execute-command --cluster "$ECS_CLUSTER" --task "$task_arn" --container "$WEB_CONTAINER_NAME" --interactive --command "python -m elspeth.web.aws_ecs_acceptance $check")"
-      receipt="$(printf '%s' "$stream" | uv run --frozen python -m elspeth.web.aws_ecs_acceptance extract-exec-receipt --check "$check" --candidate-sha "$CANDIDATE_SHA" --task-arn "$task_arn" --scenario-id "$ACTIVE_SCENARIO_ID")"
+      case "$phase" in
+        "") command="python -m elspeth.web.aws_ecs_acceptance $check" ;;
+        positive|outage)
+          test "$check" = verify-operator-telemetry || return 64
+          command="python -m elspeth.web.aws_ecs_acceptance $check --phase $phase"
+          ;;
+        *) return 64 ;;
+      esac
+      stream="$(aws_capture aws ecs execute-command --cluster "$ECS_CLUSTER" --task "$task_arn" --container "$WEB_CONTAINER_NAME" --interactive --command "$command")"
+      receipt_file="$(mktemp -p /tmp elspeth-exec-receipt.XXXXXX)"
+      chmod 600 "$receipt_file"
+      printf '%s' "$stream" | uv run --frozen python -m elspeth.web.aws_ecs_acceptance extract-exec-receipt --check "$check" --candidate-sha "$CANDIDATE_SHA" --task-arn "$task_arn" --scenario-id "$ACTIVE_SCENARIO_ID" >"$receipt_file"
       unset stream
-      jq -e --arg check "$check" --arg sha "$CANDIDATE_SHA" --arg task "$task_arn" --arg scenario "$ACTIVE_SCENARIO_ID" '.schema == "elspeth.aws-ecs-exec-receipt.v1" and .ok == true and .check == $check and .candidate_sha == $sha and .task_arn == $task and .scenario_id == $scenario' <<<"$receipt" >/dev/null
-      persist_sanitized_receipt "$ACTIVE_SCENARIO_ID" "$check" "$task_arn" "$receipt"
+      task_hash="$(printf '%s' "$task_arn" | sha256sum | awk '{print $1}')"
+      jq -e --arg check "$check" --arg sha "$CANDIDATE_SHA" --arg task_hash "$task_hash" --arg scenario "$ACTIVE_SCENARIO_ID" '.version == 1 and .ok == true and .check == $check and .candidate_sha == $sha and .task_arn_sha256 == $task_hash and .scenario_id == $scenario' "$receipt_file" >/dev/null
+      persist_sanitized_receipt "$ACTIVE_SCENARIO_ID" "$check" "$task_arn" "$receipt_file"
+      rm -f "$receipt_file"
   }
 
   run_candidate_role_checks() {
@@ -1103,7 +1176,20 @@ AWS stderr. The same rule applies through Task 8 cleanup.
       run_candidate_role_check "$task_arn" verify-s3
       run_candidate_role_check "$task_arn" verify-bedrock
       run_candidate_role_check "$task_arn" verify-bedrock-guardrails
-      run_candidate_role_check "$task_arn" verify-operator-telemetry
+      run_candidate_role_check "$task_arn" verify-operator-telemetry positive
+  }
+
+  prove_operator_telemetry_outage_and_recovery() {
+      local task_arn="$1" replacement_task=""
+      run_candidate_role_check "$task_arn" verify-operator-telemetry positive
+      aws_capture aws ecs execute-command --cluster "$ECS_CLUSTER" --task "$task_arn" --container cloudwatch-agent --interactive --command "/bin/sh -c 'kill -TERM 1'" >/dev/null
+      run_candidate_role_check "$task_arn" verify-operator-telemetry outage
+      aws_capture aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --task-definition "$CANDIDATE_TASK_DEFINITION" --desired-count 1 --force-new-deployment --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' >/dev/null
+      aws_capture aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+      replacement_task="$(aws_capture aws ecs list-tasks --cluster "$ECS_CLUSTER" --service-name "$ECS_SERVICE" --desired-status RUNNING --query 'taskArns[0]' --output text)"
+      test -n "$replacement_task" && test "$replacement_task" != None && test "$replacement_task" != "$task_arn"
+      require_exec_agent_running "$replacement_task"
+      run_candidate_role_check "$replacement_task" verify-operator-telemetry positive
   }
   ```
 
@@ -1135,16 +1221,21 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   task that contributes
   evidence: Scenario A initial task, forced replacement, and first-recovery;
   Scenario B initial candidate and candidate-after-rollback redeploy. A receipt
-  from an earlier task ARN cannot be reused. S3 inputs are already present in
+  from an earlier task ARN cannot be reused. In Scenario A, invoke
+  `prove_operator_telemetry_outage_and_recovery TASK_ARN` once after the first
+  complete positive role-check pass; the outage proof must precede task
+  replacement and the final positive proof must come from that distinct
+  replacement task. S3 inputs are already present in
   each candidate task definition as `ELSPETH_ACCEPTANCE_S3_BUCKET`,
-  UUID-scoped `ELSPETH_ACCEPTANCE_S3_PREFIX`, and region; ECS Exec does not
-  inject replacement environment variables.
+  UUID-scoped `ELSPETH_ACCEPTANCE_S3_PREFIX`, region, candidate SHA, and
+  scenario ID; ECS Exec does not inject replacement environment variables.
 
 - [ ] In Scenario B, prepare the real-browser OIDC evidence runner. Supply the
   Cognito test credentials only through pre-existing environment variables;
   never put them in the command, evidence, trace, screenshot, or change record:
 
   ```bash
+  load_scenario B
   test -n "${OIDC_TEST_USERNAME:-}"
   test -n "${OIDC_TEST_PASSWORD:-}"
   test -n "${OIDC_EXPECTED_ISSUER:-}"
@@ -1156,14 +1247,16 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   uv run --frozen python -c 'import sys; from urllib.parse import urlsplit; u=urlsplit(sys.argv[1]); assert u.scheme == "https" and u.netloc and u.hostname is not None and u.username is None and u.password is None and u.path == "" and not u.query and not u.fragment; origin = f"https://{u.hostname.lower()}" + (f":{u.port}" if u.port not in (None, 443) else ""); assert sys.argv[1] == origin' "$ALB_BASE_URL"
   OIDC_EVIDENCE_DIR="$(mktemp -d -p /tmp elspeth-oidc.XXXXXX)"
   chmod 700 "$OIDC_EVIDENCE_DIR"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update --file "$CONTROL_MANIFEST" --oidc-evidence-dir "$OIDC_EVIDENCE_DIR"
   ACCEPTANCE_STATE=""
   COGNITO_CLIENT_PREFLIGHT="$OIDC_EVIDENCE_DIR/cognito-app-client.preflight"
   : > "$COGNITO_CLIENT_PREFLIGHT"
   chmod 600 "$COGNITO_CLIENT_PREFLIGHT"
-  ALB_ATTRIBUTES="$(aws_capture elbv2 describe-load-balancer-attributes --load-balancer-arn "$ALB_ARN" --output json)"
+  ALB_ATTRIBUTES="$(aws_capture aws elbv2 describe-load-balancer-attributes --load-balancer-arn "$ALB_ARN" --output json)"
   jq -e '[.Attributes[] | select(.Key == "access_logs.s3.enabled")][0].Value == "false"' <<<"$ALB_ATTRIBUTES" >/dev/null
-  aws_capture cognito-idp describe-user-pool-client --region "$AWS_REGION" --user-pool-id "$COGNITO_USER_POOL_ID" --client-id "$OIDC_EXPECTED_AUDIENCE" --query "UserPoolClient.{clientId:ClientId,allowedOAuthFlowsUserPoolClient:AllowedOAuthFlowsUserPoolClient,allowedOAuthFlows:AllowedOAuthFlows,allowedOAuthScopes:AllowedOAuthScopes,callbackURLs:CallbackURLs,hasClientSecret:contains(keys(@), 'ClientSecret')}" --output json > "$COGNITO_CLIENT_PREFLIGHT"
-  jq -e --arg client "$OIDC_EXPECTED_AUDIENCE" --arg callback "$ALB_BASE_URL" '.clientId == $client and .allowedOAuthFlowsUserPoolClient == true and .hasClientSecret == false and (.allowedOAuthFlows | index("code")) != null and (.allowedOAuthFlows | index("implicit")) == null and ((["openid","profile","email"] - .allowedOAuthScopes) | length) == 0 and (.callbackURLs | index($callback)) != null' "$COGNITO_CLIENT_PREFLIGHT"
+  aws_capture aws cognito-idp describe-user-pool-client --region "$AWS_REGION" --user-pool-id "$COGNITO_USER_POOL_ID" --client-id "$OIDC_EXPECTED_AUDIENCE" --query "UserPoolClient.{clientId:ClientId,allowedOAuthFlowsUserPoolClient:AllowedOAuthFlowsUserPoolClient,allowedOAuthFlows:AllowedOAuthFlows,allowedOAuthScopes:AllowedOAuthScopes,callbackURLs:CallbackURLs,hasClientSecret:contains(keys(@), 'ClientSecret')}" --output json > "$COGNITO_CLIENT_PREFLIGHT"
+  OIDC_REDIRECT_URI="${ALB_BASE_URL}/"
+  jq -e --arg client "$OIDC_EXPECTED_AUDIENCE" --arg callback "$OIDC_REDIRECT_URI" '.clientId == $client and .allowedOAuthFlowsUserPoolClient == true and .hasClientSecret == false and (.allowedOAuthFlows | index("code")) != null and (.allowedOAuthFlows | index("implicit")) == null and ((["openid","profile","email"] - .allowedOAuthScopes) | length) == 0 and (.callbackURLs | index($callback)) != null' "$COGNITO_CLIENT_PREFLIGHT"
   run_oidc_evidence() {
       phase="$1"
       STAGING_BASE_URL="$ALB_BASE_URL" OIDC_TEST_USERNAME="$OIDC_TEST_USERNAME" OIDC_TEST_PASSWORD="$OIDC_TEST_PASSWORD" OIDC_EXPECTED_ISSUER="$OIDC_EXPECTED_ISSUER" OIDC_EXPECTED_AUDIENCE="$OIDC_EXPECTED_AUDIENCE" OIDC_EXPECTED_AUTHORIZATION_ORIGIN="$OIDC_EXPECTED_AUTHORIZATION_ORIGIN" OIDC_EXPECTED_AUDIENCE_CLAIM="$OIDC_EXPECTED_AUDIENCE_CLAIM" OIDC_EVIDENCE_PHASE="$phase" OIDC_EVIDENCE_FILE="$OIDC_EVIDENCE_DIR/$phase.json" npm --prefix src/elspeth/web/frontend run test:e2e:oidc
@@ -1201,19 +1294,20 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   healthy task:
 
   ```bash
-  BASELINE_PRE_DEPLOYMENT="$(aws_capture ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --query 'services[0].deployments[?status==`PRIMARY`].[id,createdAt]' --output json)"
-  aws_capture ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --task-definition "$PREVIOUS_TASK_DEFINITION" --desired-count 1 --force-new-deployment --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' >/dev/null
-  aws_capture ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
-  BASELINE_TASK_ARN="$(aws_capture ecs list-tasks --cluster "$ECS_CLUSTER" --service-name "$ECS_SERVICE" --desired-status RUNNING --query 'taskArns[0]' --output text)"
+  load_scenario B
+  BASELINE_PRE_DEPLOYMENT="$(aws_capture aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --query 'services[0].deployments[?status==`PRIMARY`].[id,createdAt]' --output json)"
+  aws_capture aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --task-definition "$PREVIOUS_TASK_DEFINITION" --desired-count 1 --force-new-deployment --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' >/dev/null
+  aws_capture aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+  BASELINE_TASK_ARN="$(aws_capture aws ecs list-tasks --cluster "$ECS_CLUSTER" --service-name "$ECS_SERVICE" --desired-status RUNNING --query 'taskArns[0]' --output text)"
   test -n "$BASELINE_TASK_ARN" && test "$BASELINE_TASK_ARN" != "None"
-  aws_capture ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" | jq -e --arg td "$PREVIOUS_TASK_DEFINITION" '(.services | length) == 1 and .services[0].desiredCount == 1 and .services[0].runningCount == 1 and .services[0].pendingCount == 0 and ([.services[0].deployments[] | select(.status == "PRIMARY" and .taskDefinition == $td and .rolloutState == "COMPLETED")] | length) == 1'
-  aws_capture ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$BASELINE_TASK_ARN" | jq -e --arg td "$PREVIOUS_TASK_DEFINITION" '(.failures | length) == 0 and (.tasks | length) == 1 and .tasks[0].taskDefinitionArn == $td'
-  BASELINE_POST_DEPLOYMENT="$(aws_capture ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --query 'services[0].deployments[?status==`PRIMARY`].[id,createdAt]' --output json)"
+  aws_capture aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" | jq -e --arg td "$PREVIOUS_TASK_DEFINITION" '(.services | length) == 1 and .services[0].desiredCount == 1 and .services[0].runningCount == 1 and .services[0].pendingCount == 0 and ([.services[0].deployments[] | select(.status == "PRIMARY" and .taskDefinition == $td and .rolloutState == "COMPLETED")] | length) == 1'
+  aws_capture aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$BASELINE_TASK_ARN" | jq -e --arg td "$PREVIOUS_TASK_DEFINITION" '(.failures | length) == 0 and (.tasks | length) == 1 and .tasks[0].taskDefinitionArn == $td'
+  BASELINE_POST_DEPLOYMENT="$(aws_capture aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --query 'services[0].deployments[?status==`PRIMARY`].[id,createdAt]' --output json)"
   test "$BASELINE_POST_DEPLOYMENT" != "$BASELINE_PRE_DEPLOYMENT"
   ```
 
   Before enabling traffic, rerun
-  `aws_capture elbv2 describe-target-groups --target-group-arns "$TARGET_GROUP_ARN"`
+  `aws_capture aws elbv2 describe-target-groups --target-group-arns "$TARGET_GROUP_ARN"`
   and retain the sanitized response as evidence. Require exactly one target
   group with `TargetType == "ip"`, `HealthCheckEnabled == true`,
   `HealthCheckPath == "/api/ready"`, `Matcher.HttpCode == "200"`, and
@@ -1239,6 +1333,13 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   returned doctor check successful. Testcontainers or a skipped integration
   test is not a substitute.
 
+  ```bash
+  load_scenario A
+  # Execute both Scenario A doctor invocations with only this loaded inventory.
+  load_scenario B
+  # Execute the Scenario B candidate non-mutating doctor with only this loaded inventory.
+  ```
+
 - [ ] Execute the implemented runbook from preflight through candidate-aware
   acceptance in **both** scenarios: `DEPLOYMENT_MODE=first` in A and
   `DEPLOYMENT_MODE=upgrade` in B. Enforce one web task, no service autoscaling,
@@ -1250,9 +1351,21 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   target, probe, event, or log failure invokes that scenario's runbook rollback
   path and returns NO-GO.
 
+  ```bash
+  load_scenario A
+  # Execute the complete first-deploy runbook path, then discard generic scenario variables.
+  load_scenario B
+  # Execute the complete upgrade runbook path, then discard generic scenario variables.
+  ```
+
 - [ ] After Scenario B's initial candidate acceptance, run
   `run_oidc_evidence candidate-initial`. Its issuer, audience, and
   SHA-256(subject) must match the previous-release evidence.
+
+  ```bash
+  load_scenario B
+  run_oidc_evidence candidate-initial
+  ```
 
 - [ ] In local-auth Scenario A, use the shipped acceptance harness to prove
   the exact public API journey and capture non-secret evidence before task
@@ -1260,12 +1373,14 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   environment variables; the module must not print or persist them:
 
   ```bash
+  load_scenario A
   test -n "${ELSPETH_ACCEPTANCE_USERNAME:-}"
   test -n "${ELSPETH_ACCEPTANCE_PASSWORD:-}"
   export ELSPETH_ACCEPTANCE_REGISTER=1
   export ELSPETH_ACCEPTANCE_BASE_URL="$ALB_BASE_URL"
   ACCEPTANCE_STATE="$(mktemp -p /tmp elspeth-acceptance.XXXXXX)"
   chmod 600 "$ACCEPTANCE_STATE"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update --file "$CONTROL_MANIFEST" --acceptance-state-path "$ACCEPTANCE_STATE"
   uv run --frozen python -m elspeth.web.aws_ecs_acceptance capture --state-file "$ACCEPTANCE_STATE"
   SESSION_ID="$(jq -er .session_id "$ACCEPTANCE_STATE")"
   APP_RUN_ID="$(jq -er .run_id "$ACCEPTANCE_STATE")"
@@ -1285,18 +1400,23 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   surface against the replacement:
 
   ```bash
-  ORIGINAL_TASK_ARN="$(aws_capture ecs list-tasks --cluster "$ECS_CLUSTER" --service-name "$ECS_SERVICE" --desired-status RUNNING --query 'taskArns[0]' --output text)"
+  load_scenario A
+  ORIGINAL_TASK_ARN="$(aws_capture aws ecs list-tasks --cluster "$ECS_CLUSTER" --service-name "$ECS_SERVICE" --desired-status RUNNING --query 'taskArns[0]' --output text)"
   test -n "$ORIGINAL_TASK_ARN" && test "$ORIGINAL_TASK_ARN" != "None"
-  aws_capture ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --force-new-deployment --desired-count 1 --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' >/dev/null
-  aws_capture ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
-  REPLACEMENT_TASK_ARN="$(aws_capture ecs list-tasks --cluster "$ECS_CLUSTER" --service-name "$ECS_SERVICE" --desired-status RUNNING --query 'taskArns[0]' --output text)"
+  aws_capture aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --force-new-deployment --desired-count 1 --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' >/dev/null
+  aws_capture aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+  REPLACEMENT_TASK_ARN="$(aws_capture aws ecs list-tasks --cluster "$ECS_CLUSTER" --service-name "$ECS_SERVICE" --desired-status RUNNING --query 'taskArns[0]' --output text)"
   test -n "$REPLACEMENT_TASK_ARN" && test "$REPLACEMENT_TASK_ARN" != "None"
   test "$ORIGINAL_TASK_ARN" != "$REPLACEMENT_TASK_ARN"
   uv run --frozen python -m elspeth.web.aws_ecs_acceptance verify-api --state-file "$ACCEPTANCE_STATE"
+  PAYLOAD_OVERRIDES="$(jq -cn --arg name "$WEB_CONTAINER_NAME" --arg run "$LANDSCAPE_RUN_ID" '{containerOverrides:[{name:$name,command:["python","-m","elspeth.web.aws_ecs_acceptance","verify-payloads","--landscape-run-id",$run]}]}')"
+  PAYLOAD_TASK_ARN="$(aws_capture aws ecs run-task --cluster "$ECS_CLUSTER" --task-definition "$PAYLOAD_VERIFIER_TASK_DEFINITION" --launch-type FARGATE --network-configuration "$DOCTOR_NETWORK_CONFIGURATION" --count 1 --overrides "$PAYLOAD_OVERRIDES" --query 'tasks[0].taskArn' --output text)"
+  aws_capture aws ecs wait tasks-stopped --cluster "$ECS_CLUSTER" --tasks "$PAYLOAD_TASK_ARN" >/dev/null
+  aws_capture aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$PAYLOAD_TASK_ARN" --output json | jq -e --arg task "$PAYLOAD_TASK_ARN" '(.failures | length) == 0 and (.tasks | length) == 1 and .tasks[0].taskArn == $task and all(.tasks[0].containers[] | select(.essential == true); .exitCode == 0)' >/dev/null
   run_candidate_role_checks "$REPLACEMENT_TASK_ARN"
   ```
 
-  Separately run `PAYLOAD_VERIFIER_TASK_DEFINITION` as a one-shot Fargate task
+  The payload proof above runs `PAYLOAD_VERIFIER_TASK_DEFINITION` as a one-shot Fargate task
   with an override supplying only `verify-payloads --landscape-run-id
   $LANDSCAPE_RUN_ID`; require empty launch failures, the exact stopped task,
   explicit UID/GID 1000, and exit 0 for every essential container. ECS Exec is
@@ -1320,6 +1440,13 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   and outputs. Any failed or missing sample resets that scenario's ten-minute
   window after repair/redeploy.
 
+  ```bash
+  load_scenario A
+  # Run and persist Scenario A's complete final observation window.
+  load_scenario B
+  # Run and persist Scenario B's complete final observation window.
+  ```
+
 - [ ] Rehearse **both** manual rollback branches; success in one mode never
   substitutes for the other:
 
@@ -1341,6 +1468,8 @@ AWS stderr. The same rule applies through Task 8 cleanup.
     the complete 20-sample observation. Keep the mode-0600
     `ACCEPTANCE_STATE` file for Task 8's evidence export; it contains only the
     non-secret IDs/hashes declared by the harness contract.
+    Begin this branch with `load_scenario A`; reload A again before the
+    first-recovery doctor, deployment, role-check, and observation sequence.
   - Scenario B (`upgrade`): require the signed compatibility record permits
     rollback. If current-state compatibility is uncertain, run the
     non-mutating rollback-baseline doctor before service mutation. Restore the
@@ -1356,6 +1485,16 @@ AWS stderr. The same rule applies through Task 8 cleanup.
     `run_oidc_evidence candidate-after-redeploy`, and the complete
     20-sample observation. Require
     `jq -s -e 'length == 4 and ([.[].phase] | unique | length) == 4 and ([.[].issuer] | unique | length) == 1 and ([.[].authorization_origin] | unique | length) == 1 and ([.[].audience] | unique | length) == 1 and ([.[].subject_sha256] | unique | length) == 1 and all(.[]; .audience_claim == "client_id" and .auth_me_status == 200 and .session_create_status == 201 and .session_read_status == 200 and .session_delete_status == 204 and .session_round_trip == true)' "$OIDC_EVIDENCE_DIR"/*.json`.
+    Begin this branch with `load_scenario B`; reload B before the rollback
+    doctor, previous deployment, candidate redeploy, each OIDC phase, role
+    checks, and the final observation sequence.
+
+  ```bash
+  load_scenario A
+  # Execute Scenario A rollback and first-recovery branch.
+  load_scenario B
+  # Execute Scenario B previous rollback and candidate redeploy branch.
+  ```
 
   Leave both disposable environments in their approved candidate state only
   until Task 8 exports evidence and destroys them. If either branch cannot be
@@ -1365,6 +1504,20 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   intact for Task 8. There is deliberately no evidence-deleting EXIT trap:
   after external mutation, even an early failure must preserve available
   sanitized evidence until the cleanup coordinator exports it.
+
+  Before recording the final Task 7 checkbox, the evidence owner writes one
+  mode-0600 closed `elspeth.aws-ecs-retained-evidence.v1` receipt containing
+  the run ID, candidate SHA, capture time, and separate Scenario A/B exact
+  CloudWatch metric queries and X-Ray trace IDs with matching counts. Each
+  metric query must carry its run-and-scenario namespace. Bind it once; the
+  resource inventories remain immutable and may not be replaced to add
+  post-observation facts:
+
+  ```bash
+  export RETAINED_EVIDENCE_RECEIPT="${RETAINED_EVIDENCE_RECEIPT:?set protected Task 7 retained-evidence receipt path}"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest bind-retained-evidence \
+    --file "$CONTROL_MANIFEST" --receipt "$RETAINED_EVIDENCE_RECEIPT"
+  ```
 
 **Definition of Done:**
 
@@ -1407,7 +1560,8 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   `DatabaseConnections` receipts satisfying the approved budget and safety
   margin against signed `max_connections` values.
 - [ ] Sanitized evidence binds the live result to the Task 1 SHA and immutable
-  candidate plus rollback-baseline image/task-definition identities.
+  candidate plus rollback-baseline image/task-definition identities; the
+  one-way retained-evidence receipt is bound after both observation windows.
 
 ---
 
@@ -1417,6 +1571,15 @@ AWS stderr. The same rule applies through Task 8 cleanup.
 approved Terraform acceptance stacks, their test identities/secrets, and the
 run-scoped ECR tags. It reads and checkpoints the protected control manifest
 and gate ledger at the owner-approved durable control location.
+
+Task 8's five ledger IDs are fixed to the five visible checkboxes in this order:
+`task8.check01` is protected cleanup resume, `task8.check02` is the initial
+pre-cleanup recovery export, `task8.check03` is the preserved original
+pre-apply inventory/tag proof, `task8.check04` is identity/shared-resource
+cleanup, and `task8.check05` is successful aggregate coordinator completion.
+The finalizer alone records `task8.check05` after every cleanup surface is
+confirmed; no later caller record is permitted. Failed attempts update only
+the resumable manifest state and do not write a nonzero immutable gate row.
 
 - [ ] Start or resume from the durable control manifest, never from remembered
   shell state. `control-manifest validate` must bind the expected candidate
@@ -1438,11 +1601,20 @@ and gate ledger at the owner-approved durable control location.
   . "$CLEANUP_ENV"
   rm -f -- "$CLEANUP_ENV"
   trap - EXIT
+  if test "$CLEANUP_REQUIRED" = "0"; then
+      uv run --frozen python -m elspeth.web.aws_ecs_acceptance cleanup-evidence-finalize \
+        --file "$CONTROL_MANIFEST" --ledger "$GATE_LEDGER" --phase commit --clear-cleanup-required
+      uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest validate \
+        --file "$CONTROL_MANIFEST" --cleanup-only --require-cleanup-cleared
+      exit 0
+  fi
   test "$CLEANUP_REQUIRED" = "1"
   if test "${DEADLINE_EXPIRED:-0}" = "1"; then
       ACCEPTANCE_REENTRY_FORBIDDEN=1
   fi
   test "${ACCEPTANCE_REENTRY_FORBIDDEN:-0}" = "0" || test "${DEADLINE_EXPIRED:-0}" = "1"
+  TASK8_RESUME_RECEIPT_HASH="$(sha256sum "$CONTROL_MANIFEST" | awk '{print $1}')"
+  record_gate_check task8.check01 0 "$TASK8_RESUME_RECEIPT_HASH"
   ```
 
   **Expected result:** the closed assignments reconstruct every cleanup
@@ -1453,31 +1625,77 @@ and gate ledger at the owner-approved durable control location.
   available sanitized change/compatibility record, command result, CI link,
   app-client preflight, OIDC evidence file, acceptance state, and Terraform
   plan/inventory identifier to the approved durable destination. Verify its
-  manifest and checksums, then set `EVIDENCE_EXPORT_CONFIRMED=1`. Never export
+  manifest and checksums. The evidence owner writes a mode-0600 protected
+  `elspeth.aws-ecs-evidence-export.v1` receipt containing exactly the original
+  run ID, `EVIDENCE_DESTINATION_SHA256`, canonical stored-receipts-and-approvals hash,
+  canonical ledger-records hash, positive artifact count, UTC export time,
+  and `verified: true`; bind it before setting `EVIDENCE_EXPORT_CONFIRMED=1`:
+
+  ```bash
+  export EVIDENCE_EXPORT_RECEIPT="${EVIDENCE_EXPORT_RECEIPT:?set protected durable-export receipt path}"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+    --file "$CONTROL_MANIFEST" --evidence-export-receipt "$EVIDENCE_EXPORT_RECEIPT"
+  TASK8_INITIAL_EXPORT_HASH="$(sha256sum "$EVIDENCE_EXPORT_RECEIPT" | awk '{print $1}')"
+  record_gate_check task8.check02 0 "$TASK8_INITIAL_EXPORT_HASH"
+  ```
+
+  This first receipt is the pre-cleanup recovery copy; it does not confirm the
+  `evidence_export` cleanup surface because destroy and orphan-sweep receipts
+  do not exist yet. After every evidence-producing cleanup operation, the
+  evidence owner performs an incremental final export and writes a distinct
+  final receipt. `cleanup-evidence-finalize --phase prepare` reopens the final
+  receipt and verifies both hashes and the destination binding from a fresh
+  process before local deletion. Never export
   credentials, tokens, raw database URLs, ECR login material, or raw payloads.
   If export fails, keep the mode-protected local evidence for owner recovery,
-  set the flag to 0, checkpoint `evidence_export: failed`, and continue the
+  leave the pre-cleanup receipt unbound, checkpoint `evidence_export: failed`, and continue the
   remaining cleanup attempts. The export operation has a deadline-derived
   timeout; success checkpoints `evidence_export: confirmed` before continuing.
 - [ ] Require the Task-7 inventory/evidence manifest contains the original
   `ACCEPTANCE_RUN_ID` and pre-apply tag-coverage proof. Do not generate a new
   cleanup-time value; the original tag is the orphan-recovery key after partial
   applies.
+
+  ```bash
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest load-cleanup \
+    --file "$CONTROL_MANIFEST" --shell-assignments >/dev/null
+  SCENARIO_A_PREAPPLY_SHA="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field scenarios.A.preapply_inventory_sha256)"
+  SCENARIO_B_PREAPPLY_SHA="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field scenarios.B.preapply_inventory_sha256)"
+  test -n "$SCENARIO_A_PREAPPLY_SHA" && test -n "$SCENARIO_B_PREAPPLY_SHA"
+  test "$SCENARIO_A_PREAPPLY_SHA" != "$SCENARIO_B_PREAPPLY_SHA"
+  TASK8_INVENTORY_PROOF_HASH="$(printf '%s\n%s\n%s\n' "$ACCEPTANCE_RUN_ID" "$SCENARIO_A_PREAPPLY_SHA" "$SCENARIO_B_PREAPPLY_SHA" | sha256sum | awk '{print $1}')"
+  record_gate_check task8.check03 0 "$TASK8_INVENTORY_PROOF_HASH"
+  ```
 - [ ] Independently attempt identity/session cleanup. The identity owner
   deletes the disposable Cognito user or rotates its password to a new
   unrecorded value and revokes active sessions. Store only a signed completion
-  receipt keyed by subject hash—never username or credential—and set
-  `IDENTITY_CLEANUP_CONFIRMED=1` only on success. Likewise set
-  `SHARED_RESOURCE_CLEANUP_CONFIRMED=1` after the inventory proves there were
+  receipt keyed by subject hash—never username or credential—and durably
+  checkpoint `identity_cleanup: confirmed` only on success. Likewise
+  checkpoint `shared_resource_cleanup: confirmed` after the inventory proves there were
   no shared exclusions or every excluded resource has a signed deletion or
   restoration receipt. The coordinator bounds the wait for each owner action
   by the teardown deadline, checkpoints identity and shared-resource surfaces
   independently as confirmed/failed, and continues after a timeout. No
   release/promotion tag may be created in this task.
+
+  Do not carry either confirmation only in a shell flag. Immediately after
+  validating and exporting each signed owner receipt, persist the result:
+
+  ```bash
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+    --file "$CONTROL_MANIFEST" --cleanup-checkpoint identity_cleanup:confirmed
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+    --file "$CONTROL_MANIFEST" --cleanup-checkpoint shared_resource_cleanup:confirmed
+  test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field cleanup_states.identity_cleanup)" = "confirmed"
+  test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field cleanup_states.shared_resource_cleanup)" = "confirmed"
+  TASK8_OWNER_CLEANUP_HASH="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field cleanup_states | sha256sum | awk '{print $1}')"
+  record_gate_check task8.check04 0 "$TASK8_OWNER_CLEANUP_HASH"
+  ```
 - [ ] Run the remaining coordinator in one Bash shell. It deliberately does
   not use `set -e`: every operation is checked in an `if` branch, every failure
   is recorded, and all independent cleanup surfaces are attempted before the
-  final aggregate non-zero result:
+  final aggregate result. Failed attempts remain retryable manifest state; the
+  finalizer writes the only aggregate ledger row after all surfaces confirm:
 
   ```bash
   set -o pipefail
@@ -1502,56 +1720,76 @@ and gate ledger at the owner-approved durable control location.
   trap cleanup_interrupted INT TERM
   if test "${DEADLINE_EXPIRED:-0}" = "1"; then
       VERDICT_FAILURES+=(teardown_deadline)
-      if test -n "${EMERGENCY_CLEANUP_DEADLINE_UTC:-}" && uv run --frozen python -c 'import sys; from datetime import datetime,timezone; assert datetime.now(timezone.utc) < datetime.fromisoformat(sys.argv[1].replace("Z","+00:00"))' "$EMERGENCY_CLEANUP_DEADLINE_UTC"; then
-          CLEANUP_EFFECTIVE_DEADLINE_UTC="$EMERGENCY_CLEANUP_DEADLINE_UTC"
-      else
-          CLEANUP_EFFECTIVE_DEADLINE_UTC="$(uv run --frozen python -c 'from datetime import datetime,timedelta,timezone; print((datetime.now(timezone.utc)+timedelta(hours=4)).isoformat().replace("+00:00","Z"))')"
-          uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update --file "$CONTROL_MANIFEST" --verdict-failure teardown_deadline --emergency-cleanup-deadline-utc "$CLEANUP_EFFECTIVE_DEADLINE_UTC" --cleanup-escalation emergency_horizon_started_or_renewed
-      fi
+      test -n "${EMERGENCY_CLEANUP_DEADLINE_UTC:-}" || { record_cleanup_failure emergency_deadline_missing; exit 1; }
+      CLEANUP_EFFECTIVE_DEADLINE_UTC="$EMERGENCY_CLEANUP_DEADLINE_UTC"
   else
       CLEANUP_EFFECTIVE_DEADLINE_UTC="$ACCEPTANCE_TEARDOWN_DEADLINE_UTC"
   fi
+  refresh_cleanup_deadline() {
+      local refresh_file=""
+      refresh_file="$(mktemp -p /tmp elspeth-cleanup-refresh.XXXXXX)" || return 1
+      chmod 600 "$refresh_file" || { rm -f -- "$refresh_file"; return 1; }
+      if ! uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest load-cleanup \
+          --file "$CONTROL_MANIFEST" --shell-assignments >"$refresh_file"; then
+          rm -f -- "$refresh_file"
+          return 1
+      fi
+      . "$refresh_file"
+      rm -f -- "$refresh_file"
+      if test "${DEADLINE_EXPIRED:-0}" = "1"; then
+          test -n "${EMERGENCY_CLEANUP_DEADLINE_UTC:-}" || return 1
+          CLEANUP_EFFECTIVE_DEADLINE_UTC="$EMERGENCY_CLEANUP_DEADLINE_UTC"
+      else
+          CLEANUP_EFFECTIVE_DEADLINE_UTC="$ACCEPTANCE_TEARDOWN_DEADLINE_UTC"
+      fi
+  }
   run_cleanup_bounded() {
       local seconds=""
+      refresh_cleanup_deadline || return 125
       seconds="$(uv run --frozen python -c 'import sys; from datetime import datetime,timezone; d=datetime.fromisoformat(sys.argv[1].replace("Z","+00:00")); remaining=max(0,int((d-datetime.now(timezone.utc)).total_seconds())); print(min(1200,remaining))' "$CLEANUP_EFFECTIVE_DEADLINE_UTC")"
       test "$seconds" -gt 0 || return 124
       timeout --foreground "${seconds}s" "$@"
   }
 
   test "${CLEANUP_REQUIRED:-0}" = "1" || record_cleanup_failure cleanup_state_not_armed
-  if test "${EVIDENCE_EXPORT_CONFIRMED:-0}" = "1"; then checkpoint_cleanup evidence_export confirmed; else record_cleanup_failure evidence_export; checkpoint_cleanup evidence_export failed; fi
-  if test "${IDENTITY_CLEANUP_CONFIRMED:-0}" = "1"; then checkpoint_cleanup identity_cleanup confirmed; else record_cleanup_failure identity_cleanup; checkpoint_cleanup identity_cleanup failed; fi
-  if test "${SHARED_RESOURCE_CLEANUP_CONFIRMED:-0}" = "1"; then checkpoint_cleanup shared_resource_cleanup confirmed; else record_cleanup_failure shared_resource_cleanup; checkpoint_cleanup shared_resource_cleanup failed; fi
+  if cleanup_surface_needed identity_cleanup; then
+      record_cleanup_failure identity_cleanup
+      checkpoint_cleanup identity_cleanup failed
+  fi
+  if cleanup_surface_needed shared_resource_cleanup; then
+      record_cleanup_failure shared_resource_cleanup
+      checkpoint_cleanup shared_resource_cleanup failed
+  fi
 
   destroy_acceptance_stack() {
-      local name="$1" scenario_id="$2" dir="$3" vars="$4" binding="$5"
+      local name="$1" scenario_id="$2" dir="$3" vars="$4" binding="$5" binding_file="$6"
       local state_output="" plan="" receipt="" plan_sha="" durable_receipt="" approval_receipt=""
       local failures_before="${#CLEANUP_FAILURES[@]}"
-      if test -z "$dir" || test -z "$vars" || test -z "$binding"; then
+      if test -z "$dir" || test -z "$vars" || test -z "$binding" || test -z "$binding_file"; then
           record_cleanup_failure "terraform_${name}_inputs"
           checkpoint_cleanup "terraform_${name}" failed
           return
       fi
-      if ! verify_tf_binding "$scenario_id" "$dir" "$vars" "$binding"; then
-          record_cleanup_failure "terraform_${name}_binding"
+      if ! terraform_capture -chdir="$dir" init -input=false -lock-timeout=5m >/dev/null; then
+          record_cleanup_failure "terraform_${name}_init"
           checkpoint_cleanup "terraform_${name}" failed
           return
       fi
-      if ! run_cleanup_bounded terraform -chdir="$dir" init -input=false -lock-timeout=5m; then
-          record_cleanup_failure "terraform_${name}_init"
-          checkpoint_cleanup "terraform_${name}_init" failed
+      if ! verify_tf_binding "$scenario_id" "$dir" "$vars" "$binding" "$binding_file"; then
+          record_cleanup_failure "terraform_${name}_binding"
+          checkpoint_cleanup "terraform_${name}" failed
           return
       fi
       plan="$(mktemp -p /tmp "elspeth-${name}-destroy.XXXXXX")"
       receipt="$(mktemp -p /tmp "elspeth-${name}-destroy-receipt.XXXXXX")"
       chmod 600 "$plan" "$receipt"
-      if ! run_cleanup_bounded terraform -chdir="$dir" plan -destroy -input=false -lock-timeout=5m \
+      if ! terraform_capture -chdir="$dir" plan -destroy -input=false -lock-timeout=5m \
           -var-file="$vars" \
           -var="acceptance_run_id=$ACCEPTANCE_RUN_ID" \
           -var="scenario_id=$scenario_id" \
           -var="candidate_image=$CANDIDATE_IMAGE" \
           -var="rollback_baseline_image=$ROLLBACK_BASELINE_IMAGE" \
-          -out="$plan"; then
+          -out="$plan" >/dev/null; then
           record_cleanup_failure "terraform_${name}_destroy_plan"
       elif ! terraform_capture -chdir="$dir" show -json "$plan" | \
           uv run --frozen python -m elspeth.web.aws_ecs_acceptance sanitize-evidence --kind terraform-destroy-plan >"$receipt"; then
@@ -1562,11 +1800,15 @@ and gate ledger at the owner-approved durable control location.
           record_cleanup_failure "terraform_${name}_destroy_receipt"
       elif ! approval_receipt="$(require_signed_tf_destroy_approval "$scenario_id" "$durable_receipt")"; then
           record_cleanup_failure "terraform_${name}_destroy_approval"
-      elif ! run_cleanup_bounded terraform -chdir="$dir" apply -input=false -lock-timeout=5m "$plan"; then
+      elif ! uv run --frozen python -m elspeth.web.aws_ecs_acceptance approval-require-current \
+          --file "$CONTROL_MANIFEST" --scenario-id "$scenario_id" --kind terraform-destroy-plan \
+          --plan-receipt-hash "$durable_receipt" --approval-hash "$approval_receipt"; then
+          record_cleanup_failure "terraform_${name}_destroy_approval_expired"
+      elif ! terraform_capture -chdir="$dir" apply -input=false -lock-timeout=5m "$plan" >/dev/null; then
           record_cleanup_failure "terraform_${name}_destroy_apply"
       fi
       rm -f -- "$plan" "$receipt"
-      if ! state_output="$(run_cleanup_bounded terraform -chdir="$dir" state list)"; then
+      if ! state_output="$(terraform_capture -chdir="$dir" state list)"; then
           record_cleanup_failure "terraform_${name}_state_read"
       elif test -n "$state_output"; then
           record_cleanup_failure "terraform_${name}_state_not_empty"
@@ -1578,10 +1820,10 @@ and gate ledger at the owner-approved durable control location.
       fi
   }
   if cleanup_surface_needed terraform_scenario_a; then
-      destroy_acceptance_stack scenario_a A "${SCENARIO_A_TF_DIR:-}" "${SCENARIO_A_TF_VARS:-}" "${SCENARIO_A_TF_BINDING_SHA:-}"
+      destroy_acceptance_stack scenario_a A "${SCENARIO_A_TF_DIR:-}" "${SCENARIO_A_TF_VARS:-}" "${SCENARIO_A_TF_BINDING_SHA:-}" "${SCENARIO_A_TF_BINDING_FILE:-}"
   fi
   if cleanup_surface_needed terraform_scenario_b; then
-      destroy_acceptance_stack scenario_b B "${SCENARIO_B_TF_DIR:-}" "${SCENARIO_B_TF_VARS:-}" "${SCENARIO_B_TF_BINDING_SHA:-}"
+      destroy_acceptance_stack scenario_b B "${SCENARIO_B_TF_DIR:-}" "${SCENARIO_B_TF_VARS:-}" "${SCENARIO_B_TF_BINDING_SHA:-}" "${SCENARIO_B_TF_BINDING_FILE:-}"
   fi
 
   ORPHAN_SWEEP_CONFIRMED=0
@@ -1601,7 +1843,7 @@ and gate ledger at the owner-approved durable control location.
           record_cleanup_failure "ecr_${label}_inputs"
           return
       fi
-      if ! listing="$(aws_capture ecr list-images --region "$AWS_REGION" --repository-name "$ECR_REPOSITORY" --filter tagStatus=TAGGED --output json)"; then
+      if ! listing="$(aws_capture aws ecr list-images --region "$AWS_REGION" --repository-name "$ECR_REPOSITORY" --filter tagStatus=TAGGED --output json)"; then
           record_cleanup_failure "ecr_${label}_list"
           return
       fi
@@ -1616,12 +1858,12 @@ and gate ledger at the owner-approved durable control location.
           record_cleanup_failure "ecr_${label}_duplicate_tag"
           return
       fi
-      if ! result="$(aws_capture ecr batch-delete-image --region "$AWS_REGION" --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$tag")"; then
+      if ! result="$(aws_capture aws ecr batch-delete-image --region "$AWS_REGION" --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$tag")"; then
           record_cleanup_failure "ecr_${label}_delete"
       elif ! jq -e '(.failures | length) == 0 and (.imageIds | length) == 1' <<<"$result" >/dev/null; then
           record_cleanup_failure "ecr_${label}_delete_result"
       fi
-      if ! listing="$(aws_capture ecr list-images --region "$AWS_REGION" --repository-name "$ECR_REPOSITORY" --filter tagStatus=TAGGED --output json)"; then
+      if ! listing="$(aws_capture aws ecr list-images --region "$AWS_REGION" --repository-name "$ECR_REPOSITORY" --filter tagStatus=TAGGED --output json)"; then
           record_cleanup_failure "ecr_${label}_post_delete_list"
       elif ! jq -e --arg tag "$tag" '[.imageIds[] | select(.imageTag == $tag)] | length == 0' <<<"$listing" >/dev/null; then
           record_cleanup_failure "ecr_${label}_tag_still_present"
@@ -1711,6 +1953,23 @@ and gate ledger at the owner-approved durable control location.
     fi
   fi
 
+  FINAL_EVIDENCE_EXPORT_CONFIRMED=0
+  if cleanup_surface_needed evidence_export; then
+      FINAL_EVIDENCE_EXPORT_RECEIPT="${FINAL_EVIDENCE_EXPORT_RECEIPT:?evidence owner must set final protected export receipt after refreshing the durable destination}"
+      if test -n "${EVIDENCE_EXPORT_RECEIPT:-}" && \
+          test "$FINAL_EVIDENCE_EXPORT_RECEIPT" != "$EVIDENCE_EXPORT_RECEIPT" && \
+          run_cleanup_bounded uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+            --file "$CONTROL_MANIFEST" --final-evidence-export-receipt "$FINAL_EVIDENCE_EXPORT_RECEIPT"; then
+          FINAL_EVIDENCE_EXPORT_CONFIRMED=1
+          checkpoint_cleanup evidence_export confirmed
+      else
+          record_cleanup_failure evidence_export
+          checkpoint_cleanup evidence_export failed
+      fi
+  else
+      FINAL_EVIDENCE_EXPORT_CONFIRMED=1
+  fi
+
   FINAL_EVIDENCE_PREPARED=0
   if run_cleanup_bounded uv run --frozen python -m elspeth.web.aws_ecs_acceptance cleanup-evidence-finalize --file "$CONTROL_MANIFEST" --ledger "$GATE_LEDGER" --phase prepare; then
       FINAL_EVIDENCE_PREPARED=1
@@ -1721,7 +1980,10 @@ and gate ledger at the owner-approved durable control location.
   fi
 
   LOCAL_EVIDENCE_FAILURES_BEFORE="${#CLEANUP_FAILURES[@]}"
-  if test "${EVIDENCE_EXPORT_CONFIRMED:-0}" = "1" && test "$FINAL_EVIDENCE_PREPARED" = "1"; then
+  EVIDENCE_EXPORT_STATE="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field cleanup_states.evidence_export)"
+  if ! cleanup_surface_needed local_evidence; then
+      :
+  elif test "$EVIDENCE_EXPORT_STATE" = confirmed && test "$FINAL_EVIDENCE_PREPARED" = "1"; then
       if test -n "${ACCEPTANCE_STATE:-}"; then
           case "$ACCEPTANCE_STATE" in
               /tmp/*) if ! rm -f -- "$ACCEPTANCE_STATE"; then record_cleanup_failure acceptance_state_remove; fi ;;
@@ -1734,8 +1996,12 @@ and gate ledger at the owner-approved durable control location.
               *) record_cleanup_failure oidc_evidence_path ;;
           esac
       fi
+  else
+      record_cleanup_failure local_evidence_prerequisite
   fi
-  if test "${#CLEANUP_FAILURES[@]}" = "$LOCAL_EVIDENCE_FAILURES_BEFORE"; then
+  if ! cleanup_surface_needed local_evidence; then
+      :
+  elif test "${#CLEANUP_FAILURES[@]}" = "$LOCAL_EVIDENCE_FAILURES_BEFORE"; then
       checkpoint_cleanup local_evidence confirmed
   else
       checkpoint_cleanup local_evidence failed
@@ -1767,6 +2033,12 @@ and gate ledger at the owner-approved durable control location.
       exit 1
   fi
   ```
+
+  A successful cleanup commit writes `task8.check05` and binds the final
+  cleanup receipt to the stable complete ledger-records hash. It deliberately
+  leaves the ledger document unfinalized so Task 9 can finalize only after the
+  GO verdict; later ledger finalization does not invalidate the cleanup
+  receipt.
 
   Empty Terraform state is necessary but not sufficient after a partial apply.
   Plan 10's tested `orphan-sweep` subcommand performs the following closed
@@ -1896,8 +2168,9 @@ and cleanup completed on time.
   recreated or retagged as a release shortcut.
 - [ ] Return **NO-GO** for any failure, missing operator prerequisite, changed
   SHA, dirty worktree, skipped required command, or incomplete dependency.
-  Name the failing command and owning plan/surface, finalize the protected
-  ledger, and add a Filigree comment with the sanitized blocker/evidence IDs;
+  Name the failing command and owning plan/surface, leave the protected ledger
+  unfinalized, checksum the current ledger/evidence snapshot, and add a
+  Filigree comment with the sanitized blocker/evidence IDs;
   leave `elspeth-05396fed38` open and assigned for resume. Do not summarize a
   partial run as "go with warnings."
 - [ ] On GO only, finalize and checksum the protected gate ledger, add the
@@ -1907,6 +2180,12 @@ and cleanup completed on time.
   anchor `release/0.7.1@$CANDIDATE_SHA`. Re-read the issue and require done
   status, matching assignee/close commit, and no missing evidence fields. No
   earlier task may close it.
+
+  ```bash
+  test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field verdict_failures)" = "[]"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger finalize \
+    --file "$GATE_LEDGER" --candidate-sha "$CANDIDATE_SHA"
+  ```
 
 **Definition of Done:**
 

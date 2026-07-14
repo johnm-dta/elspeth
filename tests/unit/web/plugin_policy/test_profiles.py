@@ -236,6 +236,36 @@ def test_bedrock_profile_resolver_exposes_only_alias_and_safe_options() -> None:
     assert lowered.executable_options["guardrail_identifier"] == "privateguardrail"
 
 
+def test_bedrock_profile_resolver_returns_only_an_authorized_exact_approved_binding() -> None:
+    runtime = RuntimeWebPluginConfig.from_settings(
+        _settings(
+            plugin_allowlist=("transform:aws_bedrock_prompt_shield",),
+            bedrock_guardrail_profiles=(
+                {
+                    "alias": "prompt-approved",
+                    "plugin": "aws_bedrock_prompt_shield",
+                    "guardrail_identifier": "privateguardrail",
+                    "guardrail_version": "7",
+                    "region": "us-east-1",
+                },
+            ),
+        )
+    )
+    policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+    registry = OperatorProfileRegistry(policy=policy, settings=runtime)
+    plugin_id = PluginId("transform", "aws_bedrock_prompt_shield")
+
+    profile = registry.approved_bedrock_guardrail_profile(plugin_id, alias="prompt-approved")
+
+    assert profile.alias == "prompt-approved"
+    assert profile.plugin == "aws_bedrock_prompt_shield"
+    assert profile.guardrail_version == "7"
+    with pytest.raises(ValueError, match="profile_unavailable"):
+        registry.approved_bedrock_guardrail_profile(plugin_id, alias="wrong")
+    with pytest.raises(ValueError, match="profile_unavailable"):
+        registry.approved_bedrock_guardrail_profile(PluginId("transform", "llm"), alias="prompt-approved")
+
+
 def test_bedrock_profile_resolver_preserves_referenced_public_schema_definitions() -> None:
     runtime = RuntimeWebPluginConfig.from_settings(
         _settings(

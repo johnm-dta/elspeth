@@ -20,13 +20,13 @@ def _patch_doctor(
     *,
     settings: object | None = None,
 ) -> list[bool]:
-    import elspeth.web.app as web_app
+    import elspeth.web.config as web_config
     import elspeth.web.doctor as doctor
 
     marker = object() if settings is None else settings
     init_values: list[bool] = []
 
-    monkeypatch.setattr(web_app, "_settings_from_env", lambda: marker)
+    monkeypatch.setattr(web_config, "settings_from_env", lambda: marker)
 
     def fake_collect(actual_settings: object, *, init_schema: bool = False) -> list[ContractCheck]:
         assert actual_settings is marker
@@ -83,12 +83,12 @@ def test_no_dotenv_skips_loader(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_settings_load_failure_is_one_sanitized_check(monkeypatch: pytest.MonkeyPatch) -> None:
-    import elspeth.web.app as web_app
+    import elspeth.web.config as web_config
 
     def fail_settings() -> object:
         raise RuntimeError("postgresql://user:hunter2@private/db /secret/path")  # secret-scan: allow-this-line
 
-    monkeypatch.setattr(web_app, "_settings_from_env", fail_settings)
+    monkeypatch.setattr(web_config, "settings_from_env", fail_settings)
 
     result = runner.invoke(app, ["--no-dotenv", "doctor", "aws-ecs", "--json"])
 
@@ -101,10 +101,10 @@ def test_settings_load_failure_is_one_sanitized_check(monkeypatch: pytest.Monkey
 
 
 def test_last_resort_internal_error_is_sanitized(monkeypatch: pytest.MonkeyPatch) -> None:
-    import elspeth.web.app as web_app
+    import elspeth.web.config as web_config
     import elspeth.web.doctor as doctor
 
-    monkeypatch.setattr(web_app, "_settings_from_env", lambda: object())
+    monkeypatch.setattr(web_config, "settings_from_env", lambda: object())
 
     def fail_collection(_settings: object, *, init_schema: bool = False) -> list[ContractCheck]:
         del init_schema

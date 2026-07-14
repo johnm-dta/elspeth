@@ -75,12 +75,12 @@ def doctor_aws_ecs(
     """Check whether this environment satisfies the AWS ECS contract."""
     from dataclasses import asdict
 
-    from elspeth.web.app import _settings_from_env
+    from elspeth.web.config import settings_from_env
     from elspeth.web.deployment_contract import ContractCheck
     from elspeth.web.doctor import collect_checks, sanitize_error
 
     try:
-        settings = _settings_from_env()
+        settings = settings_from_env()
     except Exception as exc:
         checks = [ContractCheck("settings_load", False, sanitize_error("web settings could not be loaded", exc))]
     else:
@@ -3294,7 +3294,7 @@ def web(
 
     # Bridge CLI args to create_app() via environment variables.
     # uvicorn's factory protocol calls create_app() with no arguments,
-    # so we set ELSPETH_WEB__* env vars that _settings_from_env() reads.
+    # so we set ELSPETH_WEB__* env vars that settings_from_env() reads.
     os.environ["ELSPETH_WEB__HOST"] = host
     os.environ["ELSPETH_WEB__PORT"] = str(port)
     os.environ["ELSPETH_WEB__AUTH_PROVIDER"] = auth

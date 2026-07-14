@@ -9,8 +9,12 @@ from typing import Any
 
 import pytest
 
+from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 from elspeth.plugins.transforms.aws.guardrails_live_check import run_guardrail_live_check
-from elspeth.web.app import _settings_from_env
+from elspeth.web.config import settings_from_env
+from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
+from elspeth.web.plugin_policy.models import PluginId
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
 
 _RUN_GATE = "ELSPETH_RUN_LIVE_BEDROCK_GUARDRAILS"
 _LIVE_INPUTS = {
@@ -58,18 +62,18 @@ def test_operator_approved_bedrock_guardrail_profile_live(plugin_id: str) -> Non
     if any(not value for value in values.values()):
         pytest.fail("approved Bedrock Guardrail live inputs are incomplete", pytrace=False)
     try:
-        settings = _settings_from_env()
+        settings = settings_from_env()
+        runtime = RuntimeWebPluginConfig.from_settings(settings)
+        policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+        registry = OperatorProfileRegistry(policy=policy, settings=runtime)
+        profile = registry.approved_bedrock_guardrail_profile(
+            PluginId("transform", plugin_id),
+            alias=values["alias"],
+        )
     except Exception:
         pytest.fail("approved Bedrock Guardrail live profile configuration is invalid", pytrace=False)
 
-    matching = tuple(
-        profile for profile in settings.bedrock_guardrail_profiles if profile.plugin == plugin_id and profile.alias == values["alias"]
-    )
-    if (
-        len(matching) != 1
-        or values["version"] != matching[0].guardrail_version
-        or f"transform:{plugin_id}" not in settings.plugin_allowlist
-    ):
+    if values["version"] != profile.guardrail_version:
         pytest.fail("approved Bedrock Guardrail live policy input is unavailable", pytrace=False)
 
     recorder = _LiveAuditRecorder()
@@ -79,7 +83,7 @@ def test_operator_approved_bedrock_guardrail_profile_live(plugin_id: str) -> Non
         order.append("telemetry")
 
     receipt = run_guardrail_live_check(
-        profile=matching[0],
+        profile=profile,
         safe_text=values["safe"],
         blocked_text=values["blocked"],
         execution=recorder,

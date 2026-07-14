@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { InlineRunResults } from "./InlineRunResults";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useAuthStore } from "@/stores/authStore";
 import { _resetNarrativeModeCacheForTesting } from "@/hooks/useNarrativeMode";
 import * as apiClient from "@/api/client";
 
@@ -28,9 +29,32 @@ describe("InlineRunResults", () => {
     // Default: empty catalog so useNarrativeMode resolves to false unless
     // a specific test overrides it. Without these stubs the hook would
     // make a real fetch against the unconfigured test API client.
-    vi.spyOn(apiClient, "listTransforms").mockResolvedValue([] as any);
-    vi.spyOn(apiClient, "listSources").mockResolvedValue([] as any);
-    vi.spyOn(apiClient, "listSinks").mockResolvedValue([] as any);
+    vi.spyOn(apiClient, "fetchPluginPolicy").mockResolvedValue({
+      data: {
+        principal_scope: "local:test-user",
+        snapshot_fingerprint: "test-snapshot",
+        policy_hash: "test-policy",
+        available_plugin_ids: [],
+        capability_groups: [],
+        selections: [],
+        control_modes: [],
+      },
+      snapshotFingerprint: "test-snapshot",
+    });
+    vi.spyOn(apiClient, "listTransforms").mockResolvedValue({ data: [], snapshotFingerprint: "test-snapshot" });
+    vi.spyOn(apiClient, "listSources").mockResolvedValue({ data: [], snapshotFingerprint: "test-snapshot" });
+    vi.spyOn(apiClient, "listSinks").mockResolvedValue({ data: [], snapshotFingerprint: "test-snapshot" });
+    useAuthStore.setState({
+      token: "test-token",
+      user: {
+        user_id: "test-user",
+        username: "test-user",
+        display_name: null,
+        email: null,
+        groups: [],
+      },
+      isLoading: false,
+    } as never);
     useSessionStore.setState({ compositionState: null } as never);
     useExecutionStore.setState({
       runs: [],
@@ -429,9 +453,10 @@ describe("InlineRunResults", () => {
   // ==========================================================================
 
   it("renders NarrativeResults instead of RunOutputsPanel when a composition plugin has the narrative-summary tag (plan 19b:359, 19b:365)", async () => {
-    vi.spyOn(apiClient, "listTransforms").mockResolvedValue([
-        { name: "batch_classifier_metrics", capability_tags: ["narrative-summary"] } as any,
-    ]);
+    vi.spyOn(apiClient, "listTransforms").mockResolvedValue({
+      data: [{ name: "batch_classifier_metrics", capability_tags: ["narrative-summary"] } as any],
+      snapshotFingerprint: "test-snapshot",
+    });
     useSessionStore.setState({
       compositionState: {
         sources: {},
@@ -469,9 +494,10 @@ describe("InlineRunResults", () => {
   });
 
   it("renders RunOutputsPanel and not NarrativeResults when no composition plugin carries the narrative-summary tag", async () => {
-    vi.spyOn(apiClient, "listTransforms").mockResolvedValue([
-        { name: "passthrough", capability_tags: [] } as any,
-    ]);
+    vi.spyOn(apiClient, "listTransforms").mockResolvedValue({
+      data: [{ name: "passthrough", capability_tags: [] } as any],
+      snapshotFingerprint: "test-snapshot",
+    });
     useSessionStore.setState({
       compositionState: {
         sources: {},

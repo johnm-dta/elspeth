@@ -251,8 +251,8 @@ landscape:
         result = runner.invoke(app, ["resume", "fake-run-id", "-s", str(settings_file)])
 
         assert result.exit_code == 1, f"Expected exit code 1, got {result.exit_code}. Output: {result.output}"
-        assert "does not appear to be an ELSPETH audit database" in result.output, (
-            f"Expected clear error about missing tables, got: {result.output}"
+        assert "contains foreign tables and cannot be opened as an ELSPETH audit database" in result.output, (
+            f"Expected clear error about foreign tables, got: {result.output}"
         )
         # Must NOT have crashed with a traceback
         assert "Traceback" not in result.output, f"Should not show traceback: {result.output}"

@@ -3,12 +3,12 @@
   "scope_verdict": "GO_TO_ORCHESTRATE",
   "summary": "The run sheet is ready for orchestration. One coordinator owns one ignored feat/aws-ecs-program worktree rooted at immutable PROGRAM_BASE_SHA, serializes all mutations, closes slices on truthful program-branch anchors, and ignores unrelated concurrent documentation through Stages 1-8. Stage 9 reviews and merges the then-current release tip, preserves close ancestry, records RECONCILED_RELEASE_SHA, and runs a reconciliation checkpoint. Plan 12 Task 1 then freezes the candidate, Major Checkpoint 6 runs before Task 2, cleanup gates rereconciliation, and Task 9 fast-forwards the exact tested candidate before GO.",
   "plan_file": "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md",
-  "plan_sha256": "7fffe7aa6810e435bb0990c989199fcee248e6757bb786e9e6df012e49753099",
-  "reviewed_at": "2026-07-13T04:57:30Z",
+  "plan_sha256": "749f37b3d6780ffbe81d831401ccf62b2e695b397364dd4bd6fea4f0e82fdb6b",
+  "reviewed_at": "2026-07-14T16:54:37Z",
   "review_basis": {
     "branch": "feat/aws-ecs-program",
-    "head": "a579626e46c97973bc50b5dc9235032ad98199d9",
-    "process": "Independent orchestration-contract, mechanical, and Wardline re-review of the uncommitted planning repair in the isolated program worktree. Checks covered worktree-only Stages 1-8, substantive documentation classification, Stage 9 conflict resume, Plan 10 replacement lineage, reconciliation versus candidate checkpoint ordering, cleanup-before-rereconciliation, source hashes, shell syntax, links, JSON, whitespace, and stale terms."
+    "head": "ac22d0f7d7ece676b4046090a5d2f34331d894b4",
+    "process": "Fresh independent full review of the current run sheet together with complete Plan 12. Checks covered the worktree-only boundary, Stage 9 reconciliation without release mutation, conflict resume, durable anchors, candidate freeze ordering, cleanup-before-rereconciliation, and Task 9 as the sole idempotent release transition."
   },
   "blocking_issues": [],
   "warnings": [
@@ -78,6 +78,11 @@
       "id": "B-RUN-11",
       "status": "RESOLVED",
       "resolution": "The pre-freeze reconciliation affected-area checkpoint is distinct from Major Checkpoint 6, which runs on the Task 1 frozen candidate. After external mutation, Task 8 cleanup must finish before any HEAD change or rereconciliation."
+    },
+    {
+      "id": "B-RUN-12",
+      "status": "RESOLVED",
+      "resolution": "Stage 9 no longer duplicates the release fast-forward. It only reconciles and records the release anchor; Plan 12 Task 9 owns the single finalized idempotent transition from reconciled release to the exact tested candidate."
     }
   ],
   "reviewer_summaries": {
@@ -103,7 +108,8 @@
     "git diff --check passes",
     "a synthetic divergent-release repository passed conflict-class exit, fresh-shell anchor reconstruction, staged resolution, merge commit, and preserved ancestry",
     "targeted searches found no RELEASE_START_SHA or paused-release instruction in the amended documents",
-    "independent orchestration-contract and Wardline reviewers returned APPROVED after repair"
+    "independent orchestration-contract and Wardline reviewers returned APPROVED after repair",
+    "fresh full-current Plan 12 and Stage 9 review returned GO; all 24 run-sheet Bash fences passed bash -n and git diff --check was clean"
   ],
   "review_history": [
     {
@@ -115,6 +121,11 @@
       "reviewed_at": "2026-07-13T04:57:30Z",
       "verdict": "APPROVED_AFTER_REPAIRS",
       "summary": "The worktree-only Stages 1-8 contract, Stage 9 release reconciliation and conflict resume, Plan 10 special recovery, candidate-bound Major Checkpoint 6, and cleanup-before-rereconciliation ordering were independently approved."
+    },
+    {
+      "reviewed_at": "2026-07-14T16:54:37Z",
+      "verdict": "APPROVED_AFTER_CONTRACT_REPAIR",
+      "summary": "Fresh complete review confirmed Stage 9 performs no release mutation and Plan 12 Task 9 alone owns the exact tested-candidate transition. The repaired evidence and cleanup contracts do not change orchestration order."
     }
   ]
 }

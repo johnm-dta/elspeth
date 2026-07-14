@@ -538,7 +538,12 @@ state from inside the running task. It is not an HTTP endpoint and exposes no
   Scan the sanitized signal projection for prompt/content/credential sentinels,
   and add a disposable negative lane proving a collector outage leaves the
   already committed Landscape record intact while export health degrades.
-  Raw CloudWatch/X-Ray responses are never printed or persisted.
+  A positive closed receipt includes only the exact allowlisted CloudWatch
+  metric query (with its acceptance-run/scenario namespace) and deterministic
+  X-Ray trace ID. `control-manifest checkpoint-operator-evidence` consumes that
+  receipt and creates plus binds the next immutable strict-superset retained-
+  evidence checkpoint before the live helper returns. Raw CloudWatch/X-Ray
+  responses are never printed or persisted.
 - [ ] Give `verify-s3` and `verify-bedrock` one shared ECS-Exec transport
   contract. Their only process output is exactly one bounded
   `ELSPETH_ACCEPTANCE_RECEIPT_V1:<base64url-json>` sentinel whose decoded JSON
@@ -553,7 +558,9 @@ state from inside the running task. It is not an HTTP endpoint and exposes no
   credential, ARN, model, URL, or raw-error sentinel can escape either the
   remote process or local extractor.
 - [ ] Implement a durable, interruption-safe `control-manifest` helper for
-  Plan 12. `init`, `update`, `validate`, closed-field `get`, and `load-cleanup` operate on an
+  Plan 12. `init`, `update`, `validate`, `bind-scenario`,
+  `bind-retained-evidence`, `checkpoint-operator-evidence`, closed-field `get`,
+  and `load-cleanup` operate on an
   owner-only mode-0600 regular file using no-follow reads, a same-directory
   exclusive temporary file, fsync, and atomic replace. The closed schema binds
   the acceptance run ID, candidate SHA, release PR number, exact-SHA CI run
@@ -592,12 +599,19 @@ state from inside the running task. It is not an HTTP endpoint and exposes no
   wrong-run/scenario, expired approval, interruption, idempotent-resume, and
   redaction tests; the runbook contract test proves all wrapper names are
   defined before first use.
-- [ ] Implement `gate-ledger init|record|finalize` with the same protected-file
-  discipline. A record contains only a stable command/check ID, candidate SHA,
-  start/end UTC, exit status, and sanitized receipt/output hash; it never
-  stores an expanded command line or raw stdout/stderr. Plan 12 records every
-  Task 1–8 checkbox, finalizes a checksum manifest, and exports that manifest
-  as the exact-command/exit-status evidence ledger.
+- [ ] Implement `gate-ledger init|get|record|record-cleanup|bind-candidate|finalize`
+  with the same protected-file discipline. Initialization durably binds the
+  reviewed Plan 12 SHA-256, immutable program-base SHA, reconciled-release
+  SHA, branch, and starting SHA; closed-field `get` reconstructs only those
+  non-secret anchors plus the bound candidate for process-safe resume. A
+  record contains only a stable command/check ID, candidate SHA, start/end UTC,
+  exit status, and sanitized receipt/output hash; it never stores an expanded
+  command line or raw stdout/stderr. Tasks 1–7 use one strict success stream;
+  Task 8 uses an independent strict cleanup stream so a post-mutation Task 7
+  failure can still complete and prove teardown without fabricating skipped
+  success rows. Plan 12 records every Task 1–8 checkbox, finalizes one checksum
+  over both streams, and exports that manifest as the exact-command/exit-status
+  evidence ledger.
 - [ ] Implement `sanitize-evidence --kind web-log|doctor-log|deployment-event|task-definition|terraform-plan|terraform-destroy-plan`.
   It reads a bounded JSON document from stdin and emits a closed, allowlisted
   receipt containing only timestamps, event/check/class names, severities,

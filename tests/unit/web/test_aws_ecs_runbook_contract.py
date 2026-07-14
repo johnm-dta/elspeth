@@ -17,6 +17,7 @@ RUNBOOK = REPO_ROOT / "docs" / "runbooks" / "aws-ecs-deployment.md"
 RUNBOOK_INDEX = REPO_ROOT / "docs" / "runbooks" / "index.md"
 DOCKER_GUIDE = REPO_ROOT / "docs" / "guides" / "docker.md"
 PLAN12 = REPO_ROOT / "docs" / "superpowers" / "plans" / "aws" / "2026-07-08-aws-ecs-12-integration-closeout.md"
+RUN_SHEET = REPO_ROOT / "docs" / "superpowers" / "plans" / "aws" / "2026-07-12-aws-ecs-orchestration-run-sheet.md"
 
 
 def _text() -> str:
@@ -58,6 +59,7 @@ def test_runbook_preserves_task_local_nonessential_healthy_sidecar() -> None:
         "ELSPETH_WEB__OPERATOR_TELEMETRY_ECS_SERVICE": "${ECS_SERVICE_NAME}",
         "ELSPETH_WEB__OPERATOR_TELEMETRY_TASK_DEFINITION_FAMILY": "${ECS_TASK_DEFINITION_FAMILY}",
         "ELSPETH_WEB__OPERATOR_TELEMETRY_TASK_DEFINITION_REVISION": "${ECS_TASK_DEFINITION_REVISION}",
+        "ELSPETH_ACCEPTANCE_RUN_ID": "${ACCEPTANCE_RUN_ID}",
         "ELSPETH_ACCEPTANCE_CANDIDATE_SHA": "${CANDIDATE_SHA}",
         "ELSPETH_ACCEPTANCE_SCENARIO_ID": "${SCENARIO_ID}",
     }
@@ -528,6 +530,11 @@ def test_runbook_pins_replacement_then_persistence_role_and_drained_local_auth_o
     assert 'task-level `user: "1000:1000"`' in text
     assert "root-running ECS Exec" in text
 
+    helper = sequence[sequence.index("run_candidate_role_check()") : sequence.index('run_candidate_role_check "$CANDIDATE_TASK_ARN"')]
+    assert sequence.index("checkpoint_operator_retained_evidence()") < sequence.index("run_candidate_role_check()")
+    assert helper.index("persist_sanitized_receipt") < helper.index("checkpoint_operator_retained_evidence")
+    assert helper.index("checkpoint_operator_retained_evidence") < helper.index('rm -f "$receipt_file"')
+
 
 def test_runbook_uses_canonical_orphan_and_two_phase_finalizer_commands() -> None:
     text = _text()
@@ -579,7 +586,9 @@ def test_plan12_executes_protected_scenario_order_and_durable_cleanup_contract()
     assert "IDENTITY_CLEANUP_CONFIRMED" not in text
     assert "SHARED_RESOURCE_CLEANUP_CONFIRMED" not in text
     assert "PRECLEANUP_EVIDENCE_EXPORT_CONFIRMED" not in text
-    assert text.index("record_gate_check task8.check04") < text.index('--final-evidence-export-receipt "$FINAL_EVIDENCE_EXPORT_RECEIPT"')
+    assert text.index("record_cleanup_gate_check task8.check04") < text.index(
+        '--final-evidence-export-receipt "$FINAL_EVIDENCE_EXPORT_RECEIPT"'
+    )
     assert "emergency_horizon_started_or_renewed" not in text
     for task, count in {1: 13, 2: 8, 3: 7, 4: 2, 5: 10, 6: 6, 7: 30, 8: 5}.items():
         assert f"task{task}.check01" in text
@@ -619,26 +628,73 @@ def test_plan12_task8_rows_are_retryable_and_task9_finalizes_only_on_go() -> Non
     )
     assert all(marker in task8 for marker in mapping)
     for check_id in range(1, 5):
-        assert f"record_gate_check task8.check{check_id:02d} 0" in task8
+        assert f"record_cleanup_gate_check task8.check{check_id:02d} 0" in task8
     assert "TASK8_CLEANUP_EXIT" not in task8
     assert 'record_gate_check task8.check04 "$TASK8_CLEANUP_EXIT"' not in task8
+    assert task8.index("record_cleanup_gate_check()") < task8.index("record_cleanup_gate_check task8.check01")
+    assert 'sha256sum "$CONTROL_MANIFEST"' not in task8
+    assert "--field cleanup_states | sha256sum" not in task8
+    assert "--field acceptance_run_id" in task8
+    assert "TASK8_PREFLIGHT_FAILURES" in task8
     task9 = text[text.index("### Task 9:") :]
     no_go = task9[task9.index("Return **NO-GO**") : task9.index("On GO only")]
     go = task9[task9.index("On GO only") :]
     assert "gate-ledger finalize" not in no_go
-    assert "leave the protected ledger\n  unfinalized" in no_go
-    assert "gate-ledger finalize" in go
+    assert "Failures before Task 9's evidence-freeze\n  step leave the ledger unfinalized" in no_go
+    assert "preserve the finalized\n  ledger" in no_go
+    assert "does not mutate it" in go
+
+
+def test_plan12_records_every_checkbox_against_the_frozen_candidate_and_durable_anchors() -> None:
+    text = _plan12_text()
+    task1 = text[text.index("### Task 1:") : text.index("### Task 2:")]
+    ledger_init = task1[task1.index("gate-ledger init") : task1.index("record_gate_check task1.check01")]
+    assert '--plan-sha256 "$PLAN12_SHA256"' in ledger_init
+    assert '--program-base-sha "$PROGRAM_BASE_SHA"' in ledger_init
+    assert '--reconciled-release-sha "$RECONCILED_RELEASE_SHA"' in ledger_init
+    assert task1.index('export CANDIDATE_SHA="$(git rev-parse HEAD)"') < task1.index("record_gate_check task1.check01")
+    assert 'record_gate_check task1.check06 0 "$TASK1_CANDIDATE_RECEIPT_HASH"' in task1
+    assert task1.index("record_gate_check task1.check13") < task1.index("gate-ledger bind-candidate")
+    for task, count in {1: 13, 2: 8, 3: 7, 4: 2, 5: 10, 6: 6, 7: 30}.items():
+        for check in range(1, count + 1):
+            assert f"record_gate_check task{task}.check{check:02d} 0" in text
+    for check in range(1, 5):
+        assert f"record_cleanup_gate_check task8.check{check:02d} 0" in text
+
+
+def test_plan12_uses_durable_reverse_dependency_edges_and_one_idempotent_release_transition() -> None:
+    text = _plan12_text()
+    assert "filigree show elspeth-0674a06468 --json | jq -e '.blocks | index(\"elspeth-7d1f35e3d8\")'" in text
+    assert "filigree show elspeth-7fe6aa531f --json | jq -e '.blocks | index(\"elspeth-7d1f35e3d8\")'" in text
+    assert "elspeth-7d1f35e3d8 --json | jq -e '(.blocked_by" not in text
+
+    task9 = text[text.index("### Task 9:") :]
+    assert 'RECONCILED_RELEASE_SHA="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger get' in task9
+    assert 'case "$LOCAL_RELEASE_SHA" in' in task9
+    assert 'case "$REMOTE_RELEASE_SHA" in' in task9
+    assert '"MERGED:release/0.7.1:feat/aws-ecs-program:$CANDIDATE_SHA"' in task9
+    assert task9.index("gate-ledger finalize") < task9.index('merge --ff-only "$CANDIDATE_SHA"')
+
+    stage9 = RUN_SHEET.read_text(encoding="utf-8").split("### Stage 9:", maxsplit=1)[1]
+    assert 'merge --ff-only "$CANDIDATE_SHA"' not in stage9
+    assert "Plan 12 Task 9 owns the single idempotent release transition" in stage9
 
 
 def test_plan12_binds_post_observation_evidence_without_reopening_resource_inventories() -> None:
     text = _plan12_text()
-    retained = text.index("control-manifest bind-retained-evidence")
+    retained = text.index("Immediately after **every** positive telemetry proof")
     task7 = text.index("### Task 7:")
     task8 = text.index("### Task 8:")
     assert task7 < retained < task8
-    retained_section = text[retained - 900 : retained + 300]
+    retained_section = text[retained : retained + 1800]
     assert "resource inventories remain immutable" in retained_section
     assert "elspeth.aws-ecs-retained-evidence.v1" in retained_section
+    assert "Immediately after **every** positive telemetry proof" in text
+    assert 'bind_retained_checkpoint "$RETAINED_EVIDENCE_RECEIPT" complete' in retained_section
+
+    helper = text[text.index("run_candidate_role_check()") : text.index("run_candidate_role_checks()")]
+    assert helper.index("persist_sanitized_receipt") < helper.index("checkpoint_operator_retained_evidence")
+    assert helper.index("checkpoint_operator_retained_evidence") < helper.index('rm -f "$receipt_file"')
 
 
 def test_runbook_verifies_the_initialized_remote_backend_identity() -> None:

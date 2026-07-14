@@ -124,22 +124,44 @@ then may issue GO and close Plan 12.
 - [ ] Initialize the owner-approved protected evidence ledger outside the
   repository before the first gate. Its parent directory is mode 0700 on
   durable encrypted storage; the ledger is mode 0600 and starts bound to the
-  current branch/starting SHA. Execute every checkbox in Tasks 1–8 through its
-  stable check ID and record only timing, exit status, later candidate SHA, and
+  current branch/starting SHA plus the reviewed plan, immutable program base,
+  and reconciled release anchors. Execute every checkbox in Tasks 1–8 through its
+  stable check ID and record only timing, exit status, frozen candidate SHA, and
   sanitized receipt/output hashes—never expanded commands, secrets, or raw
   output:
 
   ```bash
   export GATE_LEDGER="${GATE_LEDGER:?set approved durable mode-0600 ledger path}"
-  uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger init --file "$GATE_LEDGER" --branch feat/aws-ecs-program --starting-sha "$(git rev-parse HEAD)"
+  export PROGRAM_BASE_SHA="${PROGRAM_BASE_SHA:?restore the immutable program base from the protected checkpoint}"
+  export PLAN12_SHA256="$(sha256sum docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md | awk '{print $1}')"
+  if test -e "$GATE_LEDGER"; then
+      LEDGER_STARTING_SHA="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger get --file "$GATE_LEDGER" --field starting_sha)"
+  else
+      LEDGER_STARTING_SHA="$(git rev-parse HEAD)"
+  fi
+  git merge-base --is-ancestor "$LEDGER_STARTING_SHA" HEAD
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger init \
+    --file "$GATE_LEDGER" --branch feat/aws-ecs-program --starting-sha "$LEDGER_STARTING_SHA" \
+    --plan-sha256 "$PLAN12_SHA256" --program-base-sha "$PROGRAM_BASE_SHA" \
+    --reconciled-release-sha "$RECONCILED_RELEASE_SHA"
+  gate_pass_hash() {
+      local check_id="$1"
+      printf '%s\0%s\0passed' "$check_id" "${CANDIDATE_SHA:?candidate must be frozen before recording}" | sha256sum | awk '{print $1}'
+  }
   record_gate_check() {
       local check_id="$1" exit_status="$2" receipt_hash="$3"
       uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger record \
         --file "$GATE_LEDGER" --check-id "$check_id" \
-        --candidate-sha "$(git rev-parse HEAD)" --exit-status "$exit_status" \
+        --candidate-sha "${CANDIDATE_SHA:?candidate must be frozen before recording}" --exit-status "$exit_status" \
         --receipt-hash "$receipt_hash"
   }
-  record_gate_check task1.check01 0 "$(printf '%s' clean-start | sha256sum | awk '{print $1}')"
+  record_cleanup_gate_check() {
+      local check_id="$1" exit_status="$2" receipt_hash="$3"
+      uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger record-cleanup \
+        --file "$GATE_LEDGER" --check-id "$check_id" \
+        --candidate-sha "${CANDIDATE_SHA:?candidate must be frozen before recording}" --exit-status "$exit_status" \
+        --receipt-hash "$receipt_hash"
+  }
   ```
 
   The stable check-ID ledger is exhaustive and ordinal: Task 1 uses
@@ -150,14 +172,22 @@ then may issue GO and close Plan 12.
   `task8.check01`–`task8.check05`. Record an immutable ledger row only after
   its resumable checkbox succeeds. Failed cleanup attempts remain in protected
   `cleanup_states` and `verdict_failures` and are retried; they never consume a
-  row that a later successful retry cannot replace. The cleanup finalizer owns
+  row that a later successful retry cannot replace. Tasks 1–7 use the ordered
+  success stream; Task 8 uses the independent ordered cleanup stream so a
+  post-mutation failure never requires a fabricated success row before teardown.
+  The cleanup finalizer owns
   and idempotently writes `task8.check05`; callers record through
   `task8.check04`. Finalization rejects any missing ID, so prose completion
   cannot substitute for a recorded check.
 
   **Expected result:** a fresh-process ledger validation succeeds. An existing
-  ledger is accepted only through its exact-owner resume validation; never
-  truncate or silently replace prior evidence.
+  ledger is accepted only through its exact-owner resume validation and only
+  before that attempt has entered Task 8; never truncate or silently replace
+  prior evidence. Once any cleanup-stream row exists, preserve that attempt
+  ledger and restart Tasks 1-8 with a new owner-approved absent `GATE_LEDGER`
+  path, even when the candidate SHA is unchanged. The same rule applies if a
+  repair changes the candidate: never append a second attempt or candidate to
+  an old ledger.
 
 - [ ] Before changing the version or lock boundary, prove from the executable
   Filigree graph that every implementation slice is closed, then atomically
@@ -172,7 +202,8 @@ then may issue GO and close Plan 12.
       CLOSE_SHA="${anchor##*@}"
       git merge-base --is-ancestor "$CLOSE_SHA" HEAD
   done < <(jq -r '.phases[].steps[] | select(.issue_id != "elspeth-05396fed38") | .close_commit' /tmp/aws-ecs-plan12-start.json)
-  filigree show elspeth-7d1f35e3d8 --json | jq -e '(.blocked_by | sort) as $deps | ($deps | index("elspeth-0674a06468")) != null and ($deps | index("elspeth-7fe6aa531f")) != null' >/dev/null
+  filigree show elspeth-0674a06468 --json | jq -e '.blocks | index("elspeth-7d1f35e3d8")' >/dev/null
+  filigree show elspeth-7fe6aa531f --json | jq -e '.blocks | index("elspeth-7d1f35e3d8")' >/dev/null
   PLAN12_JSON="$(filigree show elspeth-05396fed38 --json)"
   PLAN12_STATUS="$(jq -r .status <<<"$PLAN12_JSON")"
   PLAN12_ASSIGNEE="$(jq -r '.assignee // ""' <<<"$PLAN12_JSON")"
@@ -244,20 +275,56 @@ then may issue GO and close Plan 12.
   owning slice, commit the regenerated file, and restart this plan. Never
   resolve `uv.lock` by editing conflict markers or choosing one side.
 
-- [ ] Capture the candidate commit for the final evidence record:
+- [ ] Capture the candidate commit, revalidate every Task 1 condition against
+  that immutable SHA, write all thirteen ordered rows, and bind the candidate:
 
   ```bash
   export CANDIDATE_SHA="$(git rev-parse HEAD)"
   TASK1_CANDIDATE_RECEIPT_HASH="$(printf '%s' "$CANDIDATE_SHA" | sha256sum | awk '{print $1}')"
-  record_gate_check task1.check13 0 "$TASK1_CANDIDATE_RECEIPT_HASH"
+
+  test "$(git branch --show-current)" = "feat/aws-ecs-program"
+  test -z "$(git status --porcelain)"
+  git diff --check
+  git merge-base --is-ancestor "$RECONCILED_RELEASE_SHA" "$CANDIDATE_SHA"
+  test "$(git rev-parse release/0.7.1)" = "$RECONCILED_RELEASE_SHA"
+  record_gate_check task1.check01 0 "$(gate_pass_hash task1.check01)"
+
+  test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger get --file "$GATE_LEDGER" --field plan_sha256)" = "$PLAN12_SHA256"
+  test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger get --file "$GATE_LEDGER" --field program_base_sha)" = "$PROGRAM_BASE_SHA"
+  test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger get --file "$GATE_LEDGER" --field reconciled_release_sha)" = "$RECONCILED_RELEASE_SHA"
+  test "$(stat -c '%a' "$GATE_LEDGER")" = "600"
+  record_gate_check task1.check02 0 "$(gate_pass_hash task1.check02)"
+
+  filigree plan elspeth-6343920a47 --json --detail full > /tmp/aws-ecs-plan12-candidate.json
+  uv run --frozen python -c 'import json; p=json.load(open("/tmp/aws-ecs-plan12-candidate.json")); steps=[s for phase in p["phases"] for s in phase["steps"]]; required={"elspeth-b9e8b5d24b","elspeth-9070fb0a45","elspeth-8166b310e7","elspeth-c0103e6c88","elspeth-e8dc754360","elspeth-7fe6aa531f","elspeth-dffe064287","elspeth-03cf981d4a","elspeth-1a1c31bcce","elspeth-74717426b7","elspeth-a342f333a4","elspeth-397ac915b8","elspeth-6285c29c07","elspeth-25286192ee","elspeth-5e729216f4","elspeth-f5d5dddddf","elspeth-130dc48252","elspeth-0674a06468","elspeth-7d1f35e3d8"}; done={s["issue_id"] for s in steps if s["status_category"] == "done"}; assert required <= done; plan12=next(s for s in steps if s["issue_id"] == "elspeth-05396fed38"); assert plan12["status"] == "in_progress" and plan12["assignee"] == "'"$INTEGRATION_OWNER"'"'
+  record_gate_check task1.check03 0 "$(gate_pass_hash task1.check03)"
+
+  test "$(uv version --short)" = "0.7.1"
+  grep -Eq '^## 0\.7\.1 - [0-9]{4}-[0-9]{2}-[0-9]{2}' CHANGELOG.md
+  record_gate_check task1.check04 0 "$(gate_pass_hash task1.check04)"
+
+  uv lock --check
+  test "$(uv run --frozen python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" = "3.13"
+  test "$(uv run --frozen python -c 'from importlib.metadata import version; print(version("elspeth"))')" = "0.7.1"
+  record_gate_check task1.check05 0 "$(gate_pass_hash task1.check05)"
+
+  record_gate_check task1.check06 0 "$TASK1_CANDIDATE_RECEIPT_HASH"
+  record_gate_check task1.check07 0 "$(gate_pass_hash task1.check07)"
+  record_gate_check task1.check08 0 "$(gate_pass_hash task1.check08)"
+  record_gate_check task1.check09 0 "$(gate_pass_hash task1.check09)"
+  record_gate_check task1.check10 0 "$(gate_pass_hash task1.check10)"
+  record_gate_check task1.check11 0 "$(gate_pass_hash task1.check11)"
+  record_gate_check task1.check12 0 "$(gate_pass_hash task1.check12)"
+  record_gate_check task1.check13 0 "$(gate_pass_hash task1.check13)"
   uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger bind-candidate \
     --file "$GATE_LEDGER" --candidate-sha "$CANDIDATE_SHA"
   ```
 
   **Expected result:** one 40-character commit SHA. Every later task must run
   against this SHA unless a failure causes a repair and full restart.
-  This candidate-capture block is the sole writer of `task1.check13`; do not
-  emit a second generic row for the same checkbox.
+  Candidate capture is `task1.check06`; `task1.check13` records the final
+  tracker/ownership Definition-of-Done assertion. Do not record either ID from
+  any other block.
   The atomic `bind-candidate` step accepts only the exact all-zero ordinal
   `task1.check01` through `task1.check13` prefix and binds that SHA plus the
   fixed count of 13 into the protected gate ledger; subsequent records reject any
@@ -365,6 +432,20 @@ then may issue GO and close Plan 12.
 - [ ] Every direct CI contract/inventory guard exits 0.
 - [ ] Required-mode trust-tier and trust-boundary verification exits 0.
 
+After all eight Task 2 checkbox assertions pass on the unchanged candidate,
+persist their ordered success rows:
+
+```bash
+record_gate_check task2.check01 0 "$(gate_pass_hash task2.check01)"
+record_gate_check task2.check02 0 "$(gate_pass_hash task2.check02)"
+record_gate_check task2.check03 0 "$(gate_pass_hash task2.check03)"
+record_gate_check task2.check04 0 "$(gate_pass_hash task2.check04)"
+record_gate_check task2.check05 0 "$(gate_pass_hash task2.check05)"
+record_gate_check task2.check06 0 "$(gate_pass_hash task2.check06)"
+record_gate_check task2.check07 0 "$(gate_pass_hash task2.check07)"
+record_gate_check task2.check08 0 "$(gate_pass_hash task2.check08)"
+```
+
 ---
 
 ### Task 3: Run the unfiltered test suite and CI coverage floors
@@ -430,6 +511,18 @@ then may issue GO and close Plan 12.
 - [ ] The live-CI coverage lane passes at 85% or higher.
 - [ ] All four audit-critical coverage floors pass.
 
+After all seven Task 3 checkbox assertions pass, persist their ordered rows:
+
+```bash
+record_gate_check task3.check01 0 "$(gate_pass_hash task3.check01)"
+record_gate_check task3.check02 0 "$(gate_pass_hash task3.check02)"
+record_gate_check task3.check03 0 "$(gate_pass_hash task3.check03)"
+record_gate_check task3.check04 0 "$(gate_pass_hash task3.check04)"
+record_gate_check task3.check05 0 "$(gate_pass_hash task3.check05)"
+record_gate_check task3.check06 0 "$(gate_pass_hash task3.check06)"
+record_gate_check task3.check07 0 "$(gate_pass_hash task3.check07)"
+```
+
 ---
 
 ### Task 4: Run the Wardline trust-boundary gate
@@ -457,6 +550,13 @@ then may issue GO and close Plan 12.
 **Definition of Done:**
 
 - [ ] Wardline exits 0 on the same candidate commit used for Tasks 1–3.
+
+After both Task 4 checkbox assertions pass, persist their ordered rows:
+
+```bash
+record_gate_check task4.check01 0 "$(gate_pass_hash task4.check01)"
+record_gate_check task4.check02 0 "$(gate_pass_hash task4.check02)"
+```
 
 ---
 
@@ -535,6 +635,21 @@ then may issue GO and close Plan 12.
 - [ ] The runtime remains non-root.
 - [ ] No AWS credential variable is baked into the Dockerfile or image
   history.
+
+After all ten Task 5 checkbox assertions pass, persist their ordered rows:
+
+```bash
+record_gate_check task5.check01 0 "$(gate_pass_hash task5.check01)"
+record_gate_check task5.check02 0 "$(gate_pass_hash task5.check02)"
+record_gate_check task5.check03 0 "$(gate_pass_hash task5.check03)"
+record_gate_check task5.check04 0 "$(gate_pass_hash task5.check04)"
+record_gate_check task5.check05 0 "$(gate_pass_hash task5.check05)"
+record_gate_check task5.check06 0 "$(gate_pass_hash task5.check06)"
+record_gate_check task5.check07 0 "$(gate_pass_hash task5.check07)"
+record_gate_check task5.check08 0 "$(gate_pass_hash task5.check08)"
+record_gate_check task5.check09 0 "$(gate_pass_hash task5.check09)"
+record_gate_check task5.check10 0 "$(gate_pass_hash task5.check10)"
+```
 
 ---
 
@@ -659,6 +774,17 @@ then may issue GO and close Plan 12.
 - [ ] Its `CI Success` umbrella job concluded successfully.
 - [ ] The exact-SHA CI, CodeQL, and signed-allowlist run IDs/URLs are recorded,
   all succeeded and the temporary RC ref is absent.
+
+After all six Task 6 checkbox assertions pass, persist their ordered rows:
+
+```bash
+record_gate_check task6.check01 0 "$(gate_pass_hash task6.check01)"
+record_gate_check task6.check02 0 "$(gate_pass_hash task6.check02)"
+record_gate_check task6.check03 0 "$(gate_pass_hash task6.check03)"
+record_gate_check task6.check04 0 "$(gate_pass_hash task6.check04)"
+record_gate_check task6.check05 0 "$(gate_pass_hash task6.check05)"
+record_gate_check task6.check06 0 "$(gate_pass_hash task6.check06)"
+```
 
 ---
 
@@ -826,8 +952,11 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   pre-mutation Transaction Search state hash. Every deterministic cleanup
   identity is present in the preserved pre-apply document; only explicitly
   provider-generated IDs may be added by the resolved document. Exact retained
-  metric queries and trace IDs are bound later in the one-way protected
-  `elspeth.aws-ecs-retained-evidence.v1` receipt after Task 7 creates them.
+  metric queries and trace IDs are bound later through immutable monotonic
+  `elspeth.aws-ecs-retained-evidence.v1` checkpoints as Task 7 creates them.
+  Each new protected path must preserve every previously bound identity and
+  may only add newly observed identities; untouched scenarios remain explicit
+  empty lists with zero counts.
   Define `load_scenario A|B` to clear all generic scenario variables,
   load exactly one inventory through `control-manifest`, validate every ARN
   and resource against both `ACCEPTANCE_RUN_ID` and the scenario ID, and stamp
@@ -1145,6 +1274,29 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   run both checks through one closed extractor:
 
   ```bash
+  bind_retained_checkpoint() {
+      local receipt="$1" mode="${2:-partial}"
+      local args=(control-manifest bind-retained-evidence --file "$CONTROL_MANIFEST" --receipt "$receipt")
+      case "$mode" in
+          partial) ;;
+          complete) args+=(--require-complete) ;;
+          *) return 64 ;;
+      esac
+      uv run --frozen python -m elspeth.web.aws_ecs_acceptance "${args[@]}"
+  }
+
+  checkpoint_operator_retained_evidence() {
+      local exec_receipt="$1" receipt_hash="" checkpoint=""
+      test -d "${RETAINED_EVIDENCE_DIR:?set the owner-approved protected retained-evidence directory}"
+      test ! -L "$RETAINED_EVIDENCE_DIR"
+      test "$(stat -c '%a' "$RETAINED_EVIDENCE_DIR")" = "700"
+      receipt_hash="$(sha256sum "$exec_receipt" | awk '{print $1}')"
+      checkpoint="$RETAINED_EVIDENCE_DIR/operator-${ACTIVE_SCENARIO_ID}-${receipt_hash}.json"
+      uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+        control-manifest checkpoint-operator-evidence --file "$CONTROL_MANIFEST" \
+        --exec-receipt "$exec_receipt" --checkpoint "$checkpoint"
+  }
+
   run_candidate_role_check() {
       local task_arn="$1" check="$2" phase="${3:-}" stream="" receipt_file="" command="" task_hash=""
       case "$check" in
@@ -1167,6 +1319,9 @@ AWS stderr. The same rule applies through Task 8 cleanup.
       task_hash="$(printf '%s' "$task_arn" | sha256sum | awk '{print $1}')"
       jq -e --arg check "$check" --arg sha "$CANDIDATE_SHA" --arg task_hash "$task_hash" --arg scenario "$ACTIVE_SCENARIO_ID" '.version == 1 and .ok == true and .check == $check and .candidate_sha == $sha and .task_arn_sha256 == $task_hash and .scenario_id == $scenario' "$receipt_file" >/dev/null
       persist_sanitized_receipt "$ACTIVE_SCENARIO_ID" "$check" "$task_arn" "$receipt_file"
+      if test "$check" = verify-operator-telemetry && test "$phase" != outage; then
+          checkpoint_operator_retained_evidence "$receipt_file"
+      fi
       rm -f "$receipt_file"
   }
 
@@ -1213,7 +1368,13 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   for both explicit control families, immutable versions, and audit-first
   Landscape records. The operator-telemetry receipt requires a web metric plus
   `RunStarted`/`RunFinished` trace correlated to the same Landscape run and a
-  negative collector-outage proof. Neither receipt may contain raw fixture,
+  negative collector-outage proof. The candidate task receives the non-secret
+  `ELSPETH_ACCEPTANCE_RUN_ID` and `ELSPETH_ACCEPTANCE_SCENARIO_ID`; each
+  positive receipt exposes the exact allowlisted metric query (including the
+  run/scenario namespace dimension) and deterministic X-Ray trace ID. The
+  controller command creates and binds the next strict-superset checkpoint
+  before the helper can return or the next live operation can begin. Neither
+  receipt may contain raw fixture,
   provider body, metric/trace service response, Guardrail messaging, ARN,
   account/request ID, URL, credential, or exception text.
 
@@ -1505,18 +1666,30 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   after external mutation, even an early failure must preserve available
   sanitized evidence until the cleanup coordinator exports it.
 
-  Before recording the final Task 7 checkbox, the evidence owner writes one
-  mode-0600 closed `elspeth.aws-ecs-retained-evidence.v1` receipt containing
-  the run ID, candidate SHA, capture time, and separate Scenario A/B exact
-  CloudWatch metric queries and X-Ray trace IDs with matching counts. Each
-  metric query must carry its run-and-scenario namespace. Bind it once; the
-  resource inventories remain immutable and may not be replaced to add
-  post-observation facts:
+  Immediately after **every** positive telemetry proof, before the next live
+  operation, `checkpoint_operator_retained_evidence` writes and binds a new
+  mode-0600 closed
+  `elspeth.aws-ecs-retained-evidence.v1` checkpoint containing the run ID,
+  candidate SHA, capture time, and the exact CloudWatch metric queries and
+  X-Ray trace IDs observed so far. Each metric query carries its
+  run-and-scenario namespace. The first checkpoint may contain one observed
+  scenario and one explicit empty scenario; every later checkpoint uses a new
+  immutable path and must be a strict superset. Bind each checkpoint
+  immediately. The resource inventories remain immutable and may not be
+  replaced to add post-observation facts. Before recording the final Task 7
+  checkbox, bind the complete checkpoint with non-empty matching-count
+  identities for both scenarios:
+
+  For each intermediate proof, the helper derives a new immutable path from
+  the positive exec-receipt hash inside the owner-approved mode-0700
+  `RETAINED_EVIDENCE_DIR` and executes `control-manifest
+  checkpoint-operator-evidence`; never overwrite or reuse a different
+  checkpoint at that path.
 
   ```bash
-  export RETAINED_EVIDENCE_RECEIPT="${RETAINED_EVIDENCE_RECEIPT:?set protected Task 7 retained-evidence receipt path}"
-  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest bind-retained-evidence \
-    --file "$CONTROL_MANIFEST" --receipt "$RETAINED_EVIDENCE_RECEIPT"
+  export RETAINED_EVIDENCE_RECEIPT="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field evidence.retained_evidence_path)"
+  bind_retained_checkpoint "$RETAINED_EVIDENCE_RECEIPT" complete
+  unset RETAINED_EVIDENCE_RECEIPT
   ```
 
 **Definition of Done:**
@@ -1561,7 +1734,46 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   margin against signed `max_connections` values.
 - [ ] Sanitized evidence binds the live result to the Task 1 SHA and immutable
   candidate plus rollback-baseline image/task-definition identities; the
-  one-way retained-evidence receipt is bound after both observation windows.
+  monotonic retained-evidence checkpoints cover every positive proof and the
+  final checkpoint contains both observation windows.
+
+After all thirty Task 7 checkbox assertions pass and the retained-evidence
+receipt is bound, persist their ordered rows. If Task 7 fails before this
+point, do not invent rows: enter Task 8 with the success stream incomplete and
+use the independent cleanup stream.
+
+```bash
+record_gate_check task7.check01 0 "$(gate_pass_hash task7.check01)"
+record_gate_check task7.check02 0 "$(gate_pass_hash task7.check02)"
+record_gate_check task7.check03 0 "$(gate_pass_hash task7.check03)"
+record_gate_check task7.check04 0 "$(gate_pass_hash task7.check04)"
+record_gate_check task7.check05 0 "$(gate_pass_hash task7.check05)"
+record_gate_check task7.check06 0 "$(gate_pass_hash task7.check06)"
+record_gate_check task7.check07 0 "$(gate_pass_hash task7.check07)"
+record_gate_check task7.check08 0 "$(gate_pass_hash task7.check08)"
+record_gate_check task7.check09 0 "$(gate_pass_hash task7.check09)"
+record_gate_check task7.check10 0 "$(gate_pass_hash task7.check10)"
+record_gate_check task7.check11 0 "$(gate_pass_hash task7.check11)"
+record_gate_check task7.check12 0 "$(gate_pass_hash task7.check12)"
+record_gate_check task7.check13 0 "$(gate_pass_hash task7.check13)"
+record_gate_check task7.check14 0 "$(gate_pass_hash task7.check14)"
+record_gate_check task7.check15 0 "$(gate_pass_hash task7.check15)"
+record_gate_check task7.check16 0 "$(gate_pass_hash task7.check16)"
+record_gate_check task7.check17 0 "$(gate_pass_hash task7.check17)"
+record_gate_check task7.check18 0 "$(gate_pass_hash task7.check18)"
+record_gate_check task7.check19 0 "$(gate_pass_hash task7.check19)"
+record_gate_check task7.check20 0 "$(gate_pass_hash task7.check20)"
+record_gate_check task7.check21 0 "$(gate_pass_hash task7.check21)"
+record_gate_check task7.check22 0 "$(gate_pass_hash task7.check22)"
+record_gate_check task7.check23 0 "$(gate_pass_hash task7.check23)"
+record_gate_check task7.check24 0 "$(gate_pass_hash task7.check24)"
+record_gate_check task7.check25 0 "$(gate_pass_hash task7.check25)"
+record_gate_check task7.check26 0 "$(gate_pass_hash task7.check26)"
+record_gate_check task7.check27 0 "$(gate_pass_hash task7.check27)"
+record_gate_check task7.check28 0 "$(gate_pass_hash task7.check28)"
+record_gate_check task7.check29 0 "$(gate_pass_hash task7.check29)"
+record_gate_check task7.check30 0 "$(gate_pass_hash task7.check30)"
+```
 
 ---
 
@@ -1580,6 +1792,10 @@ cleanup, and `task8.check05` is successful aggregate coordinator completion.
 The finalizer alone records `task8.check05` after every cleanup surface is
 confirmed; no later caller record is permitted. Failed attempts update only
 the resumable manifest state and do not write a nonzero immutable gate row.
+Execute all five checkbox fragments below in one Task 8 cleanup shell; the
+fence boundaries are explanatory, not process boundaries. A fresh process
+always resumes from check01 so it reconstructs the closed assignments,
+recorder function, and preflight-failure array before later fragments.
 
 - [ ] Start or resume from the durable control manifest, never from remembered
   shell state. `control-manifest validate` must bind the expected candidate
@@ -1597,24 +1813,50 @@ the resumable manifest state and do not write a nonzero immutable gate row.
   CLEANUP_ENV="$(mktemp -p /tmp elspeth-cleanup-env.XXXXXX)"
   chmod 600 "$CLEANUP_ENV"
   trap 'rm -f -- "$CLEANUP_ENV"' EXIT
-  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest load-cleanup --file "$CONTROL_MANIFEST" --shell-assignments >"$CLEANUP_ENV"
-  . "$CLEANUP_ENV"
+  if ! uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest load-cleanup --file "$CONTROL_MANIFEST" --shell-assignments >"$CLEANUP_ENV"; then
+      rm -f -- "$CLEANUP_ENV"
+      trap - EXIT
+      exit 1
+  fi
+  if ! . "$CLEANUP_ENV"; then
+      rm -f -- "$CLEANUP_ENV"
+      trap - EXIT
+      exit 1
+  fi
   rm -f -- "$CLEANUP_ENV"
   trap - EXIT
+  TASK8_PREFLIGHT_FAILURES=()
+  record_cleanup_gate_check() {
+      local check_id="$1" exit_status="$2" receipt_hash="$3"
+      uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger record-cleanup \
+        --file "$GATE_LEDGER" --check-id "$check_id" \
+        --candidate-sha "$CANDIDATE_SHA" --exit-status "$exit_status" \
+        --receipt-hash "$receipt_hash"
+  }
   if test "$CLEANUP_REQUIRED" = "0"; then
-      uv run --frozen python -m elspeth.web.aws_ecs_acceptance cleanup-evidence-finalize \
-        --file "$CONTROL_MANIFEST" --ledger "$GATE_LEDGER" --phase commit --clear-cleanup-required
-      uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest validate \
-        --file "$CONTROL_MANIFEST" --cleanup-only --require-cleanup-cleared
-      exit 0
+      if uv run --frozen python -m elspeth.web.aws_ecs_acceptance cleanup-evidence-finalize \
+          --file "$CONTROL_MANIFEST" --ledger "$GATE_LEDGER" --phase commit --clear-cleanup-required \
+        && uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest validate \
+          --file "$CONTROL_MANIFEST" --cleanup-only --require-cleanup-cleared; then
+          exit 0
+      fi
+      exit 1
   fi
   test "$CLEANUP_REQUIRED" = "1"
   if test "${DEADLINE_EXPIRED:-0}" = "1"; then
       ACCEPTANCE_REENTRY_FORBIDDEN=1
   fi
   test "${ACCEPTANCE_REENTRY_FORBIDDEN:-0}" = "0" || test "${DEADLINE_EXPIRED:-0}" = "1"
-  TASK8_RESUME_RECEIPT_HASH="$(sha256sum "$CONTROL_MANIFEST" | awk '{print $1}')"
-  record_gate_check task8.check01 0 "$TASK8_RESUME_RECEIPT_HASH"
+  if test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field acceptance_run_id)" = "$ACCEPTANCE_RUN_ID" \
+    && test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field candidate_sha)" = "$CANDIDATE_SHA" \
+    && test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger get --file "$GATE_LEDGER" --field candidate_sha)" = "$CANDIDATE_SHA"; then
+      TASK8_RESUME_RECEIPT_HASH="$(printf '%s\n%s\n%s\n' "$ACCEPTANCE_RUN_ID" "$CANDIDATE_SHA" "$GATE_LEDGER" | sha256sum | awk '{print $1}')"
+      if ! record_cleanup_gate_check task8.check01 0 "$TASK8_RESUME_RECEIPT_HASH"; then
+          TASK8_PREFLIGHT_FAILURES+=(task8_check01_ledger)
+      fi
+  else
+      TASK8_PREFLIGHT_FAILURES+=(task8_check01_binding)
+  fi
   ```
 
   **Expected result:** the closed assignments reconstruct every cleanup
@@ -1632,11 +1874,21 @@ the resumable manifest state and do not write a nonzero immutable gate row.
   and `verified: true`; bind it before setting `EVIDENCE_EXPORT_CONFIRMED=1`:
 
   ```bash
-  export EVIDENCE_EXPORT_RECEIPT="${EVIDENCE_EXPORT_RECEIPT:?set protected durable-export receipt path}"
-  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
-    --file "$CONTROL_MANIFEST" --evidence-export-receipt "$EVIDENCE_EXPORT_RECEIPT"
-  TASK8_INITIAL_EXPORT_HASH="$(sha256sum "$EVIDENCE_EXPORT_RECEIPT" | awk '{print $1}')"
-  record_gate_check task8.check02 0 "$TASK8_INITIAL_EXPORT_HASH"
+  export EVIDENCE_EXPORT_RECEIPT="${EVIDENCE_EXPORT_RECEIPT:-}"
+  if test -n "$EVIDENCE_EXPORT_RECEIPT" && \
+    uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+    --file "$CONTROL_MANIFEST" --evidence-export-receipt "$EVIDENCE_EXPORT_RECEIPT"; then
+      TASK8_INITIAL_EXPORT_HASH="$(sha256sum "$EVIDENCE_EXPORT_RECEIPT" | awk '{print $1}')"
+      if ! record_cleanup_gate_check task8.check02 0 "$TASK8_INITIAL_EXPORT_HASH"; then
+          TASK8_PREFLIGHT_FAILURES+=(task8_check02_ledger)
+      fi
+  else
+      if ! uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+        --file "$CONTROL_MANIFEST" --cleanup-checkpoint evidence_export:failed; then
+          TASK8_PREFLIGHT_FAILURES+=(task8_check02_checkpoint)
+      fi
+      TASK8_PREFLIGHT_FAILURES+=(task8_check02_export)
+  fi
   ```
 
   This first receipt is the pre-cleanup recovery copy; it does not confirm the
@@ -1657,14 +1909,17 @@ the resumable manifest state and do not write a nonzero immutable gate row.
   applies.
 
   ```bash
-  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest load-cleanup \
-    --file "$CONTROL_MANIFEST" --shell-assignments >/dev/null
   SCENARIO_A_PREAPPLY_SHA="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field scenarios.A.preapply_inventory_sha256)"
   SCENARIO_B_PREAPPLY_SHA="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field scenarios.B.preapply_inventory_sha256)"
-  test -n "$SCENARIO_A_PREAPPLY_SHA" && test -n "$SCENARIO_B_PREAPPLY_SHA"
-  test "$SCENARIO_A_PREAPPLY_SHA" != "$SCENARIO_B_PREAPPLY_SHA"
-  TASK8_INVENTORY_PROOF_HASH="$(printf '%s\n%s\n%s\n' "$ACCEPTANCE_RUN_ID" "$SCENARIO_A_PREAPPLY_SHA" "$SCENARIO_B_PREAPPLY_SHA" | sha256sum | awk '{print $1}')"
-  record_gate_check task8.check03 0 "$TASK8_INVENTORY_PROOF_HASH"
+  if test -n "$SCENARIO_A_PREAPPLY_SHA" && test -n "$SCENARIO_B_PREAPPLY_SHA" \
+    && test "$SCENARIO_A_PREAPPLY_SHA" != "$SCENARIO_B_PREAPPLY_SHA"; then
+      TASK8_INVENTORY_PROOF_HASH="$(printf '%s\n%s\n%s\n' "$ACCEPTANCE_RUN_ID" "$SCENARIO_A_PREAPPLY_SHA" "$SCENARIO_B_PREAPPLY_SHA" | sha256sum | awk '{print $1}')"
+      if ! record_cleanup_gate_check task8.check03 0 "$TASK8_INVENTORY_PROOF_HASH"; then
+          TASK8_PREFLIGHT_FAILURES+=(task8_check03_ledger)
+      fi
+  else
+      TASK8_PREFLIGHT_FAILURES+=(task8_check03_inventory)
+  fi
   ```
 - [ ] Independently attempt identity/session cleanup. The identity owner
   deletes the disposable Cognito user or rotates its password to a new
@@ -1682,14 +1937,19 @@ the resumable manifest state and do not write a nonzero immutable gate row.
   validating and exporting each signed owner receipt, persist the result:
 
   ```bash
-  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
-    --file "$CONTROL_MANIFEST" --cleanup-checkpoint identity_cleanup:confirmed
-  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
-    --file "$CONTROL_MANIFEST" --cleanup-checkpoint shared_resource_cleanup:confirmed
-  test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field cleanup_states.identity_cleanup)" = "confirmed"
-  test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field cleanup_states.shared_resource_cleanup)" = "confirmed"
-  TASK8_OWNER_CLEANUP_HASH="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field cleanup_states | sha256sum | awk '{print $1}')"
-  record_gate_check task8.check04 0 "$TASK8_OWNER_CLEANUP_HASH"
+  if uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+    --file "$CONTROL_MANIFEST" --cleanup-checkpoint identity_cleanup:confirmed \
+    && uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+      --file "$CONTROL_MANIFEST" --cleanup-checkpoint shared_resource_cleanup:confirmed \
+    && test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field cleanup_states.identity_cleanup)" = "confirmed" \
+    && test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field cleanup_states.shared_resource_cleanup)" = "confirmed"; then
+      TASK8_OWNER_CLEANUP_HASH="$(printf '%s\n%s\n' confirmed confirmed | sha256sum | awk '{print $1}')"
+      if ! record_cleanup_gate_check task8.check04 0 "$TASK8_OWNER_CLEANUP_HASH"; then
+          TASK8_PREFLIGHT_FAILURES+=(task8_check04_ledger)
+      fi
+  else
+      TASK8_PREFLIGHT_FAILURES+=(task8_check04_owner_cleanup)
+  fi
   ```
 - [ ] Run the remaining coordinator in one Bash shell. It deliberately does
   not use `set -e`: every operation is checked in an `if` branch, every failure
@@ -1699,7 +1959,7 @@ the resumable manifest state and do not write a nonzero immutable gate row.
 
   ```bash
   set -o pipefail
-  CLEANUP_FAILURES=()
+  CLEANUP_FAILURES=("${TASK8_PREFLIGHT_FAILURES[@]}")
   VERDICT_FAILURES=()
   record_cleanup_failure() { CLEANUP_FAILURES+=("$1"); }
   checkpoint_cleanup() {
@@ -1955,8 +2215,9 @@ the resumable manifest state and do not write a nonzero immutable gate row.
 
   FINAL_EVIDENCE_EXPORT_CONFIRMED=0
   if cleanup_surface_needed evidence_export; then
-      FINAL_EVIDENCE_EXPORT_RECEIPT="${FINAL_EVIDENCE_EXPORT_RECEIPT:?evidence owner must set final protected export receipt after refreshing the durable destination}"
+      FINAL_EVIDENCE_EXPORT_RECEIPT="${FINAL_EVIDENCE_EXPORT_RECEIPT:-}"
       if test -n "${EVIDENCE_EXPORT_RECEIPT:-}" && \
+          test -n "$FINAL_EVIDENCE_EXPORT_RECEIPT" && \
           test "$FINAL_EVIDENCE_EXPORT_RECEIPT" != "$EVIDENCE_EXPORT_RECEIPT" && \
           run_cleanup_bounded uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
             --file "$CONTROL_MANIFEST" --final-evidence-export-receipt "$FINAL_EVIDENCE_EXPORT_RECEIPT"; then
@@ -2038,7 +2299,11 @@ the resumable manifest state and do not write a nonzero immutable gate row.
   cleanup receipt to the stable complete ledger-records hash. It deliberately
   leaves the ledger document unfinalized so Task 9 can finalize only after the
   GO verdict; later ledger finalization does not invalidate the cleanup
-  receipt.
+  receipt. If the process stops after writing `task8.check05` but before the
+  committed manifest replace, the next check01-started Task 8 pass accepts the
+  exact prepared-manifest/terminal-row pair, re-runs prepare idempotently, and
+  proceeds to the direct commit retry; a mismatched terminal row still fails
+  closed.
 
   Empty Terraform state is necessary but not sufficient after a partial apply.
   Plan 10's tested `orphan-sweep` subcommand performs the following closed
@@ -2103,34 +2368,45 @@ and cleanup completed on time.
 
   ~~~bash
   set -Eeuo pipefail
+  export PROGRAM_WORKTREE="${PROGRAM_WORKTREE:-/home/john/elspeth/.worktrees/aws-ecs-program}"
+  RECONCILED_RELEASE_SHA="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger get --file "$GATE_LEDGER" --field reconciled_release_sha)"
+  CANDIDATE_SHA="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger get --file "$GATE_LEDGER" --field candidate_sha)"
   test "$(git branch --show-current)" = "feat/aws-ecs-program"
   test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
   test -z "$(git status --porcelain)"
+  test "$(git -C /home/john/elspeth branch --show-current)" = "release/0.7.1"
+  test -z "$(git -C /home/john/elspeth status --porcelain)"
+  LOCAL_RELEASE_SHA="$(git -C /home/john/elspeth rev-parse release/0.7.1)"
+  REMOTE_RELEASE_SHA="$(git ls-remote --heads origin refs/heads/release/0.7.1 | awk '{print $1}')"
+  case "$LOCAL_RELEASE_SHA" in
+      "$RECONCILED_RELEASE_SHA"|"$CANDIDATE_SHA") ;;
+      *) printf 'unexpected local release state: %s\n' "$LOCAL_RELEASE_SHA" >&2; exit 1 ;;
+  esac
+  case "$REMOTE_RELEASE_SHA" in
+      ""|"$RECONCILED_RELEASE_SHA"|"$CANDIDATE_SHA") ;;
+      *) printf 'unexpected remote release state: %s\n' "$REMOTE_RELEASE_SHA" >&2; exit 1 ;;
+  esac
 
   CI_REF="$(printf 'RC0.7.1-%s' "$(printf '%s' "$CANDIDATE_SHA" | cut -c1-12)")"
   PR_NUMBER="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field release_pr_number)"
   CI_RUN_ID="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field ci_run_id)"
   test "$(git ls-remote --heads origin refs/heads/feat/aws-ecs-program | awk '{print $1}')" = "$CANDIDATE_SHA"
-  test "$(gh pr view "$PR_NUMBER" --json state,baseRefName,headRefName,headRefOid --jq '.state + ":" + .baseRefName + ":" + .headRefName + ":" + .headRefOid')" = "OPEN:release/0.7.1:feat/aws-ecs-program:$CANDIDATE_SHA"
+  PR_STATE="$(gh pr view "$PR_NUMBER" --json state,baseRefName,headRefName,headRefOid --jq '.state + ":" + .baseRefName + ":" + .headRefName + ":" + .headRefOid')"
+  case "$PR_STATE" in
+      "OPEN:release/0.7.1:feat/aws-ecs-program:$CANDIDATE_SHA") ;;
+      "MERGED:release/0.7.1:feat/aws-ecs-program:$CANDIDATE_SHA")
+          test "$REMOTE_RELEASE_SHA" = "$CANDIDATE_SHA"
+          ;;
+      *) printf 'unexpected candidate PR state\n' >&2; exit 1 ;;
+  esac
   test "$(gh run view "$CI_RUN_ID" --json event,headSha,status,conclusion --jq '.event + ":" + .headSha + ":" + .status + ":" + .conclusion')" = "push:$CANDIDATE_SHA:completed:success"
   test -z "$(git ls-remote --heads origin "refs/heads/$CI_REF")"
   test "$(gh release list --limit 100 --json tagName --jq '[.[] | select(.tagName == "v0.7.1")] | length')" = "0"
   test -z "$(git tag --list v0.7.1)"
   test -z "$(git ls-remote --tags origin refs/tags/v0.7.1 'refs/tags/v0.7.1^{}')"
 
-  test "$(git -C /home/john/elspeth branch --show-current)" = "release/0.7.1"
-  test -z "$(git -C /home/john/elspeth status --porcelain)"
-  test "$(git -C /home/john/elspeth rev-parse HEAD)" = "$RECONCILED_RELEASE_SHA"
-  test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$RECONCILED_RELEASE_SHA"
   git -C "$PROGRAM_WORKTREE" merge-base --is-ancestor "$RECONCILED_RELEASE_SHA" "$CANDIDATE_SHA"
-  REMOTE_RELEASE_SHA="$(git ls-remote --heads origin refs/heads/release/0.7.1 | awk '{print $1}')"
-  test -z "$REMOTE_RELEASE_SHA" || test "$REMOTE_RELEASE_SHA" = "$RECONCILED_RELEASE_SHA"
-  git -C /home/john/elspeth merge --ff-only "$CANDIDATE_SHA"
-  test "$(git -C /home/john/elspeth rev-parse HEAD)" = "$CANDIDATE_SHA"
-  test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$CANDIDATE_SHA"
-  test -z "$(git -C /home/john/elspeth status --porcelain)"
-  git -C /home/john/elspeth push origin release/0.7.1
-  test "$(git ls-remote --heads origin refs/heads/release/0.7.1 | awk '{print $1}')" = "$CANDIDATE_SHA"
+  git -C "$PROGRAM_WORKTREE" merge-base --is-ancestor "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger get --file "$GATE_LEDGER" --field program_base_sha)" "$CANDIDATE_SHA"
 
   filigree plan elspeth-6343920a47 --json --detail full > /tmp/aws-ecs-final-plan.json
   test "$(jq '[.phases[].steps[] | select(.issue_id != "elspeth-05396fed38")] | length' /tmp/aws-ecs-final-plan.json)" -eq 19
@@ -2138,6 +2414,28 @@ and cleanup completed on time.
       test -n "$anchor"
       [[ "$anchor" =~ ^feat/aws-ecs-program@[0-9a-f]{40}$ ]]
       CLOSE_SHA="$(printf '%s' "$anchor" | cut -d@ -f2)"
+      git -C "$PROGRAM_WORKTREE" merge-base --is-ancestor "$CLOSE_SHA" "$CANDIDATE_SHA"
+  done < <(jq -r '.phases[].steps[] | select(.issue_id != "elspeth-05396fed38") | .close_commit' /tmp/aws-ecs-final-plan.json)
+
+  # Freeze the complete Task 1-8 evidence before the first release mutation.
+  # Finalization is idempotent and makes a partial release transition safely resumable.
+  test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field verdict_failures)" = "[]"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger finalize \
+    --file "$GATE_LEDGER" --candidate-sha "$CANDIDATE_SHA"
+
+  if test "$LOCAL_RELEASE_SHA" = "$RECONCILED_RELEASE_SHA"; then
+      git -C /home/john/elspeth merge --ff-only "$CANDIDATE_SHA"
+  fi
+  test "$(git -C /home/john/elspeth rev-parse HEAD)" = "$CANDIDATE_SHA"
+  test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$CANDIDATE_SHA"
+  test -z "$(git -C /home/john/elspeth status --porcelain)"
+  if test "$REMOTE_RELEASE_SHA" != "$CANDIDATE_SHA"; then
+      git -C /home/john/elspeth push origin "$CANDIDATE_SHA:refs/heads/release/0.7.1"
+  fi
+  test "$(git ls-remote --heads origin refs/heads/release/0.7.1 | awk '{print $1}')" = "$CANDIDATE_SHA"
+
+  while read -r anchor; do
+      CLOSE_SHA="${anchor##*@}"
       git -C /home/john/elspeth merge-base --is-ancestor "$CLOSE_SHA" release/0.7.1
   done < <(jq -r '.phases[].steps[] | select(.issue_id != "elspeth-05396fed38") | .close_commit' /tmp/aws-ecs-final-plan.json)
   ~~~
@@ -2146,8 +2444,11 @@ and cleanup completed on time.
   exact-SHA hosted run remains green, no temporary/ref/tag leak exists, the
   local and remote release branch started at RECONCILED_RELEASE_SHA and now
   equal CANDIDATE_SHA by fast-forward, both worktrees are clean, and all 19
-  prerequisite close SHAs are release ancestors. Any failure is NO-GO; do not
-  create a merge commit, force-push, or issue a partial verdict.
+  prerequisite close SHAs are release ancestors. The `{anchor,candidate}`
+  local/remote state machine is idempotent: a retry accepts either untouched
+  state or the exact already-transitioned candidate, and rejects every third
+  SHA. Any failure is NO-GO; do not create a merge commit, force-push, or issue
+  a partial verdict.
 
 - [ ] Return **GO** only when every checkbox in Tasks 1–8 is backed by an exit-0
   result or explicit live acceptance evidence bound to that SHA. Report the
@@ -2168,12 +2469,15 @@ and cleanup completed on time.
   recreated or retagged as a release shortcut.
 - [ ] Return **NO-GO** for any failure, missing operator prerequisite, changed
   SHA, dirty worktree, skipped required command, or incomplete dependency.
-  Name the failing command and owning plan/surface, leave the protected ledger
-  unfinalized, checksum the current ledger/evidence snapshot, and add a
+  Name the failing command and owning plan/surface, checksum the current
+  ledger/evidence snapshot, and add a
   Filigree comment with the sanitized blocker/evidence IDs;
   leave `elspeth-05396fed38` open and assigned for resume. Do not summarize a
-  partial run as "go with warnings."
-- [ ] On GO only, finalize and checksum the protected gate ledger, add the
+  partial run as "go with warnings." Failures before Task 9's evidence-freeze
+  step leave the ledger unfinalized. Failures after it preserve the finalized
+  ledger and resume only the idempotent release state machine; never rewrite
+  or replace that evidence.
+- [ ] On GO only, add the
   candidate SHA, exact-SHA workflow IDs, AWS change-record ID, cleanup receipt,
   and verdict as a sanitized Filigree comment, then close
   `elspeth-05396fed38` with that reason under `INTEGRATION_OWNER` and exact
@@ -2181,11 +2485,8 @@ and cleanup completed on time.
   status, matching assignee/close commit, and no missing evidence fields. No
   earlier task may close it.
 
-  ```bash
-  test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest get --file "$CONTROL_MANIFEST" --field verdict_failures)" = "[]"
-  uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger finalize \
-    --file "$GATE_LEDGER" --candidate-sha "$CANDIDATE_SHA"
-  ```
+  Ledger finalization already occurred immediately before the single release
+  transition and is revalidated here; this closeout step does not mutate it.
 
 **Definition of Done:**
 

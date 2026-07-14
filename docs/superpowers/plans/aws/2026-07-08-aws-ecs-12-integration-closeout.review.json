@@ -3,11 +3,11 @@
   "scope_verdict": "GO_TO_EXECUTE_AFTER_ALL_DEPENDENCIES",
   "summary": "Plan 12 is execution-ready after all 19 prerequisites close on feat/aws-ecs-program. Stage 9 first reviews and merges the then-current release/0.7.1 tip into the program lineage, preserves every close anchor, reruns the reconciliation affected-area checkpoint, and records RECONCILED_RELEASE_SHA. Task 1 then freezes one candidate, Major Checkpoint 6 runs on that exact SHA before Task 2, and Tasks 1 through 8 test it unchanged. If release moves after external mutation, Task 8 cleanup must finish before rereconciliation. Task 9 alone fast-forwards and pushes the still-reconciled release branch to that tested SHA before GO.",
   "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md",
-  "reviewed_at": "2026-07-13T04:57:30Z",
+  "reviewed_at": "2026-07-14T16:54:37Z",
   "review_basis": {
     "branch": "feat/aws-ecs-program",
-    "head": "a579626e46c97973bc50b5dc9235032ad98199d9",
-    "baseline": "The uncommitted reviewed planning repair was checked in the isolated program worktree against Plan 10 replacement-lineage semantics, Plan 12 cleanup ordering, the exact final fast-forward boundary, the autonomous prompt and run sheet, shell syntax, links, and a synthetic divergent-release conflict/resume repository."
+    "head": "ac22d0f7d7ece676b4046090a5d2f34331d894b4",
+    "baseline": "Fresh full-current review of complete Plan 12 and Stage 9 after the Plan 10/12 contract repair. The review reconciled all 81 ledger rows, two-stream phase sealing, historical export replay, evidence aggregation, exact monotonic retained telemetry checkpoints, crash-safe cleanup finalization, the new-attempt ledger rule, and the sole idempotent Task 9 release transition."
   },
   "blocking_issues": [],
   "warnings": [
@@ -122,6 +122,11 @@
       "id": "B12-18",
       "status": "RESOLVED",
       "resolution": "Concurrent main-checkout and release-branch documentation is out of scope during Stages 1-8. Stage 9 absorbs unrelated documentation, while every non-documentation change and any AWS program plan, review, design, specification, CI/security policy, generated contract, runtime, or test change triggers impact and evidence handling."
+    },
+    {
+      "id": "B12-19",
+      "status": "RESOLVED",
+      "resolution": "The full contract repair binds durable Plan/program/release anchors, uses 76 ordered success rows plus four caller cleanup rows and finalizer-owned task8.check05, aggregates missing evidence paths without abandoning independent teardown, requires a new ledger after cleanup starts, preserves historical exports, checkpoints exact retained telemetry monotonically, and recovers the terminal-row-before-manifest-commit interruption window."
     }
   ],
   "reviewer_summaries": {
@@ -157,6 +162,11 @@
       "reviewed_at": "2026-07-13T04:57:30Z",
       "verdict": "APPROVED_AFTER_ORCHESTRATION_REPAIR",
       "summary": "Plan 12 now consumes a reviewed release reconciliation anchor, keeps pre-freeze reconciliation distinct from candidate-bound Major Checkpoint 6, and finishes cleanup before any post-mutation rereconciliation."
+    },
+    {
+      "reviewed_at": "2026-07-14T16:54:37Z",
+      "verdict": "APPROVED_AFTER_CONTRACT_REPAIR",
+      "summary": "Fresh full-plan review returned GO on the complete current Plan 12 and Stage 9 after multiple repair passes. All 81 rows, cleanup resumption, evidence preservation, exact retained telemetry, and the single Task 9 release transition reconcile mechanically."
     }
   ],
   "verification": [
@@ -165,7 +175,8 @@
     "A synthetic divergent-release repository exercised conflict-class exit, fresh-shell HEAD/ORIG_HEAD and MERGE_HEAD reconstruction, staged-resolution checks, merge commit, and preserved ancestry successfully.",
     "git diff --check passes; direct AWS invocation, unsafe destroy -auto-approve, stale tag templates, RUN_ID collision, forbidden aws_capture login pipe, and || true bypass markers are absent.",
     "Current CI/CodeQL/allowlist triggers, gh/filigree command options, Terraform saved-plan contract, exact Filigree dependency set, and fresh Loomweave repository state were checked.",
-    "Plan 12 remains pending, unassigned, and dependency-controlled; this review did not claim, transition, implement, push, merge, tag, or deploy it."
+    "Plan 12 remains pending, unassigned, and dependency-controlled; this review did not claim, transition, implement, push, merge, tag, or deploy it.",
+    "fresh full-current review returned GO after 257 focused tests, Ruff check and format, mypy, 48 backtick plus 2 tilde Plan 12 Bash fences, 24 Stage 9 Bash fences, 16 deployment-runbook Bash fences, and git diff --check"
   ],
-  "plan_sha256": "7625b9bd970daa9e32966163f28e51241f262478823ab440d78f88ee67e52d1f"
+  "plan_sha256": "1a8f48a819c499d9359a2e1e75635c7aa19cc03b04749f93c7ace49ae3946eac"
 }

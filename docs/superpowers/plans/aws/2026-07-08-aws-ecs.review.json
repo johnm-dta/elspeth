@@ -1,26 +1,26 @@
 {
-  "review": "AWS ECS runtime-readiness plan set — round 9 worktree-only orchestration repair",
-  "date": "2026-07-13",
-  "reviewed_at": "2026-07-13T04:57:30Z",
+  "review": "AWS ECS runtime-readiness plan set — round 10 Plan 10/12 acceptance-contract repair",
+  "date": "2026-07-15",
+  "reviewed_at": "2026-07-14T16:54:37Z",
   "object": "docs/superpowers/plans/aws AWS ECS plan/review set, orchestration run sheet, and runtime-readiness/universal-policy designs @ feat/aws-ecs-program",
-  "process": "Independent orchestration-contract, mechanical, and Wardline re-review of the planning repair in the isolated program worktree. The review covered immutable PROGRAM_BASE_SHA ancestry, ignored concurrent documentation through Stages 1-8, substantive documentation classification, Stage 9 pre-merge inventory and conflict resume, Plan 10 replacement lineage, Plan 12 cleanup ordering, candidate-bound Major Checkpoint 6, exact final fast-forward, shell fences, links, JSON, whitespace, stale terms, and SHA256 bindings.",
+  "process": "Fresh independent full-plan reviews of Plan 10 and Plan 12/Stage 9 in the isolated program worktree, covering the current acceptance controller, canonical runbook, orchestration contract, executable evidence ordering, idempotent resume, cleanup finalization, shell fences, JSON, whitespace, and SHA256 bindings. CI, Wardline, and security review were outside this repair pass.",
   "verdict": "APPROVED_WITH_WARNINGS",
   "scope_verdict": "GO_TO_IMPLEMENT",
   "runtime_verdict": "PENDING_PLAN_12",
-  "verdict_summary": "GO to execute the dependency DAG in one ignored feat/aws-ecs-program worktree. Concurrent main/release documentation is ignored through Stages 1-8. Stage 9 reviews and merges the current release tip, records RECONCILED_RELEASE_SHA, and runs the reconciliation checkpoint before Task 1 freezes the candidate. Runtime GO still requires Major Checkpoint 6 and Plan 12 Tasks 1 through 8 on that unchanged SHA, cleanup, exact-SHA hosted CI, and the final fast-forward from the unchanged reconciliation anchor.",
+  "verdict_summary": "GO after committing and reclosing the repaired Plan 10 contract, then execute Stage 9 and Plan 12 in the prescribed order. Both independent full-plan reviews found no remaining correctness, idempotency, cleanup, evidence, or resume blocker. Runtime GO remains pending completion of the external Plan 12 acceptance sequence.",
   "source_sha256": {
     "docs/superpowers/plans/aws/2026-07-12-aws-ecs-autonomous-codex-prompt.md": "40d103810fa11916dda54f665376774cc26a2c69efc333531b0c12942f33744f",
-    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md": "7fffe7aa6810e435bb0990c989199fcee248e6757bb786e9e6df012e49753099",
+    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md": "749f37b3d6780ffbe81d831401ccf62b2e695b397364dd4bd6fea4f0e82fdb6b",
     "docs/superpowers/plans/aws/2026-07-08-aws-ecs-00-overview.md": "94047e986bd687f2c7e5b3f5d508a647a7879f3ad31b9741b378c9320bfdaa44",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-10-packaging-docker.md": "3bb971d0db88f1575c362f970f37c80728ee064d58207e285c9d2726d32ba4f6",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md": "7625b9bd970daa9e32966163f28e51241f262478823ab440d78f88ee67e52d1f"
+    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-10-packaging-docker.md": "fff072491d74e65416723ac8943820b239a799ab8b4dfdc8b0c031de0a1c90c3",
+    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md": "1a8f48a819c499d9359a2e1e75635c7aa19cc03b04749f93c7ace49ae3946eac"
   },
   "reviewer_verdicts": {
     "reality": "APPROVED_AFTER_REPAIRS",
     "architecture": "APPROVED_AFTER_REPAIRS",
     "quality_security": "APPROVED_AFTER_REPAIRS",
     "systems_dependencies": "APPROVED_AFTER_REPAIRS",
-    "final_rechecks": "APPROVED",
+    "final_rechecks": "PLAN10_AND_PLAN12_GO",
     "orchestration_contract": "APPROVED",
     "wardline_contract": "APPROVED"
   },
@@ -61,7 +61,10 @@
     "PROGRAM_BASE_SHA is the immutable Stages 1-8 ancestry marker; unrelated concurrent documentation is not inspected or gated until Stage 9.",
     "Stage 9 inventories and classifies the release-only delta before merge, reconstructs conflict-resume anchors without resampling release, and preserves all historical close anchors.",
     "Plan 10 itself and consumed prerequisites use the owner-approved replacement-lineage protocol when a substantive reconciliation delta invalidates the historical baseline.",
-    "The reconciliation affected-area checkpoint precedes Task 1; Major Checkpoint 6 runs only on the frozen candidate before Task 2, and external cleanup precedes any post-mutation rereconciliation."
+    "The reconciliation affected-area checkpoint precedes Task 1; Major Checkpoint 6 runs only on the frozen candidate before Task 2, and external cleanup precedes any post-mutation rereconciliation.",
+    "Plan 10 now re-verifies the historically bound initial evidence export against its immutable receipt even after cleanup receipts and the cleanup ledger advance.",
+    "Plan 12 requires a fresh cleanup ledger after any Task 8 start, exact allowlisted retained-metric queries plus deterministic trace evidence, and immutable strict-superset operator-evidence checkpoints before live CloudWatch deletion.",
+    "Retained evidence validation now binds the exact acceptance namespace and sentinel dimensions, enforces equal metric/trace evidence counts, and resumes safely across an interruption between terminal cleanup-ledger persistence and manifest finalization."
   ],
   "verification": [
     "git diff --check passes",
@@ -72,7 +75,11 @@
     "targeted stale-term searches found no RELEASE_START_SHA or paused-release instruction in the amended documents",
     "a synthetic divergent-release repository passed conflict-class exit, fresh-shell anchor reconstruction, staged resolution, reconciliation commit, and preserved ancestry",
     "independent orchestration-contract and Wardline reviewers returned APPROVED after repair",
-    "every reviewed source SHA256 matches its refreshed sidecar or aggregate source_sha256 binding"
+    "every reviewed source SHA256 matches its refreshed sidecar or aggregate source_sha256 binding",
+    "257 focused acceptance, runbook-contract, and operator-telemetry tests pass",
+    "Ruff check, Ruff format-check, and mypy for the acceptance controller pass",
+    "all 48 Plan 12 backtick Bash fences, 2 Plan 12 tilde Bash fences, 16 canonical-runbook Bash fences, and 24 Stage 9 run-sheet Bash fences pass syntax validation",
+    "fresh independent full Plan 10 and full Plan 12/Stage 9 reviewers returned GO with no remaining correctness, idempotency, cleanup, evidence, or resume blocker"
   ],
   "reviewed_files": [
     "docs/superpowers/plans/aws/2026-07-08-aws-ecs-00-overview.md",
@@ -134,6 +141,12 @@
       "date": "2026-07-13",
       "verdict": "APPROVED_WITH_WARNINGS",
       "summary": "The worktree-only Stages 1-8 contract and explicit Stage 9 release reconciliation were independently re-reviewed. Conflict resume, substantive documentation classification, Plan 10 replacement lineage, candidate-bound Major Checkpoint 6, cleanup-before-rereconciliation, and review hashes now agree."
+    },
+    {
+      "round": 10,
+      "date": "2026-07-15",
+      "verdict": "APPROVED_WITH_WARNINGS",
+      "summary": "The repaired Plan 10 and Plan 12 acceptance contract was independently re-reviewed in full. Historical evidence replay, exact retained telemetry, two-stream cleanup-ledger freshness, immutable evidence checkpointing, cleanup crash recovery, and all refreshed review hashes now agree."
     }
   ]
 }

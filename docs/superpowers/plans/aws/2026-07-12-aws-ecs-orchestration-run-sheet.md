@@ -1112,24 +1112,24 @@ standard pack command and requires exit 0 plus non-inert anchored coverage;
 missing or stale metrics, formal incomplete-analysis facts, and active ERROR+
 defects invalidate that evidence.
 
-After Tasks 1–8 pass and cleanup is complete, but before Task 9 issues GO:
+After Tasks 1–8 pass and cleanup is complete, hand control directly to Task 9.
+Plan 12 Task 9 owns the single idempotent release transition. The run sheet
+performs no release mutation of its own; it only confirms the inputs Task 9
+must reconstruct from the protected ledger:
 
 ~~~bash
 test "$(git -C "$PROGRAM_WORKTREE" rev-parse HEAD)" = "$CANDIDATE_SHA"
 test -z "$(git -C "$PROGRAM_WORKTREE" status --porcelain)"
-test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$RECONCILED_RELEASE_SHA"
 git -C "$PROGRAM_WORKTREE" merge-base --is-ancestor "$RECONCILED_RELEASE_SHA" "$CANDIDATE_SHA"
-test "$(git -C /home/john/elspeth branch --show-current)" = "release/0.7.1"
-test -z "$(git -C /home/john/elspeth status --porcelain)"
-git -C /home/john/elspeth merge --ff-only "$CANDIDATE_SHA"
-test "$(git -C /home/john/elspeth rev-parse HEAD)" = "$CANDIDATE_SHA"
-test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$CANDIDATE_SHA"
-test -z "$(git -C /home/john/elspeth status --porcelain)"
+test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger get --file "$GATE_LEDGER" --field reconciled_release_sha)" = "$RECONCILED_RELEASE_SHA"
+test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger get --file "$GATE_LEDGER" --field candidate_sha)" = "$CANDIDATE_SHA"
 ~~~
 
-Then re-read all 19 prerequisite issues and require each close SHA to be an
-ancestor of release/0.7.1. Only after that exact fast-forward and ancestry
-audit may Task 9 issue GO, close Plan 12 with
+Task 9 first re-reads all 19 prerequisite issues and requires each close SHA
+to be an ancestor of the candidate. It then freezes the complete ledger and
+advances local and remote `release/0.7.1` through the closed
+`{RECONCILED_RELEASE_SHA,CANDIDATE_SHA}` state machine. Only after that single
+transition and the release-ancestry audit may Task 9 issue GO, close Plan 12 with
 release/0.7.1@CANDIDATE_SHA, close Wave 4, and close milestone
 elspeth-6343920a47 at the same release anchor.
 

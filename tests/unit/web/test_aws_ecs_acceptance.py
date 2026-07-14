@@ -15,7 +15,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import ClassVar
+from typing import ClassVar, cast
 
 import httpx
 import pytest
@@ -1670,8 +1670,9 @@ class _TelemetryEmitter:
         self.events = events
         self.delivery = delivery
 
-    def emit_web_metric(self, sentinel_value: int) -> bool:
+    def emit_web_metric(self, sentinel_value: int, *, acceptance_namespace: str) -> bool:
         assert sentinel_value >= 0
+        assert acceptance_namespace.endswith("-a")
         self.events.append("metric.emit")
         return self.delivery
 
@@ -1686,9 +1687,10 @@ class _TelemetryQueries:
         self.metric_calls = 0
         self.trace_calls = {"RunStarted": 0, "RunFinished": 0}
 
-    def metric_observed(self, *, metric_name: str, sentinel_value: int) -> bool:
+    def metric_observed(self, *, metric_name: str, sentinel_value: int, acceptance_namespace: str) -> bool:
         assert metric_name == "operator.acceptance.sentinel"
         assert sentinel_value >= 0
+        assert acceptance_namespace.endswith("-a")
         self.metric_calls += 1
         return self.metric_calls >= self.available_on
 
@@ -1720,6 +1722,8 @@ def test_operator_telemetry_positive_lane_is_audit_first_bounded_status_correlat
         policy=acceptance.AcceptancePolicy(attempts=3, interval_seconds=0.25),
         sleep=sleeps.append,
         sentinel_factory=lambda: "non-content-sentinel",
+        acceptance_namespace="acceptance-run-a",
+        metric_dimensions=(("service.name", "elspeth-web"),),
         now=lambda: 1234.5,
     )
 
@@ -1734,6 +1738,8 @@ def test_operator_telemetry_positive_lane_is_audit_first_bounded_status_correlat
         "resource",
         "sentinel_sha256",
         "landscape_status_agrees",
+        "retained_metric_query",
+        "retained_trace_id",
     }
     assert evidence.trace_names == ("RunStarted", "RunFinished")
     assert evidence.landscape_status_agrees is True
@@ -1752,6 +1758,8 @@ def test_operator_telemetry_positive_lane_rejects_landscape_trace_terminal_misma
             queries=queries,
             resource=acceptance.SanitizedResourceIdentity("elspeth-web", "0.7.1", "acceptance", "aws"),
             policy=acceptance.AcceptancePolicy(attempts=1, interval_seconds=0),
+            acceptance_namespace="acceptance-run-a",
+            metric_dimensions=(("service.name", "elspeth-web"),),
         )
 
 
@@ -1764,6 +1772,7 @@ def test_operator_telemetry_outage_lane_assumes_external_stop_and_keeps_audit_wi
         queries=queries,
         policy=acceptance.AcceptancePolicy(attempts=2, interval_seconds=0),
         sentinel_factory=lambda: "negative-sentinel",
+        acceptance_namespace="acceptance-run-a",
         now=lambda: 1235.5,
     )
 
@@ -1835,7 +1844,14 @@ def test_aws_operator_telemetry_queries_use_exact_metric_dimensions_and_trace_co
         end_time=datetime(2026, 7, 14, 1, 5, tzinfo=UTC),
     )
 
-    assert queries.metric_observed(metric_name="operator.acceptance.sentinel", sentinel_value=sentinel_value) is True
+    assert (
+        queries.metric_observed(
+            metric_name="operator.acceptance.sentinel",
+            sentinel_value=sentinel_value,
+            acceptance_namespace="acceptance-run-a",
+        )
+        is True
+    )
     assert queries.trace_observed(trace_name="RunStarted", run_id=run_id) is True
     assert queries.trace_observed(trace_name="RunFinished", run_id=run_id) is True
     assert queries.trace_terminal_status(run_id=run_id) == "completed"
@@ -1845,6 +1861,7 @@ def test_aws_operator_telemetry_queries_use_exact_metric_dimensions_and_trace_co
         "MetricName": "operator.acceptance.sentinel",
         "Dimensions": [
             *[{"Name": name, "Value": value} for name, value in dimensions],
+            {"Name": "elspeth.acceptance.namespace", "Value": "acceptance-run-a"},
             {"Name": "elspeth.acceptance.sentinel", "Value": str(sentinel_value)},
         ],
     }
@@ -1891,7 +1908,14 @@ def test_aws_operator_telemetry_queries_accept_matching_point_among_repeated_win
         end_time=now + timedelta(minutes=3),
         forbidden_values=("raw-secret",),
     )
-    assert queries.metric_observed(metric_name="operator.acceptance.sentinel", sentinel_value=11) is True
+    assert (
+        queries.metric_observed(
+            metric_name="operator.acceptance.sentinel",
+            sentinel_value=11,
+            acceptance_namespace="acceptance-run-a",
+        )
+        is True
+    )
     with pytest.raises(acceptance.OperatorTelemetryAcceptanceError, match="forbidden content"):
         queries.trace_observed(trace_name="RunStarted", run_id="run-a")
 
@@ -1912,7 +1936,14 @@ def test_aws_operator_telemetry_queries_treat_absence_as_retryable_and_malformed
         start_time=datetime(2026, 7, 14, 1, 0, tzinfo=UTC),
         end_time=datetime(2026, 7, 14, 1, 5, tzinfo=UTC),
     )
-    assert queries.metric_observed(metric_name="operator.acceptance.sentinel", sentinel_value=1) is False
+    assert (
+        queries.metric_observed(
+            metric_name="operator.acceptance.sentinel",
+            sentinel_value=1,
+            acceptance_namespace="acceptance-run-a",
+        )
+        is False
+    )
     assert queries.trace_observed(trace_name="RunStarted", run_id="run-a") is False
 
     class MalformedCloudWatch:
@@ -1927,7 +1958,11 @@ def test_aws_operator_telemetry_queries_treat_absence_as_retryable_and_malformed
         end_time=datetime(2026, 7, 14, 1, 5, tzinfo=UTC),
     )
     with pytest.raises(acceptance.OperatorTelemetryAcceptanceError, match="CloudWatch projection"):
-        queries.metric_observed(metric_name="operator.acceptance.sentinel", sentinel_value=1)
+        queries.metric_observed(
+            metric_name="operator.acceptance.sentinel",
+            sentinel_value=1,
+            acceptance_namespace="acceptance-run-a",
+        )
 
     class FailedXRay:
         def batch_get_traces(self, **_kwargs: object) -> object:
@@ -2009,7 +2044,12 @@ def test_verify_operator_telemetry_live_positive_uses_default_chain_clients_and_
         operator_telemetry_task_definition_revision="17",
     )
     result = acceptance.verify_operator_telemetry_live(
-        {"AWS_REGION": "ap-southeast-2", "ELSPETH_ACCEPTANCE_PASSWORD": "must-not-escape"},
+        {
+            "AWS_REGION": "ap-southeast-2",
+            "ELSPETH_ACCEPTANCE_PASSWORD": "must-not-escape",
+            "ELSPETH_ACCEPTANCE_RUN_ID": "4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48",
+            "ELSPETH_ACCEPTANCE_SCENARIO_ID": "A",
+        },
         phase="positive",
         settings_loader=lambda: settings,
         audit_factory=lambda _settings, _env: _TelemetryAudit([]),
@@ -2037,6 +2077,19 @@ def test_verify_operator_telemetry_live_positive_uses_default_chain_clients_and_
         "trace_terminal_agrees": True,
         "collector_degraded": False,
         "cloud_receipt": True,
+        "retained_metric_query": {
+            "namespace": "ELSPETH/Operator",
+            "metric_name": "operator.acceptance.sentinel",
+            "dimensions": [
+                *[{"name": name, "value": value} for name, value in acceptance.operator_metric_dimensions(settings)],
+                {
+                    "name": "elspeth.acceptance.namespace",
+                    "value": "4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-a",
+                },
+                {"name": "elspeth.acceptance.sentinel", "value": str(sentinel_value)},
+            ],
+        },
+        "retained_trace_id": trace_id,
         "forbidden_content_absent": True,
     }
     assert client_calls == [
@@ -2073,7 +2126,11 @@ def test_verify_operator_telemetry_live_outage_requires_external_stop_effects_an
             pass
 
     result = acceptance.verify_operator_telemetry_live(
-        {"AWS_REGION": "ap-southeast-2"},
+        {
+            "AWS_REGION": "ap-southeast-2",
+            "ELSPETH_ACCEPTANCE_RUN_ID": "4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48",
+            "ELSPETH_ACCEPTANCE_SCENARIO_ID": "A",
+        },
         phase="outage",
         settings_loader=lambda: settings,
         audit_factory=lambda _settings, _env: _TelemetryAudit([]),
@@ -2153,6 +2210,33 @@ def _operator_receipt_details(*, phase: str = "positive") -> dict[str, object]:
         "trace_terminal_agrees": True if positive else None,
         "collector_degraded": not positive,
         "cloud_receipt": positive,
+        "retained_metric_query": (
+            {
+                "namespace": "ELSPETH/Operator",
+                "metric_name": "operator.acceptance.sentinel",
+                "dimensions": [
+                    {"name": "service.name", "value": "elspeth-web"},
+                    {
+                        "name": "deployment.environment",
+                        "value": "acceptance",
+                    },
+                    {"name": "service.version", "value": "0.7.1"},
+                    {"name": "aws.ecs.cluster.name", "value": "cluster-a"},
+                    {"name": "aws.ecs.service.name", "value": "service-a"},
+                    {"name": "aws.ecs.task.family", "value": "elspeth-web"},
+                    {"name": "aws.ecs.task.revision", "value": "17"},
+                    {"name": "cloud.provider", "value": "aws"},
+                    {
+                        "name": "elspeth.acceptance.namespace",
+                        "value": "4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-a",
+                    },
+                    {"name": "elspeth.acceptance.sentinel", "value": str(int(("e" * 64)[:12], 16))},
+                ],
+            }
+            if positive
+            else None
+        ),
+        "retained_trace_id": "1-12345670-a00000000000000000000000" if positive else None,
         "forbidden_content_absent": True,
     }
 
@@ -2258,6 +2342,24 @@ def test_exec_receipt_supports_closed_guardrail_and_operator_telemetry_schemas(
         expected_check=check,
     )
     assert envelope["details"] == details
+
+
+@pytest.mark.parametrize("mutation", ["missing_fixed_dimension", "wrong_sentinel_value", "extra_dimension"])
+def test_operator_exec_receipt_rejects_non_exact_retained_metric_query(mutation: str) -> None:
+    details = _operator_receipt_details()
+    query = details["retained_metric_query"]
+    assert isinstance(query, dict)
+    dimensions = query["dimensions"]
+    assert isinstance(dimensions, list)
+    if mutation == "missing_fixed_dimension":
+        dimensions[:] = [dimension for dimension in dimensions if dimension["name"] != "aws.ecs.cluster.name"]  # type: ignore[index]
+    elif mutation == "wrong_sentinel_value":
+        next(dimension for dimension in dimensions if dimension["name"] == "elspeth.acceptance.sentinel")["value"] = "1"  # type: ignore[index]
+    else:
+        dimensions.append({"name": "unexpected", "value": "value"})
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="exec_receipt_schema"):
+        acceptance.encode_exec_receipt("verify-operator-telemetry", details, _receipt_env())
 
 
 @pytest.mark.parametrize(
@@ -2501,6 +2603,7 @@ def _init_control_manifest(
     retained_mutator: Callable[[dict[str, object]], None] | None = None,
     binding_mutator: Callable[[dict[str, object], str], None] | None = None,
     bind_resolved: bool = True,
+    bind_retained: bool = True,
     prepare_apply_evidence: bool = True,
 ) -> dict[str, object]:
     run_id = "4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48"
@@ -2647,6 +2750,7 @@ def _init_control_manifest(
             inventory_path=str(scenario_b),
             now=lambda: datetime(2026, 7, 14, 1, 1, 10, tzinfo=UTC),
         )
+    if bind_resolved and bind_retained:
         retained_evidence: dict[str, object] = {
             "schema": "elspeth.aws-ecs-retained-evidence.v1",
             "acceptance_run_id": run_id,
@@ -2658,7 +2762,7 @@ def _init_control_manifest(
                             "namespace": "ELSPETH/Acceptance",
                             "metric_name": "CompletedRuns",
                             "dimensions": [
-                                {"name": "Scenario", "value": f"{run_id}-{scenario.lower()}"},
+                                {"name": "elspeth.acceptance.namespace", "value": f"{run_id}-{scenario.lower()}"},
                             ],
                         }
                     ],
@@ -3006,6 +3110,251 @@ def test_retained_evidence_is_one_way_post_observation_state_and_detects_drift(t
         )
 
 
+def _retained_checkpoint(run_id: str, included: set[str], captured_at: str) -> dict[str, object]:
+    return {
+        "schema": "elspeth.aws-ecs-retained-evidence.v1",
+        "acceptance_run_id": run_id,
+        "candidate_sha": "c" * 40,
+        "scenarios": {
+            scenario: {
+                "cloudwatch_retained_metrics": (
+                    [
+                        {
+                            "namespace": "ELSPETH/Acceptance",
+                            "metric_name": "CompletedRuns",
+                            "dimensions": [{"name": "elspeth.acceptance.namespace", "value": f"{run_id}-{scenario.lower()}"}],
+                        }
+                    ]
+                    if scenario in included
+                    else []
+                ),
+                "xray_retained_trace_ids": (
+                    [f"1-1234567{0 if scenario == 'A' else 1}-{'a' if scenario == 'A' else 'b'}" + "0" * 23] if scenario in included else []
+                ),
+                "expected_retained_metric_series": 1 if scenario in included else 0,
+                "expected_retained_trace_ids": 1 if scenario in included else 0,
+            }
+            for scenario in ("A", "B")
+        },
+        "captured_at": captured_at,
+    }
+
+
+def test_complete_retained_evidence_requires_paired_metric_and_trace_counts(tmp_path: Path) -> None:
+    run_id = "4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48"
+    manifest_path = tmp_path / "control.json"
+    _init_control_manifest(manifest_path, bind_retained=False)
+    checkpoint = _retained_checkpoint(run_id, {"A", "B"}, "2026-07-14T01:01:20Z")
+    scenarios = checkpoint["scenarios"]
+    assert isinstance(scenarios, dict)
+    scenario_a = scenarios["A"]
+    assert isinstance(scenario_a, dict)
+    metrics = scenario_a["cloudwatch_retained_metrics"]
+    assert isinstance(metrics, list)
+    metrics.append(
+        {
+            "namespace": "ELSPETH/Acceptance",
+            "metric_name": "CompletedRunsDuplicate",
+            "dimensions": [
+                {"name": "elspeth.acceptance.namespace", "value": f"{run_id}-a"},
+            ],
+        }
+    )
+    scenario_a["expected_retained_metric_series"] = 2
+    receipt_path = tmp_path / "mismatched-retained.json"
+    receipt_path.write_text(json.dumps(checkpoint))
+    os.chmod(receipt_path, 0o600)
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="retained_evidence_schema"):
+        acceptance.control_manifest_bind_retained_evidence(
+            manifest_path,
+            receipt_path=str(receipt_path),
+            require_complete=True,
+            now=lambda: datetime(2026, 7, 14, 1, 2, tzinfo=UTC),
+        )
+
+
+def test_retained_evidence_checkpoints_grow_monotonically_and_cover_mid_failure(tmp_path: Path) -> None:
+    run_id = "4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48"
+    manifest_path = tmp_path / "control.json"
+    _init_control_manifest(manifest_path, bind_retained=False)
+    partial_path = tmp_path / "retained-a.json"
+    partial_path.write_text(json.dumps(_retained_checkpoint(run_id, {"A"}, "2026-07-14T01:01:20Z")))
+    os.chmod(partial_path, 0o600)
+    acceptance.control_manifest_bind_retained_evidence(
+        manifest_path,
+        receipt_path=str(partial_path),
+        now=lambda: datetime(2026, 7, 14, 1, 1, 30, tzinfo=UTC),
+    )
+    with pytest.raises(acceptance.AcceptanceCheckError, match="retained_evidence_incomplete"):
+        acceptance.control_manifest_bind_retained_evidence(
+            manifest_path,
+            receipt_path=str(partial_path),
+            require_complete=True,
+            now=lambda: datetime(2026, 7, 14, 1, 1, 40, tzinfo=UTC),
+        )
+    acceptance.control_manifest_update(
+        manifest_path,
+        cleanup_required=True,
+        ecr_baseline_tag=f"acceptance-{run_id}-baseline",
+        ecr_candidate_tag=f"acceptance-{run_id}-candidate",
+        ecr_registry="123456789012.dkr.ecr.ap-southeast-2.amazonaws.com",
+        ecr_repository="elspeth-acceptance",
+        now=lambda: datetime(2026, 7, 14, 1, 2, tzinfo=UTC),
+    )
+    partial_receipt = acceptance.orphan_sweep(
+        manifest_path,
+        acceptance_run_id=run_id,
+        clients=_empty_orphan_clients(),
+        environ={},
+        now=lambda: datetime(2026, 7, 14, 1, 3, tzinfo=UTC),
+    )
+    assert partial_receipt["expected_retained"] == {"metric_series": 1, "trace_ids": 1}
+    assert partial_receipt["observed_retained"] == {"metric_series": 1, "trace_ids": 1}
+
+    complete_path = tmp_path / "retained-ab.json"
+    complete_path.write_text(json.dumps(_retained_checkpoint(run_id, {"A", "B"}, "2026-07-14T01:04:00Z")))
+    os.chmod(complete_path, 0o600)
+    acceptance.control_manifest_bind_retained_evidence(
+        manifest_path,
+        receipt_path=str(complete_path),
+        require_complete=True,
+        now=lambda: datetime(2026, 7, 14, 1, 4, tzinfo=UTC),
+    )
+    assert acceptance.control_manifest_get(manifest_path, "evidence.retained_evidence_path") == str(complete_path)
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="retained_evidence_conflict"):
+        acceptance.control_manifest_bind_retained_evidence(
+            manifest_path,
+            receipt_path=str(partial_path),
+            now=lambda: datetime(2026, 7, 14, 1, 5, tzinfo=UTC),
+        )
+
+
+def test_positive_operator_receipt_creates_and_binds_exact_retained_checkpoint(tmp_path: Path) -> None:
+    run_id = "4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48"
+    manifest_path = tmp_path / "control.json"
+    _init_control_manifest(manifest_path, bind_retained=False)
+    sentinel = "checkpoint-positive-sentinel"
+    sentinel_value = int(hashlib.sha256(sentinel.encode()).hexdigest()[:12], 16)
+    trace_id = acceptance.xray_trace_id("landscape-run-internal")
+
+    class CloudWatch:
+        def get_metric_data(self, **_kwargs: object) -> object:
+            return {
+                "MetricDataResults": [
+                    {
+                        "Id": "acceptance",
+                        "StatusCode": "Complete",
+                        "Timestamps": [datetime(2026, 7, 14, 1, 4, tzinfo=UTC)],
+                        "Values": [float(sentinel_value)],
+                    }
+                ]
+            }
+
+        def close(self) -> None:
+            pass
+
+    class XRay:
+        def batch_get_traces(self, **_kwargs: object) -> object:
+            return {
+                "Traces": [
+                    {
+                        "Id": trace_id,
+                        "Segments": [
+                            {"Document": json.dumps({"name": "RunStarted", "annotations": {"run_id": "landscape-run-internal"}})},
+                            {
+                                "Document": json.dumps(
+                                    {
+                                        "name": "RunFinished",
+                                        "annotations": {"run_id": "landscape-run-internal", "status": "completed"},
+                                    }
+                                )
+                            },
+                        ],
+                    }
+                ],
+                "UnprocessedTraceIds": [],
+            }
+
+        def close(self) -> None:
+            pass
+
+    settings = SimpleNamespace(
+        deployment_target="aws-ecs",
+        operator_telemetry="aws-otlp",
+        operator_pipeline_telemetry_granularity="lifecycle",
+        operator_telemetry_service_name="elspeth-web",
+        operator_telemetry_environment="acceptance",
+        operator_telemetry_release="0.7.1",
+        operator_telemetry_ecs_cluster="cluster-a",
+        operator_telemetry_ecs_service="service-a",
+        operator_telemetry_task_definition_family="elspeth-web",
+        operator_telemetry_task_definition_revision="17",
+    )
+    details = acceptance.verify_operator_telemetry_live(
+        {
+            "AWS_REGION": "ap-southeast-2",
+            "ELSPETH_ACCEPTANCE_RUN_ID": run_id,
+            "ELSPETH_ACCEPTANCE_SCENARIO_ID": "A",
+        },
+        phase="positive",
+        settings_loader=lambda: settings,
+        audit_factory=lambda _settings, _env: _TelemetryAudit([]),
+        emitter_factory=lambda _settings: _TelemetryEmitter([]),
+        aws_client_factory=lambda service, _region: CloudWatch() if service == "cloudwatch" else XRay(),
+        policy=acceptance.AcceptancePolicy(attempts=1, interval_seconds=0),
+        sentinel_factory=lambda: sentinel,
+        now_datetime=lambda: datetime(2026, 7, 14, 1, 3, tzinfo=UTC),
+        now_epoch=lambda: 1234.5,
+    )
+    exec_receipt = {
+        "version": 1,
+        "check": "verify-operator-telemetry",
+        "ok": True,
+        "candidate_sha": "c" * 40,
+        "task_arn_sha256": "d" * 64,
+        "scenario_id": "A",
+        "details": details,
+    }
+    exec_path = tmp_path / "operator-exec.json"
+    exec_path.write_text(json.dumps(exec_receipt))
+    os.chmod(exec_path, 0o600)
+    checkpoint_path = tmp_path / "retained-from-positive.json"
+
+    bound = acceptance.control_manifest_checkpoint_operator_evidence(
+        manifest_path,
+        exec_receipt_path=str(exec_path),
+        checkpoint_path=str(checkpoint_path),
+        now=lambda: datetime(2026, 7, 14, 1, 5, tzinfo=UTC),
+    )
+
+    checkpoint = json.loads(checkpoint_path.read_text())
+    assert checkpoint["acceptance_run_id"] == run_id
+    assert checkpoint["scenarios"]["A"] == {
+        "cloudwatch_retained_metrics": [details["retained_metric_query"]],
+        "xray_retained_trace_ids": [details["retained_trace_id"]],
+        "expected_retained_metric_series": 1,
+        "expected_retained_trace_ids": 1,
+    }
+    assert checkpoint["scenarios"]["B"] == {
+        "cloudwatch_retained_metrics": [],
+        "xray_retained_trace_ids": [],
+        "expected_retained_metric_series": 0,
+        "expected_retained_trace_ids": 0,
+    }
+    assert bound["evidence"]["retained_evidence_path"] == str(checkpoint_path)  # type: ignore[index]
+    assert (
+        acceptance.control_manifest_checkpoint_operator_evidence(
+            manifest_path,
+            exec_receipt_path=str(exec_path),
+            checkpoint_path=str(checkpoint_path),
+            now=lambda: datetime(2026, 7, 14, 1, 6, tzinfo=UTC),
+        )["evidence"]["retained_evidence_path"]  # type: ignore[index]
+        == str(checkpoint_path)
+    )
+
+
 class _FakeOrphanClient:
     def __init__(self, responses: Mapping[str, object]) -> None:
         self.responses = dict(responses)
@@ -3126,6 +3475,34 @@ def test_orphan_sweep_closes_all_clients_emits_only_counts_and_accepts_zero_surv
     assert all(client.closed for client in clients)
 
 
+@pytest.mark.parametrize("bind_resolved", [False, True])
+def test_orphan_sweep_accepts_early_or_mid_failure_before_retained_evidence_is_bound(tmp_path: Path, bind_resolved: bool) -> None:
+    manifest_path = tmp_path / "control.json"
+    manifest = _init_control_manifest(manifest_path, bind_resolved=bind_resolved, bind_retained=False)
+    assert manifest["evidence"]["retained_evidence_path"] is None  # type: ignore[index]
+    acceptance.control_manifest_update(
+        manifest_path,
+        cleanup_required=True,
+        ecr_baseline_tag="acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-baseline",
+        ecr_candidate_tag="acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-candidate",
+        ecr_registry="123456789012.dkr.ecr.ap-southeast-2.amazonaws.com",
+        ecr_repository="elspeth-acceptance",
+        now=lambda: datetime(2026, 7, 14, 1, 1, tzinfo=UTC),
+    )
+
+    receipt = acceptance.orphan_sweep(
+        manifest_path,
+        acceptance_run_id="4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48",
+        clients=_empty_orphan_clients(),
+        environ={},
+        now=lambda: datetime(2026, 7, 14, 1, 2, tzinfo=UTC),
+    )
+
+    assert receipt["ok"] is True
+    assert receipt["expected_retained"] == {"metric_series": 0, "trace_ids": 0}
+    assert receipt["observed_retained"] == {"metric_series": 0, "trace_ids": 0}
+
+
 def test_orphan_sweep_counts_log_alarms_as_unapproved_survivors(tmp_path: Path) -> None:
     manifest_path = tmp_path / "control.json"
     _init_control_manifest(manifest_path)
@@ -3167,7 +3544,10 @@ def test_orphan_sweep_queries_exact_retained_metric_trace_and_transaction_search
                 "namespace": "ELSPETH/Acceptance",
                 "metric_name": "CompletedRuns",
                 "dimensions": [
-                    {"name": "Scenario", "value": "4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-a"},
+                    {
+                        "name": "elspeth.acceptance.namespace",
+                        "value": "4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-a",
+                    },
                 ],
             }
         ]
@@ -3203,7 +3583,10 @@ def test_orphan_sweep_queries_exact_retained_metric_trace_and_transaction_search
             "Namespace": "ELSPETH/Acceptance",
             "MetricName": "CompletedRuns",
             "Dimensions": [
-                {"Name": "Scenario", "Value": "4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-a"},
+                {
+                    "Name": "elspeth.acceptance.namespace",
+                    "Value": "4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-a",
+                },
             ],
             "IncludeLinkedAccounts": False,
         },
@@ -3912,7 +4295,7 @@ def test_sanitize_evidence_rejects_malformed_top_level_for_every_kind(kind: str)
         acceptance.sanitize_evidence(kind, ["raw-provider-response"])
 
 
-def _fill_gate_ledger_prefix(ledger_path: Path) -> None:
+def _bind_gate_ledger_candidate(ledger_path: Path) -> None:
     ledger = json.loads(ledger_path.read_text())
     if ledger["candidate_sha"] is None:
         existing = {record["check_id"] for record in ledger["records"]}
@@ -3932,10 +4315,12 @@ def _fill_gate_ledger_prefix(ledger_path: Path) -> None:
             candidate_sha="c" * 40,
             now=lambda: datetime(2026, 7, 14, 1, 1, 30, tzinfo=UTC),
         )
+
+
+def _fill_gate_ledger_prefix(ledger_path: Path) -> None:
+    _bind_gate_ledger_candidate(ledger_path)
     existing = {record["check_id"] for record in json.loads(ledger_path.read_text())["records"]}
-    for check_id in acceptance._REQUIRED_GATE_CHECK_ORDER:
-        if check_id == acceptance._TERMINAL_GATE_CHECK_ID:
-            break
+    for check_id in acceptance._SUCCESS_GATE_CHECK_ORDER:
         if check_id in existing:
             continue
         acceptance.gate_ledger_record(
@@ -3946,6 +4331,33 @@ def _fill_gate_ledger_prefix(ledger_path: Path) -> None:
             candidate_sha="c" * 40,
             now=lambda: datetime(2026, 7, 14, 1, 2, tzinfo=UTC),
         )
+
+
+def _fill_cleanup_gate_prefix(ledger_path: Path) -> None:
+    existing = {record["check_id"] for record in json.loads(ledger_path.read_text())["cleanup_records"]}
+    for check_id in acceptance._CLEANUP_GATE_CHECK_ORDER[:-1]:
+        if check_id in existing:
+            continue
+        acceptance.gate_ledger_record_cleanup(
+            ledger_path,
+            check_id=check_id,
+            exit_status=0,
+            receipt_hash=hashlib.sha256(check_id.encode()).hexdigest(),
+            candidate_sha="c" * 40,
+            now=lambda: datetime(2026, 7, 14, 1, 2, 10, tzinfo=UTC),
+        )
+
+
+def _gate_ledger_init(ledger_path: Path) -> dict[str, object]:
+    return acceptance.gate_ledger_init(
+        ledger_path,
+        branch="feat/aws-ecs-program",
+        starting_sha="a" * 40,
+        plan_sha256="1" * 64,
+        program_base_sha="2" * 40,
+        reconciled_release_sha="3" * 40,
+        now=lambda: datetime(2026, 7, 14, 1, 0, tzinfo=UTC),
+    )
 
 
 def _checkpoint_export_phase(manifest_path: Path, ledger_path: Path, *, final: bool) -> None:
@@ -3961,7 +4373,7 @@ def _checkpoint_export_phase(manifest_path: Path, ledger_path: Path, *, final: b
             separators=(",", ":"),
         ).encode()
     ).hexdigest()
-    ledger_records_sha256 = hashlib.sha256(json.dumps(ledger["records"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    ledger_records_sha256 = acceptance._gate_ledger_records_hash(ledger)
     suffix = "final-export-receipt" if final else "export-receipt"
     receipt_path = manifest_path.with_name(f"{manifest_path.name}.{suffix}.json")
     receipt_path.write_text(
@@ -4002,12 +4414,7 @@ def test_final_evidence_export_refreshes_receipts_created_during_cleanup(tmp_pat
     manifest_path = tmp_path / "control.json"
     manifest = _init_control_manifest(manifest_path)
     ledger_path = Path(manifest["gate_ledger_path"])
-    acceptance.gate_ledger_init(
-        ledger_path,
-        branch="feat/aws-ecs-program",
-        starting_sha="a" * 40,
-        now=lambda: datetime(2026, 7, 14, 1, 0, tzinfo=UTC),
-    )
+    _gate_ledger_init(ledger_path)
     _fill_gate_ledger_prefix(ledger_path)
     _checkpoint_export_phase(manifest_path, ledger_path, final=False)
     baseline_evidence = json.loads(manifest_path.read_text())["evidence"]
@@ -4023,6 +4430,7 @@ def test_final_evidence_export_refreshes_receipts_created_during_cleanup(tmp_pat
         subject_id="d" * 64,
         receipt_file=receipt_path,
     )
+    _fill_cleanup_gate_prefix(ledger_path)
     with pytest.raises(acceptance.AcceptanceCheckError, match="cleanup_finalize_export"):
         acceptance.cleanup_evidence_finalize(
             manifest_path,
@@ -4041,16 +4449,50 @@ def test_final_evidence_export_refreshes_receipts_created_during_cleanup(tmp_pat
     assert prepared["final_evidence"]["receipt_count"] == baseline_evidence_count + 1  # type: ignore[index]
 
 
+def test_initial_evidence_export_binding_replays_after_cleanup_evidence_advances(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "control.json"
+    manifest = _init_control_manifest(manifest_path)
+    ledger_path = Path(manifest["gate_ledger_path"])
+    _gate_ledger_init(ledger_path)
+    _fill_gate_ledger_prefix(ledger_path)
+    _checkpoint_export_phase(manifest_path, ledger_path, final=False)
+    checkpointed = json.loads(manifest_path.read_text())
+    initial_path = checkpointed["evidence"]["export_receipt_path"]
+    initial_hash = checkpointed["evidence"]["export_receipt_sha256"]
+
+    acceptance.gate_ledger_record_cleanup(
+        ledger_path,
+        check_id="task8.check01",
+        exit_status=0,
+        receipt_hash="e" * 64,
+        candidate_sha="c" * 40,
+    )
+    receipt_path = tmp_path / "destroy-plan-receipt.json"
+    receipt_path.write_text(json.dumps(_terraform_receipt(kind="terraform-destroy-plan", deletes=1)))
+    os.chmod(receipt_path, 0o600)
+    acceptance.receipt_store(
+        manifest_path,
+        scenario_id="A",
+        kind="terraform-destroy-plan",
+        subject_id="d" * 64,
+        receipt_file=receipt_path,
+    )
+
+    replayed = acceptance.control_manifest_update(
+        manifest_path,
+        evidence_export_receipt=initial_path,
+        now=lambda: datetime(2026, 7, 14, 1, 3, tzinfo=UTC),
+    )
+
+    assert replayed["evidence"]["export_receipt_path"] == initial_path  # type: ignore[index]
+    assert replayed["evidence"]["export_receipt_sha256"] == initial_hash  # type: ignore[index]
+
+
 def test_final_evidence_export_requires_distinct_path_and_preserves_initial_receipt(tmp_path: Path) -> None:
     manifest_path = tmp_path / "control.json"
     manifest = _init_control_manifest(manifest_path)
     ledger_path = Path(manifest["gate_ledger_path"])
-    acceptance.gate_ledger_init(
-        ledger_path,
-        branch="feat/aws-ecs-program",
-        starting_sha="a" * 40,
-        now=lambda: datetime(2026, 7, 14, 1, 0, tzinfo=UTC),
-    )
+    _gate_ledger_init(ledger_path)
     _fill_gate_ledger_prefix(ledger_path)
     _checkpoint_export_phase(manifest_path, ledger_path, final=False)
     checkpointed = json.loads(manifest_path.read_text())
@@ -4082,12 +4524,7 @@ def test_cleanup_evidence_finalize_is_two_phase_refuses_pending_and_clears_only_
     manifest_path = tmp_path / "control.json"
     manifest = _init_control_manifest(manifest_path)
     ledger_path = Path(manifest["gate_ledger_path"])
-    acceptance.gate_ledger_init(
-        ledger_path,
-        branch="feat/aws-ecs-program",
-        starting_sha="a" * 40,
-        now=lambda: datetime(2026, 7, 14, 1, 0, tzinfo=UTC),
-    )
+    _gate_ledger_init(ledger_path)
     acceptance.gate_ledger_record(
         ledger_path,
         check_id="task1.check01",
@@ -4106,6 +4543,7 @@ def test_cleanup_evidence_finalize_is_two_phase_refuses_pending_and_clears_only_
         now=lambda: datetime(2026, 7, 14, 1, 2, tzinfo=UTC),
     )
     _fill_gate_ledger_prefix(ledger_path)
+    _fill_cleanup_gate_prefix(ledger_path)
     _checkpoint_evidence_export(manifest_path, ledger_path)
     prepared = acceptance.cleanup_evidence_finalize(
         manifest_path,
@@ -4142,7 +4580,7 @@ def test_cleanup_evidence_finalize_is_two_phase_refuses_pending_and_clears_only_
     assert acceptance.control_manifest_get(manifest_path, "cleanup_states.coordinator") == "confirmed"
     cleanup_ledger = json.loads(ledger_path.read_text())
     assert cleanup_ledger["finalized"] is None
-    assert cleanup_ledger["records"][-1]["check_id"] == acceptance._TERMINAL_GATE_CHECK_ID
+    assert cleanup_ledger["cleanup_records"][-1]["check_id"] == acceptance._TERMINAL_GATE_CHECK_ID
     acceptance.control_manifest_validate(
         manifest_path,
         acceptance_run_id="4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48",
@@ -4208,16 +4646,88 @@ def test_cleanup_evidence_finalize_is_two_phase_refuses_pending_and_clears_only_
         )
 
 
+def test_cleanup_evidence_finalize_recovers_after_terminal_row_precedes_manifest_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = tmp_path / "control.json"
+    manifest = _init_control_manifest(manifest_path)
+    ledger_path = Path(manifest["gate_ledger_path"])
+    _gate_ledger_init(ledger_path)
+    _fill_gate_ledger_prefix(ledger_path)
+    _fill_cleanup_gate_prefix(ledger_path)
+    acceptance.control_manifest_update(
+        manifest_path,
+        cleanup_required=True,
+        ecr_baseline_tag="acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-baseline",
+        ecr_candidate_tag="acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-candidate",
+        ecr_registry="123456789012.dkr.ecr.ap-southeast-2.amazonaws.com",
+        ecr_repository="elspeth-acceptance",
+        now=lambda: datetime(2026, 7, 14, 1, 2, tzinfo=UTC),
+    )
+    _checkpoint_evidence_export(manifest_path, ledger_path)
+    acceptance.cleanup_evidence_finalize(
+        manifest_path,
+        ledger_path=ledger_path,
+        phase="prepare",
+        clear_cleanup_required=False,
+        now=lambda: datetime(2026, 7, 14, 1, 3, tzinfo=UTC),
+    )
+    for surface in acceptance.CLEANUP_SURFACES:
+        if surface != "coordinator":
+            acceptance.control_manifest_update(
+                manifest_path,
+                cleanup_checkpoint=f"{surface}:confirmed",
+                now=lambda: datetime(2026, 7, 14, 1, 4, tzinfo=UTC),
+            )
+
+    original_write = acceptance._write_protected_document
+
+    def interrupt_manifest_commit(path: Path, payload: Mapping[str, object], **kwargs: object) -> None:
+        if path == manifest_path and payload.get("cleanup_required") is False:
+            raise acceptance.AcceptanceCheckError("simulated_manifest_commit_interrupt")
+        original_write(path, payload, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(acceptance, "_write_protected_document", interrupt_manifest_commit)
+    with pytest.raises(acceptance.AcceptanceCheckError, match="simulated_manifest_commit_interrupt"):
+        acceptance.cleanup_evidence_finalize(
+            manifest_path,
+            ledger_path=ledger_path,
+            phase="commit",
+            clear_cleanup_required=True,
+            now=lambda: datetime(2026, 7, 14, 1, 5, tzinfo=UTC),
+        )
+    monkeypatch.setattr(acceptance, "_write_protected_document", original_write)
+
+    interrupted_manifest = json.loads(manifest_path.read_text())
+    interrupted_ledger = json.loads(ledger_path.read_text())
+    assert interrupted_manifest["cleanup_required"] is True
+    assert interrupted_manifest["final_evidence"]["phase"] == "prepared"
+    assert interrupted_ledger["cleanup_records"][-1]["check_id"] == acceptance._TERMINAL_GATE_CHECK_ID
+
+    acceptance.cleanup_evidence_finalize(
+        manifest_path,
+        ledger_path=ledger_path,
+        phase="prepare",
+        clear_cleanup_required=False,
+        now=lambda: datetime(2026, 7, 14, 1, 6, tzinfo=UTC),
+    )
+    recovered = acceptance.cleanup_evidence_finalize(
+        manifest_path,
+        ledger_path=ledger_path,
+        phase="commit",
+        clear_cleanup_required=True,
+        now=lambda: datetime(2026, 7, 14, 1, 7, tzinfo=UTC),
+    )
+    assert recovered["cleanup_required"] is False
+    assert recovered["final_evidence"]["phase"] == "committed"  # type: ignore[index]
+
+
 def test_cleanup_evidence_finalize_preserves_failed_deadline_as_a_valid_cleanup_terminal_state(tmp_path: Path) -> None:
     manifest_path = tmp_path / "control.json"
     manifest = _init_control_manifest(manifest_path, deadline="2026-07-14T02:00:00Z")
     ledger_path = Path(manifest["gate_ledger_path"])
-    acceptance.gate_ledger_init(
-        ledger_path,
-        branch="feat/aws-ecs-program",
-        starting_sha="a" * 40,
-        now=lambda: datetime(2026, 7, 14, 1, 0, tzinfo=UTC),
-    )
+    _gate_ledger_init(ledger_path)
     acceptance.gate_ledger_record(
         ledger_path,
         check_id="task1.check01",
@@ -4235,7 +4745,8 @@ def test_cleanup_evidence_finalize_preserves_failed_deadline_as_a_valid_cleanup_
         ecr_repository="elspeth-acceptance",
         now=lambda: datetime(2026, 7, 14, 1, 2, tzinfo=UTC),
     )
-    _fill_gate_ledger_prefix(ledger_path)
+    _bind_gate_ledger_candidate(ledger_path)
+    _fill_cleanup_gate_prefix(ledger_path)
     _checkpoint_evidence_export(manifest_path, ledger_path)
     acceptance.control_manifest_load_cleanup(
         manifest_path,
@@ -4265,6 +4776,8 @@ def test_cleanup_evidence_finalize_preserves_failed_deadline_as_a_valid_cleanup_
 
     assert committed["cleanup_states"]["teardown_deadline"] == "failed"  # type: ignore[index]
     assert json.loads(ledger_path.read_text())["finalized"] is None
+    with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_incomplete"):
+        acceptance.gate_ledger_finalize(ledger_path, candidate_sha="c" * 40)
     acceptance.control_manifest_validate(
         manifest_path,
         cleanup_only=True,
@@ -4275,12 +4788,14 @@ def test_cleanup_evidence_finalize_preserves_failed_deadline_as_a_valid_cleanup_
 
 def test_gate_ledger_records_idempotent_closed_checks_and_finalizes_checksum(tmp_path: Path) -> None:
     path = tmp_path / "ledger.json"
-    acceptance.gate_ledger_init(
-        path,
-        branch="feat/aws-ecs-program",
-        starting_sha="a" * 40,
-        now=lambda: datetime(2026, 7, 14, 1, 0, tzinfo=UTC),
-    )
+    initialized = _gate_ledger_init(path)
+    assert initialized["plan_sha256"] == "1" * 64
+    assert initialized["program_base_sha"] == "2" * 40
+    assert initialized["reconciled_release_sha"] == "3" * 40
+    assert initialized["cleanup_records"] == []
+    assert initialized["success_record_count_at_cleanup_start"] is None
+    assert acceptance.gate_ledger_get(path, "reconciled_release_sha") == "3" * 40
+    assert _gate_ledger_init(path) == initialized
     first = acceptance.gate_ledger_record(
         path,
         check_id="task1.check01",
@@ -4326,7 +4841,8 @@ def test_gate_ledger_records_idempotent_closed_checks_and_finalizes_checksum(tmp
     bound = json.loads(path.read_text())
     assert bound["candidate_sha"] == "c" * 40
     assert bound["candidate_bound_record_count"] == 13
-    acceptance.gate_ledger_record(
+    _fill_cleanup_gate_prefix(path)
+    acceptance.gate_ledger_record_cleanup(
         path,
         check_id=acceptance._TERMINAL_GATE_CHECK_ID,
         exit_status=0,
@@ -4348,7 +4864,7 @@ def test_gate_ledger_records_idempotent_closed_checks_and_finalizes_checksum(tmp
     assert "raw stdout" not in rendered
 
     with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_finalized"):
-        acceptance.gate_ledger_record(
+        acceptance.gate_ledger_record_cleanup(
             path,
             check_id="task8.check05",
             exit_status=0,
@@ -4359,12 +4875,18 @@ def test_gate_ledger_records_idempotent_closed_checks_and_finalizes_checksum(tmp
 
 def test_gate_ledger_rejects_conflicting_resume_and_invalid_or_secret_shaped_fields(tmp_path: Path) -> None:
     path = tmp_path / "ledger.json"
-    acceptance.gate_ledger_init(
-        path,
-        branch="feat/aws-ecs-program",
-        starting_sha="a" * 40,
-        now=lambda: datetime(2026, 7, 14, 1, 0, tzinfo=UTC),
-    )
+    _gate_ledger_init(path)
+    with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_conflict"):
+        acceptance.gate_ledger_init(
+            path,
+            branch="feat/aws-ecs-program",
+            starting_sha="a" * 40,
+            plan_sha256="1" * 64,
+            program_base_sha="2" * 40,
+            reconciled_release_sha="4" * 40,
+        )
+    with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_get"):
+        acceptance.gate_ledger_get(path, "records")
     acceptance.gate_ledger_record(
         path,
         check_id="task1.check01",
@@ -4381,10 +4903,26 @@ def test_gate_ledger_rejects_conflicting_resume_and_invalid_or_secret_shaped_fie
             candidate_sha="c" * 40,
         )
     _fill_gate_ledger_prefix(path)
-    with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_candidate"):
+    with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_schema"):
         acceptance.gate_ledger_record(
             path,
-            check_id=acceptance._TERMINAL_GATE_CHECK_ID,
+            check_id="task8.check01",
+            exit_status=0,
+            receipt_hash="b" * 64,
+            candidate_sha="c" * 40,
+        )
+    with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_schema"):
+        acceptance.gate_ledger_record_cleanup(
+            path,
+            check_id="task1.check01",
+            exit_status=0,
+            receipt_hash="b" * 64,
+            candidate_sha="c" * 40,
+        )
+    with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_candidate"):
+        acceptance.gate_ledger_record_cleanup(
+            path,
+            check_id="task8.check01",
             exit_status=0,
             receipt_hash="b" * 64,
             candidate_sha="d" * 40,
@@ -4399,12 +4937,7 @@ def test_gate_ledger_rejects_conflicting_resume_and_invalid_or_secret_shaped_fie
         )
 
     failed_path = tmp_path / "failed-ledger.json"
-    acceptance.gate_ledger_init(
-        failed_path,
-        branch="feat/aws-ecs-program",
-        starting_sha="a" * 40,
-        now=lambda: datetime(2026, 7, 14, 1, 0, tzinfo=UTC),
-    )
+    _gate_ledger_init(failed_path)
     acceptance.gate_ledger_record(
         failed_path,
         check_id="task1.check01",
@@ -4415,3 +4948,108 @@ def test_gate_ledger_rejects_conflicting_resume_and_invalid_or_secret_shaped_fie
     )
     with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_failed"):
         _fill_gate_ledger_prefix(failed_path)
+
+
+def test_gate_ledger_enforces_candidate_bind_and_cleanup_phase_boundaries(tmp_path: Path) -> None:
+    unbound_path = tmp_path / "unbound-ledger.json"
+    _gate_ledger_init(unbound_path)
+    for check_id in acceptance._TASK1_GATE_CHECK_ORDER:
+        acceptance.gate_ledger_record(
+            unbound_path,
+            check_id=check_id,
+            exit_status=0,
+            receipt_hash=hashlib.sha256(check_id.encode()).hexdigest(),
+            candidate_sha="c" * 40,
+        )
+    with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_phase"):
+        acceptance.gate_ledger_record(
+            unbound_path,
+            check_id="task2.check01",
+            exit_status=0,
+            receipt_hash="b" * 64,
+            candidate_sha="c" * 40,
+        )
+
+    acceptance.gate_ledger_bind_candidate(unbound_path, candidate_sha="c" * 40)
+    acceptance.gate_ledger_record(
+        unbound_path,
+        check_id="task2.check01",
+        exit_status=0,
+        receipt_hash="b" * 64,
+        candidate_sha="c" * 40,
+    )
+    acceptance.gate_ledger_record_cleanup(
+        unbound_path,
+        check_id="task8.check01",
+        exit_status=0,
+        receipt_hash="d" * 64,
+        candidate_sha="c" * 40,
+    )
+    sealed = json.loads(unbound_path.read_text())
+    assert sealed["success_record_count_at_cleanup_start"] == len(sealed["records"])
+    with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_phase"):
+        acceptance.gate_ledger_record(
+            unbound_path,
+            check_id="task2.check02",
+            exit_status=0,
+            receipt_hash="e" * 64,
+            candidate_sha="c" * 40,
+        )
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_conflict"):
+        _gate_ledger_init(unbound_path)
+
+
+def test_cleanup_gate_replays_stable_rows_after_unrelated_manifest_checkpoints(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "control.json"
+    manifest = _init_control_manifest(manifest_path)
+    ledger_path = Path(manifest["gate_ledger_path"])
+    _gate_ledger_init(ledger_path)
+    _bind_gate_ledger_candidate(ledger_path)
+    run_id = cast(str, manifest["acceptance_run_id"])
+    resume_hash = hashlib.sha256(f"{run_id}\n{'c' * 40}\n{ledger_path}\n".encode()).hexdigest()
+    first = acceptance.gate_ledger_record_cleanup(
+        ledger_path,
+        check_id="task8.check01",
+        exit_status=0,
+        receipt_hash=resume_hash,
+        candidate_sha="c" * 40,
+    )
+    acceptance.control_manifest_update(manifest_path, cleanup_checkpoint="orphan_sweep:failed")
+    assert (
+        acceptance.gate_ledger_record_cleanup(
+            ledger_path,
+            check_id="task8.check01",
+            exit_status=0,
+            receipt_hash=resume_hash,
+            candidate_sha="c" * 40,
+        )
+        == first
+    )
+    for check_id in ("task8.check02", "task8.check03"):
+        acceptance.gate_ledger_record_cleanup(
+            ledger_path,
+            check_id=check_id,
+            exit_status=0,
+            receipt_hash=hashlib.sha256(check_id.encode()).hexdigest(),
+            candidate_sha="c" * 40,
+        )
+    owner_hash = hashlib.sha256(b"confirmed\nconfirmed\n").hexdigest()
+    owner_row = acceptance.gate_ledger_record_cleanup(
+        ledger_path,
+        check_id="task8.check04",
+        exit_status=0,
+        receipt_hash=owner_hash,
+        candidate_sha="c" * 40,
+    )
+    acceptance.control_manifest_update(manifest_path, cleanup_checkpoint="local_images:confirmed")
+    assert (
+        acceptance.gate_ledger_record_cleanup(
+            ledger_path,
+            check_id="task8.check04",
+            exit_status=0,
+            receipt_hash=owner_hash,
+            candidate_sha="c" * 40,
+        )
+        == owner_row
+    )

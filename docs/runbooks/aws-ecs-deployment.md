@@ -430,9 +430,14 @@ systems/access points, secret IDs, log groups, dashboard/alarm names, X-Ray
 group/sampling-rule names, EventBridge rule/target identities, owned Bedrock
 Guardrail identifiers/versions, the Cognito subject and pool-ownership flag,
 and the pre-mutation Transaction Search state hash. Exact retained CloudWatch
-metric queries and X-Ray trace IDs do not exist at resource-bind time; after
-Task 7, bind them once in a separate mode-0600
-`elspeth.aws-ecs-retained-evidence.v1` receipt with per-scenario counts.
+metric queries and X-Ray trace IDs do not exist at resource-bind time; instead,
+bind mode-0600 `elspeth.aws-ecs-retained-evidence.v1` receipts monotonically.
+Every positive
+operator-telemetry proof exposes its exact allowlisted metric query and X-Ray
+trace ID; the controller immediately creates and binds a new immutable strict-
+superset checkpoint before any later live operation. After Task 7, revalidate
+the latest bound checkpoint with `--require-complete` so both scenarios have
+non-empty matching counts.
 Omitted fields, duplicate identities, count/identity disagreement, drift from
 either pre-mutation hash, or a foreign run/scenario fail closed.
 
@@ -864,6 +869,7 @@ the entrypoint below:
         {"name": "ELSPETH_WEB__OPERATOR_TELEMETRY_ECS_SERVICE", "value": "${ECS_SERVICE_NAME}"},
         {"name": "ELSPETH_WEB__OPERATOR_TELEMETRY_TASK_DEFINITION_FAMILY", "value": "${ECS_TASK_DEFINITION_FAMILY}"},
         {"name": "ELSPETH_WEB__OPERATOR_TELEMETRY_TASK_DEFINITION_REVISION", "value": "${ECS_TASK_DEFINITION_REVISION}"},
+        {"name": "ELSPETH_ACCEPTANCE_RUN_ID", "value": "${ACCEPTANCE_RUN_ID}"},
         {"name": "ELSPETH_ACCEPTANCE_CANDIDATE_SHA", "value": "${CANDIDATE_SHA}"},
         {"name": "ELSPETH_ACCEPTANCE_SCENARIO_ID", "value": "${SCENARIO_ID}"}
       ]
@@ -1290,6 +1296,18 @@ aws_capture aws ecs wait tasks-stopped --cluster "$ECS_CLUSTER" --tasks "$PAYLOA
 aws_capture aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$PAYLOAD_TASK" \
   | jq -e '(.failures | length) == 0 and (.tasks | length) == 1 and all(.tasks[0].containers[] | select(.essential == true); .exitCode == 0)' >/dev/null
 
+checkpoint_operator_retained_evidence() {
+  local exec_receipt="$1" receipt_hash checkpoint
+  test -d "${RETAINED_EVIDENCE_DIR:?set the owner-approved protected retained-evidence directory}"
+  test ! -L "$RETAINED_EVIDENCE_DIR"
+  test "$(stat -c '%a' "$RETAINED_EVIDENCE_DIR")" = "700"
+  receipt_hash=$(sha256sum "$exec_receipt" | awk '{print $1}')
+  checkpoint="$RETAINED_EVIDENCE_DIR/operator-${ACTIVE_SCENARIO_ID}-${receipt_hash}.json"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+    control-manifest checkpoint-operator-evidence --file "$CONTROL_MANIFEST" \
+    --exec-receipt "$exec_receipt" --checkpoint "$checkpoint"
+}
+
 run_candidate_role_check() {
   local task_arn="$1" check="$2" phase="${3:-}" stream receipt_file command
   case "$phase" in
@@ -1310,6 +1328,9 @@ run_candidate_role_check() {
     --task-arn "$task_arn" --scenario-id "$ACTIVE_SCENARIO_ID" >"$receipt_file"
   unset stream
   persist_sanitized_receipt "$ACTIVE_SCENARIO_ID" "$check" "$task_arn" "$receipt_file"
+  if test "$check" = verify-operator-telemetry && test "$phase" != outage; then
+    checkpoint_operator_retained_evidence "$receipt_file"
+  fi
   rm -f "$receipt_file"
 }
 

@@ -6,15 +6,19 @@ import os
 import stat
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
+from elspeth.core.config import TelemetrySettings
 from elspeth.core.landscape.database import SchemaCompatibilityError
 from elspeth.web.config import WebSettings
 from elspeth.web.deployment_contract import ContractCheck
 from elspeth.web.doctor import (
+    _aws_operator_telemetry_check,
+    _bedrock_guardrail_plugins_check,
     _initialize_database,
     _inspect_database,
     collect_checks,
@@ -317,6 +321,89 @@ def test_capability_failures_are_isolated_and_preserve_complete_report(monkeypat
     assert all(check.detail for check in checks)
 
 
+def test_operator_telemetry_check_resolves_actual_effective_policy(tmp_path: Path) -> None:
+    check = _aws_operator_telemetry_check(_settings(tmp_path))
+
+    assert check == ContractCheck("aws_operator_telemetry", True, "AWS task-local OTLP operator policy is registered")
+
+
+def test_operator_telemetry_check_rejects_policy_shape_and_endpoint_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import elspeth.web.operator_telemetry as operator_telemetry
+
+    settings = _settings(tmp_path)
+    effective = operator_telemetry.build_aws_operator_pipeline_telemetry(settings)
+    exporter = effective.exporters[0]
+    drifted_options = dict(exporter.options)
+    drifted_options["headers"] = {"authorization": "private"}
+    drifted_exporter = exporter.model_copy(update={"options": drifted_options})
+    drifted_policy = effective.model_copy(update={"exporters": [drifted_exporter]})
+    monkeypatch.setattr(
+        operator_telemetry,
+        "build_aws_operator_pipeline_telemetry",
+        lambda _settings: drifted_policy,
+    )
+
+    assert _aws_operator_telemetry_check(settings).ok is False
+
+    monkeypatch.setattr(operator_telemetry, "AWS_OTLP_ENDPOINT", "https://remote.invalid:4317")
+    monkeypatch.setattr(
+        operator_telemetry,
+        "build_aws_operator_pipeline_telemetry",
+        lambda web_settings: TelemetrySettings(
+            enabled=True,
+            granularity=web_settings.operator_pipeline_telemetry_granularity,
+            exporters=[
+                {
+                    "name": "otlp",
+                    "options": {
+                        **exporter.options,
+                        "endpoint": operator_telemetry.AWS_OTLP_ENDPOINT,
+                    },
+                }
+            ],
+        ),
+    )
+
+    assert _aws_operator_telemetry_check(settings).ok is False
+
+
+def test_guardrail_registration_check_requires_positive_detection_blocking(monkeypatch: pytest.MonkeyPatch) -> None:
+    import elspeth.plugins.infrastructure.manager as manager_module
+
+    class _Manager:
+        @staticmethod
+        def get_transforms() -> list[object]:
+            return [
+                SimpleNamespace(
+                    name="aws_bedrock_prompt_shield",
+                    policy_capabilities=(
+                        SimpleNamespace(
+                            capability="prompt_shield",
+                            control_role="input",
+                            blocks_positive_detection=False,
+                        ),
+                    ),
+                ),
+                SimpleNamespace(
+                    name="aws_bedrock_content_safety",
+                    policy_capabilities=(
+                        SimpleNamespace(
+                            capability="content_safety",
+                            control_role="output",
+                            blocks_positive_detection=True,
+                        ),
+                    ),
+                ),
+            ]
+
+    monkeypatch.setattr(manager_module, "get_shared_plugin_manager", _Manager)
+
+    assert _bedrock_guardrail_plugins_check().ok is False
+
+
 @pytest.mark.parametrize(
     ("module_name", "check_name"),
     [
@@ -468,7 +555,7 @@ def _patch_auxiliary_checks_green(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         doctor,
         "plugin_and_dependency_checks",
-        lambda: [
+        lambda *, settings=None: [
             ContractCheck(name, True, "ready")
             for name in (
                 "aws_s3_plugin",
@@ -805,7 +892,7 @@ def test_any_auxiliary_preflight_failure_blocks_all_initializers(
         monkeypatch.setattr(
             doctor,
             "plugin_and_dependency_checks",
-            lambda: [
+            lambda *, settings=None: [
                 ContractCheck(name, name != failed_name, "static result")
                 for name in (
                     "aws_s3_plugin",

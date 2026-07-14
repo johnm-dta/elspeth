@@ -145,26 +145,50 @@ def _bedrock_provider_check() -> ContractCheck:
     return ContractCheck(name, ok, "bedrock provider is registered" if ok else "bedrock provider must be registered")
 
 
-def _aws_operator_telemetry_check() -> ContractCheck:
+def _aws_operator_telemetry_check(settings: WebSettings | None) -> ContractCheck:
     name = "aws_operator_telemetry"
+    if settings is None:
+        return ContractCheck(name, False, "AWS operator telemetry settings are required for policy validation")
     try:
-        # Plan 14 owns the validators and immutable policy builder.  At this
-        # earlier plan boundary their published WebSettings surface is the
-        # static evidence that AWS mode can resolve the fixed task-local OTLP
-        # policy rather than accept an authored endpoint or headers.
-        required_fields = {
-            "operator_telemetry",
-            "operator_telemetry_service_name",
-            "operator_telemetry_environment",
-            "operator_telemetry_release",
-            "operator_telemetry_ecs_cluster",
-            "operator_telemetry_ecs_service",
-            "operator_telemetry_task_definition_family",
-            "operator_telemetry_task_definition_revision",
-            "operator_telemetry_export_interval_seconds",
-            "operator_pipeline_telemetry_granularity",
+        from elspeth.web.operator_telemetry import build_aws_operator_pipeline_telemetry
+
+        effective = build_aws_operator_pipeline_telemetry(settings)
+        exporters = effective.exporters
+        expected_options: dict[str, object] = {
+            "endpoint": "http://127.0.0.1:4317",
+            "headers": {},
+            "service_name": settings.operator_telemetry_service_name,
+            "service_version": settings.operator_telemetry_release,
+            "deployment_environment": settings.operator_telemetry_environment,
+            "cloud_provider": "aws",
+            "aws_ecs_cluster_name": settings.operator_telemetry_ecs_cluster,
+            "aws_ecs_service_name": settings.operator_telemetry_ecs_service,
+            "aws_ecs_task_family": settings.operator_telemetry_task_definition_family,
+            "aws_ecs_task_revision": settings.operator_telemetry_task_definition_revision,
+            "batch_size": 100,
         }
-        ok = required_fields <= set(WebSettings.model_fields)
+        identity_values = (
+            settings.operator_telemetry_service_name,
+            settings.operator_telemetry_environment,
+            settings.operator_telemetry_release,
+            settings.operator_telemetry_ecs_cluster,
+            settings.operator_telemetry_ecs_service,
+            settings.operator_telemetry_task_definition_family,
+            settings.operator_telemetry_task_definition_revision,
+        )
+        ok = (
+            settings.deployment_target == "aws-ecs"
+            and settings.operator_telemetry == "aws-otlp"
+            and all(isinstance(value, str) and 0 < len(value) <= 128 for value in identity_values)
+            and effective.enabled is True
+            and effective.granularity in ("lifecycle", "rows")
+            and effective.granularity == settings.operator_pipeline_telemetry_granularity
+            and effective.backpressure_mode == "drop"
+            and effective.fail_on_total_exporter_failure is False
+            and len(exporters) == 1
+            and exporters[0].name == "otlp"
+            and exporters[0].options == expected_options
+        )
     except Exception as exc:
         return ContractCheck(name, False, sanitize_error("AWS operator telemetry policy discovery failed", exc))
     return ContractCheck(
@@ -190,11 +214,15 @@ def _bedrock_guardrail_plugins_check() -> ContractCheck:
         prompt_declarations = cast(Any, prompt).policy_capabilities
         content_declarations = cast(Any, content).policy_capabilities
         prompt_ok = any(
-            _capability_value(declaration.capability) == "prompt_shield" and _capability_value(declaration.control_role) == "input"
+            _capability_value(declaration.capability) == "prompt_shield"
+            and _capability_value(declaration.control_role) == "input"
+            and declaration.blocks_positive_detection is True
             for declaration in prompt_declarations
         )
         content_ok = any(
-            _capability_value(declaration.capability) == "content_safety" and _capability_value(declaration.control_role) == "output"
+            _capability_value(declaration.capability) == "content_safety"
+            and _capability_value(declaration.control_role) == "output"
+            and declaration.blocks_positive_detection is True
             for declaration in content_declarations
         )
         ok = prompt_ok and content_ok
@@ -217,12 +245,12 @@ def _dependency_check(module_name: str, check_name: str) -> ContractCheck:
     return ContractCheck(check_name, True, f"{module_name} dependency is importable")
 
 
-def plugin_and_dependency_checks() -> list[ContractCheck]:
+def plugin_and_dependency_checks(*, settings: WebSettings | None = None) -> list[ContractCheck]:
     """Return isolated capability checks in stable report order."""
     return [
         _aws_s3_plugin_check(),
         _bedrock_provider_check(),
-        _aws_operator_telemetry_check(),
+        _aws_operator_telemetry_check(settings),
         _bedrock_guardrail_plugins_check(),
         _dependency_check("psycopg", "psycopg_dependency"),
         _dependency_check("boto3", "boto3_dependency"),
@@ -390,7 +418,7 @@ def collect_checks(settings: WebSettings, *, init_schema: bool = False) -> list[
             probe_directory_writable("blob", allowed_source_directories(str(settings.data_dir))[0]),
         ]
     )
-    checks.extend(plugin_and_dependency_checks())
+    checks.extend(plugin_and_dependency_checks(settings=settings))
 
     database_prerequisites_pass = url_eligible and by_name["deployment_target"].ok and target_check.ok
     if not database_prerequisites_pass:

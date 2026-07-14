@@ -369,13 +369,13 @@ def bootstrap_operator_telemetry(
         return _runtime
 
 
-def apply_operator_pipeline_telemetry(settings: ElspethSettings, web_settings: WebSettings) -> ElspethSettings:
-    """Replace web-authored routing with the fixed AWS operator policy."""
+def build_aws_operator_pipeline_telemetry(web_settings: WebSettings) -> TelemetrySettings:
+    """Build the pure, fixed AWS ECS pipeline telemetry policy."""
 
     if web_settings.deployment_target != "aws-ecs":
-        return settings
+        raise ValueError("AWS operator pipeline telemetry requires AWS ECS settings")
     identity = _required_aws_resource_identity(web_settings)
-    effective = TelemetrySettings(
+    return TelemetrySettings(
         enabled=True,
         granularity=web_settings.operator_pipeline_telemetry_granularity,
         backpressure_mode="drop",
@@ -399,6 +399,14 @@ def apply_operator_pipeline_telemetry(settings: ElspethSettings, web_settings: W
             )
         ],
     )
+
+
+def apply_operator_pipeline_telemetry(settings: ElspethSettings, web_settings: WebSettings) -> ElspethSettings:
+    """Replace web-authored routing with the fixed AWS operator policy."""
+
+    if web_settings.deployment_target != "aws-ecs":
+        return settings
+    effective = build_aws_operator_pipeline_telemetry(web_settings)
     return settings.model_copy(update={"telemetry": effective})
 
 
@@ -417,6 +425,7 @@ __all__ = [
     "OperatorTelemetryRuntime",
     "apply_operator_pipeline_telemetry",
     "bootstrap_operator_telemetry",
+    "build_aws_operator_pipeline_telemetry",
     "record_operator_pipeline_queue_drops",
     "reset_operator_telemetry_for_tests",
 ]

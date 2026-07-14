@@ -147,6 +147,7 @@ def _assert_schemas_current(databases: _DatabasePair) -> None:
 def _assert_private_database_values_absent(
     output: str,
     databases: _DatabasePair,
+    environment: dict[str, str],
 ) -> None:
     for url in (databases.session_url, databases.landscape_url):
         parsed = make_url(url)
@@ -154,6 +155,13 @@ def _assert_private_database_values_absent(
         for value in private_values:
             if value:
                 assert value not in output
+    for key in (
+        "ELSPETH_WEB__SECRET_KEY",
+        "ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY",
+        "ELSPETH_WEB__DATA_DIR",
+        "ELSPETH_WEB__PAYLOAD_STORE_PATH",
+    ):
+        assert environment[key] not in output
 
 
 def test_doctor_init_schema_cli_succeeds_against_fresh_postgres(
@@ -170,7 +178,7 @@ def test_doctor_init_schema_cli_succeeds_against_fresh_postgres(
 
     assert result.exit_code == 0, result.output
     _assert_all_green_report(result.stdout)
-    _assert_private_database_values_absent(result.stdout + result.stderr, database_pair)
+    _assert_private_database_values_absent(result.stdout + result.stderr, database_pair, environment)
     _assert_schemas_current(database_pair)
 
 
@@ -222,7 +230,7 @@ def test_concurrent_doctor_init_schema_cli_runs_are_safe(
         for returncode, stdout, stderr in completed:
             assert returncode == 0, stderr or stdout
             _assert_all_green_report(stdout)
-            _assert_private_database_values_absent(stdout + stderr, database_pair)
+            _assert_private_database_values_absent(stdout + stderr, database_pair, environment)
         _assert_schemas_current(database_pair)
     finally:
         _stop_processes(processes)

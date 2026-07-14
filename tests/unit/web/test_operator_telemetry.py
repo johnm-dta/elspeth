@@ -19,6 +19,7 @@ from elspeth.web.operator_telemetry import (
     OperatorTelemetryFactories,
     apply_operator_pipeline_telemetry,
     bootstrap_operator_telemetry,
+    build_aws_operator_pipeline_telemetry,
     record_operator_pipeline_queue_drops,
     reset_operator_telemetry_for_tests,
 )
@@ -144,6 +145,26 @@ def test_aws_pipeline_telemetry_is_replaced_by_operator_policy(authored: Telemet
     assert "remote.invalid" not in rendered
     assert "authorization" not in rendered
     assert "secret" not in rendered
+
+
+def test_aws_pipeline_telemetry_pure_builder_matches_applied_policy() -> None:
+    web = _web_settings(
+        deployment_target="aws-ecs",
+        operator_telemetry="aws-otlp",
+        operator_telemetry_service_name="elspeth-web-prod",
+        operator_telemetry_environment="production",
+        operator_telemetry_release="git-deadbeef",
+        operator_telemetry_ecs_cluster="elspeth-production",
+        operator_telemetry_ecs_service="elspeth-web",
+        operator_telemetry_task_definition_family="elspeth-web-task",
+        operator_telemetry_task_definition_revision="42",
+        operator_pipeline_telemetry_granularity="rows",
+    )
+
+    built = build_aws_operator_pipeline_telemetry(web)
+    applied = apply_operator_pipeline_telemetry(_pipeline_settings(TelemetrySettings(enabled=False)), web)
+
+    assert built == applied.telemetry
 
 
 @dataclass

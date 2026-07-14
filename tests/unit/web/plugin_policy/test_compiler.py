@@ -6,6 +6,10 @@ import pytest
 
 from elspeth.contracts.plugin_capabilities import CapabilityDeclaration, ControlRole, PluginCapability
 from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+from elspeth.plugins.transforms.aws.guardrail_profiles import (
+    BedrockGuardrailProfileSettings,
+    BedrockLocalRequirementResult,
+)
 from elspeth.web.config import WebSettings
 from elspeth.web.plugin_policy.compiler import REQUIRED_WEB_PLUGIN_IDS, compile_web_plugin_policy
 from elspeth.web.plugin_policy.models import PluginId
@@ -138,3 +142,55 @@ def test_explicit_authorization_checks_local_requirement_without_detail_leak() -
         compile_web_plugin_policy(registry=_FakeRegistry(transforms=[unavailable]), settings=runtime)
 
     assert str(exc_info.value) == "web plugin policy invalid: plugin_unavailable"
+
+
+def _bedrock_profile(plugin: str = "aws_bedrock_prompt_shield") -> dict[str, str]:
+    return {
+        "alias": "private-profile-marker",
+        "plugin": plugin,
+        "guardrail_identifier": "privateguardrailmarker",
+        "guardrail_version": "7",
+        "region": "us-east-1",
+    }
+
+
+def test_authorized_operator_profile_preflights_local_requirements_without_detail_leak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        BedrockGuardrailProfileSettings,
+        "check_local_requirements",
+        lambda _self: BedrockLocalRequirementResult(available=False),
+    )
+    runtime = RuntimeWebPluginConfig.from_settings(
+        _settings(
+            plugin_allowlist=("transform:aws_bedrock_prompt_shield",),
+            bedrock_guardrail_profiles=(_bedrock_profile(),),
+        )
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+
+    rendered = str(exc_info.value)
+    assert rendered == "web plugin policy invalid: plugin_unavailable"
+    for marker in ("private-profile-marker", "privateguardrailmarker", "us-east-1"):
+        assert marker not in rendered
+
+
+def test_unallowlisted_operator_profile_does_not_preflight_optional_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def unavailable(profile: BedrockGuardrailProfileSettings) -> BedrockLocalRequirementResult:
+        calls.append(profile.alias)
+        return BedrockLocalRequirementResult(available=False)
+
+    monkeypatch.setattr(BedrockGuardrailProfileSettings, "check_local_requirements", unavailable)
+    runtime = RuntimeWebPluginConfig.from_settings(_settings(bedrock_guardrail_profiles=(_bedrock_profile(),)))
+
+    policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+
+    assert PluginId("transform", "aws_bedrock_prompt_shield") not in policy.authorized
+    assert calls == []

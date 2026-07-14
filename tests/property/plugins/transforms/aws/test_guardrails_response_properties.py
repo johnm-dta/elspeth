@@ -62,3 +62,27 @@ def test_oversized_provider_output_fails_without_text_leak(seed: str) -> None:
         parse_guardrail_response(malformed, required_filters=PROMPT_FILTERS)
 
     assert text not in str(exc_info.value)
+
+
+@settings(max_examples=30)
+@given(st.text(alphabet="abcdefghijklmnopqrstuvwxyz0123456789", min_size=1, max_size=32))
+def test_unknown_invocation_metric_members_fail_closed_without_text_leak(suffix: str) -> None:
+    member = f"PRIVATE_MEMBER_{suffix}"
+    malformed = response(full_optional_sections=True)
+    malformed["assessments"][0]["invocationMetrics"][member] = "PRIVATE_METRIC_VALUE"
+
+    with pytest.raises(GuardrailResponseError) as exc_info:
+        parse_guardrail_response(malformed, required_filters=PROMPT_FILTERS)
+
+    assert member not in str(exc_info.value)
+    assert "PRIVATE_METRIC_VALUE" not in str(exc_info.value)
+
+
+@settings(max_examples=20)
+@given(st.integers(min_value=2**63, max_value=2**80))
+def test_oversized_optional_metric_integers_fail_closed(value: int) -> None:
+    malformed = response(full_optional_sections=True)
+    malformed["assessments"][0]["invocationMetrics"]["guardrailProcessingLatency"] = value
+
+    with pytest.raises(GuardrailResponseError):
+        parse_guardrail_response(malformed, required_filters=PROMPT_FILTERS)

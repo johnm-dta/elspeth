@@ -20,9 +20,49 @@ BEDROCK_GUARDRAIL_PLUGIN_IDS: tuple[BedrockGuardrailPlugin, ...] = (
 )
 
 _ALIAS = re.compile(r"[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*\Z")
-_GUARDRAIL_ID = re.compile(r"(?:[a-z0-9]+|arn:(?:aws|aws-cn|aws-us-gov):bedrock:[a-z0-9-]+:[0-9]{12}:guardrail/[a-z0-9]+)\Z")
-_REGION = re.compile(r"[a-z]{2}(?:-[a-z0-9]+)+-[0-9]\Z")
-_NUMERIC_VERSION = re.compile(r"[1-9][0-9]*\Z")
+_GUARDRAIL_ID = re.compile(r"(?:[a-z0-9]+|arn:aws(?:-[^:]+)?:bedrock:[a-z0-9-]{1,20}:[0-9]{12}:guardrail/[a-z0-9]+)\Z")
+_NUMERIC_VERSION = re.compile(r"[1-9][0-9]{0,7}\Z")
+
+# Pinned from boto3/botocore 1.43.46's offline ``endpoints.json`` for the
+# commercial ``aws`` partition and service ``bedrock``.  Keep this static so
+# config validation neither imports the optional SDK nor performs network I/O.
+BEDROCK_GUARDRAIL_REGIONS = frozenset(
+    {
+        "af-south-1",
+        "ap-east-2",
+        "ap-northeast-1",
+        "ap-northeast-2",
+        "ap-northeast-3",
+        "ap-south-1",
+        "ap-south-2",
+        "ap-southeast-1",
+        "ap-southeast-2",
+        "ap-southeast-3",
+        "ap-southeast-4",
+        "ap-southeast-5",
+        "ap-southeast-6",
+        "ap-southeast-7",
+        "ca-central-1",
+        "ca-west-1",
+        "eu-central-1",
+        "eu-central-2",
+        "eu-north-1",
+        "eu-south-1",
+        "eu-south-2",
+        "eu-west-1",
+        "eu-west-2",
+        "eu-west-3",
+        "il-central-1",
+        "me-central-1",
+        "me-south-1",
+        "mx-central-1",
+        "sa-east-1",
+        "us-east-1",
+        "us-east-2",
+        "us-west-1",
+        "us-west-2",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,8 +83,8 @@ def validate_guardrail_version(value: str) -> str:
 
 
 def validate_guardrail_region(value: str) -> str:
-    if _REGION.fullmatch(value) is None:
-        raise ValueError("AWS region has invalid syntax")
+    if value not in BEDROCK_GUARDRAIL_REGIONS:
+        raise ValueError("AWS region is not in the supported Bedrock vocabulary")
     return value
 
 
@@ -56,7 +96,7 @@ class BedrockGuardrailProfileSettings(BaseModel):
     alias: str
     plugin: BedrockGuardrailPlugin
     guardrail_identifier: str = Field(min_length=1, max_length=2048, repr=False)
-    guardrail_version: str = Field(min_length=1, max_length=32, repr=False)
+    guardrail_version: str = Field(min_length=1, max_length=8, repr=False)
     region: str = Field(min_length=1, max_length=64, repr=False)
 
     @field_validator("alias")

@@ -86,6 +86,11 @@ def compile_web_plugin_policy(*, registry: PluginRegistry, settings: RuntimeWebP
     if not authorized <= installed.keys():
         _fail("plugin_not_installed")
 
+    for profile in settings.operator_profiles:
+        plugin_id = PluginId("transform", profile.plugin)
+        if plugin_id in authorized and not profile.check_local_requirements().available:
+            _fail("plugin_unavailable")
+
     identities = tuple((plugin_id, *_validate_identity(installed[plugin_id])) for plugin_id in sorted(authorized))
     implementations: dict[PluginCapability, set[PluginId]] = {capability: set() for capability in PluginCapability}
     for plugin_id in sorted(authorized):

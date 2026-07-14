@@ -40,7 +40,7 @@ def _profile(plugin: str = "aws_bedrock_prompt_shield") -> BedrockGuardrailProfi
             "plugin": plugin,
             "guardrail_identifier": "privateguardrailmarker",
             "guardrail_version": "73",
-            "region": "us-private-1",
+            "region": "ap-east-2",
         }
     )
 
@@ -90,7 +90,7 @@ def test_live_check_returns_only_bounded_receipt_and_uses_guard_content() -> Non
     rendered = json.dumps(asdict(receipt), sort_keys=True)
     for private in (
         "privateguardrailmarker",
-        "us-private-1",
+        "ap-east-2",
         "SAFE_FIXTURE_TEXT_MARKER",
         "BLOCKED_FIXTURE_TEXT_MARKER",
         "request-1",
@@ -161,7 +161,7 @@ def test_provider_failure_is_sanitized_without_fixture_binding_or_body() -> None
         "SAFE_FIXTURE_TEXT_MARKER",
         "BLOCKED_FIXTURE_TEXT_MARKER",
         "privateguardrailmarker",
-        "us-private-1",
+        "ap-east-2",
     ):
         assert private not in rendered
 

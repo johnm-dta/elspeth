@@ -255,6 +255,21 @@ def test_bedrock_controls_dominate_llm_input_and_post_dominate_every_output() ->
     assert control_coverage_findings(state, PluginCapability.CONTENT_SAFETY) == ()
 
 
+def test_bedrock_content_safety_input_source_does_not_claim_output_coverage() -> None:
+    state = _state(
+        _llm(on_success="content_in"),
+        _node(
+            "content_safety",
+            "aws_bedrock_content_safety",
+            "content_in",
+            "main",
+            options={"source": "INPUT"},
+        ),
+    )
+
+    assert control_coverage_findings(state, PluginCapability.CONTENT_SAFETY)
+
+
 def test_bedrock_required_coverage_fails_for_an_unshielded_input_or_output_path() -> None:
     unshielded_input = _state(
         _llm(on_success="content_in"),

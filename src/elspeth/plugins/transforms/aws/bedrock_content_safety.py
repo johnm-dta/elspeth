@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from elspeth.contracts import Determinism
@@ -33,11 +34,23 @@ class AWSBedrockContentSafety(BedrockGuardrailTransformBase):
         }
     )
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:0db791c36f9fe293"
+    source_file_hash: str | None = "sha256:128a78cb29177e65"
     config_model = AWSBedrockContentSafetyConfig
     _required_filters = HARMFUL_CONTENT_FILTERS
     _detected_reason = "content_safety_violation"
     _probe_field = "bedrock_content_safety_probe_text"
+
+    @classmethod
+    def is_effective_blocking_control(
+        cls,
+        *,
+        capability: PluginCapability,
+        role: ControlRole,
+        options: Mapping[str, object],
+    ) -> bool:
+        if not super().is_effective_blocking_control(capability=capability, role=role, options=options):
+            return False
+        return options.get("source", "OUTPUT") == "OUTPUT"
 
     def __init__(self, config: dict[str, Any]) -> None:
         cfg = AWSBedrockContentSafetyConfig.from_dict(config, plugin_name=self.name)

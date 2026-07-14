@@ -133,6 +133,11 @@ class RuntimeWebPluginConfig:
     bedrock_guardrail_profiles: tuple[BedrockGuardrailProfileSettings, ...] = field(repr=False)
     bedrock_guardrail_default_profiles: tuple[tuple[str, str], ...]
 
+    @property
+    def operator_profiles(self) -> tuple[BedrockGuardrailProfileSettings, ...]:
+        """Return profiles that own an authorized plugin's startup readiness."""
+        return self.bedrock_guardrail_profiles
+
     @classmethod
     def from_settings(cls, settings: WebSettings) -> RuntimeWebPluginConfig:
         return cls(

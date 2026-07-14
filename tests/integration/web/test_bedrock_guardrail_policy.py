@@ -34,7 +34,7 @@ _AZURE_CONTENT = PluginId("transform", "azure_content_safety")
 _PRIVATE_MARKERS = (
     "privateguardrailmarker",
     "privatecontentmarker",
-    "us-private-1",
+    "ap-east-2",
     '"73"',
     '"41"',
 )
@@ -72,14 +72,14 @@ def _profiles() -> tuple[dict[str, str], ...]:
             "plugin": "aws_bedrock_prompt_shield",
             "guardrail_identifier": "privateguardrailmarker",
             "guardrail_version": "73",
-            "region": "us-private-1",
+            "region": "ap-east-2",
         },
         {
             "alias": "content-default",
             "plugin": "aws_bedrock_content_safety",
             "guardrail_identifier": "privatecontentmarker",
             "guardrail_version": "41",
-            "region": "us-private-1",
+            "region": "ap-east-2",
         },
     )
 

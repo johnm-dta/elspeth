@@ -51,6 +51,13 @@ def _usage() -> dict[str, int]:
     return {key: index for index, key in enumerate(sorted(ALL_USAGE_KEYS))}
 
 
+def _coverage() -> dict[str, dict[str, int]]:
+    return {
+        "textCharacters": {"guarded": 12, "total": 12},
+        "images": {"guarded": 0, "total": 0},
+    }
+
+
 def _filters(required: tuple[str, ...], *, detected: str | None = None, blocked: bool = False) -> list[dict[str, object]]:
     return [
         {
@@ -70,14 +77,32 @@ def response(
     detected: str | None = None,
     blocked: bool = False,
     outputs: list[dict[str, str]] | None = None,
+    full_optional_sections: bool = False,
 ) -> dict[str, Any]:
-    return {
+    assessment: dict[str, Any] = {"contentPolicy": {"filters": _filters(required, detected=detected, blocked=blocked)}}
+    result: dict[str, Any] = {
         "usage": _usage(),
         "action": action,
         "outputs": [] if outputs is None else outputs,
-        "assessments": [{"contentPolicy": {"filters": _filters(required, detected=detected, blocked=blocked)}}],
+        "assessments": [assessment],
         "ResponseMetadata": {"RequestId": "request-1", "RetryAttempts": 0, "HTTPStatusCode": 200, "HTTPHeaders": {}},
     }
+    if full_optional_sections:
+        result["actionReason"] = "Guardrail policy assessment complete"
+        result["guardrailCoverage"] = _coverage()
+        assessment["invocationMetrics"] = {
+            "guardrailProcessingLatency": 17,
+            "usage": _usage(),
+            "guardrailCoverage": _coverage(),
+        }
+        assessment["appliedGuardrailDetails"] = {
+            "guardrailId": "privateguardrailmarker",
+            "guardrailVersion": "7",
+            "guardrailArn": "arn:aws:bedrock:us-east-1:123456789012:guardrail/privateguardrailmarker",
+            "guardrailOrigin": ["REQUEST"],
+            "guardrailOwnership": "SELF",
+        }
+    return result
 
 
 def _client(sdk: Any, execution: FakeExecution, events: list[Any]) -> BedrockGuardrailsClient:
@@ -165,6 +190,51 @@ def test_intervention_accepts_multiple_outputs_and_discards_text() -> None:
     assert decision.detected is True
     assert decision.intervened is True
     assert marker not in repr(decision)
+
+
+def test_full_optional_sections_are_validated_and_private_details_are_discarded() -> None:
+    sdk = _sdk_client()
+    execution = FakeExecution()
+    events: list[Any] = []
+    private_markers = ("privateguardrailmarker", "123456789012")
+    with Stubber(sdk) as stubber:
+        stubber.add_response("apply_guardrail", response(full_optional_sections=True))
+        decision = _client(sdk, execution, events).apply_guardrail(
+            text="marker",
+            source="INPUT",
+            required_filters=PROMPT_FILTERS,
+        )
+
+    rendered = repr((decision, execution.calls, events))
+    for marker in private_markers:
+        assert marker not in rendered
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda value: value.update(actionReason=123),
+        lambda value: value.update(actionReason="x" * 4097),
+        lambda value: value["guardrailCoverage"].update(unknown={"guarded": 0, "total": 0}),
+        lambda value: value["guardrailCoverage"]["textCharacters"].update(guarded=True),
+        lambda value: value["guardrailCoverage"]["textCharacters"].update(guarded=13, total=12),
+        lambda value: value["assessments"][0]["invocationMetrics"].update(unknown=1),
+        lambda value: value["assessments"][0]["invocationMetrics"].update(guardrailProcessingLatency=-1),
+        lambda value: value["assessments"][0]["invocationMetrics"].update(guardrailProcessingLatency=2**63),
+        lambda value: value["assessments"][0]["invocationMetrics"]["usage"].pop("contentPolicyImageUnits"),
+        lambda value: value["assessments"][0]["appliedGuardrailDetails"].update(unknown="private"),
+        lambda value: value["assessments"][0]["appliedGuardrailDetails"].update(guardrailId="x" * 2049),
+        lambda value: value["assessments"][0]["appliedGuardrailDetails"].update(guardrailOrigin=["UNKNOWN"]),
+    ],
+)
+def test_malformed_full_optional_sections_fail_closed(mutator: Any) -> None:
+    malformed = response(full_optional_sections=True)
+    mutator(malformed)
+
+    with pytest.raises(GuardrailResponseError):
+        from elspeth.plugins.transforms.aws.guardrails_client import parse_guardrail_response
+
+        parse_guardrail_response(malformed, required_filters=PROMPT_FILTERS)
 
 
 def test_content_policy_requires_exact_approved_filter_set() -> None:
@@ -255,6 +325,48 @@ def test_service_error_is_sanitized_audited_then_telemetered() -> None:
     assert execution.order == ["audit", "telemetry"]
     assert execution.calls[0]["status"] is CallStatus.ERROR
     assert execution.calls[0]["response_data"].to_dict()["attempts"] == 3
+    assert marker not in repr((execution.calls, events))
+
+
+def test_malformed_response_audits_sdk_attempt_count_before_decision_parsing() -> None:
+    malformed = response()
+    malformed["action"] = "UNKNOWN"
+    malformed["ResponseMetadata"]["RetryAttempts"] = 2
+
+    class MalformedSDK:
+        def apply_guardrail(self, **_kwargs: object) -> dict[str, Any]:
+            return malformed
+
+    execution = FakeExecution()
+    with pytest.raises(GuardrailResponseError):
+        _client(MalformedSDK(), execution, []).apply_guardrail(
+            text="marker",
+            source="INPUT",
+            required_filters=PROMPT_FILTERS,
+        )
+
+    assert execution.calls[0]["response_data"].to_dict()["attempts"] == 3
+
+
+def test_invalid_response_metadata_fails_closed_without_private_value_leak() -> None:
+    marker = "PRIVATE_REQUEST_ID_MARKER_" * 20
+    malformed = response()
+    malformed["ResponseMetadata"]["RequestId"] = marker
+
+    class MalformedSDK:
+        def apply_guardrail(self, **_kwargs: object) -> dict[str, Any]:
+            return malformed
+
+    execution = FakeExecution()
+    events: list[Any] = []
+    with pytest.raises(GuardrailResponseError) as exc_info:
+        _client(MalformedSDK(), execution, events).apply_guardrail(
+            text="marker",
+            source="INPUT",
+            required_filters=PROMPT_FILTERS,
+        )
+
+    assert marker not in str(exc_info.value)
     assert marker not in repr((execution.calls, events))
 
 

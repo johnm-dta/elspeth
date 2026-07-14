@@ -120,7 +120,7 @@ ELSPETH_WEB__PLUGIN_PREFERENCES='{"prompt_shield":["transform:aws_bedrock_prompt
 ELSPETH_WEB__PLUGIN_CONTROL_MODES='{"prompt_shield":"required","content_safety":"required"}'
 ELSPETH_WEB__LLM_PROFILES='{"tutorial":{"provider":"bedrock","model":"bedrock/anthropic.claude-3-haiku-20240307-v1:0","region_name":"ap-southeast-2"}}'
 ELSPETH_WEB__TUTORIAL_LLM_PROFILE='tutorial'
-ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES='[{"alias":"prompt-default","plugin":"aws_bedrock_prompt_shield","guardrail_identifier":"operator-prompt-guardrail","guardrail_version":"7","region":"ap-southeast-2"},{"alias":"content-default","plugin":"aws_bedrock_content_safety","guardrail_identifier":"operator-content-guardrail","guardrail_version":"4","region":"ap-southeast-2"}]'
+ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES='[{"alias":"prompt-default","plugin":"aws_bedrock_prompt_shield","guardrail_identifier":"operatorpromptguardrail","guardrail_version":"7","region":"ap-southeast-2"},{"alias":"content-default","plugin":"aws_bedrock_content_safety","guardrail_identifier":"operatorcontentguardrail","guardrail_version":"4","region":"ap-southeast-2"}]'
 ```
 
 Preference arrays are ordered. When a capability has multiple authorized
@@ -625,7 +625,7 @@ transforms:
     on_success: generation_in
     on_error: blocked
     options:
-      guardrail_identifier: operator-prompt-guardrail
+      guardrail_identifier: operatorpromptguardrail
       guardrail_version: "7"
       region: ap-southeast-2
       fields: [prompt]
@@ -638,7 +638,7 @@ transforms:
     on_success: output
     on_error: blocked
     options:
-      guardrail_identifier: operator-content-guardrail
+      guardrail_identifier: operatorcontentguardrail
       guardrail_version: "4"
       region: ap-southeast-2
       fields: [response]

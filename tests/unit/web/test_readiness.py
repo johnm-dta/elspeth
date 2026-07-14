@@ -92,10 +92,12 @@ class TestReadinessProbeRunner:
             with pytest.raises(asyncio.CancelledError):
                 await tasks[-1]
             releases[-1].set()
-            for _ in range(20):
-                if "blob_dir" not in runner._futures:
-                    break
-                await asyncio.sleep(0)
+
+            async def wait_until_source_removed() -> None:
+                while "blob_dir" in runner._futures:
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_until_source_removed(), timeout=1.0)
             assert "blob_dir" not in runner._futures
         finally:
             for event in releases:

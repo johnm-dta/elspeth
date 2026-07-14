@@ -71,12 +71,26 @@ def _llm(input_stream: str = "llm_in", on_success: str = "main") -> NodeSpec:
     return _node("judge", "llm", input_stream, on_success)
 
 
-def _shield(node_id: str, input_stream: str, on_success: str, *, detect_only: bool = False) -> NodeSpec:
-    return _node(node_id, "azure_prompt_shield", input_stream, on_success, options={"detect_only": detect_only})
+def _shield(
+    node_id: str,
+    input_stream: str,
+    on_success: str,
+    *,
+    detect_only: bool = False,
+    plugin: str = "azure_prompt_shield",
+) -> NodeSpec:
+    return _node(node_id, plugin, input_stream, on_success, options={"detect_only": detect_only})
 
 
-def _safety(node_id: str, input_stream: str, on_success: str, *, detect_only: bool = False) -> NodeSpec:
-    return _node(node_id, "azure_content_safety", input_stream, on_success, options={"detect_only": detect_only})
+def _safety(
+    node_id: str,
+    input_stream: str,
+    on_success: str,
+    *,
+    detect_only: bool = False,
+    plugin: str = "azure_content_safety",
+) -> NodeSpec:
+    return _node(node_id, plugin, input_stream, on_success, options={"detect_only": detect_only})
 
 
 @pytest.mark.parametrize(
@@ -217,3 +231,40 @@ def test_content_safety_no_op_thresholds_do_not_receive_blocking_coverage_credit
         _state(_llm(on_success="safe_in"), no_op),
         PluginCapability.CONTENT_SAFETY,
     )
+
+
+def test_bedrock_controls_dominate_llm_input_and_post_dominate_every_output() -> None:
+    state = _state(
+        _shield(
+            "prompt_shield",
+            "raw",
+            "llm_in",
+            plugin="aws_bedrock_prompt_shield",
+        ),
+        _llm(on_success="content_in"),
+        _safety(
+            "content_safety",
+            "content_in",
+            "main",
+            plugin="aws_bedrock_content_safety",
+        ),
+        source_target="raw",
+    )
+
+    assert control_coverage_findings(state, PluginCapability.PROMPT_SHIELD) == ()
+    assert control_coverage_findings(state, PluginCapability.CONTENT_SAFETY) == ()
+
+
+def test_bedrock_required_coverage_fails_for_an_unshielded_input_or_output_path() -> None:
+    unshielded_input = _state(
+        _llm(on_success="content_in"),
+        _safety("content_safety", "content_in", "main", plugin="aws_bedrock_content_safety"),
+    )
+    unshielded_output = _state(
+        _shield("prompt_shield", "raw", "llm_in", plugin="aws_bedrock_prompt_shield"),
+        _llm(),
+        source_target="raw",
+    )
+
+    assert control_coverage_findings(unshielded_input, PluginCapability.PROMPT_SHIELD)
+    assert control_coverage_findings(unshielded_output, PluginCapability.CONTENT_SAFETY)

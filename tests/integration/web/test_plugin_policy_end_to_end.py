@@ -54,8 +54,8 @@ _CORE_IDS = frozenset(
 )
 _AZURE_PROMPT = PluginId("transform", "azure_prompt_shield")
 _AZURE_CONTENT = PluginId("transform", "azure_content_safety")
-_AWS_PROMPT_FIXTURE = PluginId("transform", "aws_ready_prompt_shield_fixture")
-_AWS_CONTENT_FIXTURE = PluginId("transform", "aws_ready_content_safety_fixture")
+_AWS_PROMPT = PluginId("transform", "aws_bedrock_prompt_shield")
+_AWS_CONTENT = PluginId("transform", "aws_bedrock_content_safety")
 
 
 @dataclass(frozen=True)
@@ -70,14 +70,14 @@ _CASES = (
     _MatrixCase("core_only", frozenset(), None, None),
     _MatrixCase("azure_only", frozenset({_AZURE_PROMPT, _AZURE_CONTENT}), _AZURE_PROMPT, _AZURE_CONTENT),
     _MatrixCase(
-        "aws_ready_fixture_only",
-        frozenset({_AWS_PROMPT_FIXTURE, _AWS_CONTENT_FIXTURE}),
-        _AWS_PROMPT_FIXTURE,
-        _AWS_CONTENT_FIXTURE,
+        "aws_only",
+        frozenset({_AWS_PROMPT, _AWS_CONTENT}),
+        _AWS_PROMPT,
+        _AWS_CONTENT,
     ),
     _MatrixCase(
         "both_with_azure_preference",
-        frozenset({_AZURE_PROMPT, _AZURE_CONTENT, _AWS_PROMPT_FIXTURE, _AWS_CONTENT_FIXTURE}),
+        frozenset({_AZURE_PROMPT, _AZURE_CONTENT, _AWS_PROMPT, _AWS_CONTENT}),
         _AZURE_PROMPT,
         _AZURE_CONTENT,
     ),
@@ -94,12 +94,6 @@ class _MatrixCatalog(CatalogService):
             | {PluginId("sink", item.name): item for item in full.list_sinks()}
         )
         schemas = {plugin_id: full.get_schema(plugin_id.kind, plugin_id.name) for plugin_id in summaries}
-        for fixture_id, template_id in (
-            (_AWS_PROMPT_FIXTURE, _AZURE_PROMPT),
-            (_AWS_CONTENT_FIXTURE, _AZURE_CONTENT),
-        ):
-            summaries[fixture_id] = summaries[template_id].model_copy(update={"name": fixture_id.name})
-            schemas[fixture_id] = schemas[template_id].model_copy(update={"name": fixture_id.name})
         self._summaries = summaries
         self._schemas = schemas
 

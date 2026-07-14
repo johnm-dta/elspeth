@@ -184,3 +184,63 @@ def test_in_place_profile_credential_rotation_changes_snapshot_identity(scope: s
     assert before.snapshot_hash != after.snapshot_hash
     assert "generation-one" not in before.binding_generation_fingerprint
     assert "generation-two" not in after.binding_generation_fingerprint
+
+
+def test_bedrock_operator_binding_change_requires_rebuild_and_changes_snapshot_identity() -> None:
+    def settings(version: str) -> WebSettings:
+        return _settings(
+            plugin_allowlist=("transform:aws_bedrock_prompt_shield",),
+            bedrock_guardrail_profiles=(
+                {
+                    "alias": "prompt-default",
+                    "plugin": "aws_bedrock_prompt_shield",
+                    "guardrail_identifier": "privateguardrail",
+                    "guardrail_version": version,
+                    "region": "us-east-1",
+                },
+            ),
+        )
+
+    before_settings = settings("7")
+    before = _build(before_settings)
+    repeated = _build(before_settings)
+    after = _build(settings("8"))
+
+    assert before.available == after.available
+    assert before.binding_generation_fingerprint == repeated.binding_generation_fingerprint
+    assert before.snapshot_hash == repeated.snapshot_hash
+    assert before.binding_generation_fingerprint != after.binding_generation_fingerprint
+    assert before.snapshot_hash != after.snapshot_hash
+    for marker in ("privateguardrail", "us-east-1", '"7"', '"8"'):
+        assert marker not in before.binding_generation_fingerprint
+        assert marker not in after.binding_generation_fingerprint
+
+
+def test_fresh_snapshot_detects_request_scoped_credential_deletion_without_restart() -> None:
+    settings = _settings(
+        llm_profiles={
+            "personal": {
+                "provider": "openrouter",
+                "model": "openai/gpt-5-mini",
+                "credential_scope": "user",
+                "credential_ref": "OPENROUTER_API_KEY",
+            }
+        }
+    )
+    principal = "local:alice"
+
+    before = _build(
+        settings,
+        principal=principal,
+        inventory=_Inventory(
+            users={principal: frozenset({"OPENROUTER_API_KEY"})},
+            user_generations={(principal, "OPENROUTER_API_KEY"): "generation-one"},
+        ),
+    )
+    after = _build(settings, principal=principal, inventory=_Inventory())
+
+    llm_id = PluginId("transform", "llm")
+    assert llm_id in before.available
+    assert llm_id not in after.available
+    assert dict(after.usable_profile_aliases)[llm_id] == ()
+    assert before.snapshot_hash != after.snapshot_hash

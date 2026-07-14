@@ -106,13 +106,14 @@ def build_plugin_snapshot(
                 item.alias for item in profile_states if item.usable and profiles.check_local_requirements(plugin_id, item.alias).available
             )
             for profile_state in profile_states:
-                if not profile_state.usable or profile_state.credential_scope is None or profile_state.generation is None:
+                if not profile_state.usable or profile_state.generation is None:
                     continue
+                binding_scope = profile_state.credential_scope or "operator"
                 generation_token = hmac.new(
                     generation_key,
                     json.dumps(
                         {
-                            "scope": profile_state.credential_scope,
+                            "scope": binding_scope,
                             "alias": profile_state.alias,
                             "generation": profile_state.generation,
                         },
@@ -121,7 +122,7 @@ def build_plugin_snapshot(
                     ).encode(),
                     hashlib.sha256,
                 ).hexdigest()
-                profile_bindings.append((plugin_id, profile_state.alias, profile_state.credential_scope, generation_token))
+                profile_bindings.append((plugin_id, profile_state.alias, binding_scope, generation_token))
             usable_profile_aliases.append((plugin_id, aliases))
             selected_profile_aliases.append((plugin_id, aliases[0] if aliases else None))
             if not aliases:

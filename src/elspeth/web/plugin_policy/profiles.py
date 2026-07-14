@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections.abc import Mapping
 from copy import deepcopy
@@ -481,7 +483,29 @@ class _BedrockGuardrailProfileResolver:
         inventory: ProfileCredentialInventory,
     ) -> tuple[ProfileAvailability, ...]:
         del principal, inventory
-        return tuple(ProfileAvailability(alias=alias, credential_scope=None, usable=True) for alias in self._ordered_aliases)
+        result: list[ProfileAvailability] = []
+        for alias in self._ordered_aliases:
+            profile = self._profiles[alias]
+            binding_generation = hashlib.sha256(
+                json.dumps(
+                    {
+                        "guardrail_identifier": profile.guardrail_identifier,
+                        "guardrail_version": profile.guardrail_version,
+                        "region": profile.region,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            result.append(
+                ProfileAvailability(
+                    alias=alias,
+                    credential_scope=None,
+                    usable=True,
+                    generation=binding_generation,
+                )
+            )
+        return tuple(result)
 
     def check_local_requirements(self, alias: str) -> LocalRequirementResult:
         profile = self._profiles.get(alias)

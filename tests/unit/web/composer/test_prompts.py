@@ -37,6 +37,7 @@ from elspeth.web.composer.prompts import (
     build_messages as _build_messages,
 )
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, SourceSpec
+from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.plugin_policy.models import (
     PluginAvailability,
     PluginAvailabilitySnapshot,
@@ -327,6 +328,44 @@ class TestBuildContextString:
         assert policy["control_modes"] == {"llm": "required"}
         assert "OPENROUTER_API_KEY" not in context
         assert "provider" not in json.dumps(policy)
+
+    def test_context_exposes_only_opaque_bedrock_profile_inventory(self) -> None:
+        prompt_id = PluginId("transform", "aws_bedrock_prompt_shield")
+        snapshot = PluginAvailabilitySnapshot.create(
+            policy_hash="bedrock-policy",
+            principal_scope="local:alice",
+            available=frozenset({prompt_id}),
+            unavailable=(),
+            selected=((PluginCapability.PROMPT_SHIELD, prompt_id),),
+            usable_profile_aliases=((prompt_id, ("prompt-default",)),),
+            selected_profile_aliases=((prompt_id, "prompt-default"),),
+            control_modes=((PluginCapability.PROMPT_SHIELD, ControlMode.REQUIRED),),
+            binding_generation_fingerprint="bedrock-binding",
+        )
+        catalog = create_catalog_service()
+        view = PolicyCatalogView(catalog, snapshot, MagicMock(spec=OperatorProfileRegistry))
+
+        context = _build_context_string(
+            _empty_state(),
+            view,
+            plugin_snapshot=snapshot,
+            schemas_loaded=frozenset(),
+        )
+        policy = json.loads(context.split("\n", 1)[1])["plugin_policy"]
+
+        assert policy["usable_profile_aliases"] == {"transform:aws_bedrock_prompt_shield": ["prompt-default"]}
+        assert policy["selected_profile_aliases"] == {"transform:aws_bedrock_prompt_shield": "prompt-default"}
+        rendered = json.dumps(policy, sort_keys=True)
+        for private in (
+            "private-guardrail-marker",
+            "private-version-marker",
+            "private-region-marker",
+            "AWS_SECRET_ACCESS_KEY",
+            "arn:aws:iam::123456789012:role/private-role",
+            "https://private-endpoint.invalid",
+            "local_requirement_unavailable",
+        ):
+            assert private not in rendered
 
     def test_context_includes_discovery_time_composer_hints(self) -> None:
         """The LLM sees JIT hints even when it does not call list_* first."""

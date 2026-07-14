@@ -284,6 +284,8 @@ def build_context_string(
             "selected": {
                 capability.value: None if plugin_id is None else str(plugin_id) for capability, plugin_id in plugin_snapshot.selected
             },
+            "usable_profile_aliases": {str(plugin_id): list(aliases) for plugin_id, aliases in plugin_snapshot.usable_profile_aliases},
+            "selected_profile_aliases": {str(plugin_id): alias for plugin_id, alias in plugin_snapshot.selected_profile_aliases},
             "control_modes": {capability.value: mode.value for capability, mode in plugin_snapshot.control_modes},
         },
     }

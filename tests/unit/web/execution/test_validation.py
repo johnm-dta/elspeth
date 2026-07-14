@@ -291,6 +291,105 @@ def test_operator_profile_lowering_preserves_authored_state() -> None:
     }
 
 
+def _bedrock_prompt_policy_context() -> tuple[OperatorProfileRegistry, PluginAvailabilitySnapshot]:
+    from elspeth.web.dependencies import create_catalog_service
+
+    settings = WebSettings.model_validate(
+        {
+            **_make_settings().model_dump(),
+            "plugin_allowlist": ["transform:aws_bedrock_prompt_shield"],
+            "bedrock_guardrail_profiles": [
+                {
+                    "alias": "prompt-default",
+                    "plugin": "aws_bedrock_prompt_shield",
+                    "guardrail_identifier": "privateguardrailmarker",
+                    "guardrail_version": "7",
+                    "region": "us-east-1",
+                }
+            ],
+        }
+    )
+    runtime_config = RuntimeWebPluginConfig.from_settings(settings)
+    policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime_config)
+    profiles = OperatorProfileRegistry(policy=policy, settings=runtime_config)
+    unrestricted = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+    plugin_id = PluginId("transform", "aws_bedrock_prompt_shield")
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash=policy.policy_hash,
+        principal_scope="local:alice",
+        available=unrestricted.available,
+        unavailable=(),
+        selected=unrestricted.selected,
+        usable_profile_aliases=((plugin_id, ("prompt-default",)),),
+        selected_profile_aliases=((plugin_id, "prompt-default"),),
+        binding_generation_fingerprint="bedrock-profile-lowering-generation",
+    )
+    return profiles, snapshot
+
+
+def test_bedrock_profile_lowering_is_transient_and_keyless() -> None:
+    profiles, snapshot = _bedrock_prompt_policy_context()
+    state = _make_state(
+        nodes=(
+            _make_node(
+                plugin="aws_bedrock_prompt_shield",
+                options={
+                    "profile": "prompt-default",
+                    "fields": ["prompt"],
+                    "schema": {"mode": "observed", "fields": None},
+                },
+            ),
+        ),
+        outputs=(_make_output(),),
+    )
+
+    result = validate_plugin_policy(state, snapshot=snapshot, profile_registry=profiles)
+
+    assert result.findings == ()
+    authored = state.nodes[0].options
+    assert authored["profile"] == "prompt-default"
+    assert "guardrail_identifier" not in authored
+    executable = result.executable_state.nodes[0].options
+    assert executable["guardrail_identifier"] == "privateguardrailmarker"
+    assert executable["guardrail_version"] == "7"
+    assert executable["region"] == "us-east-1"
+    for forbidden in ("access_key", "secret_key", "session_token", "endpoint", "endpoint_url"):
+        assert forbidden not in executable
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {
+            "profile": "prompt-default",
+            "guardrail_identifier": "attackerprivatemarker",
+            "fields": ["prompt"],
+            "schema": {"mode": "observed", "fields": None},
+        },
+        {
+            "guardrail_identifier": "attackerprivatemarker",
+            "guardrail_version": "9",
+            "region": "us-west-2",
+            "fields": ["prompt"],
+            "schema": {"mode": "observed", "fields": None},
+        },
+    ],
+    ids=("profile-plus-private", "raw-private-only"),
+)
+def test_bedrock_web_policy_rejects_raw_private_binding_forms(options: dict[str, object]) -> None:
+    profiles, snapshot = _bedrock_prompt_policy_context()
+    state = _make_state(
+        nodes=(_make_node(plugin="aws_bedrock_prompt_shield", options=options),),
+        outputs=(_make_output(),),
+    )
+
+    result = validate_plugin_policy(state, snapshot=snapshot, profile_registry=profiles)
+
+    assert result.findings
+    assert {finding.stage for finding in result.findings} == {"operator_profile_options"}
+    assert "attackerprivatemarker" not in repr(result.findings)
+
+
 @dataclass
 class _FakeYamlGenerator:
     """Small YamlGenerator test double that records the state it rendered."""

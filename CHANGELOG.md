@@ -11,7 +11,9 @@ safer to operate. Structural queues are now first-class Composer nodes, so
 multiple upstream routes can feed one downstream step without merging their
 records. Guided/freeform transitions, run inspection, and the empty-state
 guidance have also been tightened around the way operators use the Composer in
-practice.
+practice. It also adds the supported AWS ECS deployment profile for running
+the web service on Fargate with Aurora PostgreSQL, EFS, S3, Bedrock, Cognito,
+CloudWatch, and X-Ray integrations.
 
 The web session database resets on upgrade: `SESSION_SCHEMA_EPOCH` advances
 from 26 to 27 to persist account-wide dismissal of the new freeform
@@ -29,6 +31,20 @@ plugin-policy evidence, so both databases require the documented cutover.
   sources, transforms, sinks, gates, forks, coalesces, aggregates, queues, and
   expands in operator language before asking for an outcome. Dismissal is
   stored in the user's Composer preferences.
+- **AWS ECS runtime support** — the lean container profile, validate-only
+  startup, deployment doctor, readiness endpoint, PostgreSQL Landscape store,
+  task-role S3 source and sink, Bedrock provider, Cognito authorization-origin
+  handling, and CloudWatch/X-Ray operator telemetry form one documented Fargate
+  deployment path. The [AWS ECS deployment runbook](docs/runbooks/aws-ecs-deployment.md)
+  covers rollout, rollback, evidence capture, and cleanup.
+- **Portable web plugin policy controls** — web catalog, Composer, recipes,
+  imports, validation, execution, and delayed exports now share one
+  principal-bound plugin snapshot. Operator profiles can expose Azure or AWS
+  prompt/content controls without placing private provider configuration in
+  authored pipeline state or audit receipts.
+- **Text pipeline endpoints** — text joins CSV and JSON as a supported source
+  and sink format, including atomic sink publication and rollback-safe output
+  handling.
 
 ### Changed
 
@@ -46,6 +62,11 @@ plugin-policy evidence, so both databases require the documented cutover.
   table and structured-JSON components; server-side paths no longer appear as
   user-facing output labels; and theme controls are available in Composer
   preferences.
+- **AWS deployments use an explicit compatibility boundary** — the supported
+  profile is one web task at a time and may require deployment downtime while
+  the epoch-23 Landscape schema is recreated. Upgrades must archive or export
+  required evidence, perform the documented drop/recreate cutover, and follow
+  the runbook rather than attempting an in-place mixed-version rollout.
 
 ### Fixed
 

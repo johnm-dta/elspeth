@@ -1829,20 +1829,22 @@ def _prevalidate_transform_for_context(
 ) -> str | None:
     """Validate web-authored profile options through their ordinary resolver."""
     authored = deep_thaw(strip_authoring_options(options))
-    if plugin_name != "llm" or "profile" not in authored:
+    plugin_id = PluginId("transform", plugin_name)
+    profiled_plugins = {candidate for candidate, _aliases in context.plugin_snapshot.usable_profile_aliases}
+    if "profile" not in authored or (plugin_name != "llm" and plugin_id not in profiled_plugins):
         return _prevalidate_transform(plugin_name, options)
 
     alias = authored.pop("profile")
     if not isinstance(alias, str):
-        return "Invalid options for transform 'llm': profile_unavailable"
+        return f"Invalid options for transform '{plugin_name}': profile_unavailable"
     try:
         lowered = context.catalog.lower_operator_profile_options(
-            PluginId("transform", "llm"),
+            plugin_id,
             alias=alias,
             safe_options=authored,
         )
     except ValueError as exc:
-        return f"Invalid options for transform 'llm': {exc}"
+        return f"Invalid options for transform '{plugin_name}': {exc}"
     return _prevalidate_transform(plugin_name, lowered.executable_options)
 
 

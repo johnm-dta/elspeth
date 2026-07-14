@@ -49,6 +49,8 @@ from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
 from elspeth.contracts.config.runtime import RuntimeTelemetryConfig
 from elspeth.contracts.errors import ExecutionError
+from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
+from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
@@ -62,10 +64,17 @@ from elspeth.plugins.transforms.aws.guardrails_live_check import run_guardrail_l
 from elspeth.plugins.transforms.llm.model_catalog import read_openrouter_catalog_snapshot_id
 from elspeth.telemetry import create_telemetry_manager
 from elspeth.telemetry.serialization import derive_trace_id
+from elspeth.web.audit_readiness.service import build_plugin_policy_readiness
 from elspeth.web.composer.llm_response_parsing import build_llm_call_record
+from elspeth.web.composer.recipes import apply_recipe
 from elspeth.web.composer.service import _litellm_acompletion
+from elspeth.web.composer.state import CompositionState
+from elspeth.web.composer.yaml_generator import generate_public_yaml
 from elspeth.web.config import settings_from_env
+from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.execution.service import _build_web_plugin_policy_evidence
 from elspeth.web.operator_telemetry import bootstrap_operator_telemetry, build_aws_operator_pipeline_telemetry
+from elspeth.web.plugin_policy.availability import build_plugin_snapshot
 from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
 from elspeth.web.plugin_policy.models import PluginId
 from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
@@ -100,6 +109,7 @@ _STATE_FIELDS = frozenset(
     {
         "schema_version",
         "session_id",
+        "tutorial_session_id",
         "blob_id",
         "run_id",
         "landscape_run_id",
@@ -118,6 +128,7 @@ _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _GIT_SHA_PATTERN = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _SCENARIO_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 FIXED_INPUT_BYTES = b"id,name\n1,alpha\n"
+TUTORIAL_INPUT_BYTES = b"url\nhttps://example.invalid/\n"
 _NO_BODY = object()
 _TERMINAL_RUN_STATUSES = frozenset({"completed", "completed_with_failures", "failed", "empty", "cancelled"})
 _EXEC_RECEIPT_PREFIX = "ELSPETH_ACCEPTANCE_RECEIPT_V1:"
@@ -134,11 +145,12 @@ _BEDROCK_DETAIL_FIELDS = frozenset(
         "cost_source",
     }
 )
-_GUARDRAIL_DETAIL_FIELDS = frozenset({"controls"})
+_GUARDRAIL_DETAIL_FIELDS = frozenset({"controls", "plugin_policy"})
 _GUARDRAIL_CONTROL_FIELDS = frozenset(
     {
         "plugin_id",
         "profile_alias",
+        "guardrail_version",
         "safe_case_passed",
         "attack_case_blocked",
         "request_ids_present",
@@ -147,6 +159,21 @@ _GUARDRAIL_CONTROL_FIELDS = frozenset(
         "checked_at",
     }
 )
+_PLUGIN_POLICY_DETAIL_FIELDS = frozenset(
+    {
+        "policy_hash",
+        "snapshot_hash",
+        "binding_sha256",
+        "tutorial_profile_ready",
+        "tutorial_ready",
+        "tutorial_blocker",
+        "tutorial_profile_alias",
+        "target_llm",
+        "selected_controls",
+        "landscape_evidence",
+    }
+)
+_PLUGIN_POLICY_CONTROL_FIELDS = frozenset({"capability", "plugin_id", "profile_alias", "mode"})
 _OPERATOR_DETAIL_FIELDS = frozenset(
     {
         "phase",
@@ -308,6 +335,15 @@ SCENARIO_ASSIGNMENT_NAMES = (
     "ECS_CLUSTER",
     "ECS_SERVICE",
     "WEB_CONTAINER_NAME",
+    "ELSPETH_WEB__PLUGIN_ALLOWLIST",
+    "ELSPETH_WEB__PLUGIN_PREFERENCES",
+    "ELSPETH_WEB__PLUGIN_CONTROL_MODES",
+    "ELSPETH_WEB__LLM_PROFILES",
+    "ELSPETH_WEB__TUTORIAL_LLM_PROFILE",
+    "ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES",
+    "ELSPETH_WEB__BEDROCK_GUARDRAIL_DEFAULT_PROFILES",
+    "ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256",
+    "ELSPETH_BEDROCK_LIVE_TEST_MODEL",
     "TARGET_GROUP_ARN",
     "ALB_BASE_URL",
     "ALB_ARN",
@@ -342,6 +378,15 @@ SCENARIO_ASSIGNMENT_NAMES = (
     "SCENARIO_TF_BINDING_FILE",
 )
 _SCENARIO_VALUE_FIELDS = frozenset(SCENARIO_ASSIGNMENT_NAMES[2:])
+PLUGIN_POLICY_ASSIGNMENT_NAMES = (
+    "ELSPETH_WEB__PLUGIN_ALLOWLIST",
+    "ELSPETH_WEB__PLUGIN_PREFERENCES",
+    "ELSPETH_WEB__PLUGIN_CONTROL_MODES",
+    "ELSPETH_WEB__LLM_PROFILES",
+    "ELSPETH_WEB__TUTORIAL_LLM_PROFILE",
+    "ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES",
+    "ELSPETH_WEB__BEDROCK_GUARDRAIL_DEFAULT_PROFILES",
+)
 _ORPHAN_INVENTORY_FIELDS = frozenset(
     {
         "tag_key",
@@ -531,6 +576,47 @@ def build_fixed_pipeline_yaml(*, session_id: str, source_path: str = "blobs/aws-
     return yaml.safe_dump(document, sort_keys=False)
 
 
+def _canonical_tutorial_policy_state(*, profile_alias: str) -> CompositionState:
+    """Materialize the product's canonical core-only tutorial candidate."""
+
+    recipe = apply_recipe(
+        "web-scrape-llm-rate-jsonl",
+        {
+            "source_blob_id": "00000000-0000-4000-8000-000000000001",
+            "source_plugin": "csv",
+            "profile": profile_alias,
+            "abuse_contact": "aws-ecs-acceptance@example.invalid",
+            "scraping_reason": "AWS ECS tutorial policy acceptance",
+            "output_path": "outputs/tutorial-policy-acceptance.jsonl",
+        },
+    )
+    source = dict(cast(Mapping[str, object], recipe["source"]))
+    source.pop("blob_id")
+    outputs = []
+    for raw_output in cast(list[dict[str, object]], recipe["outputs"]):
+        output = dict(raw_output)
+        output["name"] = output.pop("sink_name")
+        outputs.append(output)
+    return CompositionState.from_dict(
+        {
+            "source": source,
+            "nodes": recipe["nodes"],
+            "edges": recipe["edges"],
+            "outputs": outputs,
+            "metadata": recipe["metadata"],
+            "version": 1,
+        }
+    )
+
+
+def build_canonical_tutorial_pipeline_yaml(*, profile_alias: str) -> str:
+    """Return the public-import form of the canonical core-only tutorial."""
+
+    if type(profile_alias) is not str or not profile_alias.strip() or profile_alias != profile_alias.strip():
+        raise AcceptanceInputError("tutorial profile alias is invalid")
+    return generate_public_yaml(_canonical_tutorial_policy_state(profile_alias=profile_alias))
+
+
 @dataclass(frozen=True, slots=True)
 class AcceptanceCredentials:
     """One mutually exclusive acceptance authentication mode."""
@@ -560,6 +646,7 @@ class AcceptanceState:
 
     schema_version: int
     session_id: str
+    tutorial_session_id: str
     blob_id: str
     run_id: str
     landscape_run_id: str
@@ -580,7 +667,10 @@ class AcceptanceState:
         if data["schema_version"] != 1 or type(data["schema_version"]) is not int:
             raise AcceptanceStateError("acceptance state schema is invalid")
 
-        identities = {field: _state_string(data, field) for field in ("session_id", "blob_id", "run_id", "landscape_run_id", "artifact_id")}
+        identities = {
+            field: _state_string(data, field)
+            for field in ("session_id", "tutorial_session_id", "blob_id", "run_id", "landscape_run_id", "artifact_id")
+        }
         for value in identities.values():
             try:
                 parsed = uuid.UUID(value)
@@ -609,6 +699,7 @@ class AcceptanceState:
         return cls(
             schema_version=1,
             session_id=identities["session_id"],
+            tutorial_session_id=identities["tutorial_session_id"],
             blob_id=identities["blob_id"],
             run_id=identities["run_id"],
             landscape_run_id=identities["landscape_run_id"],
@@ -997,6 +1088,21 @@ def _sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def plugin_policy_binding_sha256(values: Mapping[str, str]) -> str:
+    """Hash the exact protected seven-setting web policy assignment."""
+
+    projection: dict[str, str] = {}
+    for name in PLUGIN_POLICY_ASSIGNMENT_NAMES:
+        value = values.get(name)
+        if type(value) is not str or not value or len(value) > 16 * 1024:
+            raise AcceptanceCheckError("plugin_policy_binding")
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise AcceptanceCheckError("plugin_policy_binding")
+        projection[name] = value
+    encoded = json.dumps(projection, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return _sha256(encoded)
+
+
 def _validate_s3_receipt_details(details: Mapping[str, object]) -> None:
     if set(details) != _S3_DETAIL_FIELDS:
         raise AcceptanceCheckError("exec_receipt_schema")
@@ -1042,6 +1148,7 @@ def _validate_guardrail_receipt_details(details: Mapping[str, object]) -> None:
     if not isinstance(controls, list) or len(controls) != 2:
         raise AcceptanceCheckError("exec_receipt_schema")
     expected_plugins = ("aws_bedrock_prompt_shield", "aws_bedrock_content_safety")
+    validated_aliases: list[str] = []
     for control, expected_plugin in zip(controls, expected_plugins, strict=True):
         if not isinstance(control, Mapping) or set(control) != _GUARDRAIL_CONTROL_FIELDS:
             raise AcceptanceCheckError("exec_receipt_schema")
@@ -1055,6 +1162,10 @@ def _validate_guardrail_receipt_details(details: Mapping[str, object]) -> None:
             or len(alias) > _MAX_IDENTITY_CHARS
             or any(ord(character) < 32 or ord(character) == 127 for character in alias)
         ):
+            raise AcceptanceCheckError("exec_receipt_schema")
+        validated_aliases.append(alias)
+        guardrail_version = control["guardrail_version"]
+        if type(guardrail_version) is not str or re.fullmatch(r"[1-9][0-9]*", guardrail_version) is None:
             raise AcceptanceCheckError("exec_receipt_schema")
         for field in ("safe_case_passed", "attack_case_blocked", "request_ids_present"):
             if control[field] is not True:
@@ -1070,6 +1181,48 @@ def _validate_guardrail_receipt_details(details: Mapping[str, object]) -> None:
             _parse_state_timestamp(checked_at)
         except AcceptanceStateError:
             raise AcceptanceCheckError("exec_receipt_schema") from None
+
+    plugin_policy = details["plugin_policy"]
+    if not isinstance(plugin_policy, Mapping) or set(plugin_policy) != _PLUGIN_POLICY_DETAIL_FIELDS:
+        raise AcceptanceCheckError("exec_receipt_schema")
+    for field in ("policy_hash", "snapshot_hash", "binding_sha256"):
+        value = plugin_policy[field]
+        if type(value) is not str or _SHA256_PATTERN.fullmatch(value) is None:
+            raise AcceptanceCheckError("exec_receipt_schema")
+    if (
+        plugin_policy["tutorial_profile_ready"] is not True
+        or plugin_policy["tutorial_ready"] is not False
+        or plugin_policy["tutorial_blocker"] != "tutorial_required_control_coverage"
+        or plugin_policy["landscape_evidence"] is not True
+        or plugin_policy["target_llm"] != "transform:llm"
+    ):
+        raise AcceptanceCheckError("exec_receipt_schema")
+    tutorial_alias = plugin_policy["tutorial_profile_alias"]
+    if (
+        type(tutorial_alias) is not str
+        or not tutorial_alias
+        or tutorial_alias != tutorial_alias.strip()
+        or len(tutorial_alias) > _MAX_IDENTITY_CHARS
+        or any(ord(character) < 32 or ord(character) == 127 for character in tutorial_alias)
+    ):
+        raise AcceptanceCheckError("exec_receipt_schema")
+    selected_controls = plugin_policy["selected_controls"]
+    expected_controls = (
+        ("prompt_shield", "transform:aws_bedrock_prompt_shield", validated_aliases[0]),
+        ("content_safety", "transform:aws_bedrock_content_safety", validated_aliases[1]),
+    )
+    if not isinstance(selected_controls, list) or len(selected_controls) != len(expected_controls):
+        raise AcceptanceCheckError("exec_receipt_schema")
+    for selected, (capability, plugin_id, profile_alias) in zip(selected_controls, expected_controls, strict=True):
+        if (
+            not isinstance(selected, Mapping)
+            or set(selected) != _PLUGIN_POLICY_CONTROL_FIELDS
+            or selected["capability"] != capability
+            or selected["plugin_id"] != plugin_id
+            or selected["profile_alias"] != profile_alias
+            or selected["mode"] != "required"
+        ):
+            raise AcceptanceCheckError("exec_receipt_schema")
 
 
 def _validate_operator_receipt_details(details: Mapping[str, object]) -> None:
@@ -1299,6 +1452,7 @@ def extract_exec_receipt(
     expected_task_arn: str,
     expected_scenario_id: str,
     expected_check: str,
+    expected_plugin_policy_binding_sha256: str | None = None,
 ) -> dict[str, object]:
     """Extract and bind exactly one closed receipt from Session Manager output."""
 
@@ -1327,6 +1481,14 @@ def extract_exec_receipt(
         raise AcceptanceCheckError("scenario_binding")
     if payload["check"] != expected_check:
         raise AcceptanceCheckError("check_binding")
+    if expected_plugin_policy_binding_sha256 is not None:
+        if expected_check != "verify-bedrock-guardrails" or _SHA256_PATTERN.fullmatch(expected_plugin_policy_binding_sha256) is None:
+            raise AcceptanceCheckError("plugin_policy_binding")
+        details = payload["details"]
+        assert isinstance(details, dict)
+        plugin_policy = details.get("plugin_policy")
+        if not isinstance(plugin_policy, Mapping) or plugin_policy.get("binding_sha256") != expected_plugin_policy_binding_sha256:
+            raise AcceptanceCheckError("plugin_policy_binding")
     return payload
 
 
@@ -1383,6 +1545,9 @@ def capture(
     register_value = env.get("ELSPETH_ACCEPTANCE_REGISTER")
     if register_value not in {None, "0", "1"}:
         raise AcceptanceInputError("ELSPETH_ACCEPTANCE_REGISTER must be 0 or 1")
+    tutorial_profile = env.get("ELSPETH_WEB__TUTORIAL_LLM_PROFILE")
+    if type(tutorial_profile) is not str or not tutorial_profile.strip() or tutorial_profile != tutorial_profile.strip():
+        raise AcceptanceInputError("tutorial profile alias is invalid")
     captured_at = _utc_timestamp(now())
     client = AcceptanceHttpClient.from_env(env, transport=transport)
     register = register_value == "1"
@@ -1468,9 +1633,42 @@ def capture(
         if blob_sha256 != uploaded_sha256:
             raise AcceptanceCheckError("blob_integrity")
 
+        tutorial_session = _mapping(
+            client.request_json("POST", "/api/sessions", expected_statuses={201}, json_body={}),
+            check="tutorial_session_create",
+        )
+        tutorial_session_id = _uuid_field(tutorial_session, "id", check="tutorial_session_create")
+        tutorial_blob = _mapping(
+            client.request_multipart_json(
+                "POST",
+                f"/api/sessions/{tutorial_session_id}/blobs",
+                expected_statuses={201},
+                files={"file": ("aws-ecs-tutorial-policy.csv", TUTORIAL_INPUT_BYTES, "text/csv")},
+            ),
+            check="tutorial_blob_upload",
+        )
+        tutorial_blob_id = _uuid_field(tutorial_blob, "id", check="tutorial_blob_upload")
+        if _sha256_field(tutorial_blob, "content_hash", check="tutorial_blob_upload") != _sha256(TUTORIAL_INPUT_BYTES):
+            raise AcceptanceCheckError("tutorial_blob_upload")
+        imported_tutorial = _mapping(
+            client.request_json(
+                "POST",
+                f"/api/sessions/{tutorial_session_id}/state/yaml",
+                expected_statuses={200},
+                json_body={
+                    "yaml": build_canonical_tutorial_pipeline_yaml(profile_alias=tutorial_profile),
+                    "source_blob_ids": {"source": tutorial_blob_id},
+                },
+            ),
+            check="tutorial_state_import",
+        )
+        if imported_tutorial.get("is_valid") is not False:
+            raise AcceptanceCheckError("tutorial_state_import")
+
     state = AcceptanceState(
         schema_version=1,
         session_id=session_id,
+        tutorial_session_id=tutorial_session_id,
         blob_id=blob_id,
         run_id=run_id,
         landscape_run_id=landscape_run_id,
@@ -1486,6 +1684,55 @@ def capture(
     )
     write_acceptance_state(state_file, state)
     return state
+
+
+def _verify_plugin_policy_http_contract(client: AcceptanceHttpClient, *, tutorial_session_id: str) -> None:
+    status = _mapping(
+        client.request_json("GET", "/api/system/status", expected_statuses={200}),
+        check="plugin_policy_readiness",
+    )
+    readiness = _mapping(status.get("plugin_policy_readiness"), check="plugin_policy_readiness")
+    rows = readiness.get("rows")
+    if status.get("tutorial_ready") is not True or readiness.get("tutorial_ready") is not True or not isinstance(rows, list):
+        raise AcceptanceCheckError("plugin_policy_readiness")
+    expected_ids = {
+        "policy_compilation",
+        "required_core",
+        "local_capability_configuration",
+        "live_health",
+        "tutorial_profile",
+        "tutorial_required_control_coverage",
+    }
+    statuses: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise AcceptanceCheckError("plugin_policy_readiness")
+        row_id = row.get("id")
+        row_status = row.get("status")
+        if type(row_id) is not str or row_id in statuses or type(row_status) is not str:
+            raise AcceptanceCheckError("plugin_policy_readiness")
+        statuses[row_id] = row_status
+    if (
+        set(statuses) != expected_ids
+        or statuses["policy_compilation"] != "ok"
+        or statuses["required_core"] != "ok"
+        or statuses["local_capability_configuration"] != "ok"
+        or any(value == "error" for value in statuses.values())
+    ):
+        raise AcceptanceCheckError("plugin_policy_readiness")
+
+    rejected = _mapping(
+        client.request_json(
+            "POST",
+            "/api/tutorial/run",
+            expected_statuses={409},
+            json_body={"session_id": tutorial_session_id},
+        ),
+        check="tutorial_required_control_coverage",
+    )
+    detail = _mapping(rejected.get("detail"), check="tutorial_required_control_coverage")
+    if detail.get("error_type") != "tutorial_not_ready" or detail.get("code") != "tutorial_required_control_coverage":
+        raise AcceptanceCheckError("tutorial_required_control_coverage")
 
 
 def verify_api(
@@ -1547,7 +1794,16 @@ def verify_api(
         if _sha256(artifact_content) != state.artifact_sha256:
             raise AcceptanceCheckError("artifact_integrity")
 
-    return {"check": "verify-api", "ok": True, "source_rows": state.source_rows, "failed_tokens": state.failed_tokens}
+        _verify_plugin_policy_http_contract(client, tutorial_session_id=state.tutorial_session_id)
+
+    return {
+        "check": "verify-api",
+        "ok": True,
+        "source_rows": state.source_rows,
+        "failed_tokens": state.failed_tokens,
+        "plugin_policy_ready": True,
+        "tutorial_required_control_coverage": True,
+    }
 
 
 def verify_local_auth() -> dict[str, object]:
@@ -2022,6 +2278,137 @@ def _guardrail_live_inputs(env: Mapping[str, str]) -> tuple[tuple[str, str, str,
     return tuple(values)
 
 
+class _AcceptanceSecretInventory:
+    """Empty credential inventory for the keyless ECS Bedrock acceptance principal."""
+
+    def has_ref(self, principal: str, name: str) -> bool:
+        del principal, name
+        return False
+
+    def has_server_ref(self, name: str) -> bool:
+        del name
+        return False
+
+    def has_user_ref(self, principal: str, name: str) -> bool:
+        del principal, name
+        return False
+
+    def server_generation(self, name: str) -> str | None:
+        del name
+        return None
+
+    def user_generation(self, principal: str, name: str) -> str | None:
+        del principal, name
+        return None
+
+
+def build_plugin_policy_acceptance(
+    settings: Any,
+    env: Mapping[str, str],
+) -> tuple[WebPluginPolicyEvidence, dict[str, object]]:
+    """Build and validate the effective keyless Bedrock policy used by ECS."""
+
+    live_inputs = _guardrail_live_inputs(env)
+    expected_aliases = {plugin_name: alias for plugin_name, alias, _safe, _blocked, _version in live_inputs}
+    prompt_id = PluginId("transform", "aws_bedrock_prompt_shield")
+    content_id = PluginId("transform", "aws_bedrock_content_safety")
+    llm_id = PluginId("transform", "llm")
+    try:
+        expected_binding_sha256 = env.get("ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256")
+        if (
+            type(expected_binding_sha256) is not str
+            or _SHA256_PATTERN.fullmatch(expected_binding_sha256) is None
+            or plugin_policy_binding_sha256(env) != expected_binding_sha256
+        ):
+            raise ValueError("policy binding mismatch")
+        live_model = env.get("ELSPETH_BEDROCK_LIVE_TEST_MODEL")
+        if type(live_model) is not str or not live_model.startswith("bedrock/"):
+            raise ValueError("live model missing")
+        live_region = _resolve_aws_region(env, check="plugin_policy_settings")
+        runtime = RuntimeWebPluginConfig.from_settings(settings)
+        policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+        profiles = OperatorProfileRegistry(policy=policy, settings=runtime)
+        secret_key = settings.secret_key
+        if type(secret_key) is not str or len(secret_key.encode("utf-8")) < 32:
+            raise ValueError("invalid generation key")
+        snapshot = build_plugin_snapshot(
+            policy=policy,
+            catalog=create_catalog_service(),
+            profiles=profiles,
+            principal_scope="system:aws-ecs-acceptance",
+            secret_inventory=_AcceptanceSecretInventory(),
+            generation_key=secret_key.encode("utf-8"),
+        )
+        readiness = build_plugin_policy_readiness(
+            policy=policy,
+            snapshot=snapshot,
+            tutorial_profile=runtime.tutorial_llm_profile,
+            tutorial_state=_canonical_tutorial_policy_state(profile_alias=runtime.tutorial_llm_profile or ""),
+            profile_registry=profiles,
+        )
+    except Exception:
+        raise AcceptanceCheckError("plugin_policy_settings") from None
+
+    selected = dict(snapshot.selected)
+    aliases = dict(snapshot.selected_profile_aliases)
+    modes = dict(snapshot.control_modes)
+    tutorial_alias = runtime.tutorial_llm_profile
+    llm_profiles = dict(runtime.llm_profiles)
+    tutorial_profile = llm_profiles.get(tutorial_alias) if tutorial_alias is not None else None
+    readiness_rows = {row.id: row for row in readiness.rows}
+    profile_row = readiness_rows.get("tutorial_profile")
+    coverage_row = readiness_rows.get("tutorial_required_control_coverage")
+    if (
+        tutorial_alias is None
+        or tutorial_profile is None
+        or tutorial_profile.provider != "bedrock"
+        or tutorial_profile.model != live_model
+        or dict(tutorial_profile.provider_options).get("region_name") != live_region
+        or readiness.tutorial_ready is not False
+        or profile_row is None
+        or profile_row.status == "error"
+        or coverage_row is None
+        or coverage_row.status != "error"
+        or not {llm_id, prompt_id, content_id} <= snapshot.available
+        or selected.get(PluginCapability.LLM) != llm_id
+        or selected.get(PluginCapability.PROMPT_SHIELD) != prompt_id
+        or selected.get(PluginCapability.CONTENT_SAFETY) != content_id
+        or modes.get(PluginCapability.PROMPT_SHIELD) is not ControlMode.REQUIRED
+        or modes.get(PluginCapability.CONTENT_SAFETY) is not ControlMode.REQUIRED
+        or aliases.get(llm_id) != tutorial_alias
+        or aliases.get(prompt_id) != expected_aliases["aws_bedrock_prompt_shield"]
+        or aliases.get(content_id) != expected_aliases["aws_bedrock_content_safety"]
+    ):
+        raise AcceptanceCheckError("plugin_policy_selection")
+
+    evidence = _build_web_plugin_policy_evidence(snapshot=snapshot, policy=policy)
+    receipt = {
+        "policy_hash": evidence.policy_hash,
+        "snapshot_hash": evidence.snapshot_hash,
+        "binding_sha256": expected_binding_sha256,
+        "tutorial_profile_ready": True,
+        "tutorial_ready": False,
+        "tutorial_blocker": "tutorial_required_control_coverage",
+        "tutorial_profile_alias": tutorial_alias,
+        "target_llm": str(llm_id),
+        "selected_controls": [
+            {
+                "capability": PluginCapability.PROMPT_SHIELD.value,
+                "plugin_id": str(prompt_id),
+                "profile_alias": expected_aliases["aws_bedrock_prompt_shield"],
+                "mode": ControlMode.REQUIRED.value,
+            },
+            {
+                "capability": PluginCapability.CONTENT_SAFETY.value,
+                "plugin_id": str(content_id),
+                "profile_alias": expected_aliases["aws_bedrock_content_safety"],
+                "mode": ControlMode.REQUIRED.value,
+            },
+        ],
+    }
+    return evidence, receipt
+
+
 def verify_bedrock_guardrails(
     env: Mapping[str, str],
     *,
@@ -2080,6 +2467,7 @@ def verify_bedrock_guardrails(
             {
                 "plugin_id": receipt.plugin_id,
                 "profile_alias": receipt.profile_alias,
+                "guardrail_version": expected_version,
                 "safe_case_passed": True,
                 "attack_case_blocked": True,
                 "request_ids_present": True,
@@ -2107,6 +2495,9 @@ def run_bedrock_guardrails_live(
     registry_factory: Callable[[Any], Any] = _build_operator_profile_registry,
     checker: Callable[..., Any] = run_guardrail_live_check,
     telemetry_manager_factory: Callable[[Any], Any] = _create_guardrail_telemetry_manager,
+    policy_acceptance_factory: Callable[
+        [Any, Mapping[str, str]], tuple[WebPluginPolicyEvidence, dict[str, object]]
+    ] = build_plugin_policy_acceptance,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> dict[str, object]:
     """Own the real Landscape and OTLP resources for the Guardrail live proof."""
@@ -2114,6 +2505,7 @@ def run_bedrock_guardrails_live(
     try:
         prepare_for_run()
         settings = settings_loader()
+        policy_evidence, policy_receipt = policy_acceptance_factory(settings, env)
         manager = telemetry_manager_factory(settings)
     except Exception:
         raise AcceptanceCheckError("guardrails_settings") from None
@@ -2141,6 +2533,7 @@ def run_bedrock_guardrails_live(
                     run_id=run_id,
                     openrouter_catalog_sha256=catalog_sha,
                     openrouter_catalog_source=catalog_source,
+                    web_plugin_policy_evidence=policy_evidence,
                 )
                 node = repositories.data_flow.register_node(
                     run.run_id,
@@ -2190,7 +2583,7 @@ def run_bedrock_guardrails_live(
                 started = time.monotonic()
                 failure: AcceptanceCheckError | None = None
                 try:
-                    result = verify_bedrock_guardrails(
+                    guardrail_result = verify_bedrock_guardrails(
                         env,
                         settings_loader=lambda: settings,
                         registry_factory=registry_factory,
@@ -2201,6 +2594,13 @@ def run_bedrock_guardrails_live(
                         state_id=state.state_id,
                         now=now,
                     )
+                    persisted_policy = repositories.run_lifecycle.get_web_plugin_policy_evidence(run.run_id)
+                    if persisted_policy != policy_evidence:
+                        raise AcceptanceCheckError("guardrails_policy_evidence")
+                    result = {
+                        **guardrail_result,
+                        "plugin_policy": {**policy_receipt, "landscape_evidence": True},
+                    }
                     manager.flush()
                     if audit_proofs != [True, True, True, True]:
                         raise AcceptanceCheckError("guardrails_audit_order")
@@ -3904,7 +4304,7 @@ def _validate_scenario_inventory(
     }:
         raise AcceptanceCheckError("scenario_inventory_schema")
     if (
-        payload["schema"] != "elspeth.aws-ecs-scenario-inventory.v4"
+        payload["schema"] != "elspeth.aws-ecs-scenario-inventory.v5"
         or payload["scenario_id"] != scenario_id
         or payload["phase"] != expected_phase
         or payload["acceptance_run_id"] != acceptance_run_id
@@ -3927,6 +4327,22 @@ def _validate_scenario_inventory(
         or values["OIDC_EXPECTED_AUDIENCE_CLAIM"] not in {"aud", "client_id"}
     ):
         raise AcceptanceCheckError("scenario_inventory_binding")
+    try:
+        policy_binding = plugin_policy_binding_sha256(cast(Mapping[str, str], values))
+    except AcceptanceCheckError:
+        raise AcceptanceCheckError("scenario_inventory_schema") from None
+    if values["ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256"] != policy_binding:
+        raise AcceptanceCheckError("scenario_inventory_binding")
+    live_model = values["ELSPETH_BEDROCK_LIVE_TEST_MODEL"]
+    if not live_model.startswith("bedrock/") or any(character.isspace() for character in live_model):
+        raise AcceptanceCheckError("scenario_inventory_schema")
+    for name in PLUGIN_POLICY_ASSIGNMENT_NAMES:
+        if name == "ELSPETH_WEB__TUTORIAL_LLM_PROFILE":
+            continue
+        try:
+            json.loads(cast(str, values[name]))
+        except json.JSONDecodeError:
+            raise AcceptanceCheckError("scenario_inventory_schema") from None
     for field in (
         "ECS_CLUSTER",
         "ECS_SERVICE",
@@ -5370,6 +5786,84 @@ def scenario_load(
     return "\n".join(f"{name}={shlex.quote(str(assignments[name]))}" for name in SCENARIO_ASSIGNMENT_NAMES) + "\n"
 
 
+def validate_task_definition_policy_binding(
+    payload: object,
+    *,
+    manifest_path: Path,
+    scenario_id: str,
+    container_name: str,
+) -> str:
+    """Bind a returned ECS task definition's policy environment to protected inventory."""
+
+    if scenario_id not in {"A", "B"} or re.fullmatch(r"[A-Za-z0-9_-]{1,255}", container_name) is None:
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    manifest = _read_control_manifest(manifest_path)
+    inventory = _load_bound_scenario_inventory(manifest, scenario_id, require_resolved=True)
+    values = inventory["values"]
+    if not isinstance(values, dict):
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    task = payload.get("taskDefinition") if isinstance(payload, Mapping) else None
+    if not isinstance(task, Mapping) or task.get("status") != "ACTIVE":
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    task_definition_arn = task.get("taskDefinitionArn")
+    if (
+        type(task_definition_arn) is not str
+        or re.fullmatch(
+            r"arn:aws(?:-us-gov|-cn)?:ecs:[a-z0-9-]+:[0-9]{12}:task-definition/[A-Za-z0-9_-]+:[1-9][0-9]*",
+            task_definition_arn,
+        )
+        is None
+    ):
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    containers = task.get("containerDefinitions")
+    if not isinstance(containers, list) or len(containers) > 100:
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    matches = [container for container in containers if isinstance(container, Mapping) and container.get("name") == container_name]
+    if len(matches) != 1:
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    container = matches[0]
+    environment = container.get("environment")
+    secrets = container.get("secrets", [])
+    if not isinstance(environment, list) or not isinstance(secrets, list) or len(environment) > 1_000 or len(secrets) > 1_000:
+        raise AcceptanceCheckError("task_definition_policy_binding")
+
+    observed: dict[str, str] = {}
+    for entry in environment:
+        if not isinstance(entry, Mapping) or set(entry) != {"name", "value"}:
+            raise AcceptanceCheckError("task_definition_policy_binding")
+        name = entry["name"]
+        value = entry["value"]
+        if type(name) is not str or type(value) is not str or name in observed:
+            raise AcceptanceCheckError("task_definition_policy_binding")
+        observed[name] = value
+    secret_names: set[str] = set()
+    for entry in secrets:
+        if not isinstance(entry, Mapping):
+            raise AcceptanceCheckError("task_definition_policy_binding")
+        name = entry.get("name")
+        if type(name) is not str or name in secret_names:
+            raise AcceptanceCheckError("task_definition_policy_binding")
+        secret_names.add(name)
+
+    protected_names = (
+        *PLUGIN_POLICY_ASSIGNMENT_NAMES,
+        "ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256",
+        "ELSPETH_BEDROCK_LIVE_TEST_MODEL",
+        "AWS_REGION",
+    )
+    if secret_names.intersection(protected_names):
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    if any(observed.get(name) != values.get(name) for name in protected_names):
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    try:
+        observed_binding = plugin_policy_binding_sha256(observed)
+    except AcceptanceCheckError:
+        raise AcceptanceCheckError("task_definition_policy_binding") from None
+    if observed_binding != observed["ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256"]:
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    return task_definition_arn
+
+
 @dataclass(frozen=True)
 class OrphanSweepClients:
     """Closed AWS client bundle used by the cleanup-only orphan sweep."""
@@ -6378,6 +6872,7 @@ def _validate_stored_receipt(
     subject_sha256: str,
     candidate_sha: str,
     subject_id: str | None = None,
+    expected_plugin_policy_binding_sha256: str | None = None,
 ) -> dict[str, object]:
     document = _validate_bounded_receipt_document(payload)
     if kind == "connection-budget":
@@ -6394,6 +6889,17 @@ def _validate_stored_receipt(
         or receipt["task_arn_sha256"] != subject_sha256
     ):
         raise AcceptanceCheckError("receipt_store_binding")
+    if expected_plugin_policy_binding_sha256 is not None:
+        details = receipt["details"]
+        assert isinstance(details, dict)
+        plugin_policy = details.get("plugin_policy")
+        if (
+            kind != "verify-bedrock-guardrails"
+            or _SHA256_PATTERN.fullmatch(expected_plugin_policy_binding_sha256) is None
+            or not isinstance(plugin_policy, Mapping)
+            or plugin_policy.get("binding_sha256") != expected_plugin_policy_binding_sha256
+        ):
+            raise AcceptanceCheckError("receipt_store_binding")
     return receipt
 
 
@@ -6437,6 +6943,14 @@ def receipt_store(
     manifest = _read_control_manifest(manifest_path)
     candidate_sha = manifest["candidate_sha"]
     assert isinstance(candidate_sha, str)
+    expected_plugin_policy_binding_sha256: str | None = None
+    if kind == "verify-bedrock-guardrails":
+        inventory = _load_bound_scenario_inventory(manifest, scenario_id, require_resolved=True)
+        values = inventory["values"]
+        assert isinstance(values, dict)
+        binding = values["ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256"]
+        assert isinstance(binding, str)
+        expected_plugin_policy_binding_sha256 = binding
     document = _validate_stored_receipt(
         document,
         kind=kind,
@@ -6444,6 +6958,7 @@ def receipt_store(
         subject_sha256=subject_sha256,
         candidate_sha=candidate_sha,
         subject_id=subject_id,
+        expected_plugin_policy_binding_sha256=expected_plugin_policy_binding_sha256,
     )
     canonical = json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
     receipt_sha256 = _sha256(canonical)
@@ -6464,6 +6979,7 @@ def receipt_store(
             subject_sha256=subject_sha256,
             candidate_sha=candidate_sha,
             subject_id=subject_id,
+            expected_plugin_policy_binding_sha256=expected_plugin_policy_binding_sha256,
         )
         if existing != document:
             raise AcceptanceCheckError("receipt_store_conflict")
@@ -7588,6 +8104,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract_receipt.add_argument("--candidate-sha", required=True)
     extract_receipt.add_argument("--task-arn", required=True)
     extract_receipt.add_argument("--scenario-id", required=True)
+    extract_receipt.add_argument("--plugin-policy-binding-sha256")
 
     control = commands.add_parser("control-manifest")
     control_actions = control.add_subparsers(dest="control_action", required=True)
@@ -7716,6 +8233,11 @@ def build_parser() -> argparse.ArgumentParser:
     scenario_command.add_argument("--scenario-id", required=True, choices=("A", "B"))
     scenario_command.add_argument("--shell-assignments", action="store_true", required=True)
 
+    task_definition_policy = commands.add_parser("validate-task-definition-policy")
+    task_definition_policy.add_argument("--file", required=True)
+    task_definition_policy.add_argument("--scenario-id", required=True, choices=("A", "B"))
+    task_definition_policy.add_argument("--container-name", required=True)
+
     orphan_command = commands.add_parser("orphan-sweep")
     orphan_command.add_argument("--file", required=True)
     orphan_command.add_argument("--acceptance-run-id", required=True)
@@ -7782,6 +8304,8 @@ def main(argv: list[str] | None = None) -> int:
             _write_stdout_line(encode_exec_receipt(args.command, details, resolve_exec_receipt_env(os.environ)))
         elif args.command == "extract-exec-receipt":
             stream = sys.stdin.read(MAX_EXEC_STREAM_BYTES + 1)
+            if args.check == "verify-bedrock-guardrails" and args.plugin_policy_binding_sha256 is None:
+                raise AcceptanceCheckError("plugin_policy_binding")
             _print_json(
                 extract_exec_receipt(
                     stream,
@@ -7789,6 +8313,7 @@ def main(argv: list[str] | None = None) -> int:
                     expected_task_arn=args.task_arn,
                     expected_scenario_id=args.scenario_id,
                     expected_check=args.check,
+                    expected_plugin_policy_binding_sha256=args.plugin_policy_binding_sha256,
                 )
             )
         elif args.command == "control-manifest":
@@ -7929,6 +8454,21 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "scenario-load":
             sys.stdout.write(scenario_load(Path(args.file), scenario_id=args.scenario_id))
+        elif args.command == "validate-task-definition-policy":
+            raw_payload = sys.stdin.read(MAX_JSON_RESPONSE_BYTES + 1)
+            if len(raw_payload.encode("utf-8")) > MAX_JSON_RESPONSE_BYTES:
+                raise AcceptanceCheckError("task_definition_policy_binding")
+            try:
+                payload = json.loads(raw_payload)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                raise AcceptanceCheckError("task_definition_policy_binding") from None
+            task_definition_arn = validate_task_definition_policy_binding(
+                payload,
+                manifest_path=Path(args.file),
+                scenario_id=args.scenario_id,
+                container_name=args.container_name,
+            )
+            _print_json({"task_definition_arn": task_definition_arn})
         elif args.command == "orphan-sweep":
             _print_json(orphan_sweep(Path(args.file), acceptance_run_id=args.acceptance_run_id))
         elif args.command == "cleanup-evidence-finalize":

@@ -935,7 +935,7 @@ AWS stderr. The same rule applies through Task 8 cleanup.
 
   The control manifest is a closed `elspeth.aws-ecs-control-manifest.v4`
   document. The scenario inventories are closed
-  `elspeth.aws-ecs-scenario-inventory.v4` documents with an explicit
+  `elspeth.aws-ecs-scenario-inventory.v5` documents with an explicit
   `preapply` or `resolved` phase, not a shared mutable variable bag. The
   control manifest is initialized from distinct immutable `preapply`
   inventories before mutation; provider-generated ARNs, URLs, Cognito IDs,
@@ -1141,6 +1141,11 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   `CANDIDATE_IMAGE`; previous and rollback-doctor named containers use exactly
   `ROLLBACK_BASELINE_IMAGE`. Compare the returned task-definition JSON, never
   tags. For every relevant definition mechanically require
+  Plan 10's manifest-backed `validate-task-definition-policy` result for the
+  named container: all seven policy strings, their binding hash, the live
+  Bedrock model, and AWS region must equal the protected scenario inventory,
+  so a substituted bundle plus substituted self-consistent hash cannot pass.
+  Also require
   `runtimePlatform.operatingSystemFamily == LINUX` and the closed architecture
   mapping `linux/amd64` → `X86_64`, `linux/arm64` → `ARM64`,
   non-root user, approved `taskRoleArn` (runtime S3/Bedrock/default-chain) and
@@ -1266,7 +1271,24 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   task-role/default-chain and lean-image proof.
 
 - [ ] Prove Bedrock through the **candidate ECS task role**, not the acceptance
-  controller's credentials. The approved task definition supplies a non-secret
+  controller's credentials. Before registering the candidate task definition,
+  bind the complete effective-policy environment:
+  `ELSPETH_WEB__PLUGIN_ALLOWLIST`, `ELSPETH_WEB__PLUGIN_PREFERENCES`,
+  `ELSPETH_WEB__PLUGIN_CONTROL_MODES`, `ELSPETH_WEB__LLM_PROFILES`,
+  `ELSPETH_WEB__TUTORIAL_LLM_PROFILE`,
+  `ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES`, and
+  `ELSPETH_WEB__BEDROCK_GUARDRAIL_DEFAULT_PROFILES`. Use the approved JSON and
+  aliases from the protected scenario inventory; do not reconstruct or inject
+  them with ECS Exec. The inventory also carries the recomputed
+  `ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256`; the in-task acceptance
+  command hashes the exact seven deployed strings and requires equality. The
+  controller independently validates the returned task-definition environment
+  against the bound inventory and compares the extracted Guardrail receipt's
+  `plugin_policy.binding_sha256` to that same protected value; `receipt-store`
+  repeats the manifest-backed comparison. Any
+  change requires a new task-definition revision and a forced new deployment
+  before acceptance restarts. The protected inventory and approved task
+  definition also supply the same non-secret
   `ELSPETH_BEDROCK_LIVE_TEST_MODEL` in `bedrock/<model-id>` form and
   `AWS_REGION`/`AWS_DEFAULT_REGION`; it supplies no AWS access-key, secret-key,
   session-token, endpoint, profile, or role override. After the candidate task
@@ -1299,6 +1321,7 @@ AWS stderr. The same rule applies through Task 8 cleanup.
 
   run_candidate_role_check() {
       local task_arn="$1" check="$2" phase="${3:-}" stream="" receipt_file="" command="" task_hash=""
+      local -a binding_args=()
       case "$check" in
         verify-s3|verify-bedrock|verify-bedrock-guardrails|verify-operator-telemetry) ;;
         *) return 64 ;;
@@ -1311,10 +1334,13 @@ AWS stderr. The same rule applies through Task 8 cleanup.
           ;;
         *) return 64 ;;
       esac
+      if test "$check" = verify-bedrock-guardrails; then
+        binding_args=(--plugin-policy-binding-sha256 "$ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256")
+      fi
       stream="$(aws_capture aws ecs execute-command --cluster "$ECS_CLUSTER" --task "$task_arn" --container "$WEB_CONTAINER_NAME" --interactive --command "$command")"
       receipt_file="$(mktemp -p /tmp elspeth-exec-receipt.XXXXXX)"
       chmod 600 "$receipt_file"
-      printf '%s' "$stream" | uv run --frozen python -m elspeth.web.aws_ecs_acceptance extract-exec-receipt --check "$check" --candidate-sha "$CANDIDATE_SHA" --task-arn "$task_arn" --scenario-id "$ACTIVE_SCENARIO_ID" >"$receipt_file"
+      printf '%s' "$stream" | uv run --frozen python -m elspeth.web.aws_ecs_acceptance extract-exec-receipt --check "$check" --candidate-sha "$CANDIDATE_SHA" --task-arn "$task_arn" --scenario-id "$ACTIVE_SCENARIO_ID" "${binding_args[@]}" >"$receipt_file"
       unset stream
       task_hash="$(printf '%s' "$task_arn" | sha256sum | awk '{print $1}')"
       jq -e --arg check "$check" --arg sha "$CANDIDATE_SHA" --arg task_hash "$task_hash" --arg scenario "$ACTIVE_SCENARIO_ID" '.version == 1 and .ok == true and .check == $check and .candidate_sha == $sha and .task_arn_sha256 == $task_hash and .scenario_id == $scenario' "$receipt_file" >/dev/null
@@ -1364,9 +1390,17 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   any failure is BLOCKED/NO-GO; there is no live-test skip in closeout. Retain
   the sanitized receipt with the scenario evidence.
 
-  The Guardrails receipt additionally requires safe and intervened decisions
-  for both explicit control families, immutable versions, and audit-first
-  Landscape records. The operator-telemetry receipt requires a web metric plus
+  The Guardrails receipt additionally requires a `plugin_policy` object with
+  the exact policy/snapshot/binding hashes, `tutorial_profile_ready: true`,
+  `tutorial_ready: false`, blocker `tutorial_required_control_coverage`, the
+  tutorial profile, `target_llm`, and
+  prompt-shield/content-safety entries in `selected_controls`. Both entries
+  must name the expected implementation and opaque alias in `required` mode,
+  and `landscape_evidence` must be true only after the atomic
+  `run_web_plugin_policy` row is read back unchanged. It also requires safe and
+  intervened decisions for both explicit control families, retained immutable
+  numeric versions,
+  and audit-first Landscape records. The operator-telemetry receipt requires a web metric plus
   `RunStarted`/`RunFinished` trace correlated to the same Landscape run and a
   negative collector-outage proof. The candidate task receives the non-secret
   `ELSPETH_ACCEPTANCE_RUN_ID` and `ELSPETH_ACCEPTANCE_SCENARIO_ID`; each
@@ -1587,7 +1621,17 @@ AWS stderr. The same rule applies through Task 8 cleanup.
   Re-run the runbook's exact-one-task, candidate task-definition, target-health,
   health, and readiness assertions. `verify-api` re-authenticates and requires
   the session, blob content, run results, output manifest, and artifact content
-  to match `BLOB_SHA256`/`ARTIFACT_SHA256`. `verify-payloads` queries the exact
+  to match `BLOB_SHA256`/`ARTIFACT_SHA256`; it also requires the exact six rows
+  from `GET /api/system/status`, aggregate boot readiness, mandatory
+  policy/core/local `ok` states, and no error row. It then attempts the
+  separately captured canonical core-only tutorial candidate through the
+  tutorial endpoint to prove the current principal receives the typed HTTP 409
+  `tutorial_not_ready` / `tutorial_required_control_coverage` response
+  without creating a tutorial run. The candidate policy proof separately
+  requires a usable Bedrock tutorial profile while preserving that intentional
+  fail-closed coverage posture; it privately compares the tutorial model and
+  region with `ELSPETH_BEDROCK_LIVE_TEST_MODEL` and the resolved AWS region.
+  `verify-payloads` queries the exact
   landscape run inside the task and integrity-retrieves every non-null payload
   ref from the configured EFS payload store; `verify-s3` proves the candidate
   task-role/default-chain path. Any zero-ref, missing-content, hash, S3, or
@@ -1714,9 +1758,14 @@ AWS stderr. The same rule applies through Task 8 cleanup.
 - [ ] In each candidate task, the target LLM's request context lists exactly
   the Plan-15B-authorized and locally available prompt/content controls, marks
   the operator-preferred compatible implementation and opaque profile alias,
-  selects no disabled/unavailable implementation, and leaks no secret name,
-  resolved config, Guardrail binding, environment name, AWS identity, or
-  failure detail.
+  selects no disabled/unavailable implementation, and uses `required` mode for
+  both controls. The Guardrail acceptance run atomically persists and reads
+  back its exact `run_web_plugin_policy` Landscape row; the sanitized
+  `plugin_policy` receipt proves the protected binding hash, usable tutorial
+  profile, intentional required-control coverage blocker, `target_llm`, both
+  selections, immutable numeric Guardrail versions, and `landscape_evidence`
+  without leaking a secret name, model/region, resolved config, Guardrail
+  identifier/region, environment name, AWS identity, or failure detail.
 - [ ] The two acceptance Guardrails are run-scoped Terraform resources tagged
   with the acceptance run ID; evidence records immutable version and normalized
   configuration hashes, and teardown destroys both resources plus verifies no

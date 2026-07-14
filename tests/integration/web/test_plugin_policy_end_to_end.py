@@ -3,42 +3,74 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 import json
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
+from fastapi import Request, Response
+from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
 from elspeth.core.secrets import resolve_secret_refs
 from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+from elspeth.web.auth.models import UserIdentity
+from elspeth.web.blobs.service import content_hash as blob_content_hash
+from elspeth.web.catalog import routes as catalog_routes
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
-from elspeth.web.catalog.schemas import PluginKind, PluginSchemaInfo, PluginSummary
+from elspeth.web.catalog.schemas import PluginKind, PluginPolicyResponse, PluginSchemaInfo, PluginSummary
+from elspeth.web.composer.audit import BufferingRecorder
+from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
+from elspeth.web.composer.guided.state_machine import ChainProposal, GuidedSession
+from elspeth.web.composer.guided.steps import handle_step_3_chain_accept
 from elspeth.web.composer.prompts import build_context_string
-from elspeth.web.composer.recipes import get_recipe, list_recipes
+from elspeth.web.composer.recipes import get_recipe
 from elspeth.web.composer.state import CompositionState, NodeSpec, OutputSpec, PipelineMetadata, SourceSpec
 from elspeth.web.composer.tools._common import ToolContext
+from elspeth.web.composer.tools.generation import _execute_get_plugin_assistance, _handle_get_plugin_schema
+from elspeth.web.composer.tools.recipes import _execute_list_recipes
+from elspeth.web.composer.tools.sessions import _execute_apply_pipeline_recipe
+from elspeth.web.composer.tools.sources import _handle_list_sources
+from elspeth.web.composer.tools.transforms import _handle_list_sinks, _handle_list_transforms, _handle_upsert_node
+from elspeth.web.composer.yaml_generator import generate_public_yaml
+from elspeth.web.composer.yaml_importer import composition_state_from_runtime_yaml
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.execution.preflight import require_settings_plugins_available, require_settings_sink_available
 from elspeth.web.execution.service import _build_web_plugin_policy_evidence
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
 from elspeth.web.plugin_policy.availability import RequestPluginSnapshotFactory
 from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
-from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
+from elspeth.web.plugin_policy.models import (
+    PluginAvailability,
+    PluginAvailabilitySnapshot,
+    PluginId,
+    PluginUnavailableReason,
+    WebPluginPolicy,
+)
 from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
 from elspeth.web.plugin_policy.validation import validate_plugin_policy
 from elspeth.web.secrets.server_store import ServerSecretStore
 from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
 from elspeth.web.secrets.user_store import UserSecretStore
 from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.models import blobs_table, sessions_table
+from elspeth.web.sessions.routes._helpers import _dispatch_guided_respond
 from elspeth.web.sessions.schema import initialize_session_schema
+from tests.fixtures.stores import MockPayloadStore
 
 _ROOT = Path(__file__).resolve().parents[3]
+_MATRIX_FIXTURE = _ROOT / "src/elspeth/web/frontend/src/stores/__fixtures__/pluginPolicyMatrix.json"
 _CORE_IDS = frozenset(
     {
         PluginId("source", "csv"),
@@ -61,28 +93,61 @@ _AWS_CONTENT = PluginId("transform", "aws_bedrock_content_safety")
 @dataclass(frozen=True)
 class _MatrixCase:
     name: str
+    extra_authorized: frozenset[PluginId]
     extra_available: frozenset[PluginId]
     selected_prompt: PluginId | None
     selected_content: PluginId | None
 
 
-_CASES = (
-    _MatrixCase("core_only", frozenset(), None, None),
-    _MatrixCase("azure_only", frozenset({_AZURE_PROMPT, _AZURE_CONTENT}), _AZURE_PROMPT, _AZURE_CONTENT),
-    _MatrixCase(
-        "aws_only",
-        frozenset({_AWS_PROMPT, _AWS_CONTENT}),
-        _AWS_PROMPT,
-        _AWS_CONTENT,
-    ),
-    _MatrixCase(
-        "both_with_azure_preference",
-        frozenset({_AZURE_PROMPT, _AZURE_CONTENT, _AWS_PROMPT, _AWS_CONTENT}),
-        _AZURE_PROMPT,
-        _AZURE_CONTENT,
-    ),
-    _MatrixCase("neither_control_implementation", frozenset(), None, None),
-)
+_AZURE_CONTROLS = frozenset({_AZURE_PROMPT, _AZURE_CONTENT})
+_AWS_CONTROLS = frozenset({_AWS_PROMPT, _AWS_CONTENT})
+_ALL_CONTROLS = _AZURE_CONTROLS | _AWS_CONTROLS
+
+
+_MATRIX_CONTRACT = json.loads(_MATRIX_FIXTURE.read_text())
+assert frozenset(map(PluginId.parse, _MATRIX_CONTRACT["core_plugin_ids"])) == _CORE_IDS
+
+
+def _matrix_case(raw: dict[str, object]) -> _MatrixCase:
+    selections = {entry["capability"]: entry["plugin_id"] for entry in raw["selections"]}  # type: ignore[index]
+    return _MatrixCase(
+        name=str(raw["name"]),
+        extra_authorized=frozenset(map(PluginId.parse, raw["authorized_control_ids"])),  # type: ignore[arg-type]
+        extra_available=frozenset(map(PluginId.parse, raw["available_control_ids"])),  # type: ignore[arg-type]
+        selected_prompt=(None if selections["prompt_shield"] is None else PluginId.parse(str(selections["prompt_shield"]))),
+        selected_content=(None if selections["content_safety"] is None else PluginId.parse(str(selections["content_safety"]))),
+    )
+
+
+_CASES = tuple(_matrix_case(raw) for raw in _MATRIX_CONTRACT["cases"])
+_MATRIX_CASES_BY_NAME = {raw["name"]: raw for raw in _MATRIX_CONTRACT["cases"]}
+
+_CONTROL_OPTIONS: dict[str, dict[str, object]] = {
+    "azure_prompt_shield": {
+        "endpoint": "https://example.com",
+        "api_key": {"secret_ref": "AZURE_CONTENT_SAFETY_KEY"},
+        "fields": ["text"],
+        "schema": {"mode": "observed", "fields": None},
+    },
+    "azure_content_safety": {
+        "endpoint": "https://example.com",
+        "api_key": {"secret_ref": "AZURE_CONTENT_SAFETY_KEY"},
+        "fields": ["text"],
+        "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 2},
+        "schema": {"mode": "observed", "fields": None},
+    },
+    "aws_bedrock_prompt_shield": {
+        "profile": "prompt-matrix",
+        "fields": ["text"],
+        "schema": {"mode": "observed", "fields": None},
+    },
+    "aws_bedrock_content_safety": {
+        "profile": "content-matrix",
+        "fields": ["text"],
+        "source": "OUTPUT",
+        "schema": {"mode": "observed", "fields": None},
+    },
+}
 
 
 class _MatrixCatalog(CatalogService):
@@ -124,20 +189,52 @@ class _MatrixCatalog(CatalogService):
         return ()
 
 
-def _snapshot(case: _MatrixCase) -> PluginAvailabilitySnapshot:
+def _policy(case: _MatrixCase) -> WebPluginPolicy:
+    authorized = _CORE_IDS | case.extra_authorized
+
+    def ordered(selected: PluginId | None, candidates: frozenset[PluginId]) -> tuple[PluginId, ...]:
+        return (() if selected is None else (selected,)) + tuple(sorted(candidates - ({selected} if selected is not None else set())))
+
+    return WebPluginPolicy.create(
+        required=_CORE_IDS,
+        configured_optional=case.extra_authorized,
+        preferences=(
+            (PluginCapability.PROMPT_SHIELD, ordered(case.selected_prompt, case.extra_authorized & {_AZURE_PROMPT, _AWS_PROMPT})),
+            (PluginCapability.CONTENT_SAFETY, ordered(case.selected_content, case.extra_authorized & {_AZURE_CONTENT, _AWS_CONTENT})),
+        ),
+        control_modes=(
+            (PluginCapability.PROMPT_SHIELD, ControlMode.RECOMMEND),
+            (PluginCapability.CONTENT_SAFETY, ControlMode.RECOMMEND),
+        ),
+        plugin_code_identities=tuple((plugin_id, "1.0.0", "sha256:" + "a" * 16) for plugin_id in sorted(authorized)),
+    )
+
+
+def _snapshot(case: _MatrixCase, policy: WebPluginPolicy) -> PluginAvailabilitySnapshot:
     llm_id = PluginId("transform", "llm")
+    usable_profiles: list[tuple[PluginId, tuple[str, ...]]] = [(llm_id, ("tutorial",))]
+    selected_profiles: list[tuple[PluginId, str]] = [(llm_id, "tutorial")]
+    if _AWS_PROMPT in case.extra_available:
+        usable_profiles.append((_AWS_PROMPT, ("prompt-matrix",)))
+        selected_profiles.append((_AWS_PROMPT, "prompt-matrix"))
+    if _AWS_CONTENT in case.extra_available:
+        usable_profiles.append((_AWS_CONTENT, ("content-matrix",)))
+        selected_profiles.append((_AWS_CONTENT, "content-matrix"))
     return PluginAvailabilitySnapshot.create(
-        policy_hash="1" * 64,
+        policy_hash=policy.policy_hash,
         principal_scope=f"local:{case.name}",
         available=_CORE_IDS | case.extra_available,
-        unavailable=(),
+        unavailable=tuple(
+            PluginAvailability(plugin_id, PluginUnavailableReason.LOCAL_REQUIREMENT_MISSING)
+            for plugin_id in sorted(case.extra_authorized - case.extra_available)
+        ),
         selected=(
             (PluginCapability.LLM, llm_id),
             (PluginCapability.PROMPT_SHIELD, case.selected_prompt),
             (PluginCapability.CONTENT_SAFETY, case.selected_content),
         ),
-        usable_profile_aliases=((llm_id, ("tutorial",)),),
-        selected_profile_aliases=((llm_id, "tutorial"),),
+        usable_profile_aliases=tuple(usable_profiles),
+        selected_profile_aliases=tuple(selected_profiles),
         control_modes=(
             (PluginCapability.PROMPT_SHIELD, ControlMode.RECOMMEND),
             (PluginCapability.CONTENT_SAFETY, ControlMode.RECOMMEND),
@@ -146,55 +243,442 @@ def _snapshot(case: _MatrixCase) -> PluginAvailabilitySnapshot:
     )
 
 
-def _view(snapshot: PluginAvailabilitySnapshot) -> PolicyCatalogView:
-    profiles = MagicMock(spec=OperatorProfileRegistry)
-    profiles.public_schema.side_effect = lambda _plugin_id, full_schema, **_kwargs: full_schema
+def _profiles(policy: WebPluginPolicy) -> OperatorProfileRegistry:
+    settings = WebSettings(
+        secret_key="0123456789abcdef0123456789abcdef",
+        composer_max_composition_turns=4,
+        composer_max_discovery_turns=4,
+        composer_timeout_seconds=60,
+        composer_rate_limit_per_minute=20,
+        shareable_link_signing_key=b"0123456789abcdef0123456789abcdef",
+        plugin_allowlist=[str(_AWS_PROMPT), str(_AWS_CONTENT)],
+        llm_profiles={
+            "tutorial": {
+                "provider": "bedrock",
+                "model": "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+                "region_name": "ap-southeast-2",
+            }
+        },
+        tutorial_llm_profile="tutorial",
+        bedrock_guardrail_profiles=[
+            {
+                "alias": "prompt-matrix",
+                "plugin": _AWS_PROMPT.name,
+                "guardrail_identifier": "privatepromptguardrail",
+                "guardrail_version": "7",
+                "region": "ap-southeast-2",
+            },
+            {
+                "alias": "content-matrix",
+                "plugin": _AWS_CONTENT.name,
+                "guardrail_identifier": "privatecontentguardrail",
+                "guardrail_version": "11",
+                "region": "ap-southeast-2",
+            },
+        ],
+        bedrock_guardrail_default_profiles={
+            _AWS_PROMPT.name: "prompt-matrix",
+            _AWS_CONTENT.name: "content-matrix",
+        },
+    )
+    return OperatorProfileRegistry(policy=policy, settings=RuntimeWebPluginConfig.from_settings(settings))
+
+
+def _view(snapshot: PluginAvailabilitySnapshot, profiles: OperatorProfileRegistry) -> PolicyCatalogView:
     return PolicyCatalogView(_MatrixCatalog(), snapshot, profiles)
 
 
-def _visible_ids(view: PolicyCatalogView) -> frozenset[str]:
-    return frozenset(
-        {
-            *(f"source:{item.name}" for item in view.list_sources()),
-            *(f"transform:{item.name}" for item in view.list_transforms()),
-            *(f"sink:{item.name}" for item in view.list_sinks()),
-        }
+async def _catalog_http_surfaces(
+    *,
+    snapshot: PluginAvailabilitySnapshot,
+    policy: WebPluginPolicy,
+    profiles: OperatorProfileRegistry,
+) -> tuple[frozenset[str], PluginPolicyResponse]:
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            catalog_service=_MatrixCatalog(),
+            plugin_snapshot_factory=lambda _user: snapshot,
+            operator_profile_registry=profiles,
+            web_plugin_policy=policy,
+        )
     )
+    request = Request({"type": "http", "method": "GET", "path": "/api/catalog", "headers": [], "app": app})
+    response = Response()
+    user = UserIdentity(user_id="matrix-user", username="matrix-user")
+    sources, transforms, sinks, policy_response = await asyncio.gather(
+        catalog_routes.list_sources(request, response, user),
+        catalog_routes.list_transforms(request, response, user),
+        catalog_routes.list_sinks(request, response, user),
+        catalog_routes.get_policy(request, response, user),
+    )
+    assert response.headers["X-ELSPETH-Plugin-Snapshot"] == snapshot.snapshot_hash
+    listed = frozenset(str(PluginId(item.plugin_type, item.name)) for item in (*sources, *transforms, *sinks))
+    return listed, policy_response
+
+
+def _control_probe_state(plugin_id: PluginId) -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id="control_probe",
+                node_type="transform",
+                plugin=plugin_id.name,
+                input="rows",
+                on_success="checked",
+                on_error="discard",
+                options=deepcopy(_CONTROL_OPTIONS[plugin_id.name]),
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _imported_control_probe_state(plugin_id: PluginId) -> CompositionState:
+    return composition_state_from_runtime_yaml(generate_public_yaml(_control_probe_state(plugin_id)))
+
+
+def _selected_contract(case: _MatrixCase) -> dict[str, str | None]:
+    return {
+        PluginCapability.LLM.value: "transform:llm",
+        PluginCapability.PROMPT_SHIELD.value: None if case.selected_prompt is None else str(case.selected_prompt),
+        PluginCapability.CONTENT_SAFETY.value: None if case.selected_content is None else str(case.selected_content),
+    }
+
+
+def _capability_contract(view: PolicyCatalogView) -> dict[str, tuple[str, ...]]:
+    return {capability.value: tuple(map(str, plugin_ids)) for capability, plugin_ids in view.capability_groups().items()}
+
+
+def _seed_recipe_blob(tmp_path: Path) -> tuple[sa.engine.Engine, str, str]:
+    engine = create_session_engine(
+        "sqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    initialize_session_schema(engine)
+    session_id = str(uuid4())
+    blob_id = str(uuid4())
+    now = datetime.now(UTC)
+    body = b'[{"url":"https://www.dta.gov.au"}]'
+    storage_dir = tmp_path / "blobs" / session_id
+    storage_dir.mkdir(parents=True)
+    storage_path = storage_dir / f"{blob_id}_urls.json"
+    storage_path.write_bytes(body)
+    with engine.begin() as connection:
+        connection.execute(
+            sessions_table.insert().values(
+                id=session_id,
+                user_id="matrix-user",
+                auth_provider_type="local",
+                title="Policy matrix",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        connection.execute(
+            blobs_table.insert().values(
+                id=blob_id,
+                session_id=session_id,
+                filename="urls.json",
+                mime_type="application/json",
+                size_bytes=len(body),
+                content_hash=blob_content_hash(body),
+                storage_path=str(storage_path),
+                created_at=now,
+                created_by="user",
+                source_description=None,
+                status="ready",
+            )
+        )
+    return engine, session_id, blob_id
+
+
+def _guided_base_state() -> CompositionState:
+    return CompositionState(
+        source=SourceSpec(
+            plugin="csv",
+            on_success="main",
+            options={"path": "input.csv", "schema": {"mode": "observed", "guaranteed_fields": ["text"]}},
+            on_validation_failure="discard",
+        ),
+        nodes=(),
+        edges=(),
+        outputs=(
+            OutputSpec(
+                name="output",
+                plugin="json",
+                options={"path": "output.jsonl", "schema": {"mode": "observed"}},
+                on_write_failure="discard",
+            ),
+        ),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _proposal(plugin_id: PluginId | None) -> ChainProposal:
+    steps = (
+        ()
+        if plugin_id is None
+        else (
+            {
+                "plugin": plugin_id.name,
+                "options": deepcopy(_CONTROL_OPTIONS[plugin_id.name]),
+                "rationale": "screen text without claiming row filtering",
+            },
+        )
+    )
+    return ChainProposal(steps=steps, why="five-configuration policy matrix")
 
 
 @pytest.mark.parametrize("case", _CASES, ids=lambda case: case.name)
-def test_policy_surface_parity_matrix(case: _MatrixCase) -> None:
-    snapshot = _snapshot(case)
-    view = _view(snapshot)
+def test_policy_surface_parity_matrix(case: _MatrixCase, tmp_path: Path) -> None:
+    policy = _policy(case)
+    snapshot = _snapshot(case, policy)
+    profiles = _profiles(policy)
+    view = _view(snapshot, profiles)
     expected = frozenset(map(str, snapshot.available))
+    expected_selected = _selected_contract(case)
+    expected_capabilities = _capability_contract(view)
     empty_state = CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1)
+    engine, session_id, blob_id = _seed_recipe_blob(tmp_path)
+    context = ToolContext(catalog=view, plugin_snapshot=snapshot, session_engine=engine, session_id=session_id)
 
-    catalog_api = _visible_ids(view)
-    ui_catalog = frozenset(json.loads(json.dumps(sorted(catalog_api))))
-    guided_discovery = _visible_ids(view)
-    prompt = build_context_string(empty_state, view, plugin_snapshot=snapshot, schemas_loaded=frozenset())
-    freeform_prompt = frozenset(json.loads(prompt.partition("\n")[2])["plugin_policy"]["available_ids"])
-    evidence = _build_web_plugin_policy_evidence(snapshot=snapshot, policy=None)
-
-    assert catalog_api == ui_catalog == guided_discovery == freeform_prompt == expected
-    assert frozenset(evidence.available_plugin_ids) == expected
-    assert (
-        validate_plugin_policy(
-            empty_state,
-            snapshot=snapshot,
-            profile_registry=MagicMock(spec=OperatorProfileRegistry),
-        ).findings
-        == ()
+    catalog_api, policy_wire = asyncio.run(_catalog_http_surfaces(snapshot=snapshot, policy=policy, profiles=profiles))
+    guided_results = (
+        _handle_list_sources({}, empty_state, context),
+        _handle_list_transforms({}, empty_state, context),
+        _handle_list_sinks({}, empty_state, context),
     )
+    guided_discovery = frozenset(str(PluginId(item.plugin_type, item.name)) for result in guided_results for item in result.data)
+    prompt = build_context_string(empty_state, view, plugin_snapshot=snapshot, schemas_loaded=frozenset())
+    freeform_policy = json.loads(prompt.partition("\n")[2])["plugin_policy"]
+    freeform_prompt = frozenset(freeform_policy["available_ids"])
+    evidence = _build_web_plugin_policy_evidence(snapshot=snapshot, policy=policy)
+    recipe_result = _execute_list_recipes({}, empty_state, context)
+    fixture_case = _MATRIX_CASES_BY_NAME[case.name]
+    fixture_projection = {
+        "principal_scope": fixture_case["principal_scope"],
+        "snapshot_fingerprint": fixture_case["snapshot_fingerprint"],
+        "policy_hash": fixture_case["policy_hash"],
+        "available_plugin_ids": frozenset(fixture_case["available_plugin_ids"]),
+        "capability_groups": {row["capability"]: tuple(row["available_plugin_ids"]) for row in fixture_case["capability_groups"]},
+        "selections": {row["capability"]: row["plugin_id"] for row in fixture_case["selections"]},
+        "control_modes": {row["capability"]: row["mode"] for row in fixture_case["control_modes"]},
+    }
+    backend_projection = {
+        "principal_scope": snapshot.principal_scope,
+        "snapshot_fingerprint": snapshot.snapshot_hash,
+        "policy_hash": policy.policy_hash,
+        "available_plugin_ids": expected,
+        "capability_groups": expected_capabilities,
+        "selections": expected_selected,
+        "control_modes": {capability.value: mode.value for capability, mode in snapshot.control_modes},
+    }
 
-    for plugin_id in snapshot.available:
-        assert view.get_schema(plugin_id.kind, plugin_id.name).name == plugin_id.name
+    assert backend_projection == fixture_projection
+    assert catalog_api == frozenset(policy_wire.available_plugin_ids) == guided_discovery == freeform_prompt == expected
+    assert {row.capability.value: row.plugin_id for row in policy_wire.selections} == expected_selected
+    assert freeform_policy["selected"] == expected_selected
+    assert dict(evidence.selected_implementations) == expected_selected
+    assert {row.capability.value: tuple(row.available_plugin_ids) for row in policy_wire.capability_groups} == expected_capabilities
+    assert {name: tuple(plugin_ids) for name, plugin_ids in freeform_policy["capability_groups"].items()} == expected_capabilities
+    guided_capabilities: dict[str, set[str]] = {}
+    for result in guided_results:
+        assert result.success is True
+        for item in result.data:
+            plugin_id = str(PluginId(item.plugin_type, item.name))
+            for declaration in item.policy_capabilities:
+                guided_capabilities.setdefault(declaration.capability.value, set()).add(plugin_id)
+    assert {capability: tuple(sorted(plugin_ids)) for capability, plugin_ids in guided_capabilities.items()} == expected_capabilities
+    assert frozenset(evidence.available_plugin_ids) == expected
+    assert frozenset(evidence.authorized_plugin_ids) == frozenset(map(str, _CORE_IDS | case.extra_authorized))
+    assert validate_plugin_policy(empty_state, snapshot=snapshot, profile_registry=profiles).findings == ()
 
-    for recipe_info in list_recipes(snapshot):
+    for plugin_id in _CORE_IDS | _ALL_CONTROLS:
+        schema_result = _handle_get_plugin_schema(
+            {"plugin_type": plugin_id.kind, "name": plugin_id.name},
+            empty_state,
+            context,
+        )
+        assistance_result = _execute_get_plugin_assistance(
+            {"plugin_type": plugin_id.kind, "plugin_name": plugin_id.name},
+            empty_state,
+            context,
+        )
+        assert schema_result.success is (plugin_id in snapshot.available)
+        assert assistance_result.success is (plugin_id in snapshot.available)
+        if schema_result.success:
+            assert schema_result.data.name == plugin_id.name
+        else:
+            expected_code = (
+                PluginUnavailableReason.LOCAL_REQUIREMENT_MISSING.value
+                if plugin_id in case.extra_authorized
+                else PluginUnavailableReason.NOT_AUTHORIZED.value
+            )
+            assert schema_result.data["error_code"] == expected_code
+            assert assistance_result.data["error_code"] == expected_code
+
+    assert recipe_result.success is True
+    assert "web-scrape-llm-rate-jsonl" in {recipe["name"] for recipe in recipe_result.data["recipes"]}
+    for recipe_info in recipe_result.data["recipes"]:
         recipe = get_recipe(recipe_info["name"])
         assert recipe is not None
         assert recipe.required_plugins <= snapshot.available
         assert all(not alternatives.isdisjoint(snapshot.available) for alternatives in recipe.alternative_plugin_groups)
+
+    recipe_fast_path = _execute_apply_pipeline_recipe(
+        {
+            "recipe_name": "web-scrape-llm-rate-jsonl",
+            "slots": {
+                "source_blob_id": blob_id,
+                "source_plugin": "json",
+                "profile": "tutorial",
+                "abuse_contact": "matrix@example.invalid",
+                "scraping_reason": "five-configuration policy matrix",
+            },
+        },
+        empty_state,
+        context,
+    )
+    assert recipe_fast_path.success is True
+    assert [node.plugin for node in recipe_fast_path.updated_state.nodes] == ["web_scrape", "llm", "field_mapper"]
+
+    for plugin_id in _ALL_CONTROLS:
+        probe = _control_probe_state(plugin_id)
+        validation = validate_plugin_policy(probe, snapshot=snapshot, profile_registry=profiles)
+        imported_validation = validate_plugin_policy(
+            _imported_control_probe_state(plugin_id),
+            snapshot=snapshot,
+            profile_registry=profiles,
+        )
+        direct_tool = _handle_upsert_node(
+            {
+                "id": "control_probe",
+                "node_type": "transform",
+                "plugin": plugin_id.name,
+                "input": "rows",
+                "on_success": "checked",
+                "on_error": "discard",
+                "options": deepcopy(_CONTROL_OPTIONS[plugin_id.name]),
+            },
+            empty_state,
+            context,
+        )
+        guided_result = handle_step_3_chain_accept(
+            state=_guided_base_state(),
+            session=replace(GuidedSession.initial(), step=GuidedStep.STEP_3_TRANSFORMS),
+            proposal=_proposal(plugin_id),
+            catalog=view,
+            plugin_snapshot=snapshot,
+        )
+        runtime_settings = SimpleNamespace(
+            sources={},
+            transforms=(SimpleNamespace(plugin=plugin_id.name),),
+            aggregations=(),
+            sinks={},
+        )
+        if plugin_id in snapshot.available:
+            assert validation.findings_for("plugin_enablement") == ()
+            assert validation.findings_for("operator_profile_options") == ()
+            assert imported_validation.findings_for("plugin_enablement") == ()
+            assert imported_validation.findings_for("operator_profile_options") == ()
+            assert direct_tool.success is True
+            assert guided_result.tool_result.success is True
+            assert direct_tool.updated_state.nodes[0].options == probe.nodes[0].options
+            if plugin_id in _AWS_CONTROLS:
+                assert "profile" in probe.nodes[0].options
+                assert "guardrail_identifier" not in probe.nodes[0].options
+                executable_options = validation.executable_state.nodes[0].options
+                assert executable_options["guardrail_identifier"].startswith("private")
+                assert executable_options["guardrail_version"] in {"7", "11"}
+                assert executable_options["region"] == "ap-southeast-2"
+            require_settings_plugins_available(runtime_settings, snapshot)
+        else:
+            expected_code = (
+                PluginUnavailableReason.LOCAL_REQUIREMENT_MISSING.value
+                if plugin_id in case.extra_authorized
+                else PluginUnavailableReason.NOT_AUTHORIZED.value
+            )
+            assert [finding.error_code for finding in validation.findings_for("plugin_enablement")] == [expected_code]
+            assert [finding.error_code for finding in imported_validation.findings_for("plugin_enablement")] == [expected_code]
+            assert direct_tool.success is False
+            assert direct_tool.data["error_code"] == expected_code
+            assert guided_result.tool_result.success is False
+            assert guided_result.tool_result.data["error_code"] == expected_code
+            with pytest.raises(ValueError, match="not available"):
+                require_settings_plugins_available(runtime_settings, snapshot)
+
+    dispatch_proposal = _proposal(case.selected_prompt)
+    dispatch_session = replace(
+        GuidedSession.initial(),
+        step=GuidedStep.STEP_3_TRANSFORMS,
+        step_3_proposal=dispatch_proposal,
+    )
+    dispatched_state, dispatched_session, next_turn = asyncio.run(
+        _dispatch_guided_respond(
+            state=_guided_base_state(),
+            guided=dispatch_session,
+            current_step=GuidedStep.STEP_3_TRANSFORMS,
+            current_turn_type=TurnType.PROPOSE_CHAIN,
+            turn_response={
+                "chosen": ["accept"],
+                "edited_values": None,
+                "custom_inputs": None,
+                "accepted_step_index": None,
+                "edit_step_index": None,
+                "control_signal": None,
+            },
+            catalog=view,
+            plugin_snapshot=snapshot,
+            recorder=BufferingRecorder(),
+            user_id="matrix-user",
+            data_dir=None,
+            session_engine=None,
+            session_id=session_id,
+            blob_service=None,
+            payload_store=MockPayloadStore(),
+            model="matrix-model",
+            temperature=None,
+            seed=None,
+        )
+    )
+    assert dispatched_session.step is GuidedStep.STEP_4_WIRE
+    assert next_turn["type"] == TurnType.CONFIRM_WIRING.value
+    assert [node.plugin for node in dispatched_state.nodes] == ([] if case.selected_prompt is None else [case.selected_prompt.name])
+
+    delayed_sinks = {name: SimpleNamespace(plugin=name) for name in ("csv", "json", "text")}
+    delayed_sinks["disabled"] = SimpleNamespace(plugin="azure_blob")
+    delayed_settings = SimpleNamespace(sinks=delayed_sinks)
+    for sink_name in ("csv", "json", "text"):
+        require_settings_sink_available(delayed_settings, snapshot, sink_name)
+    with pytest.raises(ValueError, match="not available"):
+        require_settings_sink_available(delayed_settings, snapshot, "disabled")
+    engine.dispose()
+
+
+def test_policy_matrix_cases_are_five_distinct_authorization_and_availability_contracts() -> None:
+    contracts = {
+        (
+            _policy(case).policy_hash,
+            _snapshot(case, _policy(case)).snapshot_hash,
+            tuple(sorted(map(str, case.extra_authorized))),
+            tuple(sorted(map(str, case.extra_available))),
+        )
+        for case in _CASES
+    }
+
+    assert len(contracts) == 5
 
 
 def test_every_web_tool_context_constructor_supplies_policy_context() -> None:

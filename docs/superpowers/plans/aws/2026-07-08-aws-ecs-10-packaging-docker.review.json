@@ -1,13 +1,13 @@
 {
   "verdict": "APPROVED",
   "scope_verdict": "GO_TO_IMPLEMENT",
-  "summary": "Plan 10 is implementation-complete and independently re-reviewed after the Plan 10/12 contract repair. The canonical runbook and Plan 12 now share the same exact positive-telemetry checkpoint path; evidence export replay, retained-evidence monotonicity, ledger phase boundaries, and cleanup crash recovery are executable and regression-covered. No correctness, idempotency, cleanup, evidence, or resume blocker remains.",
+  "summary": "Plan 10 is implementation-complete and independently re-reviewed after the protected-policy acceptance repair. Canonical tutorial state, all seven protected settings, every credited task definition, Guardrail receipts, and the shared five-case backend/frontend policy matrix are now exact and regression-covered through real direct and guided authoring. No correctness, binding, parity, evidence, or resume blocker remains.",
   "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-10-packaging-docker.md",
-  "reviewed_at": "2026-07-14T16:54:37Z",
+  "reviewed_at": "2026-07-14T18:39:49Z",
   "review_basis": {
     "branch": "feat/aws-ecs-program",
-    "head": "ac22d0f7d7ece676b4046090a5d2f34331d894b4",
-    "baseline": "Fresh full-current review of the uncommitted Plan 10/12 contract repair in the isolated feat/aws-ecs-program worktree. The review covered the complete Plan 10, acceptance controller, canonical deployment runbook, Plan 12 consumers, unit/contract regressions, exact retained telemetry identity, historical evidence-export replay, cleanup ledger phase sealing, and interrupted finalization recovery."
+    "head": "c66231eb06df5a67421ff3649c7d561fdf3ac250",
+    "baseline": "Fresh full-current review of the final uncommitted Plan 10 protected-policy repair in the isolated feat/aws-ecs-program worktree. The review covered canonical tutorial capture, seven-setting manifest inventory, all task-definition consumers, Guardrail receipt extraction and persistence, the shared five-case backend/frontend matrix, real direct/guided/YAML authoring, runtime and delayed export gates, and exact raw-fixture/live-backend projection equality."
   },
   "blocking_issues": [],
   "warnings": [
@@ -107,6 +107,16 @@
       "id": "B10-15",
       "status": "RESOLVED",
       "resolution": "The full contract repair makes initial evidence-export replay historical and idempotent, binds exact positive telemetry query/sentinel/namespace/trace identities through immutable strict-superset checkpoints in both Plan 12 and the canonical runbook, enforces paired retained counts, seals cleanup attempts, and resumes safely when task8.check05 is written before the manifest commit."
+    },
+    {
+      "id": "B10-16",
+      "status": "RESOLVED",
+      "resolution": "The acceptance controller and runbook bind every candidate, doctor, verifier, rollback, and previous task definition byte-for-byte to the protected scenario inventory for seven settings, policy binding, live model, and region; Guardrail receipts are checked again when extracted and persisted."
+    },
+    {
+      "id": "B10-17",
+      "status": "RESOLVED",
+      "resolution": "A single five-case fixture now proves exact live backend and frontend policy projections plus real direct, guided, YAML import, validation, execution, and delayed-export outcomes; public operator-profile aliases lower through the production catalog path."
     }
   ],
   "reviewer_summaries": {
@@ -140,7 +150,9 @@
     "review JSON parsed with jq",
     "git diff --check",
     "three independent specialist re-reviews plus current-HEAD synthesis reported zero remaining blockers",
-    "fresh full-current Plan 10 review returned GO after 257 focused tests, Ruff check and format, mypy, runbook and Plan 12 Bash syntax checks, and git diff --check"
+    "fresh full-current Plan 10 review returned GO after 257 focused tests, Ruff check and format, mypy, runbook and Plan 12 Bash syntax checks, and git diff --check",
+    "final frozen-tree review returned GO after exact raw-fixture/live-backend projection equality closed the final substitution counterexample",
+    "4654 backend tests and 2324 frontend tests pass; Ruff check, Ruff format-check, mypy, and git diff --check are clean"
   ],
   "review_history": [
     {
@@ -157,7 +169,12 @@
       "reviewed_at": "2026-07-14T16:54:37Z",
       "verdict": "APPROVED_AFTER_CONTRACT_REPAIR",
       "summary": "Fresh full-plan review found and repaired canonical-runbook telemetry drift, non-exact retained queries, mismatched metric/trace counts, historical export replay failure, cleanup ledger phase hazards, and the terminal-row-before-manifest-commit crash window. Independent re-review returned GO with 257 focused tests and all static/syntax checks clean."
+    },
+    {
+      "reviewed_at": "2026-07-14T18:39:49Z",
+      "verdict": "APPROVED_AFTER_PROTECTED_POLICY_REPAIR",
+      "summary": "Final frozen-tree re-review returned GO. Canonical tutorial semantics, exact seven-setting task-definition and receipt trust anchors, full five-case backend/frontend parity, and real authoring paths are closed with 4654 backend and 2324 frontend tests passing."
     }
   ],
-  "plan_sha256": "fff072491d74e65416723ac8943820b239a799ab8b4dfdc8b0c031de0a1c90c3"
+  "plan_sha256": "26db1f9b8476c37bde6d67d13fc20cf58d2eb70b712ea0e9a2122be2ddd93cb6"
 }

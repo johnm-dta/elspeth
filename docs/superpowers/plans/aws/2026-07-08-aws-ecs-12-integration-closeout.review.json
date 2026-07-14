@@ -1,13 +1,13 @@
 {
   "verdict": "APPROVED",
   "scope_verdict": "GO_TO_EXECUTE_AFTER_ALL_DEPENDENCIES",
-  "summary": "Plan 12 is execution-ready after all 19 prerequisites close on feat/aws-ecs-program. Stage 9 first reviews and merges the then-current release/0.7.1 tip into the program lineage, preserves every close anchor, reruns the reconciliation affected-area checkpoint, and records RECONCILED_RELEASE_SHA. Task 1 then freezes one candidate, Major Checkpoint 6 runs on that exact SHA before Task 2, and Tasks 1 through 8 test it unchanged. If release moves after external mutation, Task 8 cleanup must finish before rereconciliation. Task 9 alone fast-forwards and pushes the still-reconciled release branch to that tested SHA before GO.",
+  "summary": "Plan 12 is execution-ready after all 19 prerequisites close on feat/aws-ecs-program. The repaired Plan 10 handoff now makes every credited ECS task definition and Guardrail receipt prove the exact protected seven-setting inventory and exercises the same five-case policy contract through backend and frontend paths. Task 1 freezes one candidate, Major Checkpoint 6 runs on that exact SHA before Task 2, and Tasks 1 through 8 test it unchanged; Task 9 alone performs the final release transition.",
   "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md",
-  "reviewed_at": "2026-07-14T16:54:37Z",
+  "reviewed_at": "2026-07-14T18:39:49Z",
   "review_basis": {
     "branch": "feat/aws-ecs-program",
-    "head": "ac22d0f7d7ece676b4046090a5d2f34331d894b4",
-    "baseline": "Fresh full-current review of complete Plan 12 and Stage 9 after the Plan 10/12 contract repair. The review reconciled all 81 ledger rows, two-stream phase sealing, historical export replay, evidence aggregation, exact monotonic retained telemetry checkpoints, crash-safe cleanup finalization, the new-attempt ledger rule, and the sole idempotent Task 9 release transition."
+    "head": "c66231eb06df5a67421ff3649c7d561fdf3ac250",
+    "baseline": "Fresh full-current review of the Plan 12 consumers after the final Plan 10 protected-policy repair. The review reconciled canonical tutorial evidence, exact seven-setting scenario inventory, task-definition consumers, Guardrail receipt extraction and storage, five-case backend/frontend parity, and preserved the already-approved Stage 9 and Task 1 through Task 9 order."
   },
   "blocking_issues": [],
   "warnings": [
@@ -127,6 +127,11 @@
       "id": "B12-19",
       "status": "RESOLVED",
       "resolution": "The full contract repair binds durable Plan/program/release anchors, uses 76 ordered success rows plus four caller cleanup rows and finalizer-owned task8.check05, aggregates missing evidence paths without abandoning independent teardown, requires a new ledger after cleanup starts, preserves historical exports, checkpoints exact retained telemetry monotonically, and recovers the terminal-row-before-manifest-commit interruption window."
+    },
+    {
+      "id": "B12-20",
+      "status": "RESOLVED",
+      "resolution": "Plan 12 now consumes manifest-validated task-definition ARNs for all candidate, doctor, verifier, rollback, and previous-image paths, while Guardrail receipt extraction and persistence independently require the same policy-binding digest."
     }
   ],
   "reviewer_summaries": {
@@ -176,7 +181,8 @@
     "git diff --check passes; direct AWS invocation, unsafe destroy -auto-approve, stale tag templates, RUN_ID collision, forbidden aws_capture login pipe, and || true bypass markers are absent.",
     "Current CI/CodeQL/allowlist triggers, gh/filigree command options, Terraform saved-plan contract, exact Filigree dependency set, and fresh Loomweave repository state were checked.",
     "Plan 12 remains pending, unassigned, and dependency-controlled; this review did not claim, transition, implement, push, merge, tag, or deploy it.",
-    "fresh full-current review returned GO after 257 focused tests, Ruff check and format, mypy, 48 backtick plus 2 tilde Plan 12 Bash fences, 24 Stage 9 Bash fences, 16 deployment-runbook Bash fences, and git diff --check"
+    "fresh full-current review returned GO after 257 focused tests, Ruff check and format, mypy, 48 backtick plus 2 tilde Plan 12 Bash fences, 24 Stage 9 Bash fences, 16 deployment-runbook Bash fences, and git diff --check",
+    "final protected-policy handoff review returned GO with 4654 backend and 2324 frontend tests passing"
   ],
-  "plan_sha256": "1a8f48a819c499d9359a2e1e75635c7aa19cc03b04749f93c7ace49ae3946eac"
+  "plan_sha256": "622241408e07374e447de2b2b169bb0641ecad03fdb7d5bd5d5caefe1a22adbe"
 }

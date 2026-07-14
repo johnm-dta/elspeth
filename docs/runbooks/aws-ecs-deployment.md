@@ -61,6 +61,48 @@ at `http://127.0.0.1:4317`; it is not an operator endpoint setting. Uploaded
 pipeline telemetry routing is replaced with one lifecycle-or-rows OTLP
 exporter, empty headers, and best-effort failure policy.
 
+### Web plugin policy rollout
+
+Render this complete policy bundle into every candidate, rollback, recovery,
+and verifier task definition from the owner-approved protected scenario
+inventory. `scenario-load` exports these exact names and the computed
+`ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256`:
+
+- `ELSPETH_WEB__PLUGIN_ALLOWLIST`
+- `ELSPETH_WEB__PLUGIN_PREFERENCES`
+- `ELSPETH_WEB__PLUGIN_CONTROL_MODES`
+- `ELSPETH_WEB__LLM_PROFILES`
+- `ELSPETH_WEB__TUTORIAL_LLM_PROFILE`
+- `ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES`
+- `ELSPETH_WEB__BEDROCK_GUARDRAIL_DEFAULT_PROFILES`
+
+The same protected scenario inventory supplies
+`ELSPETH_BEDROCK_LIVE_TEST_MODEL`; it must exactly equal the private model in
+the selected tutorial profile, and `AWS_REGION` must equal that profile's
+private region.
+
+Values use the JSON/opaque-alias contract in
+[`configuration.md`](../reference/configuration.md). Never retain their raw
+values or rendered task-definition JSON as evidence. Changing any member
+requires the operator to register a new task-definition revision. The operator
+must force a new deployment and restart candidate acceptance; ECS Exec cannot
+change the process-frozen policy.
+
+`verify-api` requires all six sanitized boot-readiness rows from
+`GET /api/system/status`, then rechecks a separately captured canonical
+core-only tutorial candidate. Because both controls are required and the
+canonical tutorial does not auto-insert them, acceptance requires the typed
+HTTP 409 `tutorial_not_ready` / `tutorial_required_control_coverage` response
+without creating a tutorial run. `verify-bedrock-guardrails` requires the
+effective policy's `tutorial_profile_ready: true`, `tutorial_ready: false`,
+exact tutorial blocker and `target_llm` selection, plus prompt-shield and
+content-safety entries in `selected_controls` with `required` modes and opaque
+aliases. It privately correlates the tutorial model/region with the live
+Bedrock smoke and verifies the protected policy binding hash. Its sanitized
+receipt retains the binding hash and immutable numeric Guardrail versions,
+then sets `landscape_evidence` true only after the atomic
+`run_web_plugin_policy` row is read back unchanged.
+
 ## Prerequisites
 
 - A database operator has approved the Landscape and session PostgreSQL
@@ -414,7 +456,7 @@ and destroy use, and again when an approved apply is recorded; verification
 performed before expiry cannot authorize later use after expiry.
 
 Each protected scenario inventory uses
-`elspeth.aws-ecs-scenario-inventory.v4` and binds the run ID, candidate SHA,
+`elspeth.aws-ecs-scenario-inventory.v5` and binds the run ID, candidate SHA,
 account, region, scenario ID, Terraform binding, and the closed `values`
 assignment set, including the protected binding-receipt path. The initial
 immutable `preapply` document leaves provider-generated identities empty; a
@@ -486,6 +528,13 @@ load_scenario() {
   local scenario_id="$1" assignments
   unset ACTIVE_SCENARIO_ID ACCEPTANCE_RUN_ID DEPLOYMENT_MODE TARGET_PLATFORM \
     AWS_REGION ECS_CLUSTER ECS_SERVICE WEB_CONTAINER_NAME TARGET_GROUP_ARN \
+    ELSPETH_WEB__PLUGIN_ALLOWLIST ELSPETH_WEB__PLUGIN_PREFERENCES \
+    ELSPETH_WEB__PLUGIN_CONTROL_MODES ELSPETH_WEB__LLM_PROFILES \
+    ELSPETH_WEB__TUTORIAL_LLM_PROFILE \
+    ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES \
+    ELSPETH_WEB__BEDROCK_GUARDRAIL_DEFAULT_PROFILES \
+    ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256 \
+    ELSPETH_BEDROCK_LIVE_TEST_MODEL \
     ALB_BASE_URL ALB_ARN CANDIDATE_TASK_DEFINITION DOCTOR_TASK_DEFINITION \
     DOCTOR_CONTAINER_NAME DOCTOR_NETWORK_CONFIGURATION \
     PAYLOAD_VERIFIER_TASK_DEFINITION LOCAL_AUTH_VERIFIER_TASK_DEFINITION \
@@ -862,6 +911,16 @@ the entrypoint below:
       "name": "elspeth-web",
       "dependsOn": [{"containerName": "cloudwatch-agent", "condition": "HEALTHY"}],
       "environment": [
+        {"name": "ELSPETH_WEB__PLUGIN_ALLOWLIST", "value": "${ELSPETH_WEB__PLUGIN_ALLOWLIST}"},
+        {"name": "ELSPETH_WEB__PLUGIN_PREFERENCES", "value": "${ELSPETH_WEB__PLUGIN_PREFERENCES}"},
+        {"name": "ELSPETH_WEB__PLUGIN_CONTROL_MODES", "value": "${ELSPETH_WEB__PLUGIN_CONTROL_MODES}"},
+        {"name": "ELSPETH_WEB__LLM_PROFILES", "value": "${ELSPETH_WEB__LLM_PROFILES}"},
+        {"name": "ELSPETH_WEB__TUTORIAL_LLM_PROFILE", "value": "${ELSPETH_WEB__TUTORIAL_LLM_PROFILE}"},
+        {"name": "ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES", "value": "${ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES}"},
+        {"name": "ELSPETH_WEB__BEDROCK_GUARDRAIL_DEFAULT_PROFILES", "value": "${ELSPETH_WEB__BEDROCK_GUARDRAIL_DEFAULT_PROFILES}"},
+        {"name": "ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256", "value": "${ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256}"},
+        {"name": "ELSPETH_BEDROCK_LIVE_TEST_MODEL", "value": "${ELSPETH_BEDROCK_LIVE_TEST_MODEL}"},
+        {"name": "AWS_REGION", "value": "${AWS_REGION}"},
         {"name": "ELSPETH_WEB__OPERATOR_TELEMETRY", "value": "aws-otlp"},
         {"name": "ELSPETH_WEB__OPERATOR_TELEMETRY_ENVIRONMENT", "value": "production"},
         {"name": "ELSPETH_WEB__OPERATOR_TELEMETRY_RELEASE", "value": "${ELSPETH_RELEASE_SHA_OR_DIGEST}"},
@@ -1064,13 +1123,19 @@ inputs from the approved inventory:
 resource ID `service/$ECS_CLUSTER/$ECS_SERVICE`. Resolve every supplied task
 definition and replace it with the returned exact taskDefinitionArn. Require
 `ACTIVE`, the approved image digest, matching Linux CPU architecture, named
-container, network configuration, log group, and stream prefix.
+container, network configuration, log group, and stream prefix. The
+manifest-backed validator below also compares the returned named container's
+seven policy settings, binding hash, live Bedrock model, and AWS region byte
+for byte with the loaded protected scenario inventory; recomputing a matching
+hash over a substituted bundle is not sufficient.
 
 ```bash
 : "${DEPLOYMENT_MODE:?} ${TARGET_PLATFORM:?} ${AWS_REGION:?}"
 : "${ECS_CLUSTER:?} ${ECS_SERVICE:?} ${WEB_CONTAINER_NAME:?}"
 : "${TARGET_GROUP_ARN:?} ${ALB_BASE_URL:?}"
 : "${CANDIDATE_TASK_DEFINITION:?} ${DOCTOR_TASK_DEFINITION:?}"
+: "${PAYLOAD_VERIFIER_TASK_DEFINITION:?} ${LOCAL_AUTH_VERIFIER_TASK_DEFINITION:?}"
+: "${ROLLBACK_DOCTOR_TASK_DEFINITION:?}"
 : "${DOCTOR_CONTAINER_NAME:?} ${DOCTOR_NETWORK_CONFIGURATION:?}"
 : "${WEB_LOG_GROUP:?} ${WEB_LOG_STREAM_PREFIX:?}"
 : "${DOCTOR_LOG_GROUP:?} ${DOCTOR_LOG_STREAM_PREFIX:?}"
@@ -1087,6 +1152,29 @@ case "$DEPLOYMENT_MODE" in
 esac
 [[ "$ECS_CLUSTER" =~ ^[A-Za-z0-9_-]+$ ]]
 [[ "$ECS_SERVICE" =~ ^[A-Za-z0-9_-]+$ ]]
+
+resolve_bound_task_definition() {
+  local variable="$1" container_name="$2" reference raw validated resolved
+  reference=${!variable}
+  raw=$(aws_capture aws ecs describe-task-definition \
+    --task-definition "$reference" --output json)
+  validated=$(printf '%s' "$raw" \
+    | uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+        validate-task-definition-policy --file "$CONTROL_MANIFEST" \
+        --scenario-id "$ACTIVE_SCENARIO_ID" --container-name "$container_name")
+  resolved=$(jq -er '.task_definition_arn | select(length > 0)' <<<"$validated")
+  printf -v "$variable" '%s' "$resolved"
+  unset raw validated resolved reference
+}
+
+resolve_bound_task_definition CANDIDATE_TASK_DEFINITION "$WEB_CONTAINER_NAME"
+resolve_bound_task_definition DOCTOR_TASK_DEFINITION "$DOCTOR_CONTAINER_NAME"
+resolve_bound_task_definition PAYLOAD_VERIFIER_TASK_DEFINITION "$WEB_CONTAINER_NAME"
+resolve_bound_task_definition LOCAL_AUTH_VERIFIER_TASK_DEFINITION "$WEB_CONTAINER_NAME"
+resolve_bound_task_definition ROLLBACK_DOCTOR_TASK_DEFINITION "$DOCTOR_CONTAINER_NAME"
+if test "$DEPLOYMENT_MODE" = upgrade; then
+  resolve_bound_task_definition PREVIOUS_TASK_DEFINITION "$WEB_CONTAINER_NAME"
+fi
 
 OBSERVATION_START_EPOCH_MS=$(($(date +%s) * 1000))
 SERVICE_JSON=$(aws_capture aws ecs describe-services \
@@ -1249,7 +1337,9 @@ one:
    the public API into a protected state file.
 2. Force a distinct candidate deployment and prove the old task was replaced.
 3. Re-authenticate from a fresh process and run `verify-api` against that same
-   protected state without mutating the session.
+   protected state without mutating the session. Require the six-row
+   `GET /api/system/status` contract and the typed HTTP 409
+   `tutorial_required_control_coverage` recheck as part of this command.
 4. Start the explicit `1000:1000` one-shot payload verifier with the candidate
    digest and the same PostgreSQL/EFS settings; do not use root-running ECS
    Exec for this proof.
@@ -1310,6 +1400,7 @@ checkpoint_operator_retained_evidence() {
 
 run_candidate_role_check() {
   local task_arn="$1" check="$2" phase="${3:-}" stream receipt_file command
+  local -a binding_args=()
   case "$phase" in
     "") command="python -m elspeth.web.aws_ecs_acceptance $check" ;;
     positive|outage)
@@ -1318,6 +1409,9 @@ run_candidate_role_check() {
       ;;
     *) return 64 ;;
   esac
+  if test "$check" = verify-bedrock-guardrails; then
+    binding_args=(--plugin-policy-binding-sha256 "$ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256")
+  fi
   stream=$(aws_capture aws ecs execute-command \
     --cluster "$ECS_CLUSTER" --task "$task_arn" --container "$WEB_CONTAINER_NAME" \
     --interactive --command "$command")
@@ -1325,7 +1419,8 @@ run_candidate_role_check() {
   chmod 600 "$receipt_file"
   printf '%s' "$stream" | uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
     extract-exec-receipt --check "$check" --candidate-sha "$CANDIDATE_SHA" \
-    --task-arn "$task_arn" --scenario-id "$ACTIVE_SCENARIO_ID" >"$receipt_file"
+    --task-arn "$task_arn" --scenario-id "$ACTIVE_SCENARIO_ID" \
+    "${binding_args[@]}" >"$receipt_file"
   unset stream
   persist_sanitized_receipt "$ACTIVE_SCENARIO_ID" "$check" "$task_arn" "$receipt_file"
   if test "$check" = verify-operator-telemetry && test "$phase" != outage; then
@@ -1378,6 +1473,13 @@ aws_capture aws ecs wait tasks-stopped --cluster "$ECS_CLUSTER" --tasks "$LOCAL_
 aws_capture aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$LOCAL_AUTH_TASK" \
   | jq -e '(.failures | length) == 0 and (.tasks | length) == 1 and all(.tasks[0].containers[] | select(.essential == true); .exitCode == 0)' >/dev/null
 ```
+
+The `verify-bedrock-guardrails` receipt must contain `plugin_policy` with the
+exact `target_llm` and the prompt-shield/content-safety entries in
+`selected_controls`, including both opaque aliases and `required` modes, plus
+`landscape_evidence: true`. That final flag proves the acceptance run's atomic
+`run_web_plugin_policy` row was read back unchanged; a Guardrail API success
+without this policy proof is NO-GO.
 
 Both one-shot definitions set task-level `user: "1000:1000"`, explicitly
 override the image entrypoint, use the candidate digest, and reuse the exact

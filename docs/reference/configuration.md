@@ -121,7 +121,16 @@ ELSPETH_WEB__PLUGIN_CONTROL_MODES='{"prompt_shield":"required","content_safety":
 ELSPETH_WEB__LLM_PROFILES='{"tutorial":{"provider":"bedrock","model":"bedrock/anthropic.claude-3-haiku-20240307-v1:0","region_name":"ap-southeast-2"}}'
 ELSPETH_WEB__TUTORIAL_LLM_PROFILE='tutorial'
 ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES='[{"alias":"prompt-default","plugin":"aws_bedrock_prompt_shield","guardrail_identifier":"operatorpromptguardrail","guardrail_version":"7","region":"ap-southeast-2"},{"alias":"content-default","plugin":"aws_bedrock_content_safety","guardrail_identifier":"operatorcontentguardrail","guardrail_version":"4","region":"ap-southeast-2"}]'
+ELSPETH_WEB__BEDROCK_GUARDRAIL_DEFAULT_PROFILES='{"aws_bedrock_prompt_shield":"prompt-default","aws_bedrock_content_safety":"content-default"}'
 ```
+
+AWS ECS acceptance treats those seven strings as one protected assignment.
+The controller hashes their exact raw values, stores the binding in the bound
+scenario inventory, and compares every returned candidate/verifier task
+definition byte-for-byte with that inventory, together with the live Bedrock
+model and AWS region. The Guardrail receipt and durable receipt store must
+match the same protected binding; a substituted bundle with a recomputed hash
+does not satisfy the contract.
 
 Preference arrays are ordered. When a capability has multiple authorized
 implementations, list every implementation exactly once in the desired order.

@@ -7,14 +7,16 @@ dispatch, integration, close, recovery, and Plan-10/12 checkpoint procedure.
 
 **Execution model:** run the entire program in the one ignored worktree
 `/home/john/elspeth/.worktrees/aws-ecs-program` on
-`feat/aws-ecs-program`, based on the recorded initial `release/0.7.1` tip. The
-main release checkout stays paused. Slices commit directly to the program
-branch and close truthfully at `feat/aws-ecs-program@<SHA>` after focused
-integrated evidence; the run sheet supersedes every plan-local worktree,
-branch, claim, merge, and close bootstrap. Plan 12 holds the complete
-unfiltered suite until final washup, proves Tasks 1–8 on one unchanged
-candidate, then fast-forwards that exact SHA into `release/0.7.1` before Task
-9 may issue GO.
+`feat/aws-ecs-program`. The immutable `PROGRAM_BASE_SHA` is the historical
+base, not a continuing release-branch lock. Slices commit directly to the
+program branch and close truthfully at `feat/aws-ecs-program@<SHA>` after
+focused integrated evidence; the run sheet supersedes every plan-local
+worktree, branch, claim, merge, and close bootstrap. Ignore release-branch
+movement through Stage 8. Stage 9 alone fixes and reconciles the then-current
+release tip as `RECONCILED_RELEASE_SHA`; Plan 12 requires the release ref to
+remain at that exact SHA through Tasks 1–8. After those tasks and cleanup pass
+on one unchanged candidate, Task 9 alone performs the idempotent exact-SHA
+fast-forward and may then issue GO.
 
 > **For agentic workers:** This is the index, not a plan. Execute the numbered
 > subplans with superpowers:subagent-driven-development (recommended) or
@@ -57,7 +59,7 @@ extras `postgres` and `aws`.
 | 13 | `…-13-cognito-authorization-origin.md` | Authorization code + S256 PKCE for the browser public client; exact operator-declared HTTPS authorization/token origin; explicit Cognito `client_id` access-token validation; one-use expiring callback transaction | 01 · shared signed-tier/Wardline verification baseline |
 | 14 | `…-14-cloudwatch-operator-telemetry.md` | Mandatory AWS web telemetry overlay over generic OTLP; delivery/resource/status hardening; web OTLP metrics; CloudWatch Agent, dashboards/alarms, and Landscape-correlated acceptance | 13 · shared signed-tier/Wardline verification baseline |
 | 15A | `…-15a-text-sink.md` | Strict resumable `sink:text`; completes CSV/JSON/text source/sink core; collision, rollback, artifact, catalog, and round-trip proof | shared signed-tier/Wardline verification baseline |
-| 15B | `…-15b-universal-web-plugin-policy.md` | Core-only web policy; kind-qualified allowlist; LLM/operator profiles; typed capabilities; one request snapshot across catalog, authoring, import, validation, runtime, frontend, readiness, and Landscape epoch-23 evidence; five-configuration parity/property/AST acceptance seal; CLI unaffected | 15A · 05 · 08A · 09 · 11 · 14 |
+| 15B | `…-15b-universal-web-plugin-policy.md` | Core-only web policy; kind-qualified allowlist; LLM/operator profiles; typed capabilities; one request snapshot across catalog, authoring, import, validation, runtime, frontend, readiness, and Landscape epoch-23 evidence; five distinct authorization/availability configurations (including authorized-but-locally-unavailable controls) plus parity/property/AST acceptance seal; CLI unaffected | 15A · 05 · 08A · 09 · 11 · 14 |
 | 15C | `…-15c-bedrock-guardrail-shields.md` | Model-independent Bedrock prompt/content transforms; strict task-role `ApplyGuardrail`; opaque profiles; detect-only blocking; thin 15B integration; reusable live proof | 15B · 06 |
 
 ## Filigree execution graph
@@ -135,24 +137,31 @@ wait for later plugin registrations. `filigree plan elspeth-6343920a47
   transport requires the `aws` extra even though its unit tests mock the call.
   Plan 15B does not start in this wave; it waits for the Wave-3 guarded
   Landscape and telemetry prerequisites as well.
-- **Wave 3:** Plan 14 starts after 13 and the shared baseline to serialize
-  their shared web settings/app/runbook surfaces.
-  Then 03 Task 3 (integration proof — needs 06, 07, 09, 14, and 15C all
-  registered), 11 (needs 01, 02, 04), and 13 (needs 01) proceed as their
-  dependencies allow. Plan 15B joins only after 15A, 05, complete 08A, 09, 11,
+- **Wave 3:** Plan 11 (needs 01, 02, and 04) and Plan 13 (needs 01) proceed as
+  their dependencies allow. Plan 14 starts only after Plan 13 and the shared
+  baseline, serializing their shared web settings/app/runbook surfaces. Plan
+  15B joins only after 15A, 05, complete 08A, 09, 11,
   and 14 are integrated; this makes it the integration owner for final
   readiness, guarded Landscape, telemetry, LLM/profile, and authoring-gate
   surfaces. Plan 15C starts after 15B and 06 and remains a thin Bedrock
   implementation over the universal policy. It registers through 15B's generic
   capability/profile seams and must not reintroduce provider-specific web
   enablement flags or a second availability path. Its reusable live checker is
-  a handoff, not an ECS acceptance claim: Plan 10 adapts it into image,
+  then consumed by 03 Task 3, whose integration proof requires 06, 07, 09, 14,
+  and 15C all registered. The checker remains a handoff, not an ECS acceptance
+  claim: Plan 10 adapts it into image,
   task-role/IAM, task-definition, acceptance-command, and runbook surfaces;
   Plan 12 executes it per candidate, correlates Landscape/telemetry evidence,
   owns cleanup, and decides GO/NO-GO. Plan 10 consumes the sealed
   15B operator contract from `docs/reference/configuration.md`, including the
-  restart requirement, tutorial launch recheck, and Landscape epoch-23
-  compatibility boundary.
+  restart requirement, protected seven-setting binding, usable tutorial
+  profile with intentional required-control coverage rejection, live-model
+  correlation, immutable Guardrail-version receipt, returned-task-definition
+  comparison against protected inventory, controller/receipt-store binding,
+  and Landscape epoch-23 compatibility boundary. The five-case Plan-15B seal
+  uses one shared backend/UI fixture and exercises exact selections plus real
+  profile-backed direct, guided-submit, recipe, import, validation, runtime,
+  delayed-export, assistance, and evidence paths.
   Plan 10 starts last, only after every implementation
   slice in 01–09, 11, 13–14, and 15A–15C is done; the Filigree edges enforce this. Its
   Task 0 records that clean integrated pre-Plan-10 SHA as the only eligible
@@ -165,9 +174,11 @@ wait for later plugin registrations. `filigree plan elspeth-6343920a47
   only after every task and commit from 01–11, 13–14, and 15A–15C is present in
   the one integrated `feat/aws-ecs-program` tree. A failure in 12 reopens the
   owning implementation surface; after repair, restart 12's gate sequence
-  from the beginning. After Tasks 1–8 pass on one unchanged candidate, require
-  the paused release tip still equals its recorded start, fast-forward
-  `release/0.7.1` to that candidate, and only then execute Task 9 GO/closure.
+  from the beginning. Stage 9 has already fixed and reconciled the release tip
+  as `RECONCILED_RELEASE_SHA`; require the release ref to equal that SHA
+  throughout Tasks 1–8. After those tasks pass on one unchanged candidate and
+  cleanup completes, Task 9 alone idempotently fast-forwards
+  `release/0.7.1` to that candidate, audits ancestry, and issues GO/closure.
 
 **Security ordering constraint:** the plan-08 gate must be in the tree
 before (never merely in the same combined commit batch as) the first web-reachable

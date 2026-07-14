@@ -1,0 +1,250 @@
+{
+  "core_plugin_ids": [
+    "source:csv",
+    "source:json",
+    "source:text",
+    "transform:field_mapper",
+    "transform:llm",
+    "transform:web_scrape",
+    "sink:csv",
+    "sink:json",
+    "sink:text"
+  ],
+  "cases": [
+    {
+      "name": "core_only",
+      "principal_scope": "local:core_only",
+      "snapshot_fingerprint": "75000aed64811cc12ea15dea85eb3b2ed36a295683508555bbb9eb8d6c6eded6",
+      "policy_hash": "c92e5b1a32e17c0e5d1efb9274cb49d13964d66c1143c1fe559f67a32cf730c3",
+      "authorized_control_ids": [],
+      "available_control_ids": [],
+      "available_plugin_ids": [
+        "source:csv",
+        "source:json",
+        "source:text",
+        "transform:field_mapper",
+        "transform:llm",
+        "transform:web_scrape",
+        "sink:csv",
+        "sink:json",
+        "sink:text"
+      ],
+      "capability_groups": [
+        {
+          "capability": "llm",
+          "available_plugin_ids": ["transform:llm"]
+        }
+      ],
+      "selections": [
+        {"capability": "llm", "plugin_id": "transform:llm"},
+        {"capability": "prompt_shield", "plugin_id": null},
+        {"capability": "content_safety", "plugin_id": null}
+      ],
+      "control_modes": [
+        {"capability": "prompt_shield", "mode": "recommend"},
+        {"capability": "content_safety", "mode": "recommend"}
+      ]
+    },
+    {
+      "name": "azure_only",
+      "principal_scope": "local:azure_only",
+      "snapshot_fingerprint": "0c16b243a3d6e7d7e2d57e57f7d1a8cfe4f314f8acdee01e7bb09bb07fb735f4",
+      "policy_hash": "d646a457f90efe7104328bdd066c20aa21c7869d085bc0f75b9b6004de95ff44",
+      "authorized_control_ids": [
+        "transform:azure_prompt_shield",
+        "transform:azure_content_safety"
+      ],
+      "available_control_ids": [
+        "transform:azure_prompt_shield",
+        "transform:azure_content_safety"
+      ],
+      "available_plugin_ids": [
+        "source:csv",
+        "source:json",
+        "source:text",
+        "transform:field_mapper",
+        "transform:llm",
+        "transform:web_scrape",
+        "sink:csv",
+        "sink:json",
+        "sink:text",
+        "transform:azure_prompt_shield",
+        "transform:azure_content_safety"
+      ],
+      "capability_groups": [
+        {
+          "capability": "llm",
+          "available_plugin_ids": ["transform:llm"]
+        },
+        {
+          "capability": "prompt_shield",
+          "available_plugin_ids": ["transform:azure_prompt_shield"]
+        },
+        {
+          "capability": "content_safety",
+          "available_plugin_ids": ["transform:azure_content_safety"]
+        }
+      ],
+      "selections": [
+        {"capability": "llm", "plugin_id": "transform:llm"},
+        {"capability": "prompt_shield", "plugin_id": "transform:azure_prompt_shield"},
+        {"capability": "content_safety", "plugin_id": "transform:azure_content_safety"}
+      ],
+      "control_modes": [
+        {"capability": "prompt_shield", "mode": "recommend"},
+        {"capability": "content_safety", "mode": "recommend"}
+      ]
+    },
+    {
+      "name": "aws_only",
+      "principal_scope": "local:aws_only",
+      "snapshot_fingerprint": "f78587574f783e08dc8cf309bdadd3181e7c19bbc8a7ede27b68d9182b9d2e89",
+      "policy_hash": "edf8edb13f09390932ee4fd9c32ad828891b0282b389ff92ca9fcdb36bdeda83",
+      "authorized_control_ids": [
+        "transform:aws_bedrock_prompt_shield",
+        "transform:aws_bedrock_content_safety"
+      ],
+      "available_control_ids": [
+        "transform:aws_bedrock_prompt_shield",
+        "transform:aws_bedrock_content_safety"
+      ],
+      "available_plugin_ids": [
+        "source:csv",
+        "source:json",
+        "source:text",
+        "transform:field_mapper",
+        "transform:llm",
+        "transform:web_scrape",
+        "sink:csv",
+        "sink:json",
+        "sink:text",
+        "transform:aws_bedrock_prompt_shield",
+        "transform:aws_bedrock_content_safety"
+      ],
+      "capability_groups": [
+        {
+          "capability": "llm",
+          "available_plugin_ids": ["transform:llm"]
+        },
+        {
+          "capability": "prompt_shield",
+          "available_plugin_ids": ["transform:aws_bedrock_prompt_shield"]
+        },
+        {
+          "capability": "content_safety",
+          "available_plugin_ids": ["transform:aws_bedrock_content_safety"]
+        }
+      ],
+      "selections": [
+        {"capability": "llm", "plugin_id": "transform:llm"},
+        {"capability": "prompt_shield", "plugin_id": "transform:aws_bedrock_prompt_shield"},
+        {"capability": "content_safety", "plugin_id": "transform:aws_bedrock_content_safety"}
+      ],
+      "control_modes": [
+        {"capability": "prompt_shield", "mode": "recommend"},
+        {"capability": "content_safety", "mode": "recommend"}
+      ]
+    },
+    {
+      "name": "both_with_azure_preference",
+      "principal_scope": "local:both_with_azure_preference",
+      "snapshot_fingerprint": "c5ccdf9f9c41d5e8162189e82f80f02f49343493a907969a7fc460f888432cce",
+      "policy_hash": "76694b7a4c2e958383412ef6b05a4f83487079477e5d65883923279bd1b2e0b9",
+      "authorized_control_ids": [
+        "transform:azure_prompt_shield",
+        "transform:azure_content_safety",
+        "transform:aws_bedrock_prompt_shield",
+        "transform:aws_bedrock_content_safety"
+      ],
+      "available_control_ids": [
+        "transform:azure_prompt_shield",
+        "transform:azure_content_safety",
+        "transform:aws_bedrock_prompt_shield",
+        "transform:aws_bedrock_content_safety"
+      ],
+      "available_plugin_ids": [
+        "source:csv",
+        "source:json",
+        "source:text",
+        "transform:field_mapper",
+        "transform:llm",
+        "transform:web_scrape",
+        "sink:csv",
+        "sink:json",
+        "sink:text",
+        "transform:azure_prompt_shield",
+        "transform:azure_content_safety",
+        "transform:aws_bedrock_prompt_shield",
+        "transform:aws_bedrock_content_safety"
+      ],
+      "capability_groups": [
+        {
+          "capability": "llm",
+          "available_plugin_ids": ["transform:llm"]
+        },
+        {
+          "capability": "prompt_shield",
+          "available_plugin_ids": [
+            "transform:aws_bedrock_prompt_shield",
+            "transform:azure_prompt_shield"
+          ]
+        },
+        {
+          "capability": "content_safety",
+          "available_plugin_ids": [
+            "transform:aws_bedrock_content_safety",
+            "transform:azure_content_safety"
+          ]
+        }
+      ],
+      "selections": [
+        {"capability": "llm", "plugin_id": "transform:llm"},
+        {"capability": "prompt_shield", "plugin_id": "transform:azure_prompt_shield"},
+        {"capability": "content_safety", "plugin_id": "transform:azure_content_safety"}
+      ],
+      "control_modes": [
+        {"capability": "prompt_shield", "mode": "recommend"},
+        {"capability": "content_safety", "mode": "recommend"}
+      ]
+    },
+    {
+      "name": "neither_control_implementation",
+      "principal_scope": "local:neither_control_implementation",
+      "snapshot_fingerprint": "643617b5724b46a9fd61efa7f55f4ec228e1694e774dada895dab42b770d42aa",
+      "policy_hash": "a8971937a91c808bc5b653589f984c2b02f8da12b1014df45b11440b13cc61b8",
+      "authorized_control_ids": [
+        "transform:azure_prompt_shield",
+        "transform:azure_content_safety",
+        "transform:aws_bedrock_prompt_shield",
+        "transform:aws_bedrock_content_safety"
+      ],
+      "available_control_ids": [],
+      "available_plugin_ids": [
+        "source:csv",
+        "source:json",
+        "source:text",
+        "transform:field_mapper",
+        "transform:llm",
+        "transform:web_scrape",
+        "sink:csv",
+        "sink:json",
+        "sink:text"
+      ],
+      "capability_groups": [
+        {
+          "capability": "llm",
+          "available_plugin_ids": ["transform:llm"]
+        }
+      ],
+      "selections": [
+        {"capability": "llm", "plugin_id": "transform:llm"},
+        {"capability": "prompt_shield", "plugin_id": null},
+        {"capability": "content_safety", "plugin_id": null}
+      ],
+      "control_modes": [
+        {"capability": "prompt_shield", "mode": "recommend"},
+        {"capability": "content_safety", "mode": "recommend"}
+      ]
+    }
+  ]
+}

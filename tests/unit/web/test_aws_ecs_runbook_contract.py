@@ -52,6 +52,16 @@ def test_runbook_preserves_task_local_nonessential_healthy_sidecar() -> None:
     assert app["dependsOn"] == [{"containerName": "cloudwatch-agent", "condition": "HEALTHY"}]
     environment = {entry["name"]: entry["value"] for entry in app["environment"]}
     assert environment == {
+        "ELSPETH_WEB__PLUGIN_ALLOWLIST": "${ELSPETH_WEB__PLUGIN_ALLOWLIST}",
+        "ELSPETH_WEB__PLUGIN_PREFERENCES": "${ELSPETH_WEB__PLUGIN_PREFERENCES}",
+        "ELSPETH_WEB__PLUGIN_CONTROL_MODES": "${ELSPETH_WEB__PLUGIN_CONTROL_MODES}",
+        "ELSPETH_WEB__LLM_PROFILES": "${ELSPETH_WEB__LLM_PROFILES}",
+        "ELSPETH_WEB__TUTORIAL_LLM_PROFILE": "${ELSPETH_WEB__TUTORIAL_LLM_PROFILE}",
+        "ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES": "${ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES}",
+        "ELSPETH_WEB__BEDROCK_GUARDRAIL_DEFAULT_PROFILES": "${ELSPETH_WEB__BEDROCK_GUARDRAIL_DEFAULT_PROFILES}",
+        "ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256": "${ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256}",
+        "ELSPETH_BEDROCK_LIVE_TEST_MODEL": "${ELSPETH_BEDROCK_LIVE_TEST_MODEL}",
+        "AWS_REGION": "${AWS_REGION}",
         "ELSPETH_WEB__OPERATOR_TELEMETRY": "aws-otlp",
         "ELSPETH_WEB__OPERATOR_TELEMETRY_ENVIRONMENT": "production",
         "ELSPETH_WEB__OPERATOR_TELEMETRY_RELEASE": "${ELSPETH_RELEASE_SHA_OR_DIGEST}",
@@ -64,6 +74,44 @@ def test_runbook_preserves_task_local_nonessential_healthy_sidecar() -> None:
         "ELSPETH_ACCEPTANCE_SCENARIO_ID": "${SCENARIO_ID}",
     }
     assert "127.0.0.1:4317" in _text()
+
+
+def test_runbook_consumes_complete_web_plugin_policy_handoff() -> None:
+    text = _text()
+    plan12 = _plan12_text()
+
+    for required in (
+        "ELSPETH_WEB__PLUGIN_ALLOWLIST",
+        "ELSPETH_WEB__PLUGIN_PREFERENCES",
+        "ELSPETH_WEB__PLUGIN_CONTROL_MODES",
+        "ELSPETH_WEB__LLM_PROFILES",
+        "ELSPETH_WEB__TUTORIAL_LLM_PROFILE",
+        "ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES",
+        "ELSPETH_WEB__BEDROCK_GUARDRAIL_DEFAULT_PROFILES",
+        "ELSPETH_BEDROCK_LIVE_TEST_MODEL",
+        "GET /api/system/status",
+        "tutorial_required_control_coverage",
+        "typed HTTP 409",
+        "plugin_policy",
+        "landscape_evidence",
+        "run_web_plugin_policy",
+    ):
+        assert required in text
+        assert required in plan12
+
+    assert "register a new task-definition revision" in text
+    assert "force a new deployment" in text
+    assert "validate-task-definition-policy" in text
+    assert "resolve_bound_task_definition CANDIDATE_TASK_DEFINITION" in text
+    assert "resolve_bound_task_definition DOCTOR_TASK_DEFINITION" in text
+    assert "resolve_bound_task_definition PAYLOAD_VERIFIER_TASK_DEFINITION" in text
+    assert "resolve_bound_task_definition LOCAL_AUTH_VERIFIER_TASK_DEFINITION" in text
+    assert "resolve_bound_task_definition ROLLBACK_DOCTOR_TASK_DEFINITION" in text
+    assert "--plugin-policy-binding-sha256" in text
+    assert "target_llm" in text
+    assert "selected_controls" in text
+    assert "prompt-shield" in text
+    assert "content-safety" in text
 
 
 def test_runbook_preserves_versioned_config_sidecar_startup() -> None:
@@ -577,7 +625,7 @@ def test_plan12_executes_protected_scenario_order_and_durable_cleanup_contract()
     assert "elspeth.aws-ecs-evidence-export.v1" in text
     assert '--evidence-export-receipt "$EVIDENCE_EXPORT_RECEIPT"' in text
     assert '--final-evidence-export-receipt "$FINAL_EVIDENCE_EXPORT_RECEIPT"' in text
-    assert "elspeth.aws-ecs-scenario-inventory.v4" in text
+    assert "elspeth.aws-ecs-scenario-inventory.v5" in text
     assert "elspeth.aws-ecs-control-manifest.v4" in text
     assert "elspeth.aws-ecs-retained-evidence.v1" in text
     assert "control-manifest bind-retained-evidence" in text

@@ -39,6 +39,7 @@ EXPECTED_COMMANDS = {
     "approval-verify",
     "approval-require-current",
     "scenario-load",
+    "validate-task-definition-policy",
     "orphan-sweep",
     "cleanup-evidence-finalize",
 }
@@ -164,6 +165,7 @@ def _auth_env(**updates: str) -> Mapping[str, str]:
     values = {
         "ELSPETH_ACCEPTANCE_BASE_URL": "https://staging.example",
         "ELSPETH_ACCEPTANCE_BEARER_TOKEN": "bearer-secret",
+        "ELSPETH_WEB__TUTORIAL_LLM_PROFILE": "tutorial",
     }
     values.update(updates)
     return values
@@ -292,6 +294,7 @@ def _valid_state() -> acceptance.AcceptanceState:
         {
             "schema_version": 1,
             "session_id": "8e826f53-5f13-420f-8678-5ec0caecd15f",
+            "tutorial_session_id": "f6a99a36-13f9-49c9-a3af-d9f6f7924a56",
             "blob_id": "cc742c5f-ae01-49f3-988b-7ecddf0445ef",
             "run_id": "401b6510-a37f-4375-acb8-695fe0098265",
             "landscape_run_id": "a31de342-a9f2-4b31-bb02-9043a047db72",
@@ -319,6 +322,7 @@ def test_state_file_round_trip_is_mode_0600_and_closed_schema(tmp_path: Path) ->
     assert set(json.loads(path.read_text())) == {
         "schema_version",
         "session_id",
+        "tutorial_session_id",
         "blob_id",
         "run_id",
         "landscape_run_id",
@@ -463,7 +467,9 @@ def test_fixed_pipeline_yaml_rejects_noncanonical_session_id() -> None:
 
 
 _SESSION_ID = "8e826f53-5f13-420f-8678-5ec0caecd15f"
+_TUTORIAL_SESSION_ID = "f6a99a36-13f9-49c9-a3af-d9f6f7924a56"
 _BLOB_ID = "cc742c5f-ae01-49f3-988b-7ecddf0445ef"
+_TUTORIAL_BLOB_ID = "ef6866a0-640f-4bb0-ab18-d93213ee942b"
 _RUN_ID = "401b6510-a37f-4375-acb8-695fe0098265"
 _LANDSCAPE_RUN_ID = "a31de342-a9f2-4b31-bb02-9043a047db72"
 _ARTIFACT_ID = "8e82b504-5dcc-4dc9-9fe4-a1c62be47153"
@@ -477,6 +483,7 @@ class _AcceptanceApi:
         self.artifacts: list[dict[str, object]] | None = None
         self.artifact_bytes = _ARTIFACT_BYTES
         self.expected_token = "bearer-secret"
+        self.session_creates = 0
 
     @property
     def blob_sha256(self) -> str:
@@ -507,7 +514,8 @@ class _AcceptanceApi:
         assert request.headers["authorization"] == f"Bearer {self.expected_token}"
         if request.method == "POST" and path == "/api/sessions":
             assert json.loads(request.content) == {}
-            return httpx.Response(201, json={"id": _SESSION_ID})
+            self.session_creates += 1
+            return httpx.Response(201, json={"id": _SESSION_ID if self.session_creates == 1 else _TUTORIAL_SESSION_ID})
         if request.method == "POST" and path == f"/api/sessions/{_SESSION_ID}/blobs":
             assert request.headers["content-type"].startswith("multipart/form-data; boundary=")
             assert acceptance.FIXED_INPUT_BYTES in request.content
@@ -545,8 +553,51 @@ class _AcceptanceApi:
             return httpx.Response(200, json={"id": _BLOB_ID, "session_id": _SESSION_ID, "content_hash": self.blob_sha256})
         if request.method == "GET" and path == f"/api/sessions/{_SESSION_ID}/blobs/{_BLOB_ID}/content":
             return httpx.Response(200, content=acceptance.FIXED_INPUT_BYTES)
+        if request.method == "POST" and path == f"/api/sessions/{_TUTORIAL_SESSION_ID}/blobs":
+            assert acceptance.TUTORIAL_INPUT_BYTES in request.content
+            return httpx.Response(
+                201,
+                json={"id": _TUTORIAL_BLOB_ID, "content_hash": hashlib.sha256(acceptance.TUTORIAL_INPUT_BYTES).hexdigest()},
+            )
+        if request.method == "POST" and path == f"/api/sessions/{_TUTORIAL_SESSION_ID}/state/yaml":
+            body = json.loads(request.content)
+            assert body["source_blob_ids"] == {"source": _TUTORIAL_BLOB_ID}
+            assert all(plugin in body["yaml"] for plugin in ("web_scrape", "llm", "field_mapper"))
+            assert "aws_bedrock_prompt_shield" not in body["yaml"]
+            assert "aws_bedrock_content_safety" not in body["yaml"]
+            return httpx.Response(200, json={"id": "tutorial-state-1", "is_valid": False})
         if request.method == "GET" and path == f"/api/sessions/{_SESSION_ID}":
             return httpx.Response(200, json={"id": _SESSION_ID})
+        if request.method == "GET" and path == "/api/system/status":
+            return httpx.Response(
+                200,
+                json={
+                    "tutorial_ready": True,
+                    "plugin_policy_readiness": {
+                        "tutorial_ready": True,
+                        "rows": [
+                            {"id": "policy_compilation", "status": "ok"},
+                            {"id": "required_core", "status": "ok"},
+                            {"id": "local_capability_configuration", "status": "ok"},
+                            {"id": "live_health", "status": "not_applicable"},
+                            {"id": "tutorial_profile", "status": "warning"},
+                            {"id": "tutorial_required_control_coverage", "status": "not_applicable"},
+                        ],
+                    },
+                },
+            )
+        if request.method == "POST" and path == "/api/tutorial/run":
+            assert json.loads(request.content) == {"session_id": _TUTORIAL_SESSION_ID}
+            return httpx.Response(
+                409,
+                json={
+                    "detail": {
+                        "error_type": "tutorial_not_ready",
+                        "code": "tutorial_required_control_coverage",
+                        "detail": "The saved tutorial pipeline is missing required control coverage.",
+                    }
+                },
+            )
         pytest.fail(f"unexpected acceptance request: {request.method} {path}")
 
 
@@ -570,6 +621,7 @@ def test_capture_executes_fixed_pipeline_and_persists_only_closed_state(tmp_path
 
     assert acceptance.read_acceptance_state(state_path) == state
     assert state.session_id == _SESSION_ID
+    assert state.tutorial_session_id == _TUTORIAL_SESSION_ID
     assert state.blob_id == _BLOB_ID
     assert state.run_id == _RUN_ID
     assert state.landscape_run_id == _LANDSCAPE_RUN_ID
@@ -594,6 +646,9 @@ def test_capture_executes_fixed_pipeline_and_persists_only_closed_state(tmp_path
         ("GET", f"/api/runs/{_RUN_ID}/outputs"),
         ("GET", f"/api/runs/{_RUN_ID}/outputs/{_ARTIFACT_ID}/content"),
         ("GET", f"/api/sessions/{_SESSION_ID}/blobs/{_BLOB_ID}/content"),
+        ("POST", "/api/sessions"),
+        ("POST", f"/api/sessions/{_TUTORIAL_SESSION_ID}/blobs"),
+        ("POST", f"/api/sessions/{_TUTORIAL_SESSION_ID}/state/yaml"),
     ]
 
 
@@ -705,7 +760,14 @@ def test_verify_api_reauthenticates_then_performs_read_only_hash_identical_check
         transport=httpx.MockTransport(handler),
     )
 
-    assert receipt == {"check": "verify-api", "ok": True, "source_rows": 1, "failed_tokens": 0}
+    assert receipt == {
+        "check": "verify-api",
+        "ok": True,
+        "source_rows": 1,
+        "failed_tokens": 0,
+        "plugin_policy_ready": True,
+        "tutorial_required_control_coverage": True,
+    }
     assert api.calls == [
         ("GET", f"/api/sessions/{_SESSION_ID}"),
         ("GET", f"/api/sessions/{_SESSION_ID}/blobs/{_BLOB_ID}"),
@@ -714,7 +776,53 @@ def test_verify_api_reauthenticates_then_performs_read_only_hash_identical_check
         ("GET", f"/api/runs/{_RUN_ID}/results"),
         ("GET", f"/api/runs/{_RUN_ID}/outputs"),
         ("GET", f"/api/runs/{_RUN_ID}/outputs/{_ARTIFACT_ID}/content"),
+        ("GET", "/api/system/status"),
+        ("POST", "/api/tutorial/run"),
     ]
+
+
+def test_verify_api_rejects_incomplete_policy_readiness_or_missing_typed_tutorial_recheck(tmp_path: Path) -> None:
+    api = _AcceptanceApi()
+    state = acceptance.AcceptanceState.from_dict(
+        {
+            **_valid_state().to_dict(),
+            "uploaded_sha256": api.blob_sha256,
+            "blob_sha256": api.blob_sha256,
+            "artifact_sha256": api.artifact_sha256,
+        }
+    )
+    state_path = tmp_path / "state.json"
+    acceptance.write_acceptance_state(state_path, state)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/system/status":
+            return httpx.Response(200, json={"tutorial_ready": False, "plugin_policy_readiness": {"rows": []}})
+        return api(request)
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="plugin_policy_readiness"):
+        acceptance.verify_api(_auth_env(), state_file=state_path, transport=httpx.MockTransport(handler))
+
+
+def test_verify_api_rejects_non_contractual_tutorial_launch_response(tmp_path: Path) -> None:
+    api = _AcceptanceApi()
+    state = acceptance.AcceptanceState.from_dict(
+        {
+            **_valid_state().to_dict(),
+            "uploaded_sha256": api.blob_sha256,
+            "blob_sha256": api.blob_sha256,
+            "artifact_sha256": api.artifact_sha256,
+        }
+    )
+    state_path = tmp_path / "state.json"
+    acceptance.write_acceptance_state(state_path, state)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tutorial/run":
+            return httpx.Response(409, json={"detail": {"error_type": "tutorial_not_ready", "code": "other"}})
+        return api(request)
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="tutorial_required_control_coverage"):
+        acceptance.verify_api(_auth_env(), state_file=state_path, transport=httpx.MockTransport(handler))
 
 
 def test_verify_local_auth_uses_shared_settings_loader_and_read_only_delete_journal(
@@ -1369,8 +1477,55 @@ def _guardrail_env(**updates: str) -> dict[str, str]:
         "ELSPETH_LIVE_BEDROCK_CONTENT_SAFE_TEXT": "safe content fixture secret",
         "ELSPETH_LIVE_BEDROCK_CONTENT_BLOCKED_TEXT": "blocked content fixture secret",
         "ELSPETH_LIVE_BEDROCK_CONTENT_EXPECTED_VERSION": "11",
+        "ELSPETH_BEDROCK_LIVE_TEST_MODEL": "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+        "AWS_REGION": "ap-southeast-2",
+        "ELSPETH_WEB__PLUGIN_ALLOWLIST": json.dumps(
+            ["transform:aws_bedrock_prompt_shield", "transform:aws_bedrock_content_safety"], separators=(",", ":")
+        ),
+        "ELSPETH_WEB__PLUGIN_PREFERENCES": json.dumps(
+            {
+                "prompt_shield": ["transform:aws_bedrock_prompt_shield"],
+                "content_safety": ["transform:aws_bedrock_content_safety"],
+            },
+            separators=(",", ":"),
+        ),
+        "ELSPETH_WEB__PLUGIN_CONTROL_MODES": '{"prompt_shield":"required","content_safety":"required"}',
+        "ELSPETH_WEB__LLM_PROFILES": json.dumps(
+            {
+                "tutorial": {
+                    "provider": "bedrock",
+                    "model": "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+                    "region_name": "ap-southeast-2",
+                }
+            },
+            separators=(",", ":"),
+        ),
+        "ELSPETH_WEB__TUTORIAL_LLM_PROFILE": "tutorial",
+        "ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES": json.dumps(
+            [
+                {
+                    "alias": "prompt-approved",
+                    "plugin": "aws_bedrock_prompt_shield",
+                    "guardrail_identifier": "privatepromptguardrail",
+                    "guardrail_version": "7",
+                    "region": "ap-southeast-2",
+                },
+                {
+                    "alias": "content-approved",
+                    "plugin": "aws_bedrock_content_safety",
+                    "guardrail_identifier": "privatecontentguardrail",
+                    "guardrail_version": "11",
+                    "region": "ap-southeast-2",
+                },
+            ],
+            separators=(",", ":"),
+        ),
+        "ELSPETH_WEB__BEDROCK_GUARDRAIL_DEFAULT_PROFILES": (
+            '{"aws_bedrock_prompt_shield":"prompt-approved","aws_bedrock_content_safety":"content-approved"}'
+        ),
     }
     values.update(updates)
+    values.setdefault("ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256", acceptance.plugin_policy_binding_sha256(values))
     return values
 
 
@@ -1449,6 +1604,7 @@ def test_verify_bedrock_guardrails_uses_shared_profile_registry_and_reusable_che
             {
                 "plugin_id": "aws_bedrock_prompt_shield",
                 "profile_alias": "prompt-approved",
+                "guardrail_version": "7",
                 "safe_case_passed": True,
                 "attack_case_blocked": True,
                 "request_ids_present": True,
@@ -1459,6 +1615,7 @@ def test_verify_bedrock_guardrails_uses_shared_profile_registry_and_reusable_che
             {
                 "plugin_id": "aws_bedrock_content_safety",
                 "profile_alias": "content-approved",
+                "guardrail_version": "11",
                 "safe_case_passed": True,
                 "attack_case_blocked": True,
                 "request_ids_present": True,
@@ -1543,6 +1700,86 @@ def test_verify_bedrock_guardrails_rejects_version_drift_and_redacts_checker_fai
     assert "raw provider" not in str(raised.value)
 
 
+def test_plugin_policy_acceptance_binds_effective_bedrock_policy_tutorial_and_safe_aliases(tmp_path: Path) -> None:
+    from elspeth.web.config import WebSettings
+
+    settings = WebSettings(
+        data_dir=tmp_path,
+        composer_max_composition_turns=4,
+        composer_max_discovery_turns=4,
+        composer_timeout_seconds=60,
+        composer_rate_limit_per_minute=20,
+        secret_key="0123456789abcdef0123456789abcdef",
+        shareable_link_signing_key=b"0123456789abcdef0123456789abcdef",
+        plugin_allowlist=[
+            "transform:aws_bedrock_prompt_shield",
+            "transform:aws_bedrock_content_safety",
+        ],
+        plugin_preferences={
+            "prompt_shield": ["transform:aws_bedrock_prompt_shield"],
+            "content_safety": ["transform:aws_bedrock_content_safety"],
+        },
+        plugin_control_modes={"prompt_shield": "required", "content_safety": "required"},
+        llm_profiles={
+            "tutorial": {
+                "provider": "bedrock",
+                "model": "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+                "region_name": "ap-southeast-2",
+            }
+        },
+        tutorial_llm_profile="tutorial",
+        bedrock_guardrail_profiles=[
+            {
+                "alias": "prompt-approved",
+                "plugin": "aws_bedrock_prompt_shield",
+                "guardrail_identifier": "privatepromptguardrail",
+                "guardrail_version": "7",
+                "region": "ap-southeast-2",
+            },
+            {
+                "alias": "content-approved",
+                "plugin": "aws_bedrock_content_safety",
+                "guardrail_identifier": "privatecontentguardrail",
+                "guardrail_version": "11",
+                "region": "ap-southeast-2",
+            },
+        ],
+        bedrock_guardrail_default_profiles={
+            "aws_bedrock_prompt_shield": "prompt-approved",
+            "aws_bedrock_content_safety": "content-approved",
+        },
+    )
+
+    env = _guardrail_env()
+    evidence, receipt = acceptance.build_plugin_policy_acceptance(settings, env)
+
+    expected_receipt = _plugin_policy_receipt(include_landscape=False)
+    expected_receipt["policy_hash"] = evidence.policy_hash
+    expected_receipt["snapshot_hash"] = evidence.snapshot_hash
+    expected_receipt["binding_sha256"] = env["ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256"]
+    assert receipt == expected_receipt
+    assert evidence.policy_hash == receipt["policy_hash"]
+    assert evidence.snapshot_hash == receipt["snapshot_hash"]
+    assert dict(evidence.selected_implementations)["llm"] == "transform:llm"
+    assert dict(evidence.selected_implementations)["prompt_shield"] == "transform:aws_bedrock_prompt_shield"
+    assert dict(evidence.selected_implementations)["content_safety"] == "transform:aws_bedrock_content_safety"
+    rendered = json.dumps(receipt)
+    assert "privatepromptguardrail" not in rendered
+    assert "anthropic.claude" not in rendered
+
+    for updates in (
+        {"ELSPETH_BEDROCK_LIVE_TEST_MODEL": "bedrock/other-model"},
+        {"AWS_REGION": "us-east-1"},
+    ):
+        with pytest.raises(acceptance.AcceptanceCheckError, match="plugin_policy_selection"):
+            acceptance.build_plugin_policy_acceptance(settings, _guardrail_env(**updates))
+
+    drifted = _guardrail_env()
+    drifted["ELSPETH_WEB__PLUGIN_ALLOWLIST"] = "[]"
+    with pytest.raises(acceptance.AcceptanceCheckError, match="plugin_policy_settings"):
+        acceptance.build_plugin_policy_acceptance(settings, drifted)
+
+
 def test_guardrail_live_owner_persists_four_calls_before_forwarding_telemetry_and_closes_resources(tmp_path: Path) -> None:
     from elspeth.plugins.transforms.aws.guardrail_profiles import BedrockGuardrailProfileSettings
     from elspeth.plugins.transforms.aws.guardrails_live_check import run_guardrail_live_check
@@ -1619,21 +1856,25 @@ def test_guardrail_live_owner_persists_four_calls_before_forwarding_telemetry_an
             self.closed = True
 
     manager = Manager()
+    policy_evidence = _web_policy_evidence()
+    policy_receipt = _plugin_policy_receipt(include_landscape=False)
     receipt = acceptance.run_bedrock_guardrails_live(
         _guardrail_env(),
         settings_loader=lambda: settings,
         registry_factory=lambda _settings: registry,
         checker=checker,
         telemetry_manager_factory=lambda _settings: manager,
+        policy_acceptance_factory=lambda _settings, _env: (policy_evidence, policy_receipt),
         now=lambda: datetime(2026, 7, 14, 1, 2, 3, tzinfo=UTC),
     )
 
     assert len(receipt["controls"]) == 2  # type: ignore[arg-type]
+    assert receipt["plugin_policy"] == _plugin_policy_receipt()
     assert len(manager.events) == 4
     assert manager.flushed is True
     assert manager.closed is True
-    with acceptance.LandscapeDB.from_url(database_url, create_tables=False, read_only=True) as database:
-        repositories = acceptance.RecorderFactory.read_only(database)
+    with acceptance.LandscapeDB.from_url(database_url, create_tables=False) as database:
+        repositories = acceptance.RecorderFactory.writable(database)
         runs = repositories.run_lifecycle.list_runs()
         assert len(runs) == 1
         assert runs[0].status.value == "completed"
@@ -1641,9 +1882,11 @@ def test_guardrail_live_owner_persists_four_calls_before_forwarding_telemetry_an
         tokens = repositories.query.get_tokens_for_rows(runs[0].run_id, [rows[0].row_id])
         states = repositories.query.get_node_states_for_tokens(runs[0].run_id, [tokens[0].token_id])
         calls = repositories.query.get_calls(states[0].state_id)
+        persisted_policy = repositories.run_lifecycle.get_web_plugin_policy_evidence(runs[0].run_id)
     assert len(calls) == 4
     assert [call.call_index for call in calls] == [0, 1, 2, 3]
     assert all(call.request_hash and call.response_hash for call in calls)
+    assert persisted_policy == policy_evidence
 
 
 class _TelemetryAudit:
@@ -2171,6 +2414,7 @@ def _guardrail_receipt_details() -> dict[str, object]:
             {
                 "plugin_id": "aws_bedrock_prompt_shield",
                 "profile_alias": "prompt-approved",
+                "guardrail_version": "7",
                 "safe_case_passed": True,
                 "attack_case_blocked": True,
                 "request_ids_present": True,
@@ -2181,6 +2425,7 @@ def _guardrail_receipt_details() -> dict[str, object]:
             {
                 "plugin_id": "aws_bedrock_content_safety",
                 "profile_alias": "content-approved",
+                "guardrail_version": "11",
                 "safe_case_passed": True,
                 "attack_case_blocked": True,
                 "request_ids_present": True,
@@ -2188,8 +2433,75 @@ def _guardrail_receipt_details() -> dict[str, object]:
                 "blocked_text_sha256": "d" * 64,
                 "checked_at": "2026-07-14T01:02:03Z",
             },
-        ]
+        ],
+        "plugin_policy": _plugin_policy_receipt(),
     }
+
+
+def _web_policy_evidence() -> acceptance.WebPluginPolicyEvidence:
+    return acceptance.WebPluginPolicyEvidence(
+        schema_version=1,
+        policy_hash="1" * 64,
+        snapshot_hash="2" * 64,
+        authorized_plugin_ids=(
+            "transform:aws_bedrock_content_safety",
+            "transform:aws_bedrock_prompt_shield",
+            "transform:llm",
+        ),
+        available_plugin_ids=(
+            "transform:aws_bedrock_content_safety",
+            "transform:aws_bedrock_prompt_shield",
+            "transform:llm",
+        ),
+        control_modes=(("content_safety", "required"), ("prompt_shield", "required")),
+        selected_implementations=(
+            ("content_safety", "transform:aws_bedrock_content_safety"),
+            ("llm", "transform:llm"),
+            ("prompt_shield", "transform:aws_bedrock_prompt_shield"),
+        ),
+        selected_profile_aliases=(
+            ("transform:aws_bedrock_content_safety", "content-approved"),
+            ("transform:aws_bedrock_prompt_shield", "prompt-approved"),
+            ("transform:llm", "tutorial"),
+        ),
+        plugin_code_identities=(
+            ("transform:aws_bedrock_content_safety", "1.0.0", "sha256:" + "a" * 16),
+            ("transform:aws_bedrock_prompt_shield", "1.0.0", "sha256:" + "b" * 16),
+            ("transform:llm", "1.0.0", "sha256:" + "c" * 16),
+        ),
+        binding_generation_fingerprint="3" * 64,
+        decision_codes=("policy_allowed",),
+    )
+
+
+def _plugin_policy_receipt(*, include_landscape: bool = True) -> dict[str, object]:
+    receipt: dict[str, object] = {
+        "policy_hash": "1" * 64,
+        "snapshot_hash": "2" * 64,
+        "binding_sha256": "3" * 64,
+        "tutorial_profile_ready": True,
+        "tutorial_ready": False,
+        "tutorial_blocker": "tutorial_required_control_coverage",
+        "tutorial_profile_alias": "tutorial",
+        "target_llm": "transform:llm",
+        "selected_controls": [
+            {
+                "capability": "prompt_shield",
+                "plugin_id": "transform:aws_bedrock_prompt_shield",
+                "profile_alias": "prompt-approved",
+                "mode": "required",
+            },
+            {
+                "capability": "content_safety",
+                "plugin_id": "transform:aws_bedrock_content_safety",
+                "profile_alias": "content-approved",
+                "mode": "required",
+            },
+        ],
+    }
+    if include_landscape:
+        receipt["landscape_evidence"] = True
+    return receipt
 
 
 def _operator_receipt_details(*, phase: str = "positive") -> dict[str, object]:
@@ -2344,6 +2656,49 @@ def test_exec_receipt_supports_closed_guardrail_and_operator_telemetry_schemas(
     assert envelope["details"] == details
 
 
+def test_guardrail_exec_receipt_must_match_controller_policy_binding() -> None:
+    env = _receipt_env()
+    details = _guardrail_receipt_details()
+    sentinel = acceptance.encode_exec_receipt("verify-bedrock-guardrails", details, env)
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="plugin_policy_binding"):
+        acceptance.extract_exec_receipt(
+            sentinel,
+            expected_candidate_sha=env["ELSPETH_ACCEPTANCE_CANDIDATE_SHA"],
+            expected_task_arn=env["ELSPETH_ACCEPTANCE_TASK_ARN"],
+            expected_scenario_id=env["ELSPETH_ACCEPTANCE_SCENARIO_ID"],
+            expected_check="verify-bedrock-guardrails",
+            expected_plugin_policy_binding_sha256="4" * 64,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["wrong_target", "missing_landscape", "alias_mismatch", "non_required_mode", "mutable_guardrail_version"],
+)
+def test_guardrail_exec_receipt_rejects_incomplete_or_mismatched_plugin_policy_evidence(mutation: str) -> None:
+    details = _guardrail_receipt_details()
+    policy = details["plugin_policy"]
+    assert isinstance(policy, dict)
+    selected = policy["selected_controls"]
+    assert isinstance(selected, list)
+    if mutation == "wrong_target":
+        policy["target_llm"] = "transform:other"
+    elif mutation == "missing_landscape":
+        policy["landscape_evidence"] = False
+    elif mutation == "alias_mismatch":
+        selected[0]["profile_alias"] = "different"  # type: ignore[index]
+    elif mutation == "non_required_mode":
+        selected[1]["mode"] = "recommend"  # type: ignore[index]
+    else:
+        controls = details["controls"]
+        assert isinstance(controls, list)
+        controls[0]["guardrail_version"] = "DRAFT"  # type: ignore[index]
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="exec_receipt_schema"):
+        acceptance.encode_exec_receipt("verify-bedrock-guardrails", details, _receipt_env())
+
+
 @pytest.mark.parametrize("mutation", ["missing_fixed_dimension", "wrong_sentinel_value", "extra_dimension"])
 def test_operator_exec_receipt_rejects_non_exact_retained_metric_query(mutation: str) -> None:
     details = _operator_receipt_details()
@@ -2465,6 +2820,7 @@ def _scenario_inventory(
             "ECS_CLUSTER": f"acceptance-{namespace}-cluster",
             "ECS_SERVICE": f"acceptance-{namespace}-service",
             "WEB_CONTAINER_NAME": "elspeth-web",
+            "ELSPETH_BEDROCK_LIVE_TEST_MODEL": "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
             "TARGET_GROUP_ARN": f"arn:aws:elasticloadbalancing:{region}:{account}:targetgroup/{namespace}-target/0123456789abcdef",
             "ALB_BASE_URL": f"https://{namespace}.example.invalid",
             "ALB_ARN": f"arn:aws:elasticloadbalancing:{region}:{account}:loadbalancer/app/{namespace}-alb/0123456789abcdef",
@@ -2499,6 +2855,9 @@ def _scenario_inventory(
             "OIDC_EXPECTED_AUDIENCE_CLAIM": "client_id",
         }
     )
+    policy_env = _guardrail_env()
+    values.update({name: policy_env[name] for name in acceptance.PLUGIN_POLICY_ASSIGNMENT_NAMES})
+    values["ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256"] = acceptance.plugin_policy_binding_sha256(values)
     if scenario_id == "A":
         values.update(
             {
@@ -2542,7 +2901,7 @@ def _scenario_inventory(
         ):
             values[field] = ""
     return {
-        "schema": "elspeth.aws-ecs-scenario-inventory.v4",
+        "schema": "elspeth.aws-ecs-scenario-inventory.v5",
         "acceptance_run_id": run_id,
         "candidate_sha": "c" * 40,
         "aws_account_id": account,
@@ -2955,6 +3314,15 @@ def test_control_manifest_rejects_shared_terraform_state_and_foreign_scenario_re
     with pytest.raises(acceptance.AcceptanceCheckError, match="scenario_inventory_binding"):
         _init_control_manifest(tmp_path / "foreign-resource.json", inventory_mutator=foreign_arn)
 
+    def drift_policy_binding(inventory: dict[str, object], scenario: str) -> None:
+        if scenario == "A":
+            values = inventory["values"]
+            assert isinstance(values, dict)
+            values["ELSPETH_WEB__PLUGIN_ALLOWLIST"] = "[]"
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="scenario_inventory_binding"):
+        _init_control_manifest(tmp_path / "policy-drift.json", inventory_mutator=drift_policy_binding)
+
 
 def test_scenario_load_is_exact_shell_round_trippable_and_rejects_inventory_drift(tmp_path: Path) -> None:
     path = tmp_path / "control.json"
@@ -2987,6 +3355,68 @@ def test_scenario_load_is_exact_shell_round_trippable_and_rejects_inventory_drif
             path,
             scenario_id="A",
             now=lambda: datetime(2026, 7, 14, 1, 2, tzinfo=UTC),
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        *acceptance.PLUGIN_POLICY_ASSIGNMENT_NAMES,
+        "ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256",
+        "ELSPETH_BEDROCK_LIVE_TEST_MODEL",
+        "AWS_REGION",
+    ],
+)
+def test_task_definition_policy_binding_compares_returned_environment_to_protected_inventory(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    manifest_path = tmp_path / "control.json"
+    _init_control_manifest(manifest_path)
+    inventory = json.loads((tmp_path / "scenario-a.json").read_text())
+    values = inventory["values"]
+    container_name = values["WEB_CONTAINER_NAME"]
+    environment = [
+        {"name": name, "value": values[name]}
+        for name in (
+            *acceptance.PLUGIN_POLICY_ASSIGNMENT_NAMES,
+            "ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256",
+            "ELSPETH_BEDROCK_LIVE_TEST_MODEL",
+            "AWS_REGION",
+        )
+    ]
+    task_definition_arn = "arn:aws:ecs:ap-southeast-2:123456789012:task-definition/elspeth-web:17"
+    payload = {
+        "taskDefinition": {
+            "taskDefinitionArn": task_definition_arn,
+            "status": "ACTIVE",
+            "containerDefinitions": [{"name": container_name, "environment": environment, "secrets": []}],
+        }
+    }
+
+    assert (
+        acceptance.validate_task_definition_policy_binding(
+            payload,
+            manifest_path=manifest_path,
+            scenario_id="A",
+            container_name=container_name,
+        )
+        == task_definition_arn
+    )
+
+    observed = {entry["name"]: entry["value"] for entry in environment}
+    observed[field] = "us-east-1" if field == "AWS_REGION" else "substituted"
+    if field in acceptance.PLUGIN_POLICY_ASSIGNMENT_NAMES:
+        observed["ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256"] = acceptance.plugin_policy_binding_sha256(observed)
+    for entry in environment:
+        entry["value"] = observed[entry["name"]]
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
+        acceptance.validate_task_definition_policy_binding(
+            payload,
+            manifest_path=manifest_path,
+            scenario_id="A",
+            container_name=container_name,
         )
 
 
@@ -3971,6 +4401,42 @@ def test_receipt_store_binds_exec_receipts_and_allows_shared_content_for_distinc
     }
     assert len(hashes) == 1
     assert len(json.loads(manifest_path.read_text())["evidence"]["receipts"]) == 3
+
+
+def test_receipt_store_binds_guardrail_policy_receipt_to_protected_scenario_inventory(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "control.json"
+    _init_control_manifest(manifest_path)
+    task_arn = "arn:aws:ecs:ap-southeast-2:123456789012:task/cluster/private-task-id"
+    env = {
+        "ELSPETH_ACCEPTANCE_CANDIDATE_SHA": "c" * 40,
+        "ELSPETH_ACCEPTANCE_TASK_ARN": task_arn,
+        "ELSPETH_ACCEPTANCE_SCENARIO_ID": "A",
+    }
+    details = _guardrail_receipt_details()
+    policy = details["plugin_policy"]
+    assert isinstance(policy, dict)
+    policy["binding_sha256"] = "4" * 64
+    encoded = acceptance.encode_exec_receipt("verify-bedrock-guardrails", details, env)
+    receipt = acceptance.extract_exec_receipt(
+        encoded,
+        expected_candidate_sha="c" * 40,
+        expected_task_arn=task_arn,
+        expected_scenario_id="A",
+        expected_check="verify-bedrock-guardrails",
+        expected_plugin_policy_binding_sha256="4" * 64,
+    )
+    receipt_path = tmp_path / "guardrail-receipt.json"
+    receipt_path.write_text(json.dumps(receipt))
+    os.chmod(receipt_path, 0o600)
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="receipt_store_binding"):
+        acceptance.receipt_store(
+            manifest_path,
+            scenario_id="A",
+            kind="verify-bedrock-guardrails",
+            subject_id=task_arn,
+            receipt_file=receipt_path,
+        )
 
 
 @pytest.mark.parametrize(

@@ -1,26 +1,26 @@
 {
-  "review": "AWS ECS runtime-readiness plan set — round 10 Plan 10/12 acceptance-contract repair",
+  "review": "AWS ECS runtime-readiness plan set — round 11 Plan 10 protected-policy acceptance repair",
   "date": "2026-07-15",
-  "reviewed_at": "2026-07-14T16:54:37Z",
+  "reviewed_at": "2026-07-14T18:39:49Z",
   "object": "docs/superpowers/plans/aws AWS ECS plan/review set, orchestration run sheet, and runtime-readiness/universal-policy designs @ feat/aws-ecs-program",
-  "process": "Fresh independent full-plan reviews of Plan 10 and Plan 12/Stage 9 in the isolated program worktree, covering the current acceptance controller, canonical runbook, orchestration contract, executable evidence ordering, idempotent resume, cleanup finalization, shell fences, JSON, whitespace, and SHA256 bindings. CI, Wardline, and security review were outside this repair pass.",
+  "process": "Fresh independent full-plan review of the final Plan 10 protected-policy acceptance repair in the isolated program worktree, covering canonical tutorial state, all seven protected settings, task-definition and receipt trust anchors, the shared five-case backend/frontend policy matrix, real direct and guided authoring, executable evidence ordering, shell fences, JSON, whitespace, and SHA256 bindings. CI, Wardline, and security review were outside this repair pass.",
   "verdict": "APPROVED_WITH_WARNINGS",
   "scope_verdict": "GO_TO_IMPLEMENT",
   "runtime_verdict": "PENDING_PLAN_12",
-  "verdict_summary": "GO after committing and reclosing the repaired Plan 10 contract, then execute Stage 9 and Plan 12 in the prescribed order. Both independent full-plan reviews found no remaining correctness, idempotency, cleanup, evidence, or resume blocker. Runtime GO remains pending completion of the external Plan 12 acceptance sequence.",
+  "verdict_summary": "GO after committing and reclosing the repaired Plan 10 contract, then resume Plan 12 in the prescribed order. The final frozen-tree review found no remaining protected-setting, tutorial, task-definition, receipt-binding, policy-matrix, authoring, evidence, or resume blocker. Runtime GO remains pending completion of the external Plan 12 acceptance sequence.",
   "source_sha256": {
     "docs/superpowers/plans/aws/2026-07-12-aws-ecs-autonomous-codex-prompt.md": "40d103810fa11916dda54f665376774cc26a2c69efc333531b0c12942f33744f",
     "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md": "749f37b3d6780ffbe81d831401ccf62b2e695b397364dd4bd6fea4f0e82fdb6b",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-00-overview.md": "94047e986bd687f2c7e5b3f5d508a647a7879f3ad31b9741b378c9320bfdaa44",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-10-packaging-docker.md": "fff072491d74e65416723ac8943820b239a799ab8b4dfdc8b0c031de0a1c90c3",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md": "1a8f48a819c499d9359a2e1e75635c7aa19cc03b04749f93c7ace49ae3946eac"
+    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-00-overview.md": "6cea4243755db7575dbb5ac992136248f67268fcf8bdc105ada91e51d655c7c9",
+    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-10-packaging-docker.md": "26db1f9b8476c37bde6d67d13fc20cf58d2eb70b712ea0e9a2122be2ddd93cb6",
+    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md": "622241408e07374e447de2b2b169bb0641ecad03fdb7d5bd5d5caefe1a22adbe"
   },
   "reviewer_verdicts": {
     "reality": "APPROVED_AFTER_REPAIRS",
     "architecture": "APPROVED_AFTER_REPAIRS",
     "quality_security": "APPROVED_AFTER_REPAIRS",
     "systems_dependencies": "APPROVED_AFTER_REPAIRS",
-    "final_rechecks": "PLAN10_AND_PLAN12_GO",
+    "final_rechecks": "PLAN10_PROTECTED_POLICY_REPAIR_GO",
     "orchestration_contract": "APPROVED",
     "wardline_contract": "APPROVED"
   },
@@ -64,7 +64,11 @@
     "The reconciliation affected-area checkpoint precedes Task 1; Major Checkpoint 6 runs only on the frozen candidate before Task 2, and external cleanup precedes any post-mutation rereconciliation.",
     "Plan 10 now re-verifies the historically bound initial evidence export against its immutable receipt even after cleanup receipts and the cleanup ledger advance.",
     "Plan 12 requires a fresh cleanup ledger after any Task 8 start, exact allowlisted retained-metric queries plus deterministic trace evidence, and immutable strict-superset operator-evidence checkpoints before live CloudWatch deletion.",
-    "Retained evidence validation now binds the exact acceptance namespace and sentinel dimensions, enforces equal metric/trace evidence counts, and resumes safely across an interruption between terminal cleanup-ledger persistence and manifest finalization."
+    "Retained evidence validation now binds the exact acceptance namespace and sentinel dimensions, enforces equal metric/trace evidence counts, and resumes safely across an interruption between terminal cleanup-ledger persistence and manifest finalization.",
+    "Canonical tutorial acceptance now exercises captured tutorial topology and requires typed fail-closed policy errors when tutorial-required controls are unavailable.",
+    "Every candidate, doctor, verifier, rollback, and previous task definition is byte-for-byte bound to the manifest inventory for all seven protected settings, the policy-binding digest, live Bedrock model, and AWS region.",
+    "Guardrail execution receipts and receipt persistence independently bind the protected policy digest before evidence can be credited.",
+    "One shared five-case fixture now drives exact backend and frontend policy projections, including real direct, guided, YAML import, runtime, and delayed-export behavior; public operator-profile aliases lower through the production catalog path."
   ],
   "verification": [
     "git diff --check passes",
@@ -79,7 +83,10 @@
     "257 focused acceptance, runbook-contract, and operator-telemetry tests pass",
     "Ruff check, Ruff format-check, and mypy for the acceptance controller pass",
     "all 48 Plan 12 backtick Bash fences, 2 Plan 12 tilde Bash fences, 16 canonical-runbook Bash fences, and 24 Stage 9 run-sheet Bash fences pass syntax validation",
-    "fresh independent full Plan 10 and full Plan 12/Stage 9 reviewers returned GO with no remaining correctness, idempotency, cleanup, evidence, or resume blocker"
+    "fresh independent full Plan 10 and full Plan 12/Stage 9 reviewers returned GO with no remaining correctness, idempotency, cleanup, evidence, or resume blocker",
+    "final frozen-tree Plan 10 review returned GO after exact raw-fixture/live-backend projection equality closed the last label/order substitution counterexample",
+    "4654 backend tests and 2324 frontend tests pass on the reviewed tree",
+    "Ruff check, Ruff format-check, mypy, and git diff --check pass on the reviewed tree"
   ],
   "reviewed_files": [
     "docs/superpowers/plans/aws/2026-07-08-aws-ecs-00-overview.md",
@@ -147,6 +154,12 @@
       "date": "2026-07-15",
       "verdict": "APPROVED_WITH_WARNINGS",
       "summary": "The repaired Plan 10 and Plan 12 acceptance contract was independently re-reviewed in full. Historical evidence replay, exact retained telemetry, two-stream cleanup-ledger freshness, immutable evidence checkpointing, cleanup crash recovery, and all refreshed review hashes now agree."
+    },
+    {
+      "round": 11,
+      "date": "2026-07-15",
+      "verdict": "APPROVED_WITH_WARNINGS",
+      "summary": "The final Plan 10 protected-policy acceptance repair was independently re-reviewed on the frozen tree. Canonical tutorial state, seven-setting task-definition binding, receipt binding, exact five-case backend/frontend parity, and real direct/guided authoring now agree; the full focused backend and frontend suites are green."
     }
   ]
 }

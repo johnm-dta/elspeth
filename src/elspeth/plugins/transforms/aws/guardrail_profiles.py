@@ -30,6 +30,24 @@ class BedrockLocalRequirementResult:
     available: bool
 
 
+def validate_guardrail_identifier(value: str) -> str:
+    if _GUARDRAIL_ID.fullmatch(value) is None:
+        raise ValueError("guardrail identifier has invalid syntax")
+    return value
+
+
+def validate_guardrail_version(value: str) -> str:
+    if _NUMERIC_VERSION.fullmatch(value) is None:
+        raise ValueError("guardrail version must be an immutable positive numeric version")
+    return value
+
+
+def validate_guardrail_region(value: str) -> str:
+    if _REGION.fullmatch(value) is None:
+        raise ValueError("AWS region has invalid syntax")
+    return value
+
+
 class BedrockGuardrailProfileSettings(BaseModel):
     """Frozen private binding selected through an opaque public alias."""
 
@@ -51,23 +69,17 @@ class BedrockGuardrailProfileSettings(BaseModel):
     @field_validator("guardrail_identifier")
     @classmethod
     def _validate_guardrail_identifier(cls, value: str) -> str:
-        if _GUARDRAIL_ID.fullmatch(value) is None:
-            raise ValueError("guardrail identifier has invalid syntax")
-        return value
+        return validate_guardrail_identifier(value)
 
     @field_validator("guardrail_version")
     @classmethod
     def _validate_guardrail_version(cls, value: str) -> str:
-        if _NUMERIC_VERSION.fullmatch(value) is None:
-            raise ValueError("guardrail version must be an immutable positive numeric version")
-        return value
+        return validate_guardrail_version(value)
 
     @field_validator("region")
     @classmethod
     def _validate_region(cls, value: str) -> str:
-        if _REGION.fullmatch(value) is None:
-            raise ValueError("AWS region has invalid syntax")
-        return value
+        return validate_guardrail_region(value)
 
     def check_local_requirements(self) -> BedrockLocalRequirementResult:
         """Check optional SDK availability/version without making a network call."""

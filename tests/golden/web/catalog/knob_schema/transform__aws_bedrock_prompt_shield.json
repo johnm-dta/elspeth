@@ -1,0 +1,55 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Required Input Fields",
+        "name": "required_input_fields",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "kind": "text",
+        "label": "Guardrail Identifier",
+        "name": "guardrail_identifier",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "kind": "text",
+        "label": "Guardrail Version",
+        "name": "guardrail_version",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "kind": "text",
+        "label": "Region",
+        "name": "region",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Fields",
+        "name": "fields",
+        "nullable": false,
+        "required": true
+      }
+    ]
+  },
+  "plugin_kind": "transform",
+  "plugin_name": "aws_bedrock_prompt_shield"
+}

@@ -1,0 +1,208 @@
+{
+  "composer_hints": [
+    "Use OUTPUT after an LLM or INPUT when screening inbound content.",
+    "AWS categories do not include Azure Content Safety self_harm parity.",
+    "Both detect-only positives and Guardrail interventions are blocked."
+  ],
+  "description": "Block configured harmful-content categories through Bedrock Guardrails.",
+  "json_schema": {
+    "$defs": {
+      "FieldDefinition": {
+        "description": "Definition of a single field in a schema.\n\nAttributes:\n    name: Field name (must be valid Python identifier)\n    field_type: One of: str, int, float, bool, any\n    required: If False, field may be absent from the row\n    nullable: If True, field value may be None when present. Used by\n        coalesce merge logic to track whether a branch can produce None\n        values for this field (affecting collision policy semantics).",
+        "properties": {
+          "field_type": {
+            "enum": [
+              "str",
+              "int",
+              "float",
+              "bool",
+              "any"
+            ],
+            "title": "Field Type",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "nullable": {
+            "default": false,
+            "title": "Nullable",
+            "type": "boolean"
+          },
+          "required": {
+            "default": true,
+            "title": "Required",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "field_type"
+        ],
+        "title": "FieldDefinition",
+        "type": "object"
+      },
+      "SchemaConfig": {
+        "description": "Configuration for a plugin's data schema.\n\nA schema can be either observed (accept anything, infer types from data)\nor explicit (validate against specified fields).\n\nSchema Contracts (for DAG validation):\n    - guaranteed_fields: Fields the producer GUARANTEES will exist AND are\n      part of the stable API contract. Downstream can safely depend on these.\n    - required_fields: Fields the consumer REQUIRES in input.\n    - audit_fields: Fields that exist in output but are NOT part of the\n      stability contract. These are for audit trail reconstruction and may\n      change between versions. DAG validation does NOT enforce these.\n\nFor explicit schemas (mode='fixed' or 'flexible'), the declared fields are\nimplicitly guaranteed. Use guaranteed_fields/required_fields to express\ncontracts for observed schemas that still have known field requirements.\n\nExample YAML for an observed schema with explicit contracts:\n    schema:\n      mode: observed\n      guaranteed_fields: [customer_id, timestamp]  # Producer guarantees these\n\n    schema:\n      mode: observed\n      required_fields: [customer_id, amount]  # Consumer requires these\n\n    schema:\n      mode: observed\n      guaranteed_fields: [response, response_usage]  # Stable API\n      audit_fields: [response_template_hash]  # May change between versions\n\nAttributes:\n    mode: \"fixed\" (exact fields), \"flexible\" (at least these), or \"observed\" (infer from data)\n    fields: List of FieldDefinitions, or None if observed\n    is_observed: True if schema types are inferred from data\n    guaranteed_fields: Field names the producer guarantees (for observed schemas)\n    required_fields: Field names the consumer requires (for observed schemas)\n    audit_fields: Field names that exist but are not part of stability contract",
+        "properties": {
+          "audit_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Audit Fields"
+          },
+          "fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/$defs/FieldDefinition"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fields"
+          },
+          "guaranteed_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Guaranteed Fields"
+          },
+          "mode": {
+            "enum": [
+              "fixed",
+              "flexible",
+              "observed"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "required_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Required Fields"
+          }
+        },
+        "required": [
+          "mode",
+          "fields"
+        ],
+        "title": "SchemaConfig",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "fields": {
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 32,
+        "minItems": 1,
+        "title": "Fields",
+        "type": "array"
+      },
+      "profile": {
+        "description": "Operator-approved Bedrock Guardrail profile alias",
+        "enum": [
+          "content-default"
+        ],
+        "type": "string"
+      },
+      "schema": {
+        "$ref": "#/$defs/SchemaConfig",
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "title": "Schema"
+      },
+      "source": {
+        "default": "OUTPUT",
+        "enum": [
+          "INPUT",
+          "OUTPUT"
+        ],
+        "title": "Source",
+        "type": "string"
+      }
+    },
+    "required": [
+      "profile",
+      "fields",
+      "schema"
+    ],
+    "type": "object"
+  },
+  "knob_schema": {
+    "fields": [
+      {
+        "choices": [
+          "content-default"
+        ],
+        "description": "Operator-approved Bedrock Guardrail profile alias",
+        "name": "profile",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "description": null,
+        "name": "fields",
+        "required": true,
+        "type": "array"
+      },
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "name": "schema",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "description": null,
+        "name": "source",
+        "required": false,
+        "type": "string"
+      }
+    ]
+  },
+  "name": "aws_bedrock_content_safety",
+  "plugin_type": "transform",
+  "policy_capabilities": [
+    {
+      "blocks_positive_detection": true,
+      "capability": "content_safety",
+      "control_role": "output"
+    }
+  ],
+  "secret_requirements": [],
+  "web_config_authority": "operator_profiled"
+}

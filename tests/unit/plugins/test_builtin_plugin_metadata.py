@@ -91,6 +91,15 @@ class TestBuiltinTransformMetadata:
         assert isinstance(PassThrough.plugin_version, str)
         assert PassThrough.plugin_version != "0.0.0", "PassThrough has placeholder version"
 
+    def test_bedrock_guardrail_transforms_have_pinned_metadata(self) -> None:
+        from elspeth.plugins.transforms.aws.bedrock_content_safety import AWSBedrockContentSafety
+        from elspeth.plugins.transforms.aws.bedrock_prompt_shield import AWSBedrockPromptShield
+
+        for transform in (AWSBedrockPromptShield, AWSBedrockContentSafety):
+            assert transform.plugin_version == "1.0.0"
+            assert transform.source_file_hash is not None
+            assert transform.source_file_hash.startswith("sha256:")
+
     def test_field_mapper_has_plugin_version(self) -> None:
         """FieldMapper must have non-default plugin_version."""
         from elspeth.plugins.transforms.field_mapper import FieldMapper

@@ -236,6 +236,33 @@ def test_bedrock_profile_resolver_exposes_only_alias_and_safe_options() -> None:
     assert lowered.executable_options["guardrail_identifier"] == "privateguardrail"
 
 
+def test_bedrock_profile_resolver_preserves_referenced_public_schema_definitions() -> None:
+    runtime = RuntimeWebPluginConfig.from_settings(
+        _settings(
+            bedrock_guardrail_profiles=(
+                {
+                    "alias": "prompt-default",
+                    "plugin": "aws_bedrock_prompt_shield",
+                    "guardrail_identifier": "privateguardrail",
+                    "guardrail_version": "7",
+                    "region": "us-east-1",
+                },
+            ),
+        )
+    )
+    policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+    registry = OperatorProfileRegistry(policy=policy, settings=runtime)
+
+    public = registry.public_schema(
+        PluginId("transform", "aws_bedrock_prompt_shield"),
+        create_catalog_service().get_schema("transform", "aws_bedrock_prompt_shield"),
+        available_aliases=("prompt-default",),
+    )
+
+    assert public.json_schema["properties"]["schema"]["$ref"] == "#/$defs/SchemaConfig"
+    assert "SchemaConfig" in public.json_schema["$defs"]
+
+
 def test_bedrock_profile_resolver_rejects_private_or_mixed_options() -> None:
     runtime = RuntimeWebPluginConfig.from_settings(
         _settings(

@@ -415,6 +415,19 @@ class _BedrockGuardrailProfileResolver:
             "required": required,
             "additionalProperties": False,
         }
+        definitions = full_schema.json_schema.get("$defs", {})
+        referenced_definitions: dict[str, Any] = {}
+        pending = _schema_refs(public_json_schema)
+        while pending:
+            definition_name = pending.pop()
+            if definition_name in referenced_definitions:
+                continue
+            definition = definitions.get(definition_name) if isinstance(definitions, dict) else None
+            if isinstance(definition, dict):
+                referenced_definitions[definition_name] = deepcopy(definition)
+                pending.update(_schema_refs(definition))
+        if referenced_definitions:
+            public_json_schema["$defs"] = referenced_definitions
         fields = [
             {
                 "name": name,

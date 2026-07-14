@@ -281,18 +281,7 @@ class BedrockGuardrailsClient(AuditedClientBase):
         return self._sdk_client
 
     def _build_sdk_client(self) -> Any:
-        import boto3
-        from botocore.config import Config
-
-        return boto3.client(
-            "bedrock-runtime",
-            region_name=self._region,
-            config=Config(
-                retries={"mode": "standard", "total_max_attempts": 3},
-                connect_timeout=5,
-                read_timeout=15,
-            ),
-        )
+        return build_bedrock_runtime_client(self._region)
 
     def _emit_after_audit(
         self,
@@ -422,3 +411,19 @@ class BedrockGuardrailsClient(AuditedClientBase):
             raise terminal_error
         assert decision is not None
         return decision
+
+
+def build_bedrock_runtime_client(region: str) -> Any:
+    """Build the SDK client with botocore as the sole retry owner."""
+    import boto3
+    from botocore.config import Config
+
+    return boto3.client(
+        "bedrock-runtime",
+        region_name=region,
+        config=Config(
+            retries={"mode": "standard", "total_max_attempts": 3},
+            connect_timeout=5,
+            read_timeout=15,
+        ),
+    )

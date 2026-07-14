@@ -216,6 +216,8 @@ class TestDiscoverAllPlugins:
         # Azure transforms live in plugins/transforms/azure/ (subdirectory!)
         assert "azure_content_safety" in transform_names, f"Missing azure_content_safety in {transform_names}"
         assert "azure_prompt_shield" in transform_names, f"Missing azure_prompt_shield in {transform_names}"
+        assert "aws_bedrock_prompt_shield" in transform_names, f"Missing aws_bedrock_prompt_shield in {transform_names}"
+        assert "aws_bedrock_content_safety" in transform_names, f"Missing aws_bedrock_content_safety in {transform_names}"
 
     def test_discover_all_sinks(self) -> None:
         """Verify all sinks are discovered including azure."""
@@ -252,9 +254,7 @@ class TestDiscoverAllPlugins:
 
         # Expected counts verified during migration from hookimpl files
         EXPECTED_SOURCE_COUNT = 7  # csv, json, null, aws_s3, azure_blob, dataverse, text
-        EXPECTED_TRANSFORM_COUNT = (
-            29  # 22 standard transforms + 2 azure safety + azure_document_intelligence + llm + rag_retrieval + blob_fetch + blob_csv_expand
-        )
+        EXPECTED_TRANSFORM_COUNT = 31  # Existing 29 plus two AWS Bedrock Guardrail transforms
         EXPECTED_SINK_COUNT = 8  # csv, json, text, database, aws_s3, azure_blob, dataverse, chroma_sink
 
         discovered = discover_all_plugins()

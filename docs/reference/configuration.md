@@ -110,16 +110,17 @@ authoring, import, validation, and execution surface.
 
 ### Environment configuration
 
-Collection and mapping values use JSON. This example enables the Azure prompt
-and output controls, requires both controls, and selects a keyless Bedrock
-profile for the tutorial:
+Collection and mapping values use JSON. This example enables the AWS Bedrock
+prompt and output controls, requires both controls, and selects a keyless
+Bedrock profile for the tutorial:
 
 ```bash
-ELSPETH_WEB__PLUGIN_ALLOWLIST='["transform:azure_prompt_shield","transform:azure_content_safety"]'
-ELSPETH_WEB__PLUGIN_PREFERENCES='{"prompt_shield":["transform:azure_prompt_shield"],"content_safety":["transform:azure_content_safety"]}'
+ELSPETH_WEB__PLUGIN_ALLOWLIST='["transform:aws_bedrock_prompt_shield","transform:aws_bedrock_content_safety"]'
+ELSPETH_WEB__PLUGIN_PREFERENCES='{"prompt_shield":["transform:aws_bedrock_prompt_shield"],"content_safety":["transform:aws_bedrock_content_safety"]}'
 ELSPETH_WEB__PLUGIN_CONTROL_MODES='{"prompt_shield":"required","content_safety":"required"}'
 ELSPETH_WEB__LLM_PROFILES='{"tutorial":{"provider":"bedrock","model":"bedrock/anthropic.claude-3-haiku-20240307-v1:0","region_name":"ap-southeast-2"}}'
 ELSPETH_WEB__TUTORIAL_LLM_PROFILE='tutorial'
+ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES='[{"alias":"prompt-default","plugin":"aws_bedrock_prompt_shield","guardrail_identifier":"operator-prompt-guardrail","guardrail_version":"7","region":"ap-southeast-2"},{"alias":"content-default","plugin":"aws_bedrock_content_safety","guardrail_identifier":"operator-content-guardrail","guardrail_version":"4","region":"ap-southeast-2"}]'
 ```
 
 Preference arrays are ordered. When a capability has multiple authorized
@@ -133,6 +134,17 @@ operator-owned `credential_ref`. A server-scoped profile resolves only through
 the server store; a user-scoped profile resolves only through that principal's
 store. Web-authored pipeline state stores the opaque profile alias, not the
 provider, model, endpoint, or credential binding.
+
+Bedrock Guardrail profiles follow the same separation. Web authors select only
+an opaque `profile`, row `fields`, `schema`, and, for content safety, `source`.
+The operator-owned Guardrail identifier, immutable numeric version, and region
+are lowered only for validation and execution. When a plugin has multiple
+profiles, configure its choice explicitly in
+`ELSPETH_WEB__BEDROCK_GUARDRAIL_DEFAULT_PROFILES`; plugin preferences select the
+implementation, while this mapping selects that implementation's private
+binding. Credentials come from the AWS default SDK chain. On ECS, grant the
+required Bedrock permissions to the task role; never place access keys or
+custom endpoints in profile or pipeline configuration.
 
 ### Startup, restart, and remediation
 
@@ -570,6 +582,8 @@ fields = extract_jinja2_fields(template)  # frozenset({'customer_id', 'message_t
 | `llm` | Unified LLM transform (azure/openrouter/bedrock providers, single/multi-query) |
 | `azure_content_safety` | Detect harmful content via Azure AI |
 | `azure_prompt_shield` | Detect prompt injection via Azure AI |
+| `aws_bedrock_content_safety` | Detect configured harmful-content categories through Bedrock Guardrails |
+| `aws_bedrock_prompt_shield` | Detect prompt attacks through Bedrock Guardrails |
 | `rag_retrieval` | Enriches rows with retrieval-augmented context from search providers |
 
 ### AWS Bedrock LLM
@@ -594,6 +608,53 @@ transforms:
       schema:
         mode: observed
 ```
+
+### AWS Bedrock Guardrail shields
+
+CLI and batch pipelines use an explicit trained-operator binding. The Guardrail
+identifier, immutable numeric version, region, fields, and schema are required;
+there are no access-key or endpoint options. Prompt shielding always evaluates
+content as `INPUT`. Content safety accepts `source: INPUT` for inbound text or
+`source: OUTPUT` for generated text.
+
+```yaml
+transforms:
+  - name: screen_prompt
+    plugin: aws_bedrock_prompt_shield
+    input: prompt_in
+    on_success: generation_in
+    on_error: blocked
+    options:
+      guardrail_identifier: operator-prompt-guardrail
+      guardrail_version: "7"
+      region: ap-southeast-2
+      fields: [prompt]
+      schema:
+        mode: observed
+
+  - name: screen_generated_text
+    plugin: aws_bedrock_content_safety
+    input: generated_in
+    on_success: output
+    on_error: blocked
+    options:
+      guardrail_identifier: operator-content-guardrail
+      guardrail_version: "4"
+      region: ap-southeast-2
+      fields: [response]
+      source: OUTPUT
+      schema:
+        mode: observed
+```
+
+Each configured field must receive an explicit safe result. A detect-only
+positive is blocked even when the top-level Guardrail action is `NONE`, and an
+intervention, service failure, or malformed response also fails closed without
+including provider-generated text in row data or error details.
+
+The harmful-content categories required by this AWS plugin do not include
+Azure Content Safety's `self_harm` category. A deployment must not claim Azure
+coverage parity unless an additional approved control covers that category.
 
 ---
 

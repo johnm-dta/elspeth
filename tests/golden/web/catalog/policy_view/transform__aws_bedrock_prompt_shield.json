@@ -126,6 +126,7 @@
     "additionalProperties": false,
     "properties": {
       "fields": {
+        "description": "Input row fields whose text is evaluated by the Guardrail.",
         "items": {
           "type": "string"
         },
@@ -166,7 +167,7 @@
         "type": "string"
       },
       {
-        "description": null,
+        "description": "Input row fields whose text is evaluated by the Guardrail.",
         "name": "fields",
         "required": true,
         "type": "array"

@@ -20,6 +20,7 @@
         "required": false
       },
       {
+        "description": "Operator-installed Bedrock Guardrail identifier or ARN.",
         "kind": "text",
         "label": "Guardrail Identifier",
         "name": "guardrail_identifier",
@@ -27,6 +28,7 @@
         "required": true
       },
       {
+        "description": "Published Bedrock Guardrail version used for evaluation.",
         "kind": "text",
         "label": "Guardrail Version",
         "name": "guardrail_version",
@@ -34,6 +36,7 @@
         "required": true
       },
       {
+        "description": "AWS region containing the Guardrail.",
         "kind": "text",
         "label": "Region",
         "name": "region",
@@ -41,6 +44,7 @@
         "required": true
       },
       {
+        "description": "Input row fields whose text is evaluated by the Guardrail.",
         "item_kind": "text",
         "kind": "string-list",
         "label": "Fields",
@@ -50,6 +54,7 @@
       },
       {
         "default": "OUTPUT",
+        "description": "Bedrock Guardrail assessment direction for the selected fields.",
         "enum": [
           "INPUT",
           "OUTPUT"

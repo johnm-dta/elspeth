@@ -11,6 +11,7 @@ import re
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from functools import cache
 from typing import TYPE_CHECKING, Any, Final
 
 from sqlalchemy import select
@@ -36,7 +37,7 @@ from elspeth.contracts.errors import AuditIntegrityError, OrchestrationInvariant
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.preflight import PreflightResult
-from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
+from elspeth.contracts.runtime_val_manifest import _assert_runtime_val_registries_frozen, build_runtime_val_manifest
 from elspeth.contracts.scheduler import TokenWorkStatus
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.core.ids import generate_id
@@ -177,6 +178,24 @@ def _validate_openrouter_catalog_snapshot(*, sha256: str, source: str) -> None:
         raise AuditIntegrityError(f"openrouter_catalog_source must be one of {sorted(_OPENROUTER_CATALOG_SOURCES)!r}, got {source!r}")
 
 
+@cache
+def _cached_frozen_runtime_val_manifest_json() -> str:
+    """Serialize the process's frozen runtime-VAL registries once.
+
+    Building the manifest hashes source, bytecode, and transitive helper
+    dependencies. Those inputs cannot change after the registries are frozen
+    in a production worker, so recomputing them for every run adds latency
+    without adding evidence. The uncached builder remains authoritative for
+    direct drift probes that deliberately mutate code objects.
+    """
+    return canonical_json(build_runtime_val_manifest())
+
+
+def _frozen_runtime_val_manifest_json() -> str:
+    _assert_runtime_val_registries_frozen()
+    return _cached_frozen_runtime_val_manifest_json()
+
+
 class RunLifecycleRepository:
     """Run lifecycle operations for the Landscape audit trail.
 
@@ -286,7 +305,7 @@ class RunLifecycleRepository:
         # orchestrator has frozen both registries; begin_run is called from
         # Orchestrator.run() which sequences prepare_for_run() (which
         # freezes) before this call.
-        runtime_val_manifest_json = canonical_json(build_runtime_val_manifest())
+        runtime_val_manifest_json = _frozen_runtime_val_manifest_json()
 
         run = Run(
             run_id=run_id,

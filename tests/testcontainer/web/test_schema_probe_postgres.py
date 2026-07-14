@@ -30,7 +30,7 @@ from elspeth.web.schema_probe import (
     probe_session_schema,
 )
 from elspeth.web.sessions.models import metadata as session_metadata
-from elspeth.web.sessions.schema import SessionSchemaError
+from elspeth.web.sessions.schema import SessionSchemaError, initialize_session_schema
 
 pytestmark = pytest.mark.testcontainer
 
@@ -68,6 +68,15 @@ def test_fresh_create_reaches_current(postgres_engine: Engine, kind: str) -> Non
         assert probe_landscape_schema(postgres_engine) is SchemaState.MISSING
         init_landscape_schema(postgres_engine)
         assert probe_landscape_schema(postgres_engine) is SchemaState.CURRENT
+
+
+def test_postgres_session_init_does_not_poison_later_sqlite_schema(postgres_engine: Engine) -> None:
+    init_session_schema(postgres_engine)
+
+    sqlite_engine = create_engine("sqlite:///:memory:")
+    initialize_session_schema(sqlite_engine)
+
+    assert inspect(sqlite_engine).get_foreign_keys("chat_messages")
 
 
 def test_landscape_server_default_is_false(postgres_engine: Engine) -> None:

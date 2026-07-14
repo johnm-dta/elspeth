@@ -126,6 +126,7 @@
     "additionalProperties": false,
     "properties": {
       "fields": {
+        "description": "Input row fields whose text is evaluated by the Guardrail.",
         "items": {
           "type": "string"
         },
@@ -148,6 +149,7 @@
       },
       "source": {
         "default": "OUTPUT",
+        "description": "Bedrock Guardrail assessment direction for the selected fields.",
         "enum": [
           "INPUT",
           "OUTPUT"
@@ -175,7 +177,7 @@
         "type": "string"
       },
       {
-        "description": null,
+        "description": "Input row fields whose text is evaluated by the Guardrail.",
         "name": "fields",
         "required": true,
         "type": "array"
@@ -187,7 +189,7 @@
         "type": "object"
       },
       {
-        "description": null,
+        "description": "Bedrock Guardrail assessment direction for the selected fields.",
         "name": "source",
         "required": false,
         "type": "string"

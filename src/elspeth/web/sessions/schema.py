@@ -8,6 +8,7 @@ schema; stale local/runtime files should be deleted and recreated.
 
 from __future__ import annotations
 
+from threading import Lock
 from typing import Any, NoReturn
 
 from sqlalchemy import Connection, Engine, inspect, text
@@ -21,6 +22,7 @@ from elspeth.web.sessions.models import (
 )
 
 _SQLITE_INTERNAL_TABLES: frozenset[str] = frozenset({"sqlite_sequence"})
+_SESSION_METADATA_CREATE_LOCK = Lock()
 
 # Required SQLite triggers. These triggers enforce audit invariants
 # that cannot be expressed as table CHECK constraints:
@@ -71,6 +73,37 @@ class SessionSchemaError(RuntimeError):
     """
 
 
+def _create_session_tables(bind: Engine | Connection, *, checkfirst: bool = True) -> None:
+    """Create session tables without leaking SQLAlchemy's dialect-local state.
+
+    PostgreSQL breaks the session metadata's foreign-key cycles with ALTER
+    statements and temporarily annotates those constraints via the private
+    ``_create_rule`` attribute. SQLAlchemy leaves those annotations on the
+    shared metadata object after ``create_all``; a later SQLite bootstrap in
+    the same process would then omit the affected inline foreign keys.
+
+    Snapshotting and restoring the exact prior values keeps the module-level
+    metadata reusable across database dialects without weakening either
+    schema.
+    """
+    with _SESSION_METADATA_CREATE_LOCK:
+        missing = object()
+        create_rules: list[tuple[Any, object]] = []
+        for table in metadata.tables.values():
+            for constraint in table.constraints:
+                create_rules.append((constraint, getattr(constraint, "_create_rule", missing)))
+
+        try:
+            metadata.create_all(bind=bind, checkfirst=checkfirst)
+        finally:
+            for constraint, create_rule in create_rules:
+                if create_rule is missing:
+                    if hasattr(constraint, "_create_rule"):
+                        del constraint._create_rule
+                else:
+                    constraint._create_rule = create_rule
+
+
 def initialize_session_schema(engine: Engine) -> None:
     """Create or validate the current web session database schema.
 
@@ -89,7 +122,7 @@ def initialize_session_schema(engine: Engine) -> None:
         # that claims the current epoch but has no tables. Stamping after
         # ``create_all`` succeeds binds the sentinel to "schema actually
         # present at this epoch."
-        metadata.create_all(engine)
+        _create_session_tables(engine)
         _stamp_schema_sentinels(engine)
         _validate_current_schema(engine)
         return

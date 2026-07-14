@@ -41,6 +41,7 @@
       },
       {
         "default": "utf-8",
+        "description": "Character encoding used for every emitted line.",
         "enum": [
           "utf-8",
           "ascii",
@@ -55,6 +56,7 @@
       },
       {
         "default": "write",
+        "description": "Write a new output or append lines to an existing output.",
         "enum": [
           "write",
           "append"

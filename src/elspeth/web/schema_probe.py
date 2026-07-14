@@ -26,6 +26,7 @@ from elspeth.web.sessions.models import metadata as session_metadata
 from elspeth.web.sessions.schema import (
     SessionSchemaError,
     _assert_schema_sentinels,
+    _create_session_tables,
     _stamp_schema_sentinels,
     probe_current_schema,
 )
@@ -275,7 +276,7 @@ def init_session_schema(engine: Engine) -> None:
         if state is SchemaState.CURRENT:
             return
         if state is SchemaState.MISSING:
-            session_metadata.create_all(bind=conn, checkfirst=True)
+            _create_session_tables(conn, checkfirst=True)
             _stamp_schema_sentinels(conn)
             return
         raise SessionSchemaError("Session database schema is stale or partial; delete the old session database and restart.")

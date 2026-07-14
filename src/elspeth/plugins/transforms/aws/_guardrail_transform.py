@@ -18,6 +18,7 @@ from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.transforms.aws.guardrail_profiles import (
+    check_bedrock_local_requirements,
     validate_guardrail_identifier,
     validate_guardrail_region,
     validate_guardrail_version,
@@ -80,6 +81,10 @@ class BedrockGuardrailTransformBase(BaseTransform, ABC):
     _required_filters: ClassVar[tuple[str, ...]]
     _detected_reason: ClassVar[TransformErrorCategory]
     _probe_field: ClassVar[str]
+
+    @classmethod
+    def check_web_local_requirements(cls) -> bool:
+        return check_bedrock_local_requirements().available
 
     def __init__(self, config: dict[str, Any], cfg: BedrockGuardrailTransformConfig, schema_name: str) -> None:
         super().__init__(config)

@@ -70,6 +70,25 @@ class BedrockLocalRequirementResult:
     available: bool
 
 
+def check_bedrock_local_requirements() -> BedrockLocalRequirementResult:
+    """Check optional SDK availability/version without making a network call."""
+    try:
+        boto3 = importlib.import_module("boto3")
+        botocore = importlib.import_module("botocore")
+    except ImportError:
+        return BedrockLocalRequirementResult(available=False)
+
+    for module in (boto3, botocore):
+        version = getattr(module, "__version__", "")
+        try:
+            major, minor, *_rest = (int(part) for part in version.split("."))
+        except (TypeError, ValueError):
+            return BedrockLocalRequirementResult(available=False)
+        if major != 1 or minor < 40:
+            return BedrockLocalRequirementResult(available=False)
+    return BedrockLocalRequirementResult(available=True)
+
+
 def validate_guardrail_identifier(value: str) -> str:
     if _GUARDRAIL_ID.fullmatch(value) is None:
         raise ValueError("guardrail identifier has invalid syntax")
@@ -123,18 +142,4 @@ class BedrockGuardrailProfileSettings(BaseModel):
 
     def check_local_requirements(self) -> BedrockLocalRequirementResult:
         """Check optional SDK availability/version without making a network call."""
-        try:
-            boto3 = importlib.import_module("boto3")
-            botocore = importlib.import_module("botocore")
-        except ImportError:
-            return BedrockLocalRequirementResult(available=False)
-
-        for module in (boto3, botocore):
-            version = getattr(module, "__version__", "")
-            try:
-                major, minor, *_rest = (int(part) for part in version.split("."))
-            except (TypeError, ValueError):
-                return BedrockLocalRequirementResult(available=False)
-            if major != 1 or minor < 40:
-                return BedrockLocalRequirementResult(available=False)
-        return BedrockLocalRequirementResult(available=True)
+        return check_bedrock_local_requirements()

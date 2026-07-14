@@ -114,10 +114,10 @@ def _list(value: object, *, exact: int | None = None, minimum: int = 0, maximum:
     return value
 
 
-def _parse_usage(value: object, *, require_all: bool = False) -> GuardrailUsage:
+def _parse_usage(value: object) -> GuardrailUsage:
     usage = _mapping(value)
     keys = frozenset(usage)
-    if (require_all and keys != ALL_USAGE_KEYS) or (not require_all and (not keys >= _REQUIRED_USAGE_KEYS or not keys <= ALL_USAGE_KEYS)):
+    if not keys >= _REQUIRED_USAGE_KEYS or not keys <= ALL_USAGE_KEYS:
         raise GuardrailResponseError
     units: list[tuple[str, int]] = []
     for key, item in usage.items():
@@ -154,25 +154,31 @@ def _validate_coverage(value: object) -> None:
         raise GuardrailResponseError
     for raw_counts in coverage.values():
         counts = _mapping(raw_counts)
-        if set(counts) != {"guarded", "total"}:
+        if not set(counts) <= {"guarded", "total"}:
             raise GuardrailResponseError
-        guarded = counts["guarded"]
-        total = counts["total"]
-        if type(guarded) is not int or type(total) is not int:
-            raise GuardrailResponseError
-        if not 0 <= guarded <= total <= _MAX_USAGE_UNITS:
+        for name in ("guarded", "total"):
+            if name in counts:
+                count = counts[name]
+                if type(count) is not int or not 0 <= count <= _MAX_USAGE_UNITS:
+                    raise GuardrailResponseError
+        guarded = counts.get("guarded")
+        total = counts.get("total")
+        if type(guarded) is int and type(total) is int and guarded > total:
             raise GuardrailResponseError
 
 
 def _validate_invocation_metrics(value: object) -> None:
     metrics = _mapping(value)
-    if set(metrics) != {"guardrailProcessingLatency", "usage", "guardrailCoverage"}:
+    if not set(metrics) <= {"guardrailProcessingLatency", "usage", "guardrailCoverage"}:
         raise GuardrailResponseError
-    latency = metrics["guardrailProcessingLatency"]
-    if type(latency) is not int or not 0 <= latency <= _MAX_LONG:
-        raise GuardrailResponseError
-    _parse_usage(metrics["usage"], require_all=True)
-    _validate_coverage(metrics["guardrailCoverage"])
+    if "guardrailProcessingLatency" in metrics:
+        latency = metrics["guardrailProcessingLatency"]
+        if type(latency) is not int or not 0 <= latency <= _MAX_LONG:
+            raise GuardrailResponseError
+    if "usage" in metrics:
+        _parse_usage(metrics["usage"])
+    if "guardrailCoverage" in metrics:
+        _validate_coverage(metrics["guardrailCoverage"])
 
 
 def _validate_applied_guardrail_details(value: object) -> None:

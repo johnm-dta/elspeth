@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -142,6 +144,73 @@ def test_explicit_authorization_checks_local_requirement_without_detail_leak() -
         compile_web_plugin_policy(registry=_FakeRegistry(transforms=[unavailable]), settings=runtime)
 
     assert str(exc_info.value) == "web plugin policy invalid: plugin_unavailable"
+
+
+@pytest.mark.parametrize(
+    "plugin",
+    ("aws_bedrock_prompt_shield", "aws_bedrock_content_safety"),
+)
+def test_allowlisted_bedrock_shield_without_profile_requires_optional_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+    plugin: str,
+) -> None:
+    marker = "PRIVATE_IMPORT_FAILURE_MARKER"
+    real_import = importlib.import_module
+
+    def missing_sdk(name: str, package: str | None = None) -> object:
+        if name in {"boto3", "botocore"}:
+            raise ImportError(marker)
+        return real_import(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", missing_sdk)
+    runtime = RuntimeWebPluginConfig.from_settings(_settings(plugin_allowlist=(f"transform:{plugin}",)))
+
+    with pytest.raises(ValueError) as exc_info:
+        compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+
+    assert str(exc_info.value) == "web plugin policy invalid: plugin_unavailable"
+    assert marker not in str(exc_info.value)
+
+
+def test_allowlisted_bedrock_shield_without_profile_rejects_old_optional_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = importlib.import_module
+
+    def old_sdk(name: str, package: str | None = None) -> object:
+        if name in {"boto3", "botocore"}:
+            return SimpleNamespace(__version__="1.39.99")
+        return real_import(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", old_sdk)
+    runtime = RuntimeWebPluginConfig.from_settings(_settings(plugin_allowlist=("transform:aws_bedrock_prompt_shield",)))
+
+    with pytest.raises(ValueError, match=r"^web plugin policy invalid: plugin_unavailable$"):
+        compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+
+
+def test_unallowlisted_bedrock_shields_do_not_import_optional_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    real_import = importlib.import_module
+
+    def track_sdk_imports(name: str, package: str | None = None) -> object:
+        if name in {"boto3", "botocore"}:
+            calls.append(name)
+            raise ImportError("optional SDK unavailable")
+        return real_import(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", track_sdk_imports)
+
+    policy = compile_web_plugin_policy(
+        registry=get_shared_plugin_manager(),
+        settings=RuntimeWebPluginConfig.from_settings(_settings()),
+    )
+
+    assert PluginId("transform", "aws_bedrock_prompt_shield") not in policy.authorized
+    assert PluginId("transform", "aws_bedrock_content_safety") not in policy.authorized
+    assert calls == []
 
 
 def _bedrock_profile(plugin: str = "aws_bedrock_prompt_shield") -> dict[str, str]:

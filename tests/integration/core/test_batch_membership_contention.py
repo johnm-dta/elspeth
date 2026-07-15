@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing
 import queue
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -179,3 +180,81 @@ def test_batch_transition_wins_cross_process_race_without_post_closure_membershi
         assert verify.execution.get_batch_members(batch_id) == []
     finally:
         verify_db.close()
+
+
+@pytest.mark.timeout(30)
+def test_caller_deferred_transaction_refuses_concurrent_closure_without_busy_snapshot(tmp_path: Path) -> None:
+    """The guarded insert is SQLite's first snapshot-establishing statement.
+
+    The event pair makes this test discriminate both statement shapes.  On
+    the former read-then-write implementation, the peer commits immediately
+    after the batch predicate SELECT, leaving the caller with a stale WAL
+    snapshot before its INSERT.  On the insert-first implementation, the peer
+    commits immediately before that INSERT.  Both interleavings must resolve
+    as the same policy refusal, never SQLITE_BUSY_SNAPSHOT wrapped as a
+    LandscapeRecordError.
+    """
+    db_url, batch_id, token_id = _seed_file_database(tmp_path / "deferred.db")
+    caller_db = LandscapeDB.from_url(db_url, create_tables=False)
+    peer_db = LandscapeDB.from_url(db_url, create_tables=False)
+    caller = RecorderFactory(caller_db)
+    peer = RecorderFactory(peer_db)
+    start_transition = threading.Event()
+    transition_done = threading.Event()
+    coordinated = threading.Event()
+    peer_errors: list[BaseException] = []
+
+    def transition() -> None:
+        if not start_transition.wait(timeout=10):
+            peer_errors.append(TimeoutError("membership attempt did not request transition"))
+            transition_done.set()
+            return
+        try:
+            peer.execution.update_batch_status(batch_id, BatchStatus.EXECUTING)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            peer_errors.append(exc)
+        finally:
+            transition_done.set()
+
+    def commit_peer_transition() -> None:
+        if coordinated.is_set():
+            return
+        coordinated.set()
+        start_transition.set()
+        if not transition_done.wait(timeout=10):
+            raise TimeoutError("peer batch transition did not commit")
+
+    def after_caller_statement(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        normalized = " ".join(statement.upper().split())
+        if normalized.startswith("SELECT") and "FROM BATCHES" in normalized:
+            commit_peer_transition()
+
+    def before_caller_statement(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        normalized = " ".join(statement.upper().split())
+        if normalized.startswith("INSERT INTO BATCH_MEMBERS"):
+            commit_peer_transition()
+
+    worker = threading.Thread(target=transition, name="deferred-membership-peer")
+    event.listen(caller_db.engine, "after_cursor_execute", after_caller_statement)
+    event.listen(caller_db.engine, "before_cursor_execute", before_caller_statement)
+    worker.start()
+    try:
+        with (
+            caller_db.connection() as conn,
+            pytest.raises(AuditIntegrityError, match=r"status 'executing'.*immutable"),
+        ):
+            caller.execution.add_batch_member(batch_id, token_id, ordinal=0, conn=conn)
+    finally:
+        start_transition.set()
+        worker.join(timeout=10)
+        event.remove(caller_db.engine, "before_cursor_execute", before_caller_statement)
+        event.remove(caller_db.engine, "after_cursor_execute", after_caller_statement)
+
+    assert not worker.is_alive()
+    assert peer_errors == []
+    assert coordinated.is_set(), "test did not exercise the synchronized closure window"
+    batch = caller.execution.get_batch(batch_id)
+    assert batch is not None and batch.status is BatchStatus.EXECUTING
+    assert caller.execution.get_batch_members(batch_id) == []
+    caller_db.close()
+    peer_db.close()

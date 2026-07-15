@@ -28,6 +28,113 @@ _MEMBERSHIP_MUTABLE_BATCH_STATUSES = frozenset({BatchStatus.DRAFT})
 _MEMBERSHIP_MUTABLE_BATCH_STATUS_VALUES = tuple(status.value for status in _MEMBERSHIP_MUTABLE_BATCH_STATUSES)
 
 
+def add_batch_member_guarded(
+    conn: Connection,
+    *,
+    batch_id: str,
+    token_id: str,
+    ordinal: int,
+    expected_run_id: str | None = None,
+) -> BatchMember:
+    """Insert one member through the shared DRAFT-only transaction primitive.
+
+    SQLite deliberately executes the conditional INSERT as its first
+    snapshot-establishing statement.  That lets a caller-owned DEFERRED
+    transaction acquire write intent before any predicate read, eliminating
+    the read/peer-write/write ``SQLITE_BUSY_SNAPSHOT`` window.  PostgreSQL
+    keeps the batch-row ``FOR UPDATE`` lock first so status transitions and
+    membership additions retain their established lock ordering.
+
+    ``expected_run_id`` binds scheduler callers to their already-fenced run;
+    ordinary batch repository callers rely on the batch/token run join.
+    """
+    batch_row = None
+    if conn.dialect.name != "sqlite":
+        batch_row = conn.execute(
+            select(batches_table.c.run_id, batches_table.c.status).where(batches_table.c.batch_id == batch_id).with_for_update()
+        ).fetchone()
+        if batch_row is None:
+            raise AuditIntegrityError(f"Cannot add batch member: batch {batch_id} not found")
+        if expected_run_id is not None and batch_row.run_id != expected_run_id:
+            raise AuditIntegrityError(
+                f"Cannot add batch member: batch {batch_id} belongs to run {batch_row.run_id!r}, not expected run {expected_run_id!r}"
+            )
+        if batch_row.status not in _MEMBERSHIP_MUTABLE_BATCH_STATUS_VALUES:
+            raise AuditIntegrityError(
+                f"Cannot add batch member: batch {batch_id} has status {batch_row.status!r}; "
+                "batch membership is immutable outside status 'draft'."
+            )
+
+    source = (
+        select(
+            literal(batch_id),
+            batches_table.c.run_id,
+            tokens_table.c.token_id,
+            literal(ordinal),
+        )
+        .select_from(
+            batches_table.join(
+                tokens_table,
+                tokens_table.c.run_id == batches_table.c.run_id,
+            )
+        )
+        .where(batches_table.c.batch_id == batch_id)
+        .where(batches_table.c.status.in_(_MEMBERSHIP_MUTABLE_BATCH_STATUS_VALUES))
+        .where(tokens_table.c.token_id == token_id)
+    )
+    if expected_run_id is not None:
+        source = source.where(batches_table.c.run_id == expected_run_id)
+
+    inserted = conn.execute(
+        insert(batch_members_table)
+        .from_select(
+            ["batch_id", "run_id", "token_id", "ordinal"],
+            source,
+        )
+        .returning(
+            batch_members_table.c.batch_id,
+            batch_members_table.c.run_id,
+            batch_members_table.c.token_id,
+            batch_members_table.c.ordinal,
+        )
+    ).fetchone()
+    if inserted is not None:
+        return BatchMember(
+            batch_id=str(inserted.batch_id),
+            run_id=str(inserted.run_id),
+            token_id=str(inserted.token_id),
+            ordinal=int(inserted.ordinal),
+        )
+
+    if batch_row is None:
+        batch_row = conn.execute(
+            select(batches_table.c.run_id, batches_table.c.status).where(batches_table.c.batch_id == batch_id)
+        ).fetchone()
+    if batch_row is None:
+        raise AuditIntegrityError(f"Cannot add batch member: batch {batch_id} not found")
+    if expected_run_id is not None and batch_row.run_id != expected_run_id:
+        raise AuditIntegrityError(
+            f"Cannot add batch member: batch {batch_id} belongs to run {batch_row.run_id!r}, not expected run {expected_run_id!r}"
+        )
+    if batch_row.status not in _MEMBERSHIP_MUTABLE_BATCH_STATUS_VALUES:
+        raise AuditIntegrityError(
+            f"Cannot add batch member: batch {batch_id} has status {batch_row.status!r}; "
+            "batch membership is immutable outside status 'draft'."
+        )
+
+    token_run_id = conn.execute(select(tokens_table.c.run_id).where(tokens_table.c.token_id == token_id)).scalar_one_or_none()
+    if token_run_id is None:
+        raise AuditIntegrityError(f"Cannot add batch member: token {token_id} not found")
+    if token_run_id != batch_row.run_id:
+        raise AuditIntegrityError(
+            f"Cannot add batch member: token {token_id} belongs to run {token_run_id!r}, "
+            f"but batch {batch_id} belongs to run {batch_row.run_id!r}"
+        )
+    raise AuditIntegrityError(
+        f"Cannot add batch member: conditional INSERT returned no row for batch {batch_id} and token {token_id}; expected exactly one"
+    )
+
+
 class BatchRepository:
     """Aggregation batch lifecycle and membership for the audit trail."""
 
@@ -108,84 +215,11 @@ class BatchRepository:
             BatchMember model
         """
 
-        def _add_on(active_conn: Connection) -> BatchMember:
-            # PostgreSQL needs an explicit row lock so a concurrent status
-            # transition cannot commit between the predicate read and member
-            # insert. SQLite ignores FOR UPDATE, but write_connection() has
-            # already acquired its one WAL writer lock via BEGIN IMMEDIATE.
-            batch_row = active_conn.execute(
-                select(batches_table.c.run_id, batches_table.c.status).where(batches_table.c.batch_id == batch_id).with_for_update()
-            ).fetchone()
-            if batch_row is None:
-                raise AuditIntegrityError(f"Cannot add batch member: batch {batch_id} not found")
-            if batch_row.status not in _MEMBERSHIP_MUTABLE_BATCH_STATUS_VALUES:
-                raise AuditIntegrityError(
-                    f"Cannot add batch member: batch {batch_id} has status {batch_row.status!r}; "
-                    "batch membership is immutable outside status 'draft'."
-                )
-
-            # Keep batch status, batch/run ownership, and token/run ownership
-            # in the INSERT predicate itself. This is deliberately an
-            # allowlist (DRAFT only), not a complement of terminal statuses:
-            # EXECUTING is already closed to new membership.
-            source = (
-                select(
-                    literal(batch_id),
-                    batches_table.c.run_id,
-                    tokens_table.c.token_id,
-                    literal(ordinal),
-                )
-                .select_from(
-                    batches_table.join(
-                        tokens_table,
-                        tokens_table.c.run_id == batches_table.c.run_id,
-                    )
-                )
-                .where(batches_table.c.batch_id == batch_id)
-                .where(batches_table.c.status.in_(_MEMBERSHIP_MUTABLE_BATCH_STATUS_VALUES))
-                .where(tokens_table.c.token_id == token_id)
-            )
-            inserted = active_conn.execute(
-                insert(batch_members_table)
-                .from_select(
-                    ["batch_id", "run_id", "token_id", "ordinal"],
-                    source,
-                )
-                .returning(
-                    batch_members_table.c.batch_id,
-                    batch_members_table.c.run_id,
-                    batch_members_table.c.token_id,
-                    batch_members_table.c.ordinal,
-                )
-            ).fetchone()
-            if inserted is None:
-                token_run_id = active_conn.execute(
-                    select(tokens_table.c.run_id).where(tokens_table.c.token_id == token_id)
-                ).scalar_one_or_none()
-                if token_run_id is None:
-                    raise AuditIntegrityError(f"Cannot add batch member: token {token_id} not found")
-                if token_run_id != batch_row.run_id:
-                    raise AuditIntegrityError(
-                        f"Cannot add batch member: token {token_id} belongs to run {token_run_id!r}, "
-                        f"but batch {batch_id} belongs to run {batch_row.run_id!r}"
-                    )
-                raise AuditIntegrityError(
-                    f"Cannot add batch member: conditional INSERT returned no row for batch {batch_id} "
-                    f"and token {token_id}; expected exactly one"
-                )
-
-            return BatchMember(
-                batch_id=str(inserted.batch_id),
-                run_id=str(inserted.run_id),
-                token_id=str(inserted.token_id),
-                ordinal=int(inserted.ordinal),
-            )
-
         try:
             if conn is not None:
-                return _add_on(conn)
+                return add_batch_member_guarded(conn, batch_id=batch_id, token_id=token_id, ordinal=ordinal)
             with self._db.write_connection() as active_conn:
-                return _add_on(active_conn)
+                return add_batch_member_guarded(active_conn, batch_id=batch_id, token_id=token_id, ordinal=ordinal)
         except SQLAlchemyError as exc:
             raise LandscapeRecordError(
                 f"add_batch_member failed (batch_members) — database rejected audit write: {type(exc).__name__}"

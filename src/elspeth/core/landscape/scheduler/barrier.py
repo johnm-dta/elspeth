@@ -32,6 +32,7 @@ from elspeth.contracts.scheduler import (
 from elspeth.core.canonical import canonical_json
 from elspeth.core.ids import generate_id
 from elspeth.core.landscape.database import Tier1Engine, begin_write
+from elspeth.core.landscape.execution.batches import add_batch_member_guarded
 from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
 from elspeth.core.landscape.scheduler.branch_losses import record_coalesce_branch_loss
 from elspeth.core.landscape.scheduler.events import SchedulerEventStore
@@ -47,8 +48,6 @@ from elspeth.core.landscape.scheduler.work_items import (
     work_item_id as make_work_item_id,
 )
 from elspeth.core.landscape.schema import (
-    batch_members_table,
-    batches_table,
     blocked_barrier_hold_clause,
     token_outcomes_table,
     token_work_items_table,
@@ -964,26 +963,12 @@ class BarrierJournalRepository:
                 )
             outcome_id: str | None = None
             if membership is not None:
-                batch_run_id = conn.execute(
-                    select(batches_table.c.run_id).where(batches_table.c.batch_id == membership.batch_id)
-                ).scalar_one_or_none()
-                if batch_run_id is None:
-                    raise AuditIntegrityError(
-                        f"Scheduler barrier adoption for run_id={run_id!r} token_id={token_id!r} cannot add batch "
-                        f"member: batch {membership.batch_id!r} not found."
-                    )
-                if batch_run_id != run_id:
-                    raise AuditIntegrityError(
-                        f"Scheduler barrier adoption for run_id={run_id!r} token_id={token_id!r} cannot add batch "
-                        f"member: batch {membership.batch_id!r} belongs to run {batch_run_id!r}."
-                    )
-                conn.execute(
-                    insert(batch_members_table).values(
-                        batch_id=membership.batch_id,
-                        run_id=run_id,
-                        token_id=token_id,
-                        ordinal=membership.ordinal,
-                    )
+                add_batch_member_guarded(
+                    conn,
+                    batch_id=membership.batch_id,
+                    token_id=token_id,
+                    ordinal=membership.ordinal,
+                    expected_run_id=run_id,
                 )
             if buffered_outcome is not None:
                 if not buffered_outcome.batch_id:

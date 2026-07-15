@@ -22,7 +22,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import func, insert, select, update
 
-from elspeth.contracts import NodeType, RunStatus
+from elspeth.contracts import BatchStatus, NodeType, RunStatus
 from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import AuditIntegrityError, RunLeadershipLostError
 from elspeth.contracts.scheduler import TokenWorkStatus
@@ -319,6 +319,30 @@ class TestAdoption:
 
 
 class TestAdoptionRefusals:
+    @pytest.mark.parametrize(
+        "status",
+        [BatchStatus.EXECUTING, BatchStatus.COMPLETED, BatchStatus.FAILED],
+    )
+    def test_non_draft_batch_refusal_rolls_back_entire_adoption(
+        self,
+        db: LandscapeDB,
+        token: CoordinationToken,
+        status: BatchStatus,
+    ) -> None:
+        """A closed membership boundary rolls back CAS, member, and outcome."""
+        token_id, work_item_id, _blocked_at = _seed_blocked_barrier_hold(db, sequence=0)
+        with db.write_connection() as conn:
+            conn.execute(update(batches_table).where(batches_table.c.batch_id == BATCH_ID).values(status=status.value))
+
+        with pytest.raises(AuditIntegrityError, match=rf"status {status.value!r}.*immutable"):
+            _adopt(db, token, token_id=token_id, work_item_id=work_item_id)
+
+        item = _work_item(db, token_id)
+        assert item["status"] == TokenWorkStatus.BLOCKED.value
+        assert item["barrier_adopted_epoch"] is None, "adoption CAS must roll back"
+        assert _batch_members(db) == [], "membership insert must roll back"
+        assert _outcomes(db, token_id) == [], "BUFFERED outcome must not survive refusal"
+
     def test_stale_token_refused_with_fence_refusal_and_zero_mutation(self, db: LandscapeDB, token: CoordinationToken) -> None:
         token_id, work_item_id, _blocked_at = _seed_blocked_barrier_hold(db, sequence=0)
         _bump_epoch(db)

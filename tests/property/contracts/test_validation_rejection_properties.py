@@ -20,11 +20,13 @@ and extends Decimal coverage to include signaling NaN (sNaN) and nested cases.
 from __future__ import annotations
 
 from decimal import Decimal
+from enum import StrEnum
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from elspeth.contracts.enums import NodeStateStatus, RoutingKind, RunStatus, TerminalOutcome, TerminalPath
 from elspeth.core.canonical import canonical_json, stable_hash
 
 # =============================================================================
@@ -40,6 +42,11 @@ non_finite_decimals = st.sampled_from(
         Decimal("sNaN"),  # Signaling NaN
     ]
 )
+
+
+def _invalid_enum_text(enum_type: type[StrEnum]) -> st.SearchStrategy[str]:
+    valid_values = frozenset(member.value for member in enum_type)
+    return st.text(min_size=1, max_size=20).filter(lambda value: value not in valid_values)
 
 
 # =============================================================================
@@ -132,86 +139,38 @@ class TestEnumRejection:
     interpreted.
     """
 
-    @given(
-        invalid_value=st.text(min_size=1, max_size=20).filter(
-            lambda s: (
-                s
-                not in (
-                    "completed",
-                    "routed",
-                    "forked",
-                    "failed",
-                    "quarantined",
-                    "consumed_in_batch",
-                    "coalesced",
-                    "expanded",
-                    "buffered",
-                )
-            )
-        )
-    )
+    @given(invalid_value=_invalid_enum_text(TerminalOutcome))
     @settings(max_examples=50)
     def test_invalid_terminal_outcome_rejected(self, invalid_value: str) -> None:
         """Property: Invalid TerminalOutcome values raise ValueError."""
-        from elspeth.contracts.enums import TerminalOutcome
-
         with pytest.raises(ValueError):
             TerminalOutcome(invalid_value)
 
-    @given(
-        invalid_value=st.text(min_size=1, max_size=20).filter(
-            lambda s: (
-                s
-                not in (
-                    "default_flow",
-                    "gate_routed",
-                    "on_error_routed",
-                    "filter_dropped",
-                    "coalesced",
-                    "unrouted",
-                    "quarantined_at_source",
-                    "sink_fallback_to_failsink",
-                    "sink_discarded",
-                    "fork_parent",
-                    "expand_parent",
-                    "batch_consumed",
-                    "buffered",
-                )
-            )
-        )
-    )
+    @given(invalid_value=_invalid_enum_text(TerminalPath))
     @settings(max_examples=50)
     def test_invalid_terminal_path_rejected(self, invalid_value: str) -> None:
         """Property: Invalid TerminalPath values raise ValueError."""
-        from elspeth.contracts.enums import TerminalPath
-
         with pytest.raises(ValueError):
             TerminalPath(invalid_value)
 
-    @given(invalid_value=st.text(min_size=1, max_size=20).filter(lambda s: s not in ("continue", "route", "fork_to_paths")))
+    @given(invalid_value=_invalid_enum_text(RoutingKind))
     @settings(max_examples=50)
     def test_invalid_routing_kind_rejected(self, invalid_value: str) -> None:
         """Property: Invalid RoutingKind values raise ValueError."""
-        from elspeth.contracts.enums import RoutingKind
-
         with pytest.raises(ValueError):
             RoutingKind(invalid_value)
 
-    @given(invalid_value=st.text(min_size=1, max_size=20).filter(lambda s: s not in ("running", "completed", "failed")))
+    @given(invalid_value=_invalid_enum_text(RunStatus))
     @settings(max_examples=50)
     def test_invalid_run_status_rejected(self, invalid_value: str) -> None:
         """Property: Invalid RunStatus values raise ValueError."""
-        from elspeth.contracts.enums import RunStatus
-
         with pytest.raises(ValueError):
             RunStatus(invalid_value)
 
-    @given(invalid_value=st.text(min_size=1, max_size=20).filter(lambda s: s not in ("open", "pending", "completed", "failed")))
+    @given(invalid_value=_invalid_enum_text(NodeStateStatus))
     @settings(max_examples=50)
     def test_invalid_node_state_status_rejected(self, invalid_value: str) -> None:
         """Property: Invalid NodeStateStatus values raise ValueError."""
-        from elspeth.contracts.enums import NodeStateStatus
-
         with pytest.raises(ValueError):
             NodeStateStatus(invalid_value)
 

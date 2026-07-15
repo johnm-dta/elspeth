@@ -10,12 +10,12 @@ import contextlib
 import shutil
 import threading
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 from uuid import UUID
 
 import structlog
@@ -108,6 +108,11 @@ from elspeth.web.sessions.protocol import (
 )
 from elspeth.web.sessions.telemetry import _SessionsTelemetry
 from elspeth.web.validation import INTERPRETATION_PLACEHOLDER_RE, _validate_accepted_value_content
+
+if TYPE_CHECKING:
+    from elspeth.web.composer.state import CompositionState, ValidationSummary
+    from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+    from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 
 # Process-wide SQLite session-write lock registry.
 #
@@ -1496,11 +1501,67 @@ class SessionServiceImpl:
         *,
         telemetry: _SessionsTelemetry,
         log: structlog.stdlib.BoundLogger,
+        plugin_snapshot_factory: Callable[[str], PluginAvailabilitySnapshot] | None = None,
+        operator_profile_registry: OperatorProfileRegistry | None = None,
     ) -> None:
+        if (plugin_snapshot_factory is None) != (operator_profile_registry is None):
+            raise ValueError("plugin_snapshot_factory and operator_profile_registry must be configured together")
         self._engine = engine
         self._data_dir = data_dir
         self._telemetry = telemetry
         self._log = log
+        self._plugin_snapshot_factory = plugin_snapshot_factory
+        self._operator_profile_registry = operator_profile_registry
+
+    def _validate_patched_composition_state(
+        self,
+        state: CompositionState,
+        *,
+        plugin_snapshot: PluginAvailabilitySnapshot | None,
+    ) -> ValidationSummary:
+        """Validate a post-review state through its executable profile view."""
+        if self._plugin_snapshot_factory is None:
+            return state.validate()
+        if plugin_snapshot is None:
+            raise AuditIntegrityError("Profile-aware composition validation has no principal snapshot")
+
+        from elspeth.web.composer.state import ValidationEntry, ValidationSummary
+        from elspeth.web.plugin_policy.validation import validate_plugin_policy
+
+        assert self._operator_profile_registry is not None
+        policy_validation = validate_plugin_policy(
+            state,
+            snapshot=plugin_snapshot,
+            profile_registry=self._operator_profile_registry,
+        )
+        if policy_validation.findings:
+            errors = tuple(
+                ValidationEntry(
+                    component=finding.component_id or "pipeline",
+                    message=finding.message,
+                    severity="high",
+                )
+                for finding in policy_validation.findings
+            )
+            return ValidationSummary(is_valid=False, errors=errors)
+        return policy_validation.executable_state.validate()
+
+    async def _plugin_snapshot_for_session(self, session_id: str) -> PluginAvailabilitySnapshot | None:
+        """Build a principal snapshot before a session write transaction starts."""
+        if self._plugin_snapshot_factory is None:
+            return None
+
+        def _sync() -> PluginAvailabilitySnapshot | None:
+            with self._engine.connect() as conn:
+                user_id = conn.execute(
+                    select(sessions_table.c.user_id).where(sessions_table.c.id == session_id)
+                ).scalar_one_or_none()
+            if user_id is None:
+                return None
+            assert self._plugin_snapshot_factory is not None
+            return self._plugin_snapshot_factory(user_id)
+
+        return cast("PluginAvailabilitySnapshot | None", await self._run_sync(_sync))
 
     async def _run_sync(self, func: Any, *args: Any, **kwargs: Any) -> Any:
         """Run a synchronous callable in the thread pool executor."""
@@ -2846,6 +2907,7 @@ class SessionServiceImpl:
         state_id_str = str(composition_state_id)
         kind_value = kind.value
         event_id = str(uuid.uuid4())
+        plugin_snapshot = await self._plugin_snapshot_for_session(sid)
 
         def _sync() -> InterpretationEventRecord:
             with self._engine.begin() as conn, self._session_write_lock(conn, sid):
@@ -3123,7 +3185,10 @@ class SessionServiceImpl:
                         is_valid=False,
                         validation_errors=None,
                     )
-                    patched_validation = state_from_record(patched_state_record).validate()
+                    patched_validation = self._validate_patched_composition_state(
+                        state_from_record(patched_state_record),
+                        plugin_snapshot=plugin_snapshot,
+                    )
                     patched_validation_errors = [error.message for error in patched_validation.errors] or None
                     conn.execute(
                         insert(interpretation_events_table).values(
@@ -3297,6 +3362,7 @@ class SessionServiceImpl:
         now = self._ensure_utc(resolved_at) if resolved_at is not None else self._now()
         sid = str(session_id)
         eid = str(event_id)
+        plugin_snapshot = await self._plugin_snapshot_for_session(sid)
 
         def _sync() -> tuple[InterpretationEventRecord, CompositionStateRecord]:
             with self._engine.begin() as conn, self._session_write_lock(conn, sid):
@@ -3458,7 +3524,10 @@ class SessionServiceImpl:
                     is_valid=False,
                     validation_errors=None,
                 )
-                patched_validation = state_from_record(patched_state_record).validate()
+                patched_validation = self._validate_patched_composition_state(
+                    state_from_record(patched_state_record),
+                    plugin_snapshot=plugin_snapshot,
+                )
                 patched_validation_errors = [error.message for error in patched_validation.errors] or None
 
                 # Compute arguments_hash over the INTERPRETATION_HASH_DOMAIN_V2

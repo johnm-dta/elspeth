@@ -1024,18 +1024,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     sessions_telemetry = build_sessions_telemetry(meter=metrics.get_meter("elspeth.web.composer"))
     app.state.sessions_telemetry = sessions_telemetry
 
-    session_service = SessionServiceImpl(
-        session_engine,
-        data_dir=settings.data_dir,
-        telemetry=sessions_telemetry,
-        log=structlog.get_logger("sessions"),
-    )
-    app.state.session_service = session_service
     app.state.session_engine = session_engine  # available to guided step handlers
-    readiness_probe_runner = ReadinessProbeRunner()
-    app.state.readiness_probe_runner = readiness_probe_runner
-    app.state.readiness_cache = ReadinessCache()
-    weakref.finalize(app, _close_readiness_runner, readiness_probe_runner)
 
     # --- Preferences service ---
     # Per-user composer settings (default_composer_mode, banner_dismissed_at,
@@ -1069,6 +1058,20 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         user_store=user_secret_store,
         generation_key=settings.secret_key.encode("utf-8"),
     )
+
+    session_service = SessionServiceImpl(
+        session_engine,
+        data_dir=settings.data_dir,
+        telemetry=sessions_telemetry,
+        log=structlog.get_logger("sessions"),
+        plugin_snapshot_factory=app.state.plugin_snapshot_factory.for_user_id,
+        operator_profile_registry=app.state.operator_profile_registry,
+    )
+    app.state.session_service = session_service
+    readiness_probe_runner = ReadinessProbeRunner()
+    app.state.readiness_probe_runner = readiness_probe_runner
+    app.state.readiness_cache = ReadinessCache()
+    weakref.finalize(app, _close_readiness_runner, readiness_probe_runner)
 
     # --- Composer service (singleton, not per-request) ---
     runtime_preflight_coordinator = RuntimePreflightCoordinator()

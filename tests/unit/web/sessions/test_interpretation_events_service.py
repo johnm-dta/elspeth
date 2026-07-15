@@ -29,7 +29,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import structlog
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.composer_interpretation import (
@@ -41,7 +41,7 @@ from elspeth.contracts.composer_interpretation import (
 )
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.hashing import stable_hash
-from elspeth.web.composer.state import CompositionState, NodeSpec, PipelineMetadata, SourceSpec
+from elspeth.web.composer.state import CompositionState, NodeSpec, OutputSpec, PipelineMetadata, SourceSpec
 from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
     PROMPT_TEMPLATE_PARTS_KEY,
@@ -1008,6 +1008,221 @@ async def test_resolve_prompt_template_review_records_hash_without_rewriting_tem
     assert requirement["event_id"] == str(event.id)
     assert requirement["accepted_value"] == event.llm_draft
     assert requirement["resolved_prompt_template_hash"] == stable_hash(event.llm_draft)
+
+
+@pytest.mark.asyncio
+async def test_resolve_profiled_llm_review_revalidates_lowered_contract(engine) -> None:
+    """Interpretation writes must validate the executable profile binding.
+
+    The persisted node intentionally carries only the audit-safe ``profile``
+    alias.  Validating that authored shape directly cannot construct the LLM
+    pass-through transform and therefore collapses its output guarantees to
+    empty.  The interpretation writer must use the same transient profile
+    lowering as guided composition before persisting its new validity state.
+    """
+    from pathlib import Path
+
+    from pydantic import SecretBytes
+
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+    from elspeth.web.config import WebSettings
+    from elspeth.web.dependencies import create_catalog_service
+    from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
+    from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
+    from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
+
+    settings = WebSettings(
+        data_dir=Path("/tmp/profiled-interpretation-test"),
+        secret_key="profiled-interpretation-test-key",
+        composer_max_composition_turns=10,
+        composer_max_discovery_turns=5,
+        composer_timeout_seconds=30.0,
+        composer_rate_limit_per_minute=60,
+        shareable_link_signing_key=SecretBytes(bytes(range(32))),
+        llm_profiles={
+            "tutorial": {
+                "provider": "bedrock",
+                "model": "bedrock/zai.glm-5",
+                "region_name": "ap-northeast-1",
+            }
+        },
+        tutorial_llm_profile="tutorial",
+    )
+    runtime_config = RuntimeWebPluginConfig.from_settings(settings)
+    policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime_config)
+    profiles = OperatorProfileRegistry(policy=policy, settings=runtime_config)
+    unrestricted = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+    llm_id = PluginId("transform", "llm")
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash=policy.policy_hash,
+        principal_scope="local:alice",
+        available=unrestricted.available,
+        unavailable=(),
+        selected=unrestricted.selected,
+        usable_profile_aliases=((llm_id, ("tutorial",)),),
+        selected_profile_aliases=((llm_id, "tutorial"),),
+        binding_generation_fingerprint="profiled-interpretation-test-generation",
+    )
+    policy_service = SessionServiceImpl(
+        engine,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test"),
+        plugin_snapshot_factory=lambda _user_id: snapshot,
+        operator_profile_registry=profiles,
+    )
+
+    prompt_template = "Summarize {{ row.page_text }}."
+    user_term = "llm_prompt_template:llm1"
+    state = CompositionState(
+        source=SourceSpec(
+            plugin="csv",
+            on_success="llm_in",
+            options={
+                "path": "/tmp/input.csv",
+                "schema": {"mode": "observed", "guaranteed_fields": ["page_text", "url"]},
+            },
+            on_validation_failure="discard",
+        ),
+        nodes=(
+            NodeSpec(
+                id="llm1",
+                node_type="transform",
+                plugin="llm",
+                input="llm_in",
+                on_success="map_in",
+                on_error="discard",
+                options={
+                    "profile": "tutorial",
+                    "prompt_template": prompt_template,
+                    "required_input_fields": ["page_text"],
+                    "response_field": "summary",
+                    "schema": {"mode": "observed", "guaranteed_fields": ["summary"]},
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": "prompt_template_review",
+                            "kind": InterpretationKind.LLM_PROMPT_TEMPLATE.value,
+                            "user_term": user_term,
+                            "status": "pending",
+                            "draft": prompt_template,
+                            "event_id": None,
+                            "accepted_value": None,
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": None,
+                        }
+                    ],
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+            NodeSpec(
+                id="map1",
+                node_type="transform",
+                plugin="field_mapper",
+                input="map_in",
+                on_success="output",
+                on_error="discard",
+                options={
+                    "mapping": {"url": "url", "summary": "summary"},
+                    "select_only": True,
+                    "required_input_fields": ["url", "summary"],
+                    "schema": {"mode": "observed"},
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(
+            OutputSpec(
+                name="output",
+                plugin="json",
+                options={"path": "/tmp/output.json", "schema": {"mode": "observed"}},
+                on_write_failure="discard",
+            ),
+        ),
+        metadata=PipelineMetadata(name="Profiled interpretation", description=""),
+        version=1,
+    )
+    state_dict = state.to_dict()
+
+    async def save_profiled_state(*, review_disabled: bool = False) -> tuple[UUID, CompositionStateRecord]:
+        session_id = uuid4()
+        with policy_service._engine.begin() as conn:
+            _insert_session(conn, str(session_id))
+            if review_disabled:
+                conn.execute(
+                    update(sessions_table)
+                    .where(sessions_table.c.id == str(session_id))
+                    .values(interpretation_review_disabled=True)
+                )
+        saved_state = await policy_service.save_composition_state(
+            session_id,
+            CompositionStateData(
+                sources=state_dict["sources"],
+                nodes=state_dict["nodes"],
+                edges=state_dict["edges"],
+                outputs=state_dict["outputs"],
+                metadata_=state_dict["metadata"],
+                is_valid=True,
+            ),
+            provenance="tool_call",
+        )
+        return session_id, saved_state
+
+    session_id, saved = await save_profiled_state()
+    event = await policy_service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=saved.id,
+        affected_node_id="llm1",
+        tool_call_id="call_profiled_prompt_template",
+        user_term=user_term,
+        kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+        llm_draft=prompt_template,
+        model_identifier="composer-model",
+        model_version="composer-model",
+        provider="openrouter",
+        composer_skill_hash="a" * 64,
+    )
+
+    _resolved, new_state = await policy_service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=event.id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+    )
+
+    assert new_state.is_valid is True
+    assert new_state.validation_errors is None
+
+    opted_out_session_id, opted_out_saved = await save_profiled_state(review_disabled=True)
+    opted_out_event = await policy_service.create_pending_interpretation_event(
+        session_id=opted_out_session_id,
+        composition_state_id=opted_out_saved.id,
+        affected_node_id="llm1",
+        tool_call_id="call_profiled_prompt_template_opt_out",
+        user_term=user_term,
+        kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+        llm_draft=prompt_template,
+        model_identifier="composer-model",
+        model_version="composer-model",
+        provider="openrouter",
+        composer_skill_hash="a" * 64,
+    )
+    opted_out_state = await policy_service.get_current_state(opted_out_session_id)
+
+    assert opted_out_event.choice is InterpretationChoice.OPTED_OUT
+    assert opted_out_state is not None
+    assert opted_out_state.is_valid is True
+    assert opted_out_state.validation_errors is None
 
 
 @pytest.mark.asyncio

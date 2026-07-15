@@ -898,7 +898,9 @@ class TestSessionWiring:
 
     def test_session_service_on_app_state(self, tmp_path) -> None:
         app = create_app(_settings(tmp_path))
-        assert app.state.session_service is not None
+        service = app.state.session_service
+        assert service._operator_profile_registry is app.state.operator_profile_registry
+        assert service._plugin_snapshot_factory.__self__ is app.state.plugin_snapshot_factory
 
     def test_session_routes_registered(self, tmp_path) -> None:
         app = create_app(_settings(tmp_path))

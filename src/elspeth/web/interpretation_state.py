@@ -568,6 +568,8 @@ def interpretation_sites(
     web_scrape_raw_fields = _web_scrape_raw_fields(state.nodes)
     for node in state.nodes:
         node_sites = [*_pending_node_sites(node), *_legacy_placeholder_sites(node)]
+        if node.id in operator_resolved_model_node_ids:
+            node_sites = [site for site in node_sites if site.kind is not InterpretationKind.LLM_MODEL_CHOICE]
         sites.extend(node_sites)
         sites.extend(_missing_raw_html_cleanup_review_sites(node, web_scrape_raw_fields=web_scrape_raw_fields))
         if not any(site.kind is InterpretationKind.LLM_PROMPT_TEMPLATE for site in node_sites):
@@ -637,7 +639,11 @@ def materialize_state_for_execution(
             changed = True
     materialized_nodes: list[NodeSpec] = []
     for node in state.nodes:
-        materialized = _materialize_node_for_execution(node, state.nodes)
+        materialized = _materialize_node_for_execution(
+            node,
+            state.nodes,
+            operator_resolved_model=node.id in operator_resolved_model_node_ids,
+        )
         materialized_nodes.append(materialized)
         changed = changed or materialized is not node
     if not changed:
@@ -664,12 +670,17 @@ def _materialize_node_for_authoring(node: NodeSpec) -> NodeSpec:
     return _replace_prompt_if_changed(node, masked, include_hash=False)
 
 
-def _materialize_node_for_execution(node: NodeSpec, all_nodes: Sequence[NodeSpec]) -> NodeSpec:
+def _materialize_node_for_execution(
+    node: NodeSpec,
+    all_nodes: Sequence[NodeSpec],
+    *,
+    operator_resolved_model: bool = False,
+) -> NodeSpec:
     _validate_pipeline_decision_review(node, all_nodes)
     if node.plugin != "llm":
         return node
     model = node.options.get("model")
-    if isinstance(model, str) and model:
+    if isinstance(model, str) and model and not operator_resolved_model:
         _validate_model_choice_review(node, model)
     parts = _prompt_parts(node.options)
     if parts is None:

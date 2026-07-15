@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 
 from elspeth.contracts.composer_interpretation import InterpretationKind
-from elspeth.web.composer.state import NodeSpec
+from elspeth.web.composer.state import CompositionState, NodeSpec, PipelineMetadata
 from elspeth.web.composer.tools._common import (
     _options_with_default_llm_reviews,
     _options_with_default_model_choice_review,
@@ -25,6 +25,7 @@ from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
     _missing_model_choice_review_sites,
     _validate_model_choice_review,
+    materialize_state_for_execution,
 )
 
 
@@ -218,3 +219,42 @@ class TestExecutionGuard:
     def test_no_resolved_requirement_passes_silently(self) -> None:
         node = _llm_node("llm1", {"model": "anthropic/claude-sonnet-4.5"})
         _validate_model_choice_review(node, "anthropic/claude-sonnet-4.5")  # no raise
+
+    @pytest.mark.parametrize("legacy_status", ["pending", "resolved"])
+    def test_operator_profile_model_ignores_legacy_user_review(self, legacy_status: str) -> None:
+        """Profile rotation is operator policy even when old review metadata remains."""
+        from elspeth.contracts.hashing import stable_hash
+
+        old_model = "anthropic/claude-sonnet-4.5"
+        requirement: dict[str, object] = {
+            "id": "model_choice_review:llm1",
+            "kind": "llm_model_choice",
+            "user_term": "llm_model_choice:llm1",
+            "status": legacy_status,
+            "draft": old_model,
+            "event_id": "e1" if legacy_status == "resolved" else None,
+            "accepted_value": old_model if legacy_status == "resolved" else None,
+            "accepted_artifact_hash": None,
+            "resolved_prompt_template_hash": stable_hash(old_model) if legacy_status == "resolved" else None,
+        }
+        node = _llm_node(
+            "llm1",
+            {
+                "model": "bedrock/zai.glm-5",
+                INTERPRETATION_REQUIREMENTS_KEY: [requirement],
+            },
+        )
+        state = CompositionState(
+            nodes=(node,),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        materialized = materialize_state_for_execution(
+            state,
+            operator_resolved_model_node_ids=frozenset({"llm1"}),
+        )
+
+        assert isinstance(materialized, CompositionState)

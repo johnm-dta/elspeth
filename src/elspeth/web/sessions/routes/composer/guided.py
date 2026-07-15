@@ -341,7 +341,13 @@ def _build_get_guided_turn(
         # idempotency machinery handle it (no TurnRecord emitted; client retries).
         return None
     if step is GuidedStep.STEP_4_WIRE:
-        return build_step_4_wire_turn(state)
+        policy_validation = catalog.validate_authored_state(state)
+        validation_state = state if policy_validation.findings else policy_validation.executable_state
+        return build_step_4_wire_turn(
+            state,
+            catalog=catalog,
+            validation_state=validation_state,
+        )
     return None
 
 
@@ -424,17 +430,18 @@ async def _source_from_latest_uploaded_blob_for_step_1_chat(
     )
 
 
-def _guided_persisted_validity(state: CompositionState) -> tuple[bool, list[str] | None]:
+def _guided_persisted_validity(
+    state: CompositionState,
+    *,
+    catalog: PolicyCatalogView,
+) -> tuple[bool, list[str] | None]:
     """Derive is_valid/validation_errors for a guided persist site.
 
     Mirrors the freeform persist convention's authoring-only fallback
     (``_composer_persisted_validation``'s last branch in ``_helpers.py``):
-    ``CompositionState.validate()`` is a pure function of the graph alone, so
-    it is the correct, uniform check at every guided persist site regardless
-    of how far through the wizard the session has progressed — a genuinely
-    incomplete mid-flow graph (no source yet, no sinks yet) validates with
-    real errors, never the previous permanent ``is_valid=False,
-    validation_errors=None`` stamp that combination-never-produced-by-freeform.
+    Operator-profile aliases are the audit-safe persisted form, but contract
+    probes require their executable binding. Validate policy and lower into an
+    in-memory copy first; the authored state remains unchanged.
 
     No runtime preflight here (unlike ``_state_data_from_composer_state``):
     guided intermediate persists happen at points that do not uniformly carry
@@ -443,7 +450,11 @@ def _guided_persisted_validity(state: CompositionState) -> tuple[bool, list[str]
     ``execution/service.py`` stays the hard backstop regardless of what this
     Stage-1-only check reports.
     """
-    summary = state.validate()
+    policy_validation = catalog.validate_authored_state(state)
+    if policy_validation.findings:
+        messages = [finding.message for finding in policy_validation.findings]
+        return False, messages or None
+    summary = policy_validation.executable_state.validate()
     messages = [error.message for error in summary.errors]
     return summary.is_valid, messages or None
 
@@ -622,7 +633,7 @@ async def get_guided(
                 new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
 
                 state_d = new_state.to_dict()
-                persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state)
+                persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)
                 state_data = CompositionStateData(
                     sources=state_d["sources"],
                     nodes=state_d["nodes"],
@@ -977,7 +988,7 @@ async def post_guided_reenter(
 
         new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
         state_d = new_state.to_dict()
-        persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state)
+        persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)
         state_data = CompositionStateData(
             sources=state_d["sources"],
             nodes=state_d["nodes"],
@@ -1185,7 +1196,7 @@ async def post_guided_start(
 
         new_composer_meta = {"guided_session": seeded_guided.to_dict()}
         state_d = new_state.to_dict()
-        persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state)
+        persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)
         state_data = CompositionStateData(
             sources=state_d["sources"],
             nodes=state_d["nodes"],
@@ -1403,7 +1414,7 @@ async def post_guided_respond(
                 }
 
                 state_d = new_state.to_dict()
-                persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state)
+                persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)
                 state_data = CompositionStateData(
                     sources=state_d["sources"],
                     nodes=state_d["nodes"],
@@ -1798,7 +1809,7 @@ async def post_guided_respond(
                         existing_meta_error = dict(deep_thaw(state_record.composer_meta))
                     error_meta = {**existing_meta_error, "guided_session": guided.to_dict()}
                     state_d_error = new_state.to_dict()
-                    persisted_is_valid_error, persisted_errors_error = _guided_persisted_validity(new_state)
+                    persisted_is_valid_error, persisted_errors_error = _guided_persisted_validity(new_state, catalog=catalog)
                     state_data_error = CompositionStateData(
                         sources=state_d_error["sources"],
                         nodes=state_d_error["nodes"],
@@ -1856,7 +1867,7 @@ async def post_guided_respond(
             new_composer_meta = {**existing_meta, "guided_session": guided.to_dict()}
 
             state_d = new_state.to_dict()
-            persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state)
+            persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)
             state_data = CompositionStateData(
                 sources=state_d["sources"],
                 nodes=state_d["nodes"],
@@ -2076,7 +2087,7 @@ async def _build_guided_chat_apply_response(
         existing_meta = dict(deep_thaw(state_record.composer_meta))
     new_composer_meta = {**existing_meta, "guided_session": guided.to_dict()}
     state_d = new_state.to_dict()
-    persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state)
+    persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=policy_catalog)
     state_data = CompositionStateData(
         sources=state_d["sources"],
         nodes=state_d["nodes"],
@@ -3288,7 +3299,7 @@ async def post_guided_chat(
             new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
 
             state_d = new_state.to_dict()
-            persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state)
+            persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)
             state_data = CompositionStateData(
                 sources=state_d["sources"],
                 nodes=state_d["nodes"],
@@ -3710,7 +3721,7 @@ async def post_guided_convert(
             prior_version = state_record.version
             new_composer_meta = {"guided_session": seeded_guided.to_dict()}
             state_d = new_state.to_dict()
-            persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state)
+            persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)
             state_data = CompositionStateData(
                 sources=state_d["sources"],
                 nodes=state_d["nodes"],

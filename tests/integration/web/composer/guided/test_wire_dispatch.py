@@ -31,11 +31,8 @@ from elspeth.web.composer.guided.steps import (
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
-from elspeth.web.sessions.routes._helpers import (
-    _build_policy_aware_wire_turn,
-    _dispatch_guided_respond,
-    _summarize_guided_response,
-)
+from elspeth.web.sessions.routes._helpers import _dispatch_guided_respond, _summarize_guided_response
+from elspeth.web.sessions.routes.composer.guided import _build_get_guided_turn, _guided_persisted_validity
 from tests.fixtures.stores import MockPayloadStore
 
 
@@ -398,12 +395,11 @@ async def test_confirm_wiring_lowers_operator_profile_only_for_validation() -> N
     authored_validation = state.validate()
     assert authored_validation.is_valid is False
     assert any("Missing fields: [summary]" in error.message for error in authored_validation.errors)
-    wire_turn = _build_policy_aware_wire_turn(
-        state,
-        plugin_snapshot=catalog.snapshot,
-        profile_registry=profiles,
-        catalog=catalog,
-    )
+    persisted_is_valid, persisted_errors = _guided_persisted_validity(state, catalog=catalog)
+    assert persisted_is_valid is True
+    assert persisted_errors is None
+    wire_turn = _build_get_guided_turn(state, wire_session, catalog=catalog)
+    assert wire_turn is not None
     assert wire_turn["payload"]["edge_contracts"]
     assert all(contract["satisfied"] for contract in wire_turn["payload"]["edge_contracts"])
 

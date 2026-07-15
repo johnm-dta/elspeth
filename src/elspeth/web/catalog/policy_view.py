@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from elspeth.contracts.plugin_capabilities import PluginCapability
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginKind, PluginSchemaInfo, PluginSummary
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId, PluginUnavailableReason
 from elspeth.web.plugin_policy.profiles import LoweredPluginConfig, OperatorProfileRegistry
+
+if TYPE_CHECKING:
+    from elspeth.web.composer.state import CompositionState
+    from elspeth.web.plugin_policy.validation import PluginPolicyValidationResult
 
 
 class PolicyCatalogView:
@@ -112,6 +117,16 @@ class PolicyCatalogView:
         if alias not in available_aliases:
             raise ValueError("profile_unavailable")
         return self._profiles.lower_options(plugin_id, alias=alias, safe_options=safe_options)
+
+    def validate_authored_state(self, state: CompositionState) -> PluginPolicyValidationResult:
+        """Validate policy and lower private bindings without mutating authored state."""
+        from elspeth.web.plugin_policy.validation import validate_plugin_policy
+
+        return validate_plugin_policy(
+            state,
+            snapshot=self.snapshot,
+            profile_registry=self._profiles,
+        )
 
     def post_call_hints(
         self,

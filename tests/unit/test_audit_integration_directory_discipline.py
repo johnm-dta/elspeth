@@ -22,6 +22,7 @@ PRODUCTION_PATH_AUDIT_TESTS = frozenset(
 
 REPOSITORY_AUDIT_TESTS = frozenset(
     {
+        "test_call_index_process_contention.py",
         "test_contract_audit.py",
         "test_csv_sink_executor_audit.py",
         "test_declaration_contract_landscape_serialization_roundtrip.py",

@@ -134,6 +134,78 @@ git diff --check
 Expected: all selected tests pass, mypy reports success, and the diff check is
 clean. The known signed-tree failure is not part of this focused baseline.
 
+## Task 1a: Prelock complete bulk-state sets in canonical order
+
+This integration prerequisite closes the one structural gap found by the
+Task 1 lock-order audit. It must be complete, committed, and independently
+reviewed before Task 2 begins.
+
+**Files:**
+
+- Modify: `src/elspeth/core/landscape/execution/node_states.py`
+- Test: `tests/unit/core/landscape/test_execution_repository.py`
+- Test: `tests/testcontainer/core/test_token_outcome_atomicity_postgres.py`
+
+- [ ] **Step 1: Write failing sorted/deduplicated prelock tests**
+
+Add a unit test that passes reversed completions with a duplicate state ID,
+captures the lock acquisitions, and proves the complete unique set is locked
+in ascending `state_id` order before the first pre-read or update. Exercise
+both caller-owned and repository-owned transaction paths.
+
+Add a real PostgreSQL test using two distinct engines/connections and reversed
+caller order. Install a deterministic seam immediately after each contender's
+first state lock; hold the first contender there until the second is waiting,
+then release both. Assert captured ascending acquisition order, bounded
+completion, no `40P01`, and exact terminal rows.
+
+- [ ] **Step 2: Run the tests and prove the structural gap**
+
+Run:
+
+```bash
+.venv/bin/pytest -q tests/unit/core/landscape/test_execution_repository.py -k 'complete_node_states_completed_many and prelock'
+.venv/bin/pytest -q -m testcontainer tests/testcontainer/core/test_token_outcome_atomicity_postgres.py -k 'bulk_state and lock_order'
+```
+
+Expected: FAIL because `complete_node_states_completed_many()` currently
+performs unlocked pre-reads and caller-ordered executemany updates.
+
+- [ ] **Step 3: Implement the explicit state prelock primitive**
+
+Before the existing before-row reads, deduplicate the complete state ID set,
+sort it ascending, and acquire every state row explicitly with `FOR UPDATE` in
+that order. Missing rows are still reported through the existing error
+taxonomy. The primitive must run inside the supplied connection when
+`conn is not None` and inside the method's owned write transaction otherwise.
+Caller-owned primary-sink composition therefore remains sorted token -> sorted
+state; repository-owned calls legitimately begin at the state class. Do not
+use caller, driver/executemany, or planner order as the contract.
+
+- [ ] **Step 4: Run the unit and composed PostgreSQL proofs**
+
+Run:
+
+```bash
+.venv/bin/pytest -q tests/unit/core/landscape/test_execution_repository.py
+.venv/bin/pytest -q -m testcontainer tests/testcontainer/core/test_token_outcome_atomicity_postgres.py
+.venv/bin/mypy src/elspeth/core/landscape/execution/node_states.py
+git diff --check
+```
+
+Expected: unit behavior remains green; the complete existing 4003 PostgreSQL
+composition suite and new deterministic reversed-order proof pass.
+
+- [ ] **Step 5: Commit and review the prerequisite**
+
+```bash
+git add src/elspeth/core/landscape/execution/node_states.py tests/unit/core/landscape/test_execution_repository.py tests/testcontainer/core/test_token_outcome_atomicity_postgres.py
+git commit -m "fix(landscape): prelock bulk state completion"
+```
+
+Request independent spec review, then independent quality review. Any
+blocking finding must be fixed and re-reviewed before Task 2.
+
 ## Task 2: Add closed sink-effect contracts and fail-closed capability preflight
 
 **Files:**
@@ -842,7 +914,9 @@ Add immutable finalized-membership and divergent-payload refusal tests.
 
 Create two engines/connections, assert distinct `pg_backend_pid()`, pause one
 after sorted token locks and the other after its first lock, then release both.
-Assert bounded completion, no `40P01`, and one exact effect/member set.
+Capture both complete token and current-state lock query results and assert
+ascending IDs before either contender reaches a stream. Assert bounded
+completion, no `40P01`, and one exact effect/member set.
 
 - [ ] **Step 3: Run focused tests and confirm no repository exists**
 
@@ -910,7 +984,10 @@ revalidate row/run/payload and existing binding, lock required current states,
 then insert/select-lock the stream, allocate tail/sequence, lock existing
 effects ascending, and insert effect/members/operation. Use backend-native
 conflict-safe insertion and exact winner comparison. The method must never
-hold a stream while waiting for token/state locks.
+hold a stream while waiting for token/state locks. The complete required
+current-state witness set must be deduplicated and locked in ascending
+`state_id` order after tokens and before the stream; caller or planner order is
+not acceptable.
 
 - [ ] **Step 5: Wire the repository and run SQLite/PostgreSQL tests**
 
@@ -1134,11 +1211,15 @@ ID/key against `sink_effect_id`; complete the stable operation; write routing,
 outcomes, scheduler closes, and effect FINALIZED; then commit once. A witness
 change triggers a bounded restart before any later-class lock.
 
+Use the Task 1a bulk-state primitive for the complete state-witness set; the
+finalizer must not add an effect-specific state-lock path.
+
 - [ ] **Step 4: Add composed PostgreSQL races**
 
 Force finalization versus state/outcome mutation and effect-linked/legacy
 artifact mutation/read interleavings on distinct backends. Assert the legal
-winner plus no deadlock and no partial audit state.
+winner plus no deadlock and no partial audit state. The Task 1a test remains
+the canonical proof of the shared bulk-state acquisition primitive.
 
 - [ ] **Step 5: Run finalization, outcome, and PG tests**
 

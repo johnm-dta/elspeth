@@ -459,6 +459,20 @@ stream or effect. State witnesses that changed between the optimistic read and
 the locked re-read cause a bounded restart from step 1, never an out-of-order
 additional lock.
 
+The existing bulk state-completion API is not evidence of step 3 merely
+because its SQL updates happen to complete without deadlock. Before any epoch
+26 production implementation, a prerequisite change must make that API
+deduplicate the complete state set and acquire it explicitly in ascending
+`state_id` order before its first pre-read or update. The primitive may use one
+ordered `SELECT ... FOR UPDATE` or an ascending sequence of exact-row
+`SELECT ... FOR UPDATE` statements, but its acquisition order must be visible
+and testable. The effect finalizer and the composed primary-sink path must
+route through that primitive after any required sorted token prelock. A
+distinct-backend PostgreSQL test must pause deterministically after the first
+state lock and prove the full sorted state acquisition order;
+driver/executemany or planner order is never treated as the lock-order
+contract.
+
 The concrete paths obey the order as follows:
 
 - **Reservation:** resolve membership and stream identity; lock all requested

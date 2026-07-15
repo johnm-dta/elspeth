@@ -26,10 +26,15 @@ use Loomweave in this worktree.
 
 ## Integration prerequisites
 
-- Stable integration head is `b84147e57`; it includes `b33a26050`, batch
+- The integration branch is `codex/release-0.7.1-worktree`; its approved
+  direct base for this implementation is currently `b84147e57`. That head
+  includes `b33a26050`, batch
   membership, call-index recovery, and the 4003 outcome lock-order/atomicity
   work that epoch 26 must extend.
-- Rebase on the then-current `release/0.7.1` before adding production code;
+- Rebase on `b84147e57` before adding production code, and use
+  `codex/release-0.7.1-worktree` (or a later exact integration HEAD supplied by
+  the integration owner) for every subsequent rebase and changed-file diff;
+  never rebase this work directly onto the older `release/0.7.1` branch;
   preserve commits `76117fb6b`, `4c3dae2ec`, `d9b324d64`, `37249411c`,
   `0373d6c31`, and `e0dca4dd4`.
 - If the rebase changes the 4003 repository API or global order, update the
@@ -95,13 +100,13 @@ Run:
 
 ```bash
 git fetch --all --prune
-git log --oneline --decorate -20 release/0.7.1
-git merge-base --is-ancestor b84147e57 release/0.7.1
+git log --oneline --decorate -20 codex/release-0.7.1-worktree
+git merge-base --is-ancestor b84147e57 codex/release-0.7.1-worktree
 git status --short
 ```
 
-Expected: the release log contains `b84147e57`, the ancestry command exits 0,
-and status is clean.
+Expected: the integration log contains `b84147e57`, the ancestry command exits
+0, and status is clean.
 
 - [ ] **Step 2: Rebase without dropping the existing safety commits**
 
@@ -1849,7 +1854,7 @@ git commit -m "docs: document sink effect recovery"
 
 **Files:**
 
-- Verify: every file changed since `release/0.7.1`
+- Verify: every file changed since the recorded integration merge-base
 - Update: Filigree `elspeth-74a343d5ad` comment only
 
 - [ ] **Step 1: Run focused Landscape/effect tests**
@@ -1891,12 +1896,14 @@ changes; any other failure blocks completion.
 - [ ] **Step 5: Run static and repository gates**
 
 ```bash
-CHANGED_PY=$(git diff --name-only release/0.7.1 -- '*.py')
+INTEGRATION_BRANCH=codex/release-0.7.1-worktree
+INTEGRATION_BASE=$(git merge-base HEAD "$INTEGRATION_BRANCH")
+CHANGED_PY=$(git diff --name-only "$INTEGRATION_BASE"..HEAD -- '*.py')
 .venv/bin/mypy $CHANGED_PY
 .venv/bin/ruff check $CHANGED_PY
 .venv/bin/ruff format --check $CHANGED_PY
 .venv/bin/pre-commit run --all-files
-git diff --check release/0.7.1..HEAD
+git diff --check "$INTEGRATION_BASE"..HEAD
 git status --short
 ```
 
@@ -1904,7 +1911,8 @@ Expected: mypy, Ruff, pre-commit, and diff checks pass; status is clean.
 
 - [ ] **Step 6: Request independent spec review**
 
-Give the reviewer the approved design, complete branch diff, issue
+Give the reviewer the approved design, complete branch diff from the recorded
+integration merge-base, issue
 `elspeth-74a343d5ad`, and exact verification output. Require a requirement-by-
 requirement verdict covering crash seams, every built-in, zero-publication,
 artifact XOR, migration, and lock races. Fix every blocking finding in its own
@@ -1921,13 +1929,15 @@ broad gates.
 
 ```bash
 git fetch --all --prune
-git rebase release/0.7.1
+git rebase codex/release-0.7.1-worktree
+INTEGRATION_BASE=$(git merge-base HEAD codex/release-0.7.1-worktree)
 .venv/bin/pytest -q tests/unit/core/landscape/test_sink_effect_finalization.py tests/unit/engine/test_sink_effect_executor.py tests/integration/pipeline/test_sink_effect_recovery.py
 .venv/bin/pytest -q -m testcontainer tests/testcontainer/core/test_sink_effect_lock_order_postgres.py
 ```
 
 Expected: rebase is clean or conflicts are resolved without weakening the
-approved contract; critical SQLite/executor/PostgreSQL proofs pass.
+approved contract; the recorded merge-base is the current integration tip,
+and critical SQLite/executor/PostgreSQL proofs pass.
 
 - [ ] **Step 9: Add a complete Filigree evidence comment and keep the issue open**
 

@@ -772,7 +772,7 @@ def build_execution_graph(
 
     # Config gate schema resolution (pass 1): resolve gates whose upstream
     # producer already has a schema. Gates downstream of coalesce nodes are
-    # deferred to pass 2 (after coalesce schema population).
+    # deferred until pass-through schemas are populated in dependency order.
     deferred_config_gate_schemas: list[tuple[NodeID, str, str]] = []
     for gate_id, gate_name, input_connection in config_gate_schema_inputs:
         if input_connection not in producers:
@@ -1010,9 +1010,13 @@ def build_execution_graph(
     branch_info: dict[BranchName, BranchInfo] = {branch_name: plan.to_branch_info() for branch_name, plan in coalesce_branch_plans.items()}
     graph.set_branch_info(branch_info)
 
-    # ===== POPULATE COALESCE SCHEMA CONFIG =====
-    # Coalesce nodes are structural pass-throughs; record the upstream schema
-    # so audit logs reflect the actual data contract at the merge point.
+    # ===== POPULATE PASS-THROUGH SCHEMA CONFIG =====
+    # Coalesce nodes and their downstream gates are structural pass-throughs;
+    # populate them in graph order so alternating fork/coalesce chains resolve
+    # each producer before a downstream merge asks for its schema.
+    #
+    # Coalesce nodes record the upstream schema so audit logs reflect the
+    # actual data contract at the merge point.
     # Schema validation is strategy-aware:
     #   union:  require compatible types on overlapping fields
     #   nested: no cross-branch constraint (each branch keyed separately)
@@ -1023,7 +1027,18 @@ def build_execution_graph(
             cid = coalesce_ids[CoalesceName(coalesce_config.name)]
             coalesce_id_to_config[cid] = coalesce_config
 
-    for coalesce_id in coalesce_ids.values():
+    deferred_gate_input_by_id = {gate_id: input_connection for gate_id, _gate_name, input_connection in deferred_config_gate_schemas}
+
+    for pass_through_id in pipeline_nodes:
+        if pass_through_id in deferred_gate_input_by_id:
+            input_connection = deferred_gate_input_by_id[pass_through_id]
+            producer_id, _producer_label = producers[input_connection]
+            _assign_schema(pass_through_id, _best_schema_config(producer_id))
+
+        if pass_through_id not in coalesce_id_to_config:
+            continue
+
+        coalesce_id = pass_through_id
         incoming_edges = graph.get_incoming_edges(coalesce_id)
         if not incoming_edges:
             raise GraphValidationError(
@@ -1077,12 +1092,6 @@ def build_execution_graph(
     # field tracking.
     if branch_info:
         graph.set_branch_info(branch_info)
-
-    # Config gate schema resolution (pass 2): resolve gates that were deferred
-    # because their upstream producer (e.g., coalesce) didn't have schema yet.
-    for gate_id, _gate_name, input_connection in deferred_config_gate_schemas:
-        producer_id, _producer_label = producers[input_connection]
-        _assign_schema(gate_id, _best_schema_config(producer_id))
 
     # PHASE 2 VALIDATION: Validate schema compatibility AFTER graph is built
     graph.validate_edge_compatibility()

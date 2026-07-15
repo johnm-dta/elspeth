@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -754,54 +754,59 @@ def test_web_services_reject_explicit_none_policy_context() -> None:
     from elspeth.web.composer.service import ComposerServiceImpl
     from elspeth.web.execution.service import ExecutionServiceImpl
 
+    unused_dependency: Any = object()
+
+    def unexpected_snapshot_request(_user_id: str) -> PluginAvailabilitySnapshot:
+        raise AssertionError("constructor must reject its missing policy dependency before requesting a snapshot")
+
     with pytest.raises(TypeError, match="plugin_snapshot_factory"):
         ComposerServiceImpl(
-            catalog=MagicMock(spec=CatalogService),
-            settings=MagicMock(),
+            catalog=unused_dependency,
+            settings=unused_dependency,
             plugin_snapshot_factory=None,
-            operator_profile_registry=MagicMock(spec=OperatorProfileRegistry),
+            operator_profile_registry=unused_dependency,
         )
     with pytest.raises(TypeError, match="operator_profile_registry"):
         ComposerServiceImpl(
-            catalog=MagicMock(spec=CatalogService),
-            settings=MagicMock(),
-            plugin_snapshot_factory=MagicMock(),
+            catalog=unused_dependency,
+            settings=unused_dependency,
+            plugin_snapshot_factory=unexpected_snapshot_request,
             operator_profile_registry=None,
         )
     with pytest.raises(TypeError, match="plugin_snapshot_factory"):
         ExecutionServiceImpl(
-            loop=MagicMock(),
-            broadcaster=MagicMock(),
-            settings=MagicMock(),
-            session_service=MagicMock(),
-            yaml_generator=MagicMock(),
-            telemetry=MagicMock(),
+            loop=unused_dependency,
+            broadcaster=unused_dependency,
+            settings=unused_dependency,
+            session_service=unused_dependency,
+            yaml_generator=unused_dependency,
+            telemetry=unused_dependency,
             plugin_snapshot_factory=None,
-            operator_profile_registry=MagicMock(spec=OperatorProfileRegistry),
-            web_plugin_policy=MagicMock(),
+            operator_profile_registry=unused_dependency,
+            web_plugin_policy=unused_dependency,
         )
     with pytest.raises(TypeError, match="operator_profile_registry"):
         ExecutionServiceImpl(
-            loop=MagicMock(),
-            broadcaster=MagicMock(),
-            settings=MagicMock(),
-            session_service=MagicMock(),
-            yaml_generator=MagicMock(),
-            telemetry=MagicMock(),
-            plugin_snapshot_factory=MagicMock(),
+            loop=unused_dependency,
+            broadcaster=unused_dependency,
+            settings=unused_dependency,
+            session_service=unused_dependency,
+            yaml_generator=unused_dependency,
+            telemetry=unused_dependency,
+            plugin_snapshot_factory=unexpected_snapshot_request,
             operator_profile_registry=None,
-            web_plugin_policy=MagicMock(),
+            web_plugin_policy=unused_dependency,
         )
     with pytest.raises(TypeError, match="web_plugin_policy"):
         ExecutionServiceImpl(
-            loop=MagicMock(),
-            broadcaster=MagicMock(),
-            settings=MagicMock(),
-            session_service=MagicMock(),
-            yaml_generator=MagicMock(),
-            telemetry=MagicMock(),
-            plugin_snapshot_factory=MagicMock(),
-            operator_profile_registry=MagicMock(spec=OperatorProfileRegistry),
+            loop=unused_dependency,
+            broadcaster=unused_dependency,
+            settings=unused_dependency,
+            session_service=unused_dependency,
+            yaml_generator=unused_dependency,
+            telemetry=unused_dependency,
+            plugin_snapshot_factory=unexpected_snapshot_request,
+            operator_profile_registry=unused_dependency,
             web_plugin_policy=None,
         )
 

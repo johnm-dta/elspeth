@@ -7,9 +7,10 @@ import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from types import MappingProxyType
-from unittest.mock import MagicMock, patch
+from unittest.mock import create_autospec, patch
 
 import pytest
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter as SDKOTLPSpanExporter
 from opentelemetry.sdk.trace.export import SpanExportResult
 
 from elspeth.contracts.call_data import RawCallPayload
@@ -1161,9 +1162,9 @@ class TestFlush:
             manager.close()
 
     def test_flush_counts_deferred_event_delivered_when_any_exporter_succeeds(self) -> None:
-        failed_sdk = MagicMock()
+        failed_sdk = create_autospec(SDKOTLPSpanExporter, instance=True)
         failed_sdk.export.return_value = SpanExportResult.FAILURE
-        successful_sdk = MagicMock()
+        successful_sdk = create_autospec(SDKOTLPSpanExporter, instance=True)
         successful_sdk.export.return_value = SpanExportResult.SUCCESS
         failed_exporter = OTLPExporter()
         successful_exporter = OTLPExporter()
@@ -1265,7 +1266,7 @@ class TestClose:
         expected_failed: int,
         expected_dropped: int,
     ) -> None:
-        sdk_exporter = MagicMock()
+        sdk_exporter = create_autospec(SDKOTLPSpanExporter, instance=True)
         sdk_exporter.export.return_value = result
         exporter = OTLPExporter()
         with patch(
@@ -1292,9 +1293,9 @@ class TestClose:
         sdk_exporter.export.assert_called_once()
 
     def test_close_counts_deferred_event_delivered_when_any_exporter_succeeds(self) -> None:
-        failed_sdk = MagicMock()
+        failed_sdk = create_autospec(SDKOTLPSpanExporter, instance=True)
         failed_sdk.export.return_value = SpanExportResult.FAILURE
-        successful_sdk = MagicMock()
+        successful_sdk = create_autospec(SDKOTLPSpanExporter, instance=True)
         successful_sdk.export.return_value = SpanExportResult.SUCCESS
         failed_exporter = OTLPExporter()
         successful_exporter = OTLPExporter()

@@ -6,10 +6,10 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
-from elspeth.contracts.freeze import deep_freeze
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.execution.schemas import RunAccounting, RunStatusResponse, ValidationResult
@@ -31,8 +31,7 @@ class FrozenRunSettings:
     audit_safe_config: Mapping[str, Any]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "executable_config", cast(Mapping[str, Any], deep_freeze(dict(self.executable_config))))
-        object.__setattr__(self, "audit_safe_config", cast(Mapping[str, Any], deep_freeze(dict(self.audit_safe_config))))
+        freeze_fields(self, "executable_config", "audit_safe_config")
 
 
 class ValidationSettings(Protocol):

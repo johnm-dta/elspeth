@@ -1,13 +1,14 @@
 """Tests for the B1-r3 MeterProvider precondition in elspeth.web.app.
 
-Verifies that importing ``elspeth.web.app`` installs a real ``MeterProvider``
-(not the OTel default ``NoOpMeterProvider``) and that the FastAPI app exposes
-a Prometheus scrape endpoint at ``GET /metrics``.
+Verifies that ``create_app()`` installs a real ``MeterProvider`` (not the OTel
+default ``NoOpMeterProvider``) and that the FastAPI app exposes a Prometheus
+scrape endpoint at ``GET /metrics``.
 
 Process-global side effect notice
 ----------------------------------
-``elspeth.web.app`` sets the global OTel ``MeterProvider`` at module-import
-time (process-global per OTel design, do_once semantics in OTel 1.41+).
+``elspeth.web.app.create_app()`` sets the global OTel ``MeterProvider`` during
+application construction (process-global per OTel design, do_once semantics in
+OTel 1.41+).
 Once a real (non-NoOp) provider is set, subsequent ``set_meter_provider``
 calls are silently ignored — the old save/restore test pattern no longer works.
 
@@ -38,19 +39,28 @@ from starlette.responses import Response
 from starlette.routing import Route
 
 # ---------------------------------------------------------------------------
-# Test 1 — importing app.py wires a real MeterProvider
+# Test 1 — creating the app wires a real MeterProvider
 # ---------------------------------------------------------------------------
 
 
-def test_meter_provider_is_not_noop() -> None:
-    """``metrics.get_meter_provider()`` returns a real ``MeterProvider``, not
-    the OTel default ``NoOpMeterProvider``.
+def test_meter_provider_is_not_noop(tmp_path: Path) -> None:
+    """``create_app()`` installs a real ``MeterProvider``, not the OTel default.
 
     This is the B1-r3 load-bearing precondition: without a real provider every
     counter in the codebase silently discards its data.
     """
-    # Importing app triggers the module-level set_meter_provider call.
-    import elspeth.web.app  # noqa: F401 — side-effect import
+    from elspeth.web.app import create_app
+    from elspeth.web.config import WebSettings
+
+    settings = WebSettings(
+        data_dir=tmp_path,
+        composer_max_composition_turns=15,
+        composer_max_discovery_turns=10,
+        composer_timeout_seconds=85.0,
+        composer_rate_limit_per_minute=10,
+        shareable_link_signing_key=SecretBytes(b"\x00" * 32),
+    )
+    create_app(settings)
 
     provider = metrics.get_meter_provider()
     # Must be the real SDK MeterProvider, NOT the OTel no-op.

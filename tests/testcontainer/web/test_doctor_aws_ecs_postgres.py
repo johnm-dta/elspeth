@@ -22,6 +22,7 @@ from typer.testing import CliRunner
 
 from elspeth.cli import app
 from elspeth.web.schema_probe import SchemaState, probe_landscape_schema, probe_session_schema
+from elspeth.web.sessions.engine import create_session_engine
 
 pytestmark = pytest.mark.testcontainer
 
@@ -134,7 +135,7 @@ def _assert_all_green_report(stdout: str) -> list[dict[str, Any]]:
 
 
 def _assert_schemas_current(databases: _DatabasePair) -> None:
-    session_engine = create_engine(databases.session_url)
+    session_engine = create_session_engine(databases.session_url)
     landscape_engine = create_engine(databases.landscape_url)
     try:
         assert probe_session_schema(session_engine) is SchemaState.CURRENT

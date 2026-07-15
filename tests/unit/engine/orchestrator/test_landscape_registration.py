@@ -2,16 +2,22 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import create_autospec, patch
 
 import pytest
 
 from elspeth import __version__ as ENGINE_VERSION
 from elspeth.contracts import Determinism, NodeType
 from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.contracts.payload_store import PayloadStore
 from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.types import NodeID, SinkName
+from elspeth.core.events import EventBusProtocol
+from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
+from elspeth.engine.orchestrator.ceremony import RunCeremony
+from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
 from elspeth.engine.orchestrator.landscape_registration import (
     NodeAuditMetadata,
     register_nodes_with_landscape,
@@ -19,6 +25,7 @@ from elspeth.engine.orchestrator.landscape_registration import (
     resolve_source_contracts_by_node_id,
 )
 from elspeth.engine.orchestrator.run_lifecycle import RunLifecycleCoordinator
+from elspeth.engine.spans import SpanFactory
 
 _SCHEMA_CONFIG = SchemaConfig(mode="observed", fields=None)
 
@@ -43,17 +50,18 @@ def _policy_evidence() -> WebPluginPolicyEvidence:
 
 
 def test_web_policy_audit_failure_prevents_run_started_telemetry() -> None:
-    ceremony = MagicMock()
+    ceremony = create_autospec(RunCeremony, instance=True)
     lifecycle = RunLifecycleCoordinator(
-        db=MagicMock(),
-        events=MagicMock(),
+        db=create_autospec(LandscapeDB, instance=True),
+        events=create_autospec(EventBusProtocol, instance=True),
         ceremony=ceremony,
-        checkpoints=MagicMock(),
-        span_factory=MagicMock(),
+        checkpoints=create_autospec(CheckpointCoordinator, instance=True),
+        span_factory=create_autospec(SpanFactory, instance=True),
         canonical_version="v1",
     )
-    factory = MagicMock()
-    factory.run_lifecycle.begin_run.side_effect = RuntimeError("policy audit insert failed")
+    run_lifecycle = create_autospec(RunLifecycleRepository, instance=True)
+    run_lifecycle.begin_run.side_effect = RuntimeError("policy audit insert failed")
+    factory = SimpleNamespace(run_lifecycle=run_lifecycle)
     source = SimpleNamespace(name="csv", output_schema=SimpleNamespace(model_json_schema=lambda: {"type": "object"}))
     config = SimpleNamespace(sources={"input": source}, config={})
 
@@ -63,7 +71,7 @@ def test_web_policy_audit_failure_prevents_run_started_telemetry() -> None:
     ):
         lifecycle.initialize_database_phase(
             config,
-            MagicMock(),
+            create_autospec(PayloadStore, instance=True),
             None,
             openrouter_catalog_sha256="d" * 64,
             openrouter_catalog_source="bundled",
@@ -71,7 +79,7 @@ def test_web_policy_audit_failure_prevents_run_started_telemetry() -> None:
         )
 
     ceremony.emit_telemetry.assert_not_called()
-    assert factory.run_lifecycle.begin_run.call_args.kwargs["web_plugin_policy_evidence"] == _policy_evidence()
+    assert run_lifecycle.begin_run.call_args.kwargs["web_plugin_policy_evidence"] == _policy_evidence()
 
 
 class _Plugin:

@@ -388,7 +388,7 @@ def _make_minimal_settings(tmp_path: Path, *, config_hash_override: str | None =
         "landscape": {"url": f"sqlite:///{tmp_path / 'landscape.db'}"},
         "payload_store": {"backend": "filesystem", "base_path": str(tmp_path / "payloads")},
     }
-    (tmp_path / "payloads").mkdir(exist_ok=True)
+    (tmp_path / "payloads").mkdir(mode=0o700, exist_ok=True)
     settings_path = tmp_path / "settings.yaml"
     settings_path.write_text(yaml.dump(config))
     return settings_path
@@ -802,7 +802,7 @@ def _make_jsonl_settings(tmp_path: Path) -> Path:
         "landscape": {"url": f"sqlite:///{tmp_path / 'landscape.db'}"},
         "payload_store": {"backend": "filesystem", "base_path": str(tmp_path / "payloads")},
     }
-    (tmp_path / "payloads").mkdir(exist_ok=True)
+    (tmp_path / "payloads").mkdir(mode=0o700, exist_ok=True)
     settings_path = tmp_path / "settings.yaml"
     settings_path.write_text(yaml.dump(config))
     return settings_path

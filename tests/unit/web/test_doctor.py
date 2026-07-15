@@ -8,9 +8,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, create_autospec
 
 import pytest
+from sqlalchemy import Connection, Engine, create_engine
 
 from elspeth.core.config import TelemetrySettings
 from elspeth.core.landscape.database import SchemaCompatibilityError
@@ -28,7 +29,14 @@ from elspeth.web.doctor import (
     sanitize_error,
     schema_check,
 )
-from elspeth.web.schema_probe import SchemaInitBusyError, SchemaLockCleanupError, SchemaState
+from elspeth.web.schema_probe import (
+    SchemaInitBusyError,
+    SchemaLockCleanupError,
+    SchemaState,
+    init_session_schema,
+    probe_session_schema,
+)
+from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.schema import SessionSchemaError
 
 
@@ -577,16 +585,18 @@ def test_failing_target_gate_prevents_engine_probe_and_init(tmp_path: Path, monk
     _patch_auxiliary_checks_green(monkeypatch)
     shared = "postgresql+psycopg://user:password@host/shared"
     settings = _settings(tmp_path, session_db_url=shared, landscape_url=shared)
-    monkeypatch.setattr(doctor, "_inspect_database", MagicMock(side_effect=AssertionError("must not inspect")))
-    monkeypatch.setattr(doctor, "_initialize_database", MagicMock(side_effect=AssertionError("must not initialize")))
+    inspect_database = create_autospec(_inspect_database, side_effect=AssertionError("must not inspect"))
+    initialize_database = create_autospec(_initialize_database, side_effect=AssertionError("must not initialize"))
+    monkeypatch.setattr(doctor, "_inspect_database", inspect_database)
+    monkeypatch.setattr(doctor, "_initialize_database", initialize_database)
 
     checks = _by_name(collect_checks(settings, init_schema=True))
 
     assert checks["separate_db_targets"].ok is False
     assert checks["session_schema"].ok is False
     assert checks["landscape_schema"].ok is False
-    doctor._inspect_database.assert_not_called()
-    doctor._initialize_database.assert_not_called()
+    inspect_database.assert_not_called()
+    initialize_database.assert_not_called()
 
 
 def test_bad_url_contract_prevents_target_comparison_and_all_database_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -594,15 +604,17 @@ def test_bad_url_contract_prevents_target_comparison_and_all_database_work(tmp_p
 
     _patch_auxiliary_checks_green(monkeypatch)
     settings = _settings(tmp_path, session_db_url="sqlite:///forbidden.db")
-    monkeypatch.setattr(doctor, "database_target_check", MagicMock(side_effect=AssertionError("must not compare")))
-    monkeypatch.setattr(doctor, "_inspect_database", MagicMock(side_effect=AssertionError("must not inspect")))
+    target_check = create_autospec(database_target_check, side_effect=AssertionError("must not compare"))
+    inspect_database = create_autospec(_inspect_database, side_effect=AssertionError("must not inspect"))
+    monkeypatch.setattr(doctor, "database_target_check", target_check)
+    monkeypatch.setattr(doctor, "_inspect_database", inspect_database)
 
     checks = _by_name(collect_checks(settings))
 
     assert checks["session_db_url"].ok is False
     assert checks["separate_db_targets"].ok is False
-    doctor.database_target_check.assert_not_called()
-    doctor._inspect_database.assert_not_called()
+    target_check.assert_not_called()
+    inspect_database.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -632,12 +644,11 @@ def test_schema_state_details_are_static(label: str, state: SchemaState, ok: boo
 
 
 def _engine_with_connection() -> tuple[MagicMock, MagicMock]:
-    engine = MagicMock()
-    connection = MagicMock()
-    context = MagicMock()
-    context.__enter__.return_value = connection
-    context.__exit__.return_value = False
-    engine.connect.return_value = context
+    engine = MagicMock(spec_set=Engine)
+    connection = MagicMock(spec_set=Connection)
+    connection.__enter__.return_value = connection
+    connection.__exit__.return_value = False
+    engine.connect.return_value = connection
     return engine, connection
 
 
@@ -649,11 +660,11 @@ def test_inspect_database_forwards_pool_and_timeout_and_uses_one_connection(
     import elspeth.web.doctor as doctor
 
     engine, connection = _engine_with_connection()
-    session_factory = MagicMock(return_value=engine)
-    landscape_factory = MagicMock(return_value=engine)
+    session_factory = create_autospec(create_session_engine, return_value=engine)
+    landscape_factory = create_autospec(create_engine, return_value=engine)
     monkeypatch.setattr(doctor, "create_session_engine", session_factory)
     monkeypatch.setattr(doctor, "create_engine", landscape_factory)
-    probe = MagicMock(return_value=SchemaState.CURRENT)
+    probe = create_autospec(probe_session_schema, return_value=SchemaState.CURRENT)
     raw_url = "postgresql+psycopg://user:password@host/database"
 
     state, check = _inspect_database(label, raw_url, probe)
@@ -686,7 +697,8 @@ def test_inspect_database_disposes_after_connection_and_probe_failures(
         engine.connect.return_value.__enter__.side_effect = RuntimeError(
             "postgresql://user:secret@private/db"  # secret-scan: allow-this-line
         )
-    probe = MagicMock(
+    probe = create_autospec(
+        probe_session_schema,
         side_effect=(
             RuntimeError("postgresql://user:secret@private/db")  # secret-scan: allow-this-line
             if failure_site == "probe"
@@ -694,7 +706,8 @@ def test_inspect_database_disposes_after_connection_and_probe_failures(
         ),
         return_value=SchemaState.CURRENT,
     )
-    monkeypatch.setattr(doctor, "create_session_engine", MagicMock(return_value=engine))
+    session_factory = create_autospec(create_session_engine, return_value=engine)
+    monkeypatch.setattr(doctor, "create_session_engine", session_factory)
 
     state, check = _inspect_database(
         "session_schema",
@@ -715,9 +728,10 @@ def test_initialize_database_runs_initializer_then_final_probe_on_new_connection
     import elspeth.web.doctor as doctor
 
     engine, connection = _engine_with_connection()
-    monkeypatch.setattr(doctor, "create_session_engine", MagicMock(return_value=engine))
-    initializer = MagicMock()
-    probe = MagicMock(return_value=SchemaState.CURRENT)
+    session_factory = create_autospec(create_session_engine, return_value=engine)
+    monkeypatch.setattr(doctor, "create_session_engine", session_factory)
+    initializer = create_autospec(init_session_schema)
+    probe = create_autospec(probe_session_schema, return_value=SchemaState.CURRENT)
 
     check = _initialize_database(
         "session_schema",
@@ -767,13 +781,16 @@ def test_initialize_database_catches_named_failures_redacts_and_disposes(
     import elspeth.web.doctor as doctor
 
     engine, _connection = _engine_with_connection()
-    monkeypatch.setattr(doctor, "create_session_engine", MagicMock(return_value=engine))
+    session_factory = create_autospec(create_session_engine, return_value=engine)
+    probe = create_autospec(probe_session_schema, return_value=SchemaState.CURRENT)
+    initializer = create_autospec(init_session_schema, side_effect=error)
+    monkeypatch.setattr(doctor, "create_session_engine", session_factory)
 
     check = _initialize_database(
         "session_schema",
         "postgresql+psycopg://user:password@host/database",
-        MagicMock(return_value=SchemaState.CURRENT),
-        MagicMock(side_effect=error),
+        probe,
+        initializer,
     )
 
     assert check == ContractCheck("session_schema", False, detail)
@@ -785,13 +802,19 @@ def test_initialize_database_disposes_when_final_probe_fails(monkeypatch: pytest
     import elspeth.web.doctor as doctor
 
     engine, _connection = _engine_with_connection()
-    monkeypatch.setattr(doctor, "create_session_engine", MagicMock(return_value=engine))
+    session_factory = create_autospec(create_session_engine, return_value=engine)
+    probe = create_autospec(
+        probe_session_schema,
+        side_effect=RuntimeError("private URL and credentials"),
+    )
+    initializer = create_autospec(init_session_schema)
+    monkeypatch.setattr(doctor, "create_session_engine", session_factory)
 
     check = _initialize_database(
         "session_schema",
         "postgresql+psycopg://user:password@host/database",
-        MagicMock(side_effect=RuntimeError("private URL and credentials")),
-        MagicMock(),
+        probe,
+        initializer,
     )
 
     assert check == ContractCheck("session_schema", False, "session schema initialization failed (RuntimeError)")
@@ -859,7 +882,7 @@ def test_stale_or_connection_failure_on_one_target_initializes_neither(
     events: list[str] = []
     _patch_auxiliary_checks_green(monkeypatch)
     _patch_database_states(monkeypatch, session, landscape, events)
-    initializer = MagicMock(side_effect=AssertionError("must not initialize"))
+    initializer = create_autospec(_initialize_database, side_effect=AssertionError("must not initialize"))
     monkeypatch.setattr(doctor, "_initialize_database", initializer)
 
     checks = _by_name(collect_checks(_settings(tmp_path), init_schema=True))
@@ -906,7 +929,7 @@ def test_any_auxiliary_preflight_failure_blocks_all_initializers(
                 )
             ],
         )
-    initializer = MagicMock(side_effect=AssertionError("must not initialize"))
+    initializer = create_autospec(_initialize_database, side_effect=AssertionError("must not initialize"))
     monkeypatch.setattr(doctor, "_initialize_database", initializer)
 
     checks = _by_name(collect_checks(_settings(tmp_path), init_schema=True))

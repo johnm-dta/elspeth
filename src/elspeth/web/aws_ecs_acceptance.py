@@ -49,6 +49,7 @@ from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
 from elspeth.contracts.config.runtime import RuntimeTelemetryConfig
 from elspeth.contracts.errors import ExecutionError
+from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
 from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.schema import SchemaConfig
@@ -2961,6 +2962,9 @@ class OperatorTelemetryEvidence:
     retained_metric_query: Mapping[str, object]
     retained_trace_id: str
 
+    def __post_init__(self) -> None:
+        freeze_fields(self, "retained_metric_query")
+
 
 @dataclass(frozen=True, slots=True)
 class OperatorTelemetryOutageEvidence:
@@ -3160,7 +3164,7 @@ def _operator_receipt(
         "trace_terminal_agrees": trace_terminal_agrees,
         "collector_degraded": collector_degraded,
         "cloud_receipt": positive,
-        "retained_metric_query": evidence.retained_metric_query if isinstance(evidence, OperatorTelemetryEvidence) else None,
+        "retained_metric_query": deep_thaw(evidence.retained_metric_query) if isinstance(evidence, OperatorTelemetryEvidence) else None,
         "retained_trace_id": evidence.retained_trace_id if isinstance(evidence, OperatorTelemetryEvidence) else None,
     }
 

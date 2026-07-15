@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import create_autospec
 
 import jwt
 import pytest
 from fastapi import Request
 from structlog.testing import capture_logs
 
+from elspeth.core.landscape.auth_audit_repository import AuthAuditRepository
 from elspeth.core.landscape.database import SchemaCompatibilityError
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.web.auth import audit as audit_module
@@ -107,7 +108,7 @@ def test_every_writer_forwards_required_create_tables_policy(
     repository_method: str,
 ) -> None:
     open_calls: list[tuple[str, dict[str, object]]] = []
-    db_sentinel = MagicMock()
+    db_sentinel = object()
 
     class _DBContext:
         def __enter__(self) -> object:
@@ -122,10 +123,14 @@ def test_every_writer_forwards_required_create_tables_policy(
             open_calls.append((url, kwargs))
             return _DBContext()
 
-    auth_repository = MagicMock()
+    auth_repository = create_autospec(AuthAuditRepository, instance=True)
     factory = SimpleNamespace(auth_audit=auth_repository)
     monkeypatch.setattr(audit_module, "LandscapeDB", _FakeLandscapeDB)
-    monkeypatch.setattr(audit_module, "RecorderFactory", MagicMock(return_value=factory))
+    monkeypatch.setattr(
+        audit_module,
+        "RecorderFactory",
+        create_autospec(audit_module.RecorderFactory, return_value=factory),
+    )
     recorder = AuthAuditRecorder(
         landscape_url="sqlite:///auth-audit.db",
         landscape_passphrase=None,
@@ -172,7 +177,7 @@ def test_every_writer_propagates_and_redacts_expected_database_failures(
         failure = SchemaCompatibilityError("RAW_SQL_MARKER CREDENTIAL_MARKER")
     else:
         failure = LandscapeRecordError("RAW_SQL_MARKER CREDENTIAL_MARKER")
-    db_sentinel = MagicMock()
+    db_sentinel = object()
 
     class _DBContext:
         def __enter__(self) -> object:
@@ -189,14 +194,17 @@ def test_every_writer_propagates_and_redacts_expected_database_failures(
                 raise failure
             return _DBContext()
 
-    auth_repository = MagicMock()
+    auth_repository = create_autospec(AuthAuditRepository, instance=True)
     if failure_location == "repository":
         getattr(auth_repository, repository_method).side_effect = failure
     monkeypatch.setattr(audit_module, "LandscapeDB", _FakeLandscapeDB)
     monkeypatch.setattr(
         audit_module,
         "RecorderFactory",
-        MagicMock(return_value=SimpleNamespace(auth_audit=auth_repository)),
+        create_autospec(
+            audit_module.RecorderFactory,
+            return_value=SimpleNamespace(auth_audit=auth_repository),
+        ),
     )
     recorder = AuthAuditRecorder(
         landscape_url="sqlite:///SENSITIVE_URL_MARKER.db",

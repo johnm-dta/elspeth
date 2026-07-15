@@ -32,6 +32,7 @@ from elspeth.web.schema_probe import (
     probe_landscape_schema,
     probe_session_schema,
 )
+from elspeth.web.sessions.engine import create_session_engine
 
 pytestmark = pytest.mark.testcontainer
 
@@ -201,7 +202,7 @@ def _settings(tmp_path: Path, databases: _RuntimeDatabases) -> WebSettings:
 
 
 def _initialized_app(tmp_path: Path, databases: _RuntimeDatabases) -> tuple[object, Engine, Engine]:
-    session_owner = create_engine(databases.session_owner_url)
+    session_owner = create_session_engine(databases.session_owner_url)
     landscape_owner = create_engine(databases.landscape_owner_url)
     init_session_schema(session_owner)
     init_landscape_schema(landscape_owner)

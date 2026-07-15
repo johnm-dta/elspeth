@@ -1188,7 +1188,7 @@ sinks:
 
         settings_file, _db_path = self._make_settings_with_landscape_db(tmp_path)
         settings_file.write_text(settings_file.read_text().replace("output.json", "output.jsonl"))
-        (tmp_path / "payloads").mkdir()
+        (tmp_path / "payloads").mkdir(mode=0o700)
 
         run_id = "run-source-not-exhausted-50cec0a02a"
         mock_resume_point = MagicMock(spec=ResumePoint)

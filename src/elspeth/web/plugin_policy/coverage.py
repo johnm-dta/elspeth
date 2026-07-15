@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
 from elspeth.contracts.enums import Determinism
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.plugin_capabilities import ControlRole, PluginCapability
 from elspeth.plugins.infrastructure.manager import PluginNotFoundError, get_shared_plugin_manager
 from elspeth.web.composer.state import CompositionState, NodeSpec
@@ -32,6 +33,9 @@ class OutputStreamGraph:
     producers_by_stream: Mapping[str, tuple[NodeSpec, ...]]
     queue_predecessors: Mapping[str, tuple[NodeSpec, ...]]
     consumers_by_stream: Mapping[str, tuple[NodeSpec, ...]]
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "producers_by_stream", "queue_predecessors", "consumers_by_stream")
 
 
 @dataclass(frozen=True, slots=True)

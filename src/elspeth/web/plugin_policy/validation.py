@@ -8,7 +8,7 @@ from typing import Literal
 
 from jsonschema import Draft202012Validator
 
-from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.plugin_capabilities import ControlMode
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.state import CompositionState, NodeSpec, OutputSpec, SourceSpec
@@ -52,6 +52,9 @@ class _Component:
     component_type: Literal["source", "transform", "sink"]
     plugin_id: PluginId | None
     options: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "options")
 
 
 def validate_plugin_policy(
@@ -208,8 +211,12 @@ def _lower_profiled_components(
         if plugin_id is None or plugin_id not in aliases_by_plugin:
             continue
         aliases = aliases_by_plugin[plugin_id]
-        authored_options = {name: value for name, value in component.options.items() if name not in _PROFILE_LOWERING_METADATA_OPTION_KEYS}
-        authoring_metadata = {name: value for name, value in component.options.items() if name in _PROFILE_LOWERING_METADATA_OPTION_KEYS}
+        authored_options = {
+            name: deep_thaw(value) for name, value in component.options.items() if name not in _PROFILE_LOWERING_METADATA_OPTION_KEYS
+        }
+        authoring_metadata = {
+            name: deep_thaw(value) for name, value in component.options.items() if name in _PROFILE_LOWERING_METADATA_OPTION_KEYS
+        }
         alias = authored_options.pop("profile", None)
         if not isinstance(alias, str) or alias not in aliases:
             findings.append(
@@ -254,7 +261,7 @@ def _lower_profiled_components(
             )
             continue
         lowered_options[(component.component_type, component.component_id)] = {
-            **dict(lowered.executable_options),
+            **deep_thaw(lowered.executable_options),
             **authoring_metadata,
         }
 

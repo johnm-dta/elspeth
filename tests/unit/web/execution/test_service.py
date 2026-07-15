@@ -46,6 +46,7 @@ from elspeth.core.config import (
 from elspeth.core.dag.graph import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.schema import run_attributions_table, runs_table
+from elspeth.telemetry.manager import TelemetryManager
 from elspeth.web.blobs.protocol import BlobFinalizationResult, BlobRecord, BlobServiceProtocol
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.errors import PipelineValidationError
@@ -1525,7 +1526,7 @@ telemetry:
 
         # This integration test exercises Landscape persistence and ordering;
         # transport delivery itself is covered by test_operator_telemetry.py.
-        telemetry_manager = MagicMock()
+        telemetry_manager = create_autospec(TelemetryManager, instance=True)
         telemetry_manager.health_metrics = {"events_dropped": 3, "queue_drops": 1}
         with (
             patch("elspeth.telemetry.create_telemetry_manager", return_value=telemetry_manager),

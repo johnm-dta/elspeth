@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError
 import pytest
 from pydantic import ValidationError
 
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.plugin_capabilities import WebConfigAuthority
 from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 from elspeth.web.catalog.schemas import PluginSchemaInfo
@@ -228,7 +229,7 @@ def test_bedrock_profile_resolver_exposes_only_alias_and_safe_options() -> None:
         alias="prompt-default",
         safe_options={"fields": ["prompt"], "schema": {"mode": "observed"}},
     )
-    assert lowered.audit_safe_options == {
+    assert deep_thaw(lowered.audit_safe_options) == {
         "profile": "prompt-default",
         "fields": ["prompt"],
         "schema": {"mode": "observed"},
@@ -368,7 +369,7 @@ def test_profile_lowering_splits_executable_and_audit_safe_options() -> None:
         "secret_ref": "OPENROUTER_API_KEY",
         "secret_scope": "server",
     }
-    assert lowered.audit_safe_options == {
+    assert deep_thaw(lowered.audit_safe_options) == {
         "profile": "tutorial",
         "prompt_template": "Summarise {{ row }}",
         "response_field": "summary",

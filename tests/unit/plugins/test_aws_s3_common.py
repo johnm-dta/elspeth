@@ -6,7 +6,6 @@ import builtins
 import sys
 from types import ModuleType
 from typing import Any
-from unittest.mock import Mock
 
 import pytest
 
@@ -18,16 +17,27 @@ class _FakeConfig:
         self.retries = kwargs["retries"]
 
 
-def _install_fake_sdk(monkeypatch: pytest.MonkeyPatch) -> Mock:
+class _FakeS3ClientFactory:
+    def __init__(self) -> None:
+        self.return_value = object()
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def __call__(self, service_name: str, **kwargs: Any) -> object:
+        self.calls.append((service_name, kwargs))
+        return self.return_value
+
+
+def _install_fake_sdk(monkeypatch: pytest.MonkeyPatch) -> _FakeS3ClientFactory:
     boto3 = ModuleType("boto3")
-    boto3.client = Mock(return_value=object())  # type: ignore[attr-defined]
+    client = _FakeS3ClientFactory()
+    boto3.client = client  # type: ignore[attr-defined]
     botocore = ModuleType("botocore")
     config = ModuleType("botocore.config")
     config.Config = _FakeConfig  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "boto3", boto3)
     monkeypatch.setitem(sys.modules, "botocore", botocore)
     monkeypatch.setitem(sys.modules, "botocore.config", config)
-    return boto3.client  # type: ignore[attr-defined,no-any-return]
+    return client
 
 
 def test_build_s3_client_passes_region_endpoint_and_exact_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -38,9 +48,9 @@ def test_build_s3_client_passes_region_endpoint_and_exact_config(monkeypatch: py
     result = build_s3_client("ap-southeast-2", "http://localhost:4566")
 
     assert result is client.return_value
-    client.assert_called_once()
-    args, kwargs = client.call_args
-    assert args == ("s3",)
+    assert len(client.calls) == 1
+    service_name, kwargs = client.calls[0]
+    assert service_name == "s3"
     assert kwargs["region_name"] == "ap-southeast-2"
     assert kwargs["endpoint_url"] == "http://localhost:4566"
     config = kwargs["config"]
@@ -56,8 +66,9 @@ def test_none_args_pass_through(monkeypatch: pytest.MonkeyPatch) -> None:
 
     build_s3_client(None, None)
 
-    assert client.call_args.kwargs["region_name"] is None
-    assert client.call_args.kwargs["endpoint_url"] is None
+    _service_name, kwargs = client.calls[0]
+    assert kwargs["region_name"] is None
+    assert kwargs["endpoint_url"] is None
 
 
 def test_no_credential_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -67,7 +78,8 @@ def test_no_credential_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
 
     build_s3_client("ap-southeast-2", None)
 
-    assert set(client.call_args.kwargs) == {"region_name", "endpoint_url", "config"}
+    _service_name, kwargs = client.calls[0]
+    assert set(kwargs) == {"region_name", "endpoint_url", "config"}
 
 
 def test_missing_sdk_error_names_the_aws_extra(monkeypatch: pytest.MonkeyPatch) -> None:

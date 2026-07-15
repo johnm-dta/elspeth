@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from elspeth.web.sessions._guided_step_chat import _COMMIT_REJECTED_MESSAGE, _SYNTHETIC_UNAVAILABLE_MESSAGE
 
@@ -29,6 +29,14 @@ class _AsyncCompletionFake:
 
     async def __call__(self, *_args: object, **_kwargs: object) -> object:
         return self.response
+
+
+@dataclass(frozen=True)
+class _UnexpectedAsyncCall:
+    message: str
+
+    async def __call__(self, *_args: object, **_kwargs: object) -> object:
+        raise AssertionError(self.message)
 
 
 def _post_chat(client: TestClient, session_id: str, *, message: str, step_index: str):
@@ -318,7 +326,7 @@ def test_step_1_chat_upload_hint_binds_latest_uploaded_csv_without_llm(composer_
 
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(side_effect=AssertionError("upload hint should bind the latest blob before LLM chat")),
+        new=_UnexpectedAsyncCall("upload hint should bind the latest blob before LLM chat"),
     ):
         status, body = _post_chat(
             client,
@@ -371,7 +379,7 @@ def test_step_1_chat_upload_hint_binds_named_csv_when_newer_blob_exists(composer
 
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=AsyncMock(side_effect=AssertionError("named upload should bind before LLM chat")),
+        new=_UnexpectedAsyncCall("named upload should bind before LLM chat"),
     ):
         status, body = _post_chat(
             client,
@@ -449,7 +457,7 @@ def test_step_1_chat_upload_fast_path_rejection_degrades_and_audits(composer_tes
     with (
         patch(
             "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(side_effect=AssertionError("fast-path rejection should not call LLM")),
+            new=_UnexpectedAsyncCall("fast-path rejection should not call LLM"),
         ),
         patch(
             "elspeth.web.sessions.routes.composer.guided.handle_step_1_source",

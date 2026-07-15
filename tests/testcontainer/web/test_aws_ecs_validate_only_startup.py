@@ -28,6 +28,7 @@ from elspeth.web.schema_probe import (
     probe_landscape_schema,
     probe_session_schema,
 )
+from elspeth.web.sessions.engine import create_session_engine
 
 pytestmark = pytest.mark.testcontainer
 
@@ -259,7 +260,7 @@ def test_aws_ecs_startup_fails_closed_on_missing_session_schema(
 ) -> None:
     runtime_databases.provision_runtime_role()
     _assert_runtime_ddl_denied(runtime_databases)
-    session_owner = create_engine(runtime_databases.session_owner_url)
+    session_owner = create_session_engine(runtime_databases.session_owner_url)
     landscape_owner = create_engine(runtime_databases.landscape_owner_url)
     try:
         before_session = _catalog_identity(session_owner)
@@ -285,7 +286,7 @@ def test_aws_ecs_startup_fails_closed_when_only_landscape_schema_missing(
     tmp_path: Path,
     runtime_databases: _RuntimeDatabases,
 ) -> None:
-    session_owner = create_engine(runtime_databases.session_owner_url)
+    session_owner = create_session_engine(runtime_databases.session_owner_url)
     landscape_owner = create_engine(runtime_databases.landscape_owner_url)
     try:
         init_session_schema(session_owner)
@@ -314,7 +315,7 @@ def test_aws_ecs_startup_succeeds_with_current_schema_under_ddl_denied_roles(
     tmp_path: Path,
     runtime_databases: _RuntimeDatabases,
 ) -> None:
-    session_owner = create_engine(runtime_databases.session_owner_url)
+    session_owner = create_session_engine(runtime_databases.session_owner_url)
     landscape_owner = create_engine(runtime_databases.landscape_owner_url)
     app = None
     try:
@@ -334,7 +335,7 @@ def test_aws_ecs_startup_succeeds_with_current_schema_under_ddl_denied_roles(
 
         assert _catalog_identity(session_owner) == before_session
         assert _catalog_identity(landscape_owner) == before_landscape
-        session_runtime = create_engine(runtime_databases.session_runtime_url)
+        session_runtime = create_session_engine(runtime_databases.session_runtime_url)
         landscape_runtime = create_engine(runtime_databases.landscape_runtime_url)
         try:
             assert probe_session_schema(session_runtime) is SchemaState.CURRENT
@@ -371,7 +372,7 @@ def test_aws_ecs_startup_rejects_same_or_ambiguous_target_before_connecting(
 
     _assert_redacted(exc_info.value, runtime_databases)
     assert "DBAPI" not in str(exc_info.value)
-    owner = create_engine(runtime_databases.session_owner_url)
+    owner = create_session_engine(runtime_databases.session_owner_url)
     try:
         assert inspect(owner).get_table_names() == []
     finally:

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
 from elspeth.plugins.transforms.aws.guardrail_profiles import BedrockGuardrailProfileSettings
 
@@ -180,6 +181,9 @@ class LocalRequirementResult:
 class LoweredPluginConfig:
     executable_options: Mapping[str, object] = field(repr=False)
     audit_safe_options: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "executable_options", "audit_safe_options")
 
 
 class ProfileCredentialInventory(Protocol):

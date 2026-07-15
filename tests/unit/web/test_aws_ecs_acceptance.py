@@ -11,7 +11,7 @@ import os
 import sqlite3
 import subprocess
 from collections.abc import Callable, Mapping
-from dataclasses import asdict
+from dataclasses import fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1974,7 +1974,7 @@ def test_operator_telemetry_positive_lane_is_audit_first_bounded_status_correlat
     assert queries.metric_calls == 3
     assert queries.trace_calls == {"RunStarted": 3, "RunFinished": 3}
     assert sleeps == [0.25, 0.25]
-    assert set(asdict(evidence)) == {
+    assert {field.name for field in fields(evidence)} == {
         "metric_name",
         "trace_names",
         "observed_at",

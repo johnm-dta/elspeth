@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 import pytest
 from sqlalchemy import event, func, select
+from sqlalchemy.engine import Connection
 
 from elspeth.contracts import BatchStatus, NodeType, TriggerType
 from elspeth.contracts.audit import TokenRef
@@ -1402,7 +1406,10 @@ class TestRegisterArtifact:
         committed = factory.execution.register_artifact(**values)
         assert factory.execution.get_artifacts("run-1") == [committed]
 
-    def test_retry_after_fault_after_commit_returns_committed_identity(self):
+    def test_retry_after_response_loss_after_commit_returns_committed_identity(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
         _db, factory = _setup_with_sink()
         factory.execution.begin_node_state(
             "tok-1",
@@ -1422,15 +1429,24 @@ class TestRegisterArtifact:
             "size_bytes": 512,
             "idempotency_key": "run-1:row-1:csv_sink",
         }
-        committed_artifact_id: str | None = None
+        real_write_connection = factory.execution.artifacts._ops.write_connection
 
-        with pytest.raises(RuntimeError, match="fault after commit"):
-            committed = factory.execution.register_artifact(**values)
-            committed_artifact_id = committed.artifact_id
-            raise RuntimeError("fault after commit before return to caller")
+        @contextmanager
+        def _commit_then_lose_response() -> Iterator[Connection]:
+            with real_write_connection() as conn:
+                yield conn
+            raise RuntimeError("response lost after commit before return to caller")
 
-        retried = factory.execution.register_artifact(**values)
-        assert retried.artifact_id == committed_artifact_id
+        monkeypatch.setattr(factory.execution.artifacts._ops, "write_connection", _commit_then_lose_response)
+        with pytest.raises(RuntimeError, match="response lost after commit"):
+            factory.execution.register_artifact(**values, artifact_id="artifact-committed-before-response-loss")
+
+        committed = factory.execution.get_artifacts("run-1")
+        assert len(committed) == 1
+        monkeypatch.setattr(factory.execution.artifacts._ops, "write_connection", real_write_connection)
+        retried = factory.execution.register_artifact(**values, artifact_id="artifact-retry-after-response-loss")
+        assert retried.artifact_id == "artifact-committed-before-response-loss"
+        assert retried.created_at == committed[0].created_at
         assert factory.execution.get_artifacts("run-1") == [retried]
 
     def test_rejects_producer_state_from_different_run(self):

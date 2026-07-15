@@ -123,6 +123,53 @@ def _artifact_index_shapes(engine: Engine) -> set[tuple[str, tuple[str, ...], bo
     }
 
 
+class _Epoch25FailureCursorProxy:
+    def __init__(self, cursor: sqlite3.Cursor, statements: list[str]) -> None:
+        self._cursor = cursor
+        self._statements = statements
+
+    def execute(self, statement: str, parameters: Any = ()) -> _Epoch25FailureCursorProxy:
+        normalized = " ".join(statement.split())
+        self._cursor.execute(statement, parameters)
+        self._statements.append(normalized)
+        if normalized == "PRAGMA user_version = 25":
+            raise sqlite3.OperationalError("injected failure after epoch-25 index creation")
+        return self
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cursor, name)
+
+
+class _Epoch25FailureConnectionProxy:
+    def __init__(self, connection: sqlite3.Connection, statements: list[str]) -> None:
+        self.connection = connection
+        self._statements = statements
+
+    @property
+    def isolation_level(self) -> str | None:
+        return self.connection.isolation_level
+
+    @isolation_level.setter
+    def isolation_level(self, value: str | None) -> None:
+        self.connection.isolation_level = value
+
+    def cursor(self) -> _Epoch25FailureCursorProxy:
+        return _Epoch25FailureCursorProxy(self.connection.cursor(), self._statements)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.connection, name)
+
+
+def _epoch_25_failing_creator(
+    db_path: Path,
+    statements: list[str],
+    connections: list[_Epoch25FailureConnectionProxy],
+) -> _Epoch25FailureConnectionProxy:
+    connection = _Epoch25FailureConnectionProxy(sqlite3.connect(db_path, check_same_thread=False), statements)
+    connections.append(connection)
+    return connection
+
+
 def test_epoch_24_migrates_to_25_and_preserves_artifact(tmp_path: Path) -> None:
     db_path = tmp_path / "forward.db"
     url = _seed_current_database(db_path)
@@ -339,42 +386,10 @@ def test_epoch_24_static_pool_failure_rolls_back_index_and_epoch(
     predecessor.dispose()
     before = _epoch_and_schema(db_path)
     statements: list[str] = []
+    connections: list[_Epoch25FailureConnectionProxy] = []
 
-    class _CursorProxy:
-        def __init__(self, cursor: sqlite3.Cursor) -> None:
-            self._cursor = cursor
-
-        def execute(self, statement: str, parameters: Any = ()) -> _CursorProxy:
-            normalized = " ".join(statement.split())
-            self._cursor.execute(statement, parameters)
-            statements.append(normalized)
-            if normalized == "PRAGMA user_version = 25":
-                raise sqlite3.OperationalError("injected failure after epoch-25 index creation")
-            return self
-
-        def __getattr__(self, name: str) -> Any:
-            return getattr(self._cursor, name)
-
-    class _ConnectionProxy:
-        def __init__(self, connection: sqlite3.Connection) -> None:
-            self._connection = connection
-
-        @property
-        def isolation_level(self) -> str | None:
-            return self._connection.isolation_level
-
-        @isolation_level.setter
-        def isolation_level(self, value: str | None) -> None:
-            self._connection.isolation_level = value
-
-        def cursor(self) -> _CursorProxy:
-            return _CursorProxy(self._connection.cursor())
-
-        def __getattr__(self, name: str) -> Any:
-            return getattr(self._connection, name)
-
-    def _creator() -> _ConnectionProxy:
-        return _ConnectionProxy(sqlite3.connect(db_path, check_same_thread=False))
+    def _creator() -> _Epoch25FailureConnectionProxy:
+        return _epoch_25_failing_creator(db_path, statements, connections)
 
     expected_index_ddl = " ".join(landscape_database._SQLITE_EPOCH_25_ARTIFACT_INDEX_DDL.split())
     with pytest.raises(sqlite3.OperationalError, match="after epoch-25 index creation"):
@@ -388,3 +403,41 @@ def test_epoch_24_static_pool_failure_rolls_back_index_and_epoch(
     assert statements.index(expected_index_ddl) < statements.index("PRAGMA user_version = 25")
     assert _epoch_and_schema(db_path) == before
     assert before[0] == 24
+
+
+def test_epoch_24_single_connection_queue_pool_failure_rolls_back_and_returns_safe_connection(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "queue-pool-rollback.db"
+    url = _seed_current_database(db_path)
+    predecessor = create_engine(url)
+    _rewrite_as_epoch_24(predecessor)
+    predecessor.dispose()
+    before = _epoch_and_schema(db_path)
+    statements: list[str] = []
+    connections: list[_Epoch25FailureConnectionProxy] = []
+
+    def _creator() -> _Epoch25FailureConnectionProxy:
+        return _epoch_25_failing_creator(db_path, statements, connections)
+
+    expected_index_ddl = " ".join(landscape_database._SQLITE_EPOCH_25_ARTIFACT_INDEX_DDL.split())
+    with pytest.raises(sqlite3.OperationalError, match="after epoch-25 index creation"):
+        LandscapeDB.from_url(
+            url,
+            poolclass=QueuePool,
+            pool_size=1,
+            max_overflow=0,
+            pool_timeout=0.25,
+            creator=_creator,
+        )
+
+    assert len(connections) == 1
+    assert expected_index_ddl in statements
+    assert statements.index(expected_index_ddl) < statements.index("PRAGMA user_version = 25")
+    assert _epoch_and_schema(db_path) == before
+    physical = connections[0].connection
+    assert physical.execute("PRAGMA foreign_keys").fetchone() == (1,)
+    assert physical.execute("PRAGMA user_version").fetchone() == (24,)
+    physical.execute("BEGIN IMMEDIATE")
+    assert physical.execute("SELECT 1").fetchone() == (1,)
+    physical.rollback()

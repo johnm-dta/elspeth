@@ -46,10 +46,10 @@ and semantics-only changes; archive/export decision and approver; destructive
 reset requirement and database-operator approval; previous release identity
 and epochs; forward and backward compatibility decisions; and an explicit
 `rollback_permitted` decision with evidence. Epoch-22 code is not compatible
-with a freshly recreated current database, and epoch-23 code rejects the newer
-epoch-25 SQLite stamp, so rollback is `no` unless a later approved record proves
-otherwise. Plans 10 and 12 must cite the epoch-25 record when binding candidate
-and rollback decisions.
+with a freshly recreated current database, and any code that understands only
+epoch 24 or older rejects the newer epoch-25 SQLite stamp. Rollback is therefore
+`no` unless a later approved record proves otherwise. Plans 10 and 12 must cite
+the epoch-25 record when binding candidate and rollback decisions.
 
 Deployments crossing the 0.7.0 boundary from an older release must also account
 for the historical epoch-21 to epoch-22 Landscape reset described below.
@@ -267,10 +267,13 @@ Authority: current source epoch constants and schema tests:
 When the destructive preconditions apply, run after
 `sudo systemctl stop "$SERVICE"` and before
 `sudo systemctl start "$SERVICE"` in the staging procedure. Both DBs are reset
-under the same service-stop window. For SQLite epoch 23→24, archive the matched
-Landscape artifact set in that window but do not delete it; writable startup
-performs the atomic forward migration. The migrated database cannot be reopened
-by epoch-23 code, so rollback requires restoring that archive with the old image.
+under the same service-stop window. For an exact SQLite epoch-23 database,
+archive the matched Landscape artifact set in that window but do not delete it;
+writable startup performs the independently atomic 23→24 and 24→25 migrations.
+An exact epoch-24 database takes only the atomic 24→25 artifact-index step after
+the same archive decision. The migrated epoch-25 database cannot be reopened by
+epoch-24 or older code, so rollback requires restoring the matched archive with
+the old image.
 
 ```bash
 # Continuing from the staging procedure: $PROJECT_ROOT, $ENV_FILE, $SERVICE,
@@ -372,7 +375,7 @@ After restart, verify by composing a new session and confirming the new guidance
 
 The staging site is a source-checkout systemd/Caddy deployment from `/home/john/elspeth`, not the generic VM/Docker flow. When a pre-release plan changes the session DB schema (e.g. composer-progress-persistence Phase 1A and later schema-changing phases), the schema validator at startup will refuse a stale DB; the only accepted cutover path is archive + delete + recreate. Row-level `DELETE FROM chat_messages` / `DELETE FROM composition_states` is incorrect: it leaves the old table shape behind and startup rejects the stale DB.
 
-This procedure destroys staging session rows, chat history, composition states, audit access log rows, runs, run events, blob/blob-link database records, and encrypted `user_secrets` stored in the web session DB. It does not delete blob payload files under the data directory, payload storage, Filigree state, or source files. **If the deploy changes only the session DB schema, do not touch the Landscape audit DB. If both epochs change, follow the release's declared Landscape policy instead of assuming a reset: exact SQLite epoch 23→24 migrates automatically after archival, PostgreSQL uses the schema-owner migration/recreation path, and only older boundaries explicitly marked destructive use the additional [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) procedure.** **Do not run any of this outside staging.**
+This procedure destroys staging session rows, chat history, composition states, audit access log rows, runs, run events, blob/blob-link database records, and encrypted `user_secrets` stored in the web session DB. It does not delete blob payload files under the data directory, payload storage, Filigree state, or source files. **If the deploy changes only the session DB schema, do not touch the Landscape audit DB. If both epochs change, follow the release's declared Landscape policy instead of assuming a reset: exact SQLite epoch 23→24→25 and epoch 24→25 migrations run automatically after archival, PostgreSQL uses the schema-owner migration/recreation path, and only older boundaries explicitly marked destructive use the additional [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) procedure.** **Do not run any of this outside staging.**
 
 For SQLite, `sessions.db`, `sessions.db-wal`, `sessions.db-shm`, and `sessions.db-journal` are handled as one matched artifact set for archive, deletion, and rollback.
 

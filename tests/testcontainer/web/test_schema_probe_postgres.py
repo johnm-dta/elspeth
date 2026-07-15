@@ -13,13 +13,14 @@ from pathlib import Path
 
 import pytest
 import structlog
-from sqlalchemy import Connection, Engine, create_engine, inspect, select, text, update
+from sqlalchemy import Connection, Engine, create_engine, event, inspect, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, OperationalError, SQLAlchemyError
 from sqlalchemy.pool import NullPool
 from testcontainers.postgres import PostgresContainer
 from tests.unit.core.test_schema_shape import _static_check_issues
 
+from elspeth.contracts import Artifact
 from elspeth.contracts.enums import NodeType
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
@@ -559,6 +560,126 @@ def test_artifact_idempotency_index_and_behavior(postgres_engine: Engine) -> Non
         null_second = factory.execution.register_artifact(**(values | {"idempotency_key": None}))
         assert null_first.artifact_id != null_second.artifact_id
         assert len(factory.execution.get_artifacts(run.run_id)) == 3
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("divergent", [False, True], ids=["identical", "divergent"])
+def test_artifact_idempotency_contenders_use_independent_postgres_connections(
+    postgres_engine: Engine,
+    divergent: bool,
+) -> None:
+    init_landscape_schema(postgres_engine)
+    db_url = postgres_engine.url.render_as_string(hide_password=False)
+    db = LandscapeDB.from_url(db_url, create_tables=False, pool_size=2, max_overflow=0, pool_timeout=5)
+    try:
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(
+            config={},
+            canonical_version="v1",
+            run_id="postgres-artifact-contention",
+            openrouter_catalog_sha256="0" * 64,
+            openrouter_catalog_source="bundled",
+        )
+        schema = SchemaConfig.from_dict({"mode": "observed"})
+        factory.data_flow.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            node_id="postgres-artifact-contention-source",
+            schema_config=schema,
+        )
+        factory.data_flow.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0",
+            config={},
+            node_id="postgres-artifact-contention-sink",
+            schema_config=schema,
+        )
+        row = factory.data_flow.create_row(
+            run_id=run.run_id,
+            source_node_id="postgres-artifact-contention-source",
+            row_index=0,
+            data={"value": 1},
+            row_id="postgres-artifact-contention-row",
+            source_row_index=0,
+            ingest_sequence=0,
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="postgres-artifact-contention-token")
+        state = factory.execution.begin_node_state(
+            token_id=token.token_id,
+            node_id="postgres-artifact-contention-sink",
+            run_id=run.run_id,
+            step_index=0,
+            input_data={"value": 1},
+            state_id="postgres-artifact-contention-state",
+        )
+        values = {
+            "run_id": run.run_id,
+            "state_id": state.state_id,
+            "sink_node_id": "postgres-artifact-contention-sink",
+            "artifact_type": "csv",
+            "path": "/output/postgres-contention.csv",
+            "size_bytes": 128,
+            "idempotency_key": "postgres-artifact-contention-row:csv_sink",
+        }
+
+        transaction_barrier = threading.Barrier(2)
+        physical_connections: set[int] = set()
+        connection_guard = threading.Lock()
+
+        def _synchronize_contender_transactions(conn: Connection) -> None:
+            if not threading.current_thread().name.startswith("postgres-artifact-contender"):
+                return
+            with connection_guard:
+                physical_connections.add(id(conn.connection.driver_connection))
+            transaction_barrier.wait(timeout=15)
+
+        event.listen(db.engine, "begin", _synchronize_contender_transactions)
+
+        def _contend(ordinal: int) -> Artifact | AuditIntegrityError:
+            content_hash = "sha256:postgres-contention"
+            if divergent and ordinal == 1:
+                content_hash = "sha256:postgres-divergent"
+            contender = RecorderFactory(db)
+            try:
+                return contender.execution.register_artifact(
+                    **values,
+                    content_hash=content_hash,
+                    artifact_id=f"postgres-artifact-proposal-{ordinal}",
+                )
+            except AuditIntegrityError as exc:
+                return exc
+
+        try:
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="postgres-artifact-contender") as executor:
+                futures = [executor.submit(_contend, ordinal) for ordinal in range(2)]
+                outcomes = [future.result(timeout=30) for future in futures]
+        finally:
+            event.remove(db.engine, "begin", _synchronize_contender_transactions)
+
+        assert len(physical_connections) == 2
+        successful = [outcome for outcome in outcomes if isinstance(outcome, Artifact)]
+        failures = [outcome for outcome in outcomes if isinstance(outcome, AuditIntegrityError)]
+        if divergent:
+            assert len(successful) == 1
+            assert len(failures) == 1
+            assert "content_hash" in str(failures[0])
+        else:
+            assert len(successful) == 2
+            assert failures == []
+            winning_ids = {artifact.artifact_id for artifact in successful}
+            assert len(winning_ids) == 1
+            assert winning_ids <= {"postgres-artifact-proposal-0", "postgres-artifact-proposal-1"}
+            assert len({artifact.created_at for artifact in successful}) == 1
+
+        durable = factory.execution.get_artifacts(run.run_id)
+        assert len(durable) == 1
+        assert durable[0] == successful[0]
     finally:
         db.close()
 

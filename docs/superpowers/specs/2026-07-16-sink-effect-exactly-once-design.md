@@ -1,7 +1,7 @@
 # Sink Effect Exactly-Once Design
 
 Date: 2026-07-16
-Status: proposed
+Status: approved design
 Branch context: `codex/safety-74a343d5ad` from `release/0.7.1`
 Filigree: `elspeth-74a343d5ad`
 

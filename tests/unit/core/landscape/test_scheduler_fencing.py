@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import ast
 import inspect
+from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from pathlib import Path
+from types import FunctionType, SimpleNamespace
 from typing import Protocol, cast, get_type_hints
 
 import pytest
@@ -19,7 +21,8 @@ from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import RunLeadershipLostError
 from elspeth.core.landscape.database import LandscapeDB, Tier1Engine
 from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
-from elspeth.core.landscape.scheduler import fencing
+from elspeth.core.landscape.scheduler import BarrierJournalRepository, fencing
+from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.core.landscape.schema import run_coordination_table, run_workers_table, runs_table
 from tests.fixtures.landscape import make_landscape_db
 
@@ -132,6 +135,26 @@ def _legacy_unfenced_recovery_write() -> _LegacyUnfencedRecoveryWrite:
     return cast(_LegacyUnfencedRecoveryWrite, helper)
 
 
+def _resolved_parameter_annotation(method: FunctionType, parameter_name: str) -> object:
+    """Resolve one trusted source annotation without evaluating its peers."""
+    annotation_probe = type(
+        "_AnnotationProbe",
+        (),
+        {"__annotations__": {"value": method.__annotations__[parameter_name]}},
+    )
+    return get_type_hints(
+        annotation_probe,
+        globalns=method.__globals__,
+        localns={"datetime": datetime, "Mapping": Mapping},
+    )["value"]
+
+
+def _assert_required_coordination_parameter(method: FunctionType) -> None:
+    parameter = inspect.signature(method).parameters["coordination_token"]
+    assert parameter.default is inspect.Parameter.empty
+    assert _resolved_parameter_annotation(method, "coordination_token") is CoordinationToken
+
+
 def _seed_leader() -> tuple[LandscapeDB, CoordinationToken]:
     db = make_landscape_db()
     with db.engine.begin() as conn:
@@ -188,6 +211,60 @@ def test_strict_helper_rejects_runtime_none_before_transaction() -> None:
 def test_strict_helper_type_contract_forbids_optional_authority() -> None:
     helper = _strict_fenced_write()
     assert get_type_hints(helper)["coordination_token"] is CoordinationToken
+
+
+@pytest.mark.parametrize(
+    "repository_type",
+    [BarrierJournalRepository, TokenSchedulerRepository],
+    ids=["journal", "facade"],
+)
+@pytest.mark.parametrize(
+    "method_name",
+    ["mark_blocked_barrier_terminal", "mark_blocked_barrier_pending_sink_many"],
+    ids=["terminal", "pending-sink"],
+)
+def test_barrier_wrapper_type_contract_requires_authority(
+    repository_type: type[BarrierJournalRepository] | type[TokenSchedulerRepository],
+    method_name: str,
+) -> None:
+    method = cast(FunctionType, getattr(repository_type, method_name))
+    _assert_required_coordination_parameter(method)
+
+
+@pytest.mark.parametrize(
+    ("annotation", "binding"),
+    [
+        pytest.param("AuthorityAlias", CoordinationToken, id="alias"),
+        pytest.param(
+            "coordination.CoordinationToken",
+            SimpleNamespace(CoordinationToken=CoordinationToken),
+            id="qualified",
+        ),
+    ],
+)
+def test_required_coordination_parameter_accepts_equivalent_annotations(
+    annotation: str,
+    binding: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def probe(*, coordination_token: object) -> None:
+        del coordination_token
+
+    probe.__annotations__["coordination_token"] = annotation
+    monkeypatch.setitem(probe.__globals__, annotation.partition(".")[0], binding)
+
+    _assert_required_coordination_parameter(cast(FunctionType, probe))
+
+
+def test_required_coordination_parameter_rejects_wrong_runtime_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    def probe(*, coordination_token: object) -> None:
+        del coordination_token
+
+    probe.__annotations__["coordination_token"] = "WrongAuthority"
+    monkeypatch.setitem(probe.__globals__, "WrongAuthority", str)
+
+    with pytest.raises(AssertionError):
+        _assert_required_coordination_parameter(cast(FunctionType, probe))
 
 
 def test_strict_helper_accepts_current_token_and_commits() -> None:

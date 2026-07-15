@@ -215,6 +215,7 @@ blocking finding must be fixed and re-reviewed before Task 2.
 - Modify: `src/elspeth/contracts/__init__.py`
 - Modify: `src/elspeth/plugins/infrastructure/base.py`
 - Modify: `src/elspeth/engine/orchestrator/preflight.py`
+- Modify: `src/elspeth/engine/orchestrator/run_context_factory.py`
 - Test: `tests/unit/contracts/test_sink_effect_contract.py`
 - Test: `tests/unit/engine/test_sink_effect_preflight.py`
 
@@ -244,6 +245,14 @@ def test_preflight_rejects_legacy_sink_before_lifecycle_or_io() -> None:
     assert sink.on_start_calls == 0
     assert sink.write_calls == 0
 ```
+
+Add fresh-run and resume ordering regressions around
+`RunContextFactory.initialize_run_context()` proving collection validation
+runs after resolved sink instances/configured modes are available but before
+node assignment, restricted-context construction, any plugin `on_start`,
+reservation, inspection, credential resolution, or I/O. Add a non-run
+construction/settings-stub regression proving composer/config assembly does
+not invoke the production capability gate.
 
 - [ ] **Step 2: Run the tests and confirm the API is absent**
 
@@ -454,7 +463,11 @@ class SinkEffectProtocol(SinkProtocol, Protocol):
 `validate_sink_effect_capability(sink, mode)` must require the exact protocol
 version and an adapter-declared supported mode. It must not call `on_start`,
 resolve credentials, inspect a target, or write an audit row. Wire it into run
-preflight before plugin lifecycle startup.
+preflight before plugin lifecycle startup. The collection-level gate belongs
+at the shared fresh/resume `RunContextFactory.initialize_run_context()`
+boundary, before node assignment or context/lifecycle construction. Do not
+wire it into `assemble_and_validate_pipeline_config()` or add a compatibility
+bypass for composer/settings stubs; those are non-run construction surfaces.
 
 - [ ] **Step 5: Run focused tests and commit**
 
@@ -462,7 +475,7 @@ Run:
 
 ```bash
 .venv/bin/pytest -q tests/unit/contracts/test_sink_effect_contract.py tests/unit/engine/test_sink_effect_preflight.py tests/unit/plugins/test_base_sink_contract.py
-.venv/bin/mypy src/elspeth/contracts/sink_effects.py src/elspeth/contracts/plugin_protocols.py src/elspeth/engine/orchestrator/preflight.py
+.venv/bin/mypy src/elspeth/contracts/sink_effects.py src/elspeth/contracts/plugin_protocols.py src/elspeth/engine/orchestrator/preflight.py src/elspeth/engine/orchestrator/run_context_factory.py
 ```
 
 Expected: all tests pass and mypy is clean.
@@ -470,7 +483,7 @@ Expected: all tests pass and mypy is clean.
 Commit:
 
 ```bash
-git add src/elspeth/contracts src/elspeth/plugins/infrastructure/base.py src/elspeth/engine/orchestrator/preflight.py tests/unit/contracts/test_sink_effect_contract.py tests/unit/engine/test_sink_effect_preflight.py
+git add src/elspeth/contracts src/elspeth/plugins/infrastructure/base.py src/elspeth/engine/orchestrator/preflight.py src/elspeth/engine/orchestrator/run_context_factory.py tests/unit/contracts/test_sink_effect_contract.py tests/unit/engine/test_sink_effect_preflight.py
 git commit -m "feat(contracts): define sink effect protocol"
 ```
 

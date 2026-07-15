@@ -257,7 +257,12 @@ class MultiGapIdleBlockingSource(_TestSourceBase):
 
 
 class SequentialFlushSignalingBatchTransform(BaseTransform):
-    """Batch transform that releases one source idle gap per flush and records the flushing thread."""
+    """Release source gaps only from idle-worker flushes.
+
+    The engine may also flush an aggregation on the orchestrator thread. Those
+    callbacks are valid but are not evidence for idle-source polling, so they
+    must not advance this helper's gap sequence.
+    """
 
     name = "sequential_idle_flush_signaler"
     determinism = Determinism.DETERMINISTIC
@@ -267,19 +272,27 @@ class SequentialFlushSignalingBatchTransform(BaseTransform):
     on_success = "output"
     on_error = "discard"
 
-    def __init__(self, gap_events: list[threading.Event], flush_threads: list[threading.Thread]) -> None:
+    def __init__(
+        self,
+        gap_events: list[threading.Event],
+        idle_flush_threads: list[threading.Thread],
+        orchestrator_thread: threading.Thread,
+    ) -> None:
         super().__init__({"schema": {"mode": "observed"}})
         self._gap_events = gap_events
-        self._flush_threads = flush_threads
+        self._idle_flush_threads = idle_flush_threads
+        self._orchestrator_thread = orchestrator_thread
         self._flush_index = 0
 
     def process(  # type: ignore[override]
         self, rows: list[PipelineRow], ctx: Any
     ) -> TransformResult:
-        self._flush_threads.append(threading.current_thread())
-        if self._flush_index < len(self._gap_events):
-            self._gap_events[self._flush_index].set()
-        self._flush_index += 1
+        flush_thread = threading.current_thread()
+        if flush_thread is not self._orchestrator_thread:
+            self._idle_flush_threads.append(flush_thread)
+            if self._flush_index < len(self._gap_events):
+                self._gap_events[self._flush_index].set()
+            self._flush_index += 1
         return TransformResult.success(
             make_pipeline_row({"flushed_count": len(rows)}),
             success_reason={"action": "idle_timeout_flushed"},
@@ -524,9 +537,10 @@ class TestExecutionLoopRowProcessing:
         blocked inside ``next()``.
         """
         gap_events = [threading.Event(), threading.Event()]
-        flush_threads: list[threading.Thread] = []
+        orchestrator_thread = threading.current_thread()
+        idle_flush_threads: list[threading.Thread] = []
         source = MultiGapIdleBlockingSource(gap_events)
-        transform = SequentialFlushSignalingBatchTransform(gap_events, flush_threads)
+        transform = SequentialFlushSignalingBatchTransform(gap_events, idle_flush_threads, orchestrator_thread)
         sink = CollectSink("output")
 
         agg_settings = AggregationSettings(
@@ -574,9 +588,9 @@ class TestExecutionLoopRowProcessing:
         # advance until each fires); both ran on the same persistent worker
         # thread, never on the orchestrator thread. (A third, end-of-input
         # flush runs on the orchestrator thread during finalization.)
-        assert len(flush_threads) >= 2
-        assert flush_threads[0] is flush_threads[1]
-        assert flush_threads[0] is not threading.current_thread()
+        assert len(idle_flush_threads) >= 2
+        assert idle_flush_threads[0] is idle_flush_threads[1]
+        assert all(thread is not orchestrator_thread for thread in idle_flush_threads)
 
 
 class TestDatabaseInitialization:

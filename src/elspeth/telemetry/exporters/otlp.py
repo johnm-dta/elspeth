@@ -186,10 +186,10 @@ class OTLPExporter:
         raw_headers = config.get("headers", {})
         if raw_headers is None:
             headers: dict[str, str] = {}
-        elif not isinstance(raw_headers, dict):
+        elif not isinstance(raw_headers, Mapping):
             raise TelemetryExporterError(
                 self._name,
-                f"'headers' must be a dictionary or null, got {type(raw_headers).__name__}",
+                f"'headers' must be a mapping or null, got {type(raw_headers).__name__}",
             )
         else:
             headers = {}

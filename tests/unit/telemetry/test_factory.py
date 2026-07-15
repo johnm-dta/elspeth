@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, ClassVar
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ import pytest
 
 from elspeth.contracts.config.runtime import ExporterConfig, RuntimeTelemetryConfig
 from elspeth.contracts.enums import BackpressureMode, TelemetryGranularity
+from elspeth.core.config import ExporterSettings, TelemetrySettings
 from elspeth.telemetry.errors import TelemetryExporterError
 from elspeth.telemetry.factory import (
     _discover_exporter_registry,
@@ -145,6 +147,31 @@ class TestCreateTelemetryManagerEnabled:
         finally:
             if manager is not None:
                 manager.close()
+
+    def test_otlp_accepts_headers_frozen_by_runtime_config(self):
+        """The settings-to-runtime boundary deep-freezes nested exporter options."""
+        settings = TelemetrySettings(
+            enabled=True,
+            exporters=[
+                ExporterSettings(
+                    name="otlp",
+                    options={
+                        "endpoint": "http://127.0.0.1:4317",
+                        "headers": {},
+                    },
+                )
+            ],
+        )
+        config = RuntimeTelemetryConfig.from_settings(settings)
+
+        assert isinstance(config.exporter_configs[0].options["headers"], MappingProxyType)
+        with patch("opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter"):
+            manager = create_telemetry_manager(config)
+            try:
+                assert manager is not None
+            finally:
+                if manager is not None:
+                    manager.close()
 
     def test_exporter_configure_called_with_options(self):
         exporter_class = _make_recording_exporter_class("mock_exp")

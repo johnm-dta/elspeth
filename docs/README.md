@@ -35,6 +35,7 @@ Current architecture and design references.
 - [Requirements Matrix](architecture/requirements.md) — compatibility pointer to current requirement and contract sources
 - [Subsystems](architecture/subsystems.md) — compatibility pointer to current subsystem diagrams and ADRs
 - [Token Lifecycle](architecture/token-lifecycle.md) — row identity through forks and joins
+- [Token Scheduler State Engine](architecture/token-scheduler-state-engine.md) — canonical transition, fencing, plugin-boundary, and test-evidence map for the durable scheduler
 - [Landscape System](architecture/landscape.md) — audit trail architecture
 - [Landscape Entry Points](architecture/landscape-entry-points.md) — where audit records are created
 - [Telemetry](architecture/telemetry.md) — operational visibility architecture

@@ -6,6 +6,7 @@ import re
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -14,12 +15,16 @@ import pytest
 from fastapi import Request
 from psycopg import sql
 from pydantic import SecretBytes
-from sqlalchemy import Engine, create_engine, inspect, text
+from sqlalchemy import Engine, create_engine, insert, inspect, select, text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ProgrammingError
 from testcontainers.postgres import PostgresContainer  # type: ignore[import-untyped]
 
+from elspeth.contracts import NodeType
+from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.landscape.database import SchemaCompatibilityError
+from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table, scheduler_events_table, token_work_items_table, tokens_table
 from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.config import WebSettings
 from elspeth.web.deployment_contract import validate_aws_ecs_settings
@@ -256,6 +261,111 @@ def test_aws_ecs_factory_and_auth_writer_succeed_without_ddl(
         ).scalar_one()
     assert event_count == 1
     assert _catalog_identity(runtime_database.owner_engine) == before
+
+
+def test_postgres_scheduler_enqueue_verifies_inserted_rows_without_dbapi_rowcount(
+    tmp_path: Path,
+    runtime_database: _RuntimeDatabase,
+) -> None:
+    """A real psycopg enqueue succeeds even when INSERT rowcount is unknown."""
+    settings = _settings(tmp_path, runtime_database)
+    now = datetime.now(UTC)
+    payload = TokenSchedulerRepository.serialize_row_payload(
+        PipelineRow({"id": 1}, SchemaContract(mode="OBSERVED", fields=(), locked=True))
+    )
+
+    with open_landscape_db(settings) as landscape:
+        with landscape.engine.begin() as conn:
+            conn.execute(
+                insert(runs_table).values(
+                    run_id="scheduler-postgres-run",
+                    started_at=now,
+                    config_hash="config",
+                    settings_json="{}",
+                    canonical_version="v1",
+                    status="running",
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
+                )
+            )
+            conn.execute(
+                insert(nodes_table),
+                [
+                    {
+                        "run_id": "scheduler-postgres-run",
+                        "node_id": "source",
+                        "plugin_name": "csv",
+                        "node_type": NodeType.SOURCE.value,
+                        "plugin_version": "1.0",
+                        "determinism": "deterministic",
+                        "config_hash": "config",
+                        "config_json": "{}",
+                        "registered_at": now,
+                    },
+                    {
+                        "run_id": "scheduler-postgres-run",
+                        "node_id": "transform",
+                        "plugin_name": "llm",
+                        "node_type": NodeType.TRANSFORM.value,
+                        "plugin_version": "1.0",
+                        "determinism": "nondeterministic",
+                        "config_hash": "config",
+                        "config_json": "{}",
+                        "registered_at": now,
+                    },
+                ],
+            )
+            conn.execute(
+                insert(rows_table).values(
+                    row_id="row-1",
+                    run_id="scheduler-postgres-run",
+                    source_node_id="source",
+                    row_index=0,
+                    source_row_index=0,
+                    ingest_sequence=0,
+                    source_data_hash="hash-row-1",
+                    created_at=now,
+                )
+            )
+            conn.execute(
+                insert(tokens_table).values(
+                    token_id="token-1",
+                    row_id="row-1",
+                    run_id="scheduler-postgres-run",
+                    created_at=now,
+                )
+            )
+
+        scheduler = TokenSchedulerRepository(landscape.engine)
+        item = scheduler.enqueue_ready(
+            run_id="scheduler-postgres-run",
+            token_id="token-1",
+            row_id="row-1",
+            node_id="transform",
+            step_index=1,
+            ingest_sequence=0,
+            available_at=now,
+            row_payload_json=payload,
+        )
+        duplicate = scheduler.enqueue_ready(
+            run_id="scheduler-postgres-run",
+            token_id="token-1",
+            row_id="row-1",
+            node_id="transform",
+            step_index=1,
+            ingest_sequence=0,
+            available_at=now,
+            row_payload_json=payload,
+        )
+        assert duplicate.work_item_id == item.work_item_id
+
+        with landscape.engine.connect() as conn:
+            assert conn.execute(
+                select(token_work_items_table.c.work_item_id).where(token_work_items_table.c.run_id == "scheduler-postgres-run")
+            ).scalar_one() == item.work_item_id
+            assert conn.execute(
+                select(scheduler_events_table.c.work_item_id).where(scheduler_events_table.c.run_id == "scheduler-postgres-run")
+            ).scalar_one() == item.work_item_id
 
 
 def test_request_open_does_not_repair_missing_additive_index(

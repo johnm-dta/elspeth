@@ -1199,18 +1199,18 @@ def test_scheduler_event_store_wraps_database_rejection_as_landscape_record_erro
         )
 
 
-def test_scheduler_event_store_rejects_unexpected_insert_rowcount() -> None:
+def test_scheduler_event_store_rejects_unexpected_returned_identity() -> None:
     from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
     from elspeth.core.landscape.scheduler.events import SchedulerEventStore
 
-    class _ZeroRowConn:
+    class _WrongIdentityConn:
         def execute(self, statement: object) -> SimpleNamespace:
-            return SimpleNamespace(rowcount=0)
+            return SimpleNamespace(scalar_one=lambda: "wrong-event-id")
 
     store = SchedulerEventStore()
-    with pytest.raises(LandscapeRecordError, match="affected 0 rows"):
+    with pytest.raises(LandscapeRecordError, match="returned unexpected event_id"):
         store.record(
-            cast(Connection, _ZeroRowConn()),
+            cast(Connection, _WrongIdentityConn()),
             event_type=SchedulerEventType.RECOVER_EXPIRED_LEASE,
             run_id="run-1",
             token_id="token-1",

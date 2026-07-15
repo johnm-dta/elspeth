@@ -200,14 +200,20 @@ def validate_work_item_references(
 
 def insert_work_item(conn: Connection, *, values: dict[str, object], operation: str) -> None:
     identity = work_item_identity(values)
+    expected_work_item_id = values["work_item_id"]
     try:
-        result = conn.execute(token_work_items_table.insert().values(**values))
+        inserted_work_item_id = conn.execute(
+            token_work_items_table.insert().values(**values).returning(token_work_items_table.c.work_item_id)
+        ).scalar_one()
     except SQLAlchemyError as exc:
         raise LandscapeRecordError(
             f"Scheduler {operation} failed for {identity} — database rejected audit write: {type(exc).__name__}"
         ) from exc
-    if result.rowcount != 1:
-        raise LandscapeRecordError(f"Scheduler {operation} affected {result.rowcount} rows for {identity}; expected exactly one audit row.")
+    if inserted_work_item_id != expected_work_item_id:
+        raise LandscapeRecordError(
+            f"Scheduler {operation} returned unexpected work_item_id={inserted_work_item_id!r} for {identity}; "
+            f"expected {expected_work_item_id!r}."
+        )
 
 
 def insert_work_item_idempotent(conn: Connection, *, values: dict[str, object], operation: str) -> bool:
@@ -220,7 +226,8 @@ def insert_work_item_idempotent(conn: Connection, *, values: dict[str, object], 
     the same resume cursor and token lineage.
     """
     try:
-        insert_work_item(conn, values=values, operation=operation)
+        with conn.begin_nested():
+            insert_work_item(conn, values=values, operation=operation)
         return True
     except LandscapeRecordError as exc:
         cause = exc.__cause__

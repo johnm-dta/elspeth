@@ -28,9 +28,10 @@ state rather than to a complete logical effect.
    contains an attempt-scoped node-state ID.
 3. Membership order comes from durable data-flow order, not list arrival,
    lexical state-ID sorting, or the first row in a batch.
-4. Production sinks implement an effect protocol with deterministic prepare,
-   convergent commit, and authoritative reconciliation. `flush()` is not part
-   of this path.
+4. Every production sink publication path, including post-run audit export,
+   implements the effect protocol with deterministic prepare, convergent
+   commit, and authoritative reconciliation. `flush()` is not part of any
+   publication path.
 5. Reconciliation has a closed result vocabulary:
    `NOT_APPLIED`, `APPLIED_WITH_EXACT_DESCRIPTOR`, or `UNKNOWN`.
 6. `UNKNOWN` fails closed. Elspeth never guesses that an ambiguous external
@@ -61,6 +62,8 @@ This design owns:
 - safe plan, target, call-intent, and reconciliation evidence;
 - target stream serialization and read-only inspection;
 - primary, failsink, diversion, and legacy-path behavior;
+- fresh, resume, follower-worker, and post-run audit-export lifecycle and
+  publication behavior;
 - built-in CSV, JSON, Text, AWS S3, Azure Blob, Database, Dataverse, and
   Chroma adapters;
 - epoch 25 to 26 SQLite migration and PostgreSQL schema parity;
@@ -96,6 +99,14 @@ The current behavior has four independent holes:
 - failsink publication is also external-I/O-first and separately registered;
 - the artifact's mandatory `produced_by_state_id` names one attempt-scoped
   state, not the complete batch membership.
+
+Two additional production lifecycle surfaces bypass the shared run-context
+factory. Follower-worker startup calls sink `on_start()` directly, and
+post-run audit export creates a fresh sink then calls `write()` and `flush()`
+directly. Capability preflight must run at all three lifecycle boundaries
+(fresh/resume, follower, export) before `on_start()` or any node-side effect.
+The audit-export publication itself must move to the durable effect protocol;
+preflight alone does not make its legacy write/flush sequence safe.
 
 Epoch 25's `(run_id, idempotency_key)` artifact uniqueness remains useful, but
 it is a finalization ratchet rather than a publication fence.

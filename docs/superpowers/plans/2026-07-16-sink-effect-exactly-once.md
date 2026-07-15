@@ -77,7 +77,9 @@ use Loomweave in this worktree.
   `query_repository.py` — effect-linked audit/export/read behavior.
 - `src/elspeth/engine/executors/sink.py`,
   `engine/orchestrator/sink_flush.py`, `engine/orchestrator/preflight.py`,
-  `plugins/infrastructure/base.py` — replace the write/flush/legacy boundary.
+  `engine/orchestrator/run_context_factory.py`, `engine/orchestrator/export.py`,
+  `cli.py`, `plugins/infrastructure/base.py` — replace every lifecycle and
+  write/flush/legacy boundary, including follower and audit export.
 - `src/elspeth/plugins/sinks/{csv_sink,json_sink,text_sink,aws_s3_sink,azure_blob_sink,database_sink,dataverse,chroma_sink}.py`
   — first-party effect adapters.
 - `src/elspeth/mcp/types.py`, MCP analyzer/query mapping, and web audit schemas —
@@ -216,8 +218,12 @@ blocking finding must be fixed and re-reviewed before Task 2.
 - Modify: `src/elspeth/plugins/infrastructure/base.py`
 - Modify: `src/elspeth/engine/orchestrator/preflight.py`
 - Modify: `src/elspeth/engine/orchestrator/run_context_factory.py`
+- Modify: `src/elspeth/engine/orchestrator/export.py`
+- Modify: `src/elspeth/cli.py`
 - Test: `tests/unit/contracts/test_sink_effect_contract.py`
 - Test: `tests/unit/engine/test_sink_effect_preflight.py`
+- Test: `tests/unit/engine/orchestrator/test_export.py`
+- Test: `tests/unit/cli/test_cli_preflight.py`
 
 - [ ] **Step 1: Write contract-shape and closed-vocabulary tests**
 
@@ -253,6 +259,11 @@ node assignment, restricted-context construction, any plugin `on_start`,
 reservation, inspection, credential resolution, or I/O. Add a non-run
 construction/settings-stub regression proving composer/config assembly does
 not invoke the production capability gate.
+
+Add the same before-lifecycle ordering proof for follower-worker startup in
+`cli.py` and post-run audit-export startup in
+`engine/orchestrator/export.py`. Every production sink instance must be
+validated exactly once at its lifecycle boundary; neither surface is exempt.
 
 - [ ] **Step 2: Run the tests and confirm the API is absent**
 
@@ -468,14 +479,17 @@ at the shared fresh/resume `RunContextFactory.initialize_run_context()`
 boundary, before node assignment or context/lifecycle construction. Do not
 wire it into `assemble_and_validate_pipeline_config()` or add a compatibility
 bypass for composer/settings stubs; those are non-run construction surfaces.
+Invoke the same collection validator at follower-worker startup and audit
+export before their first sink `on_start()` or any node registration,
+credential resolution, reservation, or I/O.
 
 - [ ] **Step 5: Run focused tests and commit**
 
 Run:
 
 ```bash
-.venv/bin/pytest -q tests/unit/contracts/test_sink_effect_contract.py tests/unit/engine/test_sink_effect_preflight.py tests/unit/plugins/test_base_sink_contract.py
-.venv/bin/mypy src/elspeth/contracts/sink_effects.py src/elspeth/contracts/plugin_protocols.py src/elspeth/engine/orchestrator/preflight.py src/elspeth/engine/orchestrator/run_context_factory.py
+.venv/bin/pytest -q tests/unit/contracts/test_sink_effect_contract.py tests/unit/engine/test_sink_effect_preflight.py tests/unit/plugins/test_base_sink_contract.py tests/unit/engine/orchestrator/test_export.py tests/unit/cli/test_cli_preflight.py
+.venv/bin/mypy src/elspeth/contracts/sink_effects.py src/elspeth/contracts/plugin_protocols.py src/elspeth/engine/orchestrator/preflight.py src/elspeth/engine/orchestrator/run_context_factory.py src/elspeth/engine/orchestrator/export.py src/elspeth/cli.py
 ```
 
 Expected: all tests pass and mypy is clean.
@@ -483,7 +497,7 @@ Expected: all tests pass and mypy is clean.
 Commit:
 
 ```bash
-git add src/elspeth/contracts src/elspeth/plugins/infrastructure/base.py src/elspeth/engine/orchestrator/preflight.py src/elspeth/engine/orchestrator/run_context_factory.py tests/unit/contracts/test_sink_effect_contract.py tests/unit/engine/test_sink_effect_preflight.py
+git add src/elspeth/contracts src/elspeth/plugins/infrastructure/base.py src/elspeth/engine/orchestrator/preflight.py src/elspeth/engine/orchestrator/run_context_factory.py src/elspeth/engine/orchestrator/export.py src/elspeth/cli.py tests/unit/contracts/test_sink_effect_contract.py tests/unit/engine/test_sink_effect_preflight.py tests/unit/engine/orchestrator/test_export.py tests/unit/cli/test_cli_preflight.py
 git commit -m "feat(contracts): define sink effect protocol"
 ```
 
@@ -1261,7 +1275,9 @@ git commit -m "feat(landscape): finalize sink effects atomically"
 - Create: `tests/fixtures/sink_effects.py`
 - Modify: `src/elspeth/engine/executors/sink.py`
 - Modify: `src/elspeth/engine/orchestrator/sink_flush.py`
+- Modify: `src/elspeth/engine/orchestrator/export.py`
 - Test: `tests/unit/engine/test_sink_effect_executor.py`
+- Test: `tests/unit/engine/orchestrator/test_export.py`
 - Test: `tests/integration/pipeline/test_sink_effect_recovery.py`
 
 - [ ] **Step 1: Write the duplicate-observable fault-seam tests**
@@ -1288,6 +1304,10 @@ def test_fresh_executor_retry_publishes_once(fault: SinkEffectFault, landscape: 
 Add `UNKNOWN` never-commit, exact NOT_APPLIED retry, equal APPLIED finalize,
 predecessor wait, disjoint batch convergence, and finalization-response winner
 tests.
+
+Add audit-export response-loss tests proving a fresh process reuses one stable
+export effect and never repeats external publication. Assert the production
+export module does not call sink `write()` or `flush()` directly.
 
 - [ ] **Step 2: Run tests against the old write/flush boundary**
 
@@ -1325,14 +1345,18 @@ return effects.finalize(finalize_request(effect, lease, result))
 `commit_effect` subsumes durability. Delete every production `flush()` after
 commit and the arbitrary write-only/test-double branch. Preserve the public
 `SinkExecutor.write` facade while routing all behavior through the coordinator.
+Route post-run audit export through the same effect protocol, using a dedicated
+effect-safe export coordinator if its snapshot input cannot use pipeline token
+membership directly. Its snapshot/identity must be durable and replayable;
+preflight followed by legacy `write()`/`flush()` is forbidden.
 
 - [ ] **Step 4: Run caller-level and existing sink/diversion tests**
 
 Run:
 
 ```bash
-.venv/bin/pytest -q tests/unit/engine/test_sink_effect_executor.py tests/integration/pipeline/test_sink_effect_recovery.py tests/unit/engine/test_sink_executor_diversion.py tests/unit/engine/orchestrator/test_pending_sink_grouping.py
-.venv/bin/mypy src/elspeth/engine/executors/sink_effects.py src/elspeth/engine/executors/sink.py src/elspeth/engine/orchestrator/sink_flush.py
+.venv/bin/pytest -q tests/unit/engine/test_sink_effect_executor.py tests/integration/pipeline/test_sink_effect_recovery.py tests/unit/engine/test_sink_executor_diversion.py tests/unit/engine/orchestrator/test_pending_sink_grouping.py tests/unit/engine/orchestrator/test_export.py
+.venv/bin/mypy src/elspeth/engine/executors/sink_effects.py src/elspeth/engine/executors/sink.py src/elspeth/engine/orchestrator/sink_flush.py src/elspeth/engine/orchestrator/export.py
 ```
 
 Expected: fault seams publish once and current grouping/diversion behavior
@@ -1341,7 +1365,7 @@ remains semantically correct.
 - [ ] **Step 5: Commit the production boundary**
 
 ```bash
-git add src/elspeth/engine/executors src/elspeth/engine/orchestrator/sink_flush.py tests/fixtures/sink_effects.py tests/unit/engine/test_sink_effect_executor.py tests/integration/pipeline/test_sink_effect_recovery.py
+git add src/elspeth/engine/executors src/elspeth/engine/orchestrator/sink_flush.py src/elspeth/engine/orchestrator/export.py tests/fixtures/sink_effects.py tests/unit/engine/test_sink_effect_executor.py tests/unit/engine/orchestrator/test_export.py tests/integration/pipeline/test_sink_effect_recovery.py
 git commit -m "feat(engine): coordinate durable sink effects"
 ```
 
@@ -1705,11 +1729,13 @@ git commit -m "feat(sinks): persist remote member effects"
 - Modify: `src/elspeth/engine/executors/sink.py`
 - Modify: `src/elspeth/engine/orchestrator/sink_flush.py`
 - Modify: `src/elspeth/engine/orchestrator/preflight.py`
+- Modify: `src/elspeth/engine/orchestrator/export.py`
 - Modify: `src/elspeth/plugins/infrastructure/runtime_factory.py`
 - Test: `tests/unit/engine/test_sink_executor_diversion.py`
 - Test: `tests/unit/engine/test_failsink_validation.py`
 - Test: `tests/integration/pipeline/orchestrator/test_sink_diversion_counters.py`
 - Test: `tests/integration/pipeline/test_sink_effect_recovery.py`
+- Test: `tests/unit/engine/orchestrator/test_export.py`
 
 - [ ] **Step 1: Write failing linked-effect and zero-publication tests**
 
@@ -1768,13 +1794,17 @@ matrix. Assert each declares the protocol; Chroma skip/error and unsupported
 Database modes fail with remediation; a third-party write/flush-only sink
 fails before reservation, lifecycle, or I/O.
 
+Inventory fresh, resume, follower, audit export, primary, and failsink callers.
+Assert no production caller invokes sink `write()` or `flush()` after commit;
+audit export must publish through its effect-safe coordinator.
+
 - [ ] **Step 5: Run full sink-flow tests and commit**
 
 Run:
 
 ```bash
-.venv/bin/pytest -q tests/unit/engine/test_sink_executor_diversion.py tests/unit/engine/test_failsink_validation.py tests/unit/engine/test_sink_effect_executor.py tests/integration/pipeline/orchestrator/test_sink_diversion_counters.py tests/integration/pipeline/test_sink_effect_recovery.py tests/unit/plugins/sinks/test_sink_protocol_compliance.py
-.venv/bin/mypy src/elspeth/engine/executors/sink_effects.py src/elspeth/engine/executors/sink.py src/elspeth/engine/orchestrator/sink_flush.py
+.venv/bin/pytest -q tests/unit/engine/test_sink_executor_diversion.py tests/unit/engine/test_failsink_validation.py tests/unit/engine/test_sink_effect_executor.py tests/integration/pipeline/orchestrator/test_sink_diversion_counters.py tests/integration/pipeline/test_sink_effect_recovery.py tests/unit/plugins/sinks/test_sink_protocol_compliance.py tests/unit/engine/orchestrator/test_export.py
+.venv/bin/mypy src/elspeth/engine/executors/sink_effects.py src/elspeth/engine/executors/sink.py src/elspeth/engine/orchestrator/sink_flush.py src/elspeth/engine/orchestrator/export.py
 ```
 
 Expected: all primary/failsink/discard/zero-publication tests pass.
@@ -1962,10 +1992,12 @@ Expected: all focused persistence tests pass.
 - [ ] **Step 2: Run focused executor and adapter tests**
 
 ```bash
-.venv/bin/pytest -q tests/unit/engine/test_sink_effect_executor.py tests/unit/engine/test_sink_executor_diversion.py tests/integration/pipeline/test_sink_effect_recovery.py tests/unit/plugins/sinks tests/integration/plugins/sinks
+.venv/bin/pytest -q tests/unit/engine/test_sink_effect_executor.py tests/unit/engine/test_sink_executor_diversion.py tests/integration/pipeline/test_sink_effect_recovery.py tests/unit/engine/orchestrator/test_export.py tests/unit/cli/test_cli_preflight.py tests/unit/plugins/sinks tests/integration/plugins/sinks
 ```
 
-Expected: all sink, recovery, diversion, and first-party adapter tests pass.
+Expected: all sink, recovery, diversion, follower/export lifecycle, and
+first-party adapter tests pass; the audit-export inventory proves no direct
+production `write()`/`flush()` caller remains.
 
 - [ ] **Step 3: Run every real PostgreSQL proof**
 

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import pytest
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import OperationalError
 
 from elspeth.contracts import NodeStateStatus, NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.audit import TokenRef
@@ -10,6 +13,7 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape import LandscapeDB
+from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import node_states_table, token_outcomes_table
 from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run, register_test_node
@@ -1232,6 +1236,82 @@ class TestRecordTokenOutcomeAtomicity:
 
         assert validation_calls == []
         assert persisted_outcomes == []
+
+    def test_repository_owned_begin_failure_uses_landscape_error_taxonomy(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db, factory = _setup()
+        _row, token = _make_row(factory)
+
+        @contextmanager
+        def fail_begin():
+            raise OperationalError("BEGIN IMMEDIATE", {}, RuntimeError("injected begin failure"))
+            yield  # pragma: no cover - contextmanager shape only
+
+        monkeypatch.setattr(db, "write_connection", fail_begin)
+
+        with pytest.raises(LandscapeRecordError, match=r"transaction boundary.*OperationalError") as exc_info:
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="output",
+            )
+
+        assert isinstance(exc_info.value.__cause__, OperationalError)
+        assert factory.data_flow.get_token_outcome(token.token_id) is None
+
+    def test_repository_owned_commit_failure_rolls_back_and_uses_landscape_error_taxonomy(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db, factory = _setup()
+        _row, token = _make_row(factory)
+        original_write_connection = db.write_connection
+
+        @contextmanager
+        def fail_commit():
+            with original_write_connection() as conn:
+                yield conn
+                raise OperationalError("COMMIT", {}, RuntimeError("injected commit failure"))
+
+        monkeypatch.setattr(db, "write_connection", fail_commit)
+
+        with pytest.raises(LandscapeRecordError, match=r"transaction boundary.*OperationalError") as exc_info:
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="output",
+            )
+
+        assert isinstance(exc_info.value.__cause__, OperationalError)
+        assert factory.data_flow.get_token_outcome(token.token_id) is None
+
+    def test_caller_owned_commit_failure_remains_the_callers_raw_boundary_error(self) -> None:
+        db, factory = _setup()
+        _row, token = _make_row(factory)
+
+        @contextmanager
+        def caller_transaction_with_commit_failure():
+            with db.write_connection() as conn:
+                yield conn
+                raise OperationalError("COMMIT", {}, RuntimeError("caller-owned commit failure"))
+
+        with (
+            pytest.raises(OperationalError, match="caller-owned commit failure"),
+            caller_transaction_with_commit_failure() as caller_conn,
+        ):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="output",
+                conn=caller_conn,
+            )
+
+        assert factory.data_flow.get_token_outcome(token.token_id) is None
 
 
 class TestGetTokenOutcome:

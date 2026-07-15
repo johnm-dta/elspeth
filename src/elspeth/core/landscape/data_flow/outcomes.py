@@ -8,7 +8,7 @@ resume and explain.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from sqlalchemy import and_, or_, select
@@ -81,19 +81,23 @@ class TokenOutcomeRepository:
         except SQLAlchemyError as exc:
             raise LandscapeRecordError(f"{operation} failed — database rejected audit lock query: {type(exc).__name__}") from exc
 
-    def _lock_token_for_outcome(self, ref: TokenRef, *, conn: Connection) -> None:
-        """Take the first lock in the outcome-validation lock order.
+    def lock_token_outcome_dependencies(self, refs: Sequence[TokenRef], *, conn: Connection) -> None:
+        """Take token locks first, in stable order, for composed outcome writes.
 
-        PostgreSQL needs a stable token row before evaluating I1c/I3
-        cross-table witnesses. The lock also blocks a concurrent
-        ``node_states`` insert: its composite FK must take a conflicting
-        key-share lock on this token. SQLite ignores ``FOR UPDATE`` because
-        ``BEGIN IMMEDIATE`` already owns the file's write slot for the complete
-        validation+insert boundary.
+        PostgreSQL's global order is ``tokens.token_id`` then
+        ``node_states.state_id`` then ``artifacts.artifact_id``. Callers that
+        compose state/artifact mutations with outcomes must invoke this before
+        touching either downstream table. Sorting and de-duplicating here also
+        gives overlapping multi-token sink batches one common acquisition
+        order. SQLite ignores ``FOR UPDATE`` because ``BEGIN IMMEDIATE``
+        already owns the file's write slot for the complete boundary.
         """
+        token_ids = sorted({ref.token_id for ref in refs})
+        if not token_ids:
+            return
         query = (
             select(tokens_table.c.token_id)
-            .where(tokens_table.c.token_id == ref.token_id)
+            .where(tokens_table.c.token_id.in_(token_ids))
             .order_by(tokens_table.c.token_id)
             .with_for_update(of=tokens_table)
         )
@@ -429,11 +433,11 @@ class TokenOutcomeRepository:
             # Every Tier-1 read and the dependent insert use this exact
             # transaction. Repository-owned calls enter through
             # write_connection(), which is BEGIN IMMEDIATE on SQLite.
-            if (outcome, path) in {
-                (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK),
-                (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED),
-            }:
-                self._lock_token_for_outcome(ref, conn=active_conn)
+            # Outcome inserts acquire a token FK lock even for pairs without a
+            # cross-table invariant. Make that dependency explicit and first
+            # for every repository-owned outcome transaction. Composed callers
+            # prelock their whole batch before any state/artifact mutations.
+            self.lock_token_outcome_dependencies((ref,), conn=active_conn)
             self._ownership.validate_token_run_ownership(ref, conn=active_conn)
             self._validate_cross_table_invariants(
                 ref,
@@ -475,8 +479,16 @@ class TokenOutcomeRepository:
 
         if conn is not None:
             return _record_on(conn)
-        with self._db.write_connection() as active_conn:
-            return _record_on(active_conn)
+        try:
+            with self._db.write_connection() as active_conn:
+                return _record_on(active_conn)
+        except LandscapeRecordError:
+            raise
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(
+                f"record_token_outcome failed for token_id={ref.token_id!r} "
+                f"— database rejected audit transaction boundary: {type(exc).__name__}"
+            ) from exc
 
     def find_orphaned_transient_parents(self, run_id: str) -> list[SQLAlchemyRow[Any]]:
         """Find I1a parent tokens with no child token outcome witnesses."""

@@ -16,6 +16,7 @@ from elspeth.contracts import ExecutionError, NodeStateStatus, NodeType
 from elspeth.contracts.audit import DISCARD_SINK_NAME, TokenRef
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import node_states_table, token_outcomes_table
 from tests.fixtures.landscape import register_test_node
@@ -147,3 +148,32 @@ def test_sqlite_process_cannot_mutate_node_state_between_validation_and_insert(
         outcomes_count = conn.execute(select(token_outcomes_table.c.outcome_id).where(token_outcomes_table.c.token_id == token_id)).all()
     assert status == NodeStateStatus.FAILED.value
     assert len(outcomes_count) == 1
+
+
+def test_sqlite_writer_lock_contention_uses_landscape_error_taxonomy(tmp_path: Path) -> None:
+    db_path = tmp_path / "outcome-lock-contention.db"
+    db, factory, run_id, token_id, _state_id = _build_discard_candidate(db_path)
+
+    # The PRAGMA is connection-local and persists when SQLAlchemy returns this
+    # DBAPI connection to the pool, keeping the regression fast while a raw
+    # connection holds SQLite's single writer slot.
+    with db.engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA busy_timeout=50")
+
+    holder = sqlite3.connect(db_path, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(LandscapeRecordError, match=r"transaction boundary.*OperationalError") as exc_info:
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.SINK_DISCARDED,
+                sink_name=DISCARD_SINK_NAME,
+                error_hash="discard-error",
+            )
+    finally:
+        holder.rollback()
+        holder.close()
+
+    assert "database is locked" in str(exc_info.value.__cause__).lower()
+    assert factory.data_flow.get_token_outcome(token_id) is None

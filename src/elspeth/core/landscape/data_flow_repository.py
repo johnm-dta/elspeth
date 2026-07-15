@@ -335,6 +335,10 @@ class DataFlowRepository:
 
     # ── Token outcome recording (TokenOutcomeRepository) ───────────────────
 
+    def lock_token_outcome_dependencies(self, refs: Sequence[TokenRef], *, conn: Connection) -> None:
+        """Prelock token dependencies before a composed outcome transaction mutates states."""
+        self.outcomes.lock_token_outcome_dependencies(refs, conn=conn)
+
     def _validate_outcome_fields(
         self,
         outcome: TerminalOutcome | None,

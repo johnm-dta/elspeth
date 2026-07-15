@@ -664,7 +664,13 @@ class SinkExecutor:
             if self._uses_real_atomic_repositories():
                 # One audit transaction: primary node_states, the artifact row,
                 # and terminal token_outcomes commit or roll back together.
+                # The prelock establishes the PostgreSQL-wide dependency order
+                # (tokens, then states, then artifact) before state mutation.
                 with self._data_flow.write_connection() as conn:
+                    self._data_flow.lock_token_outcome_dependencies(
+                        tuple(TokenRef(token_id=token.token_id, run_id=self._run_id) for token, _state in primary_states),
+                        conn=conn,
+                    )
                     self._execution.complete_node_states_completed_many(tuple(primary_sink_outputs), conn=conn)
                     first_state = primary_states[0][1]
                     artifact = self._execution.register_artifact(

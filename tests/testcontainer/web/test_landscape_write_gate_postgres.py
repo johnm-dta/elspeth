@@ -28,6 +28,7 @@ from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table, s
 from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.config import WebSettings
 from elspeth.web.deployment_contract import validate_aws_ecs_settings
+from elspeth.web.execution.accounting import load_run_accounting_from_db
 from elspeth.web.landscape_access import open_landscape_db
 from elspeth.web.schema_probe import SchemaState, init_landscape_schema, probe_landscape_schema
 
@@ -263,7 +264,7 @@ def test_aws_ecs_factory_and_auth_writer_succeed_without_ddl(
     assert _catalog_identity(runtime_database.owner_engine) == before
 
 
-def test_postgres_scheduler_enqueue_verifies_inserted_rows_without_dbapi_rowcount(
+def test_postgres_scheduler_enqueue_and_accounting_projection_are_dialect_safe(
     tmp_path: Path,
     runtime_database: _RuntimeDatabase,
 ) -> None:
@@ -358,6 +359,9 @@ def test_postgres_scheduler_enqueue_verifies_inserted_rows_without_dbapi_rowcoun
             row_payload_json=payload,
         )
         assert duplicate.work_item_id == item.work_item_id
+        accounting = load_run_accounting_from_db(landscape, landscape_run_id="scheduler-postgres-run")
+        assert accounting.source.rows_processed == 1
+        assert accounting.sources["source"].rows_processed == 1
 
         with landscape.engine.connect() as conn:
             assert conn.execute(

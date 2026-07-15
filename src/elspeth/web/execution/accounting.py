@@ -74,10 +74,11 @@ def load_run_accounting_map_from_db(
         missing_terminal_outcomes = _zero_counts(present_run_ids)
         duplicate_terminal_outcomes = _zero_counts(present_run_ids)
 
+        source_name = func.coalesce(run_sources_table.c.source_name, rows_table.c.source_node_id).label("source_name")
         source_stmt = (
             select(
                 rows_table.c.run_id,
-                func.coalesce(run_sources_table.c.source_name, rows_table.c.source_node_id).label("source_name"),
+                source_name,
                 func.count().label("count"),
             )
             .select_from(
@@ -90,7 +91,7 @@ def load_run_accounting_map_from_db(
                 )
             )
             .where(rows_table.c.run_id.in_(present_run_ids))
-            .group_by(rows_table.c.run_id, "source_name")
+            .group_by(rows_table.c.run_id, source_name)
         )
         for run_id, source_name, count in conn.execute(source_stmt):
             source_rows_by_source[str(run_id)][str(source_name)] = int(count)

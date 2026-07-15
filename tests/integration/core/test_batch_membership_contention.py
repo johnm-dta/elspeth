@@ -23,6 +23,7 @@ _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 def _transition_batch_worker(
     db_url: str,
     batch_id: str,
+    target_status_value: str,
     transition_holds_lock: Any,
     release_transition: Any,
     results: Any,
@@ -39,7 +40,11 @@ def _transition_batch_worker(
 
     event.listen(db.engine, "after_cursor_execute", pause_after_transition)
     try:
-        factory.execution.update_batch_status(batch_id, BatchStatus.EXECUTING)
+        target_status = BatchStatus(target_status_value)
+        if target_status is BatchStatus.EXECUTING:
+            factory.execution.update_batch_status(batch_id, target_status)
+        else:
+            factory.execution.complete_batch(batch_id, target_status)
         results.put(("transition", "committed"))
     except BaseException as exc:  # pragma: no cover - asserted in parent
         results.put(("transition", f"{type(exc).__name__}: {exc}"))
@@ -116,16 +121,26 @@ def _seed_file_database(db_path: Path) -> tuple[str, str, str]:
     return db_url, batch.batch_id, token.token_id
 
 
+@pytest.mark.parametrize(
+    "target_status",
+    [BatchStatus.EXECUTING, BatchStatus.COMPLETED, BatchStatus.FAILED],
+)
 @pytest.mark.timeout(60)
-def test_batch_transition_wins_cross_process_race_without_post_closure_membership(tmp_path: Path) -> None:
-    """A SQLite writer that closes membership wins before a waiting add.
+def test_batch_transition_wins_cross_process_race_without_post_closure_membership(
+    tmp_path: Path,
+    target_status: BatchStatus,
+) -> None:
+    """Every SQLite membership-closing transition wins before a waiting add.
 
     The transition worker pauses after ``UPDATE batches`` while still holding
     its BEGIN IMMEDIATE transaction. The member process begins its repository
-    call during that pause. Once released, it must observe EXECUTING and refuse
-    the insert; the final audit image has no member row.
+    call during that pause. Once released, it must observe the new immutable
+    status and refuse the insert; the final audit image has no member row.
+
+    EXECUTING uses ``update_batch_status``. COMPLETED and FAILED use the real
+    ``complete_batch`` production path, not a raw fixture update.
     """
-    db_url, batch_id, token_id = _seed_file_database(tmp_path / "audit.db")
+    db_url, batch_id, token_id = _seed_file_database(tmp_path / f"audit-{target_status.value}.db")
     ctx = multiprocessing.get_context("spawn")
     transition_holds_lock = ctx.Event()
     release_transition = ctx.Event()
@@ -134,7 +149,7 @@ def test_batch_transition_wins_cross_process_race_without_post_closure_membershi
 
     transition = ctx.Process(
         target=_transition_batch_worker,
-        args=(db_url, batch_id, transition_holds_lock, release_transition, results),
+        args=(db_url, batch_id, target_status.value, transition_holds_lock, release_transition, results),
     )
     member = ctx.Process(
         target=_add_member_worker,
@@ -169,14 +184,14 @@ def test_batch_transition_wins_cross_process_race_without_post_closure_membershi
         observed[actor] = outcome
     assert observed["transition"] == "committed"
     assert observed["member"].startswith("refused: ")
-    assert "status 'executing'" in observed["member"]
+    assert f"status {target_status.value!r}" in observed["member"]
 
     verify_db = LandscapeDB.from_url(db_url, create_tables=False)
     verify = RecorderFactory(verify_db)
     try:
         batch = verify.execution.get_batch(batch_id)
         assert batch is not None
-        assert batch.status is BatchStatus.EXECUTING
+        assert batch.status is target_status
         assert verify.execution.get_batch_members(batch_id) == []
     finally:
         verify_db.close()

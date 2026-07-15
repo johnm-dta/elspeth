@@ -1,7 +1,7 @@
 # Sink Effect Exactly-Once Design
 
 Date: 2026-07-16
-Status: approved design
+Status: proposed
 Branch context: `codex/safety-74a343d5ad` from `release/0.7.1`
 Filigree: `elspeth-74a343d5ad`
 
@@ -44,6 +44,11 @@ state rather than to a complete logical effect.
    failsink effect finalizes.
 9. Epoch 26 owns the Landscape effect ledger and artifact-to-effect linkage.
    Epoch 27 remains reserved for the separate planned work.
+10. Target-replacing sinks are serialized by a durable per-target stream and
+    predecessor chain. Disjoint effect groups cannot plan from the same head.
+11. Remote target inspection is an explicit, read-only, durably audited phase
+    after reservation and before plan completion. It is neither preflight nor
+    reconciliation.
 
 ## Scope
 
@@ -54,6 +59,7 @@ This design owns:
 - effect reservation, leasing, fencing, takeover, and reconciliation;
 - ordered membership and overlap/rebatch recovery;
 - safe plan, target, call-intent, and reconciliation evidence;
+- target stream serialization and read-only inspection;
 - primary, failsink, diversion, and legacy-path behavior;
 - built-in CSV, JSON, Text, AWS S3, Azure Blob, Database, Dataverse, and
   Chroma adapters;
@@ -120,6 +126,13 @@ systems this includes remote staging or marker writes. Local private
 same-filesystem staging is not publication, but is bounded, effect-addressed,
 and cleaned or recovered explicitly.
 
+### Inspection
+
+A post-reservation, pre-publication read of target facts needed to complete a
+plan, such as an object ETag/version, a local file identity, or declared SQL
+ledger capability. Remote inspection has durable call intent and result. It
+cannot mutate or stage anything remotely.
+
 ### Exact descriptor
 
 The artifact type, redacted path/URI, content hash, and byte size, plus typed
@@ -146,12 +159,21 @@ The canonical member key is:
 )
 ```
 
-The lineage component recursively walks `token_parents`, retaining parent
-ordinals and canonical parent structure. It is a logical-order authority, not
-a hash of sorted IDs. The immutable token ID is only a collision backstop for
-pathologically equal lineage keys. The resolver detects cycles, missing
-parents, duplicate ordinals, cross-run links, and non-canonical lineage and
-fails closed as an audit-integrity error.
+The lineage component recursively walks `token_parents`. For a token, its
+canonical structure is the tuple of
+`(parent_relation.ordinal, canonical_parent_structure)` entries ordered by the
+unique parent ordinal. A root has the empty tuple. This preserves fork/expand
+child position and multi-parent coalesce input order without sorting identity
+strings. The immutable token ID is only a collision backstop for
+pathologically equal lineage structures.
+
+Resolution is resource-bounded before reservation: maximum depth 256,
+maximum 4,096 visited lineage nodes per member, maximum 1,024 parents for one
+token, and maximum 64 KiB canonical serialized lineage evidence per member.
+The limits are code-owned contract constants and are included in the protocol
+version. A cycle, repeated/missing parent, duplicate/non-dense ordinal,
+cross-run link, limit breach, or non-canonical structure fails closed as an
+audit-integrity error without creating an effect.
 
 Every contender for the same unbound set computes this key and therefore the
 same member order. Reservation persists dense ordinals. Those stored ordinals
@@ -203,7 +225,54 @@ Claiming partitions requested tokens under one transaction:
 Finalized membership and plan evidence are immutable. Partial overlap never
 rewrites a prior effect to match the caller's new batch shape.
 
+### Target stream and predecessor chain
+
+CSV, JSON, Text, S3, and Azure replace one logical target with a cumulative
+snapshot. Membership deduplication alone is insufficient: two disjoint groups
+could reserve concurrently, inspect the same pre-image, and each publish a
+snapshot that omits the other.
+
+Each replacing sink has a deterministic stream identity over run, sink node,
+role, immutable configuration identity, and requested target template. The
+stream row owns a monotonically allocated sequence and a tail effect. Effect
+reservation locks the stream row, allocates the next sequence, and records the
+current tail as `predecessor_effect_id` before moving the tail to the new
+effect. The first effect has no predecessor. This ordering is independent of
+member-lock order.
+
+Effects may reserve membership early, but a replacing effect is not eligible
+for inspection, plan completion, or commit until its predecessor is
+`FINALIZED`. It inherits the predecessor's exact target/head descriptor and
+builds its cumulative snapshot from that finalized chain plus its own ordered
+members. Initial collision-policy resolution becomes the stream's durable
+physical target; every successor must inherit it. A failed or ambiguous
+predecessor blocks successors rather than allowing lost rows.
+
+The stream-head CAS advances only when the expected predecessor and sequence
+match. Concurrent disjoint groups therefore queue deterministically: group 2
+cannot plan from group 0 while group 1 is unresolved, and retrying either
+group preserves the same predecessor. Tests prove both groups eventually
+publish one ordered cumulative target with no permanent `UNKNOWN` caused by
+ordinary Elspeth contention.
+
 ## Landscape Epoch 26
+
+### `sink_effect_streams`
+
+Replacing targets use one stream row with:
+
+- deterministic stream ID, run, sink node, role, and requested-target hash;
+- resolved credential-safe physical target identity once the first effect's
+  inspection wins;
+- next sequence, tail effect ID, finalized head effect ID, and head descriptor
+  hash; and
+- a uniqueness constraint over `(run_id, sink_node_id, role,
+  requested_target_hash)` plus run-scoped node ownership FKs.
+
+Tail allocation and effect reservation occur in one transaction. Tail and
+head references must belong to the same stream. The finalized head advances by
+CAS from the effect's persisted predecessor and sequence; it cannot skip an
+unfinalized predecessor.
 
 ### `sink_effects`
 
@@ -211,7 +280,7 @@ The group ledger stores:
 
 - `effect_id` primary key;
 - run, sink node, and closed `role` (`PRIMARY`, `FAILSINK`);
-- closed state (`RESERVED`, `IN_FLIGHT`, `FINALIZED`);
+- closed state (`RESERVED`, `PREPARED`, `IN_FLIGHT`, `FINALIZED`);
 - protocol version, configuration hash, ordered-membership hash, and group
   payload hash;
 - reserved artifact ID and artifact idempotency key;
@@ -220,12 +289,38 @@ The group ledger stores:
 - lease owner, monotonically increasing generation, expiry, and heartbeat;
 - last closed reconcile result and bounded evidence hash;
 - optional durable link to the originating primary effect for failsink work;
-  and
+- optional stream ID, stream sequence, and predecessor effect for replacing
+  targets; a closed descriptor mode (`PRECOMPUTED`, `RESULT_DERIVED`, or
+  `NO_PUBLICATION`); and
 - created, updated, and finalized timestamps.
 
 Plan/target/evidence JSON is schema-validated, size-bounded, and rejected if a
 path or URI contains credentials. Validation occurs both before persistence
 and immediately before publication.
+
+Database checks mechanically enforce lifecycle completeness:
+
+- `RESERVED`: plan/prepared/finalized fields and active lease fields are null;
+- `PREPARED`: immutable plan hash/evidence, inspection reference, descriptor
+  mode, prepared member dispositions, and prepared timestamp are non-null;
+  active lease fields are null;
+- `IN_FLIGHT`: every prepared field plus lease owner, positive generation,
+  expiry, and heartbeat is non-null; finalized fields are null;
+- `FINALIZED`: exact result/descriptor hash, artifact link, and finalized time
+  are non-null; no active lease remains;
+- `PRECOMPUTED` requires the expected descriptor in the plan;
+  `RESULT_DERIVED` forbids a preclaimed result descriptor and requires an
+  authoritative finalized result; `NO_PUBLICATION` requires an inherited or
+  virtual exact descriptor and forbids external commit attempts; and
+- a stream sequence/predecessor is present exactly for stream-bound effects,
+  with a CHECK making sequence zero require no predecessor and every later
+  sequence require one; composite same-stream FKs plus the tail-allocation CAS
+  prove that it is the immediately preceding stream effect.
+
+Generation is non-negative in reserved/prepared state and positive once
+in-flight. Lease expiry cannot precede heartbeat. Role, state, descriptor mode,
+attempt action, and reconcile result use database CHECK constraints over their
+closed vocabularies.
 
 ### `sink_effect_members`
 
@@ -241,13 +336,19 @@ Membership stores:
   APIs; and
 - uniqueness across `(run, sink node, role, token_id)`.
 
+Composite FKs prove member token/run and row/run ownership, plus the token's
+row identity; a member cannot cite a token from one row/run and ordering facts
+from another. Ordinals are non-negative and unique per effect, ingest sequence
+is non-negative, and disposition/member-state fields use closed CHECKs.
+
 The table stores no attempt-scoped state ID. Finalization resolves and locks
 the current open state witness for each member, proves it still represents the
 same token/node/input, and only then applies the generation-fenced transition.
 
 ### `sink_effect_attempts`
 
-Every external commit or reconcile attempt has durable intent before I/O:
+Every external inspect, commit, or reconcile attempt has durable intent before
+I/O:
 
 - deterministic attempt ID, effect/member identity, generation, and action;
 - adapter/provider and typed call kind;
@@ -263,11 +364,26 @@ reconcile action, and finalizes only from the reconciliation evidence. This
 preserves which network action actually occurred without fabricating the lost
 provider response.
 
+Effect reservation also creates one deterministic `sink_write` operation and
+links it with a nullable, unique `operations.sink_effect_id` FK. Legacy/source
+operations keep that column null; when non-null, `operation_type` must be
+`sink_write` and run/node ownership must equal the effect. Every attempt
+reserves its operation call index with the intent.
+
 The existing operation/call audit remains authoritative for exported call
-history. Finalization emits redacted call rows from returned attempt evidence,
-or an error/response-lost call plus a distinct reconciliation call. Existing
+history. A returned attempt writes its redacted call row in the same
+transaction that stores returned evidence. Recovery first marks an abandoned
+intent `RESPONSE_LOST` and immediately writes an `ERROR` call row; it then
+creates a separately intended reconcile attempt whose result creates a
+distinct call. Calls do not wait for effect finalization, so an unknown or
+never-finalized effect still exports honest action history. Existing
 request/response hashing, payload-ref policy, and call-data redaction continue
-to apply.
+to apply. The operation completes only when the effect finalizes; `UNKNOWN`
+leaves it open with durable error/reconcile calls for operator diagnosis.
+Landscape export/import, reproducibility verification, MCP diagnostics, and
+web audit views include streams, effects, members, and attempts, so an
+unrecovered `INTENT` is visible even before a new worker classifies it as
+response-lost.
 
 ### Artifact linkage
 
@@ -282,9 +398,20 @@ The linkage is exclusive. New effect finalization must use `sink_effect_id`.
 reserved on the effect. The descriptor supplied at finalization must exactly
 match the persisted plan/reconciliation evidence.
 
+This is an end-to-end contract migration, not only DDL. `Artifact`, its loader,
+repository registration APIs, execution/data-flow queries, export/import
+records, reproducibility checks, MCP/web serializers, AWS acceptance fixtures,
+and audit views all represent the producer as an XOR of state link and effect
+link. Backward reads and exports preserve epoch-25 state-linked rows exactly.
+New callers cannot assume `produced_by_state_id` is non-null and cannot create
+an epoch-26 sink artifact without a valid same-run/same-node effect. Exported
+records carry both nullable fields plus an explicit producer kind so consumers
+do not infer it from missing data.
+
 SQLite 25 to 26 therefore performs a transactional artifacts-table rebuild
 to make the state link nullable, add the effect link and exclusive check, then
-creates the three effect tables, constraints, and indexes. It validates epoch
+adds the operation effect link and creates the stream, effect, member, and
+attempt tables, constraints, and indexes. It validates epoch
 25 structure and duplicate-free artifact keys before `BEGIN IMMEDIATE`,
 rechecks under the lock, rolls back on any anomaly, and stamps epoch 26 only
 after full verification. Exact epoch-23 databases retain the ordered
@@ -296,13 +423,24 @@ must match metadata. Epoch 27 is untouched.
 ```text
 unbound
   -> RESERVED     identity, members, artifact identity committed
+  -> PREPARED     inspection and immutable complete plan committed by CAS
   -> IN_FLIGHT    lease owner/generation acquired by CAS
   -> FINALIZED    exact external evidence and all audit transitions committed
 ```
 
-`RESERVED` and `IN_FLIGHT` retain identity after validation, serialization,
-staging, plugin, or process failure. They are recoverable debt, not abandoned
-rows.
+`RESERVED`, `PREPARED`, and `IN_FLIGHT` retain identity after validation,
+inspection, serialization, staging, plugin, or process failure. They are
+recoverable debt, not abandoned rows.
+
+The initial reserved row has complete identity/membership/artifact facts but
+nullable inspection and plan fields. After any required inspection and
+effect-free preparation, one compare-and-set writes the complete immutable
+plan and moves to `PREPARED`. A concurrent preparer either observes that exact
+plan or compares every plan field and gets equality; divergent target,
+precondition, snapshot, payload, or descriptor evidence is an integrity error.
+There is no last-writer-wins plan update. `IN_FLIGHT` acquisition is rejected
+until the plan-completeness checks hold and every referenced inspect attempt
+has durable returned evidence.
 
 Takeover requires an expired lease and increments generation atomically.
 Heartbeat/expiry values use the existing coordination clock discipline. A
@@ -339,6 +477,26 @@ Unsupported third-party plugins, Chroma `skip`/`error`, and Database modes or
 dialects without required transactional behavior fail here with specific
 remediation.
 
+Preflight is local and declarative. It validates declared Database ledger
+configuration/permission requirements but does not connect to the target to
+prove them, HEAD an object, read a blob, or perform DDL.
+
+### Inspect
+
+Once reservation is durable and any stream predecessor is finalized,
+`inspect_effect` may perform the credential-safe read-only target operations
+needed for an immutable conditional plan. Examples are S3 HEAD, Azure
+properties, local pre-image identity/hash, and Database dialect/ledger/
+permission probes. Every remote/SQL inspect has committed attempt and call
+intent before it runs, a bounded timeout, and a redacted typed result stored
+afterward. Inspect cannot create a table, marker, object, blob, or remote
+staging resource.
+
+Inspection is the only initial remote-precondition capture. Reconciliation is
+reserved for an attempted/ambiguous publication and cannot stand in for it.
+Concurrent inspectors complete one plan by CAS; evidence that would yield a
+different plan fails closed instead of silently refreshing the precondition.
+
 ### Prepare
 
 `prepare_effect` receives a restricted context, stable effect identity,
@@ -349,7 +507,7 @@ Prepare may:
 
 - validate rows and compute diversion classifications;
 - render a stable target using run-start time and stable run metadata;
-- perform bounded local read-only target inspection;
+- consume the immutable bounded inspection evidence already stored;
 - serialize and hash in memory when bounded; or
 - stream into an effect-addressed, private, same-filesystem local staging
   file under explicit size/time limits.
@@ -361,8 +519,11 @@ never an opaque SDK handle. A durable staging reference is allowed only as an
 explicit safe tagged type whose path is private, normalized, effect-addressed,
 within the configured staging root, and revalidatable after process loss.
 
-The executor stores the plan fingerprint and expected descriptor while the
-effect remains reserved. Reprepare after process loss must reproduce the plan
+The executor stores the plan fingerprint and descriptor mode in the
+reservation-to-prepared CAS. `PRECOMPUTED` plans store the exact expected
+descriptor. `RESULT_DERIVED` Database plans store the full ordered input and
+policy but deliberately leave the result descriptor unset until the
+target-side transaction. Reprepare after process loss must reproduce the plan
 or fail closed.
 
 ### Commit
@@ -389,25 +550,34 @@ same-directory staging while enforcing configured byte/row/time limits. They
 fsync staging and compute hash/size during the stream. They do not build an
 unbounded full post-image in memory and do not retain a persistent writer.
 
-Under a target-scoped advisory OS lock, commit:
+Only the next prepared effect in the durable target stream may commit. Under a
+target-scoped advisory OS lock, commit:
 
 1. enforces a bounded lock timeout;
 2. revalidates the normalized target and safe staging path;
-3. verifies the authoritative persisted pre-image fingerprint, including
-   content hash plus inode or the documented platform-equivalent replacement
-   identity;
+3. verifies the predecessor/head CAS and authoritative persisted pre-image
+   fingerprint, including content hash plus inode or the documented
+   platform-equivalent replacement identity;
 4. atomically replaces the target with staged bytes;
 5. fsyncs the parent directory; and
 6. verifies and returns the exact post-image descriptor.
 
-The advisory lock reduces contention but is not authority. Exact pre/post
-evidence is authority. Lock timeout fails without publication. Filesystems
-without the required same-filesystem atomic replace, durable fsync, and lock
-semantics are rejected by preflight/documented as unsupported.
+The advisory lock reduces same-host contention but is not authority. The
+durable stream predecessor, exact pre/post evidence, and atomic replace are
+authority. Lock timeout fails without publication. Cross-host/shared
+filesystems are supported only when they provide the documented atomic
+replace, stable file identity, durable fsync, and lock semantics; otherwise
+preflight rejects them rather than claiming cross-process safety.
 
-Reconcile returns applied only for the exact post-image, not applied for the
-exact pre-image, and unknown otherwise. Effect-addressed staging is reused
-only after hash/path validation and is cleaned after finalization or bounded
+The plan records the staged file identity because atomic replacement moves
+that file identity to the public target. After an abandoned commit intent,
+reconcile returns applied only when target bytes, size, and file identity are
+the exact staged post-image; it returns not applied for the exact predecessor
+pre-image and unknown otherwise. An unrelated writer that produces equal
+bytes with a different file identity is therefore not credited as Elspeth's
+publication. If the platform cannot preserve/prove the replacement identity,
+the adapter is unsupported. Effect-addressed staging is reused only after
+hash/path/identity validation and is cleaned after finalization or bounded
 garbage-collection proof.
 
 Append/resume incorporates the validated pre-run baseline and canonical run
@@ -417,10 +587,12 @@ that invalidates the plan fails closed.
 
 ### AWS S3
 
-The plan contains stable bucket/key identity, exact full logical object hash
-and size, expected prior object version/ETag/checksum, overwrite policy, and
-safe protocol metadata. Timestamp templates use the persisted run-start time,
-never retry wall time.
+Read-only S3 inspection runs after predecessor finalization and captures the
+current HEAD/non-existence under durable intent. The plan contains stable
+bucket/key identity, exact full logical object hash and size, that inspected
+prior object version/ETag/checksum, predecessor/head identity, overwrite
+policy, and safe protocol metadata. Timestamp templates use the persisted
+run-start time, never retry wall time.
 
 Commit uses a backend-native conditional `PutObject` with checksum and
 credential-safe object metadata containing protocol version, effect ID, plan
@@ -432,10 +604,14 @@ Reconcile HEADs the exact bucket/key and requires effect metadata, plan hash,
 content checksum, byte size, and version evidence to match. Locally matching
 effect ID never authorizes overwriting an unrelated or divergent object.
 Missing target is not applied; any divergent/unverifiable target is unknown.
+The stream head prevents a later disjoint group from inspecting or publishing
+until this object version is finalized.
 
 ### Azure Blob
 
-Azure uses the same logical contract with backend-native conditions:
+Azure performs a durably intended read-only properties/non-existence inspect
+after predecessor finalization, then uses the same logical stream contract
+with backend-native conditions:
 
 - first create uses `if_none_match="*"` when overwrite is forbidden;
 - subsequent snapshots use the exact persisted ETag with `if_match`;
@@ -451,16 +627,27 @@ overwritten because a local ledger contains the same effect ID.
 
 Database mode requires an operator-declared target-ledger capability and
 permissions for a namespaced `_elspeth_sink_effects` table. Preflight verifies
-configuration without silently provisioning governance tables in an
-unapproved user database. Provisioning occurs only through the documented
-operator path or an explicitly authorized initialization mode.
+the declaration locally without silently provisioning governance tables in an
+unapproved user database. Post-reservation read-only inspection verifies the
+dialect, existing ledger contract, and granted capability/permissions under a
+durable SQL call intent. Provisioning occurs only through the documented
+operator path or an explicitly authorized initialization mode, never inspect.
+
+The prepared `RESULT_DERIVED` plan binds the full ordered canonical input,
+target table/ledger identity, schema, duplicate/constraint policy, serializer,
+and diversion policy. It does not claim an accepted-row descriptor in
+advance: accepted and diverted members depend on target constraints evaluated
+inside the transaction.
 
 Commit writes the unique target-side effect marker and accepted rows in one
 database transaction. The marker stores effect/plan hash, accepted member
 ordinals and payload hash, and bounded diversion indices/reason hashes; it
 stores no row values or credentials. A retry reads the marker and returns its
-exact evidence. Constraint-diverted rows and accepted rows are determined
-inside the transaction, so they cannot disagree with the marker.
+exact evidence. The marker is authoritative for the deterministic accepted /
+diverted partition and the descriptor derived from the actual committed
+payload. Finalization recomputes that descriptor from marker evidence and
+requires exact equality. Constraint-diverted rows and accepted rows are
+determined inside the transaction, so they cannot disagree with the marker.
 
 Table creation/replacement and the marker must share the required transaction
 boundary. Dialect/mode combinations without transactional DDL or safe
@@ -496,6 +683,24 @@ exact content from a response-lost publication without a target marker. They
 therefore fail preflight with instructions to use `overwrite` or a sink with a
 target-side marker. This capability reduction is documented in migration and
 release notes.
+
+## Zero-Accepted Effects
+
+Every effect reserves one artifact identity, including a primary group whose
+members all divert. For adapters that can determine the empty accepted set in
+prepare, the plan uses `NO_PUBLICATION`: no external commit/reconcile attempt
+is allowed, and finalization registers an artifact descriptor equal to the
+finalized predecessor/head because the target is unchanged. For an initial
+stream with no physical target, the descriptor is a typed virtual-empty target
+with the canonical empty hash and size zero; it does not claim the file/object
+exists.
+
+For Database, constraint diversion is result-derived and the target-side
+effect marker is itself the external idempotency effect even when it records
+zero accepted rows. The derived artifact describes the canonical empty
+committed payload. Dataverse/Chroma groups with no valid prepared members use
+the same no-publication rule. Tests cover initial empty, inherited unchanged,
+all-diverted with discard, and all-diverted with failsink.
 
 ## Primary, Diversion, and Failsink Flow
 
@@ -540,7 +745,10 @@ deleted. Tests use effect-capable doubles.
 | Seam | Durable fact on restart | Recovery |
 |---|---|---|
 | Before reservation | No effect | Reserve normally |
-| After reservation, before prepare | Stable identity/membership/artifact | Reprepare and compare |
+| After reservation, predecessor open | Stable queued identity and chain | Wait/recover predecessor; never inspect old head |
+| During inspect / response loss | Stable identity plus intended read | Record response-lost and reinspect before plan CAS |
+| After inspection, before prepare | Stable typed precondition evidence | Reprepare and compare |
+| After plan CAS | Immutable PREPARED effect | Acquire fenced lease |
 | During private staging | Reserved effect + bounded staging path | Validate/rebuild staging |
 | Before external commit | Intent exists, target precondition authoritative | Reconcile, then commit only if not applied |
 | After publication, before plugin return | Abandoned intent | Mark response-lost, reconcile exact |
@@ -574,23 +782,36 @@ exact bytes/metadata, exact audit attempt history, and convergent recovery.
 - lineage cycles, missing parents, duplicate ordinals, and cross-run links
   fail closed;
 - overlap/rebatch partitions finalized, in-flight, and new members;
+- concurrent disjoint groups on one replacing target allocate a predecessor
+  chain, wait for the immediate head, and publish both groups without lost
+  rows or ordinary-contention `UNKNOWN`;
 - finalized membership cannot be rewritten;
 - divergent payload for an existing member fails before I/O;
 - stale lease takeover increments generation;
 - stale-owner commit after takeover converges externally but cannot finalize;
 - lock acquisition order is independent of effect identity;
+- bounded lineage depth/node/fan-in/evidence limits fail before reservation;
 - PRIMARY and FAILSINK bindings are isolated and linked; and
 - no member can be rebound within the same run/sink/role.
 
 ### Reconciliation and audit
 
 - exact pre-image, exact post-image, missing target, and divergent target;
+- remote inspect intent/result is durable before plan CAS, response-lost
+  inspection is retried as inspection, and divergent concurrent plans fail;
+- `RESERVED` cannot acquire a lease, incomplete plans cannot become prepared,
+  and complete prepared evidence is immutable;
 - `UNKNOWN` never invokes commit;
 - response-lost intent remains distinct from reconciliation evidence;
 - bounded/redacted evidence rejects credentials and oversized provider data;
 - exact returned/reconciled descriptor is required by finalization;
 - repeated finalization returns the same artifact winner; and
-- an artifact cannot link to a first-row/new-attempt state instead of effect.
+- an artifact cannot link to a first-row/new-attempt state instead of effect;
+- epoch-25 state-linked artifacts and epoch-26 effect-linked artifacts both
+  load, query, export/import, reproduce, serialize through MCP/web, and pass
+  AWS acceptance fixtures without nullable-link assumptions; and
+- zero-accepted effects use exact no-publication/inherited/virtual semantics,
+  while Database records a zero-row target marker.
 
 ### Adapters
 
@@ -602,7 +823,8 @@ exact bytes/metadata, exact audit attempt history, and convergent recovery.
   reconciliation, and response loss;
 - Azure tests mirror native ETag/condition/property behavior;
 - Database uses SQLite and real PostgreSQL target-ledger transaction tests,
-  constraint diversion, marker collision, permissions/config preflight, and
+  result-derived descriptors, constraint diversion, marker collision,
+  declarative preflight, read-only capability inspection, permissions, and
   unsupported DDL mode rejection;
 - Dataverse and Chroma prove durable per-member partial progress and exact
   member reconciliation; and
@@ -637,21 +859,29 @@ of production execution.
 ## Acceptance Criteria
 
 1. No production sink publication occurs before durable effect, membership,
-   artifact, plan, and call-intent identity exists.
+   artifact, predecessor, complete prepared plan, and call-intent identity
+   exists.
 2. Crash/retry at every caller seam produces one externally observable effect
    and one artifact identity.
 3. Membership is complete, ordered by durable ingest/lineage authority, and
    independent of attempts and caller batch shape.
 4. Concurrent same-effect calls converge; generation fences Landscape
    finalization; stale owners cannot mutate audit state.
-5. Every reconciler returns only the closed three-result vocabulary with
+5. Concurrent disjoint replacing effects queue through one durable target
+   predecessor chain and publish cumulative snapshots without lost rows.
+6. Every reconciler returns only the closed three-result vocabulary with
    exact bounded evidence. `UNKNOWN` fails closed.
-6. Primary and failsink effects are separately recoverable and durably linked;
+7. Initial remote reads occur only through durably intended read-only inspect;
+   reserved/incomplete plans cannot become in-flight.
+8. Primary and failsink effects are separately recoverable and durably linked;
    diverted outcomes do not terminalize before failsink durability.
-7. All built-in supported modes pass adapter response-loss and exact-evidence
+9. All built-in supported modes pass adapter response-loss and exact-evidence
    tests. Unsupported modes fail before reservation or I/O.
-8. New artifacts link to the complete sink effect, not the first row's state.
-9. Epoch 25 databases migrate transactionally to 26; PostgreSQL fresh schema
+10. New artifacts link to the complete sink effect, not the first row's state;
+    old state-linked artifacts remain readable/exportable.
+11. Zero-accepted effects have explicit no-publication or result-derived marker
+    semantics and retain one deterministic artifact identity.
+12. Epoch 25 databases migrate transactionally to 26; PostgreSQL fresh schema
    is equivalent; epoch 27 remains unused.
-10. Focused and broad sink/recovery suites, real PostgreSQL probes, strict
+13. Focused and broad sink/recovery suites, real PostgreSQL probes, strict
     mypy, Ruff, and pre-commit hooks pass.

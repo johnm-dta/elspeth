@@ -530,15 +530,6 @@ class TestExecutionLoopRowProcessing:
         transform = SequentialFlushSignalingBatchTransform(gap_events, flush_thread_idents)
         sink = CollectSink("output")
 
-        pump_starts: list[int] = []
-        original_start = IdleTimeoutPump.start
-
-        def counting_start(pump: IdleTimeoutPump) -> None:
-            pump_starts.append(1)
-            original_start(pump)
-
-        monkeypatch.setattr(IdleTimeoutPump, "start", counting_start)
-
         agg_settings = AggregationSettings(
             name="multi_gap_idle_flush",
             plugin=transform.name,
@@ -572,7 +563,18 @@ class TestExecutionLoopRowProcessing:
             aggregation_settings={agg_node_id: agg_settings},
         )
 
-        result = Orchestrator(LandscapeDB.in_memory()).run(
+        orchestrator = Orchestrator(LandscapeDB.in_memory())
+        pump_builds: list[IdleTimeoutPump] = []
+        original_build = orchestrator._source_driver._build_idle_timeout_pump
+
+        def counting_build(*args: Any, **kwargs: Any) -> IdleTimeoutPump:
+            pump = original_build(*args, **kwargs)
+            pump_builds.append(pump)
+            return pump
+
+        monkeypatch.setattr(orchestrator._source_driver, "_build_idle_timeout_pump", counting_build)
+
+        result = orchestrator.run(
             config,
             graph=graph,
             payload_store=payload_store,
@@ -580,8 +582,10 @@ class TestExecutionLoopRowProcessing:
 
         assert result.status == RunStatus.COMPLETED
         assert all(gap.is_set() for gap in gap_events), "idle flushes must fire while the source is blocked in next()"
-        # Exactly ONE pump start for the whole run, not one per source fetch.
-        assert pump_starts == [1]
+        # Exactly ONE run-owned pump for the whole run, not one per source
+        # fetch. Scope the seam to this orchestrator so unrelated concurrent
+        # runs in the same pytest worker cannot contaminate the count.
+        assert len(pump_builds) == 1
         # The first two flushes are the idle-gap flushes (the source cannot
         # advance until each fires); both ran on the same persistent worker
         # thread, never on the orchestrator thread. (A third, end-of-input

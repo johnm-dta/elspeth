@@ -5,7 +5,7 @@
 | Scope | Durable token scheduler, from source-plugin ingress through transform, gate, barrier, and sink-plugin boundaries. |
 | Excluded | The web session engine. |
 | Mapped against | Commit `8c5e9533c80c00bfc3b401c1c394e8308815ce1e` (release `0.7.1`). |
-| Evidence state | Implementation mapped; test candidates located; positive per-leg confirmation has not yet been performed. |
+| Evidence state | Implementation mapped; Wave 1 executed for intake, leasing/recovery, claimed dispositions, and their plugin boundaries. Remaining families are still candidates. |
 
 This is the canonical working map for the token scheduler's test-verification
 campaign. It describes what the current code does. It does not replace an ADR,
@@ -108,7 +108,9 @@ inserts under the leader epoch fence. `TS-13` is the fail-closed bulk form of
 
 ## Durable transition ledger
 
-Every evidence entry below is **Candidate**, not yet **Confirmed**.
+The evidence entries in this baseline ledger identify candidate tests. The
+executed Wave 1 verdicts later in this document are authoritative for the legs
+already reviewed; unreviewed legs remain **Candidate**.
 
 | ID | Edge | Production trigger and guard | Required atomic consequences | Scheduler event | Candidate evidence |
 |---|---|---|---|---|---|
@@ -355,10 +357,86 @@ update this document only after reviewing the executed evidence:
 | Plugin lifecycle | PB-09 | Fresh, resume, follower, partial-start failure, normal teardown, and exceptional teardown ordering for sources, transforms, and sinks. |
 | Forbidden and dormant paths | F-01–F-13 | Negative/CAS assertions for every forbidden edge; decide whether queue-hold code is reachable, intentionally reserved, or removable. |
 
-### Candidate gaps to confirm, not yet tickets
+### Wave 1 executed evidence — 2026-07-15
+
+Wave 1 inspected the current production path, executed the narrowest relevant
+tests, and applied the proof bar defined at the top of this map. `Gap` means the
+leg lacks a complete proof package or has a reproduced defect; it does not mean
+that every behavior on the leg is broken. The baseline for this pass was commit
+`31a06b16d32c6d94ac98f288f72f55474225730e`.
+
+| Leg | Verdict | Positive evidence executed | Reason it is not Confirmed |
+|---|---|---|---|
+| TS-00 | **Gap** | Real enqueue, exact replay, single `ENQUEUE`, active/evicted membership behavior | Incompatible replay and reference-validation refusals lack explicit row-plus-event zero-mutation assertions. |
+| TS-01 | **Gap** | New-row composition produces `LEASED` with ordered `ENQUEUE` and `CLAIM_READY` events | Exact-existing-READY reconciliation and composed rollback are unproved; standalone callers reach an unfenced internal claim. |
+| TS-02 | **Gap** | Stale-leader refusal proves atomic rollback of row, token, work item, and leader seat | No successful test jointly asserts row, token, leased item, and both events; the commit-to-source-COMPLETED crash seam is unproved. |
+| TS-03 | **Confirmed** | State, identity/attempt conservation, ordering, event attribution, event-insert rollback, membership refusal, and real two-process claim contention | Concurrency claim is deliberately limited to direct repository/N=0 membership. |
+| TS-04 | **Gap** | Positive claim/event path and membership refusals | A malformed parked row is claimable without `pending_sink_name`; full sink-bundle preservation and pending-sink contention are unproved. |
+| TS-05 | **Confirmed** | Attempt bump, deterministic identity rotation, previous-ID event, refusal/liveness arms, transaction races, rollback, and two-process direct-repository contention | Registered plugin/follower concurrency is outside this leg's confirmed claim. |
+| TS-06 | **Gap** | State return, lease clear, attempt/identity preservation, reclaim, terminalization, and ABA protection | No one test proves complete sink-bundle preservation plus the recovery event; sink-redrive contention is unproved. |
+| TS-07 | **Gap** | Real drain to BLOCKED, release-key effects, membership/owner/missing-key guards, and event existence | Sink-redrive leases are not refused; transition-specific event rollback and one combined effects/event proof are absent. |
+| TS-08 | **Gap** | Real drain to TERMINAL, membership/owner refusal, and attributed event | Payload scrub, optional branch loss, event rollback, and sink-redrive refusal are not jointly proved. |
+| TS-09 | **Gap** | Real drain to FAILED, fencing, event, and direct repository branch-loss composition | No real failing transform proves both FAILED node audit and TS-09; scrub, event rollback, and sink-redrive refusal remain gaps. |
+| TS-10 | **Gap** | Real drain to PENDING_SINK with payload/bundle/owner effects, membership guard, branch loss, and event existence | Stale-owner zero mutation, detailed event attribution, rollback, and sink-redrive refusal are incomplete. |
+| AUX-01 | **Gap** | Real heartbeat extends expiry while preserving owner, identity, attempt, and lease state | No test asserts that the successful heartbeat adds no scheduler event. |
+| AUX-02 | **Gap** | Real CAS misses emit `LEASE_LOST`; drain abandonment writes no disposition | CAS miss, exact zero row mutation, event, and production-drain abandonment are not integrated in one proof. |
+| F-07 | **Confirmed** | Fresh/self exclusions, live/dead/stalled owner arms, `worker_stalled`, and unfenced compatibility behavior | The long-plugin stall window is tracked separately. |
+| PB-01 | **Gap** | Real source loading, accepted processing, boundary failure, pre-yield failure, quarantine, and durable end-to-end runs | Initial TS-02 events and zero-scheduler-row bypass/failure assertions are incomplete; the source-state crash seam is unproved. |
+| PB-02 | **Gap** | Real transform plugin retry/node audit and scheduler failure disposition are each exercised | No single real-plugin test carries a failure through FAILED node audit, TS-09, event, and effects. |
+| PB-03 | **Gap** | Real gate evaluation and routing are exercised | Scheduler disposition state, event, payload, fencing, and branch-loss effects are not asserted at the gate boundary. |
+| PB-08 | **Gap** | Follower-shaped terminal, blocked, branch-loss, and sink-handoff cases execute repository dispositions | Tests bypass the production follower build/drain/plugin traversal. |
+
+Specialist selections executed 83 passing pytest node invocations across the
+three packages; some nodes intentionally overlapped. The root review then ran
+a fresh cross-package selection: `16 passed, 1 warning in 4.88s`, including the
+real two-process claim hammer. Two direct production-repository probes also
+reproduced the subtype defects in candidates 3 and 4.
+
+#### Positively confirmed Wave 1 gaps
+
+| Candidate | Classification | Executed conclusion |
+|---|---|---|
+| 3 | Implementation defect | A reclaimed sink-redrive lease accepted `mark_terminal` and retained stale `pending_sink_name`; all normal disposition verbs share the missing subtype guard. |
+| 4 | Implementation defect | `claim_pending_sink` leased a deliberately malformed `PENDING_SINK` row whose `pending_sink_name` was NULL. |
+| 6 | Evidence gap | Event-insert rollback injection exists for TS-03 only, not TS-07–TS-10. |
+| 7 | Bounded concurrency proof | Real multi-process proof covers direct READY claim/recovery in N=0 membership mode, not the listed registered/plugin/follower/sink/barrier paths. |
+| 10 | Evidence gap | Source-boundary, pre-row failure, and quarantine tests do not explicitly prove the scheduler table stays empty. |
+| 11 | Composition evidence gap | Real failing-transform audit and TS-09 are proved separately, not in one production-path test. |
+| 14 | Crash-seam evidence gap | No interruption/replay test covers child enqueue after commit but before parent disposition. |
+| 17 | Implementation/fencing defect | Standalone initial-claim callers reach the non-membership-fenced helper; existing Filigree issue `elspeth-c25bcf5717` owns this defect. |
+| 18 | Contract and concurrency gap | No concurrent long plugin call crosses both item TTL and stall budget to pin heartbeat-loss versus stale-disposition behavior. |
+| 19 | Crash-seam evidence gap | No process-death/recovery proof covers TS-02 commit before source COMPLETED state durability. |
+
+#### Wave 1 Filigree work
+
+All Wave 1 gaps were deduplicated against open, in-progress, and completed
+Filigree issues before filing. Candidate 17 is owned by the pre-existing issue
+shown below; the other rows are newly filed coherent work packages.
+
+| Scope | Filigree issue |
+|---|---|
+| TS-00/01 refusal, replay, and atomicity proof | `elspeth-c0d4a28e11` |
+| TS-02/PB-01 ingress composition and scheduler exclusion | `elspeth-9cd07962c7` |
+| TS-02 to source-COMPLETED crash seam | `elspeth-aafba3b298` |
+| Candidate 7 registered/multiprocess/sink-redrive proof | `elspeth-9a52eb80f9` |
+| Candidate 4 malformed PENDING_SINK claim defect | `elspeth-d8e172676c` |
+| TS-04/06 complete sink-bundle proof | `elspeth-76bb92bc7d` |
+| AUX-01/02 heartbeat and lease-loss integration | `elspeth-2aba594afb` |
+| Candidate 18 long-plugin lease/stall behavior | `elspeth-51a4b5c771` |
+| Candidate 3 sink-redrive disposition defect | `elspeth-f8f9272b68` |
+| TS-07–10 effects, guards, and rollback matrix | `elspeth-1076e2716a` |
+| PB-02/03 real transform and gate disposition proof | `elspeth-2e66723070` |
+| Candidate 14 child-enqueue/parent-disposition crash seam | `elspeth-7cdc4da434` |
+| PB-08 real follower build/drain/plugin traversal | `elspeth-6f6bbbec00` |
+| Candidate 17 standalone initial-claim membership fence | `elspeth-c25bcf5717` (pre-existing) |
+
+### Baseline candidate gaps
 
 These are inspection findings for the verification agents. They are not
-asserted defects and must not become tracker issues until positively confirmed.
+asserted defects until an executed ledger says otherwise. The Wave 1 table
+above supersedes the provisional status of candidates 3, 4, 6, 7, 10, 11, 14,
+17, 18, and 19; the remaining entries are still candidates and must not become
+tracker issues until positively confirmed.
 
 1. `token_work_items.status` has no enum CHECK; only scheduler event statuses
    are enum-constrained.

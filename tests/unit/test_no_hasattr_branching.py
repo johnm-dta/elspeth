@@ -53,6 +53,8 @@ tests/unit/core/landscape/test_query_methods.py::not hasattr(factory.query._ops,
 tests/unit/core/landscape/test_query_methods.py::not hasattr(factory.query._ops, 'execute_update')
 tests/unit/core/landscape/test_query_methods.py::not hasattr(factory.query, 'count_distinct_source_rows_with_terminal_outcome')
 tests/unit/core/landscape/test_query_methods.py::not hasattr(factory.query, 'count_failed_coalesce_barrier_rows')
+tests/unit/core/landscape/test_scheduler_fencing.py::not hasattr(fencing, 'fenced_or_plain_write')
+tests/unit/core/landscape/test_scheduler_fencing.py::not hasattr(fencing, 'legacy_unfenced_write')
 tests/unit/core/landscape/test_schema.py::hasattr(schema, '_enum_in_check')
 tests/unit/core/landscape/test_schema.py::hasattr(schema, '_optional_enum_in_check')
 tests/unit/core/landscape/test_schema.py::hasattr(schema, '_sql_string_literal')

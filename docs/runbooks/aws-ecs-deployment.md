@@ -1007,6 +1007,11 @@ The acceptance run uses unique temporary tags for both the Plan 10 rollback
 baseline and the frozen candidate. The control manifest is armed before the
 first push so interruption always routes to cleanup:
 
+The image still contains the exact rollback source tree consumed by the
+runtime. Only `Dockerfile` and `.dockerignore` come from the frozen candidate,
+because those two Plan 10 packaging controls make the qualified pre-Plan-10
+source buildable without changing its application or lock content.
+
 ```bash
 set -Eeuo pipefail
 test -n "${ROLLBACK_BASELINE_SHA:?restore the Plan 10 baseline SHA}"
@@ -1014,10 +1019,28 @@ test "$ROLLBACK_BASELINE_SHA" != "$CANDIDATE_SHA"
 git merge-base --is-ancestor "$ROLLBACK_BASELINE_SHA" "$CANDIDATE_SHA"
 test "${TARGET_PLATFORM:?}" = linux/amd64 || test "$TARGET_PLATFORM" = linux/arm64
 
-git archive "$ROLLBACK_BASELINE_SHA" | docker buildx build \
-  --platform "$TARGET_PLATFORM" --load \
-  --label "org.opencontainers.image.revision=$ROLLBACK_BASELINE_SHA" \
-  -t elspeth:ecs-rollback-baseline -
+# The rollback SHA is the pre-Plan-10 source identity. Its historical Docker
+# context predates Plan 10's production-only test-source exclusions and is not
+# itself buildable. Package that exact runtime source and lock tree with the
+# frozen candidate's reviewed Dockerfile and .dockerignore. The image still
+# contains the exact rollback source tree consumed by the runtime; only its
+# packaging control files come from the candidate that earned this runbook.
+(
+  ROLLBACK_CONTEXT="$(mktemp -d -p /tmp elspeth-rollback-context.XXXXXX)"
+  chmod 700 "$ROLLBACK_CONTEXT"
+  trap 'rm -rf -- "$ROLLBACK_CONTEXT"' EXIT HUP INT TERM
+  git archive "$ROLLBACK_BASELINE_SHA" | tar -x -C "$ROLLBACK_CONTEXT"
+  git show "$CANDIDATE_SHA:Dockerfile" >"$ROLLBACK_CONTEXT/Dockerfile"
+  git show "$CANDIDATE_SHA:.dockerignore" >"$ROLLBACK_CONTEXT/.dockerignore"
+  chmod 600 "$ROLLBACK_CONTEXT/Dockerfile" "$ROLLBACK_CONTEXT/.dockerignore"
+  docker buildx build \
+    --platform "$TARGET_PLATFORM" --load \
+    --build-arg INSTALL_EXTRAS="webui llm aws postgres" \
+    --label "org.opencontainers.image.revision=$ROLLBACK_BASELINE_SHA" \
+    -t elspeth:ecs-rollback-baseline "$ROLLBACK_CONTEXT"
+)
+test "$(docker image inspect elspeth:ecs-rollback-baseline --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$ROLLBACK_BASELINE_SHA"
+test "$(docker image inspect elspeth:ecs-rollback-baseline --format '{{.Os}}/{{.Architecture}}')" = "$TARGET_PLATFORM"
 
 export ECR_REGISTRY="${ECR_REGISTRY:?set approved account registry host}"
 export ECR_REPOSITORY="${ECR_REPOSITORY:?set approved repository name}"

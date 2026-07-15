@@ -636,6 +636,24 @@ def test_fresh_account_bootstrap_is_manifest_armed_backends_initialized_and_dest
     )
 
 
+def test_rollback_image_packages_baseline_source_with_candidate_docker_contract() -> None:
+    text = _text()
+    publication = text[text.index("### Temporary image publication") : text.index("### Saved-plan apply")]
+
+    ordered = (
+        'ROLLBACK_CONTEXT="$(mktemp -d -p /tmp elspeth-rollback-context.XXXXXX)"',
+        'git archive "$ROLLBACK_BASELINE_SHA" | tar -x -C "$ROLLBACK_CONTEXT"',
+        'git show "$CANDIDATE_SHA:Dockerfile" >"$ROLLBACK_CONTEXT/Dockerfile"',
+        'git show "$CANDIDATE_SHA:.dockerignore" >"$ROLLBACK_CONTEXT/.dockerignore"',
+        "docker buildx build",
+        '--platform "$TARGET_PLATFORM" --load',
+    )
+    positions = [publication.index(marker) for marker in ordered]
+    assert positions == sorted(positions)
+    assert 'git archive "$ROLLBACK_BASELINE_SHA" | docker buildx build' not in publication
+    assert "The image still contains the exact rollback source tree" in publication
+
+
 def test_fresh_scenarios_bootstrap_schema_before_first_or_upgrade_candidate() -> None:
     text = _text()
     first = text[text.index("### Fresh Scenario A database baseline") : text.index("### Fresh Scenario B upgrade baseline")]

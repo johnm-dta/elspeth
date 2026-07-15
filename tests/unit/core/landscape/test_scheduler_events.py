@@ -987,6 +987,7 @@ def test_blocked_barrier_terminalization_records_transition_event() -> None:
         barrier_key="join:1",
         token_ids=("token-1",),
         now=now + timedelta(seconds=3),
+        coordination_token=_COORD_TOKEN,
     )
 
     events = _scheduler_events(engine)
@@ -1047,6 +1048,7 @@ def test_blocked_barrier_pending_sink_handoff_records_state_and_event() -> None:
             )
         },
         now=now + timedelta(seconds=3),
+        coordination_token=_COORD_TOKEN,
     )
 
     with engine.connect() as conn:

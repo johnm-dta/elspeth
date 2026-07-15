@@ -2503,6 +2503,7 @@ def test_scheduler_requeues_blocks_and_marks_terminal_with_leased_ownership() ->
         barrier_key="barrier:row-1",
         token_ids=("token-1",),
         now=retry_at,
+        coordination_token=_COORD_TOKEN_RUN1,
     )
     assert completed == 1
     assert restarted_repo.count_active_work(run_id="run-1") == 0
@@ -2594,6 +2595,7 @@ def test_scheduler_barrier_completion_only_terminalizes_consumed_tokens() -> Non
         barrier_key="merge",
         token_ids=("token-row-1-branch-a",),
         now=now,
+        coordination_token=_COORD_TOKEN_RUN1,
     )
 
     assert completed == 1
@@ -2977,6 +2979,7 @@ def test_scheduler_barrier_terminal_raises_when_live_tokens_missing_from_durable
             barrier_key="merge",
             token_ids=("token-a", "token-b", "token-c"),
             now=now,
+            coordination_token=_COORD_TOKEN_RUN1,
         )
 
     with engine.connect() as conn:
@@ -3034,6 +3037,7 @@ def test_scheduler_barrier_terminal_raises_when_durable_blocked_token_set_is_dis
             barrier_key="merge",
             token_ids=("live-a", "live-b", "live-c"),
             now=now,
+            coordination_token=_COORD_TOKEN_RUN1,
         )
 
     with engine.connect() as conn:
@@ -3092,6 +3096,7 @@ def test_scheduler_barrier_terminal_rejects_empty_live_token_set() -> None:
             barrier_key="merge",
             token_ids=(),
             now=now,
+            coordination_token=_COORD_TOKEN_RUN1,
         )
 
     with engine.connect() as conn:

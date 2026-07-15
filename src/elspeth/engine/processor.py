@@ -691,7 +691,7 @@ class RowProcessor:
                 clock=self._clock,
                 aggregation_settings=self._aggregation_settings,
                 coalesce_node_ids=self._coalesce_node_ids,
-                coordination_token=coordination_token,
+                coordination_token=self._require_coordination_token(),
                 scheduler_lease_owner=self._scheduler_lease_owner,
             ).restore_from_journal(barrier_restore)
 
@@ -2942,7 +2942,7 @@ class RowProcessor:
             barrier_key=barrier_key,
             token_ids=token_ids,
             now=self._clock.now_utc(),
-            coordination_token=self._coordination_token,
+            coordination_token=self._require_coordination_token(),
         )
         if expected_count and terminalized_count != expected_count:
             raise AuditIntegrityError(

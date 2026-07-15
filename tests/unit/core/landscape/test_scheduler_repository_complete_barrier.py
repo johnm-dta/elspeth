@@ -777,6 +777,7 @@ def test_wrappers_delegate_preserving_legacy_partial_release() -> None:
             )
         },
         now=NOW,
+        coordination_token=COORD_TOKEN,
     )
     assert transitioned == 1
     # Legacy wrapper event context carries NO consumed_count.
@@ -788,6 +789,7 @@ def test_wrappers_delegate_preserving_legacy_partial_release() -> None:
         barrier_key=BARRIER_KEY,
         token_ids=("t2",),  # t3 left blocked: legacy partial release
         now=NOW,
+        coordination_token=COORD_TOKEN,
     )
     assert terminalized == 1
     assert _row_for_token(engine, "t2")["status"] == TokenWorkStatus.TERMINAL.value
@@ -1151,6 +1153,7 @@ def test_mark_blocked_barrier_terminal_release_context_merged_into_event() -> No
         barrier_key=BARRIER_KEY,
         token_ids=("t3",),
         now=NOW,
+        coordination_token=COORD_TOKEN,
         release_context={
             "late_arrival": True,
             "reason": "late_arrival_after_merge",

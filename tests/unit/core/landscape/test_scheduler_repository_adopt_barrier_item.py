@@ -341,7 +341,13 @@ class TestAdoptionRefusals:
         repo = TokenSchedulerRepository(db.engine)
         token_id, work_item_id, _blocked_at = _seed_blocked_barrier_hold(db, sequence=0)
         # Terminalize it out from under the (hypothetical) intake listing.
-        repo.mark_blocked_barrier_terminal(run_id=RUN_ID, barrier_key=BARRIER_KEY, token_ids=(token_id,), now=NOW)
+        repo.mark_blocked_barrier_terminal(
+            run_id=RUN_ID,
+            barrier_key=BARRIER_KEY,
+            token_ids=(token_id,),
+            now=NOW,
+            coordination_token=token,
+        )
 
         with pytest.raises(AuditIntegrityError, match="journal corruption"):
             _adopt(db, token, token_id=token_id, work_item_id=work_item_id)

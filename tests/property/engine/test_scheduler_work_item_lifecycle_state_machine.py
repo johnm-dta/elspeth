@@ -466,7 +466,13 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
             return
         now = self._tick()
         token_ids = tuple(item.token_id for item in blocked)
-        terminalized = self.repo.mark_blocked_barrier_terminal(run_id=RUN_ID, barrier_key=barrier_key, token_ids=token_ids, now=now)
+        terminalized = self.repo.mark_blocked_barrier_terminal(
+            run_id=RUN_ID,
+            barrier_key=barrier_key,
+            token_ids=token_ids,
+            now=now,
+            coordination_token=LEADER_TOKEN,
+        )
         assert terminalized == len(blocked)
         for item in blocked:
             item.status = TokenWorkStatus.TERMINAL
@@ -495,7 +501,12 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
             for item in blocked
         }
         transitioned = self.repo.mark_blocked_barrier_pending_sink_many(
-            run_id=RUN_ID, barrier_key=barrier_key, handoffs=handoffs, now=now, pending_sink_lease_owner=owner
+            run_id=RUN_ID,
+            barrier_key=barrier_key,
+            handoffs=handoffs,
+            now=now,
+            coordination_token=LEADER_TOKEN,
+            pending_sink_lease_owner=owner,
         )
         assert transitioned == len(blocked)
         for item in blocked:
@@ -513,7 +524,13 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
         foreign_barrier = next(barrier for barrier in BARRIERS if barrier != model.barrier_key)
         now = self._tick()
         with pytest.raises(AuditIntegrityError):
-            self.repo.mark_blocked_barrier_terminal(run_id=RUN_ID, barrier_key=foreign_barrier, token_ids=(token_id,), now=now)
+            self.repo.mark_blocked_barrier_terminal(
+                run_id=RUN_ID,
+                barrier_key=foreign_barrier,
+                token_ids=(token_id,),
+                now=now,
+                coordination_token=LEADER_TOKEN,
+            )
 
     # -------------------------------------------------------------------------
     # Rules: journal-first adoption (ADR-030 §E.2, slice 3)

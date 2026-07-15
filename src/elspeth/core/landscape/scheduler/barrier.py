@@ -35,7 +35,7 @@ from elspeth.core.landscape.database import Tier1Engine, begin_write
 from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
 from elspeth.core.landscape.scheduler.branch_losses import record_coalesce_branch_loss
 from elspeth.core.landscape.scheduler.events import SchedulerEventStore
-from elspeth.core.landscape.scheduler.fencing import fenced_or_plain_write
+from elspeth.core.landscape.scheduler.fencing import fenced_or_plain_write, require_coordination_token
 from elspeth.core.landscape.scheduler.payload_codec import scrubbed_row_payload_json
 from elspeth.core.landscape.scheduler.work_items import (
     insert_work_item,
@@ -176,6 +176,7 @@ class BarrierJournalRepository:
 
         Returns the number of consumed rows terminalized.
         """
+        coordination_token = require_coordination_token(coordination_token, verb="complete_barrier")
         if scope_row_id is not None and not require_exhaustive_release:
             raise AuditIntegrityError(
                 f"Scheduler barrier completion for run_id={run_id!r} barrier_key={barrier_key!r} received "
@@ -745,7 +746,7 @@ class BarrierJournalRepository:
         barrier_key: str,
         handoffs: Mapping[str, BlockedPendingSinkHandoff],
         now: datetime,
-        coordination_token: CoordinationToken | None = None,
+        coordination_token: CoordinationToken,
         pending_sink_lease_owner: str | None = None,
     ) -> int:
         """Move BLOCKED barrier work to PENDING_SINK before external sink writes.
@@ -756,6 +757,10 @@ class BarrierJournalRepository:
         handoff token without a BLOCKED row is refused (no fresh inserts), and
         handoff events keep the ``{"barrier_key"}``-only context.
         """
+        coordination_token = require_coordination_token(
+            coordination_token,
+            verb="mark_blocked_barrier_pending_sink_many",
+        )
         requested_token_ids = tuple(handoffs.keys())
         if not requested_token_ids:
             return 0
@@ -779,7 +784,7 @@ class BarrierJournalRepository:
             emitted_ready=(),
             now=now,
             require_exhaustive_release=False,
-            coordination_token=coordination_token,  # type: ignore[arg-type]  # legacy wrapper: stays Optional (slice-4 deferred)
+            coordination_token=coordination_token,
             pending_sink_lease_owner=pending_sink_lease_owner,
         )
         # complete_barrier raised unless every requested handoff transitioned.
@@ -792,7 +797,7 @@ class BarrierJournalRepository:
         barrier_key: str,
         token_ids: tuple[str, ...],
         now: datetime,
-        coordination_token: CoordinationToken | None = None,
+        coordination_token: CoordinationToken,
         release_context: Mapping[str, object] | None = None,
     ) -> int:
         """Mark BLOCKED work consumed by a resolved barrier as terminal.
@@ -809,6 +814,10 @@ class BarrierJournalRepository:
         "scope_row_id": ...}``. ``None`` (every pre-§E.3a caller) preserves
         the pinned ``{"barrier_key"}``-only legacy context exactly.
         """
+        coordination_token = require_coordination_token(
+            coordination_token,
+            verb="mark_blocked_barrier_terminal",
+        )
         if not token_ids:
             raise AuditIntegrityError(
                 f"Scheduler barrier terminalization for run_id={run_id!r} barrier_key={barrier_key!r} "
@@ -823,7 +832,7 @@ class BarrierJournalRepository:
             emitted_ready=(),
             now=now,
             require_exhaustive_release=False,
-            coordination_token=coordination_token,  # type: ignore[arg-type]  # legacy wrapper: stays Optional (slice-4 deferred)
+            coordination_token=coordination_token,
             release_context=release_context,
         )
 

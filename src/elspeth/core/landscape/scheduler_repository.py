@@ -573,7 +573,7 @@ class TokenSchedulerRepository:
         barrier_key: str,
         handoffs: Mapping[str, BlockedPendingSinkHandoff],
         now: datetime,
-        coordination_token: CoordinationToken | None = None,
+        coordination_token: CoordinationToken,
         pending_sink_lease_owner: str | None = None,
     ) -> int:
         """Move BLOCKED barrier work to PENDING_SINK before external sink writes."""
@@ -593,7 +593,7 @@ class TokenSchedulerRepository:
         barrier_key: str,
         token_ids: tuple[str, ...],
         now: datetime,
-        coordination_token: CoordinationToken | None = None,
+        coordination_token: CoordinationToken,
         release_context: Mapping[str, object] | None = None,
     ) -> int:
         """Mark BLOCKED work consumed by a resolved barrier as terminal."""

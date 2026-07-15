@@ -45,11 +45,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from unittest.mock import patch
 
+import pytest
 from sqlalchemy import insert, select
 
 from elspeth.contracts import RowResult, TokenInfo
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
-from elspeth.contracts.errors import SchedulerLeaseLostError
+from elspeth.contracts.errors import OrchestrationInvariantError, SchedulerLeaseLostError
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.scheduler import BranchLossSpec, TokenWorkStatus
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
@@ -302,6 +303,17 @@ def test_recovery_drain_recovers_parked_pending_sinks_before_claiming_ready() ->
     assert by_token[ready_token.token_id].path is TerminalPath.FILTER_DROPPED
     status, _owner = _row_status(setup, ready_item_id)
     assert status == TokenWorkStatus.TERMINAL.value
+
+
+def test_recovery_drain_requires_token_before_lease_recovery() -> None:
+    """The production resume drain must not reach the legacy None recovery arm."""
+    processor, spy, setup, _clock = _build(lease_owner=None, register_leader=None)
+
+    spy.calls.clear()
+    with pytest.raises(OrchestrationInvariantError, match="coordination token"):
+        processor.drain_scheduled_work(_ctx(setup))
+
+    assert spy.calls_for("recover_expired_leases") == []
 
 
 def test_sink_bound_result_parks_pending_sink_with_fenced_owner_and_tags_result() -> None:

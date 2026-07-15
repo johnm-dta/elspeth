@@ -729,6 +729,7 @@ class SchedulerDrainCoordinator:
         ``mark_pending_sink`` MUST NOT be re-claimed here — see
         ``drain_claims`` docstring.
         """
+        coordination_token = self._processor._require_coordination_token()
         iterations = 0
         while True:
             iterations += 1
@@ -743,13 +744,13 @@ class SchedulerDrainCoordinator:
                 run_id=self._run_id,
                 now=now,
                 caller_owner=self._scheduler_lease_owner,
-                coordination_token=self._coordination_token,
+                coordination_token=coordination_token,
             )
             repaired = self._scheduler.terminalize_pending_sinks_with_terminal_outcomes(
                 run_id=self._run_id,
                 now=now,
                 caller_owner=self._scheduler_lease_owner,
-                coordination_token=self._processor._require_coordination_token(),
+                coordination_token=coordination_token,
             )
             if repaired:
                 continue

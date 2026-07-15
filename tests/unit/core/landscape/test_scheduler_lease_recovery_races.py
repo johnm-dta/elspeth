@@ -82,6 +82,7 @@ from elspeth.core.landscape.schema import (
     metadata,
     nodes_table,
     rows_table,
+    run_coordination_table,
     runs_table,
     scheduler_events_table,
     token_work_items_table,
@@ -244,6 +245,36 @@ def _lower_busy_timeout(engine: Tier1Engine, ms: int = 100) -> None:
         driver.execute(f"PRAGMA busy_timeout={ms}")
     finally:
         raw.close()
+
+
+def test_explicit_none_preserves_pre_coordination_direct_harness_recovery(
+    engines: tuple[Tier1Engine, Tier1Engine],
+) -> None:
+    """The load-bearing None arm remains available to direct harnesses that
+    have no coordination seat and must recover a crashed owner's lease.
+    """
+    engine, _ = engines
+    repo = TokenSchedulerRepository(engine)
+    _seed_run_rows_tokens(engine, ("token-0",))
+    original = _enqueue_tokens(repo, ("token-0",))["token-0"]
+    _expire_leases(repo, ("token-0",))
+    with engine.connect() as conn:
+        assert conn.execute(select(run_coordination_table.c.run_id)).first() is None
+
+    recovered = repo.recover_expired_leases(
+        run_id=RUN_ID,
+        now=SWEEP_AT,
+        caller_owner="direct-harness-sweeper",
+        coordination_token=None,
+    )
+
+    assert recovered == 1
+    state = _work_item_states(engine)["token-0"]
+    assert state["status"] == TokenWorkStatus.READY.value
+    assert state["attempt"] == 2
+    assert state["lease_owner"] is None
+    assert state["work_item_id"] != original.work_item_id
+    assert _event_counts(engine)[SchedulerEventType.RECOVER_EXPIRED_LEASE.value] == 1
 
 
 def test_claim_ready_probing_mid_sweep_is_lock_excluded_until_recovery_commits(

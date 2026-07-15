@@ -35,7 +35,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import insert, select, update
+from sqlalchemy import event, insert, select, update
 
 from elspeth.contracts import CheckpointDraft, NodeType, RunStatus
 from elspeth.contracts.coordination import CoordinationToken
@@ -44,7 +44,7 @@ from elspeth.contracts.errors import (
     OrchestrationInvariantError,
     RunLeadershipLostError,
 )
-from elspeth.contracts.scheduler import TokenWorkStatus
+from elspeth.contracts.scheduler import BlockedPendingSinkHandoff, TokenWorkStatus
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.checkpoint.manager import CheckpointManager
 from elspeth.core.landscape.database import LandscapeDB
@@ -52,13 +52,17 @@ from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.core.landscape.schema import (
+    batch_members_table,
+    batches_table,
     checkpoints_table,
+    coalesce_branch_losses_table,
     nodes_table,
     rows_table,
     run_coordination_events_table,
     run_coordination_table,
     run_workers_table,
     runs_table,
+    scheduler_events_table,
     token_outcomes_table,
     token_work_items_table,
     tokens_table,
@@ -195,6 +199,24 @@ def _work_item_row(db: LandscapeDB, token_id: str) -> dict[str, object]:
     return dict(row)
 
 
+def _barrier_mutation_snapshot(db: LandscapeDB) -> dict[str, tuple[tuple[object, ...], ...]]:
+    """Capture every durable surface a refused barrier write could touch."""
+    tables = (
+        rows_table,
+        tokens_table,
+        token_work_items_table,
+        scheduler_events_table,
+        run_coordination_table,
+        run_coordination_events_table,
+        coalesce_branch_losses_table,
+        batches_table,
+        batch_members_table,
+        token_outcomes_table,
+    )
+    with db.engine.connect() as conn:
+        return {table.name: tuple(tuple(row) for row in conn.execute(select(table))) for table in tables}
+
+
 def _enqueue_and_claim(db: LandscapeDB, repo: TokenSchedulerRepository, *, sequence: int, owner: str) -> tuple[str, str, str]:
     """READY → LEASED row for ``owner``; returns (token_id, row_id, work_item_id)."""
     token_id, row_id = _seed_row_and_token(db, sequence=sequence)
@@ -212,6 +234,99 @@ def _enqueue_and_claim(db: LandscapeDB, repo: TokenSchedulerRepository, *, seque
     claimed = repo.claim_ready(run_id=RUN_ID, lease_owner=owner, lease_seconds=60, now=NOW)
     assert claimed is not None and claimed.token_id == token_id
     return token_id, row_id, claimed.work_item_id
+
+
+class TestMissingTokenBarrierRefusals:
+    """Strict barrier wrappers reject runtime None before any transaction."""
+
+    def test_complete_barrier_runtime_none_refuses_before_transaction(self, db: LandscapeDB, token: CoordinationToken) -> None:
+        repo = TokenSchedulerRepository(db.engine)
+        token_id, _row_id, work_item_id = _enqueue_and_claim(db, repo, sequence=0, owner=WORKER)
+        repo.mark_blocked(work_item_id=work_item_id, queue_key=None, barrier_key="b1", now=NOW, expected_lease_owner=WORKER)
+        before = _barrier_mutation_snapshot(db)
+        transactions: list[object] = []
+
+        def record_begin(conn: object) -> None:
+            transactions.append(conn)
+
+        event.listen(db.engine, "begin", record_begin)
+        try:
+            with pytest.raises(TypeError, match="coordination_token"):
+                repo.complete_barrier(
+                    run_id=RUN_ID,
+                    barrier_key="b1",
+                    consumed_token_ids=(token_id,),
+                    emitted_pending_sink=(),
+                    emitted_ready=(),
+                    now=NOW,
+                    coordination_token=None,  # type: ignore[arg-type]  # runtime trust-boundary regression
+                )
+        finally:
+            event.remove(db.engine, "begin", record_begin)
+
+        assert transactions == [], "missing authority must be refused before opening a transaction"
+        assert _barrier_mutation_snapshot(db) == before
+
+    def test_terminal_wrapper_runtime_none_refuses_before_transaction(self, db: LandscapeDB, token: CoordinationToken) -> None:
+        repo = TokenSchedulerRepository(db.engine)
+        token_id, _row_id, work_item_id = _enqueue_and_claim(db, repo, sequence=0, owner=WORKER)
+        repo.mark_blocked(work_item_id=work_item_id, queue_key=None, barrier_key="b1", now=NOW, expected_lease_owner=WORKER)
+        before = _barrier_mutation_snapshot(db)
+        transactions: list[object] = []
+
+        def record_begin(conn: object) -> None:
+            transactions.append(conn)
+
+        event.listen(db.engine, "begin", record_begin)
+        try:
+            with pytest.raises(TypeError, match="coordination_token"):
+                repo.mark_blocked_barrier_terminal(
+                    run_id=RUN_ID,
+                    barrier_key="b1",
+                    token_ids=(token_id,),
+                    now=NOW,
+                    coordination_token=None,  # type: ignore[arg-type]  # runtime trust-boundary regression
+                )
+        finally:
+            event.remove(db.engine, "begin", record_begin)
+
+        assert transactions == [], "missing authority must be refused before opening a transaction"
+        assert _barrier_mutation_snapshot(db) == before
+
+    def test_pending_sink_wrapper_runtime_none_refuses_before_transaction(self, db: LandscapeDB, token: CoordinationToken) -> None:
+        repo = TokenSchedulerRepository(db.engine)
+        token_id, _row_id, work_item_id = _enqueue_and_claim(db, repo, sequence=0, owner=WORKER)
+        repo.mark_blocked(work_item_id=work_item_id, queue_key=None, barrier_key="b1", now=NOW, expected_lease_owner=WORKER)
+        before = _barrier_mutation_snapshot(db)
+        transactions: list[object] = []
+
+        def record_begin(conn: object) -> None:
+            transactions.append(conn)
+
+        event.listen(db.engine, "begin", record_begin)
+        try:
+            with pytest.raises(TypeError, match="coordination_token"):
+                repo.mark_blocked_barrier_pending_sink_many(
+                    run_id=RUN_ID,
+                    barrier_key="b1",
+                    handoffs={
+                        token_id: BlockedPendingSinkHandoff(
+                            row_payload_json=_payload_json(),
+                            sink_name="sink-a",
+                            outcome="success",
+                            path="completed",
+                            error_hash=None,
+                            error_message=None,
+                        )
+                    },
+                    now=NOW,
+                    coordination_token=None,  # type: ignore[arg-type]  # runtime trust-boundary regression
+                )
+        finally:
+            event.remove(db.engine, "begin", record_begin)
+
+        assert transactions == [], "missing authority must be refused before opening a transaction"
+        assert _barrier_mutation_snapshot(db) == before
 
 
 class TestStaleTokenFenceRefusals:
@@ -292,6 +407,31 @@ class TestStaleTokenFenceRefusals:
                 run_id=RUN_ID,
                 barrier_key="b1",
                 token_ids=(token_id,),
+                now=NOW,
+                coordination_token=token,
+            )
+        assert _work_item_row(db, token_id)["status"] == TokenWorkStatus.BLOCKED.value
+        assert len(_fence_refusals(db, "complete_barrier")) == 1
+
+    def test_pending_sink_barrier_wrapper_refused(self, db: LandscapeDB, token: CoordinationToken) -> None:
+        repo = TokenSchedulerRepository(db.engine)
+        token_id, _row_id, work_item_id = _enqueue_and_claim(db, repo, sequence=0, owner=WORKER)
+        repo.mark_blocked(work_item_id=work_item_id, queue_key=None, barrier_key="b1", now=NOW, expected_lease_owner=WORKER)
+        _bump_epoch(db)
+        with pytest.raises(RunLeadershipLostError):
+            repo.mark_blocked_barrier_pending_sink_many(
+                run_id=RUN_ID,
+                barrier_key="b1",
+                handoffs={
+                    token_id: BlockedPendingSinkHandoff(
+                        row_payload_json=_payload_json(),
+                        sink_name="sink-a",
+                        outcome="success",
+                        path="completed",
+                        error_hash=None,
+                        error_message=None,
+                    )
+                },
                 now=NOW,
                 coordination_token=token,
             )

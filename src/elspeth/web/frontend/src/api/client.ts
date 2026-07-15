@@ -164,6 +164,9 @@ export async function parseResponse<T>(
     // HTTPException format.
     let detail = response.statusText;
     let errorType: string | undefined;
+    let componentId: string | undefined;
+    let pluginId: string | undefined;
+    let nestedSnapshotFingerprint: string | undefined;
     let providerDetail: string | undefined;
     let providerStatusCode: number | undefined;
     let fanoutGuard: ExecutionFanoutGuard | undefined;
@@ -184,9 +187,34 @@ export async function parseResponse<T>(
           ? body.error_type
           : typeof nestedDetail?.error_type === "string"
             ? nestedDetail.error_type
-            : typeof nestedDetail?.code === "string"
-              ? nestedDetail.code
-              : undefined;
+            : typeof body.error_code === "string"
+              ? body.error_code
+              : typeof nestedDetail?.error_code === "string"
+                ? nestedDetail.error_code
+                : typeof nestedDetail?.code === "string"
+                  ? nestedDetail.code
+                  : undefined;
+
+      const rawComponentId = firstDefined(
+        ownField(body, "component_id"),
+        ownField(nestedDetail, "component_id"),
+      );
+      componentId = typeof rawComponentId === "string" ? rawComponentId : undefined;
+
+      const rawPluginId = firstDefined(
+        ownField(body, "plugin_id"),
+        ownField(nestedDetail, "plugin_id"),
+      );
+      pluginId = typeof rawPluginId === "string" ? rawPluginId : undefined;
+
+      const rawSnapshotFingerprint = firstDefined(
+        ownField(body, "snapshot_fingerprint"),
+        ownField(nestedDetail, "snapshot_fingerprint"),
+      );
+      nestedSnapshotFingerprint =
+        typeof rawSnapshotFingerprint === "string"
+          ? rawSnapshotFingerprint
+          : undefined;
 
       if (typeof nestedDetail?.detail === "string") {
         detail = nestedDetail.detail;
@@ -259,6 +287,8 @@ export async function parseResponse<T>(
       status: response.status,
       detail,
       error_type: errorType,
+      component_id: componentId,
+      plugin_id: pluginId,
       partial_state: partialState,
       failed_turn: failedTurn,
       partial_state_save_failed: partialStateSaveFailed,
@@ -267,10 +297,9 @@ export async function parseResponse<T>(
       provider_detail: providerDetail,
       provider_status_code: providerStatusCode,
       validation_errors: validationErrors,
-      snapshot_fingerprint: optionalResponseHeader(
-        response,
-        "X-ELSPETH-Plugin-Snapshot",
-      ),
+      snapshot_fingerprint:
+        optionalResponseHeader(response, "X-ELSPETH-Plugin-Snapshot") ??
+        nestedSnapshotFingerprint,
     };
     throw error;
   }

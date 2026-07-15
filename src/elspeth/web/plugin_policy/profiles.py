@@ -88,6 +88,8 @@ class WebLLMProfileSettings(BaseModel):
             if self.provider == "azure":
                 if self.endpoint is None or self.deployment_name is None:
                     raise ValueError("Azure profile requires operator endpoint and deployment")
+                if self.model != self.deployment_name:
+                    raise ValueError("Azure profile model must match deployment_name")
                 from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 
                 validate_credential_safe_https_url(self.endpoint, field_name="endpoint")
@@ -333,7 +335,8 @@ class _LLMProfileResolver:
             raise ValueError("profile_unavailable") from None
         executable = dict(safe_options)
         executable["provider"] = profile.provider
-        executable["model"] = profile.model
+        if profile.provider != "azure":
+            executable["model"] = profile.model
         executable.update(profile.provider_options)
         if profile.credential_ref is not None:
             assert profile.credential_scope is not None

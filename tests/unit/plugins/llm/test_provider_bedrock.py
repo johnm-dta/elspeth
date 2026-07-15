@@ -249,6 +249,24 @@ class TestBedrockProvider:
         ):
             _execute(_provider())
 
+    def test_empty_content_error_does_not_expose_unknown_finish_reason(self) -> None:
+        sentinel = "provider-private-finish-reason"
+        provider = _provider()
+        response = SimpleNamespace(
+            content="",
+            raw_response={"choices": [{"finish_reason": sentinel}]},
+            usage=Usage(prompt_tokens=11, completion_tokens=0, total_tokens=11),
+            model=MODEL,
+        )
+        client = SimpleNamespace(chat_completion=lambda **_kwargs: response)
+
+        with patch.object(provider, "_get_llm_client", return_value=client), pytest.raises(ContentPolicyError) as exc_info:
+            _execute(provider)
+
+        assert str(exc_info.value) == "Bedrock LLM returned empty content (finish_reason=unrecognized)"
+        assert sentinel not in str(exc_info.value)
+        assert sentinel not in repr(exc_info.value)
+
     @pytest.mark.parametrize(
         ("provider_error", "expected_type", "retryable"),
         [

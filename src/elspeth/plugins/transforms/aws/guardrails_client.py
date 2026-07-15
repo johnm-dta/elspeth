@@ -163,7 +163,7 @@ def _validate_coverage(value: object) -> None:
                     raise GuardrailResponseError
         guarded = counts.get("guarded")
         total = counts.get("total")
-        if type(guarded) is int and type(total) is int and guarded > total:
+        if type(guarded) is int and type(total) is int and guarded != total:
             raise GuardrailResponseError
 
 

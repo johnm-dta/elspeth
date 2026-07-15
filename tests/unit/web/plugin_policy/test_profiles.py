@@ -8,7 +8,9 @@ from pydantic import ValidationError
 
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.plugin_capabilities import WebConfigAuthority
+from elspeth.engine.orchestrator.preflight import check_config_value_sources
 from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+from elspeth.plugins.transforms.llm.providers.azure import AzureOpenAIConfig
 from elspeth.web.catalog.schemas import PluginSchemaInfo
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import create_catalog_service
@@ -146,7 +148,7 @@ def test_profile_reprs_hide_provider_and_provider_specific_settings() -> None:
         llm_profiles={
             "private-binding": {
                 "provider": "azure",
-                "model": "PRIVATE_MODEL_MARKER",
+                "model": "PRIVATE_DEPLOYMENT_MARKER",
                 "credential_scope": "server",
                 "credential_ref": "PRIVATE_CREDENTIAL_MARKER",
                 "endpoint": "https://private-endpoint-marker.example.com",
@@ -162,7 +164,6 @@ def test_profile_reprs_hide_provider_and_provider_specific_settings() -> None:
 
     for marker in (
         "azure",
-        "PRIVATE_MODEL_MARKER",
         "PRIVATE_CREDENTIAL_MARKER",
         "private-endpoint-marker",
         "PRIVATE_DEPLOYMENT_MARKER",
@@ -440,6 +441,55 @@ def test_profile_lowering_splits_executable_and_audit_safe_options() -> None:
         "response_field": "summary",
     }
     assert "OPENROUTER_API_KEY" not in repr(lowered)
+
+
+def test_azure_profile_lowering_honors_deployment_derived_model_contract() -> None:
+    runtime = RuntimeWebPluginConfig.from_settings(
+        _settings(
+            llm_profiles={
+                "azure-task": {
+                    "provider": "azure",
+                    "model": "operator-deployment",
+                    "credential_scope": "server",
+                    "credential_ref": "AZURE_OPENAI_API_KEY",
+                    "endpoint": "https://example.openai.azure.com",
+                    "deployment_name": "operator-deployment",
+                }
+            }
+        )
+    )
+    policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+    registry = OperatorProfileRegistry(policy=policy, settings=runtime)
+
+    lowered = registry.lower_options(
+        PluginId("transform", "llm"),
+        alias="azure-task",
+        safe_options={"prompt_template": "Summarise {{ row }}", "schema": {"mode": "observed"}},
+    )
+    executable = deep_thaw(lowered.executable_options)
+    executable["api_key"] = "resolved-secret"
+    config = AzureOpenAIConfig.model_validate(executable)
+
+    assert config.model == "operator-deployment"
+    assert check_config_value_sources(config, component_id="llm") == ()
+
+
+def test_azure_profile_rejects_model_that_disagrees_with_deployment() -> None:
+    with pytest.raises(ValueError, match="model must match deployment_name"):
+        RuntimeWebPluginConfig.from_settings(
+            _settings(
+                llm_profiles={
+                    "azure-task": {
+                        "provider": "azure",
+                        "model": "catalog-model-name",
+                        "credential_scope": "server",
+                        "credential_ref": "AZURE_OPENAI_API_KEY",
+                        "endpoint": "https://example.openai.azure.com",
+                        "deployment_name": "operator-deployment",
+                    }
+                }
+            )
+        )
 
 
 def test_bedrock_profile_lowering_is_keyless() -> None:

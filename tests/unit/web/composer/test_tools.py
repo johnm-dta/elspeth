@@ -358,6 +358,67 @@ def test_direct_upsert_cannot_name_hidden_registered_plugin() -> None:
     assert result.updated_state.version == 1
 
 
+def test_apply_pipeline_recipe_reports_unavailable_profile_alias() -> None:
+    catalog = _mock_catalog()
+    unrestricted = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    llm_id = PluginId("transform", "llm")
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash="recipe-profile-policy",
+        principal_scope="local:test-user",
+        available=unrestricted.available,
+        unavailable=(),
+        selected=unrestricted.selected,
+        usable_profile_aliases=((llm_id, ("tutorial",)),),
+        selected_profile_aliases=((llm_id, "tutorial"),),
+        binding_generation_fingerprint="recipe-profile-generation",
+    )
+    policy_catalog = PolicyCatalogView(catalog, snapshot, MagicMock(spec=OperatorProfileRegistry))
+
+    result = execute_tool(
+        "apply_pipeline_recipe",
+        {
+            "recipe_name": "classify-rows-llm-jsonl",
+            "slots": {
+                "source_blob_id": str(uuid4()),
+                "classifier_template": "Classify this row",
+                "profile": "missing-profile",
+            },
+        },
+        _empty_state(),
+        policy_catalog,
+        plugin_snapshot=snapshot,
+    )
+
+    assert result.success is False
+    assert result.data["error_code"] == "profile_unavailable"
+    assert result.updated_state.version == 1
+
+
+def test_apply_pipeline_recipe_preserves_disabled_llm_plugin_reason() -> None:
+    catalog = _mock_catalog()
+    llm_id = PluginId("transform", "llm")
+    policy_catalog, snapshot = _restricted_policy_pair(catalog, llm_id)
+
+    result = execute_tool(
+        "apply_pipeline_recipe",
+        {
+            "recipe_name": "classify-rows-llm-jsonl",
+            "slots": {
+                "source_blob_id": str(uuid4()),
+                "classifier_template": "Classify this row",
+                "profile": "missing-profile",
+            },
+        },
+        _empty_state(),
+        policy_catalog,
+        plugin_snapshot=snapshot,
+    )
+
+    assert result.success is False
+    assert result.data["error_code"] == "plugin_not_enabled"
+    assert result.updated_state.version == 1
+
+
 @pytest.mark.parametrize(
     ("tool_name", "arguments", "plugin_id"),
     [

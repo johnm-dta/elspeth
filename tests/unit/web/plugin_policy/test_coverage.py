@@ -213,6 +213,52 @@ def test_content_safety_fan_out_passes_when_each_sink_path_is_controlled() -> No
     assert control_coverage_findings(state, PluginCapability.CONTENT_SAFETY) == ()
 
 
+def test_content_safety_error_route_to_sink_is_uncovered() -> None:
+    ordinary = replace(
+        _node("ordinary", "passthrough", "ordinary_in", "safe_in"),
+        on_error="unsafe",
+    )
+    state = _state(
+        _llm(on_success="ordinary_in"),
+        ordinary,
+        _safety("safety", "safe_in", "safe"),
+        sinks=("safe", "unsafe"),
+    )
+
+    findings = control_coverage_findings(state, PluginCapability.CONTENT_SAFETY)
+
+    assert [(finding.component_id, finding.reason) for finding in findings] == [
+        ("judge", "output_not_post_dominated"),
+    ]
+
+
+def test_content_safety_post_dominates_valid_coalesce_chain() -> None:
+    coalesce = replace(
+        _node("join", None, "branches", None, node_type="coalesce"),
+        branches={"left": "left_done", "right": "right_done"},
+        policy="require_all",
+        merge="nested",
+    )
+    state = _state(
+        _llm(on_success="fanout_in"),
+        _node(
+            "fanout",
+            None,
+            "fanout_in",
+            None,
+            node_type="gate",
+            routes={"all": "fork"},
+            fork_to=("left", "right"),
+        ),
+        _node("left_path", "passthrough", "left", "left_done"),
+        _node("right_path", "passthrough", "right", "right_done"),
+        coalesce,
+        _safety("safety", "join", "main"),
+    )
+
+    assert control_coverage_findings(state, PluginCapability.CONTENT_SAFETY) == ()
+
+
 def test_content_safety_unknown_downstream_fails_safe() -> None:
     assert control_coverage_findings(_state(_llm(on_success="missing")), PluginCapability.CONTENT_SAFETY)
 

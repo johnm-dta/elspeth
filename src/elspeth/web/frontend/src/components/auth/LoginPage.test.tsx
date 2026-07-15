@@ -92,6 +92,23 @@ describe("LoginPage", () => {
     vi.stubGlobal("fetch", vi.fn());
   });
 
+  it("preserves a shared inspection route before the login page inspects callback data", async () => {
+    window.location.hash = "#/shared/tk-abc";
+    vi.mocked(api.fetchAuthConfig).mockResolvedValue(localConfig());
+
+    render(
+      <AuthGuard>
+        <div>protected</div>
+      </AuthGuard>,
+    );
+
+    await screen.findByLabelText("Username");
+    expect(window.location.hash).toBe("#/shared/tk-abc");
+    expect(sessionStorage.getItem("elspeth_post_login_redirect")).toBe(
+      "#/shared/tk-abc",
+    );
+  });
+
   describe("OIDC authorization code with PKCE", () => {
     it("uses one single-use PKCE transaction and an authorization-code request", async () => {
       vi.mocked(api.fetchAuthConfig).mockResolvedValue(oidcConfig());

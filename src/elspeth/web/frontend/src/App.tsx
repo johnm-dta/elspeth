@@ -522,9 +522,9 @@ function App() {
         {showTutorial ? (
           <HelloWorldTutorial
             key={tutorialResetEpoch}
-            composerAvailable={systemStatus?.composer_available ?? true}
+            composerAvailable={systemStatus?.composer_available ?? false}
             composerUnavailableReason={systemStatus?.composer_reason ?? null}
-            tutorialReady={systemStatus?.tutorial_ready ?? true}
+            tutorialReady={systemStatus?.tutorial_ready ?? false}
             tutorialUnavailableReason={systemStatus?.tutorial_reason ?? null}
           />
         ) : showEmptyLanding ? (

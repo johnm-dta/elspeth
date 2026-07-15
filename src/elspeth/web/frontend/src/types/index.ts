@@ -910,6 +910,8 @@ export interface ApiError {
   status: number;
   detail: string;
   error_type?: string;
+  component_id?: string;
+  plugin_id?: string;
   partial_state?: CompositionState | null;
   failed_turn?: FailedTurn | null;
   partial_state_save_failed?: boolean;

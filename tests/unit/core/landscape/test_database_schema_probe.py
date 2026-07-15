@@ -60,6 +60,47 @@ def test_missing_additive_index_is_incomplete(engine: Engine) -> None:
     assert probe_schema_shape(engine) is LandscapeSchemaShape.INCOMPLETE
 
 
+def test_additive_index_name_on_wrong_table_does_not_satisfy_tokens(engine: Engine) -> None:
+    _create_full(engine)
+    with engine.begin() as conn:
+        conn.exec_driver_sql("DROP INDEX ix_tokens_run_id")
+        conn.exec_driver_sql("CREATE INDEX ix_tokens_run_id ON rows (row_id)")
+    assert probe_schema_shape(engine) is LandscapeSchemaShape.INCOMPLETE
+
+
+def test_bare_run_coordination_event_primary_key_is_divergent(engine: Engine) -> None:
+    _create_full(engine)
+    with engine.connect() as conn:
+        ddl = conn.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='run_coordination_events'"
+        ).scalar_one()
+        assert "AUTOINCREMENT" in ddl
+        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        conn.exec_driver_sql("DROP TABLE run_coordination_events")
+        conn.exec_driver_sql(ddl.replace(" PRIMARY KEY AUTOINCREMENT", " PRIMARY KEY"))
+        for index in metadata.tables["run_coordination_events"].indexes:
+            index.create(conn)
+        conn.commit()
+
+    assert probe_schema_shape(engine) is LandscapeSchemaShape.DIVERGENT
+
+
+def test_autoincrement_word_in_sql_comment_does_not_prove_table_shape(engine: Engine) -> None:
+    _create_full(engine)
+    with engine.connect() as conn:
+        ddl = conn.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='run_coordination_events'"
+        ).scalar_one()
+        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        conn.exec_driver_sql("DROP TABLE run_coordination_events")
+        conn.exec_driver_sql(ddl.replace(" PRIMARY KEY AUTOINCREMENT", " PRIMARY KEY /* AUTOINCREMENT */"))
+        for index in metadata.tables["run_coordination_events"].indexes:
+            index.create(conn)
+        conn.commit()
+
+    assert probe_schema_shape(engine) is LandscapeSchemaShape.DIVERGENT
+
+
 def test_missing_core_table_is_divergent(engine: Engine) -> None:
     _create_full(engine)
     with engine.begin() as conn:

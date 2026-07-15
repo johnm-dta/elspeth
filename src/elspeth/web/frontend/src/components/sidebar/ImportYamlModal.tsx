@@ -68,20 +68,43 @@ interface ImportErrorInfo {
   detail: string;
 }
 
+function isPluginPolicyReason(
+  reason: string | undefined,
+): reason is PluginPolicyFinding["reason_code"] {
+  return (
+    reason === "plugin_not_enabled" ||
+    reason === "plugin_not_installed" ||
+    reason === "plugin_unavailable" ||
+    reason === "credential_unavailable" ||
+    reason === "profile_unavailable"
+  );
+}
+
 /**
  * Map an import failure to display copy.
  *
  * 400s (structural defects, anchors/aliases, unbound blob-storage paths,
  * literal credentials) and 404/409 (blob lookup) all carry a plain,
  * user-language HTTPException detail string from the backend -- rendered
- * verbatim. 422 is the one case worth overriding: it fires from the
- * request body's own Pydantic field constraint (empty/oversized yaml, or
- * an unknown field), and FastAPI's default validation-error body is an
- * array (not a string), so `parseResponse` cannot extract a usable
- * `detail` from it -- it falls back to `response.statusText`
- * ("Unprocessable Entity"), which is not useful to a user.
+ * verbatim. A plugin-policy 422 carries a structured discriminator and
+ * component identity, handled explicitly below. Other 422s come from the
+ * request body's own Pydantic field constraint (empty/oversized yaml, or an
+ * unknown field), and FastAPI's default validation-error body is an array
+ * (not a string), so `parseResponse` cannot extract a usable `detail` from it
+ * -- it falls back to `response.statusText` ("Unprocessable Entity"), which
+ * is not useful to a user.
  */
 function describeImportError(apiErr: ApiError): ImportErrorInfo {
+  if (apiErr.status === 422 && isPluginPolicyReason(apiErr.error_type)) {
+    const subject =
+      apiErr.component_id && apiErr.plugin_id
+        ? `Component ${apiErr.component_id} (${apiErr.plugin_id})`
+        : "A pipeline component";
+    return {
+      title: "Could not import this pipeline.",
+      detail: `${subject} is ${unavailableReasonLabel(apiErr.error_type).toLowerCase()} under the current plugin policy.`,
+    };
+  }
   if (apiErr.status === 422) {
     return { title: "Could not import this paste.", detail: IMPORT_YAML_422_MESSAGE };
   }

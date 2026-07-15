@@ -609,7 +609,8 @@ class TelemetryManager:
                 before = _exporter_delivery_metrics(exporter)
                 result = exporter.flush()
                 after = _exporter_delivery_metrics(exporter)
-                delivered_on_flush = max(delivered_on_flush, _metric_delta(before, after, "delivered"))
+                delivered_delta = _metric_delta(before, after, "delivered")
+                delivered_on_flush = max(delivered_on_flush, delivered_delta)
                 failed_on_flush = max(failed_on_flush, _metric_delta(before, after, "failed"))
                 dropped_on_flush = max(dropped_on_flush, _metric_delta(before, after, "dropped"))
                 if result is False:
@@ -621,6 +622,8 @@ class TelemetryManager:
                         exporter=exporter.name,
                         circuit_state=breaker.state.name,
                     )
+                elif delivered_delta:
+                    self._circuit_breakers[id(exporter)].record_success()
             except TELEMETRY_TRANSPORT_ERRORS as e:
                 # Transport/IO failure — log, don't crash. Other exceptions
                 # are programming errors and propagate.
@@ -631,6 +634,8 @@ class TelemetryManager:
                 )
 
         self._reconcile_deferred_delivery(delivered=delivered_on_flush, failed=failed_on_flush, dropped=dropped_on_flush)
+        if delivered_on_flush:
+            self._consecutive_total_failures = 0
 
     def close(self) -> None:
         """Shutdown export thread and close exporters.

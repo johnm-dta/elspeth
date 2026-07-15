@@ -37,6 +37,8 @@ _LOCK_TIMEOUT = "5s"
 _TARGET_ERROR = "PostgreSQL database target cannot be proven safe from static URL configuration."
 _SCHEMA_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*\Z")
 _SEARCH_PATH = re.compile(r"-c(?:\s+)?search_path=([^\s]+)\Z")
+_POSTGRES_TARGET_QUERY_OVERRIDES = frozenset({"host", "hostaddr", "port", "dbname", "database", "service", "servicefile"})
+_POSTGRES_MAX_IDENTIFIER_BYTES = 63
 
 
 class SchemaState(Enum):
@@ -98,6 +100,8 @@ def postgres_logical_target_key(url: str | URL) -> PostgresLogicalTarget:
         raise _target_error() from None
     if parsed.drivername.split("+", 1)[0] != "postgresql" or not parsed.host or not parsed.database:
         raise _target_error()
+    if set(parsed.query).intersection(_POSTGRES_TARGET_QUERY_OVERRIDES):
+        raise _target_error()
 
     options_value = parsed.query.get("options")
     explicit_schema: str | None = None
@@ -108,9 +112,15 @@ def postgres_logical_target_key(url: str | URL) -> PostgresLogicalTarget:
         if match is None:
             raise _target_error()
         candidate = match.group(1)
-        if not _SCHEMA_NAME.fullmatch(candidate) or candidate.startswith("$"):
+        normalized_candidate = candidate.lower()
+        if (
+            not _SCHEMA_NAME.fullmatch(candidate)
+            or candidate.startswith("$")
+            or len(candidate.encode("utf-8")) > _POSTGRES_MAX_IDENTIFIER_BYTES
+            or normalized_candidate.startswith("pg_")
+        ):
             raise _target_error()
-        explicit_schema = candidate.lower()
+        explicit_schema = normalized_candidate
 
     return PostgresLogicalTarget(
         host=parsed.host.lower(),
@@ -133,7 +143,9 @@ def require_distinct_postgres_targets(session_url: str | URL, landscape_url: str
 
 def probe_session_schema(bind: Engine | Connection) -> SchemaState:
     inspector = inspect(bind)
-    existing = set(inspector.get_table_names()) - {"sqlite_sequence"}
+    existing = set(inspector.get_table_names())
+    if bind.dialect.name == "sqlite":
+        existing.discard("sqlite_sequence")
     if not existing:
         try:
             _assert_schema_sentinels(bind)
@@ -211,11 +223,11 @@ def _run_locked(
             if postgres:
                 try:
                     conn.execute(
-                        text("SELECT set_config('lock_timeout', :timeout, true)"),
+                        text("SELECT pg_catalog.set_config('lock_timeout', :timeout, true)"),
                         {"timeout": _LOCK_TIMEOUT},
                     )
                     conn.execute(
-                        text("SELECT pg_advisory_lock(:classid, hashtext(:target))"),
+                        text("SELECT pg_catalog.pg_advisory_lock(:classid, pg_catalog.hashtext(:target))"),
                         {"classid": ELSPETH_SCHEMA_INIT_LOCK_CLASSID, "target": target},
                     )
                     acquired = True
@@ -249,7 +261,7 @@ def _run_locked(
                 if cleanup_error is None:
                     try:
                         unlocked = conn.execute(
-                            text("SELECT pg_advisory_unlock(:classid, hashtext(:target))"),
+                            text("SELECT pg_catalog.pg_advisory_unlock(:classid, pg_catalog.hashtext(:target))"),
                             {"classid": ELSPETH_SCHEMA_INIT_LOCK_CLASSID, "target": target},
                         ).scalar_one()
                         if unlocked is not True:

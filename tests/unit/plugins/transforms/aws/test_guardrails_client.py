@@ -258,6 +258,19 @@ def test_model_conforming_partial_root_coverage_is_accepted(coverage: dict[str, 
     assert attempts == 1
 
 
+@pytest.mark.parametrize("location", ["root", "invocation_metrics"])
+def test_partial_guardrail_coverage_fails_closed(location: str) -> None:
+    provider_response = response(full_optional_sections=True)
+    partial = {"textCharacters": {"guarded": 11, "total": 12}, "images": {"guarded": 0, "total": 0}}
+    if location == "root":
+        provider_response["guardrailCoverage"] = partial
+    else:
+        provider_response["assessments"][0]["invocationMetrics"]["guardrailCoverage"] = partial
+
+    with pytest.raises(GuardrailResponseError):
+        parse_guardrail_response(provider_response, required_filters=PROMPT_FILTERS)
+
+
 def test_root_usage_accepts_required_six_without_optional_counters() -> None:
     provider_response = response()
     provider_response["usage"] = _required_usage()

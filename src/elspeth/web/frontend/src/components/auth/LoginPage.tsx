@@ -73,10 +73,11 @@ function captureCallback(): CallbackCapture | null {
     oversizedCallback ? "?malformed=1" : rawSearch,
   );
   const oidcKeys = ["code", "state", "error", "error_description", "token"];
+  const sharedInspectionRoute = window.location.hash.startsWith("#/shared/");
   const hasOidcSignal =
     oversizedCallback ||
     oidcKeys.some((key) => params.has(key)) ||
-    window.location.hash.length > 0;
+    (window.location.hash.length > 0 && !sharedInspectionRoute);
   const verificationOnly = params.has("verify_token") && !hasOidcSignal;
 
   if (!hasOidcSignal && !verificationOnly) return null;

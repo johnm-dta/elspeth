@@ -1061,6 +1061,28 @@ describe("ImportYamlModal", () => {
     expect(screen.getByText(IMPORT_YAML_422_MESSAGE)).toBeInTheDocument();
   });
 
+  it("names the affected component and policy reason for a plugin-policy 422", async () => {
+    useSessionStore.setState({ compositionState: emptyState() } as never);
+    vi.mocked(api.importCompositionYaml).mockRejectedValue({
+      status: 422,
+      detail: "Unprocessable Entity",
+      error_type: "plugin_not_enabled",
+      component_id: "main",
+      plugin_id: "sink:database",
+      snapshot_fingerprint: "snapshot-a",
+    });
+
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml();
+    await clickImport();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "Component main (sink:database) is not enabled under the current plugin policy.",
+    );
+    expect(screen.queryByText(IMPORT_YAML_422_MESSAGE)).not.toBeInTheDocument();
+  });
+
   it("renders the backend detail verbatim for a 400 (structural defect)", async () => {
     useSessionStore.setState({ compositionState: emptyState() } as never);
     vi.mocked(api.importCompositionYaml).mockRejectedValue({

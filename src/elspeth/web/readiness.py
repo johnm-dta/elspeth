@@ -239,9 +239,12 @@ def _probe_directory(name: str, directory: Path) -> _ProbeResult:
 
 def _validate_directory(name: str, candidate: Path) -> _ProbeResult:
     try:
-        directory = candidate.resolve(strict=True)
-        if not directory.is_dir():
+        candidate_stat = candidate.lstat()
+        if stat.S_ISLNK(candidate_stat.st_mode):
+            return (ReadinessCheck(name, False, f"{name} directory must not be a symlink"),)
+        if not stat.S_ISDIR(candidate_stat.st_mode):
             return (ReadinessCheck(name, False, "directory is required and must already exist"),)
+        directory = candidate.resolve(strict=True)
     except BaseException as exc:
         return (ReadinessCheck(name, False, f"directory validation failed ({type(exc).__name__})"),)
     return _probe_directory(name, directory)

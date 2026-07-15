@@ -279,7 +279,7 @@ describe("CatalogDrawer", () => {
             component_id: "legacy_transform",
             plugin_id: "transform:legacy_llm",
             reason_code: "plugin_not_enabled",
-            snapshot_fingerprint: "current-snapshot",
+            snapshot_fingerprint: "catalog-test-snapshot",
           },
         ],
       },
@@ -310,6 +310,35 @@ describe("CatalogDrawer", () => {
       "true",
     );
     expect(api.getPluginSchema).not.toHaveBeenCalled();
+  });
+
+  it("does not render policy findings from an older catalog snapshot", async () => {
+    useSessionStore.setState({
+      compositionState: {
+        id: "state-stale",
+        version: 1,
+        sources: {},
+        nodes: [],
+        edges: [],
+        outputs: [],
+        metadata: { name: "Saved pipeline", description: null },
+        plugin_policy_findings: [
+          {
+            component_id: "repaired_transform",
+            plugin_id: "transform:legacy_llm",
+            reason_code: "plugin_not_enabled",
+            snapshot_fingerprint: "stale-snapshot",
+          },
+        ],
+      },
+    } as never);
+
+    render(<CatalogDrawer isOpen onClose={vi.fn()} />);
+
+    await screen.findByText("CSV file source");
+    expect(
+      screen.queryByRole("region", { name: /unavailable saved components/i }),
+    ).not.toBeInTheDocument();
   });
 });
 

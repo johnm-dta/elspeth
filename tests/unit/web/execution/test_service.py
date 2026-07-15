@@ -51,6 +51,7 @@ from elspeth.web.blobs.protocol import BlobFinalizationResult, BlobRecord, BlobS
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.errors import PipelineValidationError
 from elspeth.web.execution.progress import ProgressBroadcaster
+from elspeth.web.execution.protocol import FrozenRunSettings
 from elspeth.web.execution.schemas import (
     RunAccounting,
     RunAccountingIntegrity,
@@ -500,6 +501,32 @@ def service(
 
 
 class TestExecutionFlow:
+    def test_queued_run_rejects_rotated_plugin_binding_before_runtime_config_use(self, service: ExecutionServiceImpl) -> None:
+        base = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+
+        def with_generation(value: str) -> PluginAvailabilitySnapshot:
+            return PluginAvailabilitySnapshot.create(
+                policy_hash=base.policy_hash,
+                principal_scope="local:alice",
+                available=base.available,
+                unavailable=base.unavailable,
+                selected=base.selected,
+                usable_profile_aliases=base.usable_profile_aliases,
+                selected_profile_aliases=base.selected_profile_aliases,
+                binding_generation_fingerprint=value,
+                control_modes=base.control_modes,
+            )
+
+        frozen = FrozenRunSettings(
+            plugin_snapshot=with_generation("generation-before-queue"),
+            executable_config={},
+            audit_safe_config={},
+        )
+        service._plugin_snapshot_factory = lambda _user_id: with_generation("generation-after-queue")
+
+        with pytest.raises(RuntimeError, match="binding changed while execution was queued"):
+            service._require_current_binding_generation(frozen, user_id="alice")
+
     @pytest.mark.asyncio
     async def test_execute_returns_run_id_immediately(self, service: ExecutionServiceImpl) -> None:
         """execute() returns a UUID without blocking on pipeline completion."""

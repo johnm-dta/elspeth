@@ -144,12 +144,11 @@ class TestAWSS3SinkConfig:
         with pytest.raises(PluginConfigError):
             AWSS3SinkConfig.from_dict(_base_config(key=key))
 
-    def test_undefined_template_variable_fails_at_render(self) -> None:
-        from elspeth.plugins.sinks.aws_s3_sink import AWSS3SinkConfig, _render_key_template
+    def test_undefined_template_variable_fails_at_config(self) -> None:
+        from elspeth.plugins.sinks.aws_s3_sink import AWSS3SinkConfig
 
-        cfg = AWSS3SinkConfig.from_dict(_base_config(key="{{ missing }}"))
-        with pytest.raises(ValueError, match="render"):
-            _render_key_template(cfg.key, run_id="run-1", timestamp="2026-07-14T00:00:00+00:00")
+        with pytest.raises(PluginConfigError, match="approved variables"):
+            AWSS3SinkConfig.from_dict(_base_config(key="{{ missing }}"))
 
     @pytest.mark.parametrize("rendered", ["", " \t", "bad\nkey", "k" * 1025])
     def test_rendered_key_is_revalidated(self, rendered: str) -> None:
@@ -157,6 +156,22 @@ class TestAWSS3SinkConfig:
 
         with pytest.raises(ValueError, match="rendered key"):
             _render_key_template("{{ run_id }}", run_id=rendered, timestamp="2026-07-14T00:00:00+00:00")
+
+    def test_key_template_rejects_expressions_before_rendering(self) -> None:
+        from elspeth.plugins.sinks.aws_s3_sink import _render_key_template
+
+        class MultiplicationSentinel(str):
+            multiplied = False
+
+            def __mul__(self, count: int) -> str:
+                self.multiplied = True
+                raise AssertionError(f"template attempted multiplication by {count}")
+
+        run_id = MultiplicationSentinel("run-1")
+        with pytest.raises(ValueError, match="template"):
+            _render_key_template("{{ run_id * 1000000000 }}", run_id=run_id, timestamp="2026-07-14T00:00:00+00:00")
+
+        assert run_id.multiplied is False
 
     def test_csv_options_and_headers_match_existing_sink_contract(self) -> None:
         from elspeth.contracts.header_modes import HeaderMode
@@ -587,6 +602,13 @@ class TestAWSS3SinkRuntime:
         assert sink._buffered_rows == []
         assert len(client.requests) == 1
         assert context.calls[0]["error"] == {"type": "_ProviderFailure"}
+
+    @pytest.mark.parametrize("control", [KeyboardInterrupt(), SystemExit()])
+    def test_put_object_process_control_exceptions_are_not_converted(self, control: BaseException) -> None:
+        sink, _ = _runtime_sink(client=_S3Client([control]))
+
+        with pytest.raises(type(control)):
+            sink.write([{"id": 1, "name": "Ada"}], _SinkContext())
 
     def test_put_object_import_error_is_ambiguous_audited_and_poisoned(self) -> None:
         sink, client = _runtime_sink(client=_S3Client([ImportError("post-dispatch provider sentinel")]))

@@ -64,11 +64,8 @@ def build_output_stream_graph(nodes: Sequence[NodeSpec]) -> OutputStreamGraph:
     for node in nodes:
         for stream in _node_output_streams(node):
             register(stream, node)
-        # Error streams are producers for upstream/input dominance analysis,
-        # but are not successful LLM output paths for content post-dominance.
-        register(node.on_error, node)
-        if node.node_type != "queue" and node.input:
-            consumers.setdefault(node.input, {}).setdefault(node.id, node)
+        for stream in _node_input_streams(node):
+            consumers.setdefault(stream, {}).setdefault(node.id, node)
 
     for node in nodes:
         if node.node_type == "queue":
@@ -170,11 +167,26 @@ def _node_output_streams(node: NodeSpec) -> tuple[str, ...]:
     streams: list[str] = []
     if node.on_success:
         streams.append(node.on_success)
+    elif node.node_type == "coalesce":
+        # Runtime publishes a non-terminal coalesce under its own name.
+        streams.append(node.id)
+    if node.on_error:
+        streams.append(node.on_error)
     if node.routes:
         streams.extend(node.routes.values())
     if node.fork_to:
         streams.extend(node.fork_to)
     return tuple(dict.fromkeys(streams))
+
+
+def _node_input_streams(node: NodeSpec) -> tuple[str, ...]:
+    if node.node_type == "queue":
+        return ()
+    if node.node_type == "coalesce":
+        if isinstance(node.branches, Mapping):
+            return tuple(node.branches.values())
+        return node.branches or ()
+    return (node.input,) if node.input else ()
 
 
 def _stream_proves_input_control(

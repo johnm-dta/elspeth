@@ -88,10 +88,7 @@ class CSVOptions(BaseModel):
     @field_validator("encoding")
     @classmethod
     def _validate_encoding(cls, value: str) -> str:
-        try:
-            codecs.lookup(value)
-        except LookupError as exc:
-            raise ValueError("unknown CSV encoding") from exc
+        _validate_text_encoding(value, format_name="CSV")
         return value
 
 
@@ -106,11 +103,18 @@ class JSONOptions(BaseModel):
     @field_validator("encoding")
     @classmethod
     def _validate_encoding(cls, value: str) -> str:
-        try:
-            codecs.lookup(value)
-        except LookupError as exc:
-            raise ValueError("unknown JSON encoding") from exc
+        _validate_text_encoding(value, format_name="JSON")
         return value
+
+
+def _validate_text_encoding(value: str, *, format_name: str) -> None:
+    try:
+        decoder = codecs.getincrementaldecoder(value)(errors="strict")
+        decoded = decoder.decode(b"", final=True)
+    except (LookupError, TypeError, UnicodeError, ValueError) as exc:
+        raise ValueError(f"{format_name} encoding must decode bytes to text") from exc
+    if not isinstance(decoded, str):
+        raise ValueError(f"{format_name} encoding must decode bytes to text")
 
 
 class AWSS3SourceConfig(DataPluginConfig):
@@ -218,6 +222,8 @@ AWSS3SourceConfig.model_rebuild()
 
 
 def _normalize_error_type(exc: BaseException) -> str:
+    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+        raise exc
     name = type(exc).__name__
     return name if _SAFE_ERROR_TYPE.fullmatch(name) is not None else "ProviderError"
 
@@ -987,6 +993,8 @@ class AWSS3Source(BaseSource):
             if callable(parser_close):
                 try:
                     parser_close()
+                except (KeyboardInterrupt, SystemExit):
+                    raise
                 except BaseException:
                     cleanup_failed = True
             if download is not None and self._active_download is download:
@@ -994,6 +1002,8 @@ class AWSS3Source(BaseSource):
             if download is not None:
                 try:
                     download.close()
+                except (KeyboardInterrupt, SystemExit):
+                    raise
                 except BaseException:
                     cleanup_failed = True
             if cleanup_failed and not primary_active:

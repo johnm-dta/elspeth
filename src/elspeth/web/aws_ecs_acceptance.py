@@ -56,6 +56,7 @@ from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.payload_store import FilesystemPayloadStore
+from elspeth.core.secrets import is_secret_field
 from elspeth.engine.orchestrator import prepare_for_run
 from elspeth.plugins.aws_s3_common import build_s3_client
 from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
@@ -222,6 +223,29 @@ FORBIDDEN_AWS_OVERRIDE_ENV = frozenset(
         "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
     }
 )
+_TASK_DEFINITION_PLAINTEXT_SECRET_ENV = frozenset(
+    {
+        "DATABASE_URL",
+        "ELSPETH_DATABASE_URL",
+        "ELSPETH_WEB__SESSION_DB_URL",
+        "ELSPETH_WEB__LANDSCAPE_URL",
+    }
+)
+_TASK_DEFINITION_REQUIRED_SECRET_BINDINGS = (
+    ("ELSPETH_WEB__SECRET_KEY", "database-runtime", "secret_key"),
+    ("ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY", "database-runtime", "shareable_link_signing_key"),
+    ("OPENROUTER_API_KEY", "openrouter-composer", "openrouter_api_key"),
+    ("ELSPETH_WEB__COMPOSER_MODEL", "openrouter-composer", "composer_model"),
+    ("ELSPETH_WEB__COMPOSER_ADVISOR_MODEL", "openrouter-composer", "composer_advisor_model"),
+    ("ELSPETH_WEB__SESSION_DB_URL", "database-runtime", "session_url"),
+    ("ELSPETH_WEB__LANDSCAPE_URL", "database-runtime", "landscape_url"),
+)
+_TASK_DEFINITION_AWS_OVERRIDE_ENV = FORBIDDEN_AWS_OVERRIDE_ENV | {"AWS_DEFAULT_REGION"}
+_SECRET_VALUE_FROM_PATTERN = re.compile(
+    r"arn:(aws(?:-us-gov|-cn)?):secretsmanager:([a-z0-9-]+):([0-9]{12}):"
+    r"secret:([A-Za-z0-9/_+=.@-]{1,512})(?::([^:\x00-\x1f\x7f]{0,256}):([^:\x00-\x1f\x7f]{0,256}):([^:\x00-\x1f\x7f]{0,256}))?\Z"
+)
+_SECRET_ARN_SUFFIX_PATTERN = re.compile(r"(.+)-[A-Za-z0-9]{6}\Z")
 _S3_ACCEPTANCE_ROW: dict[str, object] = {"id": 1, "name": "elspeth-s3-acceptance"}
 _S3_ACCEPTANCE_BYTES = b'{"id":1,"name":"elspeth-s3-acceptance"}\n'
 _S3_MAX_OBJECT_BYTES = 4096
@@ -6286,6 +6310,29 @@ def scenario_load(
     return "\n".join(f"{name}={shlex.quote(str(assignments[name]))}" for name in SCENARIO_ASSIGNMENT_NAMES) + "\n"
 
 
+def _plaintext_task_definition_secret(name: str) -> bool:
+    return name in _TASK_DEFINITION_PLAINTEXT_SECRET_ENV or is_secret_field(name)
+
+
+def _secrets_manager_inventory_binding(
+    value_from: object,
+    *,
+    partition: str,
+    region: str,
+    account_id: str,
+) -> tuple[str, str | None, str | None, str | None] | None:
+    if type(value_from) is not str or len(value_from) > 2048:
+        return None
+    match = _SECRET_VALUE_FROM_PATTERN.fullmatch(value_from)
+    if match is None or match.group(1) != partition or match.group(2) != region or match.group(3) != account_id:
+        return None
+    suffixed_name = match.group(4)
+    name_match = _SECRET_ARN_SUFFIX_PATTERN.fullmatch(suffixed_name)
+    if name_match is None:
+        return None
+    return name_match.group(1), match.group(5), match.group(6), match.group(7)
+
+
 def validate_task_definition_policy_binding(
     payload: object,
     *,
@@ -6308,13 +6355,17 @@ def validate_task_definition_policy_binding(
     if not isinstance(task, Mapping) or task.get("status") != "ACTIVE":
         raise AcceptanceCheckError("task_definition_policy_binding")
     task_definition_arn = task.get("taskDefinitionArn")
-    if (
-        type(task_definition_arn) is not str
-        or re.fullmatch(
-            r"arn:aws(?:-us-gov|-cn)?:ecs:[a-z0-9-]+:[0-9]{12}:task-definition/[A-Za-z0-9_-]+:[1-9][0-9]*",
+    task_definition_match = (
+        re.fullmatch(
+            r"arn:(aws(?:-us-gov|-cn)?):ecs:[a-z0-9-]+:[0-9]{12}:task-definition/[A-Za-z0-9_-]+:[1-9][0-9]*",
             task_definition_arn,
         )
-        is None
+        if type(task_definition_arn) is str
+        else None
+    )
+    if (
+        type(task_definition_arn) is not str
+        or task_definition_match is None
     ):
         raise AcceptanceCheckError("task_definition_policy_binding")
     containers = task.get("containerDefinitions")
@@ -6369,14 +6420,40 @@ def validate_task_definition_policy_binding(
         if type(name) is not str or type(value) is not str or name in observed:
             raise AcceptanceCheckError("task_definition_policy_binding")
         observed[name] = value
+    if any(name in _TASK_DEFINITION_AWS_OVERRIDE_ENV or _plaintext_task_definition_secret(name) for name in observed):
+        raise AcceptanceCheckError("task_definition_policy_binding")
     secret_names: set[str] = set()
+    approved_secret_ids = set(cast(list[str], orphan["secret_ids"]))
+    required_secret_bindings = {
+        name: (f"{namespace}-{secret_suffix}", json_key, "", "")
+        for name, secret_suffix, json_key in _TASK_DEFINITION_REQUIRED_SECRET_BINDINGS
+    }
+    aws_region = aws.get("region")
+    assert task_definition_match is not None
+    partition = task_definition_match.group(1)
     for entry in secrets:
-        if not isinstance(entry, Mapping):
+        if not isinstance(entry, Mapping) or set(entry) != {"name", "valueFrom"}:
             raise AcceptanceCheckError("task_definition_policy_binding")
-        name = entry.get("name")
-        if type(name) is not str or name in secret_names:
+        name = entry["name"]
+        inventory_binding = _secrets_manager_inventory_binding(
+            entry["valueFrom"],
+            partition=partition,
+            region=cast(str, aws_region),
+            account_id=cast(str, account_id),
+        )
+        if (
+            type(name) is not str
+            or name in secret_names
+            or name in observed
+            or name in _TASK_DEFINITION_AWS_OVERRIDE_ENV
+            or inventory_binding is None
+            or inventory_binding[0] not in approved_secret_ids
+            or (name in required_secret_bindings and inventory_binding != required_secret_bindings[name])
+        ):
             raise AcceptanceCheckError("task_definition_policy_binding")
         secret_names.add(name)
+    if not required_secret_bindings.keys() <= secret_names:
+        raise AcceptanceCheckError("task_definition_policy_binding")
 
     protected_names = (
         *PLUGIN_POLICY_ASSIGNMENT_NAMES,

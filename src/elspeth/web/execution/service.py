@@ -407,6 +407,12 @@ class ExecutionServiceImpl:
             user_id = "trained-operator"
         return self._plugin_snapshot_factory(user_id)
 
+    def _require_current_binding_generation(self, frozen: FrozenRunSettings, *, user_id: str | None) -> None:
+        """Refuse a queued run when its credential/profile binding has rotated."""
+        current = self._plugin_snapshot_for_user(user_id, operation="queued execution revalidation")
+        if current.binding_generation_fingerprint != frozen.plugin_snapshot.binding_generation_fingerprint:
+            raise RuntimeError("Plugin binding changed while execution was queued; submit the run again.")
+
     def set_openrouter_catalog_snapshot(self, *, sha256: str, source: str) -> None:
         """Record the boot-time OpenRouter catalog snapshot id.
 
@@ -1377,6 +1383,13 @@ class ExecutionServiceImpl:
                             attempt=1,
                         )
                     )
+
+            if frozen_run_settings is not None:
+                # Rebuild the principal snapshot after secret resolution and
+                # immediately before runtime config use. A queued run must not
+                # pair newly rotated credentials/profile bindings with the
+                # request-time generation retained in its audit evidence.
+                self._require_current_binding_generation(frozen_run_settings, user_id=user_id)
 
             # Load settings in-process — never write resolved secrets or inline
             # blob contents to disk, and never serialize them back through YAML.

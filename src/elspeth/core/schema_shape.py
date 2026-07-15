@@ -616,6 +616,7 @@ def collect_metadata_shape_issues(
             continue
         table = metadata.tables[table_name]
         _collect_column_issues(issues, inspector, table, dialect)
+        _collect_sqlite_table_option_issues(issues, inspector, table, dialect)
         _collect_foreign_key_issues(issues, inspector, table, dialect)
         _collect_check_issues(issues, inspector, table, dialect, text_builtin_proof)
         _collect_unique_constraint_issues(issues, inspector, table, dialect)
@@ -628,6 +629,28 @@ def collect_metadata_shape_issues(
             allowed_missing_index_names=allowed_missing_index_names,
         )
     return tuple(issues)
+
+
+def _collect_sqlite_table_option_issues(
+    issues: list[SchemaShapeIssue],
+    inspector: Inspector,
+    table: Table,
+    dialect: Dialect,
+) -> None:
+    if dialect.name != "sqlite":
+        return
+    sqlite_options = table.dialect_options["sqlite"]
+    if "autoincrement" not in sqlite_options or sqlite_options["autoincrement"] is not True:
+        return
+    statement = text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = :table_name")
+    bind = inspector.bind
+    if isinstance(bind, Connection):
+        ddl = bind.execute(statement, {"table_name": table.name}).scalar_one_or_none()
+    else:
+        with bind.connect() as connection:
+            ddl = connection.execute(statement, {"table_name": table.name}).scalar_one_or_none()
+    if type(ddl) is not str or re.search(r"\bPRIMARY\s+KEY\s+AUTOINCREMENT\b", ddl, flags=re.IGNORECASE) is None:
+        issues.append(SchemaShapeIssue(f"{table.name} SQLite AUTOINCREMENT mismatch", True, False))
 
 
 def _proven_pg_catalog_text_builtin_calls(

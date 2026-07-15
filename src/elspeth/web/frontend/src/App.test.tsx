@@ -29,6 +29,7 @@ import {
 // Stub them out so the test focuses solely on App's own banner DOM.
 
 const tutorialMountSpy = vi.hoisted(() => vi.fn());
+const tutorialPropsSpy = vi.hoisted(() => vi.fn());
 
 vi.mock("./components/common/Layout", () => ({
   Layout: ({
@@ -67,7 +68,14 @@ vi.mock("./components/settings/SecretsPanel", () => ({
 vi.mock("./components/tutorial", async () => {
   const React = await import("react");
   return {
-    HelloWorldTutorial: () => {
+    HelloWorldTutorial: (props: {
+      composerAvailable?: boolean;
+      tutorialReady?: boolean;
+    }) => {
+      tutorialPropsSpy({
+        composerAvailable: props.composerAvailable,
+        tutorialReady: props.tutorialReady,
+      });
       React.useEffect(() => {
         tutorialMountSpy();
       }, []);
@@ -960,6 +968,31 @@ describe("App preferences bootstrap (Phase 1B)", () => {
 
     expect(screen.getByTestId("tutorial-stub")).toBeInTheDocument();
     expect(screen.queryByTestId("layout-stub")).not.toBeInTheDocument();
+  });
+
+  it("keeps tutorial readiness fail-closed while system status is still loading", async () => {
+    const { usePreferencesStore } = await import("@/stores/preferencesStore");
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "guided",
+      tutorialCompletedAt: null,
+      tutorialCompleted: false,
+    });
+    vi.spyOn(usePreferencesStore.getState(), "bootstrap").mockResolvedValueOnce(
+      undefined,
+    );
+    vi.spyOn(api, "fetchSystemStatus").mockReturnValue(new Promise(() => {}));
+    tutorialPropsSpy.mockClear();
+
+    render(<App />);
+
+    await waitFor(() => expect(tutorialPropsSpy).toHaveBeenCalled());
+    expect(tutorialPropsSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        composerAvailable: false,
+        tutorialReady: false,
+      }),
+    );
   });
 
   it("remounts the tutorial shell after Reset tutorial succeeds", async () => {

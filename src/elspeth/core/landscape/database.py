@@ -7,10 +7,11 @@ with appropriate settings for each.
 import os
 import re
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, NewType, Self, cast
 from urllib.parse import quote
 from weakref import WeakKeyDictionary
@@ -544,7 +545,8 @@ _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
     ("coalesce_branch_losses", "uq_coalesce_branch_losses_natural"),
 )
 
-_ADDITIVE_INDEX_NAMES: frozenset[str] = frozenset({"ix_tokens_run_id"})
+_ADDITIVE_INDEX_OWNERS: Mapping[str, str] = MappingProxyType({"ix_tokens_run_id": "tokens"})
+_ADDITIVE_INDEX_NAMES: frozenset[str] = frozenset(_ADDITIVE_INDEX_OWNERS)
 _ADDITIVE_TABLE_NAMES: frozenset[str] = frozenset({"auth_events", "run_attributions"})
 
 
@@ -571,10 +573,15 @@ def _sqlite_epoch_is_incompatible(bind: Engine | Connection) -> bool:
 
 
 def _missing_additive_indexes(inspector: Inspector, present_tables: set[str]) -> frozenset[str]:
-    found = {
-        str(index["name"]) for table_name in present_tables for index in inspector.get_indexes(table_name) if index.get("name") is not None
-    }
-    return _ADDITIVE_INDEX_NAMES - found
+    missing: set[str] = set()
+    for index_name, table_name in _ADDITIVE_INDEX_OWNERS.items():
+        if table_name not in present_tables:
+            missing.add(index_name)
+            continue
+        found = {str(index["name"]) for index in inspector.get_indexes(table_name) if index.get("name") is not None}
+        if index_name not in found:
+            missing.add(index_name)
+    return frozenset(missing)
 
 
 def probe_schema_shape(bind: Engine | Connection) -> LandscapeSchemaShape:

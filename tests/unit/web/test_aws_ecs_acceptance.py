@@ -16,7 +16,7 @@ from dataclasses import fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import httpx
 import pytest
@@ -3202,7 +3202,12 @@ def _scenario_inventory(
             "efs_creation_tokens": [f"{namespace}-efs"],
             "efs_file_system_ids": [f"fs-0123456789abcde{scenario_id.lower()}"] if phase == "resolved" else [],
             "efs_access_point_ids": [f"fsap-0123456789abcde{scenario_id.lower()}"] if phase == "resolved" else [],
-            "secret_ids": [f"{namespace}-database-secret"],
+            "secret_ids": [
+                f"{namespace}-database-runtime",
+                f"{namespace}-database-schema",
+                f"{namespace}-database-bootstrap",
+                f"{namespace}-openrouter-composer",
+            ],
             "iam_role_names": [f"{namespace}-task-role", f"{namespace}-execution-role"],
             "log_group_names": log_groups,
             "log_resource_policy_names": [f"{namespace}-delivery-policy"],
@@ -3678,21 +3683,7 @@ def test_scenario_load_is_exact_shell_round_trippable_and_rejects_inventory_drif
         )
 
 
-@pytest.mark.parametrize(
-    "field",
-    [
-        "ELSPETH_WEB__DATA_DIR",
-        "ELSPETH_WEB__PAYLOAD_STORE_PATH",
-        *acceptance.PLUGIN_POLICY_ASSIGNMENT_NAMES,
-        "ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256",
-        "ELSPETH_BEDROCK_LIVE_TEST_MODEL",
-        "AWS_REGION",
-    ],
-)
-def test_task_definition_policy_binding_compares_returned_environment_to_protected_inventory(
-    tmp_path: Path,
-    field: str,
-) -> None:
+def _task_definition_policy_payload(tmp_path: Path) -> tuple[Path, str, dict[str, Any], dict[str, Any]]:
     manifest_path = tmp_path / "control.json"
     _init_control_manifest(manifest_path)
     inventory = json.loads((tmp_path / "scenario-a.json").read_text())
@@ -3722,10 +3713,29 @@ def test_task_definition_policy_binding_compares_returned_environment_to_protect
             },
         ]
     )
-    task_definition_arn = "arn:aws:ecs:ap-southeast-2:123456789012:task-definition/elspeth-web:17"
+    namespace = acceptance.scenario_resource_namespace(inventory["acceptance_run_id"], "A")
+    required_secret_bindings = (
+        ("ELSPETH_WEB__SECRET_KEY", f"{namespace}-database-runtime", "secret_key"),
+        ("ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY", f"{namespace}-database-runtime", "shareable_link_signing_key"),
+        ("OPENROUTER_API_KEY", f"{namespace}-openrouter-composer", "openrouter_api_key"),
+        ("ELSPETH_WEB__COMPOSER_MODEL", f"{namespace}-openrouter-composer", "composer_model"),
+        ("ELSPETH_WEB__COMPOSER_ADVISOR_MODEL", f"{namespace}-openrouter-composer", "composer_advisor_model"),
+        ("ELSPETH_WEB__SESSION_DB_URL", f"{namespace}-database-runtime", "session_url"),
+        ("ELSPETH_WEB__LANDSCAPE_URL", f"{namespace}-database-runtime", "landscape_url"),
+    )
+    secrets = [
+        {
+            "name": name,
+            "valueFrom": (
+                "arn:aws:secretsmanager:ap-southeast-2:123456789012:"
+                f"secret:{secret_id}-AbCd12:{json_key}::"
+            ),
+        }
+        for name, secret_id, json_key in required_secret_bindings
+    ]
     payload = {
         "taskDefinition": {
-            "taskDefinitionArn": task_definition_arn,
+            "taskDefinitionArn": "arn:aws:ecs:ap-southeast-2:123456789012:task-definition/elspeth-web:17",
             "status": "ACTIVE",
             "taskRoleArn": f"arn:aws:iam::123456789012:role/{inventory['orphan_sweep']['iam_role_names'][0]}",
             "executionRoleArn": f"arn:aws:iam::123456789012:role/{inventory['orphan_sweep']['iam_role_names'][1]}",
@@ -3734,7 +3744,7 @@ def test_task_definition_policy_binding_compares_returned_environment_to_protect
                     "name": container_name,
                     "essential": True,
                     "environment": environment,
-                    "secrets": [],
+                    "secrets": secrets,
                     "mountPoints": [
                         {
                             "sourceVolume": "data",
@@ -3748,14 +3758,150 @@ def test_task_definition_policy_binding_compares_returned_environment_to_protect
                 {
                     "name": "data",
                     "efsVolumeConfiguration": {
-                        "fileSystemId": "fs-0123456789abcdea",
+                        "fileSystemId": inventory["orphan_sweep"]["efs_file_system_ids"][0],
                         "transitEncryption": "ENABLED",
-                        "authorizationConfig": {"accessPointId": "fsap-0123456789abcdea", "iam": "ENABLED"},
+                        "authorizationConfig": {
+                            "accessPointId": inventory["orphan_sweep"]["efs_access_point_ids"][0],
+                            "iam": "ENABLED",
+                        },
                     },
                 }
             ],
         }
     }
+    return manifest_path, container_name, inventory, payload
+
+
+@pytest.mark.parametrize("reference_kind", ["missing", "unapproved"])
+def test_task_definition_policy_binding_rejects_missing_or_unapproved_secret_reference(
+    tmp_path: Path,
+    reference_kind: str,
+) -> None:
+    manifest_path, container_name, _inventory, payload = _task_definition_policy_payload(tmp_path)
+    container = payload["taskDefinition"]["containerDefinitions"][0]
+    entry = next(item for item in container["secrets"] if item["name"] == "ELSPETH_WEB__SESSION_DB_URL")
+
+    acceptance.validate_task_definition_policy_binding(
+        payload,
+        manifest_path=manifest_path,
+        scenario_id="A",
+        container_name=container_name,
+    )
+
+    if reference_kind == "missing":
+        del entry["valueFrom"]
+    else:
+        entry["valueFrom"] = (
+            "arn:aws:secretsmanager:ap-southeast-2:123456789012:"
+            "secret:unapproved-database-secret-AbCd12:SESSION_DB_URL::"
+        )
+    with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
+        acceptance.validate_task_definition_policy_binding(
+            payload,
+            manifest_path=manifest_path,
+            scenario_id="A",
+            container_name=container_name,
+        )
+
+
+def test_task_definition_policy_binding_requires_complete_runtime_secret_set(tmp_path: Path) -> None:
+    manifest_path, container_name, _inventory, payload = _task_definition_policy_payload(tmp_path)
+    container = payload["taskDefinition"]["containerDefinitions"][0]
+    container["secrets"] = [
+        entry for entry in container["secrets"] if entry["name"] != "ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY"
+    ]
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
+        acceptance.validate_task_definition_policy_binding(
+            payload,
+            manifest_path=manifest_path,
+            scenario_id="A",
+            container_name=container_name,
+        )
+
+
+def test_task_definition_policy_binding_requires_exact_runtime_secret_selectors(tmp_path: Path) -> None:
+    manifest_path, container_name, _inventory, payload = _task_definition_policy_payload(tmp_path)
+    container = payload["taskDefinition"]["containerDefinitions"][0]
+    shared_reference = container["secrets"][0]["valueFrom"]
+    for entry in container["secrets"]:
+        entry["valueFrom"] = shared_reference
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
+        acceptance.validate_task_definition_policy_binding(
+            payload,
+            manifest_path=manifest_path,
+            scenario_id="A",
+            container_name=container_name,
+        )
+
+
+@pytest.mark.parametrize(
+    ("location", "name"),
+    [
+        ("environment", "ELSPETH_WEB__SECRET_KEY"),
+        ("environment", "ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY"),
+        ("environment", "ELSPETH_WEB__SESSION_DB_URL"),
+        ("environment", "ELSPETH_WEB__LANDSCAPE_URL"),
+        ("environment", "ELSPETH_FINGERPRINT_KEY"),
+        ("environment", "ELSPETH_WEB__OIDC_CLIENT_SECRET"),
+        ("environment", "DATABASE_URL"),
+        ("environment", "OPENROUTER_API_KEY"),
+        ("environment", "AWS_ACCESS_KEY_ID"),
+        ("environment", "AWS_PROFILE"),
+        ("environment", "AWS_ENDPOINT_URL"),
+        ("environment", "AWS_ROLE_ARN"),
+        ("secrets", "AWS_ACCESS_KEY_ID"),
+    ],
+)
+def test_task_definition_policy_binding_rejects_plaintext_secrets_and_aws_overrides(
+    tmp_path: Path,
+    location: str,
+    name: str,
+) -> None:
+    manifest_path, container_name, inventory, payload = _task_definition_policy_payload(tmp_path)
+    container = payload["taskDefinition"]["containerDefinitions"][0]
+    if location == "environment":
+        container["environment"].append({"name": name, "value": "raw-override-sentinel"})
+    else:
+        secret_id = inventory["orphan_sweep"]["secret_ids"][0]
+        container["secrets"].append(
+            {
+                "name": name,
+                "valueFrom": (
+                    "arn:aws:secretsmanager:ap-southeast-2:123456789012:"
+                    f"secret:{secret_id}-AbCd12:AWS_ACCESS_KEY_ID::"
+                ),
+            }
+        )
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
+        acceptance.validate_task_definition_policy_binding(
+            payload,
+            manifest_path=manifest_path,
+            scenario_id="A",
+            container_name=container_name,
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "ELSPETH_WEB__DATA_DIR",
+        "ELSPETH_WEB__PAYLOAD_STORE_PATH",
+        *acceptance.PLUGIN_POLICY_ASSIGNMENT_NAMES,
+        "ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256",
+        "ELSPETH_BEDROCK_LIVE_TEST_MODEL",
+        "AWS_REGION",
+    ],
+)
+def test_task_definition_policy_binding_compares_returned_environment_to_protected_inventory(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    manifest_path, container_name, _inventory, payload = _task_definition_policy_payload(tmp_path)
+    task_definition_arn = payload["taskDefinition"]["taskDefinitionArn"]
+    environment = payload["taskDefinition"]["containerDefinitions"][0]["environment"]
 
     assert (
         acceptance.validate_task_definition_policy_binding(
@@ -3784,63 +3930,10 @@ def test_task_definition_policy_binding_compares_returned_environment_to_protect
 
 
 def test_task_definition_policy_binding_requires_explicit_nonroot_one_shot_entrypoint(tmp_path: Path) -> None:
-    manifest_path = tmp_path / "control.json"
-    _init_control_manifest(manifest_path)
-    inventory = json.loads((tmp_path / "scenario-a.json").read_text())
-    values = inventory["values"]
-    container_name = values["WEB_CONTAINER_NAME"]
-    environment = [
-        {"name": name, "value": values[name]}
-        for name in (
-            "ELSPETH_WEB__DATA_DIR",
-            "ELSPETH_WEB__PAYLOAD_STORE_PATH",
-            *acceptance.PLUGIN_POLICY_ASSIGNMENT_NAMES,
-            "ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256",
-            "ELSPETH_BEDROCK_LIVE_TEST_MODEL",
-            "AWS_REGION",
-        )
-    ]
-    acceptance_run_id = inventory["acceptance_run_id"]
-    environment.extend(
-        [
-            {"name": "ELSPETH_ACCEPTANCE_RUN_ID", "value": acceptance_run_id},
-            {"name": "ELSPETH_ACCEPTANCE_CANDIDATE_SHA", "value": inventory["candidate_sha"]},
-            {"name": "ELSPETH_ACCEPTANCE_SCENARIO_ID", "value": "A"},
-            {"name": "ELSPETH_ACCEPTANCE_S3_BUCKET", "value": values["ELSPETH_TEST_S3_BUCKET"]},
-            {
-                "name": "ELSPETH_ACCEPTANCE_S3_PREFIX",
-                "value": f"{acceptance.scenario_resource_namespace(acceptance_run_id, 'A')}/{acceptance_run_id}",
-            },
-        ]
-    )
-    container = {
-        "name": container_name,
-        "essential": True,
-        "user": "1000:1000",
-        "entryPoint": ["python", "-m", "elspeth.web.aws_ecs_acceptance"],
-        "environment": environment,
-        "secrets": [],
-        "mountPoints": [{"sourceVolume": "data", "containerPath": values["ELSPETH_WEB__DATA_DIR"], "readOnly": False}],
-    }
-    payload = {
-        "taskDefinition": {
-            "taskDefinitionArn": "arn:aws:ecs:ap-southeast-2:123456789012:task-definition/elspeth-payload:17",
-            "status": "ACTIVE",
-            "taskRoleArn": f"arn:aws:iam::123456789012:role/{inventory['orphan_sweep']['iam_role_names'][0]}",
-            "executionRoleArn": f"arn:aws:iam::123456789012:role/{inventory['orphan_sweep']['iam_role_names'][1]}",
-            "containerDefinitions": [container],
-            "volumes": [
-                {
-                    "name": "data",
-                    "efsVolumeConfiguration": {
-                        "fileSystemId": "fs-0123456789abcdea",
-                        "transitEncryption": "ENABLED",
-                        "authorizationConfig": {"accessPointId": "fsap-0123456789abcdea", "iam": "ENABLED"},
-                    },
-                }
-            ],
-        }
-    }
+    manifest_path, container_name, _inventory, payload = _task_definition_policy_payload(tmp_path)
+    container = payload["taskDefinition"]["containerDefinitions"][0]
+    container["user"] = "1000:1000"
+    container["entryPoint"] = ["python", "-m", "elspeth.web.aws_ecs_acceptance"]
 
     acceptance.validate_task_definition_policy_binding(
         payload,

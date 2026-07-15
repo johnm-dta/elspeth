@@ -135,12 +135,7 @@ class AWSS3SinkConfig(DataPluginConfig):
         if _has_control_character(value):
             raise ValueError("key template must not contain control characters")
         reject_operator_required_placeholder_value(value, field_name="key")
-        _, template_syntax_error, environment_type = _load_jinja()
-        environment = environment_type(undefined=_load_jinja()[0])
-        try:
-            environment.from_string(value)
-        except template_syntax_error as exc:
-            raise ValueError("key template syntax is invalid") from exc
+        _compile_key_template(value)
         return value
 
     @field_validator("headers")
@@ -211,6 +206,33 @@ def _has_control_character(value: str) -> bool:
     return any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
 
 
+def _compile_key_template(template_source: str) -> Any:
+    """Compile the deliberately small key-template language without evaluating expressions."""
+    strict_undefined, template_syntax_error, environment_type = _load_jinja()
+    if not template_source.strip() or len(template_source.encode("utf-8")) > _MAX_KEY_TEMPLATE_BYTES:
+        raise ValueError("key template must be nonblank and at most 4096 UTF-8 bytes")
+    if _has_control_character(template_source):
+        raise ValueError("key template must not contain control characters")
+    environment = environment_type(undefined=strict_undefined)
+    try:
+        parsed = environment.parse(template_source)
+    except template_syntax_error as exc:
+        raise ValueError("key template syntax is invalid") from exc
+
+    from jinja2 import nodes
+
+    for body_node in parsed.body:
+        if not isinstance(body_node, nodes.Output):
+            raise ValueError("key template may contain only literal text and approved variables")
+        for output_node in body_node.nodes:
+            if isinstance(output_node, nodes.TemplateData):
+                continue
+            if isinstance(output_node, nodes.Name) and output_node.ctx == "load" and output_node.name in {"run_id", "timestamp"}:
+                continue
+            raise ValueError("key template may contain only literal text and approved variables")
+    return environment.from_string(template_source)
+
+
 def _validate_rendered_key(value: str) -> str:
     if not value.strip() or len(value.encode("utf-8")) > _MAX_RENDERED_KEY_BYTES:
         raise ValueError("rendered key must be nonblank and at most 1024 UTF-8 bytes")
@@ -220,10 +242,9 @@ def _validate_rendered_key(value: str) -> str:
 
 
 def _render_key_template(template_source: str, *, run_id: str, timestamp: str) -> str:
-    strict_undefined, _, environment_type = _load_jinja()
-    environment = environment_type(undefined=strict_undefined)
+    template = _compile_key_template(template_source)
     try:
-        rendered = environment.from_string(template_source).render(run_id=run_id, timestamp=timestamp)
+        rendered = template.render(run_id=run_id, timestamp=timestamp)
     except BaseException as exc:
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
@@ -526,6 +547,8 @@ def _serialize_rows_to_spool(
 
 
 def _normalize_error_type(error: BaseException) -> str:
+    if isinstance(error, (KeyboardInterrupt, SystemExit)):
+        raise error
     name = type(error).__name__
     return name if _SAFE_ERROR_TYPE.fullmatch(name) is not None else "ProviderError"
 

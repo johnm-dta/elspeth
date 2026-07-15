@@ -290,6 +290,17 @@ def test_foreign_target_is_stale_and_nonmutating(postgres_engine: Engine, kind: 
     assert inspect(postgres_engine).get_table_names() == ["unrelated"]
 
 
+def test_postgres_sqlite_sequence_is_foreign_and_nonmutating(postgres_engine: Engine) -> None:
+    with postgres_engine.begin() as conn:
+        conn.exec_driver_sql("CREATE TABLE sqlite_sequence (name text)")
+    before = inspect(postgres_engine).get_table_names()
+
+    assert probe_session_schema(postgres_engine) is SchemaState.STALE
+    with pytest.raises(SessionSchemaError):
+        init_session_schema(postgres_engine)
+    assert inspect(postgres_engine).get_table_names() == before
+
+
 def test_session_partial_schema_is_stale_and_nonmutating(postgres_engine: Engine) -> None:
     with postgres_engine.begin() as conn:
         conn.exec_driver_sql("CREATE TABLE sessions (id VARCHAR PRIMARY KEY)")
@@ -399,6 +410,76 @@ def test_lock_timeout_maps_to_redacted_busy_error(
             {"classid": schema_probe_module.ELSPETH_SCHEMA_INIT_LOCK_CLASSID},
         )
         holder.close()
+
+
+def test_schema_init_lock_functions_cannot_be_shadowed(postgres_engine: Engine) -> None:
+    with postgres_engine.begin() as conn:
+        conn.exec_driver_sql("CREATE SCHEMA lock_shadow")
+        conn.exec_driver_sql("CREATE TABLE lock_shadow.calls (name text NOT NULL)")
+        conn.exec_driver_sql(
+            """
+            CREATE FUNCTION lock_shadow.set_config(name text, new_value text, local_value boolean)
+            RETURNS text LANGUAGE plpgsql VOLATILE AS $$
+            BEGIN
+                INSERT INTO lock_shadow.calls VALUES ('set_config');
+                RETURN new_value;
+            END
+            $$
+            """
+        )
+        conn.exec_driver_sql(
+            """
+            CREATE FUNCTION lock_shadow.hashtext(value text)
+            RETURNS integer LANGUAGE plpgsql VOLATILE AS $$
+            BEGIN
+                INSERT INTO lock_shadow.calls VALUES ('hashtext');
+                RETURN 7;
+            END
+            $$
+            """
+        )
+        conn.exec_driver_sql(
+            """
+            CREATE FUNCTION lock_shadow.pg_advisory_lock(class_id integer, object_id integer)
+            RETURNS void LANGUAGE plpgsql VOLATILE AS $$
+            BEGIN
+                INSERT INTO lock_shadow.calls VALUES ('lock');
+                RETURN;
+            END
+            $$
+            """
+        )
+        conn.exec_driver_sql(
+            """
+            CREATE FUNCTION lock_shadow.pg_advisory_unlock(class_id integer, object_id integer)
+            RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$
+            BEGIN
+                INSERT INTO lock_shadow.calls VALUES ('unlock');
+                RETURN true;
+            END
+            $$
+            """
+        )
+
+    shadowed = create_engine(
+        postgres_engine.url,
+        connect_args={"options": "-csearch_path=lock_shadow,pg_catalog,public"},
+    )
+    observed: list[tuple[list[str], int]] = []
+
+    def body(conn: Connection) -> None:
+        calls = list(conn.execute(text("SELECT name FROM lock_shadow.calls ORDER BY name")).scalars())
+        lock_count = conn.execute(
+            text("SELECT count(*) FROM pg_catalog.pg_locks WHERE locktype = 'advisory' AND pid = pg_catalog.pg_backend_pid()")
+        ).scalar_one()
+        observed.append((calls, lock_count))
+
+    try:
+        _run_locked(shadowed, target="shadow-proof", body=body, verify=lambda _conn: None)
+    finally:
+        shadowed.dispose()
+
+    assert observed == [([], 1)]
 
 
 class _CustomBaseException(BaseException):

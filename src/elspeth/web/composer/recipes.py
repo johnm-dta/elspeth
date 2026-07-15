@@ -873,10 +873,12 @@ def unavailable_recipe_plugin(
             raise RecipeValidationError("recipe source_plugin must be a registered source plugin id") from exc
         if selected_source not in snapshot.available:
             return selected_source
-    if raw_slots is not None and isinstance(raw_slots.get("profile"), str):
+    if "profile" in recipe.slots:
         llm_id = PluginId("transform", "llm")
-        aliases_by_plugin = dict(snapshot.usable_profile_aliases)
-        if llm_id in aliases_by_plugin and raw_slots["profile"] not in aliases_by_plugin[llm_id]:
+        usable_aliases = dict(snapshot.usable_profile_aliases).get(llm_id, ())
+        if not usable_aliases:
+            return llm_id
+        if raw_slots is not None and isinstance(raw_slots.get("profile"), str) and raw_slots["profile"] not in usable_aliases:
             return llm_id
     for alternatives in recipe.alternative_plugin_groups:
         if alternatives.isdisjoint(snapshot.available):

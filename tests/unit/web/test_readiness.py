@@ -741,6 +741,19 @@ class TestReadinessFilesystemChecks:
         payload.chmod(payload.stat().st_mode | stat.S_IWGRP)
         assert _check_payload_store(settings)[0].detail == "payload_store group/world-writable directory is not allowed"
 
+    def test_blob_rejects_symlink(self, tmp_path: Path) -> None:
+        settings = _settings_stub(tmp_path)
+        blob = Path(settings.data_dir) / "blobs"
+        target = tmp_path / "blob-target"
+        target.mkdir()
+        blob.rmdir()
+        blob.symlink_to(target, target_is_directory=True)
+
+        check = _check_blob_dir(settings)[0]
+
+        assert check.ok is False
+        assert check.detail == "blob_dir directory must not be a symlink"
+
     def test_probe_uses_exclusive_create_immediate_unlink_and_same_fd(
         self,
         tmp_path: Path,

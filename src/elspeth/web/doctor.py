@@ -52,7 +52,10 @@ def probe_directory_writable(label: str, path: Path | None) -> ContractCheck:
     if path is None:
         return ContractCheck(name, False, f"{label} directory is required and must already exist")
     try:
-        if not path.is_dir():
+        path_stat = path.lstat()
+        if stat.S_ISLNK(path_stat.st_mode):
+            return ContractCheck(name, False, f"{label} directory must not be a symlink")
+        if not stat.S_ISDIR(path_stat.st_mode):
             return ContractCheck(name, False, f"{label} directory is required and must already exist")
     except Exception as exc:
         return ContractCheck(name, False, sanitize_error(f"{label} directory validation failed", exc))

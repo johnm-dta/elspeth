@@ -114,6 +114,7 @@ from elspeth.web.interpretation_state import (
     vague_term_wiring_count,
     validate_pipeline_decision_node_semantics,
 )
+from elspeth.web.plugin_policy.models import PluginId, PluginUnavailableReason
 from elspeth.web.provider_config_policy import web_aws_s3_endpoint_url_policy_error
 from elspeth.web.validation import (
     _reject_credential_shaped_content,
@@ -801,8 +802,18 @@ def _execute_apply_pipeline_recipe(
         except RecipeValidationError as exc:
             return _failure_result(state, str(exc))
         if unavailable is not None:
-            reason = context.catalog.unavailable_reason(unavailable)
-            error_code = "plugin_not_enabled" if reason is None else reason.value
+            requested_profile = raw_slots.get("profile")
+            usable_profiles = dict(context.plugin_snapshot.usable_profile_aliases).get(unavailable, ())
+            if (
+                unavailable == PluginId("transform", "llm")
+                and unavailable in context.plugin_snapshot.available
+                and isinstance(requested_profile, str)
+                and requested_profile not in usable_profiles
+            ):
+                error_code = PluginUnavailableReason.PROFILE_UNAVAILABLE.value
+            else:
+                reason = context.catalog.unavailable_reason(unavailable)
+                error_code = "plugin_not_enabled" if reason is None else reason.value
             return _failure_result(
                 state,
                 "This recipe is unavailable under the current plugin policy.",

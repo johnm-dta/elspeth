@@ -44,9 +44,25 @@ from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeW
 # --------------------------------------------------------------------------
 
 
+def _snapshot_with_llm_profiles(*aliases: str) -> PluginAvailabilitySnapshot:
+    catalog = create_catalog_service()
+    unrestricted = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    llm_id = PluginId("transform", "llm")
+    return PluginAvailabilitySnapshot.create(
+        policy_hash=unrestricted.policy_hash,
+        principal_scope=unrestricted.principal_scope,
+        available=unrestricted.available,
+        unavailable=unrestricted.unavailable,
+        selected=unrestricted.selected,
+        usable_profile_aliases=((llm_id, aliases),),
+        selected_profile_aliases=((llm_id, aliases[0] if aliases else None),),
+        binding_generation_fingerprint=unrestricted.binding_generation_fingerprint,
+    )
+
+
 class TestRecipeRegistry:
     def test_registered_recipes(self) -> None:
-        snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+        snapshot = _snapshot_with_llm_profiles("tutorial")
         names = {r["name"] for r in list_recipes(snapshot)}
         assert names == {
             "classify-rows-llm-jsonl",
@@ -73,11 +89,21 @@ class TestRecipeRegistry:
                 assert "description" in slot_meta
 
     def test_classify_recipe_advertises_only_public_profile_binding(self) -> None:
-        snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+        snapshot = _snapshot_with_llm_profiles("tutorial")
         entry = next(item for item in list_recipes(snapshot) if item["name"] == "classify-rows-llm-jsonl")
 
         assert "profile" in entry["slots"]
+        assert entry["slots"]["profile"]["choices"] == ["tutorial"]
         assert {"provider", "model", "api_key", "api_key_secret"}.isdisjoint(entry["slots"])
+
+    def test_llm_recipes_are_hidden_without_usable_profile_aliases(self) -> None:
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+
+        names = {entry["name"] for entry in list_recipes(snapshot)}
+
+        assert "classify-rows-llm-jsonl" not in names
+        assert "web-scrape-llm-rate-jsonl" not in names
+        assert "split-by-numeric-threshold" in names
 
     def test_recipe_listing_excludes_dependencies_missing_from_snapshot(self) -> None:
         catalog = create_catalog_service()

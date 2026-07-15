@@ -20,7 +20,7 @@ from elspeth.plugins.infrastructure.clients.llm import (
     ServerError,
 )
 from elspeth.plugins.transforms.llm.base import LLMConfig
-from elspeth.plugins.transforms.llm.provider import FinishReason, LLMQueryResult, parse_finish_reason
+from elspeth.plugins.transforms.llm.provider import FinishReason, LLMQueryResult, UnrecognizedFinishReason, parse_finish_reason
 
 if TYPE_CHECKING:
     from elspeth.plugins.infrastructure.clients.base import TelemetryEmitCallback
@@ -170,7 +170,8 @@ class BedrockLLMProvider:
         if not response.content or not response.content.strip():
             if finish_reason == FinishReason.TOOL_CALLS:
                 raise LLMClientError("Bedrock returned tool_calls response (not supported by ELSPETH)", retryable=False)
-            raise ContentPolicyError(f"Bedrock LLM returned empty content (finish_reason={finish_reason})")
+            safe_finish_reason = "unrecognized" if isinstance(finish_reason, UnrecognizedFinishReason) else finish_reason
+            raise ContentPolicyError(f"Bedrock LLM returned empty content (finish_reason={safe_finish_reason})")
 
         return LLMQueryResult(
             content=response.content,

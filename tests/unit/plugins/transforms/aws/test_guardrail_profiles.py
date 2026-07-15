@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from elspeth.plugins.transforms.aws import guardrail_profiles
-from elspeth.plugins.transforms.aws.guardrail_profiles import BedrockGuardrailProfileSettings
+from elspeth.plugins.transforms.aws.guardrail_profiles import BedrockGuardrailProfileSettings, validate_guardrail_identifier
 
 
 def _profile(**overrides: object) -> BedrockGuardrailProfileSettings:
@@ -65,7 +65,31 @@ def test_profile_rejects_invalid_closed_bindings(field: str, value: str) -> None
     ],
 )
 def test_profile_accepts_installed_guardrail_identifier_grammar(identifier: str) -> None:
-    assert _profile(guardrail_identifier=identifier).guardrail_identifier == identifier
+    assert validate_guardrail_identifier(identifier) == identifier
+
+
+def test_profile_accepts_guardrail_arn_in_configured_region() -> None:
+    identifier = "arn:aws:bedrock:ap-southeast-2:123456789012:guardrail/abc123"
+
+    assert _profile(guardrail_identifier=identifier, region="ap-southeast-2").guardrail_identifier == identifier
+
+
+def test_profile_rejects_guardrail_arn_from_different_region() -> None:
+    identifier = "arn:aws:bedrock:us-east-1:123456789012:guardrail/abc123"
+
+    with pytest.raises(ValidationError) as exc_info:
+        _profile(guardrail_identifier=identifier, region="ap-southeast-2")
+
+    assert identifier not in str(exc_info.value)
+
+
+def test_profile_rejects_noncommercial_guardrail_arn_even_when_region_matches() -> None:
+    identifier = "arn:aws-us-gov:bedrock:us-east-1:123456789012:guardrail/abc123"
+
+    with pytest.raises(ValidationError) as exc_info:
+        _profile(guardrail_identifier=identifier, region="us-east-1")
+
+    assert identifier not in str(exc_info.value)
 
 
 @pytest.mark.parametrize(

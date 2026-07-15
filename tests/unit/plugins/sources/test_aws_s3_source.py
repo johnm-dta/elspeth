@@ -156,6 +156,14 @@ class TestAWSS3SourceConfig:
         with pytest.raises(PluginConfigError, match="columns"):
             AWSS3SourceConfig.from_dict(_config(columns=["id"]))
 
+    @pytest.mark.parametrize("encoding", ["rot_13", "base64_codec"])
+    @pytest.mark.parametrize("field", ["csv_options", "json_options"])
+    def test_binary_or_text_transform_codecs_are_rejected(self, field: str, encoding: str) -> None:
+        from elspeth.plugins.sources.aws_s3_source import AWSS3SourceConfig
+
+        with pytest.raises(PluginConfigError, match="decode bytes to text"):
+            AWSS3SourceConfig.from_dict(_config(**{field: {"encoding": encoding}}))
+
 
 @dataclass
 class _Body:
@@ -264,6 +272,23 @@ class TestDownloadS3Object:
         downloaded.close()
         downloaded.close()
         assert downloaded.handle.closed
+
+    @pytest.mark.parametrize("control", [KeyboardInterrupt(), SystemExit()])
+    @pytest.mark.parametrize("phase", ["head", "get", "read"])
+    def test_process_control_exceptions_are_not_converted(self, phase: str, control: BaseException) -> None:
+        from elspeth.plugins.sources.aws_s3_source import _download_s3_object
+
+        data = b"x"
+        body = _Body([], read_error=control if phase == "read" else None)
+        client = _Client(
+            {"ContentLength": 1, "ETag": '"etag"'},
+            {"ContentLength": 1, "Body": body},
+            head_error=control if phase == "head" else None,
+            get_error=control if phase == "get" else None,
+        )
+
+        with pytest.raises(type(control)):
+            _download_s3_object(client, bucket="bucket", key="key", max_object_bytes=len(data))
 
     @pytest.mark.parametrize("length", [True, False, -1, "1", None])
     @pytest.mark.parametrize("phase", ["head", "get"])

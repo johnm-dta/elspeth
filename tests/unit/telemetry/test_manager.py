@@ -1193,6 +1193,31 @@ class TestFlush:
         finally:
             manager.close()
 
+    def test_successful_deferred_flush_resets_failure_state(self) -> None:
+        sdk_exporter = create_autospec(SDKOTLPSpanExporter, instance=True)
+        sdk_exporter.export.return_value = SpanExportResult.SUCCESS
+        exporter = OTLPExporter()
+        with patch(
+            "opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter",
+            return_value=sdk_exporter,
+        ):
+            exporter.configure({"endpoint": "http://127.0.0.1:4317", "batch_size": 100})
+        manager = TelemetryManager(MockTelemetryConfig(), exporters=[exporter])
+        try:
+            manager.handle_event(_lifecycle_event())
+            _wait_for_processing(manager)
+            breaker = manager._circuit_breakers[id(exporter)]
+            breaker.record_failure()
+            manager._consecutive_total_failures = 1
+
+            manager.flush()
+
+            assert breaker.failure_count == 0
+            assert breaker.metrics["total_successes"] == 1
+            assert manager.health_metrics["consecutive_total_failures"] == 0
+        finally:
+            manager.close()
+
 
 # =============================================================================
 # Close

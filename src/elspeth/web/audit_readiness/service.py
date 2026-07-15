@@ -246,10 +246,22 @@ def build_boot_plugin_policy_readiness(
     configured_aliases = tuple(alias for alias, _profile in settings.llm_profiles)
     tutorial_profile = settings.tutorial_llm_profile
     selected_by_capability = dict(policy.preferences)
+    implementations: dict[PluginCapability, list[PluginId]] = {capability: [] for capability in PluginCapability}
+    catalog = _plugin_catalog_snapshot()
+    for plugin_id in sorted(policy.authorized):
+        plugin_cls = catalog[plugin_id.kind][plugin_id.name]
+        for declaration in plugin_cls.policy_capabilities:
+            implementations[declaration.capability].append(plugin_id)
     selected = tuple(
         (
             capability,
-            (llm_id if capability is PluginCapability.LLM else (selected_by_capability.get(capability) or (None,))[0]),
+            (
+                selected_by_capability[capability][0]
+                if capability in selected_by_capability
+                else implementations[capability][0]
+                if len(implementations[capability]) == 1
+                else None
+            ),
         )
         for capability in PluginCapability
     )

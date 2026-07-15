@@ -266,6 +266,20 @@ def test_payload_symlink_fails_before_active_probe_and_redacts_path(tmp_path: Pa
     assert str(target) not in check.detail
 
 
+def test_blob_symlink_fails_before_active_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import elspeth.web.doctor as doctor
+
+    target = tmp_path / "blob-target"
+    target.mkdir()
+    link = tmp_path / "blob-link"
+    link.symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(doctor.tempfile, "mkstemp", lambda **_kwargs: pytest.fail("symlink must not be probed"))
+
+    check = probe_directory_writable("blob", link)
+
+    assert check == ContractCheck("blob_writable", False, "blob directory must not be a symlink")
+
+
 def test_group_or_world_writable_payload_fails_before_active_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import elspeth.web.doctor as doctor
 

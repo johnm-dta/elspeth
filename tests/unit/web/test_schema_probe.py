@@ -156,6 +156,27 @@ def test_logical_target_parses_single_explicit_schema(options: str, schema: str)
 
 
 @pytest.mark.parametrize(
+    "override",
+    [
+        "host=override.internal",
+        "port=6543",
+        "dbname=other",
+        "hostaddr=127.0.0.2",
+        "service=other",
+    ],
+)
+def test_logical_target_rejects_connection_target_query_overrides(override: str) -> None:
+    with pytest.raises(DatabaseTargetConflictError):
+        postgres_logical_target_key(f"postgresql+psycopg://host/audit?{override}")
+
+
+@pytest.mark.parametrize("schema", ["a" * 64, "pg_temp", "pg_catalog"])
+def test_logical_target_rejects_unstable_schema_identifiers(schema: str) -> None:
+    with pytest.raises(DatabaseTargetConflictError):
+        postgres_logical_target_key(f"postgresql+psycopg://host/audit?options=-csearch_path={schema}")
+
+
+@pytest.mark.parametrize(
     "url",
     [
         "sqlite:///audit.db",

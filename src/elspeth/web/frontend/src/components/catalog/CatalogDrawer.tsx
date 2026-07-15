@@ -161,10 +161,20 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
   const schemaErrors = usePluginCatalogStore((state) => state.schemaErrors);
   const fetchError = usePluginCatalogStore((state) => state.error);
   const isFetching = usePluginCatalogStore((state) => state.isLoading);
+  const catalogFingerprint = usePluginCatalogStore((state) => state.fingerprint);
   const load = usePluginCatalogStore((state) => state.load);
   const loadSchema = usePluginCatalogStore((state) => state.loadSchema);
-  const policyFindings = useSessionStore(
+  const storedPolicyFindings = useSessionStore(
     (state) => state.compositionState?.plugin_policy_findings ?? EMPTY_POLICY_FINDINGS,
+  );
+  const policyFindings = useMemo(
+    () =>
+      catalogFingerprint === null
+        ? EMPTY_POLICY_FINDINGS
+        : storedPolicyFindings.filter(
+            (finding) => finding.snapshot_fingerprint === catalogFingerprint,
+          ),
+    [catalogFingerprint, storedPolicyFindings],
   );
   const [searchQuery, setSearchQuery] = useState("");
   // Per-tab filter state — switching tabs reveals the user's filter set

@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 BedrockGuardrailPlugin = Literal[
     "aws_bedrock_prompt_shield",
@@ -21,6 +21,9 @@ BEDROCK_GUARDRAIL_PLUGIN_IDS: tuple[BedrockGuardrailPlugin, ...] = (
 
 _ALIAS = re.compile(r"[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*\Z")
 _GUARDRAIL_ID = re.compile(r"(?:[a-z0-9]+|arn:aws(?:-[^:]+)?:bedrock:[a-z0-9-]{1,20}:[0-9]{12}:guardrail/[a-z0-9]+)\Z")
+_GUARDRAIL_ARN = re.compile(
+    r"arn:(?P<partition>aws(?:-[^:]+)?):bedrock:(?P<region>[a-z0-9-]{1,20}):[0-9]{12}:guardrail/[a-z0-9]+\Z"
+)
 _NUMERIC_VERSION = re.compile(r"[1-9][0-9]{0,7}\Z")
 
 # Pinned from boto3/botocore 1.43.46's offline ``endpoints.json`` for the
@@ -139,6 +142,13 @@ class BedrockGuardrailProfileSettings(BaseModel):
     @classmethod
     def _validate_region(cls, value: str) -> str:
         return validate_guardrail_region(value)
+
+    @model_validator(mode="after")
+    def _validate_arn_region(self) -> BedrockGuardrailProfileSettings:
+        match = _GUARDRAIL_ARN.fullmatch(self.guardrail_identifier)
+        if match is not None and (match.group("partition") != "aws" or match.group("region") != self.region):
+            raise ValueError("guardrail ARN partition and region must match the configured commercial region")
+        return self
 
     def check_local_requirements(self) -> BedrockLocalRequirementResult:
         """Check optional SDK availability/version without making a network call."""

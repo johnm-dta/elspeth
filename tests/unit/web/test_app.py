@@ -543,6 +543,22 @@ class TestSystemStatusEndpoint:
         assert response.status_code == 200
         assert response.json()["tutorial_ready"] is True
 
+    def test_required_sole_control_is_boot_ready_without_preference(self, tmp_path) -> None:
+        app = create_app(
+            _settings(
+                tmp_path,
+                plugin_allowlist=("transform:azure_prompt_shield",),
+                plugin_control_modes={"prompt_shield": "required"},
+            )
+        )
+
+        response = TestClient(app).get("/api/system/status")
+
+        assert response.status_code == 200
+        rows = {row["id"]: row for row in response.json()["plugin_policy_readiness"]["rows"]}
+        assert rows["local_capability_configuration"]["status"] == "ok"
+        assert rows["local_capability_configuration"]["detail"] is None
+
 
 class TestMetricsEndpoint:
     """Tests for GET /metrics (Prometheus scrape endpoint)."""

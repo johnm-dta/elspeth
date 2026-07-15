@@ -186,7 +186,8 @@ before creating a run; a failed check returns a typed HTTP 409.
 
 Every web run records the policy hash, principal snapshot hash, authorized and
 available IDs, selected implementations, safe profile aliases, plugin code
-identities, and closed decision codes in Landscape epoch 23. Readiness,
+identities, and closed decision codes introduced in Landscape epoch 23 and
+retained in epoch 24. Readiness,
 errors, logs, telemetry, persisted state, and exports omit private profile
 bindings.
 
@@ -1018,7 +1019,30 @@ landscape:
 | `dump_to_jsonl_include_payloads` | bool | `false` | Include request/response bodies in journal |
 | `dump_to_jsonl_payload_base_path` | string | (from payload_store) | Payload store path for inlining |
 
-### Landscape schema epoch 23
+### Landscape schema epoch 24
+
+Landscape epoch 24 makes the persisted row authoritative for token run
+ownership. Fresh SQLite and PostgreSQL schemas enforce
+`tokens(row_id, run_id) -> rows(row_id, run_id)` in addition to the existing
+single-column references.
+
+A writable SQLite Landscape database at exactly epoch 23 is upgraded in place
+on schema-managing initialization. ELSPETH first validates the complete
+epoch-23 shape, then checks that every token's stored run matches its row,
+rebuilds only `tokens` under `BEGIN IMMEDIATE`, runs
+`PRAGMA foreign_key_check`, and commits the table change and
+`user_version=24` atomically. Any ownership mismatch or other stale epoch-23
+shape is refused without changing the epoch or schema. Databases older than
+epoch 23 retain the documented archive-and-recreate boundary; read-only and
+inspection-only opens never migrate.
+
+PostgreSQL receives the composite constraint through the schema-owner path.
+An existing PostgreSQL schema missing it is stale and requires an approved
+operator migration or recreation; the runtime role remains DML-only. Code that
+only understands epoch 23 must not be rolled back over an epoch-24 SQLite
+database.
+
+#### Historical epoch-23 boundary
 
 Landscape epoch 23 adds `run_web_plugin_policy`, an optional one-to-one audit
 row for each web-initiated run. The row records the immutable policy and

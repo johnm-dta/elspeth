@@ -156,6 +156,19 @@ def test_postgres_schema_identity_drift_is_stale_and_not_repaired(
         assert conn.execute(select(identity_table.c[column_name])).scalar_one() == wrong_value
 
 
+def test_landscape_tokens_bind_row_id_and_run_id_to_the_same_row(postgres_engine: Engine) -> None:
+    """Fresh PostgreSQL schemas carry the epoch-24 ownership constraint."""
+    init_landscape_schema(postgres_engine)
+
+    foreign_keys = inspect(postgres_engine).get_foreign_keys("tokens")
+    assert any(
+        tuple(foreign_key["constrained_columns"]) == ("row_id", "run_id")
+        and foreign_key["referred_table"] == "rows"
+        and tuple(foreign_key["referred_columns"]) == ("row_id", "run_id")
+        for foreign_key in foreign_keys
+    )
+
+
 def test_postgres_session_init_does_not_poison_later_sqlite_schema(postgres_engine: Engine) -> None:
     init_session_schema(postgres_engine)
 

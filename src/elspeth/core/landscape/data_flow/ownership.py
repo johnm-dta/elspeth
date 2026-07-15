@@ -83,7 +83,15 @@ class RowTokenOwnership:
         Raises:
             AuditIntegrityError: If token or its row not found (Tier 1 corruption)
         """
-        query = select(tokens_table.c.row_id, tokens_table.c.run_id).where(tokens_table.c.token_id == token_id)
+        query = (
+            select(
+                tokens_table.c.row_id,
+                tokens_table.c.run_id.label("token_run_id"),
+                rows_table.c.run_id.label("row_run_id"),
+            )
+            .select_from(tokens_table.outerjoin(rows_table, tokens_table.c.row_id == rows_table.c.row_id))
+            .where(tokens_table.c.token_id == token_id)
+        )
         try:
             result = conn.execute(query).fetchone() if conn is not None else self._ops.execute_fetchone(query)
         except SQLAlchemyError as exc:
@@ -95,7 +103,18 @@ class RowTokenOwnership:
                 f"Token {token_id!r} does not exist in the tokens table. "
                 f"This is Tier 1 data corruption -- the token should have been created before recording outcomes."
             )
-        return result.row_id, result.run_id
+        if result.row_run_id is None:
+            raise AuditIntegrityError(
+                f"Token {token_id!r} references row_id={result.row_id!r}, which does not exist in the rows table. "
+                "This is Tier 1 data corruption -- token ownership cannot be resolved without its authoritative row."
+            )
+        if result.token_run_id != result.row_run_id:
+            raise AuditIntegrityError(
+                f"Token {token_id!r} references row {result.row_id!r}, which belongs to run "
+                f"{result.row_run_id!r}, but the token claims run {result.token_run_id!r}. "
+                "This is Tier 1 data corruption -- the row is authoritative for token run ownership."
+            )
+        return result.row_id, result.row_run_id
 
     def validate_token_run_ownership(self, ref: TokenRef, *, conn: Connection | None = None) -> None:
         """Validate that a token belongs to the specified run.

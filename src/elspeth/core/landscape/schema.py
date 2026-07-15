@@ -63,7 +63,8 @@ def _optional_enum_in_check(column_name: str, enum_type: type[StrEnum]) -> str:
 # migration" from "runtime-required field". The constant retains its
 # historical name for compatibility.
 #
-# Epoch history (pre-1.0 policy — bumps require DB recreation):
+# Epoch history (pre-1.0 policy — bumps require DB recreation unless an epoch
+# entry explicitly names an in-place migration):
 #   1 → initial
 #   2 → Phase 5 schema contracts + operation I/O hashes (pre-ADR-010)
 #   3 → ADR-010 §Decision 3 M3: runtime_val_manifest_json
@@ -142,7 +143,11 @@ def _optional_enum_in_check(column_name: str, enum_type: type[StrEnum]) -> str:
 #        optional, sanitized policy/snapshot decision row per web run. This is
 #        a deliberate pre-1.0 drop/recreate boundary, not an in-place migration.
 #   24 → elspeth_schema_identity gives SQLite and PostgreSQL the same explicit
-#        application/store/epoch proof, including semantic-only schema bumps.
+#        application/store/epoch proof, including semantic-only schema bumps;
+#        token ownership is also mechanically row-authoritative: tokens(row_id,
+#        run_id) references rows(row_id, run_id). Populated epoch-23 SQLite
+#        databases receive a narrow, transactional tokens-table rebuild after
+#        a mismatch preflight; all older epochs retain the recreate boundary.
 SQLITE_SCHEMA_EPOCH = 24
 
 schema_identity_table = create_schema_identity_table(metadata)
@@ -419,6 +424,9 @@ tokens_table = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     # Composite unique target for downstream composite FKs (token_id, run_id)
     UniqueConstraint("token_id", "run_id"),
+    # Epoch 24: row ownership is authoritative. The independent run FK proves
+    # the run exists; this composite FK proves it is the row's run.
+    ForeignKeyConstraint(["row_id", "run_id"], ["rows.row_id", "rows.run_id"]),
 )
 
 # === Token Outcomes (AUD-001: Explicit terminal state recording) ===

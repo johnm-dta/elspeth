@@ -21,6 +21,7 @@ from typing import Any, ClassVar
 import httpx
 import pytest
 
+from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH
 from elspeth.web import aws_ecs_acceptance as acceptance
 
 EXPECTED_COMMANDS = {
@@ -5227,16 +5228,24 @@ def test_compatibility_record_is_bound_to_resolved_scenario_and_stored_by_hash(t
         "rollback_doctor_task_definition": inventory["values"]["ROLLBACK_DOCTOR_TASK_DEFINITION"],
         "previous_package_version": "0.7.0",
         "schema_facts": {
-            "candidate": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": True},
-            "previous": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": True},
-            "structural_changes": "none",
+            "candidate": {
+                "session_epoch": 27,
+                "landscape_epoch": SQLITE_SCHEMA_EPOCH,
+                "run_web_plugin_policy_present": True,
+            },
+            "previous": {
+                "session_epoch": 27,
+                "landscape_epoch": 23,
+                "run_web_plugin_policy_present": True,
+            },
+            "structural_changes": "landscape_epoch_23_to_24_token_ownership_fk",
             "semantics_only_changes": "none",
-            "archive_export_decision": "not_required",
+            "archive_export_decision": "required_before_forward_migration",
             "destructive_reset_required": False,
         },
         "forward_compatible": True,
-        "backward_compatible": True,
-        "rollback_permitted": True,
+        "backward_compatible": False,
+        "rollback_permitted": False,
         "decision": "approved",
         "approver_identity": "database-operator",
         "countersigner_identity": "release-operator",
@@ -5254,6 +5263,29 @@ def test_compatibility_record_is_bound_to_resolved_scenario_and_stored_by_hash(t
         scenario_id="B",
         now=lambda: datetime(2026, 7, 14, 1, 3, tzinfo=UTC),
     )
+    claimed_safe_rollback = json.loads(json.dumps(record))
+    claimed_safe_rollback["backward_compatible"] = True
+    claimed_safe_rollback["rollback_permitted"] = True
+    record_path.write_text(json.dumps(claimed_safe_rollback))
+    with pytest.raises(acceptance.AcceptanceCheckError, match="compatibility_record_binding"):
+        acceptance.validate_compatibility_record(
+            record_path,
+            manifest_path=manifest_path,
+            scenario_id="B",
+            now=lambda: datetime(2026, 7, 14, 1, 3, tzinfo=UTC),
+        )
+    claimed_safe_rollback_receipt = json.loads(json.dumps(receipt))
+    claimed_safe_rollback_receipt["backward_compatible"] = True
+    claimed_safe_rollback_receipt["rollback_permitted"] = True
+    with pytest.raises(acceptance.AcceptanceCheckError, match="receipt_store_schema"):
+        acceptance.receipt_store(
+            manifest_path,
+            scenario_id="B",
+            kind="compatibility-record",
+            subject_id=receipt["record_sha256"],  # type: ignore[arg-type]
+            receipt_bytes=json.dumps(claimed_safe_rollback_receipt).encode(),
+            now=lambda: datetime(2026, 7, 14, 1, 3, tzinfo=UTC),
+        )
     for path, replacement in (
         (("candidate_doctor_task_definition",), inventory["values"]["CANDIDATE_TASK_DEFINITION"]),
         (("rollback_doctor_task_definition",), inventory["values"]["PREVIOUS_TASK_DEFINITION"]),

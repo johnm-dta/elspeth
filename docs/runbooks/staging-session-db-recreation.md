@@ -1,8 +1,8 @@
 # Session DB Reset Runbook
 
-Use this runbook when a web session schema-bootstrap change requires deleting or archiving a stale `sessions.db`. Historically the session database was reset in isolation from the Landscape audit database, payload storage, blobs, and Filigree tracker data. **From the Phase 4 hello-world tutorial schema cutover onward, any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must reset the session DB and Landscape audit DB together.** Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
+Use this runbook when a web session schema-bootstrap change requires deleting or archiving a stale `sessions.db`. Historically the session database was reset in isolation from the Landscape audit database, payload storage, blobs, and Filigree tracker data. **From the Phase 4 hello-world tutorial schema cutover onward, any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must coordinate both databases in one service-stop window; follow the declared migration/reset policy for each epoch instead of assuming both are always destructive.** Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
 
-## Current Cutover: 0.7.1 (session epoch 27 and Landscape epoch 23)
+## Current Cutover: 0.7.1 (session epoch 27 and Landscape epoch 24)
 
 0.7.1 advances `SESSION_SCHEMA_EPOCH` from 26 to 27 so
 `user_preferences.freeform_intro_dismissed_at` can persist the account-wide
@@ -10,18 +10,28 @@ freeform-primer preference. The universal web plugin-policy work also advances
 `SQLITE_SCHEMA_EPOCH` from 22 to 23 and adds `run_web_plugin_policy`. This
 table is optional per run but required in the schema: web runs receive one
 policy-evidence row atomically with the run, attribution, and leader records;
-CLI runs receive none.
+CLI runs receive none. Database hardening then advances Landscape from epoch 23
+to 24 and adds `tokens(row_id, run_id) -> rows(row_id, run_id)`.
 
-This is a two-database cutover, not an in-place migration. Archive and recreate
-the session database and its sidecars under the service-stop procedure below.
-Any existing pre-23 SQLite Landscape database or non-empty PostgreSQL
-Landscape missing `run_web_plugin_policy` is stale. Validate-only startup and
-doctor must leave it unchanged. The database operator must decide and approve
-archive/export where retention applies, stop all writers, drop/recreate the
-Landscape database or schema, and perform fresh owner initialization. The
-runtime role remains DML-only. Do not use `create_all`, `--init-schema`, or a
-code rollback as a repair mechanism. `auth.db` is a separate file and is not
-reset.
+Archive and recreate the session database and its sidecars under the
+service-stop procedure below. The Landscape action depends on its starting
+shape:
+
+- An exact epoch-23 SQLite database receives the narrow automatic epoch-24
+  migration during writable schema-managing initialization. ELSPETH validates
+  the complete predecessor shape and token/row ownership before rebuilding
+  `tokens`; any mismatch leaves epoch 23 unchanged and requires operator
+  investigation.
+- Any pre-23 SQLite database remains stale and must follow the approved
+  archive/export and recreation path; the epoch-24 migrator does not skip
+  historical boundaries.
+- PostgreSQL missing either the epoch-23 policy table or the epoch-24 composite
+  FK is stale. A schema owner must apply an approved migration or recreate and
+  initialize the schema. The runtime role remains DML-only.
+
+Validate-only startup and doctor must leave stale databases unchanged. Do not
+use `create_all`, `--init-schema`, or code rollback as an improvised repair
+mechanism. `auth.db` is a separate file and is not reset.
 
 The release/schema compatibility record for every candidate using this shape
 must state: candidate git SHA and immutable image/task-definition identity;
@@ -30,9 +40,10 @@ and semantics-only changes; archive/export decision and approver; destructive
 reset requirement and database-operator approval; previous release identity
 and epochs; forward and backward compatibility decisions; and an explicit
 `rollback_permitted` decision with evidence. Epoch-22 code is not compatible
-with a freshly recreated epoch-23 database, so rollback is `no` unless a later
-approved record proves otherwise. Plans 10 and 12 must cite this epoch-23
-record when binding candidate and rollback decisions.
+with a freshly recreated current database, and epoch-23 code rejects the newer
+epoch-24 SQLite stamp, so rollback is `no` unless a later approved record proves
+otherwise. Plans 10 and 12 must cite the epoch-24 record when binding candidate
+and rollback decisions.
 
 Deployments crossing the 0.7.0 boundary from an older release must also account
 for the historical epoch-21 to epoch-22 Landscape reset described below.
@@ -203,7 +214,25 @@ Never print secret values from `deploy/elspeth-web.env`. It is acceptable to pri
 
 ## Phase 5b: Two-DB Reset
 
-This procedure applies to any staging deploy that changes both the web session DB schema and the Landscape audit DB schema in the same cutover. Phase 4 hello-world tutorial work is in scope because it changes `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` together for tutorial completion and run/audit-story replay. Phase 5b is also in scope: skipping the Landscape delete after a Phase 5b deploy leaves stale `calls_table` rows whose `resolved_prompt_template_hash` is absent or stale; the first composer run after deploy will diverge from the session DB's `interpretation_events.resolved_prompt_template_hash` and the cross-DB byte-equality invariant (asserted by `tests/integration/web/composer/test_interpretation_runtime_handoff.py`) will fire.
+This destructive procedure applies only when the declared Landscape cutover
+policy requires a reset; a simultaneous session/Landscape epoch change does not
+by itself authorize deleting both databases. Historical Phase 4 and Phase 5b
+cutovers required the reset because no supported Landscape migration crossed
+those boundaries. For the current 0.7.1 cutover, reset the session database,
+but let an exact epoch-23 SQLite Landscape migrate automatically to epoch 24 on
+writable schema-managing startup. Read-only and `create_tables=False` inspection
+opens report incompatibility without mutation. Pre-23 SQLite still follows this
+archive/delete/recreate procedure. PostgreSQL is never auto-migrated by runtime
+startup: the schema owner must apply the approved epoch-24 composite-FK DDL or
+recreate and initialize the Landscape schema.
+
+Historical rationale remains unchanged: Phase 4 changed both epochs for
+tutorial completion and run/audit-story replay. Phase 5b also required deleting
+the stale Landscape database because old `calls_table` rows lacked the current
+`resolved_prompt_template_hash`; keeping them would violate the cross-DB
+byte-equality invariant asserted by
+`tests/integration/web/composer/test_interpretation_runtime_handoff.py` on the
+first composer run.
 
 Authority: current source epoch constants and schema tests:
 `src/elspeth/web/sessions/models.py:SESSION_SCHEMA_EPOCH`,
@@ -213,15 +242,26 @@ Authority: current source epoch constants and schema tests:
 ### Two-DB preconditions
 
 1. The Stop/Go Gates above have been run for the session DB.
-2. The deploy changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH`; this includes the Phase 4 hello-world tutorial dual-schema cutover, commit `2e390fc0b` or later (Phase 5b session/Landscape schema changes), and the 0.7.0 epoch-26 / epoch-22 release cutover.
+2. The approved cutover record explicitly requires destructive Landscape
+   recreation. Historical examples include the Phase 4 tutorial dual-schema
+   cutover, Phase 5b schema changes, and the 0.7.0 epoch-26 / epoch-22 release
+   cutover. The exact SQLite epoch-23→24 path does not satisfy this precondition.
 3. The operator has resolved the active Landscape DB path per "Resolve Database Paths" above:
    - If `ELSPETH_WEB__LANDSCAPE_URL` is set, that is the Landscape URL.
    - Otherwise the default is `${ELSPETH_WEB__DATA_DIR}/runs/audit.db`, or `data/runs/audit.db` if `ELSPETH_WEB__DATA_DIR` is unset.
-4. The operator has explicitly signed off on losing the Landscape audit history in staging. The two-DB reset destroys staging audit data alongside session data; this is acceptable for staging only.
+4. The operator has explicitly signed off on losing the Landscape audit history
+   in staging. The two-DB reset destroys staging audit data alongside session
+   data; this is acceptable for staging only.
 
 ### Two-DB procedure (in addition to the staging session-DB reset below)
 
-Run after `sudo systemctl stop "$SERVICE"` and before `sudo systemctl start "$SERVICE"` in the staging procedure. Both DBs are reset under the same service-stop window.
+When the destructive preconditions apply, run after
+`sudo systemctl stop "$SERVICE"` and before
+`sudo systemctl start "$SERVICE"` in the staging procedure. Both DBs are reset
+under the same service-stop window. For SQLite epoch 23→24, archive the matched
+Landscape artifact set in that window but do not delete it; writable startup
+performs the atomic forward migration. The migrated database cannot be reopened
+by epoch-23 code, so rollback requires restoring that archive with the old image.
 
 ```bash
 # Continuing from the staging procedure: $PROJECT_ROOT, $ENV_FILE, $SERVICE,
@@ -323,7 +363,7 @@ After restart, verify by composing a new session and confirming the new guidance
 
 The staging site is a source-checkout systemd/Caddy deployment from `/home/john/elspeth`, not the generic VM/Docker flow. When a pre-release plan changes the session DB schema (e.g. composer-progress-persistence Phase 1A and later schema-changing phases), the schema validator at startup will refuse a stale DB; the only accepted cutover path is archive + delete + recreate. Row-level `DELETE FROM chat_messages` / `DELETE FROM composition_states` is incorrect: it leaves the old table shape behind and startup rejects the stale DB.
 
-This procedure destroys staging session rows, chat history, composition states, audit access log rows, runs, run events, blob/blob-link database records, and encrypted `user_secrets` stored in the web session DB. It does not delete blob payload files under the data directory, payload storage, Filigree state, or source files. **If the deploy changes only the session DB schema, do not touch the Landscape audit DB. If the deploy changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH`, run the additional [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) procedure inside the same service-stop window. Phase 4 hello-world tutorial is a dual-schema cutover; Phase 5b and later dual-schema cutovers also require it, and the cross-DB hash invariant will fire on the first run otherwise.** **Do not run any of this outside staging.**
+This procedure destroys staging session rows, chat history, composition states, audit access log rows, runs, run events, blob/blob-link database records, and encrypted `user_secrets` stored in the web session DB. It does not delete blob payload files under the data directory, payload storage, Filigree state, or source files. **If the deploy changes only the session DB schema, do not touch the Landscape audit DB. If both epochs change, follow the release's declared Landscape policy instead of assuming a reset: exact SQLite epoch 23→24 migrates automatically after archival, PostgreSQL uses the schema-owner migration/recreation path, and only older boundaries explicitly marked destructive use the additional [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) procedure.** **Do not run any of this outside staging.**
 
 For SQLite, `sessions.db`, `sessions.db-wal`, `sessions.db-shm`, and `sessions.db-journal` are handled as one matched artifact set for archive, deletion, and rollback.
 

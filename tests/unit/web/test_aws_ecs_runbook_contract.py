@@ -560,8 +560,7 @@ def test_runbook_pins_exact_oidc_redirect_phases_and_closed_evidence() -> None:
     for phase in (
         "previous-before-candidate",
         "candidate-initial",
-        "previous-after-rollback",
-        "candidate-after-redeploy",
+        "candidate-after-rollback-refusal",
     ):
         assert phase in text
     for field in (
@@ -583,6 +582,28 @@ def test_runbook_pins_exact_oidc_redirect_phases_and_closed_evidence() -> None:
         assert marker in text
     handoff = text[text.index("capture_oidc_lifecycle_handoff() {") : text.index("## ECS probe wiring")]
     assert handoff.index("unset OIDC_BEARER_TOKEN") < handoff.index("OIDC_LANDSCAPE_RUN_ID=")
+
+
+def test_upgrade_runbook_refuses_epoch_23_rollback_and_collects_forward_recovery_evidence() -> None:
+    text = _text()
+    section = text[text.index("### 7. Prove rollback refusal without crossing the schema stop") : text.index("For first/first-recovery")]
+
+    for forbidden in (
+        '--task-definition "$PREVIOUS_TASK_DEFINITION"',
+        "previous-after-rollback",
+        "set_traffic_action disabled",
+        "aws ecs update-service",
+    ):
+        assert forbidden not in section
+    ordered = (
+        "require_compatibility_record_current",
+        "rollback_permitted",
+        "verify_candidate_target_mapping",
+        "verify_public_probes",
+        "candidate-after-rollback-refusal",
+    )
+    positions = [section.index(marker) for marker in ordered]
+    assert positions == sorted(positions)
     role_check = text[text.index("run_candidate_role_check() {") : text.index("# Run once in Scenario A")]
     assert "ELSPETH_ACCEPTANCE_BEARER_TOKEN" not in role_check
 
@@ -840,7 +861,7 @@ def test_runbook_pins_operator_telemetry_positive_outage_replacement_positive_or
 
 def test_runbook_starts_connection_observation_on_a_future_minute_boundary() -> None:
     text = _text()
-    observe = text[text.index("### 6. Observe for ten minutes") : text.index("### 7. Roll back")]
+    observe = text[text.index("### 6. Observe for ten minutes") : text.index("### 7. Prove rollback refusal")]
     assert "OBSERVATION_ALIGNMENT_SECONDS=$((60 - 10#$(date -u +%S)))" in observe
     assert observe.index('sleep "$OBSERVATION_ALIGNMENT_SECONDS"') < observe.index("ACCEPTANCE_START_UTC=$(date -u +%Y-%m-%dT%H:%M:00Z)")
     assert "ACCEPTANCE_START_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" not in observe

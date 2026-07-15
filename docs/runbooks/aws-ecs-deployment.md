@@ -1430,8 +1430,8 @@ capture_oidc_lifecycle_handoff() {
 }
 ```
 
-Run exactly `previous-before-candidate`, `candidate-initial`,
-`previous-after-rollback`, and `candidate-after-redeploy`. Each JSON document
+Run exactly `previous-before-candidate`, `candidate-initial`, and
+`candidate-after-rollback-refusal`. Each JSON document
 contains only `phase`, `timestamp`, `issuer`, `authorization_origin`,
 `audience_claim`, `audience`, `subject_sha256`, `auth_me_status: 200`,
 `session_create_status: 201`, `session_read_status: 200`,
@@ -1463,16 +1463,16 @@ countersigns it. Set `SCENARIO_A_COMPATIBILITY_RECORD_FILE` and
   "rollback_doctor_task_definition": "exact-rollback-doctor-task-definition-arn",
   "previous_package_version": "0.7.0",
   "schema_facts": {
-    "candidate": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": true},
+    "candidate": {"session_epoch": 27, "landscape_epoch": 24, "run_web_plugin_policy_present": true},
     "previous": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": true},
-    "structural_changes": "none",
+    "structural_changes": "landscape_epoch_23_to_24_token_ownership_fk",
     "semantics_only_changes": "none",
-    "archive_export_decision": "not_required",
+    "archive_export_decision": "required_before_forward_migration",
     "destructive_reset_required": false
   },
   "forward_compatible": true,
-  "backward_compatible": true,
-  "rollback_permitted": true,
+  "backward_compatible": false,
+  "rollback_permitted": false,
   "decision": "approved",
   "approver_identity": "database-operator",
   "countersigner_identity": "release-operator",
@@ -1491,12 +1491,15 @@ Scenario A uses the same field set with `scenario_id: "A"`; empty strings for
 
 The controller binds the record to the manifest, image digest, exact task
 and doctor definitions, candidate and previous package/image identities,
-session epoch 27, Landscape epoch 23 and `run_web_plugin_policy` presence,
+session epoch 27, Landscape epoch 24 and `run_web_plugin_policy` presence,
 change/reset facts, decision, two distinct approvals, and expiry. It
 stores only a sanitized receipt and document hash. Reopen and revalidate the
 raw record before init-capable doctor, ordinary doctor, candidate deploy, and
-Scenario B rollback. Unknown or unapproved compatibility is NO-GO; expiry or
-identity drift is also NO-GO.
+any later deployment action. The 0.7.0 image understands Landscape epoch 23,
+not epoch 24: the candidate can migrate an exact SQLite predecessor forward,
+but the previous image cannot reopen the migrated database. Scenario B rollback
+is therefore forbidden after migration. Unknown or unapproved compatibility is NO-GO;
+expiry or identity drift is also NO-GO.
 
 Before either schema initializer runs, create and prove the required EFS
 children with the candidate image's explicit `1000:1000` one-shot definition.
@@ -1594,6 +1597,11 @@ require_compatibility_record_current() {
     compatibility-record-validate --file "$CONTROL_MANIFEST" \
     --scenario-id "$ACTIVE_SCENARIO_ID" --record "$COMPATIBILITY_RECORD_FILE" >"$receipt"
   test "$(jq -er '.record_sha256' "$receipt")" = "$COMPATIBILITY_RECORD_SHA256"
+  jq -e '
+    .forward_compatible == true
+    and .backward_compatible == false
+    and .rollback_permitted == false
+  ' "$receipt" >/dev/null
   rm -f -- "$receipt"
 }
 
@@ -1782,7 +1790,8 @@ and its database-operator-approved init-capable doctor definition. After the
 resolved inventory, TLS material, and test identity are bound, initialize the
 empty database with the rollback baseline, then launch that previous web
 revision. Only this bootstrap establishes the pre-candidate state; it is not a
-candidate deployment or a substitute for the later rollback rehearsal.
+candidate deployment or a substitute for the later rollback-refusal and
+forward-recovery proof.
 
 Execute this block only after Scenario A has completed section 7 and the
 operator has returned to the saved-plan section to run
@@ -2543,19 +2552,27 @@ directly to `sanitize-evidence`; raw logs are never printed or persisted.
 ### 3. Apply the schema compatibility gate
 
 `--init-schema` may initialize the session schema only when it is MISSING; a
-partially present session schema is STALE. It may initialize the landscape
-schema when MISSING or complete verified-shape PARTIAL state, except a
-non-empty pre-epoch-23 Landscape missing `run_web_plugin_policy` is STALE and
-must not be additively repaired. Aurora detection is structural-only: a
-semantics-only schema-epoch change can still appear CURRENT.
+partially present session schema is STALE. It may initialize a missing
+Landscape schema, but it is not a general structural migration tool. An exact
+epoch-23 SQLite Landscape is the sole current exception: writable
+schema-managing startup validates the complete predecessor before checking out
+the raw migration connection. It then uses `BEGIN IMMEDIATE` to serialize the
+locked epoch recheck and `tokens` rebuild with the epoch-24 composite ownership
+FK, committing the schema plus epoch atomically. Read-only and
+`create_tables=False` inspection opens never migrate it. PostgreSQL has no
+runtime auto-migration: the schema owner must apply the approved epoch-24 DDL
+or recreate/initialize before the candidate starts. Aurora detection is
+structural-only: a semantics-only schema-epoch change can still appear CURRENT.
 
 Attach the approved release/schema compatibility record before deployment.
 AWS ECS validate-only startup must fail closed before uvicorn binds for
 missing, partial, stale, or incompatible state. Code rollback cannot undo an
 incompatible database schema. STALE/incompatible state requires the
 database-operator-owned archive decision and drop/recreate procedure followed
-by `--init-schema`; never automate it. Code rollback to epoch 22 after an
-epoch-23 recreation is unsafe.
+by `--init-schema`; never automate it. Archive before the SQLite 23→24 forward
+migration. Once epoch 24 commits, rollback to the 0.7.0 epoch-23 image is
+forbidden; restore the matched epoch-23 archive with the old image or deploy a
+newer schema-compatible image instead.
 
 ### 4. Deploy exactly one candidate task
 
@@ -2888,60 +2905,52 @@ Non-200 liveness/readiness, `ready != true`, `readiness_check_not_ready`,
 startup/schema failure, or new unhandled `ERROR`/`CRITICAL` blocks acceptance.
 Retain only allowlisted checks, classes, counts, and hashes.
 
-### 7. Roll back without crossing the schema stop
+### 7. Prove rollback refusal without crossing the schema stop
 
-For an upgrade, first prove the release/schema compatibility record permits
-the previous code on the current schema, then force a distinct deployment:
+The current upgrade record proves the opposite of rollback authorization. Once
+the candidate has migrated Landscape from epoch 23 to 24, the 0.7.0 image must
+never be deployed against that database. Scenario B therefore exercises a
+fail-closed rollback refusal and forward recovery: revalidate and persist the
+sanitized compatibility receipt, prove the candidate task remains the active
+target, repeat its role/public probes, and capture fresh OIDC evidence. Do not
+disable traffic, invoke `update-service`, or start
+`PREVIOUS_TASK_DEFINITION` in this phase.
 
 ```bash
 if test "$DEPLOYMENT_MODE" = upgrade; then
   require_compatibility_record_current
-  set_traffic_action disabled
-  PRE_ROLLBACK_CANDIDATE_TASK_ARN="$CANDIDATE_TASK_ARN"
-  aws_capture aws ecs update-service \
-    --cluster "$ECS_CLUSTER" \
-    --service "$ECS_SERVICE" \
-    --task-definition "$PREVIOUS_TASK_DEFINITION" \
-    --desired-count 1 \
-    --force-new-deployment \
-    --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
-    >/dev/null
-  aws_waiter_capture aws ecs wait services-stable \
-    --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
-  verify_task_definition_target_mapping "$PREVIOUS_TASK_DEFINITION"
-  PREVIOUS_ROLLBACK_TASK_ARN="$ACTIVE_TASK_ARN"
-  test "$PREVIOUS_ROLLBACK_TASK_ARN" != "$PRE_ROLLBACK_CANDIDATE_TASK_ARN"
-  set_traffic_action forward
-  verify_public_probes
-  run_oidc_evidence previous-after-rollback
+  ROLLBACK_REFUSAL_RECEIPT=$(mktemp -p /tmp \
+    "elspeth-rollback-refusal-${ACTIVE_SCENARIO_ID}.XXXXXX")
+  chmod 600 "$ROLLBACK_REFUSAL_RECEIPT"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+    compatibility-record-validate --file "$CONTROL_MANIFEST" \
+    --scenario-id "$ACTIVE_SCENARIO_ID" \
+    --record "$COMPATIBILITY_RECORD_FILE" >"$ROLLBACK_REFUSAL_RECEIPT"
+  jq -e '
+    .backward_compatible == false
+    and .rollback_permitted == false
+    and .schema_facts.previous.landscape_epoch == 23
+    and .schema_facts.candidate.landscape_epoch == 24
+  ' "$ROLLBACK_REFUSAL_RECEIPT" >/dev/null
+  persist_sanitized_receipt "$ACTIVE_SCENARIO_ID" compatibility-record \
+    "$COMPATIBILITY_RECORD_SHA256" "$ROLLBACK_REFUSAL_RECEIPT" >/dev/null
+  rm -f -- "$ROLLBACK_REFUSAL_RECEIPT"
 
-  require_compatibility_record_current
-  set_traffic_action disabled
-  aws_capture aws ecs update-service \
-    --cluster "$ECS_CLUSTER" \
-    --service "$ECS_SERVICE" \
-    --task-definition "$CANDIDATE_TASK_DEFINITION" \
-    --desired-count 1 \
-    --force-new-deployment \
-    --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
-    >/dev/null
-  aws_waiter_capture aws ecs wait services-stable \
-    --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
   verify_candidate_target_mapping
-  test "$CANDIDATE_TASK_ARN" != "$PREVIOUS_ROLLBACK_TASK_ARN"
   run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-s3
   run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-bedrock
   run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-bedrock-guardrails
   run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-operator-telemetry positive "$OIDC_LANDSCAPE_RUN_ID"
-  set_traffic_action forward
   verify_public_probes
-  run_oidc_evidence candidate-after-redeploy
+  run_oidc_evidence candidate-after-rollback-refusal
 fi
 ```
 
-Repeat exact-one-task, previous-revision target mapping/health, public probes,
-CloudWatch, and EventBridge checks. If backward compatibility is unknown, keep
-traffic drained and escalate instead of rolling old code over the schema.
+The compatibility receipt plus `candidate-after-rollback-refusal` evidence is
+the refusal/forward-recovery record. If the candidate is unhealthy, keep traffic
+drained and repair forward with epoch-24-compatible code, or restore the matched
+epoch-23 database archive before deploying the previous image. Never roll old
+code over the migrated schema.
 
 For first/first-recovery, remove traffic before compute, verify the listener's
 fixed 503 action, then scale to zero:
@@ -2981,7 +2990,7 @@ if test "$DEPLOYMENT_MODE" != upgrade; then
   unset RUNNING_TASKS_JSON PENDING_TASKS_JSON TARGET_HEALTH_JSON
 
   # Prove the narrow first-recovery transition with the same immutable image
-  # after the rollback rehearsal has left traffic disabled and desired zero.
+  # after the first-deploy recovery rehearsal left traffic disabled and zero.
   require_compatibility_record_current
   DEPLOYMENT_MODE=first-recovery
   aws_capture aws ecs update-service \
@@ -3007,7 +3016,7 @@ if test "$DEPLOYMENT_MODE" != upgrade; then
 fi
 ```
 
-The rollback half requires zero running/pending tasks and no non-draining
+The drain half requires zero running/pending tasks and no non-draining
 registered targets. The recovery half must create a distinct candidate task,
 restore only the approved listener action, and read back the same persisted
 Landscape/session state. Keep failed task-definition, stopped-task, event, and

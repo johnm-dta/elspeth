@@ -55,6 +55,7 @@ from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.core.secrets import is_secret_field
 from elspeth.engine.orchestrator import prepare_for_run
@@ -7665,7 +7666,7 @@ def validate_compatibility_record(
     expected_schema_facts = {
         "candidate": {
             "session_epoch": 27,
-            "landscape_epoch": 23,
+            "landscape_epoch": SQLITE_SCHEMA_EPOCH,
             "run_web_plugin_policy_present": True,
         },
         "previous": (
@@ -7677,9 +7678,9 @@ def validate_compatibility_record(
             if scenario_id == "B"
             else None
         ),
-        "structural_changes": "none" if scenario_id == "B" else "initial_create",
+        "structural_changes": "landscape_epoch_23_to_24_token_ownership_fk" if scenario_id == "B" else "initial_create",
         "semantics_only_changes": "none",
-        "archive_export_decision": "not_required" if scenario_id == "B" else "not_applicable",
+        "archive_export_decision": "required_before_forward_migration" if scenario_id == "B" else "not_applicable",
         "destructive_reset_required": False,
     }
     if (
@@ -7698,8 +7699,8 @@ def validate_compatibility_record(
         or record["schema_facts"] != expected_schema_facts
         or record["decision"] != "approved"
         or record["forward_compatible"] is not True
-        or record["backward_compatible"] is not (scenario_id == "B")
-        or record["rollback_permitted"] is not (scenario_id == "B")
+        or record["backward_compatible"] is not False
+        or record["rollback_permitted"] is not False
     ):
         raise AcceptanceCheckError("compatibility_record_binding")
     if any(type(record[field]) is not bool for field in ("forward_compatible", "backward_compatible", "rollback_permitted")):
@@ -7825,17 +7826,29 @@ def _validate_compatibility_receipt(
     ):
         raise AcceptanceCheckError("receipt_store_binding")
     if (
-        payload["backward_compatible"] is not (scenario_id == "B")
-        or payload["rollback_permitted"] is not (scenario_id == "B")
+        payload["backward_compatible"] is not False
+        or payload["rollback_permitted"] is not False
         or any(type(payload[field]) is not bool for field in ("backward_compatible", "rollback_permitted"))
     ):
         raise AcceptanceCheckError("receipt_store_schema")
     expected_schema_facts = {
-        "candidate": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": True},
-        "previous": ({"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": True} if scenario_id == "B" else None),
-        "structural_changes": "none" if scenario_id == "B" else "initial_create",
+        "candidate": {
+            "session_epoch": 27,
+            "landscape_epoch": SQLITE_SCHEMA_EPOCH,
+            "run_web_plugin_policy_present": True,
+        },
+        "previous": (
+            {
+                "session_epoch": 27,
+                "landscape_epoch": 23,
+                "run_web_plugin_policy_present": True,
+            }
+            if scenario_id == "B"
+            else None
+        ),
+        "structural_changes": "landscape_epoch_23_to_24_token_ownership_fk" if scenario_id == "B" else "initial_create",
         "semantics_only_changes": "none",
-        "archive_export_decision": "not_required" if scenario_id == "B" else "not_applicable",
+        "archive_export_decision": "required_before_forward_migration" if scenario_id == "B" else "not_applicable",
         "destructive_reset_required": False,
     }
     if payload["schema_facts"] != expected_schema_facts:

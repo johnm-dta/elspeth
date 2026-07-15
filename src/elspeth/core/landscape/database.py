@@ -11,12 +11,12 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, TracebackType
 from typing import Any, Literal, NewType, Self, cast
 from urllib.parse import quote
 from weakref import WeakKeyDictionary
 
-from sqlalchemy import Connection, Table, create_engine, event, text
+from sqlalchemy import Connection, MetaData, Table, create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.engine.url import make_url
@@ -144,6 +144,68 @@ class SchemaCompatibilityError(Exception):
 
 
 ADR019_MIGRATION_GUIDE = "docs/operator/migrations/adr-019.md"
+
+# Epoch 24 is the first narrow in-place Landscape migration. SQLite cannot
+# add a foreign-key constraint with ALTER TABLE, so tokens is rebuilt inside a
+# single BEGIN IMMEDIATE transaction. Keep this DDL structurally identical to
+# schema.tokens_table; the migration tests compare fresh and upgraded shapes.
+_SQLITE_EPOCH_24_TOKENS_DDL = """
+CREATE TABLE tokens_epoch_24 (
+    token_id VARCHAR(64) NOT NULL,
+    row_id VARCHAR(64) NOT NULL,
+    run_id VARCHAR(64) NOT NULL,
+    fork_group_id VARCHAR(64),
+    join_group_id VARCHAR(64),
+    expand_group_id VARCHAR(32),
+    branch_name VARCHAR(64),
+    step_in_pipeline INTEGER,
+    token_data_ref VARCHAR(64),
+    created_at DATETIME NOT NULL,
+    PRIMARY KEY (token_id),
+    UNIQUE (token_id, run_id),
+    FOREIGN KEY(row_id, run_id) REFERENCES rows (row_id, run_id),
+    FOREIGN KEY(row_id) REFERENCES rows (row_id),
+    FOREIGN KEY(run_id) REFERENCES runs (run_id)
+)
+"""
+
+_SQLITE_EPOCH_24_TOKEN_COLUMNS = (
+    "token_id, row_id, run_id, fork_group_id, join_group_id, expand_group_id, branch_name, step_in_pipeline, token_data_ref, created_at"
+)
+
+_SQLITE_EPOCH_24_TOKEN_INDEX_DDL: tuple[tuple[str, str], ...] = (
+    ("ix_tokens_expand_group_id", "CREATE INDEX ix_tokens_expand_group_id ON tokens (expand_group_id)"),
+    ("ix_tokens_row_id", "CREATE INDEX ix_tokens_row_id ON tokens (row_id)"),
+    ("ix_tokens_run_id", "CREATE INDEX ix_tokens_run_id ON tokens (run_id)"),
+)
+
+_EPOCH_24_TOKEN_ROW_RUN_FK: tuple[str, tuple[str, ...], str, tuple[str, ...]] = (
+    "tokens",
+    ("row_id", "run_id"),
+    "rows",
+    ("row_id", "run_id"),
+)
+
+
+def _sqlite_epoch_23_shape_metadata() -> MetaData:
+    """Return current metadata with only the epoch-24 token FK removed."""
+    predecessor = MetaData()
+    for table in metadata.tables.values():
+        table.to_metadata(predecessor)
+
+    tokens = predecessor.tables["tokens"]
+    constraint = next(
+        foreign_key
+        for foreign_key in tokens.foreign_key_constraints
+        if tuple(element.parent.name for element in foreign_key.elements) == ("row_id", "run_id")
+        and tuple(element.column.table.name for element in foreign_key.elements) == ("rows", "rows")
+        and tuple(element.column.name for element in foreign_key.elements) == ("row_id", "run_id")
+    )
+    tokens.constraints.discard(constraint)
+    for element in constraint.elements:
+        element.parent.foreign_keys.discard(element)
+        tokens.foreign_keys.discard(element)
+    return predecessor
 
 
 def _query_base_param_name(key: str) -> str:
@@ -461,6 +523,8 @@ _REQUIRED_FOREIGN_KEYS: tuple[tuple[str, str, str], ...] = (
 # Required composite foreign keys for run-scoped audit integrity.
 # Format: (table_name, constrained_columns, referenced_table, referenced_columns)
 _REQUIRED_COMPOSITE_FOREIGN_KEYS: tuple[tuple[str, tuple[str, ...], str, tuple[str, ...]], ...] = (
+    # Epoch 24: a token's run is derived from, and must match, its row.
+    _EPOCH_24_TOKEN_ROW_RUN_FK,
     ("token_outcomes", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
     ("token_outcomes", ("batch_id", "run_id"), "batches", ("batch_id", "run_id")),
     ("node_states", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
@@ -752,10 +816,11 @@ class LandscapeDB:
                 payload_base_path=dump_to_jsonl_payload_base_path,
             )
         self._setup_engine(**engine_kwargs)
+        self._migrate_sqlite_schema()
         self._validate_schema()  # Check BEFORE create_tables
-        # Stamp only a structurally validated unstamped schema. A non-zero
-        # pre-23 Landscape is a deliberate drop/recreate boundary and is
-        # rejected here before create_all can add epoch-23 objects.
+        # Stamp only a structurally validated unstamped schema. Epoch 23 has
+        # already taken the narrow epoch-24 migration above; all older non-zero
+        # epochs retain the deliberate drop/recreate boundary.
         self._sync_sqlite_schema_epoch()
         self._create_tables()
         self._create_additive_indexes()
@@ -1081,12 +1146,207 @@ class LandscapeDB:
                 "delete/recreate the Landscape database or run the supported migration."
             )
 
+    def _migrate_sqlite_schema(self) -> None:
+        """Apply explicitly supported forward-only SQLite migrations.
+
+        Epoch 24 is intentionally narrow: only a structurally complete epoch-23
+        database is eligible, and only ``tokens`` is rebuilt. Older epochs,
+        partial/foreign schemas, read-only opens, and inspection-only opens are
+        left untouched for the compatibility validator to reject.
+
+        The rebuild follows SQLite's constraint-migration discipline:
+        the exact predecessor shape is validated before checking out the raw
+        migration connection, ``foreign_keys`` is disabled before
+        ``BEGIN IMMEDIATE``, the epoch is re-read under the write lock, the data
+        and schema change plus ``user_version`` bump commit atomically, a full
+        ``foreign_key_check`` gates commit, and FK enforcement is restored on
+        the pooled connection before it is returned.
+        """
+        if not self.connection_string.startswith("sqlite") or self._read_only:
+            return
+        if self._get_sqlite_schema_epoch() != 23:
+            return
+
+        from sqlalchemy import inspect
+
+        existing_tables = set(inspect(self.engine).get_table_names())
+        if not existing_tables:
+            return
+
+        # Validate before checking out the raw migration connection. Calling
+        # the Engine-based validator while holding BEGIN IMMEDIATE either asks
+        # a single-connection QueuePool for an impossible second checkout or,
+        # with StaticPool, reuses and rolls back the migration transaction.
+        # If a concurrent opener migrates after our initial epoch read, this
+        # predecessor validation sees epoch 24 and fails; the immediate epoch
+        # re-read converts only that completed-race case into a clean return.
+        try:
+            self._validate_schema(
+                allowed_sqlite_epochs=frozenset({23}),
+                shape_metadata=_sqlite_epoch_23_shape_metadata(),
+                ignored_missing_composite_foreign_keys=frozenset({_EPOCH_24_TOKEN_ROW_RUN_FK}),
+            )
+        except SchemaCompatibilityError as validation_error:
+            try:
+                current_epoch = self._get_sqlite_schema_epoch()
+            except Exception as epoch_error:
+                validation_error.add_note(
+                    "Epoch-24 migration could not re-read the epoch after predecessor validation failed: "
+                    f"{type(epoch_error).__name__}: {epoch_error}"
+                )
+                raise validation_error.with_traceback(validation_error.__traceback__) from None
+            if current_epoch == SQLITE_SCHEMA_EPOCH:
+                return
+            raise
+
+        raw = self.engine.raw_connection()
+        cursor = raw.cursor()
+        primary_error: Exception | None = None
+        primary_traceback: TracebackType | None = None
+        restore_error: Exception | None = None
+        close_error: Exception | None = None
+        invalidate_connection = False
+        try:
+            cursor.execute("PRAGMA foreign_keys = OFF")
+            if cursor.execute("PRAGMA foreign_keys").fetchone() != (0,):
+                raise AuditIntegrityError("Epoch-24 migration could not disable SQLite foreign-key enforcement before BEGIN")
+
+            cursor.execute("BEGIN IMMEDIATE")
+            locked_epoch = int(cursor.execute("PRAGMA user_version").fetchone()[0])
+            if locked_epoch == SQLITE_SCHEMA_EPOCH:
+                # Another process completed the same migration while this
+                # opener waited for SQLite's single-writer lock.
+                raw.rollback()
+            elif locked_epoch != 23:
+                raise SchemaCompatibilityError(
+                    "Epoch-24 migration lost its predecessor precondition after acquiring the write lock: "
+                    f"expected epoch 23, observed {locked_epoch}."
+                )
+            else:
+                mismatch = cursor.execute(
+                    """
+                    SELECT t.token_id, t.row_id, r.run_id, t.run_id
+                    FROM tokens AS t
+                    LEFT JOIN rows AS r ON r.row_id = t.row_id
+                    WHERE r.row_id IS NULL OR r.run_id <> t.run_id
+                    ORDER BY t.token_id
+                    LIMIT 1
+                    """
+                ).fetchone()
+                if mismatch is not None:
+                    token_id, row_id, row_run_id, token_run_id = mismatch
+                    raise AuditIntegrityError(
+                        f"Epoch-24 migration found token {token_id!r} referencing row {row_id!r}, "
+                        f"which belongs to run {row_run_id!r}, but the token claims run {token_run_id!r}. "
+                        "The row is authoritative; refusing to migrate forged Tier-1 ownership data."
+                    )
+
+                dependent_schema = cursor.execute(
+                    """
+                    SELECT type, name, sql
+                    FROM sqlite_schema
+                    WHERE tbl_name = 'tokens'
+                      AND type IN ('index', 'trigger')
+                      AND sql IS NOT NULL
+                    ORDER BY type, name
+                    """
+                ).fetchall()
+                cursor.execute(_SQLITE_EPOCH_24_TOKENS_DDL)
+                cursor.execute(
+                    f"INSERT INTO tokens_epoch_24 ({_SQLITE_EPOCH_24_TOKEN_COLUMNS}) SELECT {_SQLITE_EPOCH_24_TOKEN_COLUMNS} FROM tokens"
+                )
+                cursor.execute("DROP TABLE tokens")
+                cursor.execute("ALTER TABLE tokens_epoch_24 RENAME TO tokens")
+                restored_index_names: set[str] = set()
+                for object_type, object_name, statement in dependent_schema:
+                    if not isinstance(statement, str):
+                        raise AuditIntegrityError(f"Epoch-24 migration found non-text DDL for tokens {object_type} {object_name!r}")
+                    cursor.execute(statement)
+                    if object_type == "index":
+                        restored_index_names.add(str(object_name))
+                for index_name, statement in _SQLITE_EPOCH_24_TOKEN_INDEX_DDL:
+                    if index_name not in restored_index_names:
+                        cursor.execute(statement)
+
+                foreign_key_violations = cursor.execute("PRAGMA foreign_key_check").fetchall()
+                if foreign_key_violations:
+                    raise AuditIntegrityError(
+                        f"Epoch-24 migration produced foreign-key violations; refusing to commit: {foreign_key_violations[:10]!r}"
+                    )
+
+                cursor.execute(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+                raw.commit()
+        except Exception as exc:
+            primary_error = exc
+            primary_traceback = exc.__traceback__
+            try:
+                raw.rollback()
+            except Exception as rollback_error:
+                invalidate_connection = True
+                exc.add_note(
+                    "Epoch-24 migration rollback also failed; the physical connection was invalidated: "
+                    f"{type(rollback_error).__name__}: {rollback_error}"
+                )
+        finally:
+            try:
+                cursor.execute("PRAGMA foreign_keys = ON")
+                if cursor.execute("PRAGMA foreign_keys").fetchone() != (1,):
+                    raise AuditIntegrityError("Epoch-24 migration failed to restore SQLite foreign-key enforcement")
+            except Exception as exc:
+                invalidate_connection = True
+                restore_error = exc
+                if primary_error is not None:
+                    primary_error.add_note(
+                        "Epoch-24 migration foreign-key restoration also failed; the physical connection was "
+                        f"invalidated: {type(exc).__name__}: {exc}"
+                    )
+            if invalidate_connection:
+                try:
+                    raw.invalidate()
+                except Exception as invalidate_error:
+                    target_error = primary_error or restore_error
+                    if target_error is not None:
+                        target_error.add_note(
+                            "Epoch-24 migration could not invalidate an uncertain physical connection: "
+                            f"{type(invalidate_error).__name__}: {invalidate_error}"
+                        )
+            try:
+                raw.close()
+            except Exception as exc:
+                close_error = exc
+                try:
+                    raw.invalidate()
+                except Exception as invalidate_error:
+                    cleanup_note = (
+                        "Epoch-24 migration connection close failed and the uncertain physical connection could not be "
+                        f"invalidated: close={type(exc).__name__}: {exc}; "
+                        f"invalidate={type(invalidate_error).__name__}: {invalidate_error}"
+                    )
+                    exc.add_note(cleanup_note)
+                else:
+                    cleanup_note = (
+                        "Epoch-24 migration connection close failed; the uncertain physical connection was invalidated: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                target_error = primary_error or restore_error
+                if target_error is not None:
+                    target_error.add_note(cleanup_note)
+
+        if primary_error is not None:
+            raise primary_error.with_traceback(primary_traceback)
+        if restore_error is not None:
+            if isinstance(restore_error, AuditIntegrityError):
+                raise restore_error
+            raise AuditIntegrityError("Epoch-24 migration failed to restore SQLite foreign-key enforcement") from restore_error
+        if close_error is not None:
+            raise AuditIntegrityError("Epoch-24 migration failed to close its SQLite connection cleanly") from close_error
+
     def _get_sqlite_schema_epoch(self) -> int:
         """Return SQLite schema epoch from PRAGMA user_version.
 
         Uses SQLite's built-in schema version slot as a lightweight marker for
-        intentional pre-1.0 schema breaks. This is not a migration system; it
-        simply gives future migration code a stable entry point.
+        intentional pre-1.0 schema breaks and the narrow epoch-23-to-24
+        migration implemented by :meth:`_migrate_sqlite_schema`.
         """
         if not self.connection_string.startswith("sqlite"):
             return 0
@@ -1110,9 +1370,10 @@ class LandscapeDB:
         """Stamp compatible SQLite databases with the current schema epoch.
 
         New databases get the epoch immediately after create_all(). Existing
-        compatible databases without an epoch are stamped in place. Populated
-        databases carrying an older non-zero epoch are rejected at this one-way
-        schema boundary rather than migrated implicitly. Call this only from
+        compatible databases without an epoch are stamped in place. The one
+        explicitly supported predecessor migration runs before this method;
+        any other populated database carrying an older non-zero epoch is
+        rejected at the one-way schema boundary. Call this only from
         schema-managing paths; read-only/inspection opens must not mutate the
         database.
 
@@ -1162,7 +1423,13 @@ class LandscapeDB:
         if current_epoch < SQLITE_SCHEMA_EPOCH:
             self._set_sqlite_schema_epoch(SQLITE_SCHEMA_EPOCH)
 
-    def _validate_schema(self) -> None:
+    def _validate_schema(
+        self,
+        *,
+        allowed_sqlite_epochs: frozenset[int] = frozenset(),
+        shape_metadata: MetaData | None = None,
+        ignored_missing_composite_foreign_keys: frozenset[tuple[str, tuple[str, ...], str, tuple[str, ...]]] = frozenset(),
+    ) -> None:
         """Validate that existing database has the required schema.
 
         For non-SQLite backends, validates table existence when
@@ -1174,6 +1441,11 @@ class LandscapeDB:
             SchemaCompatibilityError: If database is missing required schema
                 elements, or if an encrypted database is opened without the
                 correct passphrase.
+
+        ``allowed_sqlite_epochs``, ``shape_metadata``, and
+        ``ignored_missing_composite_foreign_keys`` exist only for a migration's
+        read-only predecessor preflight. Ordinary callers must use the current
+        schema defaults.
         """
         from sqlalchemy import inspect
         from sqlalchemy.exc import OperationalError
@@ -1198,7 +1470,7 @@ class LandscapeDB:
         schema_epoch = self._get_sqlite_schema_epoch() if self.connection_string.startswith("sqlite") else 0
         identity_issue = _landscape_identity_issue(self.engine, inspector, existing_tables) if existing_tables else None
 
-        epoch_incompatible = schema_epoch not in (0, SQLITE_SCHEMA_EPOCH)
+        epoch_incompatible = schema_epoch not in (0, SQLITE_SCHEMA_EPOCH) and schema_epoch not in allowed_sqlite_epochs
         if epoch_incompatible and not present_landscape_tables:
             raise SchemaCompatibilityError(
                 "Landscape database schema is outdated.\n\n"
@@ -1236,7 +1508,7 @@ class LandscapeDB:
         shape_issues = (
             collect_metadata_shape_issues(
                 inspector,
-                metadata,
+                shape_metadata or metadata,
                 dialect=self.engine.dialect,
                 present_tables=present_landscape_tables,
                 allowed_missing_index_names=_ADDITIVE_INDEX_NAMES,
@@ -1273,6 +1545,9 @@ class LandscapeDB:
         missing_composite_fks: list[tuple[str, tuple[str, ...], str, tuple[str, ...]]] = []
 
         for table_name, constrained_columns, referenced_table, referenced_columns in _REQUIRED_COMPOSITE_FOREIGN_KEYS:
+            contract = (table_name, constrained_columns, referenced_table, referenced_columns)
+            if contract in ignored_missing_composite_foreign_keys:
+                continue
             if table_name not in existing_tables:
                 continue
 
@@ -1622,6 +1897,9 @@ class LandscapeDB:
             require_existing_schema=not create_tables,
             read_only=read_only,
         )
+
+        if create_tables and not read_only:
+            instance._migrate_sqlite_schema()
 
         # Validate BEFORE create_all - catches old schema with missing columns
         # before we try to use it. For fresh DBs, validation passes (no tables yet).

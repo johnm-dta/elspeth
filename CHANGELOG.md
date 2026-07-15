@@ -19,7 +19,14 @@ The web session database resets on upgrade: `SESSION_SCHEMA_EPOCH` advances
 from 26 to 27 to persist account-wide dismissal of the new freeform
 introduction. The integrated AWS runtime-readiness candidate also advances the
 Landscape audit schema from `SQLITE_SCHEMA_EPOCH` 22 to 23 for immutable web
-plugin-policy evidence, so both databases require the documented cutover.
+plugin-policy evidence. Database hardening then advances Landscape from 23 to
+24 with `tokens(row_id, run_id) -> rows(row_id, run_id)`. An exact epoch-23
+SQLite Landscape is automatically migrated only by writable schema-managing
+startup; PostgreSQL requires the approved schema-owner migration or recreation
+path, and older SQLite epochs retain their documented destructive boundary.
+Epoch-23 code cannot reopen an epoch-24 database, so application rollback after
+the migration is forbidden unless the matched pre-migration database archive is
+restored with the old image.
 
 ### Added
 
@@ -63,10 +70,12 @@ plugin-policy evidence, so both databases require the documented cutover.
   user-facing output labels; and theme controls are available in Composer
   preferences.
 - **AWS deployments use an explicit compatibility boundary** — the supported
-  profile is one web task at a time and may require deployment downtime while
-  the epoch-23 Landscape schema is recreated. Upgrades must archive or export
-  required evidence, perform the documented drop/recreate cutover, and follow
-  the runbook rather than attempting an in-place mixed-version rollout.
+  profile is one web task at a time. An exact SQLite Landscape epoch 23 is
+  archived and automatically migrated forward to epoch 24; PostgreSQL follows
+  the approved schema-owner migration or recreation path. Older unsupported
+  starting epochs retain their historical archive/export and drop/recreate
+  boundary. Mixed-version rollout and rollback to epoch-23 code after the
+  epoch-24 migration remain forbidden.
 
 ### Fixed
 

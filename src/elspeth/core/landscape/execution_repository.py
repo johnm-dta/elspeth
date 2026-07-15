@@ -106,7 +106,7 @@ class ExecutionRepository:
             routing_event_loader=routing_event_loader,
             payload_store=payload_store,
         )
-        self.calls = CallAuditRepository(ops, call_loader=call_loader, payload_store=payload_store)
+        self.calls = CallAuditRepository(db, ops, call_loader=call_loader, payload_store=payload_store)
         self.operations = OperationRepository(db, ops, operation_loader=operation_loader, payload_store=payload_store)
         self.batches = BatchRepository(db, ops, batch_loader=batch_loader, batch_member_loader=batch_member_loader)
         self.artifacts = ArtifactRepository(ops, artifact_loader=artifact_loader)

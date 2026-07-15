@@ -2,8 +2,9 @@
 
 Owns every write and read of the ``calls`` table — both node-state-parented
 and operation-parented calls — plus thread-safe call index allocation
-(one Lock + per-state and per-operation dicts) and payload staging /
-post-insert materialization into the payload store.
+(one Lock + per-state and per-operation dicts), database-owned collision
+recovery across independent recorders, and payload staging / post-insert
+materialization into the payload store.
 """
 
 from __future__ import annotations
@@ -14,7 +15,11 @@ from threading import Lock
 from typing import TYPE_CHECKING, NamedTuple
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import Insert, func, select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts import Call, CallStatus, CallType, FrameworkBugError
 from elspeth.contracts.audit import validate_resolved_prompt_template_hash
@@ -26,13 +31,14 @@ from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.core.ids import generate_id
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape._helpers import now
-from elspeth.core.landscape.errors import LandscapePostCommitError
+from elspeth.core.landscape.errors import LandscapePostCommitError, LandscapeRecordError
 from elspeth.core.landscape.model_loaders import CallLoader
 from elspeth.core.landscape.row_data import CallDataResult, CallDataState
 from elspeth.core.landscape.schema import calls_table, node_states_table, operations_table
 
 if TYPE_CHECKING:
     from elspeth.contracts.payload_store import PayloadStore
+    from elspeth.core.landscape.database import LandscapeDB
 
 
 logger = structlog.get_logger(__name__)
@@ -63,11 +69,13 @@ class CallAuditRepository:
 
     def __init__(
         self,
+        db: LandscapeDB,
         ops: DatabaseOps,
         *,
         call_loader: CallLoader,
         payload_store: PayloadStore | None = None,
     ) -> None:
+        self._db = db
         self._ops = ops
         self._call_loader = call_loader
         self._payload_store = payload_store
@@ -76,6 +84,8 @@ class CallAuditRepository:
         self._call_indices: dict[str, int] = {}
         self._call_index_lock = Lock()
         self._operation_call_indices: dict[str, int] = {}
+        self._pending_call_indices: set[tuple[str, int]] = set()
+        self._pending_operation_call_indices: set[tuple[str, int]] = set()
 
     def allocate_call_index(self, state_id: str) -> int:
         """Allocate next call index for a state_id (thread-safe).
@@ -93,7 +103,10 @@ class CallAuditRepository:
         Persistence:
             Counter seeds from the database on first access per state_id,
             so it survives recorder recreation (e.g., on resume). Subsequent
-            allocations are pure in-memory for performance.
+            allocations are process-local proposals. ``record_call`` remembers
+            which proposals came from this repository and atomically remaps a
+            uniqueness collision at INSERT time, after the external effect,
+            without asking the caller to repeat that effect.
 
         Args:
             state_id: Node state ID to allocate index for
@@ -125,13 +138,16 @@ class CallAuditRepository:
             # Fast path: allocate from in-memory counter (no DB access)
             idx = self._call_indices[state_id]
             self._call_indices[state_id] += 1
+            self._pending_call_indices.add((state_id, idx))
             return idx
 
     def allocate_operation_call_index(self, operation_id: str) -> int:
         """Allocate next call index for an operation_id (thread-safe).
 
-        Provides centralized call index allocation ensuring unique call numbering
-        within each operation. Parallel to allocate_call_index() for node_states.
+        Provides process-local call index proposals within each operation.
+        ``record_operation_call`` resolves a cross-process proposal collision
+        at the database INSERT boundary. Parallel to ``allocate_call_index``
+        for node states.
 
         Args:
             operation_id: Operation ID to allocate index for
@@ -152,7 +168,114 @@ class CallAuditRepository:
             # Fast path: allocate from in-memory counter (no DB access)
             idx = self._operation_call_indices[operation_id]
             self._operation_call_indices[operation_id] += 1
+            self._pending_operation_call_indices.add((operation_id, idx))
             return idx
+
+    @staticmethod
+    def _collision_tolerant_insert(
+        conn: Connection,
+        values: dict[str, object],
+        *,
+        parent_column: str,
+    ) -> Insert:
+        """Suppress only the parent/index uniqueness collision."""
+        column = calls_table.c[parent_column]
+        if conn.dialect.name == "sqlite":
+            return (
+                sqlite_insert(calls_table)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=[column, calls_table.c.call_index],
+                    index_where=column.is_not(None),
+                )
+            )
+        if conn.dialect.name == "postgresql":
+            return (
+                postgresql_insert(calls_table)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=[column, calls_table.c.call_index],
+                    index_where=column.is_not(None),
+                )
+            )
+        raise LandscapeRecordError(
+            f"call-index collision recovery is unsupported for database dialect {conn.dialect.name!r}; refusing an ambiguous audit write"
+        )
+
+    def _insert_allocated_call(
+        self,
+        values: dict[str, object],
+        *,
+        parent_column: str,
+        parent_id: str,
+        allocation_is_owned: bool,
+    ) -> dict[str, object]:
+        """Insert once, remapping only a repository-allocated index collision."""
+        proposed_index = values["call_index"]
+        if not isinstance(proposed_index, int):
+            raise FrameworkBugError("prepared call_index must be an integer")
+
+        try:
+            with self._db.write_connection() as conn:
+                if not allocation_is_owned:
+                    conn.execute(calls_table.insert().values(**values))
+                    return values
+
+                candidate = proposed_index
+                for _attempt in range(1_000):
+                    candidate_values = dict(values)
+                    candidate_values["call_index"] = candidate
+                    if parent_column == "operation_id":
+                        candidate_values["call_id"] = f"call_{parent_id}_{candidate}"
+                    inserted_id = conn.execute(
+                        self._collision_tolerant_insert(
+                            conn,
+                            candidate_values,
+                            parent_column=parent_column,
+                        ).returning(calls_table.c.call_id)
+                    ).scalar_one_or_none()
+                    if inserted_id is not None:
+                        return candidate_values
+
+                    existing_max = conn.execute(
+                        select(func.max(calls_table.c.call_index)).where(calls_table.c[parent_column] == parent_id)
+                    ).scalar_one()
+                    candidate = (existing_max if existing_max is not None else -1) + 1
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(
+                f"record_call failed for {parent_column}={parent_id!r} — database rejected audit write: {type(exc).__name__}"
+            ) from exc
+
+        raise LandscapeRecordError(f"record_call could not allocate a durable index for {parent_column}={parent_id!r} after 1000 conflicts")
+
+    def _allocation_context(
+        self,
+        *,
+        parent_id: str,
+        call_index: int,
+        operation: bool,
+    ) -> bool:
+        """Return whether this repository allocated the proposed index."""
+        with self._call_index_lock:
+            pending = self._pending_operation_call_indices if operation else self._pending_call_indices
+            return (parent_id, call_index) in pending
+
+    def _finish_allocation(
+        self,
+        *,
+        parent_id: str,
+        proposed_index: int,
+        recorded_index: int | None,
+        operation: bool,
+    ) -> None:
+        """Release the local reservation and advance the cache past remaps."""
+        with self._call_index_lock:
+            pending = self._pending_operation_call_indices if operation else self._pending_call_indices
+            pending.discard((parent_id, proposed_index))
+            if recorded_index is None:
+                return
+            counters = self._operation_call_indices if operation else self._call_indices
+            counters[parent_id] = max(counters.get(parent_id, 0), recorded_index + 1)
 
     def _prepare_call_payloads(
         self,
@@ -283,7 +406,10 @@ class CallAuditRepository:
             The recorded Call model
 
         Note:
-            Duplicate (state_id, call_index) will raise IntegrityError from SQLAlchemy.
+            A duplicate repository-allocated ``(state_id, call_index)`` is
+            remapped atomically because the represented external effect has
+            already occurred. A duplicate explicit index that bypassed this
+            repository's allocator remains an integrity error.
             Invalid state_id will raise IntegrityError due to foreign key constraint.
             Call indices should be allocated via allocate_call_index() for coordination.
         """
@@ -304,7 +430,7 @@ class CallAuditRepository:
             response_ref,
         )
 
-        values = {
+        values: dict[str, object] = {
             "call_id": call_id,
             "state_id": state_id,
             "operation_id": None,  # State call, not operation call
@@ -321,7 +447,33 @@ class CallAuditRepository:
             "created_at": timestamp,
         }
 
-        self._ops.execute_insert(calls_table.insert().values(**values))
+        proposed_call_index = call_index
+        allocation_is_owned = self._allocation_context(
+            parent_id=state_id,
+            call_index=proposed_call_index,
+            operation=False,
+        )
+        recorded_index: int | None = None
+        try:
+            values = self._insert_allocated_call(
+                values,
+                parent_column="state_id",
+                parent_id=state_id,
+                allocation_is_owned=allocation_is_owned,
+            )
+            call_id = str(values["call_id"])
+            recorded_value = values["call_index"]
+            if type(recorded_value) is not int:
+                raise FrameworkBugError("inserted state call returned a non-integer call_index")
+            recorded_index = recorded_value
+            call_index = recorded_index
+        finally:
+            self._finish_allocation(
+                parent_id=state_id,
+                proposed_index=proposed_call_index,
+                recorded_index=recorded_index,
+                operation=False,
+            )
         request_ref, response_ref = self._materialize_call_refs_after_insert(call_id, prepared)
 
         return Call(
@@ -393,7 +545,7 @@ class CallAuditRepository:
             response_ref,
         )
 
-        values = {
+        values: dict[str, object] = {
             "call_id": call_id,
             "state_id": None,  # NOT a node_state call
             "operation_id": operation_id,  # Operation call
@@ -410,7 +562,33 @@ class CallAuditRepository:
             "created_at": timestamp,
         }
 
-        self._ops.execute_insert(calls_table.insert().values(**values))
+        proposed_call_index = call_index
+        allocation_is_owned = self._allocation_context(
+            parent_id=operation_id,
+            call_index=proposed_call_index,
+            operation=True,
+        )
+        recorded_index = None
+        try:
+            values = self._insert_allocated_call(
+                values,
+                parent_column="operation_id",
+                parent_id=operation_id,
+                allocation_is_owned=allocation_is_owned,
+            )
+            call_id = str(values["call_id"])
+            recorded_value = values["call_index"]
+            if type(recorded_value) is not int:
+                raise FrameworkBugError("inserted operation call returned a non-integer call_index")
+            recorded_index = recorded_value
+            call_index = recorded_index
+        finally:
+            self._finish_allocation(
+                parent_id=operation_id,
+                proposed_index=proposed_call_index,
+                recorded_index=recorded_index,
+                operation=True,
+            )
         request_ref, response_ref = self._materialize_call_refs_after_insert(call_id, prepared)
 
         return Call(

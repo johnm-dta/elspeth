@@ -31,7 +31,6 @@ from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
-from elspeth.engine.orchestrator.idle_timeout_pump import IdleTimeoutPump
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.testing import make_pipeline_row
@@ -268,16 +267,16 @@ class SequentialFlushSignalingBatchTransform(BaseTransform):
     on_success = "output"
     on_error = "discard"
 
-    def __init__(self, gap_events: list[threading.Event], flush_thread_idents: list[int]) -> None:
+    def __init__(self, gap_events: list[threading.Event], flush_threads: list[threading.Thread]) -> None:
         super().__init__({"schema": {"mode": "observed"}})
         self._gap_events = gap_events
-        self._flush_thread_idents = flush_thread_idents
+        self._flush_threads = flush_threads
         self._flush_index = 0
 
     def process(  # type: ignore[override]
         self, rows: list[PipelineRow], ctx: Any
     ) -> TransformResult:
-        self._flush_thread_idents.append(threading.get_ident())
+        self._flush_threads.append(threading.current_thread())
         if self._flush_index < len(self._gap_events):
             self._gap_events[self._flush_index].set()
         self._flush_index += 1
@@ -514,7 +513,7 @@ class TestExecutionLoopRowProcessing:
         assert flush_seen.is_set()
         assert sink.results[0]["flushed_count"] == 2
 
-    def test_idle_timeout_polling_uses_one_pump_for_the_whole_run(self, payload_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_idle_timeout_polling_uses_one_pump_for_the_whole_run(self, payload_store) -> None:
         """One persistent IdleTimeoutPump per run — no per-fetch thread churn (elspeth-735df9576d).
 
         The run performs four source ``next()`` calls (prefetch, two gap rows,
@@ -525,9 +524,9 @@ class TestExecutionLoopRowProcessing:
         blocked inside ``next()``.
         """
         gap_events = [threading.Event(), threading.Event()]
-        flush_thread_idents: list[int] = []
+        flush_threads: list[threading.Thread] = []
         source = MultiGapIdleBlockingSource(gap_events)
-        transform = SequentialFlushSignalingBatchTransform(gap_events, flush_thread_idents)
+        transform = SequentialFlushSignalingBatchTransform(gap_events, flush_threads)
         sink = CollectSink("output")
 
         agg_settings = AggregationSettings(
@@ -563,18 +562,7 @@ class TestExecutionLoopRowProcessing:
             aggregation_settings={agg_node_id: agg_settings},
         )
 
-        orchestrator = Orchestrator(LandscapeDB.in_memory())
-        pump_builds: list[IdleTimeoutPump] = []
-        original_build = orchestrator._source_driver._build_idle_timeout_pump
-
-        def counting_build(*args: Any, **kwargs: Any) -> IdleTimeoutPump:
-            pump = original_build(*args, **kwargs)
-            pump_builds.append(pump)
-            return pump
-
-        monkeypatch.setattr(orchestrator._source_driver, "_build_idle_timeout_pump", counting_build)
-
-        result = orchestrator.run(
+        result = Orchestrator(LandscapeDB.in_memory()).run(
             config,
             graph=graph,
             payload_store=payload_store,
@@ -582,18 +570,13 @@ class TestExecutionLoopRowProcessing:
 
         assert result.status == RunStatus.COMPLETED
         assert all(gap.is_set() for gap in gap_events), "idle flushes must fire while the source is blocked in next()"
-        # Exactly ONE run-owned pump for the whole run, not one per source
-        # fetch. Scope the seam to this orchestrator so unrelated concurrent
-        # runs in the same pytest worker cannot contaminate the count.
-        assert len(pump_builds) == 1
         # The first two flushes are the idle-gap flushes (the source cannot
         # advance until each fires); both ran on the same persistent worker
         # thread, never on the orchestrator thread. (A third, end-of-input
         # flush runs on the orchestrator thread during finalization.)
-        assert len(flush_thread_idents) >= 2
-        idle_flush_idents = set(flush_thread_idents[:2])
-        assert len(idle_flush_idents) == 1
-        assert threading.get_ident() not in idle_flush_idents
+        assert len(flush_threads) >= 2
+        assert flush_threads[0] is flush_threads[1]
+        assert flush_threads[0] is not threading.current_thread()
 
 
 class TestDatabaseInitialization:

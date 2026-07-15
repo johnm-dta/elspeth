@@ -94,7 +94,7 @@ use Loomweave in this worktree.
 - Verify: branch history and clean worktree
 - Verify: 4003 outcome-composition repository and tests
 
-- [ ] **Step 1: Wait for the integration dependency and inspect it**
+- [x] **Step 1: Wait for the integration dependency and inspect it**
 
 Run:
 
@@ -108,7 +108,7 @@ git status --short
 Expected: the integration log contains `b84147e57`, the ancestry command exits
 0, and status is clean.
 
-- [ ] **Step 2: Rebase without dropping the existing safety commits**
+- [x] **Step 2: Rebase without dropping the existing safety commits**
 
 Run:
 
@@ -121,7 +121,7 @@ Expected: the seven listed commit subjects/content remain in order above
 `b84147e57`, including the three approved design commits; rebased commit hashes
 may change.
 
-- [ ] **Step 3: Run the dependency-sensitive baseline**
+- [x] **Step 3: Run the dependency-sensitive baseline**
 
 Run:
 
@@ -146,7 +146,7 @@ reviewed before Task 2 begins.
 - Test: `tests/unit/core/landscape/test_execution_repository.py`
 - Test: `tests/testcontainer/core/test_token_outcome_atomicity_postgres.py`
 
-- [ ] **Step 1: Write failing sorted/deduplicated prelock tests**
+- [x] **Step 1: Write failing sorted/deduplicated prelock tests**
 
 Add a unit test that passes reversed completions with a duplicate state ID,
 captures the lock acquisitions, and proves the complete unique set is locked
@@ -159,7 +159,7 @@ first state lock; hold the first contender there until the second is waiting,
 then release both. Assert captured ascending acquisition order, bounded
 completion, no `40P01`, and exact terminal rows.
 
-- [ ] **Step 2: Run the tests and prove the structural gap**
+- [x] **Step 2: Run the tests and prove the structural gap**
 
 Run:
 
@@ -171,7 +171,7 @@ Run:
 Expected: FAIL because `complete_node_states_completed_many()` currently
 performs unlocked pre-reads and caller-ordered executemany updates.
 
-- [ ] **Step 3: Implement the explicit state prelock primitive**
+- [x] **Step 3: Implement the explicit state prelock primitive**
 
 Before the existing before-row reads, deduplicate the complete state ID set,
 sort it ascending, and acquire every state row explicitly with `FOR UPDATE` in
@@ -182,7 +182,7 @@ Caller-owned primary-sink composition therefore remains sorted token -> sorted
 state; repository-owned calls legitimately begin at the state class. Do not
 use caller, driver/executemany, or planner order as the contract.
 
-- [ ] **Step 4: Run the unit and composed PostgreSQL proofs**
+- [x] **Step 4: Run the unit and composed PostgreSQL proofs**
 
 Run:
 
@@ -196,7 +196,7 @@ git diff --check
 Expected: unit behavior remains green; the complete existing 4003 PostgreSQL
 composition suite and new deterministic reversed-order proof pass.
 
-- [ ] **Step 5: Commit and review the prerequisite**
+- [x] **Step 5: Commit and review the prerequisite**
 
 ```bash
 git add src/elspeth/core/landscape/execution/node_states.py tests/unit/core/landscape/test_execution_repository.py tests/testcontainer/core/test_token_outcome_atomicity_postgres.py

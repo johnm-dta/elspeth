@@ -811,6 +811,7 @@ load_cleanup_state() {
   case "$SANITIZED_ORPHAN_RECEIPT" in /tmp/elspeth-orphan-*.json) ;; *) return 1 ;; esac
   test ! -L "$SANITIZED_ORPHAN_RECEIPT"
   export BOOTSTRAP_TF_DIR BOOTSTRAP_STATE BACKEND_STATE_BUCKET ACCEPTANCE_TLS_DIR SANITIZED_ORPHAN_RECEIPT
+  export ACCEPTANCE_TEARDOWN_DEADLINE_UTC
 }
 
 remove_local_acceptance_images() {
@@ -826,6 +827,7 @@ remove_local_acceptance_images() {
     docker image inspect "$ref" >/dev/null 2>&1 && docker image rm "$ref" >/dev/null || true
     docker image inspect "$ref" >/dev/null 2>&1 && return 1
   done
+  return 0
 }
 
 remove_local_acceptance_evidence() {
@@ -1204,7 +1206,8 @@ plan_and_apply_scenario() {
   terraform_capture -chdir="$directory" validate >/dev/null
   terraform_capture -chdir="$directory" plan -input=false -lock-timeout=5m \
     -var-file="$vars" -var="acceptance_run_id=$ACCEPTANCE_RUN_ID" \
-    -var="scenario_id=$scenario_id" -var="candidate_image=$CANDIDATE_IMAGE" \
+    -var="scenario_id=$scenario_id" -var="aws_account_id=$AWS_ACCOUNT_ID" \
+    -var="candidate_image=$CANDIDATE_IMAGE" \
     -var="rollback_baseline_image=$ROLLBACK_BASELINE_IMAGE" -out="$plan" >/dev/null
   chmod 600 "$plan"
   terraform_capture -chdir="$directory" show -json "$plan" | \
@@ -1229,6 +1232,7 @@ plan_and_apply_scenario() {
   terraform_capture -chdir="$directory" plan -input=false -lock-timeout=5m \
     -detailed-exitcode -var-file="$vars" \
     -var="acceptance_run_id=$ACCEPTANCE_RUN_ID" -var="scenario_id=$scenario_id" \
+    -var="aws_account_id=$AWS_ACCOUNT_ID" \
     -var="candidate_image=$CANDIDATE_IMAGE" \
     -var="rollback_baseline_image=$ROLLBACK_BASELINE_IMAGE" -out="$plan" >/dev/null
   chmod 600 "$plan"
@@ -3042,7 +3046,8 @@ uv run --frozen python -m elspeth.web.aws_ecs_acceptance evidence-export-receipt
 bind_initial_evidence_export "$EVIDENCE_EXPORT_RECEIPT"
 cleanup_failures=()
 SCENARIO_B_COGNITO_POOL_ID=$(jq -er '.values.COGNITO_USER_POOL_ID // ""' "$SCENARIO_B_INVENTORY")
-SCENARIO_B_COGNITO_POOL_OWNED=$(jq -er '.orphan_sweep.cognito_pool_owned' "$SCENARIO_B_INVENTORY")
+SCENARIO_B_COGNITO_POOL_OWNED=$(jq -r '.orphan_sweep.cognito_pool_owned' "$SCENARIO_B_INVENTORY")
+case "$SCENARIO_B_COGNITO_POOL_OWNED" in true|false) ;; *) exit 1 ;; esac
 
 destroy_scenario() {
   local scenario_id="$1" directory="$2" vars="$3" binding="$4"
@@ -3062,7 +3067,8 @@ destroy_scenario() {
     fi
     terraform_capture -chdir="$directory" plan -destroy -input=false -lock-timeout=5m \
       -var-file="$vars" -var="acceptance_run_id=$ACCEPTANCE_RUN_ID" \
-      -var="scenario_id=$scenario_id" -var="candidate_image=$CANDIDATE_IMAGE" \
+      -var="scenario_id=$scenario_id" -var="aws_account_id=$AWS_ACCOUNT_ID" \
+      -var="candidate_image=$CANDIDATE_IMAGE" \
       -var="rollback_baseline_image=$ROLLBACK_BASELINE_IMAGE" -out="$plan" >/dev/null
     chmod 600 "$plan"
     terraform_capture -chdir="$directory" show -json "$plan" | \
@@ -3187,11 +3193,12 @@ destroy_shared_bootstrap() {
 
 scenario_a_destroyed=0
 scenario_b_destroyed=0
-EARLY_BOOTSTRAP_ONLY=$(jq -er '
+EARLY_BOOTSTRAP_ONLY=$(jq -r '
   (.ecr.baseline_digest == null) and (.ecr.candidate_digest == null)
   and (.scenarios.A.terraform_applied == false)
   and (.scenarios.B.terraform_applied == false)
 ' "$CONTROL_MANIFEST")
+case "$EARLY_BOOTSTRAP_ONLY" in true|false) ;; *) exit 1 ;; esac
 if test "$EARLY_BOOTSTRAP_ONLY" = true; then
   # Application mutation is impossible before bootstrap and image publication.
   checkpoint_cleanup terraform_scenario_a confirmed

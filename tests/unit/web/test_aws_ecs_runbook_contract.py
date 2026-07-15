@@ -666,6 +666,44 @@ def test_rollback_image_packages_baseline_source_with_candidate_docker_contract(
     assert "The image still contains the exact rollback source tree" in publication
 
 
+def test_scenario_plan_noop_and_destroy_keep_the_provider_account_binding() -> None:
+    text = _text()
+    apply = text[text.index("plan_and_apply_scenario()") : text.index("activate_scenario_stack()")]
+    first_plan, noop_plan = apply.split('  plan="$work/noop.tfplan"', maxsplit=1)
+    cleanup = text[text.index("destroy_scenario()") : text.index("delete_ecr_tag()")]
+
+    account_binding = '-var="aws_account_id=$AWS_ACCOUNT_ID"'
+    assert first_plan.count(account_binding) == 1
+    assert noop_plan.count(account_binding) == 1
+    assert cleanup.count(account_binding) == 1
+
+
+def test_cleanup_boolean_reads_accept_and_validate_false() -> None:
+    text = _text()
+    cleanup = text[text.index("## Disposable acceptance cleanup") : text.index("Durable lean-image publication")]
+
+    assert "SCENARIO_B_COGNITO_POOL_OWNED=$(jq -r" in cleanup
+    assert "EARLY_BOOTSTRAP_ONLY=$(jq -r" in cleanup
+    assert 'case "$SCENARIO_B_COGNITO_POOL_OWNED" in true|false)' in cleanup
+    assert 'case "$EARLY_BOOTSTRAP_ONLY" in true|false)' in cleanup
+    assert "SCENARIO_B_COGNITO_POOL_OWNED=$(jq -er" not in cleanup
+    assert "EARLY_BOOTSTRAP_ONLY=$(jq -er" not in cleanup
+
+
+def test_local_image_cleanup_returns_success_after_all_absence_checks() -> None:
+    text = _text()
+    helper = text[text.index("remove_local_acceptance_images()") : text.index("remove_local_acceptance_evidence()")]
+
+    assert helper.index('docker image inspect "$ref" >/dev/null 2>&1 && return 1') < helper.index("return 0")
+
+
+def test_cleanup_loader_exports_deadline_for_subprocess_validation() -> None:
+    text = _text()
+    loader = text[text.index("load_cleanup_state()") : text.index("remove_local_acceptance_images()")]
+
+    assert "export ACCEPTANCE_TEARDOWN_DEADLINE_UTC" in loader
+
+
 def test_terraform_binding_hash_matches_python_canonical_json_without_newline() -> None:
     text = _text()
     capture = text[text.index("verify_tf_binding()") : text.index("### Closed lifecycle helper wrappers")]

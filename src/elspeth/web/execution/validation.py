@@ -867,6 +867,16 @@ def validate_pipeline(
     checks: list[ValidationCheck] = []
     errors: list[ValidationError] = []
 
+    # Preserve which model bindings came from public operator-profile aliases
+    # before policy lowering replaces those aliases with private provider/model
+    # options.  A concrete model selected by the operator is not a model choice
+    # authored by the composer and therefore has no user review card to resolve.
+    operator_resolved_model_node_ids = frozenset(
+        node.id
+        for node in state.nodes
+        if node.plugin == "llm" and isinstance(node.options.get("profile"), str)
+    )
+
     # Step 0: Empty-composition short-circuit.
     #
     # A CompositionState with no source, no transforms, and no outputs cannot
@@ -1443,7 +1453,12 @@ def validate_pipeline(
     )
 
     materialized_state = (
-        materialize_state_for_authoring(state) if allow_pending_interpretation_placeholders else materialize_state_for_execution(state)
+        materialize_state_for_authoring(state)
+        if allow_pending_interpretation_placeholders
+        else materialize_state_for_execution(
+            state,
+            operator_resolved_model_node_ids=operator_resolved_model_node_ids,
+        )
     )
     if isinstance(materialized_state, InterpretationReviewPending):
         site_detail = _format_interpretation_sites(materialized_state.sites)

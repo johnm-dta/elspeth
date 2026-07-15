@@ -542,8 +542,18 @@ def _raw_html_cleanup_requirement(requirements: Sequence[InterpretationRequireme
     return None
 
 
-def interpretation_sites(state: CompositionState) -> tuple[InterpretationReviewSite, ...]:
-    """Return unresolved interpretation-review sites across source and transforms."""
+def interpretation_sites(
+    state: CompositionState,
+    *,
+    operator_resolved_model_node_ids: frozenset[str] = frozenset(),
+) -> tuple[InterpretationReviewSite, ...]:
+    """Return unresolved interpretation-review sites across source and transforms.
+
+    ``operator_resolved_model_node_ids`` identifies LLM nodes whose concrete
+    model was supplied by lowering an operator-owned profile alias.  Those
+    model choices are operator policy, not composer-authored decisions, so
+    they do not require a user ``llm_model_choice`` review.
+    """
 
     sites: list[InterpretationReviewSite] = []
     # Source-level interpretation review is keyed to the default source
@@ -562,7 +572,9 @@ def interpretation_sites(state: CompositionState) -> tuple[InterpretationReviewS
         sites.extend(_missing_raw_html_cleanup_review_sites(node, web_scrape_raw_fields=web_scrape_raw_fields))
         if not any(site.kind is InterpretationKind.LLM_PROMPT_TEMPLATE for site in node_sites):
             sites.extend(_missing_prompt_template_review_sites(node))
-        if not any(site.kind is InterpretationKind.LLM_MODEL_CHOICE for site in node_sites):
+        if node.id not in operator_resolved_model_node_ids and not any(
+            site.kind is InterpretationKind.LLM_MODEL_CHOICE for site in node_sites
+        ):
             sites.extend(_missing_model_choice_review_sites(node))
     return tuple(dict.fromkeys(sites))
 
@@ -598,10 +610,17 @@ def materialize_state_for_authoring(state: CompositionState) -> CompositionState
     return replace(state, nodes=tuple(materialized_nodes))
 
 
-def materialize_state_for_execution(state: CompositionState) -> CompositionState | InterpretationReviewPending:
+def materialize_state_for_execution(
+    state: CompositionState,
+    *,
+    operator_resolved_model_node_ids: frozenset[str] = frozenset(),
+) -> CompositionState | InterpretationReviewPending:
     """Materialize resolved interpretation state or return pending sites."""
 
-    pending_sites = interpretation_sites(state)
+    pending_sites = interpretation_sites(
+        state,
+        operator_resolved_model_node_ids=operator_resolved_model_node_ids,
+    )
     if pending_sites:
         return InterpretationReviewPending(sites=pending_sites)
 

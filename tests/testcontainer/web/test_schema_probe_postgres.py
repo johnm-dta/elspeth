@@ -18,6 +18,7 @@ from sqlalchemy.pool import NullPool
 from testcontainers.postgres import PostgresContainer
 from tests.unit.core.test_schema_shape import _static_check_issues
 
+from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape.database import SchemaCompatibilityError
 from elspeth.core.schema_shape import _text_builtin_identity_rows_on_connection
 from elspeth.web import schema_probe as schema_probe_module
@@ -129,6 +130,26 @@ def test_landscape_server_default_is_false(postgres_engine: Engine) -> None:
             values,
         )
         assert conn.execute(text("SELECT seeded_from_cache FROM runs WHERE run_id='server-default-run'")).scalar_one() is False
+
+
+def test_run_source_contract_hash_column_fits_runtime_hash(postgres_engine: Engine) -> None:
+    init_landscape_schema(postgres_engine)
+    runtime_hash = SchemaContract(mode="OBSERVED", fields=(), locked=True).version_hash()
+
+    with postgres_engine.connect() as conn:
+        column_width = conn.execute(
+            text(
+                """
+                SELECT character_maximum_length
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'run_sources'
+                  AND column_name = 'schema_contract_hash'
+                """
+            )
+        ).scalar_one()
+
+    assert column_width == len(runtime_hash)
 
 
 @pytest.mark.parametrize("object_name", ["auth_events", "run_attributions", "ix_tokens_run_id"])

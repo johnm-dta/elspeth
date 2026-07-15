@@ -10,6 +10,7 @@ import elspeth.core.landscape.schema as schema
 from elspeth.contracts import Determinism
 from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
+from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape.schema import (
     RunSourceLifecycleState,
     run_sources_table,
@@ -41,6 +42,12 @@ def _optional_enum_in_check(column_name: str, enum_type: type[StrEnum]) -> str:
 def _sql_string_literal(value: str) -> str:
     assert hasattr(schema, "_sql_string_literal")
     return schema._sql_string_literal(value)
+
+
+def test_run_source_contract_hash_column_fits_runtime_hash() -> None:
+    runtime_hash = SchemaContract(mode="OBSERVED", fields=(), locked=True).version_hash()
+
+    assert run_sources_table.c.schema_contract_hash.type.length == len(runtime_hash)
 
 
 class TestEnumCheckConstraints:

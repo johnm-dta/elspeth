@@ -256,7 +256,10 @@ run_sources_table = Table(
     Column("config_hash", String(64), nullable=False),
     Column("schema_json", Text),
     Column("schema_contract_json", Text),
-    Column("schema_contract_hash", String(16)),
+    # SchemaContract.version_hash() is a 32-character (128-bit) hex digest.
+    # PostgreSQL enforces VARCHAR widths (SQLite does not), so this column must
+    # match the runtime contract rather than the historical 16-char width.
+    Column("schema_contract_hash", String(32)),
     Column("field_resolution_json", Text),
     Column("recorded_at", DateTime(timezone=True), nullable=False),
     PrimaryKeyConstraint("run_id", "source_node_id"),

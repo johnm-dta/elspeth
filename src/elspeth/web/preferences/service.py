@@ -14,10 +14,9 @@ re-reading — this avoids the corrupt-mode PATCH lockout (Finding 7): a
 pre-existing corrupt row would crash a re-read even when the PATCH
 write succeeded and supplied a valid new mode.
 
-SQLite-dialect-specific (``ON CONFLICT ... DO UPDATE``) — the deployed
-dialect. If a future phase migrates to Postgres, swap the import to
-``sqlalchemy.dialects.postgresql.insert``; both expose the same
-``on_conflict_do_update`` API.
+SQLite and PostgreSQL both use ``ON CONFLICT ... DO UPDATE``, but SQLAlchemy's
+upsert construct is dialect-specific. The write path selects the matching
+insert builder from the active connection before constructing the statement.
 
 Async/sync bridge: uses ``run_sync_in_worker`` from
 ``elspeth.web.async_workers`` (single-worker pool with cancellation
@@ -34,6 +33,7 @@ from typing import Any
 from opentelemetry import metrics
 from sqlalchemy import String, select
 from sqlalchemy import cast as sql_cast
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 
@@ -429,7 +429,17 @@ class PreferencesService:
                     "updated_at": now,
                     **resolved_progress,
                 }
-                stmt = sqlite_insert(user_preferences_table).values(**values)
+                dialect = conn.dialect.name
+                stmt: Any
+                if dialect == "sqlite":
+                    stmt = sqlite_insert(user_preferences_table).values(**values)
+                elif dialect == "postgresql":
+                    stmt = postgresql_insert(user_preferences_table).values(**values)
+                else:
+                    raise NotImplementedError(
+                        "PreferencesService requires an atomic upsert for session database "
+                        f"dialect {dialect!r}; supported dialects: sqlite, postgresql"
+                    )
                 update_clause: dict[str, object] = {"updated_at": now}
                 if payload.default_mode is not None:
                     update_clause["default_composer_mode"] = payload.default_mode

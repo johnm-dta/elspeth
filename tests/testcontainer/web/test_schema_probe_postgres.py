@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import threading
 import time
@@ -20,6 +21,8 @@ from tests.unit.core.test_schema_shape import _static_check_issues
 from elspeth.core.landscape.database import SchemaCompatibilityError
 from elspeth.core.schema_shape import _text_builtin_identity_rows_on_connection
 from elspeth.web import schema_probe as schema_probe_module
+from elspeth.web.preferences.models import UpdateComposerPreferencesRequest
+from elspeth.web.preferences.service import PreferencesService
 from elspeth.web.schema_probe import (
     SchemaInitBusyError,
     SchemaState,
@@ -77,6 +80,24 @@ def test_postgres_session_init_does_not_poison_later_sqlite_schema(postgres_engi
     initialize_session_schema(sqlite_engine)
 
     assert inspect(sqlite_engine).get_foreign_keys("chat_messages")
+
+
+def test_preferences_upsert_round_trips_on_postgres(postgres_engine: Engine) -> None:
+    """The account preferences write path must use PostgreSQL's upsert builder."""
+    init_session_schema(postgres_engine)
+    service = PreferencesService(postgres_engine)
+
+    transition = asyncio.run(
+        service.update_composer_preferences(
+            "postgres-preferences-user",
+            UpdateComposerPreferencesRequest(default_mode="guided", tutorial_completed_at=None),
+        )
+    )
+
+    assert transition.prior is None
+    assert transition.current.default_mode == "guided"
+    assert transition.current.tutorial_completed_at is None
+    assert asyncio.run(service.get_composer_preferences("postgres-preferences-user")) == transition.current
 
 
 def test_landscape_server_default_is_false(postgres_engine: Engine) -> None:

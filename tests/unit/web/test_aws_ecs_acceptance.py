@@ -8,6 +8,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 from collections.abc import Callable, Mapping
@@ -24,12 +25,15 @@ from elspeth.web import aws_ecs_acceptance as acceptance
 
 EXPECTED_COMMANDS = {
     "capture",
+    "provision-storage",
+    "scenario-namespace",
     "verify-api",
     "verify-payloads",
     "verify-local-auth",
     "verify-s3",
     "verify-bedrock",
     "verify-bedrock-guardrails",
+    "verify-connection-budget",
     "verify-operator-telemetry",
     "extract-exec-receipt",
     "sanitize-evidence",
@@ -40,8 +44,10 @@ EXPECTED_COMMANDS = {
     "approval-require-current",
     "scenario-load",
     "validate-task-definition-policy",
+    "compatibility-record-validate",
     "orphan-sweep",
     "cleanup-evidence-finalize",
+    "evidence-export-receipt",
 }
 
 
@@ -879,6 +885,75 @@ def test_verify_local_auth_fails_closed_without_creating_or_echoing_database_pat
     assert str(data_dir) not in str(raised.value)
     if mode == "missing":
         assert not auth_db.exists()
+
+
+def test_provision_storage_creates_and_probes_required_non_root_directories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(mode=0o700)
+    payload_root = data_dir / "payloads"
+    monkeypatch.setattr(
+        acceptance,
+        "settings_from_env",
+        lambda: SimpleNamespace(
+            data_dir=data_dir,
+            payload_store_path=payload_root,
+            get_payload_store_path=lambda: payload_root,
+        ),
+    )
+
+    receipt = acceptance.provision_storage()
+
+    assert receipt == {
+        "check": "provision-storage",
+        "ok": True,
+        "uid": 1000,
+        "gid": 1000,
+        "directories": 3,
+        "write_read_fsync_delete_probes": 3,
+    }
+    assert payload_root.is_dir()
+    assert (data_dir / "blobs").is_dir()
+    assert not list(data_dir.rglob(".elspeth-probe-*"))
+
+
+@pytest.mark.parametrize("payload_kind", ["data", "blobs"])
+def test_provision_storage_rejects_duplicate_required_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload_kind: str) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(mode=0o700)
+    payload_root = data_dir if payload_kind == "data" else data_dir / "blobs"
+    monkeypatch.setattr(
+        acceptance,
+        "settings_from_env",
+        lambda: SimpleNamespace(
+            data_dir=data_dir,
+            payload_store_path=payload_root,
+            get_payload_store_path=lambda: payload_root,
+        ),
+    )
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="storage_boundary"):
+        acceptance.provision_storage()
+
+
+def test_provision_storage_rejects_outside_payload_root_without_creating_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(mode=0o700)
+    payload_root = tmp_path / "outside" / "payloads"
+    monkeypatch.setattr(
+        acceptance,
+        "settings_from_env",
+        lambda: SimpleNamespace(
+            data_dir=data_dir,
+            payload_store_path=payload_root,
+            get_payload_store_path=lambda: payload_root,
+        ),
+    )
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="storage_boundary"):
+        acceptance.provision_storage()
+
+    assert not payload_root.exists()
+    assert not payload_root.parent.exists()
 
 
 def test_verify_payloads_uses_read_only_landscape_and_retrieves_every_non_null_ref(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2286,6 +2361,12 @@ def test_verify_operator_telemetry_live_positive_uses_default_chain_clients_and_
         operator_telemetry_task_definition_family="elspeth-web",
         operator_telemetry_task_definition_revision="17",
     )
+    existing_run_ids: list[str] = []
+
+    def existing_audit_factory(_settings: object, run_id: str) -> _TelemetryAudit:
+        existing_run_ids.append(run_id)
+        return _TelemetryAudit([])
+
     result = acceptance.verify_operator_telemetry_live(
         {
             "AWS_REGION": "ap-southeast-2",
@@ -2294,8 +2375,10 @@ def test_verify_operator_telemetry_live_positive_uses_default_chain_clients_and_
             "ELSPETH_ACCEPTANCE_SCENARIO_ID": "A",
         },
         phase="positive",
+        landscape_run_id="landscape-run-internal",
         settings_loader=lambda: settings,
-        audit_factory=lambda _settings, _env: _TelemetryAudit([]),
+        audit_factory=lambda _settings, _env: pytest.fail("new API capture must not run for an existing Landscape ID"),
+        existing_audit_factory=existing_audit_factory,
         emitter_factory=lambda _settings: _TelemetryEmitter([]),
         aws_client_factory=client_factory,
         policy=acceptance.AcceptancePolicy(attempts=1, interval_seconds=0),
@@ -2341,7 +2424,164 @@ def test_verify_operator_telemetry_live_positive_uses_default_chain_clients_and_
         ("close", "xray"),
         ("close", "cloudwatch"),
     ]
+    assert existing_run_ids == ["landscape-run-internal"]
     assert "must-not-escape" not in json.dumps(result)
+
+
+def test_verify_connection_budget_live_queries_cluster_metric_and_database_limit() -> None:
+    calls: list[dict[str, object]] = []
+
+    class CloudWatch:
+        def get_metric_data(self, **kwargs: object) -> object:
+            calls.append(kwargs)
+            return {
+                "MetricDataResults": [
+                    {
+                        "Id": "connections",
+                        "StatusCode": "Complete",
+                        "Timestamps": [datetime(2026, 7, 14, 1, minute, tzinfo=UTC) for minute in range(10)],
+                        "Values": [7.0, 8.0, 7.0, 6.0, 5.0, 5.0, 4.0, 4.0, 3.0, 3.0],
+                    }
+                ]
+            }
+
+        def close(self) -> None:
+            calls.append({"closed": True})
+
+    receipt = acceptance.verify_connection_budget_live(
+        {"AWS_REGION": "ap-southeast-2"},
+        cluster_id="a-0123456789abcdef0123-db",
+        start_time="2026-07-14T01:00:00Z",
+        approved_budget=20,
+        safety_margin=10,
+        settings_loader=lambda: object(),
+        max_connections_reader=lambda _settings: 100,
+        aws_client_factory=lambda service, region: (
+            CloudWatch() if (service, region) == ("cloudwatch", "ap-southeast-2") else pytest.fail("unexpected client")
+        ),
+        now=lambda: datetime(2026, 7, 14, 1, 11, tzinfo=UTC),
+        attempts=1,
+    )
+
+    assert receipt == {
+        "schema": "elspeth.rds-connection-budget.v2",
+        "cluster_id_sha256": hashlib.sha256(b"a-0123456789abcdef0123-db").hexdigest(),
+        "window_start": "2026-07-14T01:00:00Z",
+        "window_end": "2026-07-14T01:10:00Z",
+        "period_seconds": 60,
+        "expected_points": 10,
+        "points": [
+            {"timestamp": f"2026-07-14T01:{minute:02d}:00Z", "count": count}
+            for minute, count in enumerate([7.0, 8.0, 7.0, 6.0, 5.0, 5.0, 4.0, 4.0, 3.0, 3.0])
+        ],
+        "high_water": 8.0,
+        "max_connections": 100,
+        "approved_budget": 20,
+        "safety_margin": 10,
+        "ok": True,
+    }
+    query = calls[0]["MetricDataQueries"]
+    assert query[0]["MetricStat"]["Metric"]["Dimensions"] == [  # type: ignore[index]
+        {"Name": "DBClusterIdentifier", "Value": "a-0123456789abcdef0123-db"}
+    ]
+    assert calls[0]["StartTime"] == datetime(2026, 7, 14, 1, 0, tzinfo=UTC)
+    assert calls[0]["EndTime"] == datetime(2026, 7, 14, 1, 10, tzinfo=UTC)
+    assert calls[-1] == {"closed": True}
+
+
+def test_verify_connection_budget_live_rejects_non_minute_aligned_start() -> None:
+    with pytest.raises(acceptance.AcceptanceCheckError, match="connection_budget_input"):
+        acceptance.verify_connection_budget_live(
+            {"AWS_REGION": "ap-southeast-2"},
+            cluster_id="a-0123456789abcdef0123-db",
+            start_time="2026-07-14T01:00:59Z",
+            approved_budget=20,
+            safety_margin=10,
+            now=lambda: datetime(2026, 7, 14, 1, 11, tzinfo=UTC),
+        )
+
+
+def test_verify_connection_budget_live_retries_partial_data_even_when_it_has_points() -> None:
+    responses = [
+        {
+            "MetricDataResults": [
+                {
+                    "Id": "connections",
+                    "StatusCode": "PartialData",
+                    "Timestamps": [datetime(2026, 7, 14, 1, 1, tzinfo=UTC)],
+                    "Values": [2.0],
+                }
+            ]
+        },
+        {
+            "MetricDataResults": [
+                {
+                    "Id": "connections",
+                    "StatusCode": "Complete",
+                    "Timestamps": [datetime(2026, 7, 14, 1, minute, tzinfo=UTC) for minute in range(10)],
+                    "Values": [8.0] * 10,
+                }
+            ]
+        },
+    ]
+    sleeps: list[float] = []
+
+    class CloudWatch:
+        def get_metric_data(self, **_kwargs: object) -> object:
+            return responses.pop(0)
+
+        def close(self) -> None:
+            pass
+
+    receipt = acceptance.verify_connection_budget_live(
+        {"AWS_REGION": "ap-southeast-2"},
+        cluster_id="a-0123456789abcdef0123-db",
+        start_time="2026-07-14T01:00:00Z",
+        approved_budget=20,
+        safety_margin=10,
+        settings_loader=lambda: object(),
+        max_connections_reader=lambda _settings: 100,
+        aws_client_factory=lambda _service, _region: CloudWatch(),
+        now=lambda: datetime(2026, 7, 14, 1, 11, tzinfo=UTC),
+        sleep=sleeps.append,
+        attempts=2,
+    )
+
+    assert receipt["high_water"] == 8.0
+    assert sleeps == [30.0]
+
+
+def test_verify_connection_budget_live_retries_complete_but_sparse_grid() -> None:
+    full_timestamps = [datetime(2026, 7, 14, 1, minute, tzinfo=UTC) for minute in range(10)]
+    responses = [
+        {"MetricDataResults": [{"Id": "connections", "StatusCode": "Complete", "Timestamps": full_timestamps[:-1], "Values": [2.0] * 9}]},
+        {"MetricDataResults": [{"Id": "connections", "StatusCode": "Complete", "Timestamps": full_timestamps, "Values": [3.0] * 10}]},
+    ]
+    sleeps: list[float] = []
+
+    class CloudWatch:
+        def get_metric_data(self, **_kwargs: object) -> object:
+            return responses.pop(0)
+
+        def close(self) -> None:
+            pass
+
+    receipt = acceptance.verify_connection_budget_live(
+        {"AWS_REGION": "ap-southeast-2"},
+        cluster_id="a-0123456789abcdef0123-db",
+        start_time="2026-07-14T01:00:00Z",
+        approved_budget=20,
+        safety_margin=10,
+        settings_loader=lambda: object(),
+        max_connections_reader=lambda _settings: 100,
+        aws_client_factory=lambda _service, _region: CloudWatch(),
+        now=lambda: datetime(2026, 7, 14, 1, 11, tzinfo=UTC),
+        sleep=sleeps.append,
+        attempts=2,
+    )
+
+    assert receipt["expected_points"] == 10
+    assert sleeps == [30.0]
 
 
 def test_verify_operator_telemetry_live_outage_requires_external_stop_effects_and_rejects_aws_overrides() -> None:
@@ -2553,6 +2793,23 @@ def _operator_receipt_details(*, phase: str = "positive") -> dict[str, object]:
     }
 
 
+def _connection_budget_details() -> dict[str, object]:
+    return {
+        "schema": "elspeth.rds-connection-budget.v2",
+        "cluster_id_sha256": "a" * 64,
+        "window_start": "2026-07-14T01:00:00Z",
+        "window_end": "2026-07-14T01:10:00Z",
+        "period_seconds": 60,
+        "expected_points": 10,
+        "points": [{"timestamp": f"2026-07-14T01:{minute:02d}:00Z", "count": 8.0} for minute in range(10)],
+        "high_water": 8.0,
+        "max_connections": 100,
+        "approved_budget": 20,
+        "safety_margin": 10,
+        "ok": True,
+    }
+
+
 def _receipt_env() -> dict[str, str]:
     return {
         "ELSPETH_ACCEPTANCE_CANDIDATE_SHA": "c" * 40,
@@ -2636,6 +2893,7 @@ def test_exec_receipt_round_trip_binds_candidate_task_hash_scenario_and_check() 
     ("check", "details"),
     [
         ("verify-bedrock-guardrails", _guardrail_receipt_details()),
+        ("verify-connection-budget", _connection_budget_details()),
         ("verify-operator-telemetry", _operator_receipt_details()),
         ("verify-operator-telemetry", _operator_receipt_details(phase="outage")),
     ],
@@ -2802,16 +3060,22 @@ def _scenario_inventory(
     phase: str = "resolved",
 ) -> dict[str, object]:
     values = {name: "" for name in acceptance.SCENARIO_ASSIGNMENT_NAMES if name not in {"ACTIVE_SCENARIO_ID", "ACCEPTANCE_RUN_ID"}}
-    namespace = f"{run_id}-{scenario_id.lower()}"
+    namespace = acceptance.scenario_resource_namespace(run_id, scenario_id)
     account = "123456789012"
     region = "ap-southeast-2"
     task_families = [f"acceptance-{namespace}"]
     task_arns = [f"arn:aws:ecs:{region}:{account}:task-definition/{task_families[0]}:{revision}" for revision in range(1, 7)]
-    listener_arn = (
-        f"arn:aws:elasticloadbalancing:{region}:{account}:listener-rule/app/{namespace}-alb/0123456789abcdef/"
-        "0123456789abcdef/0123456789abcdef"
+    load_balancer_suffix = f"app/{namespace}-alb/0123456789abcdef"
+    listener_arn = f"arn:aws:elasticloadbalancing:{region}:{account}:listener/{load_balancer_suffix}/0123456789abcdef"
+    listener_rule_arn = (
+        f"arn:aws:elasticloadbalancing:{region}:{account}:listener-rule/{load_balancer_suffix}/0123456789abcdef/0123456789abcdef"
     )
-    log_groups = [f"/aws/ecs/{namespace}-web", f"/aws/ecs/{namespace}-doctor", f"/aws/events/{namespace}-deployments"]
+    log_groups = [
+        f"/aws/ecs/{namespace}-web",
+        f"/aws/ecs/{namespace}-doctor",
+        f"/aws/events/{namespace}-deployments",
+        f"/aws/ecs/{namespace}-operator-metrics",
+    ]
     values.update(
         {
             "DEPLOYMENT_MODE": "first" if scenario_id == "A" else "upgrade",
@@ -2820,6 +3084,8 @@ def _scenario_inventory(
             "ECS_CLUSTER": f"acceptance-{namespace}-cluster",
             "ECS_SERVICE": f"acceptance-{namespace}-service",
             "WEB_CONTAINER_NAME": "elspeth-web",
+            "ELSPETH_WEB__DATA_DIR": "/var/lib/elspeth",
+            "ELSPETH_WEB__PAYLOAD_STORE_PATH": "/var/lib/elspeth/payloads",
             "ELSPETH_BEDROCK_LIVE_TEST_MODEL": "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
             "TARGET_GROUP_ARN": f"arn:aws:elasticloadbalancing:{region}:{account}:targetgroup/{namespace}-target/0123456789abcdef",
             "ALB_BASE_URL": f"https://{namespace}.example.invalid",
@@ -2843,6 +3109,7 @@ def _scenario_inventory(
             "WEB_LOG_STREAM_PREFIX": "web",
             "DOCTOR_LOG_GROUP": log_groups[1],
             "DOCTOR_LOG_STREAM_PREFIX": "doctor",
+            "OPERATOR_METRICS_LOG_GROUP": log_groups[3],
             "ECS_DEPLOYMENT_EVENT_RULE": f"{namespace}-deployments",
             "ECS_DEPLOYMENT_EVENT_TARGET_ID": f"{namespace}-deployment-log",
             "ECS_DEPLOYMENT_EVENT_LOG_GROUP": log_groups[2],
@@ -2856,19 +3123,25 @@ def _scenario_inventory(
         }
     )
     policy_env = _guardrail_env()
+    scenario_profiles = json.loads(policy_env["ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES"])
+    compact_namespace = namespace.replace("-", "")
+    for profile in scenario_profiles:
+        profile["guardrail_identifier"] = (
+            f"{compact_namespace}{'prompt' if profile['plugin'] == 'aws_bedrock_prompt_shield' else 'content'}"
+        )
+    policy_env["ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES"] = json.dumps(scenario_profiles, separators=(",", ":"))
     values.update({name: policy_env[name] for name in acceptance.PLUGIN_POLICY_ASSIGNMENT_NAMES})
     values["ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256"] = acceptance.plugin_policy_binding_sha256(values)
-    if scenario_id == "A":
-        values.update(
-            {
-                "FIRST_DEPLOY_LISTENER_RULE_ARN": listener_arn,
-                "FIRST_DEPLOY_FORWARD_ACTIONS": json.dumps(
-                    [{"Type": "forward", "TargetGroupArn": values["TARGET_GROUP_ARN"]}], separators=(",", ":")
-                ),
-                "FIRST_DEPLOY_DISABLED_ACTIONS": '[{"Type":"fixed-response","FixedResponseConfig":{"StatusCode":"503"}}]',
-            }
-        )
-    else:
+    values.update(
+        {
+            "FIRST_DEPLOY_LISTENER_RULE_ARN": listener_rule_arn,
+            "FIRST_DEPLOY_FORWARD_ACTIONS": json.dumps(
+                [{"Type": "forward", "TargetGroupArn": values["TARGET_GROUP_ARN"]}], separators=(",", ":")
+            ),
+            "FIRST_DEPLOY_DISABLED_ACTIONS": '[{"Type":"fixed-response","FixedResponseConfig":{"StatusCode":"503"}}]',
+        }
+    )
+    if scenario_id == "B":
         pool_id = f"{region}_AbCd1234"
         values.update(
             {
@@ -2887,6 +3160,7 @@ def _scenario_inventory(
             "ALB_ARN",
             "CANDIDATE_TASK_DEFINITION",
             "DOCTOR_TASK_DEFINITION",
+            "DOCTOR_NETWORK_CONFIGURATION",
             "PAYLOAD_VERIFIER_TASK_DEFINITION",
             "LOCAL_AUTH_VERIFIER_TASK_DEFINITION",
             "ROLLBACK_DOCTOR_TASK_DEFINITION",
@@ -2900,6 +3174,16 @@ def _scenario_inventory(
             "OIDC_EXPECTED_AUTHORIZATION_ORIGIN",
         ):
             values[field] = ""
+        values["ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES"] = "[]"
+        values["ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256"] = acceptance.plugin_policy_binding_sha256(values)
+    guardrail_profiles = json.loads(values["ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES"])
+    bedrock_guardrails = [
+        {
+            "identifier": profile["guardrail_identifier"],
+            "versions": [profile["guardrail_version"]],
+        }
+        for profile in guardrail_profiles
+    ]
     return {
         "schema": "elspeth.aws-ecs-scenario-inventory.v5",
         "acceptance_run_id": run_id,
@@ -2913,17 +3197,19 @@ def _scenario_inventory(
             "tag_key": "ACCEPTANCE_RUN_ID",
             "cleanup_owner": "aws-acceptance-owner",
             "ecs_task_definition_families": task_families,
-            "elbv2_listener_arns": [listener_arn] if scenario_id == "A" and phase == "resolved" else [],
+            "elbv2_listener_arns": [listener_arn] if phase == "resolved" else [],
             "rds_db_instance_identifiers": [f"{namespace}-aurora-1"],
             "efs_creation_tokens": [f"{namespace}-efs"],
-            "efs_file_system_ids": [],
-            "efs_access_point_ids": [],
+            "efs_file_system_ids": [f"fs-0123456789abcde{scenario_id.lower()}"] if phase == "resolved" else [],
+            "efs_access_point_ids": [f"fsap-0123456789abcde{scenario_id.lower()}"] if phase == "resolved" else [],
             "secret_ids": [f"{namespace}-database-secret"],
+            "iam_role_names": [f"{namespace}-task-role", f"{namespace}-execution-role"],
             "log_group_names": log_groups,
+            "log_resource_policy_names": [f"{namespace}-delivery-policy"],
             "cloudwatch_dashboard_names": [f"{namespace}-dashboard"],
             "cloudwatch_alarm_names": [f"{namespace}-alarm"],
             "cloudwatch_retained_metrics": [],
-            "xray_group_names": [f"{namespace}-xray-group"],
+            "xray_group_names": [f"{namespace}-xray"],
             "xray_sampling_rule_names": [f"{namespace}-sampling"],
             "xray_retained_trace_ids": [],
             "transaction_search_baseline_sha256": hashlib.sha256(
@@ -2944,13 +3230,27 @@ def _scenario_inventory(
                     "target_ids": [f"{namespace}-deployment-log"],
                 }
             ],
-            "bedrock_guardrails": [],
+            "bedrock_guardrails": bedrock_guardrails,
             "cognito_subject_sub": "subject-1234" if scenario_id == "B" and phase == "resolved" else "",
             "cognito_pool_owned": scenario_id == "B" and phase == "resolved",
             "expected_retained_metric_series": 0,
             "expected_retained_trace_ids": 0,
         },
     }
+
+
+def test_scenario_resource_namespace_fits_strict_aws_name_limits() -> None:
+    run_id = "4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48"
+
+    scenario_a = acceptance.scenario_resource_namespace(run_id, "A")
+    scenario_b = acceptance.scenario_resource_namespace(run_id, "B")
+
+    assert re.fullmatch(r"a-[0-9a-f]{20}", scenario_a)
+    assert re.fullmatch(r"b-[0-9a-f]{20}", scenario_b)
+    assert scenario_a != scenario_b
+    assert len(f"{scenario_a}-alb") <= 32
+    assert len(f"{scenario_a}-target") <= 32
+    assert len(f"{scenario_a}-xray") <= 32
 
 
 def _init_control_manifest(
@@ -3235,7 +3535,7 @@ def test_control_manifest_deadline_blocks_acceptance_but_records_and_permits_cle
     )
     assert "DEADLINE_EXPIRED=1" in assignments
     assert "ELSPETH_CLEANUP_MODE=1" in assignments
-    assert "EMERGENCY_CLEANUP_DEADLINE_UTC=2026-07-14T03:31:00Z" in assignments
+    assert "EMERGENCY_CLEANUP_DEADLINE_UTC=2026-07-14T05:01:00Z" in assignments
     assert "ACCEPTANCE_REENTRY_FORBIDDEN=1" in assignments
     assert acceptance.control_manifest_get(path, "deadline_failure_recorded") == "true"
     assert acceptance.control_manifest_get(path, "verdict_failures") == '["teardown_deadline"]'
@@ -3322,6 +3622,29 @@ def test_control_manifest_rejects_shared_terraform_state_and_foreign_scenario_re
         _init_control_manifest(tmp_path / "policy-drift.json", inventory_mutator=drift_policy_binding)
 
 
+def test_scenario_inventory_binds_listener_rule_to_its_parent_listener(tmp_path: Path) -> None:
+    def replace_listener_with_rule(inventory: dict[str, object], scenario: str) -> None:
+        if scenario != "A":
+            return
+        values = inventory["values"]
+        orphan = inventory["orphan_sweep"]
+        assert isinstance(values, dict)
+        assert isinstance(orphan, dict)
+        orphan["elbv2_listener_arns"] = [values["FIRST_DEPLOY_LISTENER_RULE_ARN"]]
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="scenario_inventory_binding"):
+        _init_control_manifest(tmp_path / "rule-as-listener.json", inventory_mutator=replace_listener_with_rule)
+
+    def omit_upgrade_listener(inventory: dict[str, object], scenario: str) -> None:
+        if scenario == "B":
+            orphan = inventory["orphan_sweep"]
+            assert isinstance(orphan, dict)
+            orphan["elbv2_listener_arns"] = []
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="scenario_inventory_binding"):
+        _init_control_manifest(tmp_path / "missing-upgrade-listener.json", inventory_mutator=omit_upgrade_listener)
+
+
 def test_scenario_load_is_exact_shell_round_trippable_and_rejects_inventory_drift(tmp_path: Path) -> None:
     path = tmp_path / "control.json"
     manifest = _init_control_manifest(path)
@@ -3339,9 +3662,8 @@ def test_scenario_load_is_exact_shell_round_trippable_and_rejects_inventory_drif
         capture_output=True,
         text=True,
     )
-    assert completed.stdout == (
-        f"A|acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-a-cluster|{manifest['scenarios']['A']['tf_binding_sha256']}\n"  # type: ignore[index]
-    )
+    namespace = acceptance.scenario_resource_namespace("4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48", "A")
+    assert completed.stdout == f"A|acceptance-{namespace}-cluster|{manifest['scenarios']['A']['tf_binding_sha256']}\n"  # type: ignore[index]
 
     inventory = tmp_path / "scenario-a.json"
     drifted = json.loads(inventory.read_text())
@@ -3359,6 +3681,8 @@ def test_scenario_load_is_exact_shell_round_trippable_and_rejects_inventory_drif
 @pytest.mark.parametrize(
     "field",
     [
+        "ELSPETH_WEB__DATA_DIR",
+        "ELSPETH_WEB__PAYLOAD_STORE_PATH",
         *acceptance.PLUGIN_POLICY_ASSIGNMENT_NAMES,
         "ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256",
         "ELSPETH_BEDROCK_LIVE_TEST_MODEL",
@@ -3377,18 +3701,59 @@ def test_task_definition_policy_binding_compares_returned_environment_to_protect
     environment = [
         {"name": name, "value": values[name]}
         for name in (
+            "ELSPETH_WEB__DATA_DIR",
+            "ELSPETH_WEB__PAYLOAD_STORE_PATH",
             *acceptance.PLUGIN_POLICY_ASSIGNMENT_NAMES,
             "ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256",
             "ELSPETH_BEDROCK_LIVE_TEST_MODEL",
             "AWS_REGION",
         )
     ]
+    acceptance_run_id = inventory["acceptance_run_id"]
+    environment.extend(
+        [
+            {"name": "ELSPETH_ACCEPTANCE_RUN_ID", "value": acceptance_run_id},
+            {"name": "ELSPETH_ACCEPTANCE_CANDIDATE_SHA", "value": inventory["candidate_sha"]},
+            {"name": "ELSPETH_ACCEPTANCE_SCENARIO_ID", "value": "A"},
+            {"name": "ELSPETH_ACCEPTANCE_S3_BUCKET", "value": values["ELSPETH_TEST_S3_BUCKET"]},
+            {
+                "name": "ELSPETH_ACCEPTANCE_S3_PREFIX",
+                "value": f"{acceptance.scenario_resource_namespace(acceptance_run_id, 'A')}/{acceptance_run_id}",
+            },
+        ]
+    )
     task_definition_arn = "arn:aws:ecs:ap-southeast-2:123456789012:task-definition/elspeth-web:17"
     payload = {
         "taskDefinition": {
             "taskDefinitionArn": task_definition_arn,
             "status": "ACTIVE",
-            "containerDefinitions": [{"name": container_name, "environment": environment, "secrets": []}],
+            "taskRoleArn": f"arn:aws:iam::123456789012:role/{inventory['orphan_sweep']['iam_role_names'][0]}",
+            "executionRoleArn": f"arn:aws:iam::123456789012:role/{inventory['orphan_sweep']['iam_role_names'][1]}",
+            "containerDefinitions": [
+                {
+                    "name": container_name,
+                    "essential": True,
+                    "environment": environment,
+                    "secrets": [],
+                    "mountPoints": [
+                        {
+                            "sourceVolume": "data",
+                            "containerPath": values["ELSPETH_WEB__DATA_DIR"],
+                            "readOnly": False,
+                        }
+                    ],
+                }
+            ],
+            "volumes": [
+                {
+                    "name": "data",
+                    "efsVolumeConfiguration": {
+                        "fileSystemId": "fs-0123456789abcdea",
+                        "transitEncryption": "ENABLED",
+                        "authorizationConfig": {"accessPointId": "fsap-0123456789abcdea", "iam": "ENABLED"},
+                    },
+                }
+            ],
         }
     }
 
@@ -3415,6 +3780,149 @@ def test_task_definition_policy_binding_compares_returned_environment_to_protect
             manifest_path=manifest_path,
             scenario_id="A",
             container_name=container_name,
+        )
+
+
+def test_task_definition_policy_binding_requires_explicit_nonroot_one_shot_entrypoint(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "control.json"
+    _init_control_manifest(manifest_path)
+    inventory = json.loads((tmp_path / "scenario-a.json").read_text())
+    values = inventory["values"]
+    container_name = values["WEB_CONTAINER_NAME"]
+    environment = [
+        {"name": name, "value": values[name]}
+        for name in (
+            "ELSPETH_WEB__DATA_DIR",
+            "ELSPETH_WEB__PAYLOAD_STORE_PATH",
+            *acceptance.PLUGIN_POLICY_ASSIGNMENT_NAMES,
+            "ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256",
+            "ELSPETH_BEDROCK_LIVE_TEST_MODEL",
+            "AWS_REGION",
+        )
+    ]
+    acceptance_run_id = inventory["acceptance_run_id"]
+    environment.extend(
+        [
+            {"name": "ELSPETH_ACCEPTANCE_RUN_ID", "value": acceptance_run_id},
+            {"name": "ELSPETH_ACCEPTANCE_CANDIDATE_SHA", "value": inventory["candidate_sha"]},
+            {"name": "ELSPETH_ACCEPTANCE_SCENARIO_ID", "value": "A"},
+            {"name": "ELSPETH_ACCEPTANCE_S3_BUCKET", "value": values["ELSPETH_TEST_S3_BUCKET"]},
+            {
+                "name": "ELSPETH_ACCEPTANCE_S3_PREFIX",
+                "value": f"{acceptance.scenario_resource_namespace(acceptance_run_id, 'A')}/{acceptance_run_id}",
+            },
+        ]
+    )
+    container = {
+        "name": container_name,
+        "essential": True,
+        "user": "1000:1000",
+        "entryPoint": ["python", "-m", "elspeth.web.aws_ecs_acceptance"],
+        "environment": environment,
+        "secrets": [],
+        "mountPoints": [{"sourceVolume": "data", "containerPath": values["ELSPETH_WEB__DATA_DIR"], "readOnly": False}],
+    }
+    payload = {
+        "taskDefinition": {
+            "taskDefinitionArn": "arn:aws:ecs:ap-southeast-2:123456789012:task-definition/elspeth-payload:17",
+            "status": "ACTIVE",
+            "taskRoleArn": f"arn:aws:iam::123456789012:role/{inventory['orphan_sweep']['iam_role_names'][0]}",
+            "executionRoleArn": f"arn:aws:iam::123456789012:role/{inventory['orphan_sweep']['iam_role_names'][1]}",
+            "containerDefinitions": [container],
+            "volumes": [
+                {
+                    "name": "data",
+                    "efsVolumeConfiguration": {
+                        "fileSystemId": "fs-0123456789abcdea",
+                        "transitEncryption": "ENABLED",
+                        "authorizationConfig": {"accessPointId": "fsap-0123456789abcdea", "iam": "ENABLED"},
+                    },
+                }
+            ],
+        }
+    }
+
+    acceptance.validate_task_definition_policy_binding(
+        payload,
+        manifest_path=manifest_path,
+        scenario_id="A",
+        container_name=container_name,
+        expected_user="1000:1000",
+    )
+    task_definition = payload["taskDefinition"]
+    original_task_role = task_definition["taskRoleArn"]
+    original_execution_role = task_definition["executionRoleArn"]
+    task_definition["taskRoleArn"] = original_execution_role
+    task_definition["executionRoleArn"] = original_task_role
+    with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
+        acceptance.validate_task_definition_policy_binding(
+            payload,
+            manifest_path=manifest_path,
+            scenario_id="A",
+            container_name=container_name,
+            expected_user="1000:1000",
+        )
+    task_definition["taskRoleArn"] = original_task_role
+    task_definition["executionRoleArn"] = original_execution_role
+    task_definition["taskRoleArn"] = "arn:aws:iam::999999999999:role/foreign-task-role"
+    with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
+        acceptance.validate_task_definition_policy_binding(
+            payload,
+            manifest_path=manifest_path,
+            scenario_id="A",
+            container_name=container_name,
+            expected_user="1000:1000",
+        )
+    task_definition["taskRoleArn"] = original_task_role
+    task_definition["volumes"].append(
+        {
+            "name": "foreign-data",
+            "efsVolumeConfiguration": {
+                "fileSystemId": "fs-ffffffffffffffffa",
+                "transitEncryption": "ENABLED",
+                "authorizationConfig": {"accessPointId": "fsap-ffffffffffffffffa", "iam": "ENABLED"},
+            },
+        }
+    )
+    container["mountPoints"].append({"sourceVolume": "foreign-data", "containerPath": "/foreign", "readOnly": False})
+    with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
+        acceptance.validate_task_definition_policy_binding(
+            payload,
+            manifest_path=manifest_path,
+            scenario_id="A",
+            container_name=container_name,
+            expected_user="1000:1000",
+        )
+    task_definition["volumes"].pop()
+    container["mountPoints"].pop()
+    task_definition["volumes"].append({"name": "data", "host": {}})
+    with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
+        acceptance.validate_task_definition_policy_binding(
+            payload,
+            manifest_path=manifest_path,
+            scenario_id="A",
+            container_name=container_name,
+            expected_user="1000:1000",
+        )
+    task_definition["volumes"].pop()
+    container["user"] = "0"
+    with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
+        acceptance.validate_task_definition_policy_binding(
+            payload,
+            manifest_path=manifest_path,
+            scenario_id="A",
+            container_name=container_name,
+            expected_user="1000:1000",
+        )
+    container["user"] = "1000:1000"
+    payload["taskDefinition"]["volumes"][0]["efsVolumeConfiguration"]["fileSystemId"] = "fs-ffffffffffffffffa"  # type: ignore[index]
+    with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
+        acceptance.validate_task_definition_policy_binding(
+            payload,
+            manifest_path=manifest_path,
+            scenario_id="A",
+            container_name=container_name,
+            expected_user="1000:1000",
         )
 
 
@@ -3447,6 +3955,61 @@ def test_scenario_inventory_requires_atomic_preapply_to_resolved_binding(tmp_pat
         )
 
 
+def test_scenario_inventory_resolves_real_provider_guardrail_profiles(tmp_path: Path) -> None:
+    def preapply(inventory: dict[str, object], _scenario: str) -> None:
+        values = inventory["values"]
+        assert isinstance(values, dict)
+        values["ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES"] = "[]"
+        values["ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256"] = acceptance.plugin_policy_binding_sha256(values)
+
+    def resolved(inventory: dict[str, object], _scenario: str) -> None:
+        values = inventory["values"]
+        orphan = inventory["orphan_sweep"]
+        assert isinstance(values, dict)
+        assert isinstance(orphan, dict)
+        profiles = json.loads(values["ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES"])
+        orphan["bedrock_guardrails"] = [
+            {
+                "identifier": profile["guardrail_identifier"],
+                "versions": [profile["guardrail_version"]],
+            }
+            for profile in profiles
+        ]
+
+    manifest = _init_control_manifest(
+        tmp_path / "guardrail-control.json",
+        preapply_inventory_mutator=preapply,
+        inventory_mutator=resolved,
+    )
+
+    assert manifest["scenarios"]["A"]["inventory_phase"] == "resolved"  # type: ignore[index]
+    assert manifest["scenarios"]["B"]["inventory_phase"] == "resolved"  # type: ignore[index]
+
+
+def test_scenario_inventory_rejects_guardrails_not_bound_to_policy_profiles(tmp_path: Path) -> None:
+    def mismatched(inventory: dict[str, object], _scenario: str) -> None:
+        orphan = inventory["orphan_sweep"]
+        assert isinstance(orphan, dict)
+        orphan["bedrock_guardrails"] = [{"identifier": "differentguardrail", "versions": ["1"]}]
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="scenario_inventory_binding"):
+        _init_control_manifest(tmp_path / "mismatched-guardrails.json", inventory_mutator=mismatched)
+
+
+def test_scenario_inventory_rejects_duplicate_profile_guardrail_binding(tmp_path: Path) -> None:
+    def duplicate_profile_binding(inventory: dict[str, object], _scenario: str) -> None:
+        values = inventory["values"]
+        assert isinstance(values, dict)
+        profiles = json.loads(values["ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES"])
+        profiles[1]["guardrail_identifier"] = profiles[0]["guardrail_identifier"]
+        profiles[1]["guardrail_version"] = profiles[0]["guardrail_version"]
+        values["ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES"] = json.dumps(profiles, separators=(",", ":"))
+        values["ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256"] = acceptance.plugin_policy_binding_sha256(values)
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="scenario_inventory_binding"):
+        _init_control_manifest(tmp_path / "duplicate-profile-guardrail.json", inventory_mutator=duplicate_profile_binding)
+
+
 def test_scenario_inventory_bind_requires_apply_evidence_deadline_and_preserved_preapply_contract(tmp_path: Path) -> None:
     missing_path = tmp_path / "missing-evidence-control.json"
     _init_control_manifest(missing_path, bind_resolved=False, prepare_apply_evidence=False)
@@ -3472,7 +4035,8 @@ def test_scenario_inventory_bind_requires_apply_evidence_deadline_and_preserved_
         if scenario == "A":
             values = inventory["values"]
             assert isinstance(values, dict)
-            values["ECS_SERVICE"] = "acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-a-changed-service"
+            namespace = acceptance.scenario_resource_namespace("4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48", "A")
+            values["ECS_SERVICE"] = f"acceptance-{namespace}-changed-service"
 
     with pytest.raises(acceptance.AcceptanceCheckError, match="scenario_inventory_conflict"):
         _init_control_manifest(tmp_path / "drift-control.json", inventory_mutator=drift_service)
@@ -3813,6 +4377,18 @@ class _OrphanNotFound(RuntimeError):
     response: ClassVar[dict[str, object]] = {"Error": {"Code": "ResourceNotFoundException"}}
 
 
+class _OrphanListenerNotFound(RuntimeError):
+    response: ClassVar[dict[str, object]] = {"Error": {"Code": "ListenerNotFound"}}
+
+
+class _OrphanRepositoryNotFound(RuntimeError):
+    response: ClassVar[dict[str, object]] = {"Error": {"Code": "RepositoryNotFoundException"}}
+
+
+class _OrphanNoSuchEntity(RuntimeError):
+    response: ClassVar[dict[str, object]] = {"Error": {"Code": "NoSuchEntity"}}
+
+
 def _empty_orphan_clients(*, tagged: list[dict[str, object]] | None = None) -> acceptance.OrphanSweepClients:
     return acceptance.OrphanSweepClients(
         tagging=_FakeOrphanClient({"get_resources": {"ResourceTagMappingList": tagged or []}}),
@@ -3840,7 +4416,8 @@ def _empty_orphan_clients(*, tagged: list[dict[str, object]] | None = None) -> a
             }
         ),
         secretsmanager=_FakeOrphanClient({"describe_secret": _OrphanNotFound()}),
-        logs=_FakeOrphanClient({"describe_log_groups": {"logGroups": []}}),
+        iam=_FakeOrphanClient({"get_role": _OrphanNoSuchEntity()}),
+        logs=_FakeOrphanClient({"describe_log_groups": {"logGroups": []}, "describe_resource_policies": {"resourcePolicies": []}}),
         cloudwatch=_FakeOrphanClient(
             {
                 "list_dashboards": {"DashboardEntries": []},
@@ -3901,6 +4478,97 @@ def test_orphan_sweep_closes_all_clients_emits_only_counts_and_accepts_zero_surv
     assert receipt["ok"] is True
     assert "4adf8a87" not in json.dumps(receipt)
     assert all(client.closed for client in clients)
+
+
+@pytest.mark.parametrize("surface", ["guardrail-draft", "iam-role", "logs-resource-policy"])
+def test_orphan_sweep_rejects_non_taggable_or_unlisted_owned_survivors(tmp_path: Path, surface: str) -> None:
+    manifest_path = tmp_path / "control.json"
+    _init_control_manifest(manifest_path)
+    acceptance.control_manifest_update(
+        manifest_path,
+        cleanup_required=True,
+        ecr_baseline_tag="acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-baseline",
+        ecr_candidate_tag="acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-candidate",
+        ecr_registry="123456789012.dkr.ecr.ap-southeast-2.amazonaws.com",
+        ecr_repository="elspeth-acceptance",
+        now=lambda: datetime(2026, 7, 14, 1, 1, tzinfo=UTC),
+    )
+    clients = _empty_orphan_clients()
+    if surface == "guardrail-draft":
+        clients.bedrock.responses["list_guardrails"] = {"guardrails": [{"version": "DRAFT"}]}  # type: ignore[union-attr]
+    elif surface == "iam-role":
+        clients.iam.responses["get_role"] = lambda **kwargs: {"Role": {"RoleName": kwargs["RoleName"]}}  # type: ignore[union-attr]
+    else:
+        namespace = acceptance.scenario_resource_namespace("4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48", "A")
+        clients.logs.responses["describe_resource_policies"] = {  # type: ignore[union-attr]
+            "resourcePolicies": [{"policyName": f"{namespace}-delivery-policy"}]
+        }
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="orphan_sweep_survivors"):
+        acceptance.orphan_sweep(
+            manifest_path,
+            acceptance_run_id="4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48",
+            clients=clients,
+            environ={},
+            now=lambda: datetime(2026, 7, 14, 1, 2, tzinfo=UTC),
+        )
+
+
+def test_orphan_sweep_accepts_listener_already_removed_by_terraform(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "control.json"
+    _init_control_manifest(manifest_path)
+    acceptance.control_manifest_update(
+        manifest_path,
+        cleanup_required=True,
+        ecr_baseline_tag="acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-baseline",
+        ecr_candidate_tag="acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-candidate",
+        ecr_registry="123456789012.dkr.ecr.ap-southeast-2.amazonaws.com",
+        ecr_repository="elspeth-acceptance",
+        now=lambda: datetime(2026, 7, 14, 1, 1, tzinfo=UTC),
+    )
+    clients = _empty_orphan_clients()
+    assert isinstance(clients.elbv2, _FakeOrphanClient)
+    clients.elbv2.responses["describe_listeners"] = _OrphanListenerNotFound()
+
+    receipt = acceptance.orphan_sweep(
+        manifest_path,
+        acceptance_run_id="4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48",
+        clients=clients,
+        environ={},
+        now=lambda: datetime(2026, 7, 14, 1, 2, tzinfo=UTC),
+    )
+
+    assert receipt["ok"] is True
+    listener_calls = [kwargs for method, kwargs in clients.elbv2.calls if method == "describe_listeners"]
+    assert len(listener_calls) == 2
+    assert all("listener-rule/" not in str(call["ListenerArns"][0]) for call in listener_calls)
+
+
+def test_orphan_sweep_accepts_bootstrap_repository_not_created_or_already_removed(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "control.json"
+    _init_control_manifest(manifest_path)
+    acceptance.control_manifest_update(
+        manifest_path,
+        cleanup_required=True,
+        ecr_baseline_tag="acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-baseline",
+        ecr_candidate_tag="acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-candidate",
+        ecr_registry="123456789012.dkr.ecr.ap-southeast-2.amazonaws.com",
+        ecr_repository="elspeth-acceptance",
+        now=lambda: datetime(2026, 7, 14, 1, 1, tzinfo=UTC),
+    )
+    clients = _empty_orphan_clients()
+    assert isinstance(clients.ecr, _FakeOrphanClient)
+    clients.ecr.responses["describe_images"] = _OrphanRepositoryNotFound()
+
+    receipt = acceptance.orphan_sweep(
+        manifest_path,
+        acceptance_run_id="4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48",
+        clients=clients,
+        environ={},
+        now=lambda: datetime(2026, 7, 14, 1, 2, tzinfo=UTC),
+    )
+
+    assert receipt["ok"] is True
 
 
 @pytest.mark.parametrize("bind_resolved", [False, True])
@@ -4159,7 +4827,8 @@ def test_orphan_sweep_deletes_ecr_tags_and_moves_owned_active_task_definition_to
         ecr_repository="elspeth-acceptance",
         now=lambda: datetime(2026, 7, 14, 1, 1, tzinfo=UTC),
     )
-    task_definition_arn = "arn:aws:ecs:ap-southeast-2:123456789012:task-definition/acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-a:1"
+    namespace = acceptance.scenario_resource_namespace("4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48", "A")
+    task_definition_arn = f"arn:aws:ecs:ap-southeast-2:123456789012:task-definition/acceptance-{namespace}:1"
     clients = _empty_orphan_clients(tagged=[{"ResourceARN": task_definition_arn}])
     clients.ecs.responses.update(  # type: ignore[union-attr]
         {
@@ -4334,6 +5003,168 @@ def test_receipt_store_persists_only_canonical_sanitized_content_and_checkpoints
     assert len(json.loads(manifest_path.read_text())["evidence"]["receipts"]) == 1
 
 
+def test_receipt_store_accepts_bootstrap_terraform_but_rejects_application_receipts(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "control.json"
+    _init_control_manifest(manifest_path, bind_resolved=False, prepare_apply_evidence=False)
+    receipt_path = tmp_path / "bootstrap-plan.json"
+    receipt_path.write_text(json.dumps(_terraform_receipt()))
+    os.chmod(receipt_path, 0o600)
+
+    receipt_hash = acceptance.receipt_store(
+        manifest_path,
+        scenario_id="bootstrap",
+        kind="terraform-plan",
+        subject_id="a" * 64,
+        receipt_file=receipt_path,
+    )
+
+    assert len(receipt_hash) == 64
+    with pytest.raises(acceptance.AcceptanceCheckError, match="receipt_store_binding"):
+        acceptance.receipt_store(
+            manifest_path,
+            scenario_id="bootstrap",
+            kind="verify-s3",
+            subject_id="task",
+            receipt_bytes=json.dumps(_s3_receipt_details()).encode(),
+        )
+
+    approval_path = tmp_path / "bootstrap-approval.json"
+    approval_path.write_text(
+        json.dumps(
+            {
+                "schema": "elspeth.aws-ecs-approval.v1",
+                "acceptance_run_id": "4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48",
+                "scenario_id": "bootstrap",
+                "kind": "terraform-plan",
+                "plan_receipt_hash": receipt_hash,
+                "approver_identity": "infrastructure-owner",
+                "authority": "terraform-apply",
+                "decision": "approved",
+                "approved_at": "2026-07-14T01:00:00Z",
+                "expires_at": "2026-07-14T02:00:00Z",
+                "key_id": "owner-key-1",
+                "signature": "opaque-signature",
+            }
+        )
+    )
+    os.chmod(approval_path, 0o600)
+    approval_hash = acceptance.approval_verify(
+        manifest_path,
+        scenario_id="bootstrap",
+        kind="terraform-plan",
+        plan_receipt_hash=receipt_hash,
+        approval_file=approval_path,
+        signature_verifier=lambda _payload, _signature, _key: True,
+        now=lambda: datetime(2026, 7, 14, 1, 5, tzinfo=UTC),
+    )
+    acceptance.approval_require_current(
+        manifest_path,
+        scenario_id="bootstrap",
+        kind="terraform-plan",
+        plan_receipt_hash=receipt_hash,
+        approval_hash=approval_hash,
+        now=lambda: datetime(2026, 7, 14, 1, 6, tzinfo=UTC),
+    )
+
+
+def test_compatibility_record_is_bound_to_resolved_scenario_and_stored_by_hash(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "control.json"
+    _init_control_manifest(manifest_path)
+    acceptance.control_manifest_update(
+        manifest_path,
+        cleanup_required=True,
+        ecr_baseline_tag=f"acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-baseline-{'a' * 40}",
+        ecr_candidate_tag="acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-candidate",
+        ecr_registry="123456789012.dkr.ecr.ap-southeast-2.amazonaws.com",
+        ecr_repository="elspeth-acceptance",
+        now=lambda: datetime(2026, 7, 14, 1, 2, tzinfo=UTC),
+    )
+    acceptance.control_manifest_update(
+        manifest_path,
+        ecr_baseline_digest="sha256:" + "b" * 64,
+        ecr_candidate_digest="sha256:" + "d" * 64,
+        now=lambda: datetime(2026, 7, 14, 1, 2, 10, tzinfo=UTC),
+    )
+    inventory = json.loads((tmp_path / "scenario-b.json").read_text())
+    record = {
+        "schema": "elspeth.aws-ecs-compatibility-record.v2",
+        "record_id": "change-123",
+        "acceptance_run_id": inventory["acceptance_run_id"],
+        "scenario_id": "B",
+        "candidate_sha": inventory["candidate_sha"],
+        "candidate_image_digest": "sha256:" + "d" * 64,
+        "candidate_task_definition": inventory["values"]["CANDIDATE_TASK_DEFINITION"],
+        "candidate_doctor_task_definition": inventory["values"]["DOCTOR_TASK_DEFINITION"],
+        "candidate_package_version": "0.7.1",
+        "previous_source_sha": "a" * 40,
+        "previous_image_digest": "sha256:" + "b" * 64,
+        "previous_task_definition": inventory["values"]["PREVIOUS_TASK_DEFINITION"],
+        "rollback_doctor_task_definition": inventory["values"]["ROLLBACK_DOCTOR_TASK_DEFINITION"],
+        "previous_package_version": "0.7.1",
+        "schema_facts": {
+            "candidate": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": True},
+            "previous": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": True},
+            "structural_changes": "none",
+            "semantics_only_changes": "none",
+            "archive_export_decision": "not_required",
+            "destructive_reset_required": False,
+        },
+        "forward_compatible": True,
+        "backward_compatible": True,
+        "rollback_permitted": True,
+        "decision": "approved",
+        "approver_identity": "database-operator",
+        "countersigner_identity": "release-operator",
+        "approved_at": "2026-07-14T01:00:00Z",
+        "countersigned_at": "2026-07-14T01:01:00Z",
+        "expires_at": "2026-07-14T03:00:00Z",
+    }
+    record_path = tmp_path / "compatibility-b.json"
+    record_path.write_text(json.dumps(record))
+    os.chmod(record_path, 0o600)
+
+    receipt = acceptance.validate_compatibility_record(
+        record_path,
+        manifest_path=manifest_path,
+        scenario_id="B",
+        now=lambda: datetime(2026, 7, 14, 1, 3, tzinfo=UTC),
+    )
+    for path, replacement in (
+        (("candidate_doctor_task_definition",), inventory["values"]["CANDIDATE_TASK_DEFINITION"]),
+        (("rollback_doctor_task_definition",), inventory["values"]["PREVIOUS_TASK_DEFINITION"]),
+        (("previous_source_sha",), "f" * 40),
+        (("previous_image_digest",), "sha256:" + "f" * 64),
+        (("schema_facts", "candidate", "landscape_epoch"), 22),
+        (("schema_facts", "previous", "session_epoch"), 26),
+    ):
+        mutated = json.loads(json.dumps(record))
+        target = mutated
+        for segment in path[:-1]:
+            target = target[segment]
+        target[path[-1]] = replacement
+        record_path.write_text(json.dumps(mutated))
+        with pytest.raises(acceptance.AcceptanceCheckError, match="compatibility_record_binding"):
+            acceptance.validate_compatibility_record(
+                record_path,
+                manifest_path=manifest_path,
+                scenario_id="B",
+                now=lambda: datetime(2026, 7, 14, 1, 3, tzinfo=UTC),
+            )
+    record_path.write_text(json.dumps(record))
+    receipt_hash = acceptance.receipt_store(
+        manifest_path,
+        scenario_id="B",
+        kind="compatibility-record",
+        subject_id=receipt["record_sha256"],  # type: ignore[arg-type]
+        receipt_bytes=json.dumps(receipt).encode(),
+        now=lambda: datetime(2026, 7, 14, 1, 4, tzinfo=UTC),
+    )
+
+    assert len(receipt_hash) == 64
+    assert receipt["approvals_present"] is True
+    assert "database-operator" not in json.dumps(receipt)
+
+
 def test_receipt_store_rejects_unprotected_or_raw_secret_shaped_documents(tmp_path: Path) -> None:
     manifest_path = tmp_path / "control.json"
     _init_control_manifest(manifest_path)
@@ -4459,6 +5290,26 @@ def test_receipt_store_rejects_open_or_wrongly_bound_receipt_documents(tmp_path:
             subject_id="d" * 64,
             receipt_file=receipt_path,
         )
+
+
+def test_receipt_store_accepts_closed_event_delivery_canary_receipt(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "control.json"
+    _init_control_manifest(manifest_path)
+    receipt = {
+        "schema": "elspeth.aws-ecs-event-canary.v1",
+        "delivered": True,
+        "removed": True,
+    }
+
+    receipt_hash = acceptance.receipt_store(
+        manifest_path,
+        scenario_id="A",
+        kind="deployment-event-canary",
+        subject_id="a-0123456789abcdef0123-deployments",
+        receipt_bytes=json.dumps(receipt).encode(),
+    )
+
+    assert receipt_hash == hashlib.sha256(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def test_approval_verify_binds_receipt_run_scenario_authority_decision_and_expiry_with_injected_verifier(tmp_path: Path) -> None:
@@ -4872,6 +5723,33 @@ def _checkpoint_export_phase(manifest_path: Path, ledger_path: Path, *, final: b
 def _checkpoint_evidence_export(manifest_path: Path, ledger_path: Path) -> None:
     _checkpoint_export_phase(manifest_path, ledger_path, final=False)
     _checkpoint_export_phase(manifest_path, ledger_path, final=True)
+
+
+def test_create_evidence_export_receipt_derives_current_manifest_and_ledger_hashes(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "control.json"
+    manifest = _init_control_manifest(manifest_path)
+    ledger_path = Path(manifest["gate_ledger_path"])
+    _gate_ledger_init(ledger_path)
+    _fill_gate_ledger_prefix(ledger_path)
+    output_path = tmp_path / "initial-export.json"
+
+    receipt = acceptance.create_evidence_export_receipt(
+        manifest_path,
+        ledger_path=ledger_path,
+        output_path=output_path,
+        artifact_count=10,
+        now=lambda: datetime(2026, 7, 14, 1, 2, 30, tzinfo=UTC),
+    )
+
+    assert receipt["verified"] is True
+    assert receipt["artifact_count"] == 10
+    assert receipt["acceptance_run_id"] == manifest["acceptance_run_id"]
+    assert output_path.stat().st_mode & 0o777 == 0o600
+    acceptance.control_manifest_update(
+        manifest_path,
+        evidence_export_receipt=str(output_path),
+        now=lambda: datetime(2026, 7, 14, 1, 2, 31, tzinfo=UTC),
+    )
 
 
 def test_final_evidence_export_refreshes_receipts_created_during_cleanup(tmp_path: Path) -> None:

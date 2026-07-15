@@ -16,6 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNBOOK = REPO_ROOT / "docs" / "runbooks" / "aws-ecs-deployment.md"
 RUNBOOK_INDEX = REPO_ROOT / "docs" / "runbooks" / "index.md"
 DOCKER_GUIDE = REPO_ROOT / "docs" / "guides" / "docker.md"
+OIDC_PLAYWRIGHT_CONFIG = REPO_ROOT / "src" / "elspeth" / "web" / "frontend" / "playwright.oidc.config.ts"
 
 
 def _text() -> str:
@@ -66,6 +67,8 @@ def test_runbook_preserves_task_local_nonessential_healthy_sidecar() -> None:
         "ELSPETH_ACCEPTANCE_RUN_ID": "${ACCEPTANCE_RUN_ID}",
         "ELSPETH_ACCEPTANCE_CANDIDATE_SHA": "${CANDIDATE_SHA}",
         "ELSPETH_ACCEPTANCE_SCENARIO_ID": "${SCENARIO_ID}",
+        "ELSPETH_ACCEPTANCE_S3_BUCKET": "${ELSPETH_TEST_S3_BUCKET}",
+        "ELSPETH_ACCEPTANCE_S3_PREFIX": "${SCENARIO_RESOURCE_NAMESPACE}/${ACCEPTANCE_RUN_ID}",
     }
     assert "127.0.0.1:4317" in _text()
 
@@ -168,13 +171,14 @@ def test_runbook_preserves_versioned_hashed_bounded_agent_config() -> None:
     assert set(otel["exporters"]) == {"awsemf/elspeth", "awsxray/elspeth"}
     assert otel["exporters"]["awsemf/elspeth"] == {
         "namespace": "ELSPETH/Operator",
-        "log_group_name": "/elspeth/operator/metrics",
+        "log_group_name": "${OPERATOR_METRICS_LOG_GROUP}",
         "log_stream_name": "telemetry",
         "dimension_rollup_option": "NoDimensionRollup",
         "retain_initial_value_of_delta_metric": True,
         "resource_to_telemetry_conversion": {"enabled": True},
     }
     assert otel["exporters"]["awsxray/elspeth"] == {}
+    assert "OPERATOR_METRICS_LOG_GROUP" in SCENARIO_ASSIGNMENT_NAMES
     assert otel["service"]["pipelines"] == {
         "metrics/elspeth": {
             "receivers": ["otlp/elspeth"],
@@ -213,6 +217,8 @@ def test_runbook_preserves_role_separation_without_credentials() -> None:
         "logs:DescribeLogStreams",
         "logs:CreateLogStream",
         "logs:PutLogEvents",
+        "cloudwatch:GetMetricData",
+        "xray:BatchGetTraces",
     } <= actions
     assert "cloudwatch:PutMetricData" not in actions
     assert "Execution role" in text
@@ -314,8 +320,10 @@ def test_protected_command_wrappers_are_bounded_redacted_and_complete() -> None:
     text = _text()
     capture = text[text.index("export ELSPETH_COMMAND_OUTPUT_LIMIT_BYTES") : text.index("### Closed lifecycle helper wrappers")]
 
-    for helper in ("aws_capture", "aws_ecr_login", "terraform_capture", "verify_tf_binding"):
+    for helper in ("aws_capture_with_kind", "aws_ecr_login", "terraform_capture", "verify_tf_binding"):
         assert f"{helper}() (" in capture
+    for helper in ("aws_capture", "aws_waiter_capture"):
+        assert f"{helper}() {{" in capture
     for marker in (
         "ELSPETH_COMMAND_OUTPUT_LIMIT_BYTES=2097152",
         "ulimit -f 4096",
@@ -332,6 +340,10 @@ def test_protected_command_wrappers_are_bounded_redacted_and_complete() -> None:
         assert marker in capture
     assert 'cat "$stderr_file"' not in capture
     assert "get-login-password" in capture
+    terraform = capture[capture.index("terraform_capture()") : capture.index("verify_tf_binding()")]
+    assert "ulimit -f" not in terraform
+    assert "ELSPETH_AWS_EXEC_CEILING_SECONDS=420" in capture
+    assert "aws_exec_capture()" in capture
 
 
 def test_container_health_command_is_parseable_json_and_liveness_only() -> None:
@@ -373,7 +385,7 @@ def test_runbook_pins_core_runtime_and_identity_contracts() -> None:
         "AllowedOAuthFlows",
         "AllowedOAuthScopes",
         "CallbackURLs",
-        'INSTALL_EXTRAS="webui llm aws postgres"',
+        "elspeth:ecs-0.7.1-closeout",
         "TARGET_PLATFORM",
         "runtimePlatform",
         "linux/amd64",
@@ -386,6 +398,16 @@ def test_runbook_pins_core_runtime_and_identity_contracts() -> None:
     )
     for marker in required:
         assert marker in text, marker
+
+
+def test_verifier_overrides_do_not_repeat_the_python_module_entrypoint() -> None:
+    text = _text()
+
+    assert '"entryPoint": ["python", "-m", "elspeth.web.aws_ecs_acceptance"]' in text
+    assert 'command:["verify-payloads","--landscape-run-id",$run]' in text
+    assert 'command:["verify-local-auth"]' in text
+    assert 'command:["python","-m","elspeth.web.aws_ecs_acceptance","verify-payloads"' not in text
+    assert 'command:["python","-m","elspeth.web.aws_ecs_acceptance","verify-local-auth"]' not in text
 
 
 def test_runbook_pins_guardrail_telemetry_and_task_role_contracts() -> None:
@@ -552,6 +574,91 @@ def test_runbook_pins_exact_oidc_redirect_phases_and_closed_evidence() -> None:
     ):
         assert field in text
     assert "[chromium] aws-ecs-oidc.staging.spec.ts" in text
+    for marker in (
+        "OIDC_BEARER_HANDOFF_FILE",
+        'ELSPETH_ACCEPTANCE_BEARER_TOKEN="$OIDC_BEARER_TOKEN"',
+        'run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-operator-telemetry positive "$OIDC_LANDSCAPE_RUN_ID"',
+        "--landscape-run-id",
+    ):
+        assert marker in text
+    handoff = text[text.index("capture_oidc_lifecycle_handoff() {") : text.index("## ECS probe wiring")]
+    assert handoff.index("unset OIDC_BEARER_TOKEN") < handoff.index("OIDC_LANDSCAPE_RUN_ID=")
+    role_check = text[text.index("run_candidate_role_check() {") : text.index("# Run once in Scenario A")]
+    assert "ELSPETH_ACCEPTANCE_BEARER_TOKEN" not in role_check
+
+
+def test_fresh_account_https_uses_per_scenario_certificate_and_exact_browser_spki_pin() -> None:
+    text = _text()
+    config = OIDC_PLAYWRIGHT_CONFIG.read_text(encoding="utf-8")
+
+    for marker in (
+        "tls_self_signed_cert",
+        "aws_acm_certificate",
+        "aws_lb.web.dns_name",
+        "ACCEPTANCE_TLS_CA_BUNDLE",
+        "ACCEPTANCE_TLS_SPKI_SHA256",
+        '--cacert "$ACCEPTANCE_TLS_CA_BUNDLE"',
+        'SSL_CERT_FILE="$ACCEPTANCE_TLS_CA_BUNDLE"',
+        'NODE_EXTRA_CA_CERTS="$ACCEPTANCE_TLS_CA_BUNDLE"',
+        'OIDC_TLS_SPKI_SHA256="$ACCEPTANCE_TLS_SPKI_SHA256"',
+    ):
+        assert marker in text
+    assert "--ignore-certificate-errors-spki-list=" in config
+    assert "OIDC_TLS_SPKI_SHA256" in config
+    assert "ignoreHTTPSErrors: true" not in config
+
+
+def test_fresh_account_bootstrap_is_manifest_armed_backends_initialized_and_destroyed_before_orphan_sweep() -> None:
+    text = _text()
+    bootstrap = text[text.index("### Fresh-account shared bootstrap") : text.index("### Temporary image publication")]
+    cleanup = text[text.index("## Disposable acceptance cleanup") :]
+
+    for marker in (
+        'BOOTSTRAP_TF_DIR="$IAC_PACKAGE_DIR/bootstrap"',
+        'BACKEND_STATE_BUCKET="elspeth-acc-${ACCEPTANCE_RUN_ID//-/}"',
+        "arm_external_cleanup",
+        'terraform_capture -chdir="$BOOTSTRAP_TF_DIR" apply',
+        "checkpoint_cleanup shared_resource_cleanup pending",
+        "initialize_scenario_backend A",
+        "initialize_scenario_backend B",
+        "backend_state_bucket",
+        "ECR_REPOSITORY",
+    ):
+        assert marker in bootstrap
+    assert bootstrap.index("arm_external_cleanup") < bootstrap.index('terraform_capture -chdir="$BOOTSTRAP_TF_DIR" apply')
+    assert bootstrap.index("initialize_scenario_backend A") < text.index("### Temporary image publication")
+    assert 'terraform_capture -chdir="$BOOTSTRAP_TF_DIR" plan -destroy' in cleanup
+    assert cleanup.index("if ! destroy_scenario B") < cleanup.index('if test "$scenario_a_destroyed" = 1')
+    assert cleanup.index('if test "$scenario_a_destroyed" = 1') < cleanup.index("run_orphan_sweep")
+    shared_destroy = cleanup[cleanup.index("destroy_shared_bootstrap() {") : cleanup.index("if ! destroy_scenario A")]
+    assert shared_destroy.index('terraform_capture -chdir="$BOOTSTRAP_TF_DIR" plan -destroy') < shared_destroy.index(
+        "checkpoint_cleanup shared_resource_cleanup confirmed"
+    )
+
+
+def test_fresh_scenarios_bootstrap_schema_before_first_or_upgrade_candidate() -> None:
+    text = _text()
+    first = text[text.index("### Fresh Scenario A database baseline") : text.index("### Fresh Scenario B upgrade baseline")]
+    first_ordered = (
+        'test "$ACTIVE_SCENARIO_ID" = A',
+        '"doctor","aws-ecs","--init-schema","--json"',
+        '--task-definition "$DOCTOR_TASK_DEFINITION"',
+    )
+    first_positions = [first.index(marker) for marker in first_ordered]
+    assert first_positions == sorted(first_positions)
+    assert '--task-definition "$CANDIDATE_TASK_DEFINITION"' not in first
+
+    section = text[text.index("### Fresh Scenario B upgrade baseline") : text.index("## ECS probe wiring")]
+    ordered = (
+        'test "$ACTIVE_SCENARIO_ID" = B',
+        '"doctor","aws-ecs","--init-schema","--json"',
+        '--task-definition "$ROLLBACK_DOCTOR_TASK_DEFINITION"',
+        '--task-definition "$PREVIOUS_TASK_DEFINITION"',
+        "run_oidc_evidence previous-before-candidate",
+    )
+    positions = [section.index(marker) for marker in ordered]
+    assert positions == sorted(positions)
+    assert '--task-definition "$CANDIDATE_TASK_DEFINITION"' not in section
 
 
 def test_runbook_pins_replacement_then_persistence_role_and_drained_local_auth_order() -> None:
@@ -567,11 +674,16 @@ def test_runbook_pins_replacement_then_persistence_role_and_drained_local_auth_o
     )
     positions = [sequence.index(marker) for marker in ordered]
     assert positions == sorted(positions)
+    assert sequence.index("require_compatibility_record_current") < sequence.index("PRE_REPLACEMENT_TASK_ARN")
     assert 'task-level `user: "1000:1000"`' in text
     assert "root-running ECS Exec" in text
 
-    helper = sequence[sequence.index("run_candidate_role_check()") : sequence.index('run_candidate_role_check "$CANDIDATE_TASK_ARN"')]
-    assert sequence.index("checkpoint_operator_retained_evidence()") < sequence.index("run_candidate_role_check()")
+    phase = text[text.index("### 5. Perform candidate-aware acceptance") : text.index("### 6. Observe")]
+    helper = phase[phase.index("run_candidate_role_check()") : phase.index("verify_candidate_target_mapping\n")]
+    assert phase.index("run_candidate_role_check()") < phase.index('run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-s3')
+    assert phase.index("checkpoint_operator_retained_evidence()") < phase.index(
+        'run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-operator-telemetry'
+    )
     assert helper.index("persist_sanitized_receipt") < helper.index("checkpoint_operator_retained_evidence")
     assert helper.index("checkpoint_operator_retained_evidence") < helper.index('rm -f "$receipt_file"')
 
@@ -588,13 +700,25 @@ def test_runbook_uses_canonical_orphan_and_two_phase_finalizer_commands() -> Non
 
 def test_runbook_projects_cognito_before_capture_and_persists_local_evidence_paths_first() -> None:
     text = _text()
-    cognito = text[text.index("COGNITO_CLIENT_JSON=$(aws_capture") : text.index("unset COGNITO_CLIENT_JSON")]
+    identity = text[text.index("provision_scenario_b_test_identity()") : text.index("render_resolved_inventory()")]
+    assert "admin-create-user" in identity
+    assert "admin-set-user-password" in identity
+    assert "admin-get-user" in identity
+    render = text[text.index("render_resolved_inventory()") : text.index("plan_and_apply_scenario()")]
+    assert render.index("provision_scenario_b_test_identity") < render.index("cognito_subject_sub = $subject")
+    cognito = text[text.index("prepare_scenario_b_oidc()") : text.index("### Real-browser OIDC evidence")]
     assert "UserPoolClient.{clientId:ClientId" in cognito
     assert ".UserPoolClient as $c" not in cognito
-    oidc_create = text.index("OIDC_EVIDENCE_DIR=$(mktemp")
+    assert "admin-get-user" in cognito
+    assert ".sub == $subject" in cognito
+    oidc_create = text.index('OIDC_EVIDENCE_DIR="/tmp/elspeth-oidc-${ACCEPTANCE_RUN_ID}"')
     oidc_update = text.index('--oidc-evidence-dir "$OIDC_EVIDENCE_DIR"', oidc_create)
     oidc_run = text.index("run_oidc_evidence()", oidc_create)
     assert oidc_create < oidc_update < oidc_run
+    browser_preflight = text.index("playwright install chromium")
+    assert browser_preflight < text.index("\narm_external_cleanup\n", browser_preflight)
+    scenario_b = text.index("load_scenario B")
+    assert scenario_b < text.index("prepare_scenario_b_oidc", scenario_b)
     state_create = text.index("ACCEPTANCE_STATE=$(mktemp")
     state_update = text.index('--acceptance-state-path "$ACCEPTANCE_STATE"', state_create)
     capture = text.index("aws_ecs_acceptance capture", state_create)
@@ -633,7 +757,50 @@ def test_runbook_pins_operator_telemetry_positive_outage_replacement_positive_or
     )
     positions = [sequence.index(marker) for marker in markers]
     assert positions == sorted(positions)
+    outage = sequence[sequence.index('OUTAGE_TASK_ARN="$CANDIDATE_TASK_ARN"') :]
+    assert outage.index("require_compatibility_record_current") < outage.index("aws_capture aws ecs update-service")
     assert "--container cloudwatch-agent" in sequence
+
+
+def test_runbook_starts_connection_observation_on_a_future_minute_boundary() -> None:
+    text = _text()
+    observe = text[text.index("### 6. Observe for ten minutes") : text.index("### 7. Roll back")]
+    assert "OBSERVATION_ALIGNMENT_SECONDS=$((60 - 10#$(date -u +%S)))" in observe
+    assert observe.index('sleep "$OBSERVATION_ALIGNMENT_SECONDS"') < observe.index("ACCEPTANCE_START_UTC=$(date -u +%Y-%m-%dT%H:%M:00Z)")
+    assert "ACCEPTANCE_START_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" not in observe
+
+
+def test_runbook_validates_task_definitions_and_compatibility_before_baseline_mutation() -> None:
+    text = _text()
+    for scenario, end_marker in (("A", "### Fresh Scenario B upgrade baseline"), ("B", "## ECS probe wiring")):
+        start = text.index(f"load_scenario {scenario}")
+        block = text[start : text.index(end_marker, start)]
+        assert block.index("validate_scenario_task_definitions") < block.index("bind_compatibility_record")
+        assert block.index("bind_compatibility_record") < block.index("provision_scenario_storage")
+        assert block.index("provision_scenario_storage") < block.index("--init-schema")
+    assert ".containers[] | select(.essential == true)" not in text
+    assert "require_stopped_task_success" in text
+
+
+def test_runbook_binds_bootstrap_approvals_and_terminal_receipt_lifecycle() -> None:
+    text = _text()
+    bootstrap_apply = text[
+        text.index('BOOTSTRAP_PLAN="$BOOTSTRAP_TF_DIR/bootstrap.tfplan"') : text.index("checkpoint_cleanup shared_resource_cleanup pending")
+    ]
+    assert bootstrap_apply.index("persist_sanitized_receipt bootstrap terraform-plan") < bootstrap_apply.index("approval-require-current")
+    assert bootstrap_apply.index("approval-require-current") < bootstrap_apply.rindex('sha256sum "$BOOTSTRAP_PLAN"')
+    assert bootstrap_apply.rindex('sha256sum "$BOOTSTRAP_PLAN"') < bootstrap_apply.index(" apply -input=false")
+    bootstrap_destroy = text[text.index("destroy_shared_bootstrap()") : text.index("scenario_a_destroyed=0")]
+    assert "persist_sanitized_receipt bootstrap terraform-destroy-plan" in bootstrap_destroy
+    assert bootstrap_destroy.index("approval-require-current") < bootstrap_destroy.rindex('sha256sum "$plan"')
+    assert bootstrap_destroy.rindex('sha256sum "$plan"') < bootstrap_destroy.index(" apply -input=false")
+    assert 'SANITIZED_ORPHAN_RECEIPT="/tmp/elspeth-orphan-${ACCEPTANCE_RUN_ID}.json"' in text
+    orphan = text[text.index("ORPHAN_RECEIPT_DIR=") : text.index('if test "${#cleanup_failures[@]}"')]
+    assert "install -m 600 /dev/null" not in orphan
+    assert orphan.index("mktemp") < orphan.index("run_orphan_sweep") < orphan.index("mv -fT")
+    assert "protected_timeout_seconds orphan-sweep" in text
+    removal = text[text.index("remove_local_acceptance_evidence()") : text.index("Use these transitions")]
+    assert 'rm -f -- "$SANITIZED_ORPHAN_RECEIPT"' in removal
 
 
 def test_runbook_is_linked_from_operator_indexes() -> None:

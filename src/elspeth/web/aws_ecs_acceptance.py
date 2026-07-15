@@ -27,7 +27,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import TracebackType
 from typing import Any, Literal, Protocol, Self, cast
 from urllib.parse import quote, urlsplit
@@ -61,6 +61,7 @@ from elspeth.plugins.aws_s3_common import build_s3_client
 from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 from elspeth.plugins.sinks.aws_s3_sink import AWSS3Sink, S3ConditionalWriteRejectedError
 from elspeth.plugins.sources.aws_s3_source import AWSS3Source
+from elspeth.plugins.transforms.aws.guardrail_profiles import BedrockGuardrailProfileSettings
 from elspeth.plugins.transforms.aws.guardrails_live_check import run_guardrail_live_check
 from elspeth.plugins.transforms.llm.model_catalog import read_openrouter_catalog_snapshot_id
 from elspeth.telemetry import create_telemetry_manager
@@ -104,7 +105,7 @@ MAX_STATE_FILE_BYTES = 64 * 1024
 MAX_EXEC_RECEIPT_CHARS = 16 * 1024
 MAX_EXEC_STREAM_BYTES = 2 * 1024 * 1024
 MAX_CONTROL_DOCUMENT_BYTES = 256 * 1024
-_EMERGENCY_CLEANUP_SECONDS = 90 * 60
+_EMERGENCY_CLEANUP_SECONDS = 3 * 60 * 60
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _STATE_FIELDS = frozenset(
     {
@@ -322,6 +323,8 @@ _GATE_LEDGER_GET_FIELDS = frozenset(
     {"branch", "starting_sha", "plan_sha256", "program_base_sha", "reconciled_release_sha", "candidate_sha"}
 )
 _TERMINAL_GATE_CHECK_ID = "cleanup"
+_APPLICATION_SCENARIO_IDS = frozenset({"A", "B"})
+_INFRASTRUCTURE_APPROVAL_SCOPES = frozenset({"A", "B", "bootstrap"})
 SCENARIO_ASSIGNMENT_NAMES = (
     "ACTIVE_SCENARIO_ID",
     "ACCEPTANCE_RUN_ID",
@@ -331,6 +334,8 @@ SCENARIO_ASSIGNMENT_NAMES = (
     "ECS_CLUSTER",
     "ECS_SERVICE",
     "WEB_CONTAINER_NAME",
+    "ELSPETH_WEB__DATA_DIR",
+    "ELSPETH_WEB__PAYLOAD_STORE_PATH",
     "ELSPETH_WEB__PLUGIN_ALLOWLIST",
     "ELSPETH_WEB__PLUGIN_PREFERENCES",
     "ELSPETH_WEB__PLUGIN_CONTROL_MODES",
@@ -354,6 +359,7 @@ SCENARIO_ASSIGNMENT_NAMES = (
     "WEB_LOG_STREAM_PREFIX",
     "DOCTOR_LOG_GROUP",
     "DOCTOR_LOG_STREAM_PREFIX",
+    "OPERATOR_METRICS_LOG_GROUP",
     "ECS_DEPLOYMENT_EVENT_RULE",
     "ECS_DEPLOYMENT_EVENT_TARGET_ID",
     "ECS_DEPLOYMENT_EVENT_LOG_GROUP",
@@ -394,7 +400,9 @@ _ORPHAN_INVENTORY_FIELDS = frozenset(
         "efs_file_system_ids",
         "efs_access_point_ids",
         "secret_ids",
+        "iam_role_names",
         "log_group_names",
+        "log_resource_policy_names",
         "cloudwatch_dashboard_names",
         "cloudwatch_alarm_names",
         "cloudwatch_retained_metrics",
@@ -417,6 +425,7 @@ _ORPHAN_SURFACES = (
     "rds",
     "efs",
     "secretsmanager",
+    "iam",
     "logs",
     "cloudwatch",
     "xray",
@@ -434,6 +443,7 @@ _PROVIDER_GENERATED_SCENARIO_FIELDS = frozenset(
         "ALB_ARN",
         "CANDIDATE_TASK_DEFINITION",
         "DOCTOR_TASK_DEFINITION",
+        "DOCTOR_NETWORK_CONFIGURATION",
         "PAYLOAD_VERIFIER_TASK_DEFINITION",
         "LOCAL_AUTH_VERIFIER_TASK_DEFINITION",
         "ROLLBACK_DOCTOR_TASK_DEFINITION",
@@ -445,6 +455,13 @@ _PROVIDER_GENERATED_SCENARIO_FIELDS = frozenset(
         "OIDC_EXPECTED_ISSUER",
         "OIDC_EXPECTED_AUDIENCE",
         "OIDC_EXPECTED_AUTHORIZATION_ORIGIN",
+    }
+)
+_RESOLVED_SCENARIO_FIELDS = frozenset(
+    {
+        *_PROVIDER_GENERATED_SCENARIO_FIELDS,
+        "ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES",
+        "ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256",
     }
 )
 _PROVIDER_GENERATED_ORPHAN_FIELDS = frozenset(
@@ -1084,6 +1101,19 @@ def _sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def scenario_resource_namespace(acceptance_run_id: str, scenario_id: str) -> str:
+    """Return the stable AWS-name-safe namespace for one acceptance scenario."""
+
+    try:
+        canonical_run_id = _canonical_uuid(acceptance_run_id, label="acceptance run ID")
+    except AcceptanceInputError:
+        raise AcceptanceCheckError("scenario_inventory_binding") from None
+    if scenario_id not in {"A", "B"}:
+        raise AcceptanceCheckError("scenario_inventory_binding")
+    digest = _sha256(f"{canonical_run_id}\0{scenario_id}".encode())[:20]
+    return f"{scenario_id.lower()}-{digest}"
+
+
 def plugin_policy_binding_sha256(values: Mapping[str, str]) -> str:
     """Hash the exact protected seven-setting web policy assignment."""
 
@@ -1334,6 +1364,7 @@ def _validate_exec_receipt_schema(payload: object) -> dict[str, object]:
         "verify-s3",
         "verify-bedrock",
         "verify-bedrock-guardrails",
+        "verify-connection-budget",
         "verify-operator-telemetry",
     }:
         raise AcceptanceCheckError("exec_receipt_schema")
@@ -1351,6 +1382,11 @@ def _validate_exec_receipt_schema(payload: object) -> dict[str, object]:
         _validate_bedrock_receipt_details(details)
     elif check == "verify-bedrock-guardrails":
         _validate_guardrail_receipt_details(details)
+    elif check == "verify-connection-budget":
+        cluster_sha256 = details.get("cluster_id_sha256")
+        if type(cluster_sha256) is not str:
+            raise AcceptanceCheckError("exec_receipt_schema")
+        _validate_connection_budget_receipt(details, subject_sha256=cluster_sha256)
     else:
         _validate_operator_receipt_details(details)
     return payload
@@ -1828,6 +1864,95 @@ def verify_local_auth() -> dict[str, object]:
         "check": "verify-local-auth",
         "ok": True,
         "checks": {"auth_provider_local": True, "auth_db_exists": True, "journal_mode_delete": True},
+    }
+
+
+def provision_storage() -> dict[str, object]:
+    """Create and prove the three required EFS-backed directories as UID/GID 1000."""
+
+    try:
+        settings = settings_from_env()
+        data_dir = settings.data_dir
+        if settings.payload_store_path is None:
+            raise AcceptanceCheckError("storage_settings")
+        payload_root = settings.get_payload_store_path()
+    except AcceptanceCheckError:
+        raise
+    except Exception:
+        raise AcceptanceCheckError("storage_settings") from None
+    if os.geteuid() != 1000 or os.getegid() != 1000:
+        raise AcceptanceCheckError("storage_identity")
+    if not isinstance(data_dir, Path) or not isinstance(payload_root, Path):
+        raise AcceptanceCheckError("storage_settings")
+    if data_dir.is_symlink() or not data_dir.is_dir():
+        raise AcceptanceCheckError("storage_root")
+    blob_root = data_dir / "blobs"
+    try:
+        data_resolved = data_dir.resolve(strict=True)
+        preflight_roots = (payload_root.resolve(strict=False), blob_root.resolve(strict=False))
+    except OSError:
+        raise AcceptanceCheckError("storage_provision") from None
+    if (
+        len({data_resolved, *preflight_roots}) != 3
+        or any(path == data_resolved or not path.is_relative_to(data_resolved) for path in preflight_roots)
+        or payload_root.is_symlink()
+        or blob_root.is_symlink()
+    ):
+        raise AcceptanceCheckError("storage_boundary")
+    try:
+        for path in (payload_root, blob_root):
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        roots = (data_dir, payload_root, blob_root)
+        resolved_roots = tuple(path.resolve(strict=True) for path in roots)
+    except OSError:
+        raise AcceptanceCheckError("storage_provision") from None
+    if (
+        len(set(resolved_roots)) != 3
+        or resolved_roots[1] == data_resolved
+        or resolved_roots[2] == data_resolved
+        or not resolved_roots[1].is_relative_to(data_resolved)
+        or not resolved_roots[2].is_relative_to(data_resolved)
+        or any(path.is_symlink() for path in roots)
+    ):
+        raise AcceptanceCheckError("storage_boundary")
+
+    probe_bytes = b"elspeth-efs-storage-probe\n"
+    for path in roots:
+        probe: Path | None = None
+        try:
+            metadata = path.lstat()
+            if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 1000 or metadata.st_gid != 1000:
+                raise AcceptanceCheckError("storage_ownership")
+            probe = path / f".elspeth-probe-{uuid.uuid4().hex}"
+            descriptor = os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+            try:
+                os.write(descriptor, probe_bytes)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            if probe.read_bytes() != probe_bytes:
+                raise AcceptanceCheckError("storage_probe")
+            probe.unlink()
+            directory_descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        except AcceptanceCheckError:
+            raise
+        except OSError:
+            raise AcceptanceCheckError("storage_probe") from None
+        finally:
+            if probe is not None:
+                probe.unlink(missing_ok=True)
+
+    return {
+        "check": "provision-storage",
+        "ok": True,
+        "uid": 1000,
+        "gid": 1000,
+        "directories": 3,
+        "write_read_fsync_delete_probes": 3,
     }
 
 
@@ -3019,6 +3144,40 @@ class PublicApiLifecycleAudit:
         return self._verified_status or ""
 
 
+class ExistingLandscapeLifecycleAudit:
+    """Verify a browser-authenticated lifecycle run without handling its bearer token."""
+
+    def __init__(
+        self,
+        settings: Any,
+        run_id: str,
+        *,
+        status_reader: Callable[[Any, str], str | None] | None = None,
+    ) -> None:
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", run_id) is None:
+            raise OperatorTelemetryAcceptanceError("existing Landscape run identity is invalid")
+        self._settings = settings
+        self._run_id = run_id
+        self._status_reader = status_reader or _read_landscape_terminal_status
+        self._verified_status: str | None = None
+
+    def execute_lifecycle_run(self) -> str:
+        return self._run_id
+
+    def verify_run(self, run_id: str) -> bool:
+        if run_id != self._run_id:
+            return False
+        self._verified_status = self._status_reader(self._settings, run_id)
+        return self._verified_status == "completed"
+
+    def terminal_status(self, run_id: str) -> str:
+        if run_id != self._run_id:
+            return ""
+        if self._verified_status is None:
+            self._verified_status = self._status_reader(self._settings, run_id)
+        return self._verified_status or ""
+
+
 def _read_landscape_terminal_status(settings: Any, run_id: str) -> str | None:
     try:
         with LandscapeDB.from_url(
@@ -3301,8 +3460,10 @@ def verify_operator_telemetry_live(
     env: Mapping[str, str],
     *,
     phase: Literal["positive", "outage"],
+    landscape_run_id: str | None = None,
     settings_loader: Callable[[], Any] = settings_from_env,
     audit_factory: Callable[[Any, Mapping[str, str]], AuditSentinel] = PublicApiLifecycleAudit,
+    existing_audit_factory: Callable[[Any, str], AuditSentinel] = ExistingLandscapeLifecycleAudit,
     emitter_factory: Callable[[Any], TelemetrySentinelEmitter] = AWSOperatorMetricEmitter,
     aws_client_factory: Callable[[str, str], Any] = _build_aws_observability_client,
     policy: AcceptancePolicy = _DEFAULT_ACCEPTANCE_POLICY,
@@ -3315,6 +3476,10 @@ def verify_operator_telemetry_live(
 
     if phase not in {"positive", "outage"}:
         raise OperatorTelemetryAcceptanceError("operator telemetry phase is invalid")
+    if landscape_run_id is not None and (
+        phase != "positive" or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", landscape_run_id) is None
+    ):
+        raise OperatorTelemetryAcceptanceError("existing Landscape run identity is invalid")
     if any(name in env for name in FORBIDDEN_AWS_OVERRIDE_ENV):
         raise OperatorTelemetryAcceptanceError("operator telemetry AWS override is forbidden")
     try:
@@ -3348,7 +3513,7 @@ def verify_operator_telemetry_live(
         try:
             cloudwatch = aws_client_factory("cloudwatch", region)
             xray = aws_client_factory("xray", region)
-            audit = audit_factory(settings, env)
+            audit = audit_factory(settings, env) if landscape_run_id is None else existing_audit_factory(settings, landscape_run_id)
             emitter = emitter_factory(settings)
         except OperatorTelemetryAcceptanceError:
             raise
@@ -3416,6 +3581,196 @@ def verify_operator_telemetry_live(
                 close_failed = True
         if close_failed and sys.exc_info()[0] is None:
             raise OperatorTelemetryAcceptanceError("operator telemetry resource close failed")
+
+
+def _read_postgres_max_connections(settings: Any) -> int:
+    try:
+        with LandscapeDB.from_url(
+            settings.get_landscape_url(),
+            passphrase=settings.landscape_passphrase,
+            create_tables=False,
+            read_only=True,
+        ) as database:
+            if database.engine.dialect.name != "postgresql":
+                raise AcceptanceCheckError("connection_budget_database")
+            with database.engine.connect() as connection:
+                value = connection.exec_driver_sql("SHOW max_connections").scalar_one()
+    except AcceptanceCheckError:
+        raise
+    except Exception:
+        raise AcceptanceCheckError("connection_budget_database") from None
+    try:
+        maximum = int(value)
+    except (TypeError, ValueError):
+        raise AcceptanceCheckError("connection_budget_database") from None
+    if maximum <= 0:
+        raise AcceptanceCheckError("connection_budget_database")
+    return maximum
+
+
+def verify_connection_budget_live(
+    env: Mapping[str, str],
+    *,
+    cluster_id: str,
+    start_time: str,
+    approved_budget: int,
+    safety_margin: int,
+    settings_loader: Callable[[], Any] = settings_from_env,
+    max_connections_reader: Callable[[Any], int] = _read_postgres_max_connections,
+    aws_client_factory: Callable[[str, str], Any] = _build_aws_observability_client,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    sleep: Callable[[float], None] = time.sleep,
+    attempts: int = 10,
+) -> dict[str, object]:
+    """Verify the observed Aurora connection high-water against an approved budget."""
+
+    if (
+        type(cluster_id) is not str
+        or len(cluster_id) > 63
+        or re.fullmatch(r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?", cluster_id) is None
+        or "--" in cluster_id
+        or type(approved_budget) is not int
+        or type(safety_margin) is not int
+        or approved_budget <= 0
+        or safety_margin < 0
+        or type(attempts) is not int
+        or not 1 <= attempts <= 20
+    ):
+        raise AcceptanceCheckError("connection_budget_input")
+    try:
+        window_start = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        raise AcceptanceCheckError("connection_budget_input") from None
+    observed_now = now()
+    if (
+        window_start.tzinfo is None
+        or observed_now.tzinfo is None
+        or window_start >= observed_now
+        or observed_now - window_start > timedelta(hours=1)
+    ):
+        raise AcceptanceCheckError("connection_budget_input")
+    window_start = window_start.astimezone(UTC)
+    if window_start.second != 0 or window_start.microsecond != 0:
+        raise AcceptanceCheckError("connection_budget_input")
+    window_end = window_start + timedelta(minutes=10)
+    observed_now = observed_now.astimezone(UTC)
+    if observed_now < window_end:
+        raise AcceptanceCheckError("connection_budget_input")
+    expected_timestamps = tuple(window_start + timedelta(minutes=offset) for offset in range(10))
+    region = _resolve_aws_region(env, check="connection_budget_input")
+    try:
+        settings = settings_loader()
+        maximum = max_connections_reader(settings)
+    except AcceptanceCheckError:
+        raise
+    except Exception:
+        raise AcceptanceCheckError("connection_budget_database") from None
+    if maximum <= 0 or approved_budget > maximum - safety_margin:
+        raise AcceptanceCheckError("connection_budget_limit")
+
+    cloudwatch: Any | None = None
+    points: list[dict[str, object]] = []
+    try:
+        cloudwatch = aws_client_factory("cloudwatch", region)
+        for attempt in range(attempts):
+            try:
+                response = cloudwatch.get_metric_data(
+                    MetricDataQueries=[
+                        {
+                            "Id": "connections",
+                            "MetricStat": {
+                                "Metric": {
+                                    "Namespace": "AWS/RDS",
+                                    "MetricName": "DatabaseConnections",
+                                    "Dimensions": [{"Name": "DBClusterIdentifier", "Value": cluster_id}],
+                                },
+                                "Period": 60,
+                                "Stat": "Maximum",
+                            },
+                            "ReturnData": True,
+                        }
+                    ],
+                    StartTime=window_start,
+                    EndTime=window_end,
+                    ScanBy="TimestampAscending",
+                    MaxDatapoints=1000,
+                )
+            except Exception:
+                raise AcceptanceCheckError("connection_budget_cloudwatch") from None
+            if not isinstance(response, Mapping) or response.get("NextToken") is not None:
+                raise AcceptanceCheckError("connection_budget_cloudwatch")
+            results = response.get("MetricDataResults")
+            if not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], Mapping):
+                raise AcceptanceCheckError("connection_budget_cloudwatch")
+            result = results[0]
+            timestamps = result.get("Timestamps")
+            values = result.get("Values")
+            if result.get("Id") != "connections" or result.get("StatusCode") not in {"Complete", "PartialData"}:
+                raise AcceptanceCheckError("connection_budget_cloudwatch")
+            if not isinstance(timestamps, list) or not isinstance(values, list) or len(timestamps) != len(values):
+                raise AcceptanceCheckError("connection_budget_cloudwatch")
+            candidate_points: list[dict[str, object]] = []
+            candidate_timestamps: list[datetime] = []
+            for timestamp, value in zip(timestamps, values, strict=True):
+                if (
+                    not isinstance(timestamp, datetime)
+                    or timestamp.tzinfo is None
+                    or isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    or float(value) < 0
+                ):
+                    raise AcceptanceCheckError("connection_budget_cloudwatch")
+                normalized_timestamp = timestamp.astimezone(UTC)
+                candidate_timestamps.append(normalized_timestamp)
+                candidate_points.append({"timestamp": _utc_timestamp(normalized_timestamp), "count": float(value)})
+            if result.get("StatusCode") == "PartialData":
+                if attempt + 1 < attempts:
+                    sleep(30.0)
+                    continue
+                raise AcceptanceCheckError("connection_budget_cloudwatch")
+            complete_grid = (
+                len(candidate_timestamps) == len(expected_timestamps)
+                and len(set(candidate_timestamps)) == len(candidate_timestamps)
+                and tuple(sorted(candidate_timestamps)) == expected_timestamps
+            )
+            if complete_grid:
+                points = sorted(candidate_points, key=lambda point: cast(str, point["timestamp"]))
+                break
+            if attempt + 1 < attempts:
+                sleep(30.0)
+        if not points:
+            raise AcceptanceCheckError("connection_budget_cloudwatch")
+    finally:
+        if cloudwatch is not None:
+            close = getattr(cloudwatch, "close", None)
+            if not callable(close):
+                if sys.exc_info()[0] is None:
+                    raise AcceptanceCheckError("connection_budget_cloudwatch")
+            else:
+                try:
+                    close()
+                except Exception:
+                    if sys.exc_info()[0] is None:
+                        raise AcceptanceCheckError("connection_budget_cloudwatch") from None
+
+    high_water = max(cast(float, point["count"]) for point in points)
+    if high_water > approved_budget or maximum - high_water < safety_margin:
+        raise AcceptanceCheckError("connection_budget_exceeded")
+    return {
+        "schema": "elspeth.rds-connection-budget.v2",
+        "cluster_id_sha256": _sha256(cluster_id.encode("utf-8")),
+        "window_start": _utc_timestamp(window_start),
+        "window_end": _utc_timestamp(window_end),
+        "period_seconds": 60,
+        "expected_points": len(expected_timestamps),
+        "points": points,
+        "high_water": high_water,
+        "max_connections": maximum,
+        "approved_budget": approved_budget,
+        "safety_margin": safety_margin,
+        "ok": True,
+    }
 
 
 def _validate_control_parent(path: Path, *, check: str = "control_manifest_parent") -> None:
@@ -3720,9 +4075,11 @@ def _validate_control_manifest(payload: object) -> dict[str, object]:
             "stored_at",
         }:
             raise AcceptanceCheckError("control_manifest_schema")
-        if receipt["scenario_id"] not in {"A", "B"}:
-            raise AcceptanceCheckError("control_manifest_schema")
         if type(receipt["kind"]) is not str or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", receipt["kind"]) is None:
+            raise AcceptanceCheckError("control_manifest_schema")
+        if receipt["scenario_id"] not in _INFRASTRUCTURE_APPROVAL_SCOPES or (
+            receipt["scenario_id"] == "bootstrap" and receipt["kind"] not in _TERRAFORM_RECEIPT_KINDS
+        ):
             raise AcceptanceCheckError("control_manifest_schema")
         for field in ("subject_sha256", "receipt_sha256"):
             value = receipt[field]
@@ -3743,7 +4100,7 @@ def _validate_control_manifest(payload: object) -> dict[str, object]:
             "verified_at",
         }:
             raise AcceptanceCheckError("control_manifest_schema")
-        if approval["scenario_id"] not in {"A", "B"} or approval["kind"] not in {
+        if approval["scenario_id"] not in _INFRASTRUCTURE_APPROVAL_SCOPES or approval["kind"] not in {
             "terraform-plan",
             "terraform-destroy-plan",
         }:
@@ -3820,7 +4177,9 @@ def _validate_orphan_inventory(payload: object) -> dict[str, object]:
         "efs_file_system_ids",
         "efs_access_point_ids",
         "secret_ids",
+        "iam_role_names",
         "log_group_names",
+        "log_resource_policy_names",
         "cloudwatch_dashboard_names",
         "cloudwatch_alarm_names",
         "xray_group_names",
@@ -4023,6 +4382,17 @@ def _validate_tf_binding_receipt(
     return receipt, _sha256(json.dumps(state_identity, sort_keys=True, separators=(",", ":")).encode("utf-8"))
 
 
+def _listener_arn_from_rule_arn(rule_arn: str) -> str:
+    match = re.fullmatch(
+        r"(arn:(?:aws|aws-us-gov|aws-cn):elasticloadbalancing:[a-z0-9-]+:[0-9]{12})"
+        r":listener-rule/(app/[A-Za-z0-9-]{1,32}/[0-9a-f]{16}/[0-9a-f]{16})/[0-9a-f]{16}",
+        rule_arn,
+    )
+    if match is None:
+        raise AcceptanceCheckError("scenario_inventory_binding")
+    return f"{match.group(1)}:listener/{match.group(2)}"
+
+
 def _validate_scenario_resource_bindings(
     values: Mapping[str, object],
     orphan: Mapping[str, object],
@@ -4032,13 +4402,14 @@ def _validate_scenario_resource_bindings(
     aws_account_id: str,
     aws_region: str,
 ) -> None:
-    namespace = f"{acceptance_run_id}-{scenario_id.lower()}"
+    namespace = scenario_resource_namespace(acceptance_run_id, scenario_id)
     for field in (
         "ECS_CLUSTER",
         "ECS_SERVICE",
         "DB_CLUSTER_IDENTIFIER",
         "WEB_LOG_GROUP",
         "DOCTOR_LOG_GROUP",
+        "OPERATOR_METRICS_LOG_GROUP",
         "ECS_DEPLOYMENT_EVENT_RULE",
         "ECS_DEPLOYMENT_EVENT_TARGET_ID",
         "ECS_DEPLOYMENT_EVENT_LOG_GROUP",
@@ -4052,7 +4423,9 @@ def _validate_scenario_resource_bindings(
         "rds_db_instance_identifiers",
         "efs_creation_tokens",
         "secret_ids",
+        "iam_role_names",
         "log_group_names",
+        "log_resource_policy_names",
         "cloudwatch_dashboard_names",
         "cloudwatch_alarm_names",
         "xray_group_names",
@@ -4060,6 +4433,11 @@ def _validate_scenario_resource_bindings(
     ):
         if any(namespace not in identity for identity in cast(list[str], orphan[field])):
             raise AcceptanceCheckError("scenario_inventory_binding")
+    if set(cast(list[str], orphan["iam_role_names"])) != {
+        f"{namespace}-task-role",
+        f"{namespace}-execution-role",
+    }:
+        raise AcceptanceCheckError("scenario_inventory_binding")
     arn_services = {
         "TARGET_GROUP_ARN": "elasticloadbalancing",
         "ALB_ARN": "elasticloadbalancing",
@@ -4094,7 +4472,7 @@ def _validate_scenario_resource_bindings(
         if value and _task_definition_family(value) not in families:
             raise AcceptanceCheckError("scenario_inventory_binding")
     log_group_names = cast(list[str], orphan["log_group_names"])
-    for field in ("WEB_LOG_GROUP", "DOCTOR_LOG_GROUP", "ECS_DEPLOYMENT_EVENT_LOG_GROUP"):
+    for field in ("WEB_LOG_GROUP", "DOCTOR_LOG_GROUP", "OPERATOR_METRICS_LOG_GROUP", "ECS_DEPLOYMENT_EVENT_LOG_GROUP"):
         value = values[field]
         if value and value not in log_group_names:
             raise AcceptanceCheckError("scenario_inventory_binding")
@@ -4102,8 +4480,17 @@ def _validate_scenario_resource_bindings(
     event_rules = cast(list[object], orphan["event_rules"])
     if event_rule and not any(isinstance(rule, Mapping) and rule.get("rule_name") == event_rule for rule in event_rules):
         raise AcceptanceCheckError("scenario_inventory_binding")
-    listener_arn = values["FIRST_DEPLOY_LISTENER_RULE_ARN"]
-    if listener_arn and listener_arn not in cast(list[str], orphan["elbv2_listener_arns"]):
+    listener_arns = cast(list[str], orphan["elbv2_listener_arns"])
+    listener_pattern = re.compile(
+        rf"arn:(?:aws|aws-us-gov|aws-cn):elasticloadbalancing:{re.escape(aws_region)}:{re.escape(aws_account_id)}:"
+        rf"listener/app/[A-Za-z0-9-]*{re.escape(namespace)}[A-Za-z0-9-]*/[0-9a-f]{{16}}/[0-9a-f]{{16}}"
+    )
+    if values["ALB_ARN"] and not listener_arns:
+        raise AcceptanceCheckError("scenario_inventory_binding")
+    if any(listener_pattern.fullmatch(listener_arn) is None for listener_arn in listener_arns):
+        raise AcceptanceCheckError("scenario_inventory_binding")
+    listener_rule_arn = values["FIRST_DEPLOY_LISTENER_RULE_ARN"]
+    if listener_rule_arn and _listener_arn_from_rule_arn(cast(str, listener_rule_arn)) not in listener_arns:
         raise AcceptanceCheckError("scenario_inventory_binding")
     event_target = values["ECS_DEPLOYMENT_EVENT_TARGET_ID"]
     if (
@@ -4129,11 +4516,13 @@ def _validate_resolved_scenario_values(
     acceptance_run_id: str,
     aws_region: str,
 ) -> None:
-    namespace = f"{acceptance_run_id}-{scenario_id.lower()}"
+    namespace = scenario_resource_namespace(acceptance_run_id, scenario_id)
     required_common = {
         "ECS_CLUSTER",
         "ECS_SERVICE",
         "WEB_CONTAINER_NAME",
+        "ELSPETH_WEB__DATA_DIR",
+        "ELSPETH_WEB__PAYLOAD_STORE_PATH",
         "TARGET_GROUP_ARN",
         "ALB_BASE_URL",
         "ALB_ARN",
@@ -4147,6 +4536,7 @@ def _validate_resolved_scenario_values(
         "WEB_LOG_STREAM_PREFIX",
         "DOCTOR_LOG_GROUP",
         "DOCTOR_LOG_STREAM_PREFIX",
+        "OPERATOR_METRICS_LOG_GROUP",
         "ECS_DEPLOYMENT_EVENT_RULE",
         "ECS_DEPLOYMENT_EVENT_TARGET_ID",
         "ECS_DEPLOYMENT_EVENT_LOG_GROUP",
@@ -4157,6 +4547,17 @@ def _validate_resolved_scenario_values(
         raise AcceptanceCheckError("scenario_inventory_schema")
     if values["DEPLOYMENT_MODE"] != ("first" if scenario_id == "A" else "upgrade"):
         raise AcceptanceCheckError("scenario_inventory_binding")
+    data_dir = PurePosixPath(cast(str, values["ELSPETH_WEB__DATA_DIR"]))
+    payload_root = PurePosixPath(cast(str, values["ELSPETH_WEB__PAYLOAD_STORE_PATH"]))
+    if (
+        not data_dir.is_absolute()
+        or not payload_root.is_absolute()
+        or data_dir == PurePosixPath("/")
+        or payload_root == data_dir
+        or data_dir not in payload_root.parents
+        or payload_root == data_dir / "blobs"
+    ):
+        raise AcceptanceCheckError("scenario_inventory_schema")
     alb_url = cast(str, values["ALB_BASE_URL"])
     parsed_alb = urlsplit(alb_url)
     if (
@@ -4196,8 +4597,46 @@ def _validate_resolved_scenario_values(
         or any(type(item) is not str or not item for item in [*awsvpc["subnets"], *awsvpc["securityGroups"]])
     ):
         raise AcceptanceCheckError("scenario_inventory_schema")
+    listener_fields = {"FIRST_DEPLOY_LISTENER_RULE_ARN", "FIRST_DEPLOY_FORWARD_ACTIONS", "FIRST_DEPLOY_DISABLED_ACTIONS"}
+    if any(not values[field] for field in listener_fields):
+        raise AcceptanceCheckError("scenario_inventory_binding")
+    for field in ("FIRST_DEPLOY_FORWARD_ACTIONS", "FIRST_DEPLOY_DISABLED_ACTIONS"):
+        try:
+            actions = json.loads(cast(str, values[field]))
+        except json.JSONDecodeError:
+            raise AcceptanceCheckError("scenario_inventory_schema") from None
+        if not isinstance(actions, list) or not actions or any(not isinstance(action, dict) for action in actions):
+            raise AcceptanceCheckError("scenario_inventory_schema")
+        if field == "FIRST_DEPLOY_FORWARD_ACTIONS":
+            target_group = values["TARGET_GROUP_ARN"]
+
+            def forwards_to_expected_target(
+                action: Mapping[str, object],
+                expected_target_group: object = target_group,
+            ) -> bool:
+                if action.get("Type") != "forward":
+                    return False
+                if action.get("TargetGroupArn") == expected_target_group:
+                    return True
+                forward_config = action.get("ForwardConfig")
+                if not isinstance(forward_config, Mapping):
+                    return False
+                targets = forward_config.get("TargetGroups")
+                return isinstance(targets, list) and any(
+                    isinstance(target, Mapping) and target.get("TargetGroupArn") == expected_target_group for target in targets
+                )
+
+            if not any(forwards_to_expected_target(cast(Mapping[str, object], action)) for action in actions):
+                raise AcceptanceCheckError("scenario_inventory_binding")
+        elif not any(
+            action.get("Type") == "fixed-response"
+            and isinstance(action.get("FixedResponseConfig"), Mapping)
+            and cast(Mapping[str, object], action["FixedResponseConfig"]).get("StatusCode") == "503"
+            for action in actions
+        ):
+            raise AcceptanceCheckError("scenario_inventory_binding")
+
     if scenario_id == "A":
-        required = {"FIRST_DEPLOY_LISTENER_RULE_ARN", "FIRST_DEPLOY_FORWARD_ACTIONS", "FIRST_DEPLOY_DISABLED_ACTIONS"}
         forbidden = {
             "PREVIOUS_TASK_DEFINITION",
             "ROLLBACK_DOCTOR_TASK_DEFINITION",
@@ -4206,43 +4645,8 @@ def _validate_resolved_scenario_values(
             "OIDC_EXPECTED_AUDIENCE",
             "OIDC_EXPECTED_AUTHORIZATION_ORIGIN",
         }
-        if any(not values[field] for field in required) or any(values[field] for field in forbidden):
+        if any(values[field] for field in forbidden):
             raise AcceptanceCheckError("scenario_inventory_binding")
-        for field in ("FIRST_DEPLOY_FORWARD_ACTIONS", "FIRST_DEPLOY_DISABLED_ACTIONS"):
-            try:
-                actions = json.loads(cast(str, values[field]))
-            except json.JSONDecodeError:
-                raise AcceptanceCheckError("scenario_inventory_schema") from None
-            if not isinstance(actions, list) or not actions or any(not isinstance(action, dict) for action in actions):
-                raise AcceptanceCheckError("scenario_inventory_schema")
-            if field == "FIRST_DEPLOY_FORWARD_ACTIONS":
-                target_group = values["TARGET_GROUP_ARN"]
-
-                def forwards_to_expected_target(
-                    action: Mapping[str, object],
-                    expected_target_group: object = target_group,
-                ) -> bool:
-                    if action.get("Type") != "forward":
-                        return False
-                    if action.get("TargetGroupArn") == expected_target_group:
-                        return True
-                    forward_config = action.get("ForwardConfig")
-                    if not isinstance(forward_config, Mapping):
-                        return False
-                    targets = forward_config.get("TargetGroups")
-                    return isinstance(targets, list) and any(
-                        isinstance(target, Mapping) and target.get("TargetGroupArn") == expected_target_group for target in targets
-                    )
-
-                if not any(forwards_to_expected_target(cast(Mapping[str, object], action)) for action in actions):
-                    raise AcceptanceCheckError("scenario_inventory_binding")
-            elif not any(
-                action.get("Type") == "fixed-response"
-                and isinstance(action.get("FixedResponseConfig"), Mapping)
-                and cast(Mapping[str, object], action["FixedResponseConfig"]).get("StatusCode") == "503"
-                for action in actions
-            ):
-                raise AcceptanceCheckError("scenario_inventory_binding")
     else:
         required = {
             "PREVIOUS_TASK_DEFINITION",
@@ -4252,8 +4656,7 @@ def _validate_resolved_scenario_values(
             "OIDC_EXPECTED_AUDIENCE",
             "OIDC_EXPECTED_AUTHORIZATION_ORIGIN",
         }
-        forbidden = {"FIRST_DEPLOY_LISTENER_RULE_ARN", "FIRST_DEPLOY_FORWARD_ACTIONS", "FIRST_DEPLOY_DISABLED_ACTIONS"}
-        if any(not values[field] for field in required) or any(values[field] for field in forbidden):
+        if any(not values[field] for field in required):
             raise AcceptanceCheckError("scenario_inventory_binding")
         pool_id = cast(str, values["COGNITO_USER_POOL_ID"])
         if re.fullmatch(rf"{re.escape(aws_region)}_[A-Za-z0-9]+", pool_id) is None:
@@ -4341,12 +4744,14 @@ def _validate_scenario_inventory(
         "ECS_CLUSTER",
         "ECS_SERVICE",
         "WEB_CONTAINER_NAME",
+        "ELSPETH_WEB__DATA_DIR",
+        "ELSPETH_WEB__PAYLOAD_STORE_PATH",
         "DOCTOR_CONTAINER_NAME",
-        "DOCTOR_NETWORK_CONFIGURATION",
         "WEB_LOG_GROUP",
         "WEB_LOG_STREAM_PREFIX",
         "DOCTOR_LOG_GROUP",
         "DOCTOR_LOG_STREAM_PREFIX",
+        "OPERATOR_METRICS_LOG_GROUP",
         "ECS_DEPLOYMENT_EVENT_RULE",
         "ECS_DEPLOYMENT_EVENT_TARGET_ID",
         "ECS_DEPLOYMENT_EVENT_LOG_GROUP",
@@ -4362,12 +4767,59 @@ def _validate_scenario_inventory(
     _control_path(values["SCENARIO_TF_VARS"])
     _control_path(values["SCENARIO_TF_BINDING_FILE"])
     orphan = _validate_orphan_inventory(payload["orphan_sweep"])
+    try:
+        guardrail_profiles_payload = json.loads(cast(str, values["ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES"]))
+    except json.JSONDecodeError:
+        raise AcceptanceCheckError("scenario_inventory_schema") from None
+    if expected_phase == "preapply":
+        if guardrail_profiles_payload != []:
+            raise AcceptanceCheckError("scenario_inventory_schema")
+    else:
+        if not isinstance(guardrail_profiles_payload, list) or len(guardrail_profiles_payload) != 2:
+            raise AcceptanceCheckError("scenario_inventory_schema")
+        try:
+            guardrail_profiles = [BedrockGuardrailProfileSettings.model_validate(profile) for profile in guardrail_profiles_payload]
+        except Exception:
+            raise AcceptanceCheckError("scenario_inventory_schema") from None
+        if {profile.plugin for profile in guardrail_profiles} != {
+            "aws_bedrock_prompt_shield",
+            "aws_bedrock_content_safety",
+        } or any(profile.region != aws_region for profile in guardrail_profiles):
+            raise AcceptanceCheckError("scenario_inventory_binding")
+        try:
+            guardrail_defaults = json.loads(cast(str, values["ELSPETH_WEB__BEDROCK_GUARDRAIL_DEFAULT_PROFILES"]))
+        except json.JSONDecodeError:
+            raise AcceptanceCheckError("scenario_inventory_schema") from None
+        if (
+            not isinstance(guardrail_defaults, dict)
+            or set(guardrail_defaults)
+            != {
+                "aws_bedrock_prompt_shield",
+                "aws_bedrock_content_safety",
+            }
+            or any(guardrail_defaults[profile.plugin] != profile.alias for profile in guardrail_profiles)
+        ):
+            raise AcceptanceCheckError("scenario_inventory_binding")
+        owned_guardrails = cast(list[Mapping[str, object]], orphan["bedrock_guardrails"])
+        owned_versions = {cast(str, guardrail["identifier"]): set(cast(list[str], guardrail["versions"])) for guardrail in owned_guardrails}
+        if (
+            len(owned_versions) != 2
+            or {profile.guardrail_identifier for profile in guardrail_profiles} != set(owned_versions)
+            or any(
+                profile.guardrail_identifier not in owned_versions
+                or profile.guardrail_version not in owned_versions[profile.guardrail_identifier]
+                for profile in guardrail_profiles
+            )
+        ):
+            raise AcceptanceCheckError("scenario_inventory_binding")
     for field in (
         "ecs_task_definition_families",
         "rds_db_instance_identifiers",
         "efs_creation_tokens",
         "secret_ids",
+        "iam_role_names",
         "log_group_names",
+        "log_resource_policy_names",
         "cloudwatch_dashboard_names",
         "cloudwatch_alarm_names",
         "xray_group_names",
@@ -4376,6 +4828,8 @@ def _validate_scenario_inventory(
     ):
         if not orphan[field]:
             raise AcceptanceCheckError("scenario_inventory_schema")
+    if len(cast(list[str], orphan["log_resource_policy_names"])) != 1:
+        raise AcceptanceCheckError("scenario_inventory_schema")
     if any(orphan[field] != 0 for field in ("expected_retained_metric_series", "expected_retained_trace_ids")):
         raise AcceptanceCheckError("scenario_inventory_schema")
     if orphan["cloudwatch_retained_metrics"] or orphan["xray_retained_trace_ids"]:
@@ -4402,6 +4856,15 @@ def _validate_scenario_inventory(
         if any(orphan[field] != empty_value for field, empty_value in empty_provider_orphans.items()):
             raise AcceptanceCheckError("scenario_inventory_schema")
     else:
+        file_system_ids = cast(list[str], orphan["efs_file_system_ids"])
+        access_point_ids = cast(list[str], orphan["efs_access_point_ids"])
+        if (
+            len(file_system_ids) != 1
+            or len(access_point_ids) != 1
+            or re.fullmatch(r"fs-[0-9a-f]{8,40}", file_system_ids[0]) is None
+            or re.fullmatch(r"fsap-[0-9a-f]{8,40}", access_point_ids[0]) is None
+        ):
+            raise AcceptanceCheckError("scenario_inventory_schema")
         _validate_resolved_scenario_values(
             values,
             scenario_id=scenario_id,
@@ -4442,6 +4905,7 @@ def _validate_scenario_inventory_isolation(
         "LOCAL_AUTH_VERIFIER_TASK_DEFINITION",
         "WEB_LOG_GROUP",
         "DOCTOR_LOG_GROUP",
+        "OPERATOR_METRICS_LOG_GROUP",
         "ECS_DEPLOYMENT_EVENT_RULE",
         "ECS_DEPLOYMENT_EVENT_TARGET_ID",
         "ECS_DEPLOYMENT_EVENT_LOG_GROUP",
@@ -4461,7 +4925,9 @@ def _validate_scenario_inventory_isolation(
         "efs_file_system_ids",
         "efs_access_point_ids",
         "secret_ids",
+        "iam_role_names",
         "log_group_names",
+        "log_resource_policy_names",
         "cloudwatch_dashboard_names",
         "cloudwatch_alarm_names",
         "xray_group_names",
@@ -4990,7 +5456,7 @@ def control_manifest_bind_scenario(
     orphan = inventory["orphan_sweep"]
     assert isinstance(values, dict) and isinstance(orphan, dict)
     assert isinstance(preapply_values, dict) and isinstance(preapply_orphan, dict)
-    if any(values[field] != preapply_values[field] for field in _SCENARIO_VALUE_FIELDS - _PROVIDER_GENERATED_SCENARIO_FIELDS):
+    if any(values[field] != preapply_values[field] for field in _SCENARIO_VALUE_FIELDS - _RESOLVED_SCENARIO_FIELDS):
         raise AcceptanceCheckError("scenario_inventory_conflict")
     if any(orphan[field] != preapply_orphan[field] for field in _ORPHAN_INVENTORY_FIELDS - _PROVIDER_GENERATED_ORPHAN_FIELDS):
         raise AcceptanceCheckError("scenario_inventory_conflict")
@@ -5163,6 +5629,52 @@ def _reverify_bound_evidence_export_receipt(
     )
     if observed_sha256 != expected_sha256:
         raise AcceptanceCheckError("evidence_export_binding")
+
+
+def create_evidence_export_receipt(
+    manifest_path: Path,
+    *,
+    ledger_path: Path,
+    output_path: Path,
+    artifact_count: int,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> dict[str, object]:
+    """Record an evidence owner's completed and verified external export."""
+
+    if type(artifact_count) is not int or not 1 <= artifact_count <= 100_000:
+        raise AcceptanceCheckError("evidence_export_schema")
+    manifest = _read_control_manifest(manifest_path)
+    ledger = _read_gate_ledger(ledger_path)
+    if ledger.get("candidate_sha") != manifest["candidate_sha"]:
+        raise AcceptanceCheckError("evidence_export_binding")
+    evidence_record_count, receipts_sha256 = _verify_stored_receipts(manifest_path, manifest)
+    if artifact_count < max(1, evidence_record_count):
+        raise AcceptanceCheckError("evidence_export_binding")
+    receipt = {
+        "schema": "elspeth.aws-ecs-evidence-export.v1",
+        "acceptance_run_id": manifest["acceptance_run_id"],
+        "destination_sha256": cast(Mapping[str, object], manifest["evidence"])["destination_sha256"],
+        "receipts_sha256": receipts_sha256,
+        "ledger_records_sha256": _gate_ledger_records_hash(ledger),
+        "artifact_count": artifact_count,
+        "exported_at": _utc_timestamp(now()),
+        "verified": True,
+    }
+    _write_protected_document(
+        output_path,
+        receipt,
+        create=True,
+        exists_check="evidence_export_receipt",
+        write_check="evidence_export_receipt",
+        parent_check="evidence_export_receipt",
+    )
+    _validate_evidence_export_receipt(
+        output_path,
+        manifest=manifest,
+        receipts_sha256=receipts_sha256,
+        ledger_records_sha256=cast(str, receipt["ledger_records_sha256"]),
+    )
+    return receipt
 
 
 def control_manifest_update(
@@ -5778,6 +6290,7 @@ def validate_task_definition_policy_binding(
     manifest_path: Path,
     scenario_id: str,
     container_name: str,
+    expected_user: str | None = None,
 ) -> str:
     """Bind a returned ECS task definition's policy environment to protected inventory."""
 
@@ -5786,7 +6299,8 @@ def validate_task_definition_policy_binding(
     manifest = _read_control_manifest(manifest_path)
     inventory = _load_bound_scenario_inventory(manifest, scenario_id, require_resolved=True)
     values = inventory["values"]
-    if not isinstance(values, dict):
+    orphan = inventory["orphan_sweep"]
+    if not isinstance(values, dict) or not isinstance(orphan, dict):
         raise AcceptanceCheckError("task_definition_policy_binding")
     task = payload.get("taskDefinition") if isinstance(payload, Mapping) else None
     if not isinstance(task, Mapping) or task.get("status") != "ACTIVE":
@@ -5808,6 +6322,37 @@ def validate_task_definition_policy_binding(
     if len(matches) != 1:
         raise AcceptanceCheckError("task_definition_policy_binding")
     container = matches[0]
+    if container.get("essential") is not True:
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    aws = manifest["aws"]
+    role_names = orphan.get("iam_role_names")
+    if not isinstance(aws, Mapping) or not isinstance(role_names, list):
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    account_id = aws.get("account_id")
+    namespace = scenario_resource_namespace(cast(str, manifest["acceptance_run_id"]), scenario_id)
+    expected_roles = {
+        "taskRoleArn": f"{namespace}-task-role",
+        "executionRoleArn": f"{namespace}-execution-role",
+    }
+    role_arns = tuple(task.get(field) for field in expected_roles)
+    if role_arns[0] == role_arns[1]:
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    for field, expected_name in expected_roles.items():
+        role_arn = task.get(field)
+        if type(role_arn) is not str:
+            raise AcceptanceCheckError("task_definition_policy_binding")
+        match = re.fullmatch(
+            r"arn:aws(?:-us-gov|-cn)?:iam::([0-9]{12}):role/([A-Za-z0-9+=,.@_-]{1,64})",
+            role_arn,
+        )
+        if match is None or match.group(1) != account_id or match.group(2) != expected_name or expected_name not in role_names:
+            raise AcceptanceCheckError("task_definition_policy_binding")
+    if expected_user is not None and (
+        expected_user != "1000:1000"
+        or container.get("user") != expected_user
+        or container.get("entryPoint") != ["python", "-m", "elspeth.web.aws_ecs_acceptance"]
+    ):
+        raise AcceptanceCheckError("task_definition_policy_binding")
     environment = container.get("environment")
     secrets = container.get("secrets", [])
     if not isinstance(environment, list) or not isinstance(secrets, list) or len(environment) > 1_000 or len(secrets) > 1_000:
@@ -5837,9 +6382,92 @@ def validate_task_definition_policy_binding(
         "ELSPETH_BEDROCK_LIVE_TEST_MODEL",
         "AWS_REGION",
     )
-    if secret_names.intersection(protected_names):
+    acceptance_run_id = cast(str, manifest["acceptance_run_id"])
+    expected_runtime = {
+        "ELSPETH_WEB__DATA_DIR": cast(str, values["ELSPETH_WEB__DATA_DIR"]),
+        "ELSPETH_WEB__PAYLOAD_STORE_PATH": cast(str, values["ELSPETH_WEB__PAYLOAD_STORE_PATH"]),
+        "ELSPETH_ACCEPTANCE_RUN_ID": acceptance_run_id,
+        "ELSPETH_ACCEPTANCE_CANDIDATE_SHA": cast(str, manifest["candidate_sha"]),
+        "ELSPETH_ACCEPTANCE_SCENARIO_ID": scenario_id,
+        "ELSPETH_ACCEPTANCE_S3_BUCKET": cast(str, values["ELSPETH_TEST_S3_BUCKET"]),
+        "ELSPETH_ACCEPTANCE_S3_PREFIX": f"{scenario_resource_namespace(acceptance_run_id, scenario_id)}/{acceptance_run_id}",
+    }
+    if secret_names.intersection((*protected_names, *expected_runtime)):
         raise AcceptanceCheckError("task_definition_policy_binding")
     if any(observed.get(name) != values.get(name) for name in protected_names):
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    if any(observed.get(name) != value for name, value in expected_runtime.items()):
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    data_dir_value = observed.get("ELSPETH_WEB__DATA_DIR")
+    payload_root_value = observed.get("ELSPETH_WEB__PAYLOAD_STORE_PATH")
+    try:
+        data_dir = PurePosixPath(cast(str, data_dir_value))
+        payload_root = PurePosixPath(cast(str, payload_root_value))
+    except (TypeError, ValueError):
+        raise AcceptanceCheckError("task_definition_policy_binding") from None
+    if (
+        type(data_dir_value) is not str
+        or type(payload_root_value) is not str
+        or not data_dir.is_absolute()
+        or not payload_root.is_absolute()
+        or data_dir == PurePosixPath("/")
+        or payload_root == data_dir
+        or data_dir not in payload_root.parents
+        or payload_root == data_dir / "blobs"
+    ):
+        raise AcceptanceCheckError("task_definition_policy_binding")
+
+    file_system_ids = orphan.get("efs_file_system_ids")
+    access_point_ids = orphan.get("efs_access_point_ids")
+    if (
+        not isinstance(file_system_ids, list)
+        or not isinstance(access_point_ids, list)
+        or len(file_system_ids) != 1
+        or len(access_point_ids) != 1
+        or type(file_system_ids[0]) is not str
+        or type(access_point_ids[0]) is not str
+    ):
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    volumes = task.get("volumes")
+    mount_points = container.get("mountPoints")
+    if not isinstance(volumes, list) or not isinstance(mount_points, list):
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    volume_names: set[str] = set()
+    matching_volumes: list[str] = []
+    efs_volume_names: set[str] = set()
+    for volume in volumes:
+        if not isinstance(volume, Mapping) or type(volume.get("name")) is not str:
+            raise AcceptanceCheckError("task_definition_policy_binding")
+        volume_name = cast(str, volume["name"])
+        if volume_name in volume_names:
+            raise AcceptanceCheckError("task_definition_policy_binding")
+        volume_names.add(volume_name)
+        efs = volume.get("efsVolumeConfiguration")
+        if not isinstance(efs, Mapping):
+            continue
+        efs_volume_names.add(volume_name)
+        authorization = efs.get("authorizationConfig")
+        if (
+            efs.get("fileSystemId") == file_system_ids[0]
+            and efs.get("transitEncryption") == "ENABLED"
+            and (efs.get("rootDirectory") is None or efs.get("rootDirectory") == "/")
+            and isinstance(authorization, Mapping)
+            and authorization.get("accessPointId") == access_point_ids[0]
+            and authorization.get("iam") == "ENABLED"
+        ):
+            matching_volumes.append(volume_name)
+    if len(matching_volumes) != 1 or efs_volume_names != {matching_volumes[0]}:
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    bound_mounts = [
+        mount
+        for mount in mount_points
+        if isinstance(mount, Mapping) and (mount.get("sourceVolume") == matching_volumes[0] or mount.get("containerPath") == data_dir_value)
+    ]
+    if len(bound_mounts) != 1 or not (
+        bound_mounts[0].get("sourceVolume") == matching_volumes[0]
+        and bound_mounts[0].get("containerPath") == data_dir_value
+        and bound_mounts[0].get("readOnly") is False
+    ):
         raise AcceptanceCheckError("task_definition_policy_binding")
     try:
         observed_binding = plugin_policy_binding_sha256(observed)
@@ -5860,6 +6488,7 @@ class OrphanSweepClients:
     rds: Any
     efs: Any
     secretsmanager: Any
+    iam: Any
     logs: Any
     cloudwatch: Any
     xray: Any
@@ -5877,6 +6506,7 @@ class OrphanSweepClients:
                 self.rds,
                 self.efs,
                 self.secretsmanager,
+                self.iam,
                 self.logs,
                 self.cloudwatch,
                 self.xray,
@@ -5915,6 +6545,7 @@ def _build_orphan_sweep_clients(region: str) -> OrphanSweepClients:
             rds=client("rds"),
             efs=client("efs"),
             secretsmanager=client("secretsmanager"),
+            iam=client("iam"),
             logs=client("logs"),
             cloudwatch=client("cloudwatch"),
             xray=client("xray"),
@@ -5952,6 +6583,9 @@ _ORPHAN_NOT_FOUND_CODES = frozenset(
         "FileSystemNotFound",
         "ImageNotFoundException",
         "LoadBalancerNotFound",
+        "ListenerNotFound",
+        "NoSuchEntity",
+        "RepositoryNotFoundException",
         "ResourceNotFoundException",
         "RuleNotFound",
         "SecretNotFoundException",
@@ -6444,6 +7078,29 @@ def orphan_sweep(
                     counts["secretsmanager"]["queried"] += 1
                     if response is not None:
                         counts["secretsmanager"]["unapproved_survivors"] += 1
+                for role_name in cast(list[str], orphan["iam_role_names"]):
+                    response = _orphan_call(clients.iam, "get_role", RoleName=role_name)
+                    counts["iam"]["queried"] += 1
+                    if response is not None:
+                        role = response.get("Role")
+                        if not isinstance(role, Mapping) or role.get("RoleName") != role_name:
+                            raise AcceptanceCheckError("orphan_sweep_api")
+                        counts["iam"]["unapproved_survivors"] += 1
+                resource_policies = _orphan_paged_items(
+                    clients.logs,
+                    "describe_resource_policies",
+                    item_field="resourcePolicies",
+                    request_token="nextToken",
+                    response_token="nextToken",
+                    kwargs={"limit": 50},
+                )
+                expected_resource_policies = set(cast(list[str], orphan["log_resource_policy_names"]))
+                counts["logs"]["queried"] += 1
+                for policy in resource_policies:
+                    if not isinstance(policy, Mapping) or type(policy.get("policyName")) is not str:
+                        raise AcceptanceCheckError("orphan_sweep_api")
+                    if policy["policyName"] in expected_resource_policies:
+                        counts["logs"]["unapproved_survivors"] += 1
                 log_group_names = {
                     str(values[field]) for field in ("WEB_LOG_GROUP", "DOCTOR_LOG_GROUP", "ECS_DEPLOYMENT_EVENT_LOG_GROUP") if values[field]
                 } | set(cast(list[str], orphan["log_group_names"]))
@@ -6645,10 +7302,9 @@ def orphan_sweep(
                         kwargs={"guardrailIdentifier": guardrail["identifier"], "maxResults": 1000},
                     )
                     counts["bedrock"]["queried"] += 1
-                    expected_versions = set(cast(list[str], guardrail["versions"]))
-                    counts["bedrock"]["unapproved_survivors"] += sum(
-                        isinstance(item, Mapping) and str(item.get("version")) in expected_versions for item in guardrails
-                    )
+                    if any(not isinstance(item, Mapping) for item in guardrails):
+                        raise AcceptanceCheckError("orphan_sweep_api")
+                    counts["bedrock"]["unapproved_survivors"] += len(guardrails)
                 user_pool_id = values["COGNITO_USER_POOL_ID"]
                 if user_pool_id and orphan["cognito_pool_owned"] is True:
                     response = _orphan_call(clients.cognito, "describe_user_pool", UserPoolId=user_pool_id)
@@ -6769,6 +7425,10 @@ def _validate_connection_budget_receipt(payload: object, *, subject_sha256: str)
     if not isinstance(payload, dict) or set(payload) != {
         "schema",
         "cluster_id_sha256",
+        "window_start",
+        "window_end",
+        "period_seconds",
+        "expected_points",
         "points",
         "high_water",
         "max_connections",
@@ -6777,22 +7437,47 @@ def _validate_connection_budget_receipt(payload: object, *, subject_sha256: str)
         "ok",
     }:
         raise AcceptanceCheckError("receipt_store_schema")
-    if payload["schema"] != "elspeth.rds-connection-budget.v1" or payload["cluster_id_sha256"] != subject_sha256:
+    if (
+        payload["schema"] != "elspeth.rds-connection-budget.v2"
+        or type(payload["cluster_id_sha256"]) is not str
+        or _SHA256_PATTERN.fullmatch(payload["cluster_id_sha256"]) is None
+        or payload["cluster_id_sha256"] != subject_sha256
+    ):
         raise AcceptanceCheckError("receipt_store_binding")
     points = payload["points"]
-    if not isinstance(points, list) or not points or len(points) > 10_000:
+    window_start = _control_timestamp(payload["window_start"])
+    window_end = _control_timestamp(payload["window_end"])
+    if (
+        payload["period_seconds"] != 60
+        or payload["expected_points"] != 10
+        or window_end - window_start != timedelta(minutes=10)
+        or window_start.second != 0
+        or window_start.microsecond != 0
+    ):
+        raise AcceptanceCheckError("receipt_store_schema")
+    expected_timestamps = [window_start + timedelta(minutes=offset) for offset in range(10)]
+    if not isinstance(points, list) or len(points) != len(expected_timestamps):
         raise AcceptanceCheckError("receipt_store_schema")
     counts: list[float] = []
+    observed_timestamps: list[datetime] = []
     for point in points:
         if not isinstance(point, dict) or set(point) != {"timestamp", "count"}:
             raise AcceptanceCheckError("receipt_store_schema")
-        _control_timestamp(point["timestamp"])
+        observed_timestamps.append(_control_timestamp(point["timestamp"]))
         counts.append(_receipt_number(point["count"]))
+    if observed_timestamps != expected_timestamps or len(set(observed_timestamps)) != len(observed_timestamps):
+        raise AcceptanceCheckError("receipt_store_schema")
     high_water = _receipt_number(payload["high_water"])
     maximum = _receipt_number(payload["max_connections"])
     budget = _receipt_number(payload["approved_budget"])
     margin = _receipt_number(payload["safety_margin"])
-    if payload["ok"] is not True or high_water != max(counts) or high_water > budget or maximum - high_water < margin:
+    if (
+        payload["ok"] is not True
+        or high_water != max(counts)
+        or high_water > budget
+        or budget > maximum - margin
+        or maximum - high_water < margin
+    ):
         raise AcceptanceCheckError("receipt_store_schema")
     return payload
 
@@ -6836,9 +7521,254 @@ def _validate_terraform_receipt(payload: object, *, kind: str, subject_id: str |
     return payload
 
 
+def _validate_event_canary_receipt(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict) or payload != {
+        "schema": "elspeth.aws-ecs-event-canary.v1",
+        "delivered": True,
+        "removed": True,
+    }:
+        raise AcceptanceCheckError("receipt_store_schema")
+    return payload
+
+
+def validate_compatibility_record(
+    record_path: Path,
+    *,
+    manifest_path: Path,
+    scenario_id: str,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> dict[str, object]:
+    """Validate the release/schema authority bound to one resolved scenario."""
+
+    if scenario_id not in _APPLICATION_SCENARIO_IDS:
+        raise AcceptanceCheckError("compatibility_record_binding")
+    manifest = _read_control_manifest(manifest_path)
+    inventory = _load_bound_scenario_inventory(manifest, scenario_id, require_resolved=True)
+    values = inventory["values"]
+    ecr = manifest["ecr"]
+    assert isinstance(values, dict) and isinstance(ecr, dict)
+    record = _read_protected_document(record_path, check="compatibility_record_file")
+    fields = {
+        "schema",
+        "record_id",
+        "acceptance_run_id",
+        "scenario_id",
+        "candidate_sha",
+        "candidate_image_digest",
+        "candidate_task_definition",
+        "candidate_doctor_task_definition",
+        "candidate_package_version",
+        "previous_source_sha",
+        "previous_image_digest",
+        "previous_task_definition",
+        "rollback_doctor_task_definition",
+        "previous_package_version",
+        "schema_facts",
+        "forward_compatible",
+        "backward_compatible",
+        "rollback_permitted",
+        "decision",
+        "approver_identity",
+        "countersigner_identity",
+        "approved_at",
+        "countersigned_at",
+        "expires_at",
+    }
+    if set(record) != fields or record["schema"] != "elspeth.aws-ecs-compatibility-record.v2":
+        raise AcceptanceCheckError("compatibility_record_schema")
+    previous = values["PREVIOUS_TASK_DEFINITION"] if scenario_id == "B" else ""
+    rollback_doctor = values["ROLLBACK_DOCTOR_TASK_DEFINITION"] if scenario_id == "B" else ""
+    previous_digest = ecr["baseline_digest"] if scenario_id == "B" else ""
+    baseline_tag = ecr["baseline_tag"] if scenario_id == "B" else ""
+    baseline_match = re.search(r"baseline-([0-9a-f]{40})$", cast(str, baseline_tag)) if baseline_tag else None
+    previous_source_sha = baseline_match.group(1) if baseline_match is not None else ""
+    expected_schema_facts = {
+        "candidate": {
+            "session_epoch": 27,
+            "landscape_epoch": 23,
+            "run_web_plugin_policy_present": True,
+        },
+        "previous": (
+            {
+                "session_epoch": 27,
+                "landscape_epoch": 23,
+                "run_web_plugin_policy_present": True,
+            }
+            if scenario_id == "B"
+            else None
+        ),
+        "structural_changes": "none" if scenario_id == "B" else "initial_create",
+        "semantics_only_changes": "none",
+        "archive_export_decision": "not_required" if scenario_id == "B" else "not_applicable",
+        "destructive_reset_required": False,
+    }
+    if (
+        record["acceptance_run_id"] != manifest["acceptance_run_id"]
+        or record["scenario_id"] != scenario_id
+        or record["candidate_sha"] != manifest["candidate_sha"]
+        or record["candidate_image_digest"] != ecr["candidate_digest"]
+        or record["candidate_task_definition"] != values["CANDIDATE_TASK_DEFINITION"]
+        or record["candidate_doctor_task_definition"] != values["DOCTOR_TASK_DEFINITION"]
+        or record["candidate_package_version"] != "0.7.1"
+        or record["previous_source_sha"] != previous_source_sha
+        or record["previous_image_digest"] != previous_digest
+        or record["previous_task_definition"] != previous
+        or record["rollback_doctor_task_definition"] != rollback_doctor
+        or record["previous_package_version"] != ("0.7.1" if scenario_id == "B" else "")
+        or record["schema_facts"] != expected_schema_facts
+        or record["decision"] != "approved"
+        or record["forward_compatible"] is not True
+        or record["backward_compatible"] is not (scenario_id == "B")
+        or record["rollback_permitted"] is not (scenario_id == "B")
+    ):
+        raise AcceptanceCheckError("compatibility_record_binding")
+    if any(type(record[field]) is not bool for field in ("forward_compatible", "backward_compatible", "rollback_permitted")):
+        raise AcceptanceCheckError("compatibility_record_schema")
+    for field in ("record_id", "approver_identity", "countersigner_identity"):
+        value = record[field]
+        if type(value) is not str or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}", value) is None:
+            raise AcceptanceCheckError("compatibility_record_schema")
+    if record["approver_identity"] == record["countersigner_identity"]:
+        raise AcceptanceCheckError("compatibility_record_schema")
+    approved_at = _control_timestamp(record["approved_at"])
+    countersigned_at = _control_timestamp(record["countersigned_at"])
+    expires_at = _control_timestamp(record["expires_at"])
+    current = now()
+    if current.tzinfo is None or current.utcoffset() is None or not approved_at <= countersigned_at <= current < expires_at:
+        raise AcceptanceCheckError("compatibility_record_expired")
+    canonical = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "schema": "elspeth.aws-ecs-compatibility-receipt.v2",
+        "record_sha256": _sha256(canonical),
+        "acceptance_run_id_sha256": _sha256(cast(str, manifest["acceptance_run_id"]).encode()),
+        "scenario_id": scenario_id,
+        "candidate_sha": manifest["candidate_sha"],
+        "candidate_image_digest": ecr["candidate_digest"],
+        "candidate_task_definition_sha256": _sha256(cast(str, values["CANDIDATE_TASK_DEFINITION"]).encode()),
+        "candidate_doctor_task_definition_sha256": _sha256(cast(str, values["DOCTOR_TASK_DEFINITION"]).encode()),
+        "candidate_package_version": "0.7.1",
+        "previous_source_sha": previous_source_sha or None,
+        "previous_image_digest": previous_digest or None,
+        "previous_task_definition_sha256": _sha256(cast(str, previous).encode()) if previous else None,
+        "rollback_doctor_task_definition_sha256": _sha256(cast(str, rollback_doctor).encode()) if rollback_doctor else None,
+        "previous_package_version": "0.7.1" if scenario_id == "B" else None,
+        "schema_facts": expected_schema_facts,
+        "forward_compatible": record["forward_compatible"],
+        "backward_compatible": record["backward_compatible"],
+        "rollback_permitted": record["rollback_permitted"],
+        "decision": "approved",
+        "approvals_present": True,
+        "expires_at": _utc_timestamp(expires_at),
+    }
+
+
+def _validate_compatibility_receipt(
+    payload: object,
+    *,
+    scenario_id: str,
+    candidate_sha: str,
+    subject_id: str | None,
+) -> dict[str, object]:
+    fields = {
+        "schema",
+        "record_sha256",
+        "acceptance_run_id_sha256",
+        "scenario_id",
+        "candidate_sha",
+        "candidate_image_digest",
+        "candidate_task_definition_sha256",
+        "candidate_doctor_task_definition_sha256",
+        "candidate_package_version",
+        "previous_source_sha",
+        "previous_image_digest",
+        "previous_task_definition_sha256",
+        "rollback_doctor_task_definition_sha256",
+        "previous_package_version",
+        "schema_facts",
+        "forward_compatible",
+        "backward_compatible",
+        "rollback_permitted",
+        "decision",
+        "approvals_present",
+        "expires_at",
+    }
+    if not isinstance(payload, dict) or set(payload) != fields:
+        raise AcceptanceCheckError("receipt_store_schema")
+    if (
+        subject_id is None
+        or _SHA256_PATTERN.fullmatch(subject_id) is None
+        or payload["schema"] != "elspeth.aws-ecs-compatibility-receipt.v2"
+        or payload["record_sha256"] != subject_id
+        or payload["scenario_id"] != scenario_id
+        or payload["candidate_sha"] != candidate_sha
+        or type(payload["candidate_image_digest"]) is not str
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", payload["candidate_image_digest"]) is None
+        or payload["candidate_package_version"] != "0.7.1"
+        or payload["forward_compatible"] is not True
+        or payload["decision"] != "approved"
+        or payload["approvals_present"] is not True
+    ):
+        raise AcceptanceCheckError("receipt_store_binding")
+    for field in (
+        "record_sha256",
+        "acceptance_run_id_sha256",
+        "candidate_task_definition_sha256",
+        "candidate_doctor_task_definition_sha256",
+    ):
+        if type(payload[field]) is not str or _SHA256_PATTERN.fullmatch(payload[field]) is None:
+            raise AcceptanceCheckError("receipt_store_schema")
+    previous_hash = payload["previous_task_definition_sha256"]
+    rollback_doctor_hash = payload["rollback_doctor_task_definition_sha256"]
+    previous_source_sha = payload["previous_source_sha"]
+    previous_image_digest = payload["previous_image_digest"]
+    if (scenario_id == "B") != (
+        type(previous_hash) is str
+        and _SHA256_PATTERN.fullmatch(previous_hash) is not None
+        and type(rollback_doctor_hash) is str
+        and _SHA256_PATTERN.fullmatch(rollback_doctor_hash) is not None
+        and type(previous_source_sha) is str
+        and re.fullmatch(r"[0-9a-f]{40}", previous_source_sha) is not None
+        and type(previous_image_digest) is str
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", previous_image_digest) is not None
+        and payload["previous_package_version"] == "0.7.1"
+    ):
+        raise AcceptanceCheckError("receipt_store_binding")
+    if scenario_id == "A" and any(
+        payload[field] is not None
+        for field in (
+            "previous_source_sha",
+            "previous_image_digest",
+            "previous_task_definition_sha256",
+            "rollback_doctor_task_definition_sha256",
+            "previous_package_version",
+        )
+    ):
+        raise AcceptanceCheckError("receipt_store_binding")
+    if (
+        payload["backward_compatible"] is not (scenario_id == "B")
+        or payload["rollback_permitted"] is not (scenario_id == "B")
+        or any(type(payload[field]) is not bool for field in ("backward_compatible", "rollback_permitted"))
+    ):
+        raise AcceptanceCheckError("receipt_store_schema")
+    expected_schema_facts = {
+        "candidate": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": True},
+        "previous": ({"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": True} if scenario_id == "B" else None),
+        "structural_changes": "none" if scenario_id == "B" else "initial_create",
+        "semantics_only_changes": "none",
+        "archive_export_decision": "not_required" if scenario_id == "B" else "not_applicable",
+        "destructive_reset_required": False,
+    }
+    if payload["schema_facts"] != expected_schema_facts:
+        raise AcceptanceCheckError("receipt_store_binding")
+    _control_timestamp(payload["expires_at"])
+    return payload
+
+
 _RECEIPT_KINDS = frozenset(
     {
         "connection-budget",
+        "compatibility-record",
+        "deployment-event-canary",
         "terraform-plan",
         "terraform-noop",
         "terraform-destroy-plan",
@@ -6848,6 +7778,7 @@ _RECEIPT_KINDS = frozenset(
         "verify-operator-telemetry",
     }
 )
+_TERRAFORM_RECEIPT_KINDS = frozenset({"terraform-plan", "terraform-noop", "terraform-destroy-plan"})
 
 
 def _validate_stored_receipt(
@@ -6863,6 +7794,15 @@ def _validate_stored_receipt(
     document = _validate_bounded_receipt_document(payload)
     if kind == "connection-budget":
         return _validate_connection_budget_receipt(document, subject_sha256=subject_sha256)
+    if kind == "compatibility-record":
+        return _validate_compatibility_receipt(
+            document,
+            scenario_id=scenario_id,
+            candidate_sha=candidate_sha,
+            subject_id=subject_id,
+        )
+    if kind == "deployment-event-canary":
+        return _validate_event_canary_receipt(document)
     if kind in {"terraform-plan", "terraform-noop", "terraform-destroy-plan"}:
         return _validate_terraform_receipt(document, kind=kind, subject_id=subject_id)
     if kind not in _RECEIPT_KINDS:
@@ -6901,7 +7841,11 @@ def receipt_store(
 ) -> str:
     """Persist one bounded sanitized receipt and atomically bind its hash."""
 
-    if scenario_id not in {"A", "B"} or kind not in _RECEIPT_KINDS:
+    if (
+        scenario_id not in _INFRASTRUCTURE_APPROVAL_SCOPES
+        or kind not in _RECEIPT_KINDS
+        or (scenario_id == "bootstrap" and kind not in _TERRAFORM_RECEIPT_KINDS)
+    ):
         raise AcceptanceCheckError("receipt_store_binding")
     if (
         type(subject_id) is not str
@@ -6937,6 +7881,30 @@ def receipt_store(
         binding = values["ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256"]
         assert isinstance(binding, str)
         expected_plugin_policy_binding_sha256 = binding
+    if kind == "compatibility-record":
+        inventory = _load_bound_scenario_inventory(manifest, scenario_id, require_resolved=True)
+        values = inventory["values"]
+        ecr = manifest["ecr"]
+        if not isinstance(values, dict) or not isinstance(ecr, dict) or not isinstance(document, Mapping):
+            raise AcceptanceCheckError("receipt_store_binding")
+        previous = values["PREVIOUS_TASK_DEFINITION"] if scenario_id == "B" else ""
+        rollback_doctor = values["ROLLBACK_DOCTOR_TASK_DEFINITION"] if scenario_id == "B" else ""
+        baseline_tag = ecr["baseline_tag"] if scenario_id == "B" else ""
+        baseline_match = re.search(r"baseline-([0-9a-f]{40})$", cast(str, baseline_tag)) if baseline_tag else None
+        previous_source_sha = baseline_match.group(1) if baseline_match is not None else None
+        if (
+            document.get("acceptance_run_id_sha256") != _sha256(cast(str, manifest["acceptance_run_id"]).encode())
+            or document.get("candidate_image_digest") != ecr["candidate_digest"]
+            or document.get("candidate_task_definition_sha256") != _sha256(cast(str, values["CANDIDATE_TASK_DEFINITION"]).encode())
+            or document.get("candidate_doctor_task_definition_sha256") != _sha256(cast(str, values["DOCTOR_TASK_DEFINITION"]).encode())
+            or document.get("previous_source_sha") != previous_source_sha
+            or document.get("previous_image_digest") != (ecr["baseline_digest"] if scenario_id == "B" else None)
+            or document.get("previous_task_definition_sha256") != (_sha256(cast(str, previous).encode()) if previous else None)
+            or document.get("rollback_doctor_task_definition_sha256")
+            != (_sha256(cast(str, rollback_doctor).encode()) if rollback_doctor else None)
+            or _control_timestamp(document.get("expires_at")) <= now()
+        ):
+            raise AcceptanceCheckError("receipt_store_binding")
     document = _validate_stored_receipt(
         document,
         kind=kind,
@@ -7076,7 +8044,7 @@ def approval_verify(
 
     if signature_verifier is None:
         signature_verifier = _configured_approval_signature_verifier(environ)
-    if scenario_id not in {"A", "B"} or kind not in {"terraform-plan", "terraform-destroy-plan"}:
+    if scenario_id not in _INFRASTRUCTURE_APPROVAL_SCOPES or kind not in {"terraform-plan", "terraform-destroy-plan"}:
         raise AcceptanceCheckError("approval_binding")
     if _SHA256_PATTERN.fullmatch(plan_receipt_hash) is None:
         raise AcceptanceCheckError("approval_binding")
@@ -7197,7 +8165,7 @@ def approval_require_current(
     """Reopen a stored approval and require it to be current at point of use."""
 
     if (
-        scenario_id not in {"A", "B"}
+        scenario_id not in _INFRASTRUCTURE_APPROVAL_SCOPES
         or kind not in {"terraform-plan", "terraform-destroy-plan"}
         or _SHA256_PATTERN.fullmatch(plan_receipt_hash) is None
         or _SHA256_PATTERN.fullmatch(approval_hash) is None
@@ -8078,14 +9046,31 @@ def build_parser() -> argparse.ArgumentParser:
     verify_payloads = commands.add_parser("verify-payloads")
     verify_payloads.add_argument("--landscape-run-id", required=True)
 
+    scenario_namespace = commands.add_parser("scenario-namespace")
+    scenario_namespace.add_argument("--acceptance-run-id", required=True)
+    scenario_namespace.add_argument("--scenario-id", required=True, choices=("A", "B"))
+
     verify_operator = commands.add_parser("verify-operator-telemetry")
     verify_operator.add_argument("--phase", choices=("positive", "outage"), default="positive")
+    verify_operator.add_argument("--landscape-run-id")
+
+    verify_connection = commands.add_parser("verify-connection-budget")
+    verify_connection.add_argument("--cluster-id", required=True)
+    verify_connection.add_argument("--start-time", required=True)
+    verify_connection.add_argument("--approved-budget", required=True, type=int)
+    verify_connection.add_argument("--safety-margin", required=True, type=int)
 
     extract_receipt = commands.add_parser("extract-exec-receipt")
     extract_receipt.add_argument(
         "--check",
         required=True,
-        choices=("verify-s3", "verify-bedrock", "verify-bedrock-guardrails", "verify-operator-telemetry"),
+        choices=(
+            "verify-s3",
+            "verify-bedrock",
+            "verify-bedrock-guardrails",
+            "verify-connection-budget",
+            "verify-operator-telemetry",
+        ),
     )
     extract_receipt.add_argument("--candidate-sha", required=True)
     extract_receipt.add_argument("--task-arn", required=True)
@@ -8192,7 +9177,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     receipt_command = commands.add_parser("receipt-store")
     receipt_command.add_argument("--file", required=True)
-    receipt_command.add_argument("--scenario-id", required=True, choices=("A", "B"))
+    receipt_command.add_argument("--scenario-id", required=True, choices=("A", "B", "bootstrap"))
     receipt_command.add_argument("--kind", required=True)
     receipt_command.add_argument("--subject-id", required=True)
     receipt_input = receipt_command.add_mutually_exclusive_group(required=True)
@@ -8201,13 +9186,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     approval_command = commands.add_parser("approval-verify")
     approval_command.add_argument("--file", required=True)
-    approval_command.add_argument("--scenario-id", required=True, choices=("A", "B"))
+    approval_command.add_argument("--scenario-id", required=True, choices=("A", "B", "bootstrap"))
     approval_command.add_argument("--kind", required=True, choices=("terraform-plan", "terraform-destroy-plan"))
     approval_command.add_argument("--plan-receipt-hash", required=True)
     approval_command.add_argument("--approval-file", required=True)
     approval_current = commands.add_parser("approval-require-current")
     approval_current.add_argument("--file", required=True)
-    approval_current.add_argument("--scenario-id", required=True, choices=("A", "B"))
+    approval_current.add_argument("--scenario-id", required=True, choices=("A", "B", "bootstrap"))
     approval_current.add_argument("--kind", required=True, choices=("terraform-plan", "terraform-destroy-plan"))
     approval_current.add_argument("--plan-receipt-hash", required=True)
     approval_current.add_argument("--approval-hash", required=True)
@@ -8221,6 +9206,12 @@ def build_parser() -> argparse.ArgumentParser:
     task_definition_policy.add_argument("--file", required=True)
     task_definition_policy.add_argument("--scenario-id", required=True, choices=("A", "B"))
     task_definition_policy.add_argument("--container-name", required=True)
+    task_definition_policy.add_argument("--expected-user", choices=("1000:1000",))
+
+    compatibility_record = commands.add_parser("compatibility-record-validate")
+    compatibility_record.add_argument("--file", required=True)
+    compatibility_record.add_argument("--scenario-id", required=True, choices=("A", "B"))
+    compatibility_record.add_argument("--record", required=True)
 
     orphan_command = commands.add_parser("orphan-sweep")
     orphan_command.add_argument("--file", required=True)
@@ -8232,7 +9223,14 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_command.add_argument("--phase", required=True, choices=("prepare", "commit"))
     cleanup_command.add_argument("--clear-cleanup-required", action="store_true")
 
+    evidence_export = commands.add_parser("evidence-export-receipt")
+    evidence_export.add_argument("--file", required=True)
+    evidence_export.add_argument("--ledger", required=True)
+    evidence_export.add_argument("--output", required=True)
+    evidence_export.add_argument("--artifact-count", required=True, type=int)
+
     for command in (
+        "provision-storage",
         "verify-local-auth",
         "verify-s3",
         "verify-bedrock",
@@ -8264,6 +9262,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "capture":
             capture(os.environ, state_file=Path(args.state_file))
+        elif args.command == "provision-storage":
+            _print_json(provision_storage())
+        elif args.command == "scenario-namespace":
+            _write_stdout_line(scenario_resource_namespace(args.acceptance_run_id, args.scenario_id))
         elif args.command == "verify-api":
             _print_json(verify_api(os.environ, state_file=Path(args.state_file)))
         elif args.command == "verify-payloads":
@@ -8274,6 +9276,7 @@ def main(argv: list[str] | None = None) -> int:
             "verify-s3",
             "verify-bedrock",
             "verify-bedrock-guardrails",
+            "verify-connection-budget",
             "verify-operator-telemetry",
         }:
             with _suppress_process_output():
@@ -8283,8 +9286,20 @@ def main(argv: list[str] | None = None) -> int:
                     details = asyncio.run(verify_bedrock(os.environ))
                 elif args.command == "verify-bedrock-guardrails":
                     details = run_bedrock_guardrails_live(os.environ)
+                elif args.command == "verify-connection-budget":
+                    details = verify_connection_budget_live(
+                        os.environ,
+                        cluster_id=args.cluster_id,
+                        start_time=args.start_time,
+                        approved_budget=args.approved_budget,
+                        safety_margin=args.safety_margin,
+                    )
                 else:
-                    details = verify_operator_telemetry_live(os.environ, phase=args.phase)
+                    details = verify_operator_telemetry_live(
+                        os.environ,
+                        phase=args.phase,
+                        landscape_run_id=args.landscape_run_id,
+                    )
             _write_stdout_line(encode_exec_receipt(args.command, details, resolve_exec_receipt_env(os.environ)))
         elif args.command == "extract-exec-receipt":
             stream = sys.stdin.read(MAX_EXEC_STREAM_BYTES + 1)
@@ -8449,8 +9464,17 @@ def main(argv: list[str] | None = None) -> int:
                 manifest_path=Path(args.file),
                 scenario_id=args.scenario_id,
                 container_name=args.container_name,
+                expected_user=args.expected_user,
             )
             _print_json({"task_definition_arn": task_definition_arn})
+        elif args.command == "compatibility-record-validate":
+            _print_json(
+                validate_compatibility_record(
+                    Path(args.record),
+                    manifest_path=Path(args.file),
+                    scenario_id=args.scenario_id,
+                )
+            )
         elif args.command == "orphan-sweep":
             _print_json(orphan_sweep(Path(args.file), acceptance_run_id=args.acceptance_run_id))
         elif args.command == "cleanup-evidence-finalize":
@@ -8459,6 +9483,15 @@ def main(argv: list[str] | None = None) -> int:
                 ledger_path=Path(args.ledger),
                 phase=args.phase,
                 clear_cleanup_required=args.clear_cleanup_required,
+            )
+        elif args.command == "evidence-export-receipt":
+            _print_json(
+                create_evidence_export_receipt(
+                    Path(args.file),
+                    ledger_path=Path(args.ledger),
+                    output_path=Path(args.output),
+                    artifact_count=args.artifact_count,
+                )
             )
         elif args.command == "sanitize-evidence":
             content = sys.stdin.buffer.read(MAX_CONTROL_DOCUMENT_BYTES + 1)

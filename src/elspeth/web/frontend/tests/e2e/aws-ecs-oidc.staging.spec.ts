@@ -8,6 +8,7 @@ import {
   buildOidcEvidence,
   validateAccessToken,
   validateAuthConfig,
+  writeOidcBearerHandoff,
   writeOidcEvidence,
   type OidcAudienceClaim,
   type OidcEvidencePhase,
@@ -99,6 +100,7 @@ test("completes public-client OIDC and session round trip", async ({ page, reque
   const audienceClaim = requiredEnvironment("OIDC_EXPECTED_AUDIENCE_CLAIM") as OidcAudienceClaim;
   const evidencePhase = requiredEnvironment("OIDC_EVIDENCE_PHASE") as OidcEvidencePhase;
   const evidenceFile = requiredEnvironment("OIDC_EVIDENCE_FILE");
+  const bearerHandoffFile = process.env.OIDC_BEARER_HANDOFF_FILE;
   requireOidc(OIDC_EVIDENCE_PHASES.includes(evidencePhase), "oidc_evidence_phase");
 
   const configResponse = await request.get(`${stagingOrigin}/api/auth/config`, {
@@ -244,6 +246,10 @@ test("completes public-client OIDC and session round trip", async ({ page, reque
   }
   if (sessionFailure !== null) throw sessionFailure;
   requireOidc(sessionDeleteStatus === 204, "oidc_session_delete");
+
+  if (bearerHandoffFile !== undefined && bearerHandoffFile !== "") {
+    writeOidcBearerHandoff(bearerHandoffFile, accessToken);
+  }
 
   const evidence = buildOidcEvidence({
     phase: evidencePhase,

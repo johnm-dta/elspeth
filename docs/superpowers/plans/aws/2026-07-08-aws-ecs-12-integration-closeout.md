@@ -239,8 +239,11 @@ mechanics. Do not duplicate or improvise those commands here.
 - [ ] Before mutation, obtain and validate:
 
   - a usable default AWS credential chain and the approved account/region;
-  - distinct Scenario A and B Terraform roots, vars, workspaces, encrypted
-    locked remote state, binding receipts, and pre-apply inventories;
+  - distinct Scenario A and B Terraform roots, vars, workspaces, planned
+    encrypted/locked S3 state identities, binding receipts, and pre-apply
+    inventories;
+  - for a fresh account, the protected local-state bootstrap root that owns
+    only the run-scoped S3 state bucket and ECR repository;
   - the Plan 10 rollback-baseline SHA and the approved ECR registry/repository;
   - the evidence destination and teardown deadline;
   - database retention/schema approval;
@@ -283,6 +286,12 @@ mechanics. Do not duplicate or improvise those commands here.
     --file "$CONTROL_MANIFEST" --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
     --candidate-sha "$CANDIDATE_SHA"
   ```
+
+  In a fresh account, now follow the runbook's “Fresh-account shared
+  bootstrap” section: arm cleanup before its first apply, create and verify
+  the state bucket/ECR repository, then initialize and live-verify both
+  scenario S3 backends before any image push or scenario apply. The bootstrap
+  root is destroyed last in Task 6. It is not a pre-manifest exception.
 
 - [ ] Execute the deployment runbook in this order for both isolated
   scenarios:
@@ -377,8 +386,22 @@ cleanup” section; continue independent cleanup attempts after one fails.
   checkpoint_cleanup local_images confirmed
   remove_local_acceptance_evidence
   checkpoint_cleanup local_evidence confirmed
-  uv run --frozen python -c 'from datetime import UTC, datetime; import os; assert datetime.now(UTC) <= datetime.fromisoformat(os.environ["ACCEPTANCE_TEARDOWN_DEADLINE_UTC"].replace("Z", "+00:00"))'
-  checkpoint_cleanup teardown_deadline confirmed
+  if uv run --frozen python -c 'from datetime import UTC, datetime; import os; assert datetime.now(UTC) <= datetime.fromisoformat(os.environ["ACCEPTANCE_TEARDOWN_DEADLINE_UTC"].replace("Z", "+00:00"))'; then
+    checkpoint_cleanup teardown_deadline confirmed
+  else
+    # Follow the runbook's bounded emergency-cleanup branch: record the
+    # deadline verdict, keep cleanup progressing, and checkpoint this surface
+    # failed before committing the final cleanup evidence.
+    if test -z "${EMERGENCY_CLEANUP_DEADLINE_UTC:-}"; then
+      EMERGENCY_CLEANUP_DEADLINE_UTC=$(date -u -d '+3 hours' +%Y-%m-%dT%H:%M:%SZ)
+      export EMERGENCY_CLEANUP_DEADLINE_UTC
+      uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+        --file "$CONTROL_MANIFEST" --verdict-failure teardown_deadline \
+        --emergency-cleanup-deadline-utc "$EMERGENCY_CLEANUP_DEADLINE_UTC" \
+        --cleanup-escalation teardown_deadline
+    fi
+    checkpoint_cleanup teardown_deadline failed
+  fi
 
   uv run --frozen python -m elspeth.web.aws_ecs_acceptance cleanup-evidence-finalize \
     --file "$CONTROL_MANIFEST" --ledger "$GATE_LEDGER" --phase commit \

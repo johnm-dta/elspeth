@@ -278,35 +278,53 @@ export function writeOidcEvidence(destination: string, evidence: OidcEvidence): 
   if (Object.keys(evidence).sort().join(",") !== Object.keys(validated).sort().join(",") || evidence.session_round_trip !== true) {
     throw new OidcEvidenceError("oidc_evidence_schema");
   }
+  const content = `${JSON.stringify(validated)}\n`;
+  writeOwnerOnlyFile(destination, content, {
+    maxBytes: MAX_EVIDENCE_BYTES,
+    parentCheck: "oidc_evidence_parent",
+    destinationCheck: "oidc_evidence_destination",
+    sizeCheck: "oidc_evidence_size",
+    writeCheck: "oidc_evidence_write",
+  });
+}
+
+interface OwnerOnlyWriteChecks {
+  maxBytes: number;
+  parentCheck: string;
+  destinationCheck: string;
+  sizeCheck: string;
+  writeCheck: string;
+}
+
+function writeOwnerOnlyFile(destination: string, content: string, checks: OwnerOnlyWriteChecks): void {
   const parent = dirname(destination);
   let parentStat;
   try {
     parentStat = lstatSync(parent);
   } catch {
-    throw new OidcEvidenceError("oidc_evidence_parent");
+    throw new OidcEvidenceError(checks.parentCheck);
   }
   if (!parentStat.isDirectory() || parentStat.isSymbolicLink() || parentStat.uid !== ownerUid() || (parentStat.mode & 0o077) !== 0) {
-    throw new OidcEvidenceError("oidc_evidence_parent");
+    throw new OidcEvidenceError(checks.parentCheck);
   }
   try {
     lstatSync(destination);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw new OidcEvidenceError("oidc_evidence_destination");
+      throw new OidcEvidenceError(checks.destinationCheck);
     }
   }
   try {
     lstatSync(destination);
-    throw new OidcEvidenceError("oidc_evidence_destination");
+    throw new OidcEvidenceError(checks.destinationCheck);
   } catch (error) {
     if (error instanceof OidcEvidenceError) throw error;
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw new OidcEvidenceError("oidc_evidence_destination");
+      throw new OidcEvidenceError(checks.destinationCheck);
     }
   }
-  const content = `${JSON.stringify(validated)}\n`;
-  if (Buffer.byteLength(content, "utf8") > MAX_EVIDENCE_BYTES) {
-    throw new OidcEvidenceError("oidc_evidence_size");
+  if (Buffer.byteLength(content, "utf8") > checks.maxBytes) {
+    throw new OidcEvidenceError(checks.sizeCheck);
   }
   const temporary = join(parent, `.${basename(destination)}.${process.pid}.${randomUUID()}.tmp`);
   let fileDescriptor: number | null = null;
@@ -341,6 +359,25 @@ export function writeOidcEvidence(destination: string, evidence: OidcEvidence): 
     } catch {
       // The file may already have been atomically renamed.
     }
-    throw new OidcEvidenceError("oidc_evidence_write");
+    throw new OidcEvidenceError(checks.writeCheck);
   }
+}
+
+export function writeOidcBearerHandoff(destination: string, accessToken: string): void {
+  const segments = accessToken.split(".");
+  if (
+    accessToken.length === 0 ||
+    Buffer.byteLength(accessToken, "utf8") > MAX_JWT_BYTES ||
+    segments.length !== 3 ||
+    segments.some((segment) => !BASE64URL.test(segment))
+  ) {
+    throw new OidcEvidenceError("oidc_bearer_handoff");
+  }
+  writeOwnerOnlyFile(destination, accessToken, {
+    maxBytes: MAX_JWT_BYTES,
+    parentCheck: "oidc_bearer_handoff",
+    destinationCheck: "oidc_bearer_handoff",
+    sizeCheck: "oidc_bearer_handoff",
+    writeCheck: "oidc_bearer_handoff",
+  });
 }

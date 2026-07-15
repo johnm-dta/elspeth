@@ -9,6 +9,7 @@ import {
   buildOidcEvidence,
   validateAccessToken,
   validateAuthConfig,
+  writeOidcBearerHandoff,
   writeOidcEvidence,
 } from "./oidc-evidence";
 
@@ -178,6 +179,26 @@ describe("OIDC evidence", () => {
     expect(() => writeOidcEvidence(join(directory, "invalid.json"), { ...evidence, audience: "" })).toThrow(
       "oidc_evidence_schema",
     );
+  });
+
+  it("writes a bounded bearer handoff only to a new owner-only file", () => {
+    const directory = join(tmpdir(), `elspeth-oidc-handoff-${process.pid}-${directories.length}`);
+    directories.push(directory);
+    mkdirSync(directory, { mode: 0o700 });
+    const destination = join(directory, "access-token");
+    const accessToken = token({
+      iss: expected.issuer,
+      sub: "subject",
+      exp: 2_000_000_000,
+      client_id: expected.audience,
+      token_use: "access",
+    });
+
+    writeOidcBearerHandoff(destination, accessToken);
+
+    expect(lstatSync(destination).mode & 0o777).toBe(0o600);
+    expect(readFileSync(destination, "utf8")).toBe(accessToken);
+    expect(() => writeOidcBearerHandoff(destination, accessToken)).toThrow("oidc_bearer_handoff");
   });
 
   it("rejects symlink, permissive parent, and pre-existing destination attacks", () => {

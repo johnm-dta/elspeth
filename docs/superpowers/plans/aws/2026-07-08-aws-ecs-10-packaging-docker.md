@@ -465,7 +465,9 @@ state from inside the running task. It is not an HTTP endpoint and exposes no
 - [ ] Implement `verify-payloads --landscape-run-id ID` for execution in a
   dedicated one-shot `PAYLOAD_VERIFIER_TASK_DEFINITION`, using the candidate
   digest, same PostgreSQL/EFS settings, explicit `user: "1000:1000"`, and a
-  Python module entrypoint. Do not use ECS Exec: it runs as root and would mask
+  single Python module entrypoint `python -m elspeth.web.aws_ecs_acceptance`;
+  ECS command overrides contain only the subcommand and arguments. Do not use
+  ECS Exec: it runs as root and would mask
   the non-root EFS permission contract. Load `WebSettings` through the same generic environment
   loader as the app; open the configured landscape DB read-only with the
   configured passphrase; select every non-null `rows.source_data_ref` for the
@@ -481,7 +483,8 @@ state from inside the running task. It is not an HTTP endpoint and exposes no
   auth's EFS SQLite contract is one-task/one-process; opening it through ECS
   Exec beside uvicorn is forbidden. The verifier task definition uses the
   candidate digest and same EFS/settings, overrides the Docker image entrypoint
-  explicitly to `python -m elspeth.web.aws_ecs_acceptance verify-local-auth`,
+  once to `python -m elspeth.web.aws_ecs_acceptance`, and uses
+  `verify-local-auth` as its command,
   and is checked like the doctor task. Load settings, require
   `auth_provider == "local"`, require
   `data_dir / "auth.db"` exists, open it read-only, and require

@@ -2,6 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 const isListOnly = process.argv.includes("--list");
 const stagingBaseUrl = isListOnly ? "https://oidc-list.invalid" : process.env.STAGING_BASE_URL;
+const tlsSpkiSha256 = process.env.OIDC_TLS_SPKI_SHA256;
 
 if (stagingBaseUrl === undefined) {
   throw new Error("oidc_staging_base_url");
@@ -23,6 +24,9 @@ if (
   parsed.origin !== stagingBaseUrl
 ) {
   throw new Error("oidc_staging_base_url");
+}
+if (tlsSpkiSha256 !== undefined && !/^[A-Za-z0-9+/]{43}=$/.test(tlsSpkiSha256)) {
+  throw new Error("oidc_tls_spki_sha256");
 }
 
 export default defineConfig({
@@ -46,7 +50,13 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"] },
+      use: {
+        ...devices["Desktop Chrome"],
+        launchOptions:
+          tlsSpkiSha256 === undefined
+            ? undefined
+            : { args: [`--ignore-certificate-errors-spki-list=${tlsSpkiSha256}`] },
+      },
     },
   ],
 });

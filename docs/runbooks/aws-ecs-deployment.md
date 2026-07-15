@@ -120,13 +120,108 @@ then sets `landscape_evidence` true only after the atomic
   uses Linux Fargate 1.4.0 or `LATEST`, declares `runtimePlatform`, and uses
   the approved EFS access point and immutable image digest.
 
+### Fresh-account HTTPS
+
+Acceptance does not assume that the disposable AWS account owns a DNS zone or
+already has an ACM certificate. Each scenario Terraform root owns a different
+short-lived self-signed certificate whose only DNS SAN is that scenario's real
+ALB DNS name, imports it into ACM, and attaches it to the scenario HTTPS
+listener. The private key exists only in that scenario's encrypted, locked
+remote state. Both the ACM certificate and ALB are tagged with the full
+`ACCEPTANCE_RUN_ID` and scenario ID and are destroyed with the scenario.
+
+The scenario stack uses this shape; the ALB itself can exist before the HTTPS
+listener, so the generated SAN does not introduce a dependency cycle:
+
+```hcl
+resource "tls_private_key" "alb" {
+  algorithm = "RSA"
+  rsa_bits  = 2048
+}
+
+resource "tls_self_signed_cert" "alb" {
+  private_key_pem       = tls_private_key.alb.private_key_pem
+  validity_period_hours = 24
+  early_renewal_hours   = 1
+  dns_names             = [aws_lb.web.dns_name]
+  allowed_uses          = ["key_encipherment", "digital_signature", "server_auth"]
+
+  subject {
+    organization = "ELSPETH disposable acceptance"
+  }
+}
+
+resource "aws_acm_certificate" "alb" {
+  private_key      = tls_private_key.alb.private_key_pem
+  certificate_body = tls_self_signed_cert.alb.cert_pem
+  tags             = local.acceptance_tags
+}
+
+output "acceptance_tls_ca_pem" {
+  value     = tls_self_signed_cert.alb.cert_pem
+  sensitive = true
+}
+```
+
+After each scenario apply and resolved inventory bind, write that public
+certificate to the protected live-work directory and derive its exact
+Chromium SPKI pin. Repeat this after every `load_scenario`; the active CA and
+pin must belong to the same scenario as `ALB_BASE_URL`:
+
+```bash
+ACCEPTANCE_TLS_DIR="/tmp/elspeth-acceptance-tls-${ACCEPTANCE_RUN_ID}"
+if test -e "$ACCEPTANCE_TLS_DIR"; then
+  test ! -L "$ACCEPTANCE_TLS_DIR" && test -d "$ACCEPTANCE_TLS_DIR"
+  test "$(stat -c %u "$ACCEPTANCE_TLS_DIR")" = "$(id -u)"
+  test "$(stat -c %a "$ACCEPTANCE_TLS_DIR")" = 700
+else
+  mkdir -m 700 -- "$ACCEPTANCE_TLS_DIR"
+fi
+
+prepare_scenario_tls() {
+  local scenario_id="$1" terraform_dir="$2" alb_base_url="$3" hostname ca_file spki
+  case "$scenario_id" in A|B) ;; *) return 2 ;; esac
+  ca_file="$ACCEPTANCE_TLS_DIR/scenario-${scenario_id,,}-ca.pem"
+  terraform_capture -chdir="$terraform_dir" output -raw acceptance_tls_ca_pem >"$ca_file"
+  chmod 600 "$ca_file"
+  hostname=$(uv run --frozen python -c 'import sys, urllib.parse; print(urllib.parse.urlsplit(sys.argv[1]).hostname or "")' "$alb_base_url")
+  test -n "$hostname"
+  openssl x509 -in "$ca_file" -noout -checkend 3600
+  openssl x509 -in "$ca_file" -noout -checkhost "$hostname"
+  spki=$(openssl x509 -in "$ca_file" -pubkey -noout \
+    | openssl pkey -pubin -outform DER \
+    | openssl dgst -sha256 -binary \
+    | openssl base64 -A)
+  [[ "$spki" =~ ^[A-Za-z0-9+/]{43}=$ ]]
+  printf -v "SCENARIO_${scenario_id}_TLS_CA_BUNDLE" '%s' "$ca_file"
+  printf -v "SCENARIO_${scenario_id}_TLS_SPKI_SHA256" '%s' "$spki"
+}
+
+activate_scenario_tls() {
+  local scenario_id="$1" ca_name="SCENARIO_${1}_TLS_CA_BUNDLE" spki_name="SCENARIO_${1}_TLS_SPKI_SHA256"
+  ACCEPTANCE_TLS_CA_BUNDLE=${!ca_name:?prepare scenario TLS first}
+  ACCEPTANCE_TLS_SPKI_SHA256=${!spki_name:?prepare scenario TLS first}
+  export ACCEPTANCE_TLS_CA_BUNDLE ACCEPTANCE_TLS_SPKI_SHA256
+}
+```
+
+Host-side HTTP clients trust only the active scenario certificate. Use
+`--cacert "$ACCEPTANCE_TLS_CA_BUNDLE"` for curl,
+`SSL_CERT_FILE="$ACCEPTANCE_TLS_CA_BUNDLE"` for Python/httpx, and both
+`NODE_EXTRA_CA_CERTS="$ACCEPTANCE_TLS_CA_BUNDLE"` and the exact Chromium SPKI
+pin for the OIDC browser. Never use curl `-k`, `verify=False`, Playwright
+`ignoreHTTPSErrors`, or a general Chromium certificate-error bypass. The CA
+files and pins are live-only material and are removed with the protected local
+acceptance evidence after final export.
+
 ### Protected command capture
 
 Start every operator shell with strict mode and protected capture. Every AWS
 CLI call in rollout, acceptance, diagnosis, and cleanup goes through
-`aws_capture`; raw logs are never printed or persisted. A non-zero AWS call
-emits only a static class. Plan 10's packaged acceptance module supplies the
-closed `sanitize-evidence` projectors used below.
+`aws_capture`, or through `aws_waiter_capture` for an ECS waiter; raw logs are
+never printed or persisted. A non-zero AWS call emits only a static class.
+Plan 10's packaged acceptance module supplies the closed `sanitize-evidence`
+projectors used below.
 
 ```bash
 set -Eeuo pipefail
@@ -136,16 +231,24 @@ export AWS_CLI_CONNECT_TIMEOUT=5
 export AWS_CLI_READ_TIMEOUT=30
 export ELSPETH_COMMAND_OUTPUT_LIMIT_BYTES=2097152
 export ELSPETH_AWS_CALL_CEILING_SECONDS=60
-export ELSPETH_TERRAFORM_CALL_CEILING_SECONDS=900
+export ELSPETH_AWS_WAITER_CEILING_SECONDS=900
+export ELSPETH_AWS_EXEC_CEILING_SECONDS=420
+export ELSPETH_ORPHAN_SWEEP_CEILING_SECONDS=900
+# Aurora create/delete can legitimately consume the provider's two-hour
+# timeout. This outer ceiling adds ten minutes for provider bookkeeping.
+export ELSPETH_TERRAFORM_CALL_CEILING_SECONDS=7800
 export ELSPETH_CLEANUP_RESERVE_SECONDS=5400
 
 protected_timeout_seconds() {
   local kind="$1" ceiling deadline now_epoch deadline_epoch remaining reserve refresh_file
-  if test "$kind" = terraform; then
-    ceiling="${ELSPETH_TERRAFORM_CALL_CEILING_SECONDS:?set Terraform call ceiling}"
-  else
-    ceiling="${ELSPETH_AWS_CALL_CEILING_SECONDS:?set AWS call ceiling}"
-  fi
+  case "$kind" in
+    terraform) ceiling="${ELSPETH_TERRAFORM_CALL_CEILING_SECONDS:?set Terraform call ceiling}" ;;
+    aws-waiter) ceiling="${ELSPETH_AWS_WAITER_CEILING_SECONDS:?set AWS waiter ceiling}" ;;
+    aws-exec) ceiling="${ELSPETH_AWS_EXEC_CEILING_SECONDS:?set ECS Exec ceiling}" ;;
+    orphan-sweep) ceiling="${ELSPETH_ORPHAN_SWEEP_CEILING_SECONDS:?set orphan sweep ceiling}" ;;
+    aws) ceiling="${ELSPETH_AWS_CALL_CEILING_SECONDS:?set AWS call ceiling}" ;;
+    *) printf '%s\n' 'command_kind_invalid' >&2; return 1 ;;
+  esac
   test "$ceiling" -gt 0 2>/dev/null || {
     printf '%s\n' 'command_timeout_invalid' >&2
     return 1
@@ -205,8 +308,9 @@ protected_timeout_seconds() {
   fi
 }
 
-aws_capture() (
-  local stdout_file stderr_file status stdout_size stderr_size timeout_seconds
+aws_capture_with_kind() (
+  local timeout_kind="$1" stdout_file stderr_file status stdout_size stderr_size timeout_seconds
+  shift
   test "${1:-}" = aws || {
     printf '%s\n' 'aws_command_invalid' >&2
     exit 1
@@ -215,7 +319,7 @@ aws_capture() (
   stderr_file=$(mktemp)
   trap 'rm -f -- "$stdout_file" "$stderr_file"' EXIT HUP INT TERM
   chmod 600 "$stdout_file" "$stderr_file"
-  timeout_seconds=$(protected_timeout_seconds aws) || exit 1
+  timeout_seconds=$(protected_timeout_seconds "$timeout_kind") || exit 1
   if (ulimit -f 4096; timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" "$@" \
       --cli-connect-timeout "$AWS_CLI_CONNECT_TIMEOUT" --cli-read-timeout "$AWS_CLI_READ_TIMEOUT") \
       >"$stdout_file" 2>"$stderr_file"; then
@@ -235,6 +339,18 @@ aws_capture() (
   }
   cat "$stdout_file"
 )
+
+aws_capture() {
+  aws_capture_with_kind aws "$@"
+}
+
+aws_waiter_capture() {
+  aws_capture_with_kind aws-waiter "$@"
+}
+
+aws_exec_capture() {
+  aws_capture_with_kind aws-exec "$@"
+}
 
 aws_ecr_login() (
   local registry="$1" region="$2" aws_stderr docker_stderr status aws_size docker_size timeout_seconds
@@ -282,7 +398,7 @@ terraform_capture() (
   trap 'rm -f -- "$stdout_file" "$stderr_file"' EXIT HUP INT TERM
   chmod 600 "$stdout_file" "$stderr_file"
   timeout_seconds=$(protected_timeout_seconds terraform) || exit 1
-  if (ulimit -f 4096; timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" terraform "$@") \
+  if timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" terraform "$@" \
     >"$stdout_file" 2>"$stderr_file"; then
     status=0
   else
@@ -468,7 +584,8 @@ ordinary scenario loads reject an unresolved inventory. Its additional closed
 `orphan_sweep` object records
 `tag_key: ACCEPTANCE_RUN_ID`, a non-secret cleanup owner, ECS task-definition
 families, listener ARNs, DB instance identifiers, EFS creation tokens/file
-systems/access points, secret IDs, log groups, dashboard/alarm names, X-Ray
+systems/access points, secret IDs, exact task/execution IAM role names, log
+groups, exact CloudWatch Logs resource-policy names, dashboard/alarm names, X-Ray
 group/sampling-rule names, EventBridge rule/target identities, owned Bedrock
 Guardrail identifiers/versions, the Cognito subject and pool-ownership flag,
 and the pre-mutation Transaction Search state hash. Exact retained CloudWatch
@@ -482,6 +599,21 @@ the `live` phase, revalidate the latest bound checkpoint with
 `--require-complete` so both scenarios have non-empty matching counts.
 Omitted fields, duplicate identities, count/identity disagreement, drift from
 either pre-mutation hash, or a foreign run/scenario fail closed.
+
+Every Terraform root derives its AWS resource namespace identically. The
+input is the canonical lowercase UUID, a literal NUL byte, and the uppercase
+scenario ID; take the first 20 lowercase hex characters of SHA-256 and prefix
+them with `a-` or `b-`. The full UUID remains in tags, telemetry dimensions,
+and the terminal S3 prefix segment; it is not placed in length-constrained AWS
+resource names.
+
+```hcl
+locals {
+  scenario_id_upper          = upper(var.scenario_id)
+  scenario_resource_digest  = substr(sha256("${lower(var.acceptance_run_id)}\u0000${local.scenario_id_upper}"), 0, 20)
+  scenario_resource_namespace = "${lower(local.scenario_id_upper)}-${local.scenario_resource_digest}"
+}
+```
 
 ```bash
 persist_sanitized_receipt() {
@@ -524,10 +656,27 @@ require_signed_tf_destroy_approval() {
     --approval-file "$TERRAFORM_DESTROY_APPROVAL_FILE"
 }
 
+request_signed_tf_approval() {
+  local scenario_id="$1" kind="$2" receipt_hash="$3" receipt_file="$4" approval_file="$5"
+  local handoff="${TERRAFORM_APPROVAL_HANDOFF:?set the reviewed operator approval handoff executable}"
+  case "$kind" in terraform-plan|terraform-destroy-plan) ;; *) return 64 ;; esac
+  test "${handoff#/}" != "$handoff"
+  test ! -L "$handoff" && test -f "$handoff" && test -x "$handoff"
+  test "$(stat -c %u "$handoff")" = "$(id -u)"
+  # The handoff receives only the sanitized receipt and its hash. It blocks
+  # until the operator has reviewed that receipt and written the signed,
+  # mode-0600 approval document to approval_file.
+  "$handoff" "$scenario_id" "$kind" "$receipt_hash" "$receipt_file" "$approval_file"
+  test ! -L "$approval_file" && test -f "$approval_file"
+  test "$(stat -c %u "$approval_file")" = "$(id -u)"
+  test "$(stat -c %a "$approval_file")" = 600
+}
+
 load_scenario() {
-  local scenario_id="$1" assignments
+  local scenario_id="$1" assignments tls_ca_name
   unset ACTIVE_SCENARIO_ID ACCEPTANCE_RUN_ID DEPLOYMENT_MODE TARGET_PLATFORM \
     AWS_REGION ECS_CLUSTER ECS_SERVICE WEB_CONTAINER_NAME TARGET_GROUP_ARN \
+    ELSPETH_WEB__DATA_DIR ELSPETH_WEB__PAYLOAD_STORE_PATH \
     ELSPETH_WEB__PLUGIN_ALLOWLIST ELSPETH_WEB__PLUGIN_PREFERENCES \
     ELSPETH_WEB__PLUGIN_CONTROL_MODES ELSPETH_WEB__LLM_PROFILES \
     ELSPETH_WEB__TUTORIAL_LLM_PROFILE \
@@ -539,7 +688,8 @@ load_scenario() {
     DOCTOR_CONTAINER_NAME DOCTOR_NETWORK_CONFIGURATION \
     PAYLOAD_VERIFIER_TASK_DEFINITION LOCAL_AUTH_VERIFIER_TASK_DEFINITION \
     ROLLBACK_DOCTOR_TASK_DEFINITION WEB_LOG_GROUP WEB_LOG_STREAM_PREFIX \
-    DOCTOR_LOG_GROUP DOCTOR_LOG_STREAM_PREFIX ECS_DEPLOYMENT_EVENT_RULE \
+    DOCTOR_LOG_GROUP DOCTOR_LOG_STREAM_PREFIX OPERATOR_METRICS_LOG_GROUP \
+    ECS_DEPLOYMENT_EVENT_RULE \
     ECS_DEPLOYMENT_EVENT_TARGET_ID ECS_DEPLOYMENT_EVENT_LOG_GROUP \
     PREVIOUS_TASK_DEFINITION FIRST_DEPLOY_LISTENER_RULE_ARN \
     FIRST_DEPLOY_FORWARD_ACTIONS FIRST_DEPLOY_DISABLED_ACTIONS \
@@ -551,11 +701,18 @@ load_scenario() {
   assignments=$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance scenario-load \
     --file "$CONTROL_MANIFEST" --scenario-id "$scenario_id" --shell-assignments)
   eval "$assignments"
+  tls_ca_name="SCENARIO_${scenario_id}_TLS_CA_BUNDLE"
+  if test -n "${ACCEPTANCE_TLS_DIR:-}" && test -n "${!tls_ca_name:-}"; then
+    activate_scenario_tls "$scenario_id"
+  fi
 }
 
 run_orphan_sweep() {
-  uv run --frozen python -m elspeth.web.aws_ecs_acceptance orphan-sweep \
-    --file "$CONTROL_MANIFEST" --acceptance-run-id "$ACCEPTANCE_RUN_ID"
+  local timeout_seconds
+  timeout_seconds=$(protected_timeout_seconds orphan-sweep)
+  timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" \
+    uv run --frozen python -m elspeth.web.aws_ecs_acceptance orphan-sweep \
+      --file "$CONTROL_MANIFEST" --acceptance-run-id "$ACCEPTANCE_RUN_ID"
 }
 
 finalize_cleanup_evidence() {
@@ -626,13 +783,34 @@ bind_final_evidence_export() {
 }
 
 load_cleanup_state() {
-  local assignments
+  local assignments iac_parent bootstrap_state_entries
   assignments="$(mktemp -p /tmp elspeth-cleanup-state.XXXXXX)"
   chmod 600 "$assignments"
   uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest load-cleanup \
     --file "$CONTROL_MANIFEST" --shell-assignments >"$assignments"
   . "$assignments"
   rm -f -- "$assignments"
+  iac_parent=$(dirname "$SCENARIO_A_TF_DIR")
+  test "$(dirname "$SCENARIO_B_TF_DIR")" = "$iac_parent"
+  BOOTSTRAP_TF_DIR="$iac_parent/bootstrap"
+  BOOTSTRAP_STATE="$BOOTSTRAP_TF_DIR/terraform.tfstate"
+  BACKEND_STATE_BUCKET="elspeth-acc-${ACCEPTANCE_RUN_ID//-/}"
+  ACCEPTANCE_TLS_DIR="/tmp/elspeth-acceptance-tls-${ACCEPTANCE_RUN_ID}"
+  SANITIZED_ORPHAN_RECEIPT="/tmp/elspeth-orphan-${ACCEPTANCE_RUN_ID}.json"
+  test ! -L "$BOOTSTRAP_TF_DIR" && test -d "$BOOTSTRAP_TF_DIR"
+  if test -e "$BOOTSTRAP_STATE"; then
+    test ! -L "$BOOTSTRAP_STATE" && test -f "$BOOTSTRAP_STATE"
+    test "$(stat -c %u "$BOOTSTRAP_STATE")" = "$(id -u)"
+    test "$(stat -c %a "$BOOTSTRAP_STATE")" = 600
+    bootstrap_state_entries=$(terraform_capture -chdir="$BOOTSTRAP_TF_DIR" state list)
+    if test -n "$bootstrap_state_entries"; then
+      test "$(terraform_capture -chdir="$BOOTSTRAP_TF_DIR" output -raw backend_state_bucket)" = "$BACKEND_STATE_BUCKET"
+    fi
+  fi
+  [[ "$BACKEND_STATE_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]
+  case "$SANITIZED_ORPHAN_RECEIPT" in /tmp/elspeth-orphan-*.json) ;; *) return 1 ;; esac
+  test ! -L "$SANITIZED_ORPHAN_RECEIPT"
+  export BOOTSTRAP_TF_DIR BOOTSTRAP_STATE BACKEND_STATE_BUCKET ACCEPTANCE_TLS_DIR SANITIZED_ORPHAN_RECEIPT
 }
 
 remove_local_acceptance_images() {
@@ -657,6 +835,13 @@ remove_local_acceptance_evidence() {
   if test -n "${OIDC_EVIDENCE_DIR:-}"; then
     case "$OIDC_EVIDENCE_DIR" in /tmp/*) rm -rf -- "$OIDC_EVIDENCE_DIR" ;; *) return 1 ;; esac
   fi
+  if test -n "${ACCEPTANCE_TLS_DIR:-}"; then
+    case "$ACCEPTANCE_TLS_DIR" in /tmp/*) rm -rf -- "$ACCEPTANCE_TLS_DIR" ;; *) return 1 ;; esac
+  fi
+  if test -n "${SANITIZED_ORPHAN_RECEIPT:-}"; then
+    case "$SANITIZED_ORPHAN_RECEIPT" in /tmp/elspeth-orphan-*.json) rm -f -- "$SANITIZED_ORPHAN_RECEIPT" ;; *) return 1 ;; esac
+    test ! -e "$SANITIZED_ORPHAN_RECEIPT"
+  fi
 }
 ```
 
@@ -674,6 +859,147 @@ Use these transitions around the real deployment, not as a substitute for it:
 
 The controller will reject calls made out of order or against a different
 candidate, run, state binding, receipt, approval, inventory, tag, or digest.
+
+### Fresh-account shared bootstrap
+
+In a new disposable account the encrypted S3 backend and ECR repository do
+not exist yet. Prepare one separate bootstrap Terraform root outside the
+repository with protected local state. It owns exactly the run-scoped S3
+backend state bucket and ECR repository; it does not own either scenario's
+application resources. The bucket enables versioning, SSE-S3 or SSE-KMS,
+public-access blocking, and native S3 lockfiles. The ECR repository enables
+scan-on-push. Both resources are tagged with the full `ACCEPTANCE_RUN_ID` and
+the cleanup owner. Their names are known before creation, so the two scenario
+binding receipts and pre-apply inventories can bind distinct hashed state keys
+before Plan 12 initializes the control manifest.
+
+Plan 12 must initialize and validate the control manifest before this block.
+The three Terraform roots share one protected parent directory: `bootstrap/`,
+`scenario-a/`, and `scenario-b/`. The backend bucket name is derived only from
+the manifest-bound account and run UUID, so cleanup can recover it even if the
+bootstrap apply is interrupted before local state is written. Arm cleanup with
+the planned ECR identity before the bootstrap apply, keep the bootstrap state
+under that protected parent, and checkpoint the still-pending shared cleanup
+immediately after the mutation:
+
+```bash
+SCENARIO_A_TF_DIR=$(jq -er '.values.SCENARIO_TF_DIR' "$SCENARIO_A_INVENTORY")
+SCENARIO_A_TF_VARS=$(jq -er '.values.SCENARIO_TF_VARS' "$SCENARIO_A_INVENTORY")
+SCENARIO_A_TF_BINDING_FILE=$(jq -er '.values.SCENARIO_TF_BINDING_FILE' "$SCENARIO_A_INVENTORY")
+SCENARIO_B_TF_DIR=$(jq -er '.values.SCENARIO_TF_DIR' "$SCENARIO_B_INVENTORY")
+SCENARIO_B_TF_VARS=$(jq -er '.values.SCENARIO_TF_VARS' "$SCENARIO_B_INVENTORY")
+SCENARIO_B_TF_BINDING_FILE=$(jq -er '.values.SCENARIO_TF_BINDING_FILE' "$SCENARIO_B_INVENTORY")
+IAC_PACKAGE_DIR=$(dirname "${SCENARIO_A_TF_DIR:?set Scenario A Terraform root}")
+test "$(dirname "${SCENARIO_B_TF_DIR:?set Scenario B Terraform root}")" = "$IAC_PACKAGE_DIR"
+BOOTSTRAP_TF_DIR="$IAC_PACKAGE_DIR/bootstrap"
+BOOTSTRAP_STATE="$BOOTSTRAP_TF_DIR/terraform.tfstate"
+BACKEND_STATE_BUCKET="elspeth-acc-${ACCEPTANCE_RUN_ID//-/}"
+export ECR_REGISTRY="${ECR_REGISTRY:?set approved account registry host}"
+export ECR_REPOSITORY="${ECR_REPOSITORY:?set run-scoped ECR repository name}"
+export ROLLBACK_BASELINE_TAG="acceptance-${ACCEPTANCE_RUN_ID}-baseline-${ROLLBACK_BASELINE_SHA}"
+export CANDIDATE_TAG="acceptance-${ACCEPTANCE_RUN_ID}-0.7.1-${CANDIDATE_SHA}"
+
+test ! -L "$BOOTSTRAP_TF_DIR" && test -d "$BOOTSTRAP_TF_DIR"
+test "$BOOTSTRAP_STATE" = "$BOOTSTRAP_TF_DIR/terraform.tfstate"
+[[ "$BACKEND_STATE_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]
+test ! -e "$BOOTSTRAP_STATE" || { test ! -L "$BOOTSTRAP_STATE" && test "$(stat -c '%a' "$BOOTSTRAP_STATE")" = 600; }
+uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest validate \
+  --file "$CONTROL_MANIFEST" --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
+  --candidate-sha "$CANDIDATE_SHA"
+test "$(aws_capture aws sts get-caller-identity --query Account --output text)" = "$AWS_ACCOUNT_ID"
+
+# Complete the credential-free browser installation/discovery and require the
+# operator-provided identity inputs before the first AWS mutation.
+test -n "${OIDC_TEST_USERNAME:-}" && test -n "${OIDC_TEST_PASSWORD:-}"
+[[ "$OIDC_TEST_USERNAME" =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$ ]]
+test "${#OIDC_TEST_PASSWORD}" -ge 12 && test "${#OIDC_TEST_PASSWORD}" -le 256
+npm --prefix src/elspeth/web/frontend ci
+npm --prefix src/elspeth/web/frontend exec -- playwright install chromium
+OIDC_LIST_OUTPUT=$(npm --prefix src/elspeth/web/frontend run test:e2e:oidc -- --list)
+grep -Fq '[chromium] aws-ecs-oidc.staging.spec.ts' <<<"$OIDC_LIST_OUTPUT"
+test "$(grep -Fc '[chromium] aws-ecs-oidc.staging.spec.ts' <<<"$OIDC_LIST_OUTPUT")" = 1
+unset OIDC_LIST_OUTPUT
+arm_external_cleanup
+
+terraform_capture -chdir="$BOOTSTRAP_TF_DIR" init -input=false >/dev/null
+terraform_capture -chdir="$BOOTSTRAP_TF_DIR" validate >/dev/null
+BOOTSTRAP_PLAN="$BOOTSTRAP_TF_DIR/bootstrap.tfplan"
+BOOTSTRAP_PLAN_RECEIPT=$(mktemp -p /tmp elspeth-bootstrap-plan.XXXXXX)
+chmod 600 "$BOOTSTRAP_PLAN_RECEIPT"
+terraform_capture -chdir="$BOOTSTRAP_TF_DIR" plan -input=false \
+  -var="acceptance_run_id=$ACCEPTANCE_RUN_ID" \
+  -var="aws_account_id=$AWS_ACCOUNT_ID" \
+  -var="aws_region=$AWS_REGION" \
+  -var="backend_state_bucket=$BACKEND_STATE_BUCKET" \
+  -var="ecr_repository=$ECR_REPOSITORY" \
+  -out="$BOOTSTRAP_PLAN" >/dev/null
+chmod 600 "$BOOTSTRAP_PLAN"
+BOOTSTRAP_PLAN_SHA=$(sha256sum "$BOOTSTRAP_PLAN" | awk '{print $1}')
+terraform_capture -chdir="$BOOTSTRAP_TF_DIR" show -json "$BOOTSTRAP_PLAN" \
+  | uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+      sanitize-evidence --kind terraform-plan >"$BOOTSTRAP_PLAN_RECEIPT"
+BOOTSTRAP_PLAN_RECEIPT_HASH=$(persist_sanitized_receipt bootstrap terraform-plan \
+  "$BOOTSTRAP_PLAN_SHA" "$BOOTSTRAP_PLAN_RECEIPT")
+request_signed_tf_approval bootstrap terraform-plan "$BOOTSTRAP_PLAN_RECEIPT_HASH" \
+  "$BOOTSTRAP_PLAN_RECEIPT" "${BOOTSTRAP_PLAN_APPROVAL_FILE:?set bootstrap apply approval file}"
+BOOTSTRAP_PLAN_APPROVAL_HASH=$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+  approval-verify --file "$CONTROL_MANIFEST" --scenario-id bootstrap --kind terraform-plan \
+  --plan-receipt-hash "$BOOTSTRAP_PLAN_RECEIPT_HASH" \
+  --approval-file "$BOOTSTRAP_PLAN_APPROVAL_FILE")
+uv run --frozen python -m elspeth.web.aws_ecs_acceptance approval-require-current \
+  --file "$CONTROL_MANIFEST" --scenario-id bootstrap --kind terraform-plan \
+  --plan-receipt-hash "$BOOTSTRAP_PLAN_RECEIPT_HASH" \
+  --approval-hash "$BOOTSTRAP_PLAN_APPROVAL_HASH"
+test "$(sha256sum "$BOOTSTRAP_PLAN" | awk '{print $1}')" = "$BOOTSTRAP_PLAN_SHA"
+terraform_capture -chdir="$BOOTSTRAP_TF_DIR" apply -input=false \
+  "$BOOTSTRAP_PLAN" >/dev/null
+rm -f -- "$BOOTSTRAP_PLAN" "$BOOTSTRAP_PLAN_RECEIPT"
+test ! -L "$BOOTSTRAP_STATE" && test "$(stat -c '%a' "$BOOTSTRAP_STATE")" = 600
+test "$(terraform_capture -chdir="$BOOTSTRAP_TF_DIR" output -raw backend_state_bucket)" = "$BACKEND_STATE_BUCKET"
+test "$(terraform_capture -chdir="$BOOTSTRAP_TF_DIR" output -raw ecr_repository)" = "$ECR_REPOSITORY"
+checkpoint_cleanup shared_resource_cleanup pending
+
+aws_capture aws s3api head-bucket --bucket "$BACKEND_STATE_BUCKET" >/dev/null
+aws_capture aws ecr describe-repositories --region "$AWS_REGION" \
+  --repository-names "$ECR_REPOSITORY" >/dev/null
+```
+
+The bootstrap provider sets `region = var.aws_region` and
+`allowed_account_ids = [var.aws_account_id]`; the same closed account binding
+is required in both scenario providers.
+
+Each scenario root is deliberately disposable: Aurora sets
+`deletion_protection = false` and `skip_final_snapshot = true`, every owned
+Secrets Manager secret sets `recovery_window_in_days = 0`, and the scenario
+S3 bucket sets `force_destroy = true`. The resolved inventory emits the exact
+task/execution IAM role names and CloudWatch Logs resource-policy name so the
+terminal sweep can prove their absence; Resource Groups Tagging API is not a
+substitute for either surface.
+
+Initialize and live-verify both distinct S3 backends now, before any image is
+pushed. This does not apply Scenario B or create application resources:
+
+```bash
+initialize_scenario_backend() {
+  local scenario_id="$1" directory="$2" vars="$3" binding="$4" binding_file="$5" workspace
+  workspace=$(jq -er '.workspace | select(test("^[A-Za-z0-9_-]{1,90}$"))' "$binding_file")
+  terraform_capture -chdir="$directory" init -input=false -reconfigure -lock-timeout=5m >/dev/null
+  terraform_capture -chdir="$directory" workspace select "$workspace" >/dev/null \
+    || terraform_capture -chdir="$directory" workspace new "$workspace" >/dev/null
+  verify_tf_binding "$scenario_id" "$directory" "$vars" "$binding" "$binding_file"
+}
+
+initialize_scenario_backend A "$SCENARIO_A_TF_DIR" "$SCENARIO_A_TF_VARS" \
+  "$SCENARIO_A_TF_BINDING_SHA" "$SCENARIO_A_TF_BINDING_FILE"
+initialize_scenario_backend B "$SCENARIO_B_TF_DIR" "$SCENARIO_B_TF_VARS" \
+  "$SCENARIO_B_TF_BINDING_SHA" "$SCENARIO_B_TF_BINDING_FILE"
+```
+
+Only after both checks pass may an image be pushed. Cleanup destroys Scenario
+A and B first, removes the two image tags, then destroys this bootstrap root
+before the terminal orphan sweep. Its run-scoped bucket may use
+`force_destroy` because it contains only these two disposable state objects;
+no shared or pre-existing bucket is permitted.
 
 ### Temporary image publication
 
@@ -747,9 +1073,100 @@ checkpoint_ecr_digests
 Apply Scenario A completely before Scenario B. Terraform plan files may
 contain secrets: keep them mode 0600 under `/tmp`, apply only the reviewed
 saved plan, and delete them immediately. The durable receipt is a sanitized
-projection and hash, not the plan itself.
+projection and hash, not the plan itself. `TERRAFORM_APPROVAL_HANDOFF` is the
+reviewed owner-side executable defined above: it receives the newly created
+sanitized receipt and blocks until the operator writes the matching signed
+approval. An approval file cannot validly be prepared before its receipt hash
+exists.
 
 ```bash
+provision_scenario_b_test_identity() (
+  set -Eeuo pipefail
+  local pool_id="$1" users count work create_input password_input verified subject
+  test -n "$pool_id"
+  work=$(mktemp -d -p /tmp elspeth-oidc-identity.XXXXXX)
+  chmod 700 "$work"
+  trap 'rm -rf -- "$work"' EXIT
+  create_input="$work/create.json"
+  password_input="$work/password.json"
+
+  users=$(aws_capture aws cognito-idp list-users --region "$AWS_REGION" \
+    --user-pool-id "$pool_id" --filter "username = \"$OIDC_TEST_USERNAME\"" \
+    --attributes-to-get sub --limit 60 --output json)
+  count=$(jq -er --arg username "$OIDC_TEST_USERNAME" \
+    '[.Users[] | select(.Username == $username)] | length' <<<"$users")
+  test "$count" = 0 || test "$count" = 1
+  if test "$count" = 0; then
+    jq -cn --arg pool "$pool_id" --arg username "$OIDC_TEST_USERNAME" \
+      --arg password "$OIDC_TEST_PASSWORD" \
+      '{UserPoolId:$pool,Username:$username,TemporaryPassword:$password,MessageAction:"SUPPRESS"}' \
+      >"$create_input"
+    chmod 600 "$create_input"
+    aws_capture aws cognito-idp admin-create-user --region "$AWS_REGION" \
+      --cli-input-json "file://$create_input" --query 'User.UserStatus' --output text \
+      | grep -Fxq FORCE_CHANGE_PASSWORD
+  fi
+
+  jq -cn --arg pool "$pool_id" --arg username "$OIDC_TEST_USERNAME" \
+    --arg password "$OIDC_TEST_PASSWORD" \
+    '{UserPoolId:$pool,Username:$username,Password:$password,Permanent:true}' \
+    >"$password_input"
+  chmod 600 "$password_input"
+  aws_capture aws cognito-idp admin-set-user-password --region "$AWS_REGION" \
+    --cli-input-json "file://$password_input" >/dev/null
+  verified=$(aws_capture aws cognito-idp admin-get-user --region "$AWS_REGION" \
+    --user-pool-id "$pool_id" --username "$OIDC_TEST_USERNAME" \
+    --query '{username:Username,enabled:Enabled,status:UserStatus,sub:UserAttributes[?Name==`sub`]|[0].Value}' \
+    --output json)
+  subject=$(jq -er --arg username "$OIDC_TEST_USERNAME" '
+    select(keys == ["enabled","status","sub","username"])
+    | select(.username == $username and .enabled == true and .status == "CONFIRMED")
+    | .sub | select(type == "string" and length > 0 and length <= 128)
+  ' <<<"$verified")
+  printf '%s\n' "$subject"
+)
+
+render_resolved_inventory() (
+  local scenario_id="$1" directory="$2" output_path="$3" rendered rebound pool_id subject
+  rendered=$(mktemp -p /tmp "elspeth-${scenario_id}-inventory.XXXXXX")
+  rebound=""
+  trap 'test -z "$rendered" || rm -f -- "$rendered"; test -z "$rebound" || rm -f -- "$rebound"' EXIT
+  chmod 600 "$rendered"
+  terraform_capture -chdir="$directory" output -json resolved_inventory >"$rendered"
+  if test "$scenario_id" = B; then
+    test "$(jq -er '.orphan_sweep.cognito_subject_sub' "$rendered")" = ""
+    pool_id=$(jq -er '.values.COGNITO_USER_POOL_ID | select(type == "string" and length > 0)' "$rendered")
+    subject=$(provision_scenario_b_test_identity "$pool_id")
+    rebound=$(mktemp -p /tmp elspeth-B-inventory-bound.XXXXXX)
+    chmod 600 "$rebound"
+    jq --arg subject "$subject" '.orphan_sweep.cognito_subject_sub = $subject' \
+      "$rendered" >"$rebound"
+    mv -fT -- "$rebound" "$rendered"
+    rebound=""
+  fi
+  jq -e --arg run "$ACCEPTANCE_RUN_ID" --arg candidate "$CANDIDATE_SHA" \
+    --arg account "$AWS_ACCOUNT_ID" --arg region "$AWS_REGION" --arg scenario "$scenario_id" '
+      type == "object"
+      and .schema == "elspeth.aws-ecs-scenario-inventory.v5"
+      and .phase == "resolved"
+      and .acceptance_run_id == $run
+      and .candidate_sha == $candidate
+      and .aws_account_id == $account
+      and .aws_region == $region
+      and .scenario_id == $scenario
+    ' "$rendered" >/dev/null
+  if test -e "$output_path"; then
+    test ! -L "$output_path" && test -f "$output_path"
+    test "$(stat -c %u "$output_path")" = "$(id -u)"
+    test "$(stat -c %a "$output_path")" = 600
+    cmp -s "$rendered" "$output_path"
+  else
+    mv -- "$rendered" "$output_path"
+    rendered=""
+    chmod 600 "$output_path"
+  fi
+)
+
 plan_and_apply_scenario() {
   local scenario_id="$1" directory="$2" vars="$3" expected_binding="$4"
   local binding_file="$5" resolved_inventory="$6"
@@ -773,11 +1190,14 @@ plan_and_apply_scenario() {
   chmod 600 "$receipt"
   plan_sha="$(sha256sum "$plan" | awk '{print $1}')"
   receipt_hash="$(persist_sanitized_receipt "$scenario_id" terraform-plan "$plan_sha" "$receipt")"
+  request_signed_tf_approval "$scenario_id" terraform-plan "$receipt_hash" \
+    "$receipt" "$TERRAFORM_PLAN_APPROVAL_FILE"
   approval_hash="$(require_signed_tf_plan_approval "$scenario_id" "$receipt_hash")"
   checkpoint_terraform_plan "$scenario_id" "$plan_sha" "$receipt_hash" "$approval_hash"
   uv run --frozen python -m elspeth.web.aws_ecs_acceptance approval-require-current \
     --file "$CONTROL_MANIFEST" --scenario-id "$scenario_id" --kind terraform-plan \
     --plan-receipt-hash "$receipt_hash" --approval-hash "$approval_hash"
+  test "$(sha256sum "$plan" | awk '{print $1}')" = "$plan_sha"
   terraform_capture -chdir="$directory" apply -input=false -lock-timeout=5m "$plan" >/dev/null
   checkpoint_terraform_apply "$scenario_id" "$plan_sha" "$receipt_hash" "$approval_hash"
 
@@ -795,20 +1215,48 @@ plan_and_apply_scenario() {
   chmod 600 "$receipt"
   noop_sha="$(sha256sum "$plan" | awk '{print $1}')"
   receipt_hash="$(persist_sanitized_receipt "$scenario_id" terraform-noop "$noop_sha" "$receipt")"
+  render_resolved_inventory "$scenario_id" "$directory" "$resolved_inventory"
   checkpoint_terraform_noop_and_bind "$scenario_id" "$noop_sha" \
     "$receipt_hash" "$resolved_inventory"
   rm -rf -- "$work"
 }
 
-plan_and_apply_scenario A "$SCENARIO_A_TF_DIR" "$SCENARIO_A_TF_VARS" \
-  "$SCENARIO_A_TF_BINDING_SHA" "$SCENARIO_A_TF_BINDING_FILE" \
-  "$SCENARIO_A_RESOLVED_INVENTORY"
-load_scenario A
-plan_and_apply_scenario B "$SCENARIO_B_TF_DIR" "$SCENARIO_B_TF_VARS" \
-  "$SCENARIO_B_TF_BINDING_SHA" "$SCENARIO_B_TF_BINDING_FILE" \
-  "$SCENARIO_B_RESOLVED_INVENTORY"
-load_scenario B
+activate_scenario_stack() {
+  local scenario_id="$1" directory vars binding binding_file inventory
+  case "$scenario_id" in
+    A)
+      directory="$SCENARIO_A_TF_DIR"
+      vars="$SCENARIO_A_TF_VARS"
+      binding="$SCENARIO_A_TF_BINDING_SHA"
+      binding_file="$SCENARIO_A_TF_BINDING_FILE"
+      inventory="${SCENARIO_A_INVENTORY%.json}.resolved.json"
+      ;;
+    B)
+      directory="$SCENARIO_B_TF_DIR"
+      vars="$SCENARIO_B_TF_VARS"
+      binding="$SCENARIO_B_TF_BINDING_SHA"
+      binding_file="$SCENARIO_B_TF_BINDING_FILE"
+      inventory="${SCENARIO_B_INVENTORY%.json}.resolved.json"
+      ;;
+    *) return 64 ;;
+  esac
+  plan_and_apply_scenario "$scenario_id" "$directory" "$vars" \
+    "$binding" "$binding_file" "$inventory"
+  load_scenario "$scenario_id"
+  prepare_scenario_tls "$scenario_id" "$directory" "$ALB_BASE_URL"
+  activate_scenario_tls "$scenario_id"
+}
+
+# First pass only. Do not apply B until A has completed rollback section 7.
+activate_scenario_stack A
 ```
+
+After Scenario A completes section 7, return here once and run
+`activate_scenario_stack B`; then execute only the Scenario B baseline and
+repeat sections 1 through 7. The B backend was initialized in the pre-push
+bootstrap gate, but no B application plan is applied while A acceptance is in
+progress. Cleanup remains deferred until both isolated scenarios have
+completed or an interruption/failure requires Task 6.
 
 ## Authentication and secret injection
 
@@ -835,23 +1283,48 @@ Before browser acceptance, query the one approved pool/client through the
 protected capture wrapper and project only booleans and counts:
 
 ```bash
-COGNITO_CLIENT_JSON=$(aws_capture aws cognito-idp describe-user-pool-client \
-  --user-pool-id "$COGNITO_USER_POOL_ID" \
-  --client-id "$OIDC_EXPECTED_AUDIENCE" \
-  --query "UserPoolClient.{clientId:ClientId,allowedOAuthFlowsUserPoolClient:AllowedOAuthFlowsUserPoolClient,allowedOAuthFlows:AllowedOAuthFlows,allowedOAuthScopes:AllowedOAuthScopes,callbackURLs:CallbackURLs,hasClientSecret:contains(keys(@), 'ClientSecret')}" \
-  --output json)
-
-OIDC_REDIRECT_URI="${ALB_BASE_URL}/"
-jq -e --arg callback "$OIDC_REDIRECT_URI" '
-  keys == ["allowedOAuthFlows","allowedOAuthFlowsUserPoolClient","allowedOAuthScopes","callbackURLs","clientId","hasClientSecret"]
-  and .hasClientSecret == false
-  and .allowedOAuthFlowsUserPoolClient == true
-  and (.allowedOAuthFlows | index("code") != null)
-  and (.allowedOAuthFlows | index("implicit") == null)
-  and (["openid", "profile", "email"] - .allowedOAuthScopes | length == 0)
-  and (.callbackURLs | index($callback) != null)
-' <<<"$COGNITO_CLIENT_JSON" >/dev/null
-unset COGNITO_CLIENT_JSON
+prepare_scenario_b_oidc() {
+  local cognito_client_json identity_json inventory_path expected_sub OIDC_REDIRECT_URI
+  test "$ACTIVE_SCENARIO_ID" = B
+  cognito_client_json=$(aws_capture aws cognito-idp describe-user-pool-client \
+    --user-pool-id "$COGNITO_USER_POOL_ID" \
+    --client-id "$OIDC_EXPECTED_AUDIENCE" \
+    --query "UserPoolClient.{clientId:ClientId,allowedOAuthFlowsUserPoolClient:AllowedOAuthFlowsUserPoolClient,allowedOAuthFlows:AllowedOAuthFlows,allowedOAuthScopes:AllowedOAuthScopes,callbackURLs:CallbackURLs,hasClientSecret:contains(keys(@), 'ClientSecret')}" \
+    --output json)
+  OIDC_REDIRECT_URI="${ALB_BASE_URL}/"
+  jq -e --arg callback "$OIDC_REDIRECT_URI" '
+    keys == ["allowedOAuthFlows","allowedOAuthFlowsUserPoolClient","allowedOAuthScopes","callbackURLs","clientId","hasClientSecret"]
+    and .hasClientSecret == false
+    and .allowedOAuthFlowsUserPoolClient == true
+    and (.allowedOAuthFlows | index("code") != null)
+    and (.allowedOAuthFlows | index("implicit") == null)
+    and (["openid", "profile", "email"] - .allowedOAuthScopes | length == 0)
+    and (.callbackURLs | index($callback) != null)
+  ' <<<"$cognito_client_json" >/dev/null
+  inventory_path=$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+    control-manifest get --file "$CONTROL_MANIFEST" --field scenarios.B.inventory_path)
+  expected_sub=$(jq -er '.orphan_sweep.cognito_subject_sub \
+    | select(type == "string" and length > 0)' "$inventory_path")
+  identity_json=$(aws_capture aws cognito-idp admin-get-user --region "$AWS_REGION" \
+    --user-pool-id "$COGNITO_USER_POOL_ID" --username "$OIDC_TEST_USERNAME" \
+    --query '{username:Username,enabled:Enabled,status:UserStatus,sub:UserAttributes[?Name==`sub`]|[0].Value}' \
+    --output json)
+  jq -e --arg username "$OIDC_TEST_USERNAME" --arg subject "$expected_sub" '
+    keys == ["enabled","status","sub","username"]
+    and .username == $username and .sub == $subject
+    and .enabled == true and .status == "CONFIRMED"
+  ' <<<"$identity_json" >/dev/null
+  OIDC_EVIDENCE_DIR="/tmp/elspeth-oidc-${ACCEPTANCE_RUN_ID}"
+  if test -e "$OIDC_EVIDENCE_DIR"; then
+    test ! -L "$OIDC_EVIDENCE_DIR" && test -d "$OIDC_EVIDENCE_DIR"
+    test "$(stat -c %u "$OIDC_EVIDENCE_DIR")" = "$(id -u)"
+    test "$(stat -c %a "$OIDC_EVIDENCE_DIR")" = 700
+  else
+    mkdir -m 700 -- "$OIDC_EVIDENCE_DIR"
+  fi
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+    --file "$CONTROL_MANIFEST" --oidc-evidence-dir "$OIDC_EVIDENCE_DIR"
+}
 ```
 
 `ALB_BASE_URL` is an exact HTTPS origin with no path, query, fragment, or
@@ -872,16 +1345,9 @@ through root-running ECS Exec beside uvicorn.
 
 ### Real-browser OIDC evidence
 
-Install Chromium through the frontend lock before any AWS mutation, and prove
-the dedicated configuration discovers exactly one test without credentials:
-
-```bash
-npm --prefix src/elspeth/web/frontend ci
-npm --prefix src/elspeth/web/frontend exec -- playwright install chromium
-OIDC_LIST_OUTPUT=$(npm --prefix src/elspeth/web/frontend run test:e2e:oidc -- --list)
-grep -Fq '[chromium] aws-ecs-oidc.staging.spec.ts' <<<"$OIDC_LIST_OUTPUT"
-test "$(grep -Fc '[chromium] aws-ecs-oidc.staging.spec.ts' <<<"$OIDC_LIST_OUTPUT")" = 1
-```
+Chromium installation and exact test discovery already completed in the
+fresh-account preflight before `arm_external_cleanup`; never defer them until
+after bootstrap or Scenario A mutation.
 
 The live runner accepts credentials only through the existing environment,
 uses no storage state, screenshot, trace, video, or secondary reporter, and
@@ -889,14 +1355,11 @@ writes one owner-only evidence document only after the created session is
 deleted successfully:
 
 ```bash
-OIDC_EVIDENCE_DIR=$(mktemp -d -p /tmp elspeth-oidc.XXXXXX)
-chmod 700 "$OIDC_EVIDENCE_DIR"
-uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
-  --file "$CONTROL_MANIFEST" --oidc-evidence-dir "$OIDC_EVIDENCE_DIR"
-
 run_oidc_evidence() {
   local phase="$1"
   STAGING_BASE_URL="$ALB_BASE_URL" \
+  NODE_EXTRA_CA_CERTS="$ACCEPTANCE_TLS_CA_BUNDLE" \
+  OIDC_TLS_SPKI_SHA256="$ACCEPTANCE_TLS_SPKI_SHA256" \
   OIDC_TEST_USERNAME="$OIDC_TEST_USERNAME" \
   OIDC_TEST_PASSWORD="$OIDC_TEST_PASSWORD" \
   OIDC_EXPECTED_ISSUER="$OIDC_EXPECTED_ISSUER" \
@@ -905,8 +1368,38 @@ run_oidc_evidence() {
   OIDC_EXPECTED_AUDIENCE_CLAIM="$OIDC_EXPECTED_AUDIENCE_CLAIM" \
   OIDC_EVIDENCE_PHASE="$phase" \
   OIDC_EVIDENCE_FILE="$OIDC_EVIDENCE_DIR/$phase.json" \
+  OIDC_BEARER_HANDOFF_FILE="${OIDC_BEARER_HANDOFF_FILE:-}" \
     npm --prefix src/elspeth/web/frontend run test:e2e:oidc
   test "$(stat -c '%a' "$OIDC_EVIDENCE_DIR/$phase.json")" = 600
+}
+
+capture_oidc_lifecycle_handoff() {
+  local handoff_dir handoff_file
+  test "$ACTIVE_SCENARIO_ID" = B
+  handoff_dir=$(mktemp -d -p /tmp elspeth-oidc-bearer.XXXXXX)
+  chmod 700 "$handoff_dir"
+  handoff_file="$handoff_dir/access-token"
+  OIDC_LIFECYCLE_STATE="$OIDC_EVIDENCE_DIR/candidate-lifecycle.state"
+  test ! -e "$OIDC_LIFECYCLE_STATE" && test ! -L "$OIDC_LIFECYCLE_STATE"
+  (
+    set -Eeuo pipefail
+    trap 'unset OIDC_BEARER_TOKEN; rm -rf -- "$handoff_dir"' EXIT HUP INT TERM
+    OIDC_BEARER_HANDOFF_FILE="$handoff_file" run_oidc_evidence candidate-initial
+    test -f "$handoff_file" && test ! -L "$handoff_file"
+    test "$(stat -c '%a' "$handoff_file")" = 600
+    test "$(wc -c <"$handoff_file")" -le 16384
+    OIDC_BEARER_TOKEN=$(<"$handoff_file")
+    rm -f -- "$handoff_file"
+    [[ "$OIDC_BEARER_TOKEN" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]
+    SSL_CERT_FILE="$ACCEPTANCE_TLS_CA_BUNDLE" \
+    ELSPETH_ACCEPTANCE_BEARER_TOKEN="$OIDC_BEARER_TOKEN" \
+      uv run --frozen python -m elspeth.web.aws_ecs_acceptance capture \
+        --state-file "$OIDC_LIFECYCLE_STATE"
+    unset OIDC_BEARER_TOKEN
+  )
+  OIDC_LANDSCAPE_RUN_ID=$(jq -er \
+    '.landscape_run_id | select(test("^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$"))' \
+    "$OIDC_LIFECYCLE_STATE")
 }
 ```
 
@@ -918,6 +1411,413 @@ contains only `phase`, `timestamp`, `issuer`, `authorization_origin`,
 `session_delete_status: 204`, and `session_round_trip: true`. It never contains a token,
 authorization code, verifier, credential, callback URL/query/fragment,
 cookie, header, page HTML, or artifact path.
+
+### Bound release/schema compatibility record
+
+Before either storage provisioner or schema initializer runs, the database
+operator supplies a protected mode-0600 JSON record and the release operator
+countersigns it. Set `SCENARIO_A_COMPATIBILITY_RECORD_FILE` and
+`SCENARIO_B_COMPATIBILITY_RECORD_FILE`. Scenario B has exactly this shape:
+
+```json
+{
+  "schema": "elspeth.aws-ecs-compatibility-record.v2",
+  "record_id": "change-record-id",
+  "acceptance_run_id": "manifest-run-uuid",
+  "scenario_id": "B",
+  "candidate_sha": "40-lowercase-hex",
+  "candidate_image_digest": "sha256:64-lowercase-hex",
+  "candidate_task_definition": "exact-candidate-task-definition-arn",
+  "candidate_doctor_task_definition": "exact-candidate-doctor-task-definition-arn",
+  "candidate_package_version": "0.7.1",
+  "previous_source_sha": "40-lowercase-hex",
+  "previous_image_digest": "sha256:64-lowercase-hex",
+  "previous_task_definition": "exact-previous-task-definition-arn",
+  "rollback_doctor_task_definition": "exact-rollback-doctor-task-definition-arn",
+  "previous_package_version": "0.7.1",
+  "schema_facts": {
+    "candidate": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": true},
+    "previous": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": true},
+    "structural_changes": "none",
+    "semantics_only_changes": "none",
+    "archive_export_decision": "not_required",
+    "destructive_reset_required": false
+  },
+  "forward_compatible": true,
+  "backward_compatible": true,
+  "rollback_permitted": true,
+  "decision": "approved",
+  "approver_identity": "database-operator",
+  "countersigner_identity": "release-operator",
+  "approved_at": "RFC3339-UTC",
+  "countersigned_at": "RFC3339-UTC",
+  "expires_at": "RFC3339-UTC"
+}
+```
+
+Scenario A uses the same field set with `scenario_id: "A"`; empty strings for
+`previous_source_sha`, `previous_image_digest`, `previous_task_definition`,
+`rollback_doctor_task_definition`, and `previous_package_version`;
+`schema_facts.previous: null`; `structural_changes: "initial_create"`;
+`archive_export_decision: "not_applicable"`; and both
+`backward_compatible` and `rollback_permitted` false.
+
+The controller binds the record to the manifest, image digest, exact task
+and doctor definitions, candidate and previous package/image identities,
+session epoch 27, Landscape epoch 23 and `run_web_plugin_policy` presence,
+change/reset facts, decision, two distinct approvals, and expiry. It
+stores only a sanitized receipt and document hash. Reopen and revalidate the
+raw record before init-capable doctor, ordinary doctor, candidate deploy, and
+Scenario B rollback. Unknown or unapproved compatibility is NO-GO; expiry or
+identity drift is also NO-GO.
+
+Before either schema initializer runs, create and prove the required EFS
+children with the candidate image's explicit `1000:1000` one-shot definition.
+The command creates only the configured payload directory and `data_dir/blobs`
+under the already-mounted `data_dir`, then performs create/read/fsync/delete
+probes in all three directories. It emits no paths:
+
+```bash
+resolve_bound_task_definition() {
+  local variable="$1" container_name="$2" expected_user="${3:-}"
+  local reference raw validated resolved expected_image expected_log_group expected_log_prefix expected_arch
+  local -a user_args=()
+  if test -n "$expected_user"; then
+    user_args=(--expected-user "$expected_user")
+  fi
+  reference=${!variable}
+  raw=$(aws_capture aws ecs describe-task-definition \
+    --task-definition "$reference" --output json)
+  case "$variable" in
+    PREVIOUS_TASK_DEFINITION|ROLLBACK_DOCTOR_TASK_DEFINITION) expected_image="$ROLLBACK_BASELINE_IMAGE" ;;
+    *) expected_image="$CANDIDATE_IMAGE" ;;
+  esac
+  case "$variable" in
+    DOCTOR_TASK_DEFINITION|ROLLBACK_DOCTOR_TASK_DEFINITION)
+      expected_log_group="$DOCTOR_LOG_GROUP"; expected_log_prefix="$DOCTOR_LOG_STREAM_PREFIX" ;;
+    *) expected_log_group="$WEB_LOG_GROUP"; expected_log_prefix="$WEB_LOG_STREAM_PREFIX" ;;
+  esac
+  case "$TARGET_PLATFORM" in
+    linux/amd64) expected_arch=X86_64 ;;
+    linux/arm64) expected_arch=ARM64 ;;
+    *) return 64 ;;
+  esac
+  jq -e --arg container "$container_name" --arg image "$expected_image" \
+    --arg arch "$expected_arch" --arg log_group "$expected_log_group" \
+    --arg log_prefix "$expected_log_prefix" '
+      .taskDefinition.status == "ACTIVE"
+      and .taskDefinition.networkMode == "awsvpc"
+      and (.taskDefinition.requiresCompatibilities | index("FARGATE") != null)
+      and .taskDefinition.runtimePlatform.operatingSystemFamily == "LINUX"
+      and .taskDefinition.runtimePlatform.cpuArchitecture == $arch
+      and (.taskDefinition.executionRoleArn | type == "string" and length > 0)
+      and (.taskDefinition.taskRoleArn | type == "string" and length > 0)
+      and .taskDefinition.executionRoleArn != .taskDefinition.taskRoleArn
+      and ([.taskDefinition.containerDefinitions[] | select(.name == $container and .essential == true)] | length) == 1
+      and ([.taskDefinition.containerDefinitions[] | select(.name == $container)
+        | select(.image == $image)
+        | select(.logConfiguration.logDriver == "awslogs")
+        | select(.logConfiguration.options["awslogs-group"] == $log_group)
+        | select(.logConfiguration.options["awslogs-stream-prefix"] == $log_prefix)] | length) == 1
+    ' <<<"$raw" >/dev/null
+  validated=$(printf '%s' "$raw" \
+    | uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+        validate-task-definition-policy --file "$CONTROL_MANIFEST" \
+        --scenario-id "$ACTIVE_SCENARIO_ID" --container-name "$container_name" \
+        "${user_args[@]}")
+  resolved=$(jq -er '.task_definition_arn | select(length > 0)' <<<"$validated")
+  printf -v "$variable" '%s' "$resolved"
+}
+
+validate_scenario_task_definitions() {
+  resolve_bound_task_definition CANDIDATE_TASK_DEFINITION "$WEB_CONTAINER_NAME"
+  resolve_bound_task_definition DOCTOR_TASK_DEFINITION "$DOCTOR_CONTAINER_NAME"
+  resolve_bound_task_definition PAYLOAD_VERIFIER_TASK_DEFINITION "$WEB_CONTAINER_NAME" 1000:1000
+  resolve_bound_task_definition LOCAL_AUTH_VERIFIER_TASK_DEFINITION "$WEB_CONTAINER_NAME" 1000:1000
+  if test "$DEPLOYMENT_MODE" = upgrade; then
+    resolve_bound_task_definition ROLLBACK_DOCTOR_TASK_DEFINITION "$DOCTOR_CONTAINER_NAME"
+    resolve_bound_task_definition PREVIOUS_TASK_DEFINITION "$WEB_CONTAINER_NAME"
+  fi
+  TASK_DEFINITIONS_VALIDATED_FOR="$ACTIVE_SCENARIO_ID"
+}
+
+bind_compatibility_record() {
+  local variable="SCENARIO_${ACTIVE_SCENARIO_ID}_COMPATIBILITY_RECORD_FILE" record receipt raw_sha
+  record=${!variable:?set the protected compatibility record for the active scenario}
+  receipt=$(mktemp -p /tmp "elspeth-compatibility-${ACTIVE_SCENARIO_ID}.XXXXXX")
+  chmod 600 "$receipt"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+    compatibility-record-validate --file "$CONTROL_MANIFEST" \
+    --scenario-id "$ACTIVE_SCENARIO_ID" --record "$record" >"$receipt"
+  raw_sha=$(jq -cS . "$record" | sha256sum | awk '{print $1}')
+  test "$(jq -er '.record_sha256' "$receipt")" = "$raw_sha"
+  persist_sanitized_receipt "$ACTIVE_SCENARIO_ID" compatibility-record "$raw_sha" "$receipt" >/dev/null
+  COMPATIBILITY_RECORD_FILE="$record"
+  COMPATIBILITY_RECORD_SHA256="$raw_sha"
+  rm -f -- "$receipt"
+}
+
+require_compatibility_record_current() {
+  local receipt current_sha
+  receipt=$(mktemp -p /tmp "elspeth-compatibility-current-${ACTIVE_SCENARIO_ID}.XXXXXX")
+  chmod 600 "$receipt"
+  current_sha=$(jq -cS . "$COMPATIBILITY_RECORD_FILE" | sha256sum | awk '{print $1}')
+  test "$current_sha" = "$COMPATIBILITY_RECORD_SHA256"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+    compatibility-record-validate --file "$CONTROL_MANIFEST" \
+    --scenario-id "$ACTIVE_SCENARIO_ID" --record "$COMPATIBILITY_RECORD_FILE" >"$receipt"
+  test "$(jq -er '.record_sha256' "$receipt")" = "$COMPATIBILITY_RECORD_SHA256"
+  rm -f -- "$receipt"
+}
+
+set_traffic_action() {
+  local mode="$1" actions expected observed
+  case "$mode" in
+    forward) actions="$FIRST_DEPLOY_FORWARD_ACTIONS" ;;
+    disabled) actions="$FIRST_DEPLOY_DISABLED_ACTIONS" ;;
+    *) return 64 ;;
+  esac
+  aws_capture aws elbv2 modify-rule --rule-arn "$FIRST_DEPLOY_LISTENER_RULE_ARN" \
+    --actions "$actions" >/dev/null
+  observed=$(aws_capture aws elbv2 describe-rules \
+    --rule-arns "$FIRST_DEPLOY_LISTENER_RULE_ARN" --output json)
+  expected=$(jq -cS . <<<"$actions")
+  test "$(jq -cS '.Rules | select(length == 1) | .[0].Actions' <<<"$observed")" = "$expected"
+}
+
+verify_task_definition_target_mapping() {
+  local expected_task_definition="$1"
+  local service running pending task task_ip task_port target_health
+  service=$(aws_capture aws ecs describe-services \
+    --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --output json)
+  jq -e --arg task_definition "$expected_task_definition" '
+    (.failures | length) == 0 and (.services | length) == 1
+    and .services[0].desiredCount == 1 and .services[0].runningCount == 1
+    and .services[0].pendingCount == 0
+    and (.services[0].deployments | length) == 1
+    and .services[0].deployments[0].status == "PRIMARY"
+    and .services[0].deployments[0].taskDefinition == $task_definition
+    and .services[0].deployments[0].rolloutState == "COMPLETED"
+  ' <<<"$service" >/dev/null
+  task_port=$(jq -er --arg target_group "$TARGET_GROUP_ARN" --arg container "$WEB_CONTAINER_NAME" '
+    [.services[0].loadBalancers[]
+      | select(.targetGroupArn == $target_group and .containerName == $container)]
+    | select(length == 1) | .[0].containerPort
+    | select(type == "number" and . >= 1 and . <= 65535)
+  ' <<<"$service")
+  running=$(aws_capture aws ecs list-tasks --cluster "$ECS_CLUSTER" \
+    --service-name "$ECS_SERVICE" --desired-status RUNNING --output json)
+  pending=$(aws_capture aws ecs list-tasks --cluster "$ECS_CLUSTER" \
+    --service-name "$ECS_SERVICE" --desired-status PENDING --output json)
+  jq -e '.taskArns | length == 1' <<<"$running" >/dev/null
+  jq -e '.taskArns | length == 0' <<<"$pending" >/dev/null
+  ACTIVE_TASK_ARN=$(jq -er '.taskArns[0]' <<<"$running")
+  task=$(aws_capture aws ecs describe-tasks --cluster "$ECS_CLUSTER" \
+    --tasks "$ACTIVE_TASK_ARN" --output json)
+  jq -e --arg task "$ACTIVE_TASK_ARN" --arg definition "$expected_task_definition" \
+    --arg container "$WEB_CONTAINER_NAME" '
+    (.failures | length) == 0 and (.tasks | length) == 1
+    and .tasks[0].taskArn == $task
+    and .tasks[0].taskDefinitionArn == $definition
+    and .tasks[0].lastStatus == "RUNNING"
+    and ([.tasks[0].containers[] | select(.name == $container)] | length) == 1
+    and ([.tasks[0].containers[] | select(.name == $container)
+      | .managedAgents[]
+      | select(.name == "ExecuteCommandAgent" and .lastStatus == "RUNNING")] | length) == 1
+  ' <<<"$task" >/dev/null
+  task_ip=$(jq -er '
+    [.tasks[0].attachments[] | select(.type == "ElasticNetworkInterface")
+      | .details[] | select(.name == "privateIPv4Address") | .value]
+    | select(length == 1) | .[0]
+    | select(test("^[0-9]{1,3}(\\.[0-9]{1,3}){3}$"))
+  ' <<<"$task")
+  target_health=$(aws_capture aws elbv2 describe-target-health \
+    --target-group-arn "$TARGET_GROUP_ARN" --output json)
+  jq -e --arg id "$task_ip" --argjson port "$task_port" '
+    [.TargetHealthDescriptions[]
+      | select(.Target.Id == $id and .Target.Port == $port and .TargetHealth.State == "healthy")]
+      | length == 1
+  ' <<<"$target_health" >/dev/null
+  jq -e --arg id "$task_ip" --argjson port "$task_port" '
+    all(.TargetHealthDescriptions[];
+      (.Target.Id == $id and .Target.Port == $port) or .TargetHealth.State == "draining")
+  ' <<<"$target_health" >/dev/null
+}
+
+verify_public_probes() {
+  local health_body ready_body health_status ready_status
+  health_body=$(mktemp -p /tmp elspeth-health.XXXXXX)
+  ready_body=$(mktemp -p /tmp elspeth-ready.XXXXXX)
+  chmod 600 "$health_body" "$ready_body"
+  if health_status=$(curl --cacert "$ACCEPTANCE_TLS_CA_BUNDLE" \
+      --connect-timeout 5 --max-time 10 --max-redirs 0 --max-filesize 1048576 \
+      -sS -o "$health_body" -w '%{http_code}' "$ALB_BASE_URL/api/health") \
+    && ready_status=$(curl --cacert "$ACCEPTANCE_TLS_CA_BUNDLE" \
+      --connect-timeout 5 --max-time 10 --max-redirs 0 --max-filesize 1048576 \
+      -sS -o "$ready_body" -w '%{http_code}' "$ALB_BASE_URL/api/ready") \
+    && test "$health_status" = 200 && test "$ready_status" = 200 \
+    && jq -e '.ready == true' "$ready_body" >/dev/null; then
+    rm -f -- "$health_body" "$ready_body"
+    return 0
+  fi
+  rm -f -- "$health_body" "$ready_body"
+  return 1
+}
+
+require_stopped_task_success() {
+  local task_definition="$1" task_arn="$2" definition essential result
+  definition=$(aws_capture aws ecs describe-task-definition \
+    --task-definition "$task_definition" --output json)
+  essential=$(jq -ce '
+    [.taskDefinition.containerDefinitions[] | select(.essential != false) | .name] as $names
+    | select(($names | length) > 0 and ($names | length) == ($names | unique | length))
+    | ($names | sort)' <<<"$definition")
+  result=$(aws_capture aws ecs describe-tasks \
+    --cluster "$ECS_CLUSTER" --tasks "$task_arn" --output json)
+  jq -e --arg task_definition "$task_definition" --argjson essential "$essential" '
+    (.failures | length) == 0 and (.tasks | length) == 1
+    and .tasks[0].taskDefinitionArn == $task_definition
+    and .tasks[0].lastStatus == "STOPPED"
+    and ([.tasks[0].containers[].name] | sort) as $actual
+    and ($essential - $actual | length) == 0
+    and all($essential[] as $name;
+      ([.tasks[0].containers[] | select(.name == $name and (.exitCode | type == "number") and .exitCode == 0)] | length) == 1)
+  ' <<<"$result" >/dev/null
+}
+
+provision_scenario_storage() {
+  local overrides task
+  overrides=$(jq -cn --arg name "$WEB_CONTAINER_NAME" \
+    '{containerOverrides:[{name:$name,command:["provision-storage"]}]}')
+  task=$(aws_capture aws ecs run-task \
+    --cluster "$ECS_CLUSTER" --task-definition "$PAYLOAD_VERIFIER_TASK_DEFINITION" \
+    --launch-type FARGATE --network-configuration "$DOCTOR_NETWORK_CONFIGURATION" \
+    --count 1 --overrides "$overrides" --query 'tasks[0].taskArn' --output text)
+  aws_waiter_capture aws ecs wait tasks-stopped \
+    --cluster "$ECS_CLUSTER" --tasks "$task" >/dev/null
+  require_stopped_task_success "$PAYLOAD_VERIFIER_TASK_DEFINITION" "$task"
+}
+```
+
+### Fresh Scenario A database baseline
+
+Scenario A is a true first deploy. Its Terraform stack creates the database,
+EFS paths, disabled 503 listener rule, task definitions, and service at desired
+count zero, but application startup never creates schemas. While traffic is
+still disabled, run the candidate image's init-capable doctor once under the
+database-operator-approved schema-owner secret. The ordinary ordered rollout
+then runs the same candidate's read-only doctor before launching the first web
+task.
+
+Execute this block only on the first pass, immediately after
+`activate_scenario_stack A`. Skip the Scenario B baseline below and continue
+with ordered rollout sections 1 through 7.
+
+```bash
+load_scenario A
+test "$ACTIVE_SCENARIO_ID" = A
+validate_scenario_task_definitions
+bind_compatibility_record
+require_compatibility_record_current
+SERVICE_JSON=$(aws_capture aws ecs describe-services \
+  --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --output json)
+jq -e '(.failures | length) == 0 and (.services | length) == 1
+  and .services[0].desiredCount == 0 and .services[0].runningCount == 0
+  and .services[0].pendingCount == 0' <<<"$SERVICE_JSON" >/dev/null
+unset SERVICE_JSON
+provision_scenario_storage
+
+require_compatibility_record_current
+FIRST_INIT_OVERRIDES=$(jq -cn --arg name "$DOCTOR_CONTAINER_NAME" \
+  '{containerOverrides:[{name:$name,command:["doctor","aws-ecs","--init-schema","--json"]}]}')
+FIRST_INIT_TASK=$(aws_capture aws ecs run-task \
+  --cluster "$ECS_CLUSTER" \
+  --task-definition "$DOCTOR_TASK_DEFINITION" \
+  --launch-type FARGATE --network-configuration "$DOCTOR_NETWORK_CONFIGURATION" \
+  --count 1 --overrides "$FIRST_INIT_OVERRIDES" \
+  --query 'tasks[0].taskArn' --output text)
+aws_waiter_capture aws ecs wait tasks-stopped \
+  --cluster "$ECS_CLUSTER" --tasks "$FIRST_INIT_TASK" >/dev/null
+require_stopped_task_success "$DOCTOR_TASK_DEFINITION" "$FIRST_INIT_TASK"
+unset FIRST_INIT_OVERRIDES
+```
+
+Failure leaves desired count zero and the listener fixed at 503. Do not run
+the candidate service or switch the listener until the later read-only doctor
+and schema compatibility gate both pass.
+
+### Fresh Scenario B upgrade baseline
+
+Scenario B proves an upgrade, but a fresh account has neither schema nor a
+running previous revision. Its Terraform stack therefore creates the service
+at desired count zero while registering both the rollback-baseline web task
+and its database-operator-approved init-capable doctor definition. After the
+resolved inventory, TLS material, and test identity are bound, initialize the
+empty database with the rollback baseline, then launch that previous web
+revision. Only this bootstrap establishes the pre-candidate state; it is not a
+candidate deployment or a substitute for the later rollback rehearsal.
+
+Execute this block only after Scenario A has completed section 7 and the
+operator has returned to the saved-plan section to run
+`activate_scenario_stack B`. Do not rerun the Scenario A baseline.
+
+```bash
+load_scenario B
+test "$ACTIVE_SCENARIO_ID" = B
+validate_scenario_task_definitions
+bind_compatibility_record
+require_compatibility_record_current
+prepare_scenario_b_oidc
+set_traffic_action disabled
+SERVICE_JSON=$(aws_capture aws ecs describe-services \
+  --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --output json)
+jq -e '(.failures | length) == 0 and (.services | length) == 1
+  and .services[0].desiredCount == 0 and .services[0].runningCount == 0
+  and .services[0].pendingCount == 0' <<<"$SERVICE_JSON" >/dev/null
+unset SERVICE_JSON
+provision_scenario_storage
+
+require_compatibility_record_current
+ROLLBACK_INIT_OVERRIDES=$(jq -cn --arg name "$DOCTOR_CONTAINER_NAME" \
+  '{containerOverrides:[{name:$name,command:["doctor","aws-ecs","--init-schema","--json"]}]}')
+ROLLBACK_INIT_TASK=$(aws_capture aws ecs run-task \
+  --cluster "$ECS_CLUSTER" \
+  --task-definition "$ROLLBACK_DOCTOR_TASK_DEFINITION" \
+  --launch-type FARGATE --network-configuration "$DOCTOR_NETWORK_CONFIGURATION" \
+  --count 1 --overrides "$ROLLBACK_INIT_OVERRIDES" \
+  --query 'tasks[0].taskArn' --output text)
+aws_waiter_capture aws ecs wait tasks-stopped \
+  --cluster "$ECS_CLUSTER" --tasks "$ROLLBACK_INIT_TASK" >/dev/null
+require_stopped_task_success "$ROLLBACK_DOCTOR_TASK_DEFINITION" "$ROLLBACK_INIT_TASK"
+unset ROLLBACK_INIT_OVERRIDES
+
+require_compatibility_record_current
+aws_capture aws ecs update-service \
+  --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+  --task-definition "$PREVIOUS_TASK_DEFINITION" --desired-count 1 \
+  --force-new-deployment \
+  --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
+  >/dev/null
+aws_waiter_capture aws ecs wait services-stable \
+  --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
+SERVICE_JSON=$(aws_capture aws ecs describe-services \
+  --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --output json)
+jq -e --arg previous "$PREVIOUS_TASK_DEFINITION" '
+  (.failures | length) == 0 and (.services | length) == 1
+  and .services[0].taskDefinition == $previous
+  and .services[0].desiredCount == 1 and .services[0].runningCount == 1
+  and .services[0].pendingCount == 0' <<<"$SERVICE_JSON" >/dev/null
+unset SERVICE_JSON
+verify_task_definition_target_mapping "$PREVIOUS_TASK_DEFINITION"
+set_traffic_action forward
+verify_public_probes
+run_oidc_evidence previous-before-candidate
+set_traffic_action disabled
+```
+
+From this point the ordinary upgrade preflight requires desired/running count
+one on `PREVIOUS_TASK_DEFINITION`. Any failed baseline doctor, unstable
+service, unhealthy target, or failed browser round trip blocks the candidate.
 
 ## ECS probe wiring
 
@@ -954,7 +1854,10 @@ loop rather than readiness.
 
 ## Packaging and platform identity
 
-Build a temporary acceptance image for one explicitly approved platform:
+Task 4's inspected `elspeth:ecs-0.7.1-closeout` image is the only candidate.
+The earlier fresh-account publication step binds that exact local image to its
+registry digest before either scenario apply; do not rebuild or retag a second
+candidate here. Validate the approved platform mapping only:
 
 ```bash
 set -Eeuo pipefail
@@ -965,9 +1868,6 @@ case "$TARGET_PLATFORM" in
   *) printf '%s\n' 'unsupported TARGET_PLATFORM' >&2; exit 2 ;;
 esac
 
-docker build --platform "$TARGET_PLATFORM" \
-  --build-arg INSTALL_EXTRAS="webui llm aws postgres" \
-  -t "$ACCEPTANCE_ECR_REPOSITORY:$ACCEPTANCE_RUN_ID-candidate" .
 ```
 
 Every web, doctor, verifier, and rollback definition declares
@@ -975,19 +1875,18 @@ Every web, doctor, verifier, and rollback definition declares
 `runtimePlatform.cpuArchitecture` (`linux/amd64` → `X86_64`, `linux/arm64` →
 `ARM64`). A host-native image with no recorded target platform is NO-GO. The
 lean image omits the `azure` extra; `azure_blob` pipelines need the default
-`all` image or an expanded `INSTALL_EXTRAS`. Operators push their own temporary
-tag to ECR. The published GHCR/ACR default remains `all`.
+`all` image or an expanded `INSTALL_EXTRAS`. The published GHCR/ACR default
+remains `all`.
 
 ## Storage provisioning and cold start
 
-Before doctor, the infrastructure/release operator provisions `data_dir`,
-explicit `payload_store_path`, and the derived blob directory on the intended
-EFS access point. The non-root `1000:1000` user must create, read, fsync, and
-delete a probe file in each directory. Mounting only the parent is
-insufficient: doctor deliberately never calls `mkdir`, including with
-`--init-schema`, because an overlay child would mask a displaced EFS mount.
-Record the filesystem/access-point identity and non-root probe booleans, never
-paths or credentials.
+Before doctor, run `provision_scenario_storage` above. It provisions
+`data_dir`, explicit `payload_store_path`, and the derived blob directory on
+the intended EFS access point and proves them as the non-root `1000:1000`
+user. Mounting only the parent is insufficient: doctor deliberately never
+calls `mkdir`, including with `--init-schema`, because an overlay child would
+mask a displaced EFS mount. Record the filesystem/access-point identity and
+non-root probe booleans, never paths or credentials.
 
 `elspeth doctor aws-ecs --init-schema` has one 10-second connection attempt and
 no retry budget. Before first use against min-0-ACU Aurora, set a non-zero
@@ -1077,7 +1976,7 @@ processors:
 exporters:
   awsemf/elspeth:
     namespace: ELSPETH/Operator
-    log_group_name: /elspeth/operator/metrics
+    log_group_name: ${OPERATOR_METRICS_LOG_GROUP}
     log_stream_name: telemetry
     dimension_rollup_option: NoDimensionRollup
     retain_initial_value_of_delta_metric: true
@@ -1100,7 +1999,7 @@ The suffix on every receiver, processor, exporter, and pipeline prevents
 merge conflicts with pipelines generated by the CloudWatch Agent itself. The
 `awsemf` exporter is a component shipped in the current agent: it converts the
 bounded OTLP metrics to Embedded Metric Format, writes them to the pre-created
-`/elspeth/operator/metrics` log group, and extracts them into the
+scenario-owned `OPERATOR_METRICS_LOG_GROUP`, and extracts them into the
 `ELSPETH/Operator` CloudWatch namespace. `NoDimensionRollup` prevents the
 exporter from silently creating additional dimension sets, and retaining the
 first delta value preserves low-frequency acceptance and failure counters.
@@ -1169,7 +2068,9 @@ the entrypoint below:
         {"name": "ELSPETH_WEB__OPERATOR_TELEMETRY_TASK_DEFINITION_REVISION", "value": "${ECS_TASK_DEFINITION_REVISION}"},
         {"name": "ELSPETH_ACCEPTANCE_RUN_ID", "value": "${ACCEPTANCE_RUN_ID}"},
         {"name": "ELSPETH_ACCEPTANCE_CANDIDATE_SHA", "value": "${CANDIDATE_SHA}"},
-        {"name": "ELSPETH_ACCEPTANCE_SCENARIO_ID", "value": "${SCENARIO_ID}"}
+        {"name": "ELSPETH_ACCEPTANCE_SCENARIO_ID", "value": "${SCENARIO_ID}"},
+        {"name": "ELSPETH_ACCEPTANCE_S3_BUCKET", "value": "${ELSPETH_TEST_S3_BUCKET}"},
+        {"name": "ELSPETH_ACCEPTANCE_S3_PREFIX", "value": "${SCENARIO_RESOURCE_NAMESPACE}/${ACCEPTANCE_RUN_ID}"}
       ]
     }
   ]
@@ -1185,11 +2086,15 @@ an observability outage degrades alarms without killing healthy audited work.
 
 ## IAM separation
 
-Pre-create `/elspeth/operator/metrics`, apply the retention policy below, and
-do not grant the task permission to create arbitrary log groups. The
-**Task role** carries only application-time EMF and trace delivery. The EMF
-exporter needs stream discovery/creation and event writes on that exact group;
-X-Ray write APIs do not support narrower resource scoping:
+Pre-create the scenario-owned `OPERATOR_METRICS_LOG_GROUP`, include it in the
+protected scenario inventory and orphan sweep, apply the retention policy
+below, and do not grant the task permission to create arbitrary log groups.
+The **Task role** carries application-time EMF and trace delivery. The
+temporary acceptance task role also carries the two read APIs used by the
+in-task positive/outage verifier; a durable production role may omit those
+reads. The EMF exporter needs stream discovery/creation and event writes on
+that exact group. CloudWatch metric reads and X-Ray APIs do not support useful
+narrower resource scoping:
 
 ```json
 {
@@ -1200,14 +2105,20 @@ X-Ray write APIs do not support narrower resource scoping:
       "Effect": "Allow",
       "Action": ["logs:DescribeLogStreams", "logs:CreateLogStream", "logs:PutLogEvents"],
       "Resource": [
-        "arn:aws:logs:${AWS_REGION}:${AWS_ACCOUNT}:log-group:/elspeth/operator/metrics",
-        "arn:aws:logs:${AWS_REGION}:${AWS_ACCOUNT}:log-group:/elspeth/operator/metrics:log-stream:telemetry"
+        "arn:aws:logs:${AWS_REGION}:${AWS_ACCOUNT}:log-group:${OPERATOR_METRICS_LOG_GROUP}",
+        "arn:aws:logs:${AWS_REGION}:${AWS_ACCOUNT}:log-group:${OPERATOR_METRICS_LOG_GROUP}:log-stream:telemetry"
       ]
     },
     {
       "Sid": "PutElspethTraces",
       "Effect": "Allow",
       "Action": ["xray:PutTraceSegments", "xray:PutTelemetryRecords"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadElspethAcceptanceTelemetry",
+      "Effect": "Allow",
+      "Action": ["cloudwatch:GetMetricData", "xray:BatchGetTraces"],
       "Resource": "*"
     }
   ]
@@ -1349,8 +2260,8 @@ inputs from the approved inventory:
 - `CANDIDATE_TASK_DEFINITION`, `DOCTOR_TASK_DEFINITION`,
   `DOCTOR_CONTAINER_NAME`, and the complete JSON
   `DOCTOR_NETWORK_CONFIGURATION`;
-- `WEB_LOG_GROUP`, `WEB_LOG_STREAM_PREFIX`, `DOCTOR_LOG_GROUP`, and
-  `DOCTOR_LOG_STREAM_PREFIX`;
+- `WEB_LOG_GROUP`, `WEB_LOG_STREAM_PREFIX`, `DOCTOR_LOG_GROUP`,
+  `DOCTOR_LOG_STREAM_PREFIX`, and `OPERATOR_METRICS_LOG_GROUP`;
 - `ECS_DEPLOYMENT_EVENT_RULE`, `ECS_DEPLOYMENT_EVENT_TARGET_ID`, and
   `ECS_DEPLOYMENT_EVENT_LOG_GROUP`;
 - `PREVIOUS_TASK_DEFINITION` for upgrades; and
@@ -1374,15 +2285,14 @@ hash over a substituted bundle is not sufficient.
 : "${TARGET_GROUP_ARN:?} ${ALB_BASE_URL:?}"
 : "${CANDIDATE_TASK_DEFINITION:?} ${DOCTOR_TASK_DEFINITION:?}"
 : "${PAYLOAD_VERIFIER_TASK_DEFINITION:?} ${LOCAL_AUTH_VERIFIER_TASK_DEFINITION:?}"
-: "${ROLLBACK_DOCTOR_TASK_DEFINITION:?}"
 : "${DOCTOR_CONTAINER_NAME:?} ${DOCTOR_NETWORK_CONFIGURATION:?}"
 : "${WEB_LOG_GROUP:?} ${WEB_LOG_STREAM_PREFIX:?}"
-: "${DOCTOR_LOG_GROUP:?} ${DOCTOR_LOG_STREAM_PREFIX:?}"
+: "${DOCTOR_LOG_GROUP:?} ${DOCTOR_LOG_STREAM_PREFIX:?} ${OPERATOR_METRICS_LOG_GROUP:?}"
 : "${ECS_DEPLOYMENT_EVENT_RULE:?} ${ECS_DEPLOYMENT_EVENT_TARGET_ID:?}"
 : "${ECS_DEPLOYMENT_EVENT_LOG_GROUP:?} ${ACCEPTANCE_RUN_ID:?}"
 
 case "$DEPLOYMENT_MODE" in
-  upgrade) : "${PREVIOUS_TASK_DEFINITION:?}" ;;
+  upgrade) : "${PREVIOUS_TASK_DEFINITION:?} ${ROLLBACK_DOCTOR_TASK_DEFINITION:?}" ;;
   first|first-recovery)
     : "${FIRST_DEPLOY_LISTENER_RULE_ARN:?}"
     : "${FIRST_DEPLOY_FORWARD_ACTIONS:?} ${FIRST_DEPLOY_DISABLED_ACTIONS:?}"
@@ -1392,28 +2302,7 @@ esac
 [[ "$ECS_CLUSTER" =~ ^[A-Za-z0-9_-]+$ ]]
 [[ "$ECS_SERVICE" =~ ^[A-Za-z0-9_-]+$ ]]
 
-resolve_bound_task_definition() {
-  local variable="$1" container_name="$2" reference raw validated resolved
-  reference=${!variable}
-  raw=$(aws_capture aws ecs describe-task-definition \
-    --task-definition "$reference" --output json)
-  validated=$(printf '%s' "$raw" \
-    | uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
-        validate-task-definition-policy --file "$CONTROL_MANIFEST" \
-        --scenario-id "$ACTIVE_SCENARIO_ID" --container-name "$container_name")
-  resolved=$(jq -er '.task_definition_arn | select(length > 0)' <<<"$validated")
-  printf -v "$variable" '%s' "$resolved"
-  unset raw validated resolved reference
-}
-
-resolve_bound_task_definition CANDIDATE_TASK_DEFINITION "$WEB_CONTAINER_NAME"
-resolve_bound_task_definition DOCTOR_TASK_DEFINITION "$DOCTOR_CONTAINER_NAME"
-resolve_bound_task_definition PAYLOAD_VERIFIER_TASK_DEFINITION "$WEB_CONTAINER_NAME"
-resolve_bound_task_definition LOCAL_AUTH_VERIFIER_TASK_DEFINITION "$WEB_CONTAINER_NAME"
-resolve_bound_task_definition ROLLBACK_DOCTOR_TASK_DEFINITION "$DOCTOR_CONTAINER_NAME"
-if test "$DEPLOYMENT_MODE" = upgrade; then
-  resolve_bound_task_definition PREVIOUS_TASK_DEFINITION "$WEB_CONTAINER_NAME"
-fi
+test "$TASK_DEFINITIONS_VALIDATED_FOR" = "$ACTIVE_SCENARIO_ID"
 
 OBSERVATION_START_EPOCH_MS=$(($(date +%s) * 1000))
 SERVICE_JSON=$(aws_capture aws ecs describe-services \
@@ -1421,9 +2310,51 @@ SERVICE_JSON=$(aws_capture aws ecs describe-services \
 SCALING_JSON=$(aws_capture aws application-autoscaling describe-scalable-targets \
   --service-namespace ecs \
   --resource-ids "service/$ECS_CLUSTER/$ECS_SERVICE" --output json)
-jq -e '.failures | length == 0' <<<"$SERVICE_JSON" >/dev/null
+jq -e --arg cluster "$ECS_CLUSTER" --arg service "$ECS_SERVICE" \
+  --arg target_group "$TARGET_GROUP_ARN" --arg container "$WEB_CONTAINER_NAME" \
+  --arg mode "$DEPLOYMENT_MODE" '
+    (.failures | length) == 0 and (.services | length) == 1
+    and (.services[0].serviceArn | endswith("/" + $service))
+    and (.services[0].clusterArn | endswith("/" + $cluster))
+    and .services[0].launchType == "FARGATE"
+    and (.services[0].platformVersion == "1.4.0" or .services[0].platformVersion == "LATEST")
+    and .services[0].deploymentController.type == "ECS"
+    and .services[0].enableExecuteCommand == true
+    and .services[0].deploymentConfiguration.minimumHealthyPercent == 0
+    and .services[0].deploymentConfiguration.maximumPercent == 100
+    and .services[0].healthCheckGracePeriodSeconds >= 150
+    and ([.services[0].loadBalancers[]
+      | select(.targetGroupArn == $target_group and .containerName == $container)] | length) == 1
+    and (if $mode == "upgrade" then
+      .services[0].desiredCount == 1 and .services[0].runningCount == 1
+      and .services[0].pendingCount == 0
+    else
+      .services[0].desiredCount == 0 and .services[0].runningCount == 0
+      and .services[0].pendingCount == 0
+    end)
+  ' <<<"$SERVICE_JSON" >/dev/null
 jq -e '.ScalableTargets | length == 0' <<<"$SCALING_JSON" >/dev/null
-unset SERVICE_JSON SCALING_JSON
+TARGET_GROUP_JSON=$(aws_capture aws elbv2 describe-target-groups \
+  --target-group-arns "$TARGET_GROUP_ARN" --output json)
+jq -e --arg arn "$TARGET_GROUP_ARN" '
+  (.TargetGroups | length) == 1
+  and .TargetGroups[0].TargetGroupArn == $arn
+  and .TargetGroups[0].TargetType == "ip"
+  and .TargetGroups[0].HealthCheckEnabled == true
+  and .TargetGroups[0].HealthCheckPath == "/api/ready"
+  and .TargetGroups[0].Matcher.HttpCode == "200"
+  and .TargetGroups[0].HealthCheckTimeoutSeconds >= 6
+' <<<"$TARGET_GROUP_JSON" >/dev/null
+
+CANDIDATE_DEFINITION_JSON=$(aws_capture aws ecs describe-task-definition \
+  --task-definition "$CANDIDATE_TASK_DEFINITION" --output json)
+jq -e --arg container "$WEB_CONTAINER_NAME" '
+  [.taskDefinition.containerDefinitions[] | select(.name == $container)] | length == 1
+  and .[0].healthCheck.startPeriod >= 150
+  and .[0].healthCheck.command == ["CMD","python","-c",
+    "import http.client,sys; c=http.client.HTTPConnection('\''127.0.0.1'\'',8451,timeout=5); c.request('\''GET'\','\''/api/health'\''); r=c.getresponse(); sys.exit(0 if r.status == 200 else 1)"]
+' <<<"$CANDIDATE_DEFINITION_JSON" >/dev/null
+unset SERVICE_JSON SCALING_JSON TARGET_GROUP_JSON CANDIDATE_DEFINITION_JSON
 ```
 
 The returned service ARN/name must agree with the short names. The
@@ -1450,12 +2381,111 @@ AWS-owned `aws.ecs`. Create a temporary custom-source canary rule named from
 group, retain only a sanitized receipt, and remove and prove absence of that
 canary before deployment.
 
+```bash
+DEPLOYMENT_RULE_JSON=$(aws_capture aws events describe-rule \
+  --region "$AWS_REGION" --name "$ECS_DEPLOYMENT_EVENT_RULE" --event-bus-name default)
+jq -e '
+  .State == "ENABLED"
+  and (.EventPattern | fromjson
+    | keys == ["detail","detail-type","source"]
+    and .source == ["aws.ecs"]
+    and .["detail-type"] == ["ECS Deployment State Change"]
+    and .detail == {"eventName":["SERVICE_DEPLOYMENT_FAILED"]})
+' <<<"$DEPLOYMENT_RULE_JSON" >/dev/null
+DEPLOYMENT_TARGETS_JSON=$(aws_capture aws events list-targets-by-rule \
+  --region "$AWS_REGION" --rule "$ECS_DEPLOYMENT_EVENT_RULE" --event-bus-name default)
+EXPECTED_EVENT_LOG_ARN="arn:aws:logs:${AWS_REGION}:${AWS_ACCOUNT_ID}:log-group:${ECS_DEPLOYMENT_EVENT_LOG_GROUP}"
+jq -e --arg id "$ECS_DEPLOYMENT_EVENT_TARGET_ID" --arg arn "$EXPECTED_EVENT_LOG_ARN" '
+  (.Targets | length) == 1 and .Targets[0].Id == $id and .Targets[0].Arn == $arn
+  and (.Targets[0] | has("RoleArn") | not)
+' <<<"$DEPLOYMENT_TARGETS_JSON" >/dev/null
+LOG_POLICIES_JSON=$(aws_capture aws logs describe-resource-policies --region "$AWS_REGION")
+ACTIVE_INVENTORY_PATH=$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+  control-manifest get --file "$CONTROL_MANIFEST" \
+  --field "scenarios.${ACTIVE_SCENARIO_ID}.inventory_path")
+LOG_RESOURCE_POLICY_NAME=$(jq -er '
+  .orphan_sweep.log_resource_policy_names
+  | select(type == "array" and length == 1) | .[0]
+' "$ACTIVE_INVENTORY_PATH")
+jq -e --arg name "$LOG_RESOURCE_POLICY_NAME" --arg arn "${EXPECTED_EVENT_LOG_ARN}:*" '
+  [.resourcePolicies[] | select(.policyName == $name)] as $policies
+  | ($policies | length) == 1
+  and ($policies[0].policyDocument | fromjson
+    | (.Statement | type == "array" and length == 1)
+    and (.Statement[0] as $statement
+      | (($statement | keys - ["Sid"] | sort) == ["Action","Effect","Principal","Resource"])
+      and $statement.Effect == "Allow"
+      and $statement.Resource == $arn
+      and (($statement.Action | if type == "string" then [.] else . end | sort)
+        == ["logs:CreateLogStream","logs:PutLogEvents"])
+      and (($statement.Principal | keys) == ["Service"])
+      and (($statement.Principal.Service | if type == "string" then [.] else . end | sort)
+        == ["delivery.logs.amazonaws.com","events.amazonaws.com"])))
+' <<<"$LOG_POLICIES_JSON" >/dev/null
+unset DEPLOYMENT_RULE_JSON DEPLOYMENT_TARGETS_JSON LOG_POLICIES_JSON \
+  ACTIVE_INVENTORY_PATH LOG_RESOURCE_POLICY_NAME
+
+run_event_delivery_canary() (
+  set -Eeuo pipefail
+  local namespace rule target correlation event_pattern event_entry events delivered=0 created=0
+  namespace=$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+    scenario-namespace --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
+    --scenario-id "$ACTIVE_SCENARIO_ID")
+  rule="${namespace}-event-canary"
+  target="${namespace}-canary-target"
+  correlation=$(uv run --frozen python -c 'import uuid; print(uuid.uuid4())')
+  event_pattern='{"source":["elspeth.acceptance"]}'
+  event_entry=$(jq -cn --arg correlation "$correlation" \
+    '[{Source:"elspeth.acceptance",DetailType:"acceptance-canary",
+      Detail:({correlation:$correlation}|tojson)}]')
+  cleanup_canary() {
+    test "$created" = 1 || return 0
+    aws_capture aws events remove-targets --region "$AWS_REGION" --event-bus-name default \
+      --rule "$rule" --ids "$target" >/dev/null 2>&1 || true
+    aws_capture aws events delete-rule --region "$AWS_REGION" --event-bus-name default \
+      --name "$rule" >/dev/null 2>&1 || true
+  }
+  trap cleanup_canary EXIT
+  aws_capture aws events put-rule --region "$AWS_REGION" --event-bus-name default \
+    --name "$rule" --state ENABLED --event-pattern "$event_pattern" \
+    --tags "Key=ACCEPTANCE_RUN_ID,Value=$ACCEPTANCE_RUN_ID" \
+      "Key=SCENARIO_ID,Value=$ACTIVE_SCENARIO_ID" >/dev/null
+  created=1
+  aws_capture aws events put-targets --region "$AWS_REGION" --event-bus-name default \
+    --rule "$rule" --targets "Id=$target,Arn=$EXPECTED_EVENT_LOG_ARN" \
+    | jq -e '.FailedEntryCount == 0' >/dev/null
+  aws_capture aws events put-events --region "$AWS_REGION" --entries "$event_entry" \
+    | jq -e '.FailedEntryCount == 0' >/dev/null
+  for _attempt in $(seq 1 30); do
+    events=$(aws_capture aws logs filter-log-events --region "$AWS_REGION" \
+      --log-group-name "$ECS_DEPLOYMENT_EVENT_LOG_GROUP" --filter-pattern "\"$correlation\"")
+    if jq -e '(.events | length) >= 1' <<<"$events" >/dev/null; then
+      delivered=1
+      break
+    fi
+    sleep 5
+  done
+  test "$delivered" = 1
+  cleanup_canary
+  created=0
+  test "$(aws_capture aws events list-rules --region "$AWS_REGION" \
+    --event-bus-name default --name-prefix "$rule" \
+    --query "length(Rules[?Name=='$rule'])" --output text)" = 0
+  printf '%s' '{"schema":"elspeth.aws-ecs-event-canary.v1","delivered":true,"removed":true}' \
+    | persist_sanitized_receipt "$ACTIVE_SCENARIO_ID" deployment-event-canary \
+      "$ECS_DEPLOYMENT_EVENT_RULE"
+)
+
+run_event_delivery_canary
+```
+
 ### 2. Run the hardened one-shot doctor
 
 Use the candidate digest in the doctor definition. The schema-owner variant is
 used only for a database-operator-approved `--init-schema` action.
 
 ```bash
+require_compatibility_record_current
 DOCTOR_OVERRIDES=$(jq -cn --arg name "$DOCTOR_CONTAINER_NAME" \
   '{containerOverrides:[{name:$name,command:["doctor","aws-ecs","--json"]}]}')
 
@@ -1473,20 +2503,9 @@ DOCTOR_TASK_ARN=$(jq -er '.tasks[0].taskArn | select(length > 0)' \
   <<<"$RUN_TASK_JSON")
 unset RUN_TASK_JSON
 
-aws_capture aws ecs wait tasks-stopped \
+aws_waiter_capture aws ecs wait tasks-stopped \
   --cluster "$ECS_CLUSTER" --tasks "$DOCTOR_TASK_ARN" >/dev/null
-DOCTOR_RESULT=$(aws_capture aws ecs describe-tasks \
-  --cluster "$ECS_CLUSTER" --tasks "$DOCTOR_TASK_ARN" --output json)
-ESSENTIAL_NAMES=$(aws_capture aws ecs describe-task-definition \
-  --task-definition "$DOCTOR_TASK_DEFINITION" --output json \
-  | jq -c '[.taskDefinition.containerDefinitions[] | select(.essential == true) | .name]')
-jq -e --arg arn "$DOCTOR_TASK_ARN" --argjson essential "$ESSENTIAL_NAMES" '
-  (.failures | length) == 0
-  and .tasks[0].taskArn == $arn
-  and ([.tasks[0].containers[] | select(.name as $n | $essential | index($n))
-        | .exitCode == 0] | all)
-' <<<"$DOCTOR_RESULT" >/dev/null
-unset DOCTOR_RESULT ESSENTIAL_NAMES
+require_stopped_task_success "$DOCTOR_TASK_DEFINITION" "$DOCTOR_TASK_ARN"
 ```
 
 Missing/null `exitCode`, a name mismatch, non-zero essential-container exit,
@@ -1518,6 +2537,8 @@ does not prove a new deployment. Every intentional launch, relaunch, upgrade,
 or manual upgrade rollback uses a forced new deployment:
 
 ```bash
+require_compatibility_record_current
+set_traffic_action disabled
 aws_capture aws ecs update-service \
   --cluster "$ECS_CLUSTER" \
   --service "$ECS_SERVICE" \
@@ -1527,7 +2548,7 @@ aws_capture aws ecs update-service \
   --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
   >/dev/null
 
-aws_capture aws ecs wait services-stable \
+aws_waiter_capture aws ecs wait services-stable \
   --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
 ```
 
@@ -1553,105 +2574,32 @@ Only then, in first/first-recovery, change
 `TARGET_GROUP_ARN`.
 
 ```bash
-health_body=$(mktemp)
-ready_body=$(mktemp)
-chmod 600 "$health_body" "$ready_body"
-trap 'rm -f "$health_body" "$ready_body"' EXIT
-
-health_status=$(curl --connect-timeout 5 --max-time 10 --max-redirs 0 \
-  -sS -o "$health_body" -w '%{http_code}' "$ALB_BASE_URL/api/health")
-ready_status=$(curl --connect-timeout 5 --max-time 10 --max-redirs 0 \
-  -sS -o "$ready_body" -w '%{http_code}' "$ALB_BASE_URL/api/ready")
-[[ "$health_status" == 200 ]]
-[[ "$ready_status" == 200 ]]
-jq -e '.ready == true' "$ready_body" >/dev/null
-```
-
-#### Persistence, replacement, task-role, and local-auth sequence
-
-Run these checks in this order; a later check never substitutes for an earlier
-one:
-
-1. In the disposable local-auth scenario, capture one fixed pipeline through
-   the public API into a protected state file.
-2. Force a distinct candidate deployment and prove the old task was replaced.
-3. Re-authenticate from a fresh process and run `verify-api` against that same
-   protected state without mutating the session. Require the six-row
-   `GET /api/system/status` contract and the typed HTTP 409
-   `tutorial_required_control_coverage` recheck as part of this command.
-4. Start the explicit `1000:1000` one-shot payload verifier with the candidate
-   digest and the same PostgreSQL/EFS settings; do not use root-running ECS
-   Exec for this proof.
-5. From every contributing healthy candidate task, use ECS Exec for the S3,
-   Bedrock, Guardrail, and operator-telemetry checks and locally extract the
-   one sanitized receipt sentinel.
-6. Drain traffic to fixed 503, scale the service to zero, then start the
-   explicit `1000:1000` local-auth verifier against the same EFS mount.
-
-```bash
-ACCEPTANCE_STATE=$(mktemp -p /tmp elspeth-aws-ecs-state.XXXXXX)
-rm -f "$ACCEPTANCE_STATE"
-uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
-  --file "$CONTROL_MANIFEST" --acceptance-state-path "$ACCEPTANCE_STATE"
-ELSPETH_ACCEPTANCE_REGISTER=1 \
-  uv run --frozen python -m elspeth.web.aws_ecs_acceptance capture \
-    --state-file "$ACCEPTANCE_STATE"
-LANDSCAPE_RUN_ID=$(jq -er '.landscape_run_id' "$ACCEPTANCE_STATE")
-
-PRE_REPLACEMENT_TASK_ARN="$CANDIDATE_TASK_ARN"
-aws_capture aws ecs update-service \
-  --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
-  --task-definition "$CANDIDATE_TASK_DEFINITION" --desired-count 1 \
-  --force-new-deployment \
-  --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
-  >/dev/null
-aws_capture aws ecs wait services-stable \
-  --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
-CANDIDATE_TASK_ARN=$(aws_capture aws ecs list-tasks \
-  --cluster "$ECS_CLUSTER" --service-name "$ECS_SERVICE" \
-  --desired-status RUNNING --query 'taskArns[0]' --output text)
-test "$CANDIDATE_TASK_ARN" != "$PRE_REPLACEMENT_TASK_ARN"
-
-uv run --frozen python -m elspeth.web.aws_ecs_acceptance verify-api \
-  --state-file "$ACCEPTANCE_STATE"
-
-PAYLOAD_OVERRIDES=$(jq -cn --arg name "$WEB_CONTAINER_NAME" --arg run "$LANDSCAPE_RUN_ID" \
-  '{containerOverrides:[{name:$name,command:["python","-m","elspeth.web.aws_ecs_acceptance","verify-payloads","--landscape-run-id",$run]}]}')
-PAYLOAD_TASK=$(aws_capture aws ecs run-task \
-  --cluster "$ECS_CLUSTER" --task-definition "$PAYLOAD_VERIFIER_TASK_DEFINITION" \
-  --launch-type FARGATE --network-configuration "$DOCTOR_NETWORK_CONFIGURATION" \
-  --count 1 --overrides "$PAYLOAD_OVERRIDES" --query 'tasks[0].taskArn' --output text)
-aws_capture aws ecs wait tasks-stopped --cluster "$ECS_CLUSTER" --tasks "$PAYLOAD_TASK" >/dev/null
-aws_capture aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$PAYLOAD_TASK" \
-  | jq -e '(.failures | length) == 0 and (.tasks | length) == 1 and all(.tasks[0].containers[] | select(.essential == true); .exitCode == 0)' >/dev/null
-
-checkpoint_operator_retained_evidence() {
-  local exec_receipt="$1" receipt_hash checkpoint
-  test -d "${RETAINED_EVIDENCE_DIR:?set the owner-approved protected retained-evidence directory}"
-  test ! -L "$RETAINED_EVIDENCE_DIR"
-  test "$(stat -c '%a' "$RETAINED_EVIDENCE_DIR")" = "700"
-  receipt_hash=$(sha256sum "$exec_receipt" | awk '{print $1}')
-  checkpoint="$RETAINED_EVIDENCE_DIR/operator-${ACTIVE_SCENARIO_ID}-${receipt_hash}.json"
-  uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
-    control-manifest checkpoint-operator-evidence --file "$CONTROL_MANIFEST" \
-    --exec-receipt "$exec_receipt" --checkpoint "$checkpoint"
+verify_candidate_target_mapping() {
+  verify_task_definition_target_mapping "$CANDIDATE_TASK_DEFINITION"
+  CANDIDATE_TASK_ARN="$ACTIVE_TASK_ARN"
 }
 
 run_candidate_role_check() {
-  local task_arn="$1" check="$2" phase="${3:-}" stream receipt_file command
+  local task_arn="$1" check="$2" phase="${3:-}" landscape_run_id="${4:-}"
+  local stream receipt_file command
   local -a binding_args=()
   case "$phase" in
     "") command="python -m elspeth.web.aws_ecs_acceptance $check" ;;
     positive|outage)
       test "$check" = verify-operator-telemetry || return 64
       command="python -m elspeth.web.aws_ecs_acceptance $check --phase $phase"
+      if test -n "$landscape_run_id"; then
+        test "$phase" = positive || return 64
+        [[ "$landscape_run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$ ]] || return 64
+        command="$command --landscape-run-id $landscape_run_id"
+      fi
       ;;
     *) return 64 ;;
   esac
   if test "$check" = verify-bedrock-guardrails; then
     binding_args=(--plugin-policy-binding-sha256 "$ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256")
   fi
-  stream=$(aws_capture aws ecs execute-command \
+  stream=$(aws_exec_capture aws ecs execute-command \
     --cluster "$ECS_CLUSTER" --task "$task_arn" --container "$WEB_CONTAINER_NAME" \
     --interactive --command "$command")
   receipt_file=$(mktemp -p /tmp elspeth-exec-receipt.XXXXXX)
@@ -1668,49 +2616,194 @@ run_candidate_role_check() {
   rm -f "$receipt_file"
 }
 
+verify_candidate_target_mapping
 run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-s3
 run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-bedrock
 run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-bedrock-guardrails
-run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-operator-telemetry positive
+set_traffic_action forward
+verify_public_probes
+```
 
-# Run once in Scenario A after the complete positive role-check pass.
-aws_capture aws ecs execute-command \
-  --cluster "$ECS_CLUSTER" --task "$CANDIDATE_TASK_ARN" \
-  --container cloudwatch-agent --interactive \
-  --command "/bin/sh -c 'kill -TERM 1'" >/dev/null
-run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-operator-telemetry outage
-OUTAGE_TASK_ARN="$CANDIDATE_TASK_ARN"
+#### Persistence, replacement, task-role, and local-auth sequence
+
+Run these checks in this order; a later check never substitutes for an earlier
+one:
+
+1. Before admitting traffic, run S3, Bedrock, and both Guardrail checks through
+   the initial candidate task role.
+2. In the disposable local-auth scenario, capture one fixed pipeline through
+   the public API into a protected state file.
+3. Force a distinct candidate deployment and prove the old task was replaced.
+4. Re-authenticate from a fresh process and run `verify-api` against that same
+   protected state without mutating the session. Require the six-row
+   `GET /api/system/status` contract and the typed HTTP 409
+   `tutorial_required_control_coverage` recheck as part of this command.
+5. Start the explicit `1000:1000` one-shot payload verifier with the candidate
+   digest and the same PostgreSQL/EFS settings; do not use root-running ECS
+   Exec for this proof.
+6. From every contributing healthy candidate task, use ECS Exec for the S3,
+   Bedrock, Guardrail, and operator-telemetry checks and locally extract the
+   one sanitized receipt sentinel.
+7. Drain traffic to fixed 503, scale the service to zero, then start the
+   explicit `1000:1000` local-auth verifier against the same EFS mount.
+
+```bash
+case "$ACTIVE_SCENARIO_ID" in
+  A)
+    ACCEPTANCE_STATE=$(mktemp -p /tmp elspeth-aws-ecs-state.XXXXXX)
+    rm -f "$ACCEPTANCE_STATE"
+    uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+      --file "$CONTROL_MANIFEST" --acceptance-state-path "$ACCEPTANCE_STATE"
+    SSL_CERT_FILE="$ACCEPTANCE_TLS_CA_BUNDLE" \
+    ELSPETH_ACCEPTANCE_REGISTER=1 \
+      uv run --frozen python -m elspeth.web.aws_ecs_acceptance capture \
+        --state-file "$ACCEPTANCE_STATE"
+    LANDSCAPE_RUN_ID=$(jq -er '.landscape_run_id' "$ACCEPTANCE_STATE")
+    ;;
+  B)
+    capture_oidc_lifecycle_handoff
+    LANDSCAPE_RUN_ID="$OIDC_LANDSCAPE_RUN_ID"
+    ;;
+  *) exit 64 ;;
+esac
+
+require_compatibility_record_current
+PRE_REPLACEMENT_TASK_ARN="$CANDIDATE_TASK_ARN"
 aws_capture aws ecs update-service \
   --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
   --task-definition "$CANDIDATE_TASK_DEFINITION" --desired-count 1 \
   --force-new-deployment \
   --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
   >/dev/null
-aws_capture aws ecs wait services-stable \
+aws_waiter_capture aws ecs wait services-stable \
   --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
-CANDIDATE_TASK_ARN=$(aws_capture aws ecs list-tasks \
-  --cluster "$ECS_CLUSTER" --service-name "$ECS_SERVICE" \
-  --desired-status RUNNING --query 'taskArns[0]' --output text)
-test -n "$CANDIDATE_TASK_ARN" && test "$CANDIDATE_TASK_ARN" != None
-test "$CANDIDATE_TASK_ARN" != "$OUTAGE_TASK_ARN"
-run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-operator-telemetry positive
+verify_candidate_target_mapping
+test "$CANDIDATE_TASK_ARN" != "$PRE_REPLACEMENT_TASK_ARN"
+verify_public_probes
 
-aws_capture aws elbv2 modify-rule --rule-arn "$FIRST_DEPLOY_LISTENER_RULE_ARN" \
-  --actions "$FIRST_DEPLOY_DISABLED_ACTIONS" >/dev/null
-aws_capture aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
-  --desired-count 0 \
-  --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
-  >/dev/null
-aws_capture aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
-LOCAL_AUTH_OVERRIDES=$(jq -cn --arg name "$WEB_CONTAINER_NAME" \
-  '{containerOverrides:[{name:$name,command:["python","-m","elspeth.web.aws_ecs_acceptance","verify-local-auth"]}]}')
-LOCAL_AUTH_TASK=$(aws_capture aws ecs run-task \
-  --cluster "$ECS_CLUSTER" --task-definition "$LOCAL_AUTH_VERIFIER_TASK_DEFINITION" \
+if test "$ACTIVE_SCENARIO_ID" = A; then
+  SSL_CERT_FILE="$ACCEPTANCE_TLS_CA_BUNDLE" \
+    uv run --frozen python -m elspeth.web.aws_ecs_acceptance verify-api \
+    --state-file "$ACCEPTANCE_STATE"
+else
+  test "$ACTIVE_SCENARIO_ID" = B
+  test "$(jq -er '.landscape_run_id' "$OIDC_LIFECYCLE_STATE")" = "$LANDSCAPE_RUN_ID"
+fi
+
+PAYLOAD_OVERRIDES=$(jq -cn --arg name "$WEB_CONTAINER_NAME" --arg run "$LANDSCAPE_RUN_ID" \
+  '{containerOverrides:[{name:$name,command:["verify-payloads","--landscape-run-id",$run]}]}')
+PAYLOAD_TASK=$(aws_capture aws ecs run-task \
+  --cluster "$ECS_CLUSTER" --task-definition "$PAYLOAD_VERIFIER_TASK_DEFINITION" \
   --launch-type FARGATE --network-configuration "$DOCTOR_NETWORK_CONFIGURATION" \
-  --count 1 --overrides "$LOCAL_AUTH_OVERRIDES" --query 'tasks[0].taskArn' --output text)
-aws_capture aws ecs wait tasks-stopped --cluster "$ECS_CLUSTER" --tasks "$LOCAL_AUTH_TASK" >/dev/null
-aws_capture aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$LOCAL_AUTH_TASK" \
-  | jq -e '(.failures | length) == 0 and (.tasks | length) == 1 and all(.tasks[0].containers[] | select(.essential == true); .exitCode == 0)' >/dev/null
+  --count 1 --overrides "$PAYLOAD_OVERRIDES" --query 'tasks[0].taskArn' --output text)
+aws_waiter_capture aws ecs wait tasks-stopped --cluster "$ECS_CLUSTER" --tasks "$PAYLOAD_TASK" >/dev/null
+require_stopped_task_success "$PAYLOAD_VERIFIER_TASK_DEFINITION" "$PAYLOAD_TASK"
+
+checkpoint_operator_retained_evidence() {
+  local exec_receipt="$1" receipt_hash checkpoint
+  test -d "${RETAINED_EVIDENCE_DIR:?set the owner-approved protected retained-evidence directory}"
+  test ! -L "$RETAINED_EVIDENCE_DIR"
+  test "$(stat -c '%a' "$RETAINED_EVIDENCE_DIR")" = "700"
+  receipt_hash=$(sha256sum "$exec_receipt" | awk '{print $1}')
+  checkpoint="$RETAINED_EVIDENCE_DIR/operator-${ACTIVE_SCENARIO_ID}-${receipt_hash}.json"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+    control-manifest checkpoint-operator-evidence --file "$CONTROL_MANIFEST" \
+    --exec-receipt "$exec_receipt" --checkpoint "$checkpoint"
+}
+
+run_connection_budget_check() {
+  local task_arn="$1" stream envelope_file details_file command
+  [[ "$ACCEPTANCE_START_UTC" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+  [[ "$ACCEPTANCE_CONNECTION_BUDGET" =~ ^[1-9][0-9]{0,8}$ ]]
+  [[ "$ACCEPTANCE_CONNECTION_SAFETY_MARGIN" =~ ^[0-9]{1,9}$ ]]
+  command="python -m elspeth.web.aws_ecs_acceptance verify-connection-budget"
+  command="$command --cluster-id $DB_CLUSTER_IDENTIFIER --start-time $ACCEPTANCE_START_UTC"
+  command="$command --approved-budget $ACCEPTANCE_CONNECTION_BUDGET"
+  command="$command --safety-margin $ACCEPTANCE_CONNECTION_SAFETY_MARGIN"
+  stream=$(aws_exec_capture aws ecs execute-command \
+    --cluster "$ECS_CLUSTER" --task "$task_arn" --container "$WEB_CONTAINER_NAME" \
+    --interactive --command "$command")
+  envelope_file=$(mktemp -p /tmp elspeth-connection-envelope.XXXXXX)
+  details_file=$(mktemp -p /tmp elspeth-connection-budget.XXXXXX)
+  chmod 600 "$envelope_file" "$details_file"
+  printf '%s' "$stream" | uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+    extract-exec-receipt --check verify-connection-budget \
+    --candidate-sha "$CANDIDATE_SHA" --task-arn "$task_arn" \
+    --scenario-id "$ACTIVE_SCENARIO_ID" >"$envelope_file"
+  unset stream
+  jq -e '.details' "$envelope_file" >"$details_file"
+  persist_sanitized_receipt "$ACTIVE_SCENARIO_ID" connection-budget \
+    "$DB_CLUSTER_IDENTIFIER" "$details_file" >/dev/null
+  rm -f -- "$envelope_file" "$details_file"
+}
+
+run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-s3
+run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-bedrock
+run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-bedrock-guardrails
+case "$ACTIVE_SCENARIO_ID" in
+  A) run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-operator-telemetry positive ;;
+  B) run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-operator-telemetry positive "$OIDC_LANDSCAPE_RUN_ID" ;;
+  *) exit 64 ;;
+esac
+
+# Run once in Scenario A after the complete positive role-check pass.
+if test "$ACTIVE_SCENARIO_ID" = A; then
+  aws_exec_capture aws ecs execute-command \
+    --cluster "$ECS_CLUSTER" --task "$CANDIDATE_TASK_ARN" \
+    --container cloudwatch-agent --interactive \
+    --command "/bin/sh -c 'kill -TERM 1'" >/dev/null
+  run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-operator-telemetry outage
+  OUTAGE_TASK_ARN="$CANDIDATE_TASK_ARN"
+  require_compatibility_record_current
+  aws_capture aws ecs update-service \
+    --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+    --task-definition "$CANDIDATE_TASK_DEFINITION" --desired-count 1 \
+    --force-new-deployment \
+    --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
+    >/dev/null
+  aws_waiter_capture aws ecs wait services-stable \
+    --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
+  verify_candidate_target_mapping
+  test "$CANDIDATE_TASK_ARN" != "$OUTAGE_TASK_ARN"
+  verify_public_probes
+  run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-operator-telemetry positive
+
+  aws_capture aws elbv2 modify-rule --rule-arn "$FIRST_DEPLOY_LISTENER_RULE_ARN" \
+    --actions "$FIRST_DEPLOY_DISABLED_ACTIONS" >/dev/null
+  aws_capture aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+    --desired-count 0 \
+    --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
+    >/dev/null
+  aws_waiter_capture aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
+  LOCAL_AUTH_OVERRIDES=$(jq -cn --arg name "$WEB_CONTAINER_NAME" \
+    '{containerOverrides:[{name:$name,command:["verify-local-auth"]}]}')
+  LOCAL_AUTH_TASK=$(aws_capture aws ecs run-task \
+    --cluster "$ECS_CLUSTER" --task-definition "$LOCAL_AUTH_VERIFIER_TASK_DEFINITION" \
+    --launch-type FARGATE --network-configuration "$DOCTOR_NETWORK_CONFIGURATION" \
+    --count 1 --overrides "$LOCAL_AUTH_OVERRIDES" --query 'tasks[0].taskArn' --output text)
+  aws_waiter_capture aws ecs wait tasks-stopped --cluster "$ECS_CLUSTER" --tasks "$LOCAL_AUTH_TASK" >/dev/null
+  require_stopped_task_success "$LOCAL_AUTH_VERIFIER_TASK_DEFINITION" "$LOCAL_AUTH_TASK"
+
+  require_compatibility_record_current
+  PRE_LOCAL_AUTH_RELAUNCH_TASK_ARN="$CANDIDATE_TASK_ARN"
+  aws_capture aws ecs update-service \
+    --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+    --task-definition "$CANDIDATE_TASK_DEFINITION" --desired-count 1 \
+    --force-new-deployment \
+    --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
+    >/dev/null
+  aws_waiter_capture aws ecs wait services-stable \
+    --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
+  verify_candidate_target_mapping
+  test "$CANDIDATE_TASK_ARN" != "$PRE_LOCAL_AUTH_RELAUNCH_TASK_ARN"
+  run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-s3
+  run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-bedrock
+  run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-bedrock-guardrails
+  run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-operator-telemetry positive
+  aws_capture aws elbv2 modify-rule --rule-arn "$FIRST_DEPLOY_LISTENER_RULE_ARN" \
+    --actions "$FIRST_DEPLOY_FORWARD_ACTIONS" >/dev/null
+  verify_public_probes
+fi
 ```
 
 The `verify-bedrock-guardrails` receipt must contain `plugin_policy` with the
@@ -1720,8 +2813,10 @@ exact `target_llm` and the prompt-shield/content-safety entries in
 `run_web_plugin_policy` row was read back unchanged; a Guardrail API success
 without this policy proof is NO-GO.
 
-Both one-shot definitions set task-level `user: "1000:1000"`, explicitly
-override the image entrypoint, use the candidate digest, and reuse the exact
+Both one-shot definitions set task-level `user: "1000:1000"`, override the
+image entrypoint exactly once with
+`{"entryPoint": ["python", "-m", "elspeth.web.aws_ecs_acceptance"]}`,
+use the candidate digest, and reuse the exact
 approved EFS access point and database settings. The role-check transport
 requires the Session Manager plugin, running `ExecuteCommandAgent`, and only
 the module's single bounded receipt sentinel; interactive output is never
@@ -1729,27 +2824,33 @@ echoed or retained.
 
 ### 6. Observe for ten minutes
 
-Set `ACCEPTANCE_START_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)` immediately after
-the first complete pass. Poll every 30 seconds for 20 iterations, repeating
+Wait for the next UTC minute boundary, then set an exact `:00Z`
+`ACCEPTANCE_START_UTC` immediately after the first complete pass. Poll every 30 seconds for 20 iterations, repeating
 the exact service/deployment counts, candidate task/target mapping, target
-health, and exact-200 bounded `/api/health` and `/api/ready` checks.
+health, and exact-200 bounded `/api/health` and `/api/ready` checks. Before the
+loop, set integer `ACCEPTANCE_CONNECTION_BUDGET` and
+`ACCEPTANCE_CONNECTION_SAFETY_MARGIN` from the database operator's approved
+record. At the end, the candidate task reads PostgreSQL's live
+`max_connections` and queries the `AWS/RDS` `DatabaseConnections` maximums
+for the exact cluster and observation window; a missing datapoint, excess over
+budget, or insufficient remaining margin fails acceptance.
 
 ```bash
-ACCEPTANCE_START_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+OBSERVATION_ALIGNMENT_SECONDS=$((60 - 10#$(date -u +%S)))
+sleep "$OBSERVATION_ALIGNMENT_SECONDS"
+while test "$(date -u +%S)" != 00; do
+  OBSERVATION_ALIGNMENT_SECONDS=$((60 - 10#$(date -u +%S)))
+  sleep "$OBSERVATION_ALIGNMENT_SECONDS"
+done
+ACCEPTANCE_START_UTC=$(date -u +%Y-%m-%dT%H:%M:00Z)
+unset OBSERVATION_ALIGNMENT_SECONDS
 for iteration in $(seq 1 20); do
   printf 'acceptance_sample=%s\n' "$iteration"
-  SERVICE_SAMPLE=$(aws_capture aws ecs describe-services \
-    --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --output json)
-  jq -e --arg task_definition "$CANDIDATE_TASK_DEFINITION" '
-    .services[0]
-    | .desiredCount == 1 and .runningCount == 1 and .pendingCount == 0
-      and (.deployments | length) == 1
-      and .deployments[0].taskDefinition == $task_definition
-      and .deployments[0].rolloutState == "COMPLETED"
-  ' <<<"$SERVICE_SAMPLE" >/dev/null
-  unset SERVICE_SAMPLE
+  verify_candidate_target_mapping
+  verify_public_probes
   sleep 30
 done
+run_connection_budget_check "$CANDIDATE_TASK_ARN"
 ```
 
 `SERVICE_DEPLOYMENT_FAILED`, `rolloutState=FAILED`, launch/placement failures,
@@ -1766,16 +2867,49 @@ For an upgrade, first prove the release/schema compatibility record permits
 the previous code on the current schema, then force a distinct deployment:
 
 ```bash
-aws_capture aws ecs update-service \
-  --cluster "$ECS_CLUSTER" \
-  --service "$ECS_SERVICE" \
-  --task-definition "$PREVIOUS_TASK_DEFINITION" \
-  --desired-count 1 \
-  --force-new-deployment \
-  --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
-  >/dev/null
-aws_capture aws ecs wait services-stable \
-  --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
+if test "$DEPLOYMENT_MODE" = upgrade; then
+  require_compatibility_record_current
+  set_traffic_action disabled
+  PRE_ROLLBACK_CANDIDATE_TASK_ARN="$CANDIDATE_TASK_ARN"
+  aws_capture aws ecs update-service \
+    --cluster "$ECS_CLUSTER" \
+    --service "$ECS_SERVICE" \
+    --task-definition "$PREVIOUS_TASK_DEFINITION" \
+    --desired-count 1 \
+    --force-new-deployment \
+    --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
+    >/dev/null
+  aws_waiter_capture aws ecs wait services-stable \
+    --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
+  verify_task_definition_target_mapping "$PREVIOUS_TASK_DEFINITION"
+  PREVIOUS_ROLLBACK_TASK_ARN="$ACTIVE_TASK_ARN"
+  test "$PREVIOUS_ROLLBACK_TASK_ARN" != "$PRE_ROLLBACK_CANDIDATE_TASK_ARN"
+  set_traffic_action forward
+  verify_public_probes
+  run_oidc_evidence previous-after-rollback
+
+  require_compatibility_record_current
+  set_traffic_action disabled
+  aws_capture aws ecs update-service \
+    --cluster "$ECS_CLUSTER" \
+    --service "$ECS_SERVICE" \
+    --task-definition "$CANDIDATE_TASK_DEFINITION" \
+    --desired-count 1 \
+    --force-new-deployment \
+    --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
+    >/dev/null
+  aws_waiter_capture aws ecs wait services-stable \
+    --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
+  verify_candidate_target_mapping
+  test "$CANDIDATE_TASK_ARN" != "$PREVIOUS_ROLLBACK_TASK_ARN"
+  run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-s3
+  run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-bedrock
+  run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-bedrock-guardrails
+  run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-operator-telemetry positive "$OIDC_LANDSCAPE_RUN_ID"
+  set_traffic_action forward
+  verify_public_probes
+  run_oidc_evidence candidate-after-redeploy
+fi
 ```
 
 Repeat exact-one-task, previous-revision target mapping/health, public probes,
@@ -1786,62 +2920,76 @@ For first/first-recovery, remove traffic before compute, verify the listener's
 fixed 503 action, then scale to zero:
 
 ```bash
-aws_capture aws elbv2 modify-rule \
-  --rule-arn "$FIRST_DEPLOY_LISTENER_RULE_ARN" \
-  --actions "$FIRST_DEPLOY_DISABLED_ACTIONS" >/dev/null
-aws_capture aws ecs update-service \
-  --cluster "$ECS_CLUSTER" \
-  --service "$ECS_SERVICE" \
-  --desired-count 0 \
-  --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
-  >/dev/null
-aws_capture aws ecs wait services-stable \
-  --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
+if test "$DEPLOYMENT_MODE" != upgrade; then
+  PRE_FIRST_RECOVERY_TASK_ARN="$CANDIDATE_TASK_ARN"
+  aws_capture aws elbv2 modify-rule \
+    --rule-arn "$FIRST_DEPLOY_LISTENER_RULE_ARN" \
+    --actions "$FIRST_DEPLOY_DISABLED_ACTIONS" >/dev/null
+  RULE_JSON=$(aws_capture aws elbv2 describe-rules \
+    --rule-arns "$FIRST_DEPLOY_LISTENER_RULE_ARN" --output json)
+  jq -e --argjson actions "$FIRST_DEPLOY_DISABLED_ACTIONS" \
+    '(.Rules | length) == 1 and .Rules[0].Actions == $actions' <<<"$RULE_JSON" >/dev/null
+  unset RULE_JSON
+  aws_capture aws ecs update-service \
+    --cluster "$ECS_CLUSTER" \
+    --service "$ECS_SERVICE" \
+    --desired-count 0 \
+    --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
+    >/dev/null
+  aws_waiter_capture aws ecs wait services-stable \
+    --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
+  RUNNING_TASKS_JSON=$(aws_capture aws ecs list-tasks --cluster "$ECS_CLUSTER" \
+    --service-name "$ECS_SERVICE" --desired-status RUNNING --output json)
+  PENDING_TASKS_JSON=$(aws_capture aws ecs list-tasks --cluster "$ECS_CLUSTER" \
+    --service-name "$ECS_SERVICE" --desired-status PENDING --output json)
+  jq -e '.taskArns | length == 0' <<<"$RUNNING_TASKS_JSON" >/dev/null
+  jq -e '.taskArns | length == 0' <<<"$PENDING_TASKS_JSON" >/dev/null
+  TARGET_HEALTH_JSON=$(aws_capture aws elbv2 describe-target-health \
+    --target-group-arn "$TARGET_GROUP_ARN" --output json)
+  jq -e 'all(.TargetHealthDescriptions[]; .TargetHealth.State == "draining")' \
+    <<<"$TARGET_HEALTH_JSON" >/dev/null
+  test "$(curl --cacert "$ACCEPTANCE_TLS_CA_BUNDLE" --connect-timeout 5 \
+    --max-time 10 --max-redirs 0 --max-filesize 1048576 -sS -o /dev/null \
+    -w '%{http_code}' "$ALB_BASE_URL/api/health")" = 503
+  unset RUNNING_TASKS_JSON PENDING_TASKS_JSON TARGET_HEALTH_JSON
+
+  # Prove the narrow first-recovery transition with the same immutable image
+  # after the rollback rehearsal has left traffic disabled and desired zero.
+  require_compatibility_record_current
+  DEPLOYMENT_MODE=first-recovery
+  aws_capture aws ecs update-service \
+    --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+    --task-definition "$CANDIDATE_TASK_DEFINITION" --desired-count 1 \
+    --force-new-deployment \
+    --deployment-configuration '{"deploymentCircuitBreaker":{"enable":true,"rollback":true},"minimumHealthyPercent":0,"maximumPercent":100}' \
+    >/dev/null
+  aws_waiter_capture aws ecs wait services-stable \
+    --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" >/dev/null
+  verify_candidate_target_mapping
+  test "$CANDIDATE_TASK_ARN" != "$PRE_FIRST_RECOVERY_TASK_ARN"
+  run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-s3
+  run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-bedrock
+  run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-bedrock-guardrails
+  aws_capture aws elbv2 modify-rule --rule-arn "$FIRST_DEPLOY_LISTENER_RULE_ARN" \
+    --actions "$FIRST_DEPLOY_FORWARD_ACTIONS" >/dev/null
+  verify_public_probes
+  SSL_CERT_FILE="$ACCEPTANCE_TLS_CA_BUNDLE" \
+    uv run --frozen python -m elspeth.web.aws_ecs_acceptance verify-api \
+      --state-file "$ACCEPTANCE_STATE"
+  run_candidate_role_check "$CANDIDATE_TASK_ARN" verify-operator-telemetry positive
+fi
 ```
 
-Require zero running/pending tasks and no non-draining registered targets.
-Keep failed task-definition, stopped-task, event, and sanitized log receipts
-until the incident record is complete.
-
-## Release/schema compatibility record
-
-The database operator is the author/approver and the release operator is the
-countersigner before doctor/deploy. Store this record in the approved change
-system; Plan 12 binds its ID to both scenarios.
-
-```yaml
-record_id: change-record-id
-timestamp_utc: 2026-01-01T00:00:00Z
-candidate git SHA: 40-lowercase-hex
-immutable image digest: sha256:64-lowercase-hex
-candidate_task_definition_arn: exact-arn
-doctor_task_definition_arn: exact-arn
-candidate_package_version: 0.7.0
-candidate_session_schema_epoch: approved-value
-candidate_landscape_schema_epoch: 23
-run_web_plugin_policy_present: true
-structural_schema_changes: reviewed-summary
-semantics-only changes: reviewed-summary
-archive_export_decision: approved-value
-destructive_reset_required: false
-previous_identity: exact-digest-and-task-definition-or-not_applicable
-previous_schema_epochs: approved-values-or-not_applicable
-forward_compatible: yes-or-no
-backward_compatible: yes-or-no-or-not_applicable
-rollback_permitted: yes-or-no
-rollback_evidence: approved-reference
-code_schema_diff_inspector: operator-identity
-database_operator_approval: operator-identity-and-timestamp
-release_operator_countersignature: operator-identity-and-timestamp
-expiry_or_supersession: timestamp-or-record-id
-```
-
-Unknown or unapproved compatibility is NO-GO.
+The rollback half requires zero running/pending tasks and no non-draining
+registered targets. The recovery half must create a distinct candidate task,
+restore only the approved listener action, and read back the same persisted
+Landscape/session state. Keep failed task-definition, stopped-task, event, and
+sanitized log receipts until the incident record is complete.
 
 ## Disposable acceptance cleanup
 
 Before either Terraform scenario is created, record infrastructure owner,
-identity owner, sanitized evidence destination, non-secret UUID
+identity owner for the Cognito test identity, sanitized evidence destination, non-secret UUID
 `ACCEPTANCE_RUN_ID`, and a teardown deadline no later than four hours after
 the live gate. Tag every disposable resource. Promotion is forbidden before Plan 12 final GO
 and while cleanup is pending.
@@ -1849,18 +2997,29 @@ and while cleanup is pending.
 On success, failure, interruption, or timeout:
 
 1. Export only approved sanitized evidence.
-2. Destroy both Terraform stacks and verify separately bound state is empty.
-3. Delete/rotate the Cognito test identity and test secrets.
-4. Delete the rollback-baseline ECR tag and candidate acceptance ECR tag.
-5. Run the closed `orphan-sweep` across ECS, ALB, Aurora, EFS, Secrets
+2. Destroy both Terraform stacks, verify separately bound state is empty, and
+   prove the Scenario B-owned Cognito pool/identity is absent.
+3. Delete the rollback-baseline ECR tag and candidate acceptance ECR tag.
+4. Destroy the shared bootstrap bucket/repository only after both remote
+   scenario states are empty.
+5. Run the closed terminal `orphan-sweep` across ECS, ALB, Aurora, EFS, Secrets
    Manager, CloudWatch Logs, EventBridge, Cognito, ECR, and Guardrails.
 6. Clear `CLEANUP_REQUIRED=0` only after all independent surfaces pass.
 
 ```bash
 set -o pipefail
 load_cleanup_state
+test "$(aws_capture aws sts get-caller-identity --query Account --output text)" = "$AWS_ACCOUNT_ID"
+: "${EVIDENCE_EXPORT_RECEIPT:?set a new protected initial-export receipt path}"
+: "${INITIAL_EVIDENCE_ARTIFACT_COUNT:?set the verified initial export artifact count}"
+uv run --frozen python -m elspeth.web.aws_ecs_acceptance evidence-export-receipt \
+  --file "$CONTROL_MANIFEST" --ledger "$GATE_LEDGER" \
+  --output "$EVIDENCE_EXPORT_RECEIPT" \
+  --artifact-count "$INITIAL_EVIDENCE_ARTIFACT_COUNT" >/dev/null
 bind_initial_evidence_export "$EVIDENCE_EXPORT_RECEIPT"
 cleanup_failures=()
+SCENARIO_B_COGNITO_POOL_ID=$(jq -er '.values.COGNITO_USER_POOL_ID // ""' "$SCENARIO_B_INVENTORY")
+SCENARIO_B_COGNITO_POOL_OWNED=$(jq -er '.orphan_sweep.cognito_pool_owned' "$SCENARIO_B_INVENTORY")
 
 destroy_scenario() {
   local scenario_id="$1" directory="$2" vars="$3" binding="$4"
@@ -1889,6 +3048,8 @@ destroy_scenario() {
     chmod 600 "$receipt"
     plan_sha="$(sha256sum "$plan" | awk '{print $1}')"
     receipt_hash="$(persist_sanitized_receipt "$scenario_id" terraform-destroy-plan "$plan_sha" "$receipt")"
+    request_signed_tf_approval "$scenario_id" terraform-destroy-plan "$receipt_hash" \
+      "$receipt" "$approval_file"
     approval_hash="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
       approval-verify --file "$CONTROL_MANIFEST" --scenario-id "$scenario_id" \
       --kind terraform-destroy-plan --plan-receipt-hash "$receipt_hash" \
@@ -1897,6 +3058,7 @@ destroy_scenario() {
       --file "$CONTROL_MANIFEST" --scenario-id "$scenario_id" \
       --kind terraform-destroy-plan --plan-receipt-hash "$receipt_hash" \
       --approval-hash "$approval_hash"
+    test "$(sha256sum "$plan" | awk '{print $1}')" = "$plan_sha"
     terraform_capture -chdir="$directory" apply -input=false -lock-timeout=5m "$plan" >/dev/null
     test -z "$(terraform_capture -chdir="$directory" state list)"
   ); then
@@ -1908,9 +3070,15 @@ destroy_scenario() {
 }
 
 delete_ecr_tag() {
-  local label="$1" tag="$2" surface="ecr_$1" listing count result
+  local label="$1" tag="$2" surface="ecr_$1" repositories listing count result
   if (
     set -Eeuo pipefail
+    repositories=$(aws_capture aws ecr describe-repositories --region "$AWS_REGION" \
+      --query "length(repositories[?repositoryName=='$ECR_REPOSITORY'])" --output text)
+    test "$repositories" = 0 || test "$repositories" = 1
+    if test "$repositories" = 0; then
+      exit 0
+    fi
     listing="$(aws_capture aws ecr list-images --region "$AWS_REGION" \
       --repository-name "$ECR_REPOSITORY" --filter tagStatus=TAGGED --output json)"
     count="$(jq --arg tag "$tag" '[.imageIds[] | select(.imageTag == $tag)] | length' <<<"$listing")"
@@ -1932,24 +3100,116 @@ delete_ecr_tag() {
   fi
 }
 
-if ! destroy_scenario A "$SCENARIO_A_TF_DIR" "$SCENARIO_A_TF_VARS" \
-  "$SCENARIO_A_TF_BINDING_SHA" "$SCENARIO_A_TF_BINDING_FILE" \
-  "$SCENARIO_A_DESTROY_APPROVAL_FILE" terraform_scenario_a; then
-  cleanup_failures+=(terraform_scenario_a)
-fi
-if ! destroy_scenario B "$SCENARIO_B_TF_DIR" "$SCENARIO_B_TF_VARS" \
-  "$SCENARIO_B_TF_BINDING_SHA" "$SCENARIO_B_TF_BINDING_FILE" \
-  "$SCENARIO_B_DESTROY_APPROVAL_FILE" terraform_scenario_b; then
-  cleanup_failures+=(terraform_scenario_b)
-fi
+destroy_shared_bootstrap() {
+  if (
+    set -Eeuo pipefail
+    if test -e "$BOOTSTRAP_STATE"; then
+      state_before=$(terraform_capture -chdir="$BOOTSTRAP_TF_DIR" state list)
+      if test -n "$state_before"; then
+        plan="$BOOTSTRAP_TF_DIR/destroy.tfplan"
+        receipt="$BOOTSTRAP_TF_DIR/destroy.receipt.json"
+        trap 'rm -f -- "$plan" "$receipt"' EXIT
+        terraform_capture -chdir="$BOOTSTRAP_TF_DIR" plan -destroy -input=false \
+          -var="acceptance_run_id=$ACCEPTANCE_RUN_ID" \
+          -var="aws_account_id=$AWS_ACCOUNT_ID" \
+          -var="aws_region=$AWS_REGION" \
+          -var="backend_state_bucket=$BACKEND_STATE_BUCKET" \
+          -var="ecr_repository=$ECR_REPOSITORY" -out="$plan" >/dev/null
+        chmod 600 "$plan"
+        terraform_capture -chdir="$BOOTSTRAP_TF_DIR" show -json "$plan" | \
+          uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+            sanitize-evidence --kind terraform-destroy-plan >"$receipt"
+        chmod 600 "$receipt"
+        plan_sha=$(sha256sum "$plan" | awk '{print $1}')
+        receipt_hash=$(persist_sanitized_receipt bootstrap terraform-destroy-plan "$plan_sha" "$receipt")
+        request_signed_tf_approval bootstrap terraform-destroy-plan "$receipt_hash" \
+          "$receipt" "${BOOTSTRAP_DESTROY_APPROVAL_FILE:?set bootstrap destroy approval file}"
+        approval_hash=$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+          approval-verify --file "$CONTROL_MANIFEST" --scenario-id bootstrap \
+          --kind terraform-destroy-plan --plan-receipt-hash "$receipt_hash" \
+          --approval-file "$BOOTSTRAP_DESTROY_APPROVAL_FILE")
+        uv run --frozen python -m elspeth.web.aws_ecs_acceptance approval-require-current \
+          --file "$CONTROL_MANIFEST" --scenario-id bootstrap --kind terraform-destroy-plan \
+          --plan-receipt-hash "$receipt_hash" --approval-hash "$approval_hash"
+        test "$(sha256sum "$plan" | awk '{print $1}')" = "$plan_sha"
+        terraform_capture -chdir="$BOOTSTRAP_TF_DIR" apply -input=false "$plan" >/dev/null
+      fi
+      test -z "$(terraform_capture -chdir="$BOOTSTRAP_TF_DIR" state list)"
+    else
+      # Recovery for interruption before the first local-state write. At this
+      # point no scenario backend could have been initialized, so the planned
+      # bucket must be empty.
+      if test "$(aws_capture aws s3api list-buckets \
+          --query "length(Buckets[?Name=='$BACKEND_STATE_BUCKET'])" --output text)" = 1; then
+        aws_capture aws s3api delete-bucket --bucket "$BACKEND_STATE_BUCKET" \
+          --region "$AWS_REGION" >/dev/null
+      fi
+      if test "$(aws_capture aws ecr describe-repositories --region "$AWS_REGION" \
+          --query "length(repositories[?repositoryName=='$ECR_REPOSITORY'])" --output text)" = 1; then
+        aws_capture aws ecr delete-repository --region "$AWS_REGION" \
+          --repository-name "$ECR_REPOSITORY" --force >/dev/null
+      fi
+    fi
+    test "$(aws_capture aws s3api list-buckets \
+      --query "length(Buckets[?Name=='$BACKEND_STATE_BUCKET'])" --output text)" = 0
+    test "$(aws_capture aws ecr describe-repositories --region "$AWS_REGION" \
+      --query "length(repositories[?repositoryName=='$ECR_REPOSITORY'])" --output text)" = 0
+  ); then
+    checkpoint_cleanup shared_resource_cleanup confirmed
+  else
+    checkpoint_cleanup shared_resource_cleanup failed || true
+    return 1
+  fi
+}
 
-if SANITIZED_ORPHAN_RECEIPT="$(mktemp -p /tmp elspeth-orphan.XXXXXX)" && \
-  chmod 600 "$SANITIZED_ORPHAN_RECEIPT" && \
-  run_orphan_sweep >"$SANITIZED_ORPHAN_RECEIPT"; then
-  checkpoint_cleanup orphan_sweep confirmed
+scenario_a_destroyed=0
+scenario_b_destroyed=0
+EARLY_BOOTSTRAP_ONLY=$(jq -er '
+  (.ecr.baseline_digest == null) and (.ecr.candidate_digest == null)
+  and (.scenarios.A.terraform_applied == false)
+  and (.scenarios.B.terraform_applied == false)
+' "$CONTROL_MANIFEST")
+if test "$EARLY_BOOTSTRAP_ONLY" = true; then
+  # Application mutation is impossible before bootstrap and image publication.
+  checkpoint_cleanup terraform_scenario_a confirmed
+  checkpoint_cleanup terraform_scenario_b confirmed
+  scenario_a_destroyed=1
+  scenario_b_destroyed=1
 else
-  checkpoint_cleanup orphan_sweep failed || true
-  cleanup_failures+=(orphan_sweep)
+  if ! destroy_scenario A "$SCENARIO_A_TF_DIR" "$SCENARIO_A_TF_VARS" \
+    "$SCENARIO_A_TF_BINDING_SHA" "$SCENARIO_A_TF_BINDING_FILE" \
+    "$SCENARIO_A_DESTROY_APPROVAL_FILE" terraform_scenario_a; then
+    cleanup_failures+=(terraform_scenario_a)
+  else
+    scenario_a_destroyed=1
+  fi
+  if ! destroy_scenario B "$SCENARIO_B_TF_DIR" "$SCENARIO_B_TF_VARS" \
+    "$SCENARIO_B_TF_BINDING_SHA" "$SCENARIO_B_TF_BINDING_FILE" \
+    "$SCENARIO_B_DESTROY_APPROVAL_FILE" terraform_scenario_b; then
+    cleanup_failures+=(terraform_scenario_b)
+  else
+    scenario_b_destroyed=1
+  fi
+fi
+unset EARLY_BOOTSTRAP_ONLY
+
+if test "$scenario_b_destroyed" = 1 && (
+  set -Eeuo pipefail
+  if test -n "$SCENARIO_B_COGNITO_POOL_ID"; then
+    test "$SCENARIO_B_COGNITO_POOL_OWNED" = true
+    test "$(aws_capture aws cognito-idp list-user-pools --region "$AWS_REGION" \
+      --max-results 60 --query \
+      "length(UserPools[?Id=='$SCENARIO_B_COGNITO_POOL_ID'])" --output text)" = 0
+  else
+    test "$SCENARIO_B_COGNITO_POOL_OWNED" = false
+  fi
+); then
+  # Scenario B owns the disposable pool. Its successful Terraform destroy and
+  # this independent absence query delete the user and invalidate all sessions.
+  checkpoint_cleanup identity_cleanup confirmed
+else
+  checkpoint_cleanup identity_cleanup failed || true
+  cleanup_failures+=(identity_cleanup)
 fi
 
 if ! delete_ecr_tag baseline "$ROLLBACK_BASELINE_TAG"; then
@@ -1958,6 +3218,30 @@ fi
 if ! delete_ecr_tag candidate "$CANDIDATE_TAG"; then
   cleanup_failures+=(ecr_candidate)
 fi
+if test "$scenario_a_destroyed" = 1 && test "$scenario_b_destroyed" = 1; then
+  destroy_shared_bootstrap || cleanup_failures+=(shared_resource_cleanup)
+else
+  checkpoint_cleanup shared_resource_cleanup failed || true
+  cleanup_failures+=(shared_resource_cleanup)
+fi
+
+ORPHAN_RECEIPT_DIR=$(dirname -- "$SANITIZED_ORPHAN_RECEIPT")
+test ! -e "$SANITIZED_ORPHAN_RECEIPT" || {
+  test ! -L "$SANITIZED_ORPHAN_RECEIPT" && test -f "$SANITIZED_ORPHAN_RECEIPT"
+  test "$(stat -c %u "$SANITIZED_ORPHAN_RECEIPT")" = "$(id -u)"
+  test "$(stat -c %a "$SANITIZED_ORPHAN_RECEIPT")" = 600
+}
+ORPHAN_RECEIPT_TMP=$(mktemp -p "$ORPHAN_RECEIPT_DIR" .elspeth-orphan.XXXXXX)
+chmod 600 "$ORPHAN_RECEIPT_TMP"
+if run_orphan_sweep >"$ORPHAN_RECEIPT_TMP" && \
+  mv -fT -- "$ORPHAN_RECEIPT_TMP" "$SANITIZED_ORPHAN_RECEIPT"; then
+  checkpoint_cleanup orphan_sweep confirmed
+else
+  rm -f -- "$ORPHAN_RECEIPT_TMP"
+  checkpoint_cleanup orphan_sweep failed || true
+  cleanup_failures+=(orphan_sweep)
+fi
+unset ORPHAN_RECEIPT_DIR ORPHAN_RECEIPT_TMP
 
 if test "${#cleanup_failures[@]}" -ne 0; then
   printf 'cleanup failures: %s\n' "${cleanup_failures[*]}" >&2
@@ -1965,12 +3249,16 @@ if test "${#cleanup_failures[@]}" -ne 0; then
 fi
 ```
 
-Identity and shared-resource cleanup are owner actions rather than shell
-substitutes. After validating their signed completion/restoration receipts,
-call `checkpoint_cleanup identity_cleanup confirmed` and
-`checkpoint_cleanup shared_resource_cleanup confirmed`. Failed or timed-out
-owner actions are checkpointed `failed`; they do not prevent the independent
-Terraform, orphan-sweep, and ECR attempts above.
+In this fresh-account topology Scenario B owns the complete disposable Cognito
+pool. Destroying that stack deletes the test identity and invalidates its
+sessions; the independent paginated absence query above is the identity
+cleanup proof. A deployment that reuses an approved pool must instead delete
+the disposable user, invalidate its sessions, validate the owner receipt, and
+checkpoint that action before destroying Scenario B. The fresh-account shared
+bucket and ECR repository are removed by `destroy_shared_bootstrap` after both
+scenario states and image tags are gone and before the terminal orphan sweep.
+Failed or timed-out actions are checkpointed `failed`; they do not prevent
+other independent cleanup attempts unless a later action depends on them.
 
 The evidence owner binds an initial export before deletion and a distinct
 final export after the cleanup receipts exist. Plan 12 then prepares final
@@ -1980,6 +3268,12 @@ checkpoints those operations, and commits the finalizer. No checkpoint may be
 marked `confirmed` until its real operation and absence/recovery check pass.
 
 ```bash
+: "${FINAL_EVIDENCE_EXPORT_RECEIPT:?set a distinct protected final-export receipt path}"
+: "${FINAL_EVIDENCE_ARTIFACT_COUNT:?set the verified final export artifact count}"
+uv run --frozen python -m elspeth.web.aws_ecs_acceptance evidence-export-receipt \
+  --file "$CONTROL_MANIFEST" --ledger "$GATE_LEDGER" \
+  --output "$FINAL_EVIDENCE_EXPORT_RECEIPT" \
+  --artifact-count "$FINAL_EVIDENCE_ARTIFACT_COUNT" >/dev/null
 bind_final_evidence_export "$FINAL_EVIDENCE_EXPORT_RECEIPT"
 checkpoint_cleanup evidence_export confirmed
 finalize_cleanup_evidence prepare
@@ -1988,8 +3282,21 @@ remove_local_acceptance_images
 checkpoint_cleanup local_images confirmed
 remove_local_acceptance_evidence
 checkpoint_cleanup local_evidence confirmed
-uv run --frozen python -c 'from datetime import UTC, datetime; import os; assert datetime.now(UTC) <= datetime.fromisoformat(os.environ["ACCEPTANCE_TEARDOWN_DEADLINE_UTC"].replace("Z", "+00:00"))'
-checkpoint_cleanup teardown_deadline confirmed
+if uv run --frozen python -c 'from datetime import UTC, datetime; import os; assert datetime.now(UTC) <= datetime.fromisoformat(os.environ["ACCEPTANCE_TEARDOWN_DEADLINE_UTC"].replace("Z", "+00:00"))'; then
+  checkpoint_cleanup teardown_deadline confirmed
+else
+  # Record the terminal verdict and bounded three-hour emergency window if the
+  # original deadline expired during cleanup; resource removal still finishes.
+  if test -z "${EMERGENCY_CLEANUP_DEADLINE_UTC:-}"; then
+    EMERGENCY_CLEANUP_DEADLINE_UTC=$(date -u -d '+3 hours' +%Y-%m-%dT%H:%M:%SZ)
+    export EMERGENCY_CLEANUP_DEADLINE_UTC
+    uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+      --file "$CONTROL_MANIFEST" --verdict-failure teardown_deadline \
+      --emergency-cleanup-deadline-utc "$EMERGENCY_CLEANUP_DEADLINE_UTC" \
+      --cleanup-escalation teardown_deadline
+  fi
+  checkpoint_cleanup teardown_deadline failed
+fi
 finalize_cleanup_evidence commit
 uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest validate \
   --file "$CONTROL_MANIFEST" --cleanup-only --require-cleanup-cleared

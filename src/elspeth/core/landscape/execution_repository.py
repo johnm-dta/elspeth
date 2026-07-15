@@ -459,9 +459,11 @@ class ExecutionRepository:
         batch_id: str,
         token_id: str,
         ordinal: int,
+        *,
+        conn: Connection | None = None,
     ) -> BatchMember:
         """Add a token to a batch."""
-        return self.batches.add_batch_member(batch_id, token_id, ordinal)
+        return self.batches.add_batch_member(batch_id, token_id, ordinal, conn=conn)
 
     def update_batch_status(
         self,

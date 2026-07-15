@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import event, func, select
 
 from elspeth.contracts import BatchStatus, NodeType, TriggerType
 from elspeth.contracts.audit import TokenRef
@@ -8,7 +9,9 @@ from elspeth.contracts.enums import TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape import LandscapeDB
+from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.schema import batch_members_table
 from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run, register_test_node
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
@@ -228,8 +231,101 @@ class TestAddBatchMember:
         _db, factory = _setup_two_runs_with_batch_integrity_records()
         factory.execution.create_batch("run-A", "agg-1", batch_id="batch-A")
 
-        with pytest.raises(AuditIntegrityError):
+        with pytest.raises(AuditIntegrityError, match=r"belongs to run 'run-B'.*belongs to run 'run-A'"):
             factory.execution.add_batch_member("batch-A", "tok-B", ordinal=0)
+
+        assert factory.execution.get_batch_members("batch-A") == []
+
+    @pytest.mark.parametrize(
+        "status",
+        [BatchStatus.EXECUTING, BatchStatus.COMPLETED, BatchStatus.FAILED],
+    )
+    def test_rejects_every_non_draft_batch_status(self, status: BatchStatus) -> None:
+        """DRAFT is the sole status in which batch membership is mutable."""
+        _db, factory = _setup_with_token()
+        factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
+        if status is BatchStatus.EXECUTING:
+            factory.execution.update_batch_status("b-1", status)
+        else:
+            factory.execution.complete_batch("b-1", status)
+
+        with pytest.raises(AuditIntegrityError, match=rf"status {status.value!r}.*immutable"):
+            factory.execution.add_batch_member("b-1", "tok-1", ordinal=0)
+
+        assert factory.execution.get_batch_members("b-1") == []
+
+    def test_nonexistent_batch_fails_without_membership(self) -> None:
+        _db, factory = _setup_with_token()
+
+        with pytest.raises(AuditIntegrityError, match="batch missing not found"):
+            factory.execution.add_batch_member("missing", "tok-1", ordinal=0)
+
+        assert factory.execution.get_batch_members("missing") == []
+
+    def test_caller_connection_preserves_draft_guard_and_atomic_write(self) -> None:
+        db, factory = _setup_with_token()
+        factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
+
+        with db.write_connection() as conn:
+            member = factory.execution.add_batch_member("b-1", "tok-1", ordinal=0, conn=conn)
+
+        assert member.run_id == "run-1"
+        assert [record.token_id for record in factory.execution.get_batch_members("b-1")] == ["tok-1"]
+
+    def test_caller_connection_rejects_closed_batch_without_poisoning_transaction(self) -> None:
+        db, factory = _setup_with_token()
+        factory.execution.create_batch("run-1", "agg-1", batch_id="closed")
+        factory.execution.update_batch_status("closed", BatchStatus.EXECUTING)
+        factory.execution.create_batch("run-1", "agg-1", batch_id="open")
+
+        with db.write_connection() as conn:
+            with pytest.raises(AuditIntegrityError, match=r"status 'executing'.*immutable"):
+                factory.execution.add_batch_member("closed", "tok-1", ordinal=0, conn=conn)
+            factory.execution.add_batch_member("open", "tok-1", ordinal=0, conn=conn)
+
+        assert factory.execution.get_batch_members("closed") == []
+        assert [member.token_id for member in factory.execution.get_batch_members("open")] == ["tok-1"]
+
+    def test_duplicate_membership_remains_a_conflict(self) -> None:
+        """The hardening does not turn natural-key collisions into success."""
+        _db, factory = _setup_with_token()
+        factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
+        factory.execution.add_batch_member("b-1", "tok-1", ordinal=0)
+
+        with pytest.raises(LandscapeRecordError, match="database rejected audit write"):
+            factory.execution.add_batch_member("b-1", "tok-1", ordinal=0)
+
+        assert len(factory.execution.get_batch_members("b-1")) == 1
+
+    def test_duplicate_ordinal_remains_a_conflict(self) -> None:
+        """Two different tokens cannot occupy the same batch ordinal."""
+        _db, factory = _setup_with_token()
+        factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
+        factory.execution.add_batch_member("b-1", "tok-1", ordinal=0)
+
+        with pytest.raises(LandscapeRecordError, match="database rejected audit write"):
+            factory.execution.add_batch_member("b-1", "tok-2", ordinal=0)
+
+        assert [member.token_id for member in factory.execution.get_batch_members("b-1")] == ["tok-1"]
+
+    def test_failure_after_insert_rolls_back_membership(self) -> None:
+        """An exception after the INSERT cannot leave a partially committed member."""
+        db, factory = _setup_with_token()
+        factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
+
+        def fail_after_member_insert(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+            if statement.lstrip().upper().startswith("INSERT INTO BATCH_MEMBERS"):
+                raise RuntimeError("injected post-insert failure")
+
+        event.listen(db.engine, "after_cursor_execute", fail_after_member_insert)
+        try:
+            with pytest.raises(RuntimeError, match="injected post-insert failure"):
+                factory.execution.add_batch_member("b-1", "tok-1", ordinal=0)
+        finally:
+            event.remove(db.engine, "after_cursor_execute", fail_after_member_insert)
+
+        with db.read_only_connection() as conn:
+            assert conn.execute(select(func.count()).select_from(batch_members_table)).scalar_one() == 0
 
 
 # ---------------------------------------------------------------------------

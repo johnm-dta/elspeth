@@ -6627,6 +6627,7 @@ def _orphan_paged_items(
     request_token: str,
     response_token: str,
     kwargs: Mapping[str, object],
+    allow_missing_items: bool = False,
 ) -> list[object]:
     token: str | None = None
     seen_tokens: set[str] = set()
@@ -6638,7 +6639,8 @@ def _orphan_paged_items(
         response = _orphan_call(client, method, **request)
         if response is None:
             return collected
-        collected.extend(_orphan_response_items(response, item_field))
+        page_items = [] if allow_missing_items and item_field not in response else _orphan_response_items(response, item_field)
+        collected.extend(page_items)
         if len(collected) > _ORPHAN_MAX_ITEMS:
             raise AcceptanceCheckError("orphan_sweep_api")
         continuation = response.get(response_token)
@@ -7237,6 +7239,7 @@ def orphan_sweep(
                     request_token="NextToken",
                     response_token="NextToken",
                     kwargs={},
+                    allow_missing_items=True,
                 )
                 spans_groups = _orphan_paged_items(
                     clients.logs,

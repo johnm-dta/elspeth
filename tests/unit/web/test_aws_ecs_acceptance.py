@@ -4644,6 +4644,32 @@ def test_transaction_search_projection_accepts_aws_response_without_optional_act
     }
 
 
+def test_orphan_sweep_accepts_aws_response_without_optional_empty_indexing_rules(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "control.json"
+    _init_control_manifest(manifest_path)
+    acceptance.control_manifest_update(
+        manifest_path,
+        cleanup_required=True,
+        ecr_baseline_tag="acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-baseline",
+        ecr_candidate_tag="acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-candidate",
+        ecr_registry="123456789012.dkr.ecr.ap-southeast-2.amazonaws.com",
+        ecr_repository="elspeth-acceptance",
+        now=lambda: datetime(2026, 7, 14, 1, 1, tzinfo=UTC),
+    )
+    clients = _empty_orphan_clients()
+    clients.xray.responses["get_indexing_rules"] = {}  # type: ignore[union-attr]
+
+    receipt = acceptance.orphan_sweep(
+        manifest_path,
+        acceptance_run_id="4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48",
+        clients=clients,
+        environ={},
+    )
+
+    assert receipt["total_unapproved_survivors"] == 0
+    assert all(client.closed for client in clients)
+
+
 def test_orphan_sweep_queries_exact_retained_metric_trace_and_transaction_search_identities(tmp_path: Path) -> None:
     trace_id = f"1-12345678-{'a' * 24}"
 

@@ -54,14 +54,20 @@ use Loomweave in this worktree.
   evidence, immutable plan CAS, leases, attempts, response loss, and takeover.
 - `src/elspeth/core/landscape/execution/sink_effect_finalization.py` — global
   token/state/effect/artifact/operation finalization transaction.
+- `src/elspeth/core/landscape/execution/audit_export_snapshots.py` — consistent
+  terminal-run snapshot registry, bounded spool/chunk manifest, and winner CAS.
 - `src/elspeth/core/landscape/execution/sink_effects.py` — narrow repository
   facade composing the three persistence units.
 - `src/elspeth/engine/executors/sink_effects.py` — caller-level effect
   coordinator and recovery state machine.
+- `src/elspeth/engine/orchestrator/audit_export_effects.py` — typed snapshot
+  effect coordinator for JSON and CSV bundle export.
 - `src/elspeth/plugins/infrastructure/sink_effects.py` — capability validation,
   restricted contexts, plan/evidence validation, and shared adapter helpers.
 - `src/elspeth/plugins/sinks/_local_file_effects.py` — bounded streamed staging,
   file identity, advisory lock, atomic replace, and reconciliation.
+- `src/elspeth/plugins/sinks/_audit_export_bundle_effects.py` — create-only CSV
+  directory-bundle plan/commit/reconcile with canonical bundle manifest.
 - `tests/fixtures/sink_effects.py` — effect-capable duplicate-observable fake and
   deterministic fault seams.
 
@@ -307,6 +313,11 @@ class SinkEffectInspectionMode(StrEnum):
     NO_INSPECTION_REQUIRED = "no_inspection_required"
 
 
+class SinkEffectInputKind(StrEnum):
+    PIPELINE_MEMBERS = "pipeline_members"
+    AUDIT_EXPORT_SNAPSHOT = "audit_export_snapshot"
+
+
 class SinkEffectReconcileKind(StrEnum):
     NOT_APPLIED = "not_applied"
     APPLIED_WITH_EXACT_DESCRIPTOR = "applied_with_exact_descriptor"
@@ -363,6 +374,7 @@ class SinkEffectPrepareRequest:
 class SinkEffectPlan:
     effect_id: str
     protocol_version: str
+    input_kind: SinkEffectInputKind
     descriptor_mode: SinkEffectDescriptorMode
     inspection_mode: SinkEffectInspectionMode
     target: str
@@ -509,6 +521,7 @@ git commit -m "feat(contracts): define sink effect protocol"
 - Modify: `src/elspeth/contracts/audit.py`
 - Modify: `src/elspeth/core/landscape/model_loaders.py`
 - Test: `tests/unit/core/landscape/test_sink_effect_schema.py`
+- Test: `tests/unit/core/landscape/test_audit_export_snapshot_schema.py`
 - Test: `tests/unit/core/landscape/test_schema_epoch_and_required_columns.py`
 - Test: `tests/testcontainer/web/test_schema_probe_postgres.py`
 
@@ -544,6 +557,11 @@ def test_member_token_row_run_ownership_is_enforced(connection: Connection) -> N
 
 Also assert the exclusive artifact producer CHECK and the
 `operations.sink_effect_id -> sink_effects.effect_id` unique FK.
+Assert the input-kind XOR: pipeline effects require at least one token member
+and forbid an export association; audit-export effects require zero token
+members and exactly one immutable snapshot association. Assert unique registry
+keys, dense chunk ordinals, bounded count/size columns, terminal-run ownership,
+and unique effect-to-snapshot association.
 
 - [ ] **Step 2: Run the schema tests and verify epoch 26 is absent**
 
@@ -553,10 +571,10 @@ Run:
 .venv/bin/pytest -q tests/unit/core/landscape/test_sink_effect_schema.py tests/unit/core/landscape/test_schema_epoch_and_required_columns.py
 ```
 
-Expected: FAIL because the four effect tables, new columns, and epoch 26 do not
-exist.
+Expected: FAIL because the effect and audit-export snapshot tables, new
+columns, and epoch 26 do not exist.
 
-- [ ] **Step 3: Add the four tables and artifact/operation linkage**
+- [ ] **Step 3: Add effect, snapshot, and artifact/operation linkage**
 
 Add metadata tables with these keys and constraints:
 
@@ -586,21 +604,36 @@ sequence/predecessor shape, member ownership, closed states, and unique member
 binding. Add the stream/effect tail/head FKs after both tables exist. Change
 artifacts to producer XOR plus non-null publication-performed/evidence-kind
 columns, and operations to nullable unique effect linkage.
+
+Add `audit_export_snapshots`, `audit_export_snapshot_chunks`, and
+`sink_effect_export_snapshots`. The registry is unique over source run,
+exporter/serialization version, format, signing mode, and public config hash;
+when signed it also includes an operator-visible credential-free
+`signer_key_id`/version (or typed `UNSIGNED` sentinel), never key material or a
+low-entropy key digest. It stores the terminal witness/cutoff, configured
+limits, counts, manifest and
+snapshot hashes only. Chunks store ordered content-addressed refs, hashes,
+sizes, and record counts. The association is unique by effect and snapshot
+shape. Mechanically enforce `PIPELINE_MEMBERS` >=1 members/no snapshot versus
+`AUDIT_EXPORT_SNAPSHOT` zero members/exactly one snapshot association without
+synthetic token/row FKs. Use backend-appropriate transactional completeness
+validation where a row-local CHECK cannot count child rows.
 Set `SQLITE_SCHEMA_EPOCH = 26`; do not add any epoch-27 symbol.
 
 - [ ] **Step 4: Add immutable loader models**
 
-Add `SinkEffectStream`, `SinkEffect`, `SinkEffectMemberRecord`, and
-`SinkEffectAttempt` dataclasses to `contracts/audit.py` and corresponding
-strict loaders. Loader enum conversion and nullable-state validation must
-raise on malformed DB rows.
+Add `SinkEffectStream`, `SinkEffect`, `SinkEffectMemberRecord`,
+`AuditExportSnapshot`, `AuditExportSnapshotChunk`,
+`SinkEffectExportSnapshotAssociation`, and `SinkEffectAttempt` dataclasses to
+`contracts/audit.py` and corresponding strict loaders. Loader enum conversion,
+input XOR, bounds, and nullable-state validation must raise on malformed rows.
 
 - [ ] **Step 5: Run SQLite and real PostgreSQL schema probes**
 
 Run:
 
 ```bash
-.venv/bin/pytest -q tests/unit/core/landscape/test_sink_effect_schema.py tests/unit/core/landscape/test_schema_epoch_and_required_columns.py
+.venv/bin/pytest -q tests/unit/core/landscape/test_sink_effect_schema.py tests/unit/core/landscape/test_audit_export_snapshot_schema.py tests/unit/core/landscape/test_schema_epoch_and_required_columns.py
 .venv/bin/pytest -q -m testcontainer tests/testcontainer/web/test_schema_probe_postgres.py
 ```
 
@@ -609,7 +642,7 @@ Expected: metadata invariants pass on SQLite and PostgreSQL 16.
 - [ ] **Step 6: Commit the metadata boundary**
 
 ```bash
-git add src/elspeth/core/landscape/schema.py src/elspeth/contracts/audit.py src/elspeth/core/landscape/model_loaders.py tests/unit/core/landscape/test_sink_effect_schema.py tests/unit/core/landscape/test_schema_epoch_and_required_columns.py tests/testcontainer/web/test_schema_probe_postgres.py
+git add src/elspeth/core/landscape/schema.py src/elspeth/contracts/audit.py src/elspeth/core/landscape/model_loaders.py tests/unit/core/landscape/test_sink_effect_schema.py tests/unit/core/landscape/test_audit_export_snapshot_schema.py tests/unit/core/landscape/test_schema_epoch_and_required_columns.py tests/testcontainer/web/test_schema_probe_postgres.py
 git commit -m "feat(landscape): define epoch 26 sink effects"
 ```
 
@@ -650,7 +683,9 @@ def test_epoch_25_to_26_rolls_back_every_object_when_artifact_rebuild_fails(tmp_
 
 Cover exact 23 -> 24 -> 25 -> 26 ordering, `BEGIN IMMEDIATE` contention,
 malformed predecessor refusal, duplicate key refusal, close/invalidation
-failure, and successful reopen.
+failure, and successful reopen. Assert the snapshot registry, chunk manifest,
+and effect association are created atomically and an injected failure leaves
+none of them behind.
 
 - [ ] **Step 2: Run the migration tests and confirm epoch 25 is rejected**
 
@@ -686,6 +721,8 @@ existing rollback/invalidate/close discipline on every exception path.
 The artifacts rebuild also adds non-null `publication_performed` and
 `publication_evidence_kind`; legacy epoch-25 rows backfill `true` and
 `legacy_returned` so old evidence is not misclassified as no-publication.
+Create the empty audit-export snapshot registry/chunk/association tables in the
+same transaction; epoch 25 has no rows to backfill for them.
 
 - [ ] **Step 4: Run migration and compatibility suites**
 
@@ -846,6 +883,13 @@ def test_state_attempt_ids_do_not_change_effect_identity(factory: RecorderFactor
     first = build_identity_input(factory, current_state_ids=("state-attempt-0",))
     second = build_identity_input(factory, current_state_ids=("state-attempt-1",))
     assert compute_effect_identity(first.members) == compute_effect_identity(second.members)
+
+
+def test_audit_export_identity_binds_manifest_without_synthetic_members() -> None:
+    identity = compute_audit_export_effect_identity(EXPORT_SNAPSHOT, SAFE_TARGET_CONFIG)
+    assert identity.input_kind is SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT
+    assert identity.member_ids == ()
+    assert identity.snapshot_hash == EXPORT_SNAPSHOT.snapshot_hash
 ```
 
 Property tests generate DAG-shaped lineage within limits and prove reversed
@@ -878,6 +922,10 @@ and order members by `(ingest_sequence, lineage_structure, token_id)`. Hash
 canonical row payload and the complete ordered identity with the protocol
 version. Derive `effect_id`, `artifact_id`, `artifact_idempotency_key`,
 `stream_id`, and member sub-effect IDs from labeled hashes.
+For `AUDIT_EXPORT_SNAPSHOT`, derive the effect/artifact identities from the
+registry key, manifest/snapshot hash, protocol/exporter/serialization versions,
+format/signing mode, and credential-free target/config hash. It has zero member
+IDs and must not invoke token-lineage resolution.
 
 - [ ] **Step 4: Run unit/property tests and commit**
 
@@ -936,6 +984,10 @@ def test_disjoint_replacing_groups_form_one_predecessor_chain(factory: RecorderF
 ```
 
 Add immutable finalized-membership and divergent-payload refusal tests.
+Add concurrent audit-export reservation tests proving both contenders reuse
+one snapshot/effect, zero token members, and one exact association. Assert
+pipeline-without-members, pipeline-with-snapshot, export-with-members, and
+export-without-snapshot all fail before SQL.
 
 - [ ] **Step 2: Write a real PostgreSQL reservation-vs-outcome race**
 
@@ -966,8 +1018,10 @@ class SinkEffectReservationRequest:
     run_id: str
     sink_node_id: str
     role: SinkEffectRole
+    input_kind: SinkEffectInputKind
     requested_target_hash: str
     members: Sequence[SinkEffectMember]
+    audit_export_snapshot_id: str | None
     config_hash: str
     replacing_target: bool
     primary_effect_id: str | None
@@ -987,8 +1041,10 @@ class SinkEffectRepository:
         run_id: str,
         sink_node_id: str,
         role: SinkEffectRole,
+        input_kind: SinkEffectInputKind,
         requested_target_hash: str,
         members: Sequence[SinkEffectMember],
+        audit_export_snapshot_id: str | None = None,
         config_hash: str,
         replacing_target: bool,
         primary_effect_id: str | None = None,
@@ -997,8 +1053,10 @@ class SinkEffectRepository:
             run_id=run_id,
             sink_node_id=sink_node_id,
             role=role,
+            input_kind=input_kind,
             requested_target_hash=requested_target_hash,
             members=tuple(members),
+            audit_export_snapshot_id=audit_export_snapshot_id,
             config_hash=config_hash,
             replacing_target=replacing_target,
             primary_effect_id=primary_effect_id,
@@ -1015,6 +1073,13 @@ hold a stream while waiting for token/state locks. The complete required
 current-state witness set must be deduplicated and locked in ascending
 `state_id` order after tokens and before the stream; caller or planner order is
 not acceptable.
+
+For `AUDIT_EXPORT_SNAPSHOT`, validate the immutable registry winner and exact
+manifest hash without token/state locks, then begin at the stream/effect class
+and insert the unique association with the effect. It must have zero members
+and exactly one snapshot ID. Pipeline reservation requires at least one member
+and no snapshot ID. Concurrent export reservation uses conflict-safe insert
+and exact winner comparison; it never rereads live audit tables.
 
 - [ ] **Step 5: Wire the repository and run SQLite/PostgreSQL tests**
 
@@ -1272,13 +1337,18 @@ git commit -m "feat(landscape): finalize sink effects atomically"
 **Files:**
 
 - Create: `src/elspeth/engine/executors/sink_effects.py`
+- Create: `src/elspeth/core/landscape/execution/audit_export_snapshots.py`
+- Create: `src/elspeth/engine/orchestrator/audit_export_effects.py`
 - Create: `tests/fixtures/sink_effects.py`
 - Modify: `src/elspeth/engine/executors/sink.py`
 - Modify: `src/elspeth/engine/orchestrator/sink_flush.py`
 - Modify: `src/elspeth/engine/orchestrator/export.py`
 - Test: `tests/unit/engine/test_sink_effect_executor.py`
+- Test: `tests/unit/core/landscape/test_audit_export_snapshots.py`
 - Test: `tests/unit/engine/orchestrator/test_export.py`
 - Test: `tests/integration/pipeline/test_sink_effect_recovery.py`
+- Test: `tests/integration/pipeline/test_audit_export_effect_recovery.py`
+- Test: `tests/testcontainer/core/test_audit_export_snapshot_postgres.py`
 
 - [ ] **Step 1: Write the duplicate-observable fault-seam tests**
 
@@ -1308,6 +1378,22 @@ tests.
 Add audit-export response-loss tests proving a fresh process reuses one stable
 export effect and never repeats external publication. Assert the production
 export module does not call sink `write()` or `flush()` directly.
+
+Add terminal-witness and snapshot-store tests: non-terminal runs fail before
+spooling; PostgreSQL uses a real repeatable-read transaction (never default
+READ COMMITTED) for registry lookup, terminal witness, and enumeration;
+bounded local spooling completes and closes the DB transaction before any
+chunk-store I/O. Concurrent exporters reuse one exact registry winner.
+Existing-winner lookup exact-checks `signer_key_id`. Same run/config with a
+rotated signer ID must select a distinct winner or fail closed under the
+configured single-export policy; it may never reuse old signed bytes silently.
+Inject crashes before chunk storage, after chunks/before registry CAS, after
+registry CAS, and after later audit rows are added. Before registry, only
+harmless content-addressed chunks may remain; afterward recovery reads only
+the winning manifest/chunks and reproduces the pre-export snapshot.
+The PostgreSQL proof uses distinct backend PIDs and demonstrates that a
+concurrent post-snapshot audit insert is invisible to the open repeatable-read
+enumeration while registry winner CAS still converges.
 
 - [ ] **Step 2: Run tests against the old write/flush boundary**
 
@@ -1345,18 +1431,29 @@ return effects.finalize(finalize_request(effect, lease, result))
 `commit_effect` subsumes durability. Delete every production `flush()` after
 commit and the arbitrary write-only/test-double branch. Preserve the public
 `SinkExecutor.write` facade while routing all behavior through the coordinator.
-Route post-run audit export through the same effect protocol, using a dedicated
-effect-safe export coordinator if its snapshot input cannot use pipeline token
-membership directly. Its snapshot/identity must be durable and replayable;
+Route post-run audit export through the dedicated typed effect-safe export
+coordinator; it never uses pipeline token membership. Its snapshot/identity
+must be durable and replayable;
 preflight followed by legacy `write()`/`flush()` is forbidden.
+
+Implement the dedicated typed path, not synthetic tokens. Snapshot creation
+uses one consistent read to enumerate into a bounded local spool, closes the
+DB transaction, writes ordered content-addressed chunks, then CAS-inserts or
+exact-compares the immutable registry/manifest in a short transaction. The
+coordinator reserves one zero-member `AUDIT_EXPORT_SNAPSHOT` effect with one
+snapshot association and replays only manifest chunks through an
+effect-capable fake/JSON adapter. Effect identity binds the manifest and safe
+target configuration. Export audit rows are registered only after the
+snapshot winner exists, making self-recursion structural.
 
 - [ ] **Step 4: Run caller-level and existing sink/diversion tests**
 
 Run:
 
 ```bash
-.venv/bin/pytest -q tests/unit/engine/test_sink_effect_executor.py tests/integration/pipeline/test_sink_effect_recovery.py tests/unit/engine/test_sink_executor_diversion.py tests/unit/engine/orchestrator/test_pending_sink_grouping.py tests/unit/engine/orchestrator/test_export.py
-.venv/bin/mypy src/elspeth/engine/executors/sink_effects.py src/elspeth/engine/executors/sink.py src/elspeth/engine/orchestrator/sink_flush.py src/elspeth/engine/orchestrator/export.py
+.venv/bin/pytest -q tests/unit/engine/test_sink_effect_executor.py tests/unit/core/landscape/test_audit_export_snapshots.py tests/integration/pipeline/test_sink_effect_recovery.py tests/integration/pipeline/test_audit_export_effect_recovery.py tests/unit/engine/test_sink_executor_diversion.py tests/unit/engine/orchestrator/test_pending_sink_grouping.py tests/unit/engine/orchestrator/test_export.py
+.venv/bin/pytest -q -m testcontainer tests/testcontainer/core/test_audit_export_snapshot_postgres.py
+.venv/bin/mypy src/elspeth/core/landscape/execution/audit_export_snapshots.py src/elspeth/engine/executors/sink_effects.py src/elspeth/engine/executors/sink.py src/elspeth/engine/orchestrator/audit_export_effects.py src/elspeth/engine/orchestrator/sink_flush.py src/elspeth/engine/orchestrator/export.py
 ```
 
 Expected: fault seams publish once and current grouping/diversion behavior
@@ -1365,7 +1462,7 @@ remains semantically correct.
 - [ ] **Step 5: Commit the production boundary**
 
 ```bash
-git add src/elspeth/engine/executors src/elspeth/engine/orchestrator/sink_flush.py src/elspeth/engine/orchestrator/export.py tests/fixtures/sink_effects.py tests/unit/engine/test_sink_effect_executor.py tests/unit/engine/orchestrator/test_export.py tests/integration/pipeline/test_sink_effect_recovery.py
+git add src/elspeth/core/landscape/execution/audit_export_snapshots.py src/elspeth/engine/executors src/elspeth/engine/orchestrator/audit_export_effects.py src/elspeth/engine/orchestrator/sink_flush.py src/elspeth/engine/orchestrator/export.py tests/fixtures/sink_effects.py tests/unit/core/landscape/test_audit_export_snapshots.py tests/unit/engine/test_sink_effect_executor.py tests/unit/engine/orchestrator/test_export.py tests/integration/pipeline/test_sink_effect_recovery.py tests/integration/pipeline/test_audit_export_effect_recovery.py tests/testcontainer/core/test_audit_export_snapshot_postgres.py
 git commit -m "feat(engine): coordinate durable sink effects"
 ```
 
@@ -1730,12 +1827,14 @@ git commit -m "feat(sinks): persist remote member effects"
 - Modify: `src/elspeth/engine/orchestrator/sink_flush.py`
 - Modify: `src/elspeth/engine/orchestrator/preflight.py`
 - Modify: `src/elspeth/engine/orchestrator/export.py`
+- Create: `src/elspeth/plugins/sinks/_audit_export_bundle_effects.py`
 - Modify: `src/elspeth/plugins/infrastructure/runtime_factory.py`
 - Test: `tests/unit/engine/test_sink_executor_diversion.py`
 - Test: `tests/unit/engine/test_failsink_validation.py`
 - Test: `tests/integration/pipeline/orchestrator/test_sink_diversion_counters.py`
 - Test: `tests/integration/pipeline/test_sink_effect_recovery.py`
 - Test: `tests/unit/engine/orchestrator/test_export.py`
+- Test: `tests/unit/plugins/sinks/test_audit_export_bundle_effects.py`
 
 - [ ] **Step 1: Write failing linked-effect and zero-publication tests**
 
@@ -1766,6 +1865,13 @@ Cover initial virtual-empty, Database zero-row marker, discard, failsink CSV,
 failsink JSON, response loss between linked effects, scheduler terminalization,
 and exact diversion counters.
 
+Cover JSON audit snapshot replay after response loss and CSV bundle crashes
+before create-only rename, after rename/before return, and after return/before
+effect finalization. Two concurrent exporters must reuse one snapshot/effect;
+later audit DB mutations must not alter recovery bytes. Assert exact-existing
+bundle converges, divergent-existing is UNKNOWN/fail-closed, non-terminal run
+is refused, and no export row enters its own snapshot.
+
 - [ ] **Step 2: Run diversion/failsink tests**
 
 Run:
@@ -1787,6 +1893,16 @@ terminal evidence in the token-first transaction. Use `NO_PUBLICATION` for
 prepare-known zero accepted groups and the target marker for result-derived
 Database zero accepted groups.
 
+Complete the real audit-export adapters. JSON consumes ordered registered
+manifest chunks through its effect methods. CSV multifile prepares a private
+effect-addressed sibling directory with a canonical relative-file manifest and
+aggregate bundle hash, then uses create-only atomic rename when the target is
+absent. Exact-existing is a no-op/reconcile success; divergent-existing fails
+closed. Never generically overwrite a non-empty directory. Platforms or
+filesystems without proven create-only rename and parent durability semantics,
+and remote modes without an exact bundle primitive, fail preflight. Delete
+direct `_export_csv_multifile`, sink `write()`, and sink `flush()` publication.
+
 - [ ] **Step 4: Prove every built-in mode passes preflight and every legacy sink fails**
 
 Parametrize the installed first-party sink inventory and supported mode
@@ -1803,8 +1919,8 @@ audit export must publish through its effect-safe coordinator.
 Run:
 
 ```bash
-.venv/bin/pytest -q tests/unit/engine/test_sink_executor_diversion.py tests/unit/engine/test_failsink_validation.py tests/unit/engine/test_sink_effect_executor.py tests/integration/pipeline/orchestrator/test_sink_diversion_counters.py tests/integration/pipeline/test_sink_effect_recovery.py tests/unit/plugins/sinks/test_sink_protocol_compliance.py tests/unit/engine/orchestrator/test_export.py
-.venv/bin/mypy src/elspeth/engine/executors/sink_effects.py src/elspeth/engine/executors/sink.py src/elspeth/engine/orchestrator/sink_flush.py src/elspeth/engine/orchestrator/export.py
+.venv/bin/pytest -q tests/unit/engine/test_sink_executor_diversion.py tests/unit/engine/test_failsink_validation.py tests/unit/engine/test_sink_effect_executor.py tests/integration/pipeline/orchestrator/test_sink_diversion_counters.py tests/integration/pipeline/test_sink_effect_recovery.py tests/integration/pipeline/test_audit_export_effect_recovery.py tests/unit/plugins/sinks/test_sink_protocol_compliance.py tests/unit/plugins/sinks/test_audit_export_bundle_effects.py tests/unit/engine/orchestrator/test_export.py
+.venv/bin/mypy src/elspeth/engine/executors/sink_effects.py src/elspeth/engine/executors/sink.py src/elspeth/engine/orchestrator/sink_flush.py src/elspeth/engine/orchestrator/export.py src/elspeth/plugins/sinks/_audit_export_bundle_effects.py
 ```
 
 Expected: all primary/failsink/discard/zero-publication tests pass.
@@ -1812,7 +1928,7 @@ Expected: all primary/failsink/discard/zero-publication tests pass.
 Commit:
 
 ```bash
-git add src/elspeth/engine src/elspeth/plugins/infrastructure/runtime_factory.py tests/unit/engine tests/integration/pipeline tests/unit/plugins/sinks/test_sink_protocol_compliance.py
+git add src/elspeth/engine src/elspeth/plugins/infrastructure/runtime_factory.py src/elspeth/plugins/sinks/_audit_export_bundle_effects.py tests/unit/engine tests/integration/pipeline tests/unit/plugins/sinks/test_sink_protocol_compliance.py tests/unit/plugins/sinks/test_audit_export_bundle_effects.py
 git commit -m "feat(engine): recover primary and failsink effects"
 ```
 
@@ -1948,7 +2064,8 @@ and how to identify a blocked successor. The migration/release note must call
 out third-party fail-closed behavior, Chroma skip/error reduction, Database
 ledger/DDL restrictions, unsupported filesystems, artifact producer XOR, and
 epoch 25 -> 26 behavior. Configuration docs must list byte/row/staging/lock/
-network limits.
+network limits plus the signer key ID/version rotation contract; keys and
+low-entropy key-derived identifiers are never persisted.
 
 - [ ] **Step 4: Correct the old architecture claim**
 
@@ -1984,7 +2101,7 @@ git commit -m "docs: document sink effect recovery"
 - [ ] **Step 1: Run focused Landscape/effect tests**
 
 ```bash
-.venv/bin/pytest -q tests/unit/core/landscape/test_sink_effect_schema.py tests/unit/core/landscape/test_sink_effect_migration.py tests/unit/core/landscape/test_effect_linked_artifacts.py tests/unit/core/landscape/test_sink_effect_identity.py tests/unit/core/landscape/test_sink_effect_reservation.py tests/unit/core/landscape/test_sink_effect_lifecycle.py tests/unit/core/landscape/test_sink_effect_finalization.py
+.venv/bin/pytest -q tests/unit/core/landscape/test_sink_effect_schema.py tests/unit/core/landscape/test_audit_export_snapshot_schema.py tests/unit/core/landscape/test_sink_effect_migration.py tests/unit/core/landscape/test_effect_linked_artifacts.py tests/unit/core/landscape/test_sink_effect_identity.py tests/unit/core/landscape/test_sink_effect_reservation.py tests/unit/core/landscape/test_sink_effect_lifecycle.py tests/unit/core/landscape/test_sink_effect_finalization.py tests/unit/core/landscape/test_audit_export_snapshots.py
 ```
 
 Expected: all focused persistence tests pass.
@@ -1992,7 +2109,7 @@ Expected: all focused persistence tests pass.
 - [ ] **Step 2: Run focused executor and adapter tests**
 
 ```bash
-.venv/bin/pytest -q tests/unit/engine/test_sink_effect_executor.py tests/unit/engine/test_sink_executor_diversion.py tests/integration/pipeline/test_sink_effect_recovery.py tests/unit/engine/orchestrator/test_export.py tests/unit/cli/test_cli_preflight.py tests/unit/plugins/sinks tests/integration/plugins/sinks
+.venv/bin/pytest -q tests/unit/engine/test_sink_effect_executor.py tests/unit/engine/test_sink_executor_diversion.py tests/integration/pipeline/test_sink_effect_recovery.py tests/integration/pipeline/test_audit_export_effect_recovery.py tests/unit/engine/orchestrator/test_export.py tests/unit/cli/test_cli_preflight.py tests/unit/plugins/sinks tests/integration/plugins/sinks
 ```
 
 Expected: all sink, recovery, diversion, follower/export lifecycle, and
@@ -2002,11 +2119,11 @@ production `write()`/`flush()` caller remains.
 - [ ] **Step 3: Run every real PostgreSQL proof**
 
 ```bash
-.venv/bin/pytest -q -m testcontainer tests/testcontainer/core/test_sink_effect_lock_order_postgres.py tests/testcontainer/plugins/test_database_sink_effects_postgres.py tests/testcontainer/web/test_schema_probe_postgres.py
+.venv/bin/pytest -q -m testcontainer tests/testcontainer/core/test_sink_effect_lock_order_postgres.py tests/testcontainer/core/test_audit_export_snapshot_postgres.py tests/testcontainer/plugins/test_database_sink_effects_postgres.py tests/testcontainer/web/test_schema_probe_postgres.py
 ```
 
-Expected: schema parity, target marker, and all forced lock interleavings pass
-on PostgreSQL 16 with distinct backend PIDs.
+Expected: schema parity, target marker, repeatable-read snapshot winner, and
+all forced lock interleavings pass on PostgreSQL 16 with distinct backend PIDs.
 
 - [ ] **Step 4: Run broad regressions**
 

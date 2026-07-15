@@ -124,6 +124,22 @@ the group. Per-record APIs may use durable member sub-effects under the group.
 One token in an effect group, with a dense ordinal, row identity, exact
 canonical payload hash, and immutable data-flow ordering evidence.
 
+### Effect input kind
+
+Every effect declares one closed input kind. `PIPELINE_MEMBERS` uses the
+ordered token membership above. `AUDIT_EXPORT_SNAPSHOT` uses no synthetic
+token or row; it binds exactly one immutable, content-addressed post-run audit
+snapshot. The database enforces the two shapes as an XOR.
+
+### Audit-export snapshot
+
+A transactionally consistent, terminal-run view materialized before any
+export node, effect, operation, attempt, or call row is registered. It is a
+bounded ordered chunk manifest plus source-run terminal witness and aggregate
+hash, not an unbounded copy of records in Landscape. Once its registry row
+exists, every retry reads the immutable manifest/chunks and never rereads the
+now-self-modified live audit tables.
+
 ### Plan
 
 Credential-safe, deterministic evidence produced without external effects. It
@@ -292,8 +308,9 @@ The group ledger stores:
 - `effect_id` primary key;
 - run, sink node, and closed `role` (`PRIMARY`, `FAILSINK`);
 - closed state (`RESERVED`, `PREPARED`, `IN_FLIGHT`, `FINALIZED`);
-- protocol version, configuration hash, ordered-membership hash, and group
-  payload hash;
+- protocol version, closed input kind (`PIPELINE_MEMBERS` or
+  `AUDIT_EXPORT_SNAPSHOT`), configuration hash, ordered-membership or snapshot
+  manifest hash, and group payload hash;
 - reserved artifact ID and artifact idempotency key;
 - redacted typed target and plan evidence, plan fingerprint, expected
   descriptor, and precondition fingerprint;
@@ -329,6 +346,13 @@ Database checks mechanically enforce lifecycle completeness:
   sequence require one; composite same-stream FKs plus the tail-allocation CAS
   prove that it is the immediately preceding stream effect.
 
+Input shape is also mechanical: a `PIPELINE_MEMBERS` effect has at least one
+ordered token member and no export-snapshot association;
+`AUDIT_EXPORT_SNAPSHOT` has zero token members and exactly one immutable
+snapshot association. Repository methods validate the XOR before SQL and the
+schema enforces the input-kind CHECK, unique association FK, and transactional
+completeness validation on both supported backends.
+
 Generation is non-negative in reserved/prepared state and positive once
 in-flight. Lease expiry cannot precede heartbeat. Role, state, descriptor mode,
 attempt action, and reconcile result use database CHECK constraints over their
@@ -362,6 +386,64 @@ is non-negative, and disposition/member-state fields use closed CHECKs.
 The table stores no attempt-scoped state ID. Finalization resolves and locks
 the current open state witness for each member, proves it still represents the
 same token/node/input, and only then applies the generation-fenced transition.
+
+### `audit_export_snapshots`
+
+The immutable registry has one winner for:
+
+```text
+(source_run_id, exporter_version, format, signing_mode, signer_key_id,
+ public_export_config_hash)
+```
+
+`signer_key_id` is a required operator-visible, credential-free key identity /
+version when signing is enabled and a typed `UNSIGNED` sentinel otherwise. It
+is never key material or a low-entropy digest of key material. Rotating a
+signer must change this ID. Existing-winner lookup exact-checks it before
+reuse; the same run/config with a different signer ID selects a distinct
+snapshot winner or fails closed under explicit single-export policy.
+
+The registry stores the source-run terminal witness/cutoff, canonical serialization
+version, configured record/chunk/byte limits, record and chunk counts,
+aggregate manifest and snapshot hashes, and timestamps. It contains no
+signing key, credentials, raw provider body, or unbounded record payload.
+
+Materialization begins a real repeatable-read/consistent-snapshot transaction
+that checks for an existing registry winner and, when absent, verifies the run
+is terminal and enumerates every exported record from that same snapshot.
+PostgreSQL `READ COMMITTED` is insufficient. Records are canonically serialized
+into a bounded local spool and the DB transaction closes before any chunk-store
+I/O; no DB lock/transaction spans external storage. The spool is then split
+into bounded ordered content-addressed chunks. Only after every chunk is
+durable does a short transaction CAS-insert or exact-compare the immutable
+registry candidate. Concurrent candidates reuse the existing exact winner;
+divergence for the same registry key is an integrity error. A pre-registry
+crash may leave harmless unreferenced chunks for bounded cleanup. After
+registry insertion, recovery uses only the manifest/chunks and never rereads
+live audit tables.
+
+An exporter whose initial registry lookup races with another exporter keeps
+the same consistent read snapshot it opened before the other export's audit
+rows were committed. Both candidates therefore compute the same manifest.
+This store-first boundary makes self-recursion structural; timestamp filtering
+is forbidden.
+
+### `audit_export_snapshot_chunks`
+
+The ordered manifest stores `(snapshot_id, ordinal)` plus the
+content-addressed chunk reference, canonical chunk hash, byte size, and record
+count. Ordinals are dense and non-negative, references are credential-free,
+aggregate counts/hashes must match the registry, and configured per-chunk and
+total record/byte limits are checked before registry insertion. Raw records
+live in the bounded snapshot store, not Landscape.
+
+### `sink_effect_export_snapshots`
+
+This association stores exactly one `(effect_id, snapshot_id)` for an
+`AUDIT_EXPORT_SNAPSHOT` effect and is forbidden for `PIPELINE_MEMBERS`. Its
+unique effect FK prevents one effect from changing snapshots. Effect identity
+binds the registry key, aggregate manifest/snapshot hash, sink configuration,
+and credential-free target.
 
 ### `sink_effect_attempts`
 
@@ -798,6 +880,42 @@ therefore fail preflight with instructions to use `overwrite` or a sink with a
 target-side marker. This capability reduction is documented in migration and
 release notes.
 
+### Post-run audit export
+
+Audit export never synthesizes pipeline tokens. Before registering an export
+node/effect/operation/call, the export coordinator materializes or reuses the
+typed `AUDIT_EXPORT_SNAPSHOT` registry winner. The effect has zero token
+members, one snapshot association, and an identity over the manifest hash plus
+safe sink target/configuration. It otherwise uses the same inspect, immutable
+plan, attempt, lease, commit, reconcile, and finalization lifecycle.
+
+JSON audit export replays the ordered manifest chunks through an effect-capable
+JSON sink adapter; retries never enumerate live Landscape rows. CSV multifile
+export uses a dedicated create-only directory-bundle adapter: prepare
+reconstructs the complete bundle into a private effect-addressed sibling
+staging directory containing a canonical bundle manifest, and the plan binds
+every relative file hash/size plus one aggregate bundle hash. Commit atomically
+renames only when the target is absent; an exact existing bundle is a no-op /
+reconcile success and a divergent existing bundle fails closed. It never
+promises portable overwrite of a non-empty directory. Platforms/filesystems
+without a proven create-only rename primitive fail preflight; any future
+overwrite mode requires a separately proven native primitive or immutable
+generation directory plus atomically replaced pointer manifest. Parent
+durability is fsynced and reconcile returns exact only for the same bundle
+manifest/identity. The artifact descriptor names one bundle and aggregate
+hash. Direct
+`_export_csv_multifile`, sink `write()`, and sink `flush()` publication are
+removed. Filesystems without the required directory replacement/identity
+semantics and remote sink modes without an exact bundle primitive fail
+preflight before snapshot reservation or I/O.
+
+Tests force crashes before snapshot registration, after registry insertion,
+after external publication, and after finalization; concurrent exporters must
+reuse one registry/effect winner. They also mutate audit tables after snapshot
+registration and prove recovery still emits the original manifest, verify the
+terminal-run witness, and prove no export row can recursively enter its own
+snapshot.
+
 ## Zero-Accepted Effects
 
 Every effect reserves one artifact identity, including a primary group whose
@@ -850,6 +968,10 @@ deleted. Tests use effect-capable doubles.
 
 - Every serializer has configured maximum rows, bytes, staging bytes, and
   bounded lock/network timeouts.
+- Audit-export snapshots have configured total record/byte/chunk limits and
+  per-chunk record/byte limits; consistent-read enumeration writes only to a
+  bounded local spool, and chunk-store I/O starts after the DB transaction
+  closes.
 - Staging paths must remain under an operator-approved root and on the target
   filesystem for atomic local publication.
 - URI validation rejects userinfo and credential-bearing query, fragment, or
@@ -866,6 +988,8 @@ deleted. Tests use effect-capable doubles.
 
 | Seam | Durable fact on restart | Recovery |
 |---|---|---|
+| Before audit snapshot registry | No export effect; possible unreferenced content chunks | Rematerialize from a terminal consistent read; bounded cleanup removes orphans |
+| After audit snapshot registry, before export effect | Immutable manifest/chunks | Reuse registry winner; never reread live audit tables |
 | Before reservation | No effect | Reserve normally |
 | After reservation, predecessor open | Stable queued identity and chain | Wait/recover predecessor; never inspect old head |
 | During inspect / response loss | Stable identity plus intended read | Record response-lost and reinspect before plan CAS |
@@ -913,8 +1037,11 @@ exact bytes/metadata, exact audit attempt history, and convergent recovery.
 - stale-owner commit after takeover converges externally but cannot finalize;
 - lock acquisition order is independent of effect identity;
 - bounded lineage depth/node/fan-in/evidence limits fail before reservation;
-- PRIMARY and FAILSINK bindings are isolated and linked; and
-- no member can be rebound within the same run/sink/role.
+- PRIMARY and FAILSINK bindings are isolated and linked;
+- no member can be rebound within the same run/sink/role;
+- pipeline-member/export-snapshot XOR rejects every mixed or empty shape; and
+- concurrent exporters reuse one snapshot/effect winner without synthetic
+  tokens, even when later export audit rows change the live database.
 
 ### Reconciliation and audit
 
@@ -952,7 +1079,11 @@ exact bytes/metadata, exact audit attempt history, and convergent recovery.
   unsupported DDL mode rejection;
 - Dataverse and Chroma prove durable per-member partial progress and exact
   member reconciliation; and
-- Chroma `skip/error` rejects before reservation/on_start/I/O.
+- Chroma `skip/error` rejects before reservation/on_start/I/O;
+- audit JSON replays only registered manifest chunks; and
+- CSV multifile uses a create-only atomic directory bundle with exact-existing
+  convergence, divergent-existing refusal, crash recovery, and
+  unsupported-platform guards.
 
 ### Schema and regressions
 
@@ -962,6 +1093,8 @@ exact bytes/metadata, exact audit attempt history, and convergent recovery.
   versus finalization, and artifact mutation/read paths;
 - exact 25-to-26 migration, 23-to-24-to-25-to-26 ordered migration, rollback,
   lock contention, duplicate/malformed predecessor refusal, and reopen;
+- real PostgreSQL repeatable-read snapshot winner and concurrent post-snapshot
+  audit-row exclusion, with no DB transaction spanning chunk-store I/O;
 - full sink recovery, diversion, failsink, scheduler handoff, artifact export,
   and checkpoint suites;
 - strict mypy, Ruff, and repository pre-commit hooks.
@@ -986,12 +1119,13 @@ of production execution.
 ## Acceptance Criteria
 
 1. No production sink publication occurs before durable effect, membership,
-   artifact, predecessor, complete prepared plan, and call-intent identity
-   exists.
+   or exact audit-export snapshot association, artifact, predecessor, complete
+   prepared plan, and call-intent identity exists.
 2. Crash/retry at every caller seam produces one externally observable effect
    and one artifact identity.
-3. Membership is complete, ordered by durable ingest/lineage authority, and
-   independent of attempts and caller batch shape.
+3. Pipeline membership is complete, ordered by durable ingest/lineage
+   authority, and independent of attempts and caller batch shape; audit-export
+   input has zero token members and exactly one immutable snapshot.
 4. Concurrent same-effect calls converge; generation fences Landscape
    finalization; stale owners cannot mutate audit state; all composed
    PostgreSQL paths obey the one token/state/stream/effect/artifact-operation
@@ -1016,3 +1150,8 @@ of production execution.
    is equivalent; epoch 27 remains unused.
 13. Focused and broad sink/recovery suites, real PostgreSQL probes, strict
     mypy, Ruff, and pre-commit hooks pass.
+14. Audit export materializes one bounded terminal-run repeatable-read snapshot
+    before export audit rows, closes the DB transaction before chunk-store I/O,
+    binds the credential-free signer key identity, reuses one concurrent
+    winner, and recovers JSON/CSV publication without live-table rereads or
+    direct `write()`/`flush()`.

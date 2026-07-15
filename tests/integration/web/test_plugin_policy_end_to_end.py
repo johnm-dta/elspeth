@@ -19,6 +19,7 @@ import sqlalchemy as sa
 from fastapi import Request, Response
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
 from elspeth.core.secrets import resolve_secret_refs
@@ -866,7 +867,7 @@ def test_server_profile_scope_survives_lowering_and_same_name_user_shadow(
     )
 
     resolved, evidence = resolve_secret_refs(
-        {"options": dict(lowered.executable_options)},
+        {"options": deep_thaw(lowered.executable_options)},
         resolver,
         "alice",
     )

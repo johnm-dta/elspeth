@@ -2,7 +2,7 @@
 
 Use this runbook when a web session schema-bootstrap change requires deleting or archiving a stale `sessions.db`. Historically the session database was reset in isolation from the Landscape audit database, payload storage, blobs, and Filigree tracker data. **From the Phase 4 hello-world tutorial schema cutover onward, any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must coordinate both databases in one service-stop window; follow the declared migration/reset policy for each epoch instead of assuming both are always destructive.** Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
 
-## Current Cutover: 0.7.1 (session epoch 27 and Landscape epoch 24)
+## Current Cutover: 0.7.1 (session epoch 27 and Landscape epoch 25)
 
 0.7.1 advances `SESSION_SCHEMA_EPOCH` from 26 to 27 so
 `user_preferences.freeform_intro_dismissed_at` can persist the account-wide
@@ -11,23 +11,29 @@ freeform-primer preference. The universal web plugin-policy work also advances
 table is optional per run but required in the schema: web runs receive one
 policy-evidence row atomically with the run, attribution, and leader records;
 CLI runs receive none. Database hardening then advances Landscape from epoch 23
-to 24 and adds `tokens(row_id, run_id) -> rows(row_id, run_id)`.
+to 24 and adds `tokens(row_id, run_id) -> rows(row_id, run_id)`, then advances
+to 25 with a partial unique index over non-null
+`artifacts(run_id, idempotency_key)` pairs.
 
 Archive and recreate the session database and its sidecars under the
 service-stop procedure below. The Landscape action depends on its starting
 shape:
 
-- An exact epoch-23 SQLite database receives the narrow automatic epoch-24
-  migration during writable schema-managing initialization. ELSPETH validates
-  the complete predecessor shape and token/row ownership before rebuilding
-  `tokens`; any mismatch leaves epoch 23 unchanged and requires operator
-  investigation.
+- An exact epoch-23 SQLite database receives the ordered automatic epoch-24 and
+  epoch-25 migrations during writable schema-managing initialization. ELSPETH
+  validates each complete predecessor shape, verifies token/row ownership
+  before rebuilding `tokens`, then refuses duplicate non-null artifact
+  logical-effect keys before creating the partial unique index.
+- An exact epoch-24 SQLite database receives only the narrow automatic epoch-25
+  artifact-index migration. Duplicate logical-effect keys or any other shape
+  mismatch leave the schema and epoch unchanged for operator investigation.
 - Any pre-23 SQLite database remains stale and must follow the approved
-  archive/export and recreation path; the epoch-24 migrator does not skip
+  archive/export and recreation path; the ordered migrator does not skip
   historical boundaries.
 - PostgreSQL missing either the epoch-23 policy table or the epoch-24 composite
-  FK is stale. A schema owner must apply an approved migration or recreate and
-  initialize the schema. The runtime role remains DML-only.
+  FK, or the epoch-25 artifact index, is stale. A schema owner must apply an
+  approved migration or recreate and initialize the schema. The runtime role
+  remains DML-only.
 
 Validate-only startup and doctor must leave stale databases unchanged. Do not
 use `create_all`, `--init-schema`, or code rollback as an improvised repair
@@ -41,8 +47,8 @@ reset requirement and database-operator approval; previous release identity
 and epochs; forward and backward compatibility decisions; and an explicit
 `rollback_permitted` decision with evidence. Epoch-22 code is not compatible
 with a freshly recreated current database, and epoch-23 code rejects the newer
-epoch-24 SQLite stamp, so rollback is `no` unless a later approved record proves
-otherwise. Plans 10 and 12 must cite the epoch-24 record when binding candidate
+epoch-25 SQLite stamp, so rollback is `no` unless a later approved record proves
+otherwise. Plans 10 and 12 must cite the epoch-25 record when binding candidate
 and rollback decisions.
 
 Deployments crossing the 0.7.0 boundary from an older release must also account
@@ -219,12 +225,14 @@ policy requires a reset; a simultaneous session/Landscape epoch change does not
 by itself authorize deleting both databases. Historical Phase 4 and Phase 5b
 cutovers required the reset because no supported Landscape migration crossed
 those boundaries. For the current 0.7.1 cutover, reset the session database,
-but let an exact epoch-23 SQLite Landscape migrate automatically to epoch 24 on
-writable schema-managing startup. Read-only and `create_tables=False` inspection
-opens report incompatibility without mutation. Pre-23 SQLite still follows this
-archive/delete/recreate procedure. PostgreSQL is never auto-migrated by runtime
-startup: the schema owner must apply the approved epoch-24 composite-FK DDL or
-recreate and initialize the Landscape schema.
+but let an exact epoch-23 SQLite Landscape migrate automatically through epoch
+24 to epoch 25 on writable schema-managing startup; an exact epoch-24 database
+takes only the epoch-25 artifact-index step. Read-only and
+`create_tables=False` inspection opens report incompatibility without mutation.
+Pre-23 SQLite still follows this archive/delete/recreate procedure. PostgreSQL
+is never auto-migrated by runtime startup: the schema owner must apply the
+approved epoch-24 composite-FK and epoch-25 partial-index DDL or recreate and
+initialize the Landscape schema.
 
 Historical rationale remains unchanged: Phase 4 changed both epochs for
 tutorial completion and run/audit-story replay. Phase 5b also required deleting
@@ -245,7 +253,8 @@ Authority: current source epoch constants and schema tests:
 2. The approved cutover record explicitly requires destructive Landscape
    recreation. Historical examples include the Phase 4 tutorial dual-schema
    cutover, Phase 5b schema changes, and the 0.7.0 epoch-26 / epoch-22 release
-   cutover. The exact SQLite epoch-23→24 path does not satisfy this precondition.
+   cutover. The exact SQLite epoch-23→24→25 and epoch-24→25 paths do not satisfy
+   this precondition.
 3. The operator has resolved the active Landscape DB path per "Resolve Database Paths" above:
    - If `ELSPETH_WEB__LANDSCAPE_URL` is set, that is the Landscape URL.
    - Otherwise the default is `${ELSPETH_WEB__DATA_DIR}/runs/audit.db`, or `data/runs/audit.db` if `ELSPETH_WEB__DATA_DIR` is unset.

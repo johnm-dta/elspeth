@@ -1,0 +1,390 @@
+"""Epoch-25 SQLite migration proofs for artifact logical-effect identity."""
+
+from __future__ import annotations
+
+import sqlite3
+import threading
+from pathlib import Path
+from typing import Any
+
+import pytest
+from sqlalchemy import Engine, create_engine, inspect
+from sqlalchemy.pool import QueuePool, StaticPool
+
+from elspeth.contracts.enums import NodeType
+from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.schema import SchemaConfig
+from elspeth.core.landscape import database as landscape_database
+from elspeth.core.landscape.database import LandscapeDB, LandscapeSchemaShape, SchemaCompatibilityError, probe_schema_shape
+from elspeth.core.landscape.factory import RecorderFactory
+from tests.unit.core.landscape.test_token_ownership_run_scope import _rewrite_tokens_as_epoch_23
+
+_ARTIFACT_INDEX = "uq_artifacts_run_idempotency_key"
+_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+
+
+def _seed_current_database(db_path: Path) -> str:
+    url = f"sqlite:///{db_path}"
+    db = LandscapeDB(url)
+    try:
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(
+            config={},
+            canonical_version="v1",
+            run_id="run-artifact-migration",
+            openrouter_catalog_sha256="0" * 64,
+            openrouter_catalog_source="bundled",
+        )
+        factory.data_flow.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            node_id="source-artifact-migration",
+            schema_config=_SCHEMA,
+        )
+        factory.data_flow.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0",
+            config={},
+            node_id="sink-artifact-migration",
+            schema_config=_SCHEMA,
+        )
+        row = factory.data_flow.create_row(
+            run_id=run.run_id,
+            source_node_id="source-artifact-migration",
+            row_index=0,
+            data={"value": 1},
+            row_id="row-artifact-migration",
+            source_row_index=0,
+            ingest_sequence=0,
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-artifact-migration")
+        state = factory.execution.begin_node_state(
+            token_id=token.token_id,
+            node_id="sink-artifact-migration",
+            run_id=run.run_id,
+            step_index=0,
+            input_data={"value": 1},
+            state_id="state-artifact-migration",
+        )
+        factory.execution.register_artifact(
+            run_id=run.run_id,
+            state_id=state.state_id,
+            sink_node_id="sink-artifact-migration",
+            artifact_type="csv",
+            path="/output/migration.csv",
+            content_hash="sha256:migration",
+            size_bytes=128,
+            artifact_id="artifact-migration-original",
+            idempotency_key="run-artifact-migration:row-artifact-migration:csv_sink",
+        )
+    finally:
+        db.close()
+    return url
+
+
+def _rewrite_as_epoch_24(engine: Engine) -> None:
+    with engine.begin() as conn:
+        conn.exec_driver_sql(f"DROP INDEX {_ARTIFACT_INDEX}")
+        conn.exec_driver_sql("PRAGMA user_version = 24")
+
+
+def _epoch_and_schema(db_path: Path) -> tuple[int, list[tuple[object, ...]]]:
+    with sqlite3.connect(db_path) as conn:
+        epoch = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        schema = conn.execute(
+            """
+            SELECT type, name, tbl_name, sql
+            FROM sqlite_schema
+            WHERE name NOT LIKE 'sqlite_%'
+            ORDER BY type, name
+            """
+        ).fetchall()
+    return epoch, schema
+
+
+def _artifact_indexes(engine: Engine) -> set[str]:
+    return {str(index["name"]) for index in inspect(engine).get_indexes("artifacts")}
+
+
+def _artifact_index_shapes(engine: Engine) -> set[tuple[str, tuple[str, ...], bool, str]]:
+    return {
+        (
+            str(index["name"]),
+            tuple(str(column) for column in index["column_names"]),
+            bool(index["unique"]),
+            str(index.get("dialect_options", {}).get("sqlite_where", "")),
+        )
+        for index in inspect(engine).get_indexes("artifacts")
+    }
+
+
+def test_epoch_24_migrates_to_25_and_preserves_artifact(tmp_path: Path) -> None:
+    db_path = tmp_path / "forward.db"
+    url = _seed_current_database(db_path)
+    predecessor = create_engine(url)
+    _rewrite_as_epoch_24(predecessor)
+    predecessor.dispose()
+
+    migrated = LandscapeDB(url)
+    try:
+        with migrated.engine.connect() as conn:
+            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 25
+            artifact = conn.exec_driver_sql("SELECT artifact_id, content_hash FROM artifacts WHERE idempotency_key IS NOT NULL").one()
+        assert tuple(artifact) == ("artifact-migration-original", "sha256:migration")
+        assert _ARTIFACT_INDEX in _artifact_indexes(migrated.engine)
+        assert probe_schema_shape(migrated.engine) is LandscapeSchemaShape.MATCHES
+    finally:
+        migrated.close()
+
+
+def test_epoch_23_migrates_sequentially_through_24_to_25(tmp_path: Path) -> None:
+    db_path = tmp_path / "sequential.db"
+    url = _seed_current_database(db_path)
+    predecessor = create_engine(url)
+    _rewrite_as_epoch_24(predecessor)
+    _rewrite_tokens_as_epoch_23(predecessor)
+    predecessor.dispose()
+
+    migrated = LandscapeDB(url)
+    try:
+        with migrated.engine.connect() as conn:
+            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 25
+            token_fks = conn.exec_driver_sql("PRAGMA foreign_key_list(tokens)").fetchall()
+        assert any(str(row[2]) == "rows" and str(row[3]) == "run_id" and str(row[4]) == "run_id" for row in token_fks)
+        assert _ARTIFACT_INDEX in _artifact_indexes(migrated.engine)
+        assert probe_schema_shape(migrated.engine) is LandscapeSchemaShape.MATCHES
+    finally:
+        migrated.close()
+
+
+def test_epoch_24_migrated_schema_matches_fresh_schema(tmp_path: Path) -> None:
+    migrated_path = tmp_path / "migrated.db"
+    url = _seed_current_database(migrated_path)
+    predecessor = create_engine(url)
+    _rewrite_as_epoch_24(predecessor)
+    predecessor.dispose()
+
+    migrated = LandscapeDB(url)
+    fresh = LandscapeDB(f"sqlite:///{tmp_path / 'fresh.db'}")
+    try:
+        assert probe_schema_shape(migrated.engine) is LandscapeSchemaShape.MATCHES
+        assert probe_schema_shape(fresh.engine) is LandscapeSchemaShape.MATCHES
+        migrated_index = _artifact_index_shapes(migrated.engine)
+        fresh_index = _artifact_index_shapes(fresh.engine)
+        assert migrated_index == fresh_index
+    finally:
+        migrated.close()
+        fresh.close()
+
+
+@pytest.mark.parametrize("divergent", [False, True], ids=["identical", "divergent"])
+def test_epoch_24_duplicate_key_refuses_without_mutation(tmp_path: Path, divergent: bool) -> None:
+    db_path = tmp_path / f"duplicate-{'divergent' if divergent else 'identical'}.db"
+    url = _seed_current_database(db_path)
+    predecessor = create_engine(url)
+    _rewrite_as_epoch_24(predecessor)
+    with predecessor.begin() as conn:
+        conn.exec_driver_sql(
+            """
+            INSERT INTO artifacts (
+                artifact_id, run_id, produced_by_state_id, sink_node_id,
+                artifact_type, path_or_uri, content_hash, size_bytes,
+                idempotency_key, created_at
+            )
+            SELECT
+                'artifact-migration-duplicate', run_id, produced_by_state_id,
+                sink_node_id, artifact_type, path_or_uri,
+                CASE WHEN ? THEN 'sha256:divergent' ELSE content_hash END,
+                size_bytes, idempotency_key, created_at
+            FROM artifacts
+            WHERE artifact_id = 'artifact-migration-original'
+            """,
+            (divergent,),
+        )
+    predecessor.dispose()
+    before = _epoch_and_schema(db_path)
+
+    with pytest.raises(AuditIntegrityError, match=r"duplicate.*idempotency"):
+        LandscapeDB(url)
+
+    assert _epoch_and_schema(db_path) == before
+    assert before[0] == 24
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM artifacts").fetchone() == (2,)
+
+
+def test_epoch_24_other_shape_divergence_refuses_before_mutation(tmp_path: Path) -> None:
+    db_path = tmp_path / "divergent-shape.db"
+    url = _seed_current_database(db_path)
+    predecessor = create_engine(url)
+    _rewrite_as_epoch_24(predecessor)
+    with predecessor.begin() as conn:
+        conn.exec_driver_sql("DROP INDEX ix_checkpoints_run_sequence_unique")
+    predecessor.dispose()
+    before = _epoch_and_schema(db_path)
+
+    with pytest.raises(SchemaCompatibilityError, match=r"checkpoints.*index"):
+        LandscapeDB(url)
+
+    assert _epoch_and_schema(db_path) == before
+
+
+def test_epoch_24_concurrent_openers_converge_on_completed_migration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "concurrent.db"
+    url = _seed_current_database(db_path)
+    predecessor = create_engine(url)
+    _rewrite_as_epoch_24(predecessor)
+    predecessor.dispose()
+
+    original_get_epoch = LandscapeDB._get_sqlite_schema_epoch
+    opener_b_read_epoch_24 = threading.Event()
+    opener_a_finished = threading.Event()
+    opener_b_waited = False
+    wait_guard = threading.Lock()
+
+    def _synchronized_get_epoch(db: LandscapeDB) -> int:
+        nonlocal opener_b_waited
+        epoch = original_get_epoch(db)
+        if threading.current_thread().name == "epoch-25-opener-b" and epoch == 24:
+            with wait_guard:
+                should_wait = not opener_b_waited
+                opener_b_waited = True
+            if should_wait:
+                opener_b_read_epoch_24.set()
+                if not opener_a_finished.wait(timeout=15):
+                    raise AssertionError("opener A did not complete the epoch-25 migration")
+        return epoch
+
+    monkeypatch.setattr(LandscapeDB, "_get_sqlite_schema_epoch", _synchronized_get_epoch)
+    opened: list[LandscapeDB] = []
+    errors: list[BaseException] = []
+    result_guard = threading.Lock()
+
+    def _open(*, signal_finished: bool) -> None:
+        try:
+            db = LandscapeDB(url)
+            with result_guard:
+                opened.append(db)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            with result_guard:
+                errors.append(exc)
+        finally:
+            if signal_finished:
+                opener_a_finished.set()
+
+    opener_b = threading.Thread(target=_open, kwargs={"signal_finished": False}, name="epoch-25-opener-b")
+    opener_b.start()
+    assert opener_b_read_epoch_24.wait(timeout=15)
+    opener_a = threading.Thread(target=_open, kwargs={"signal_finished": True}, name="epoch-25-opener-a")
+    opener_a.start()
+    opener_a.join(timeout=15)
+    opener_b.join(timeout=15)
+
+    try:
+        assert not opener_a.is_alive()
+        assert not opener_b.is_alive()
+        assert errors == []
+        assert len(opened) == 2
+        assert _ARTIFACT_INDEX in _artifact_indexes(opened[0].engine)
+    finally:
+        for db in opened:
+            db.close()
+
+
+def test_epoch_24_migration_succeeds_with_single_connection_queue_pool(tmp_path: Path) -> None:
+    db_path = tmp_path / "queue-size-one.db"
+    url = _seed_current_database(db_path)
+    predecessor = create_engine(url)
+    _rewrite_as_epoch_24(predecessor)
+    predecessor.dispose()
+
+    migrated = LandscapeDB.from_url(url, pool_size=1, max_overflow=0, pool_timeout=0.25)
+    try:
+        assert isinstance(migrated.engine.pool, QueuePool)
+        assert _ARTIFACT_INDEX in _artifact_indexes(migrated.engine)
+    finally:
+        migrated.close()
+
+
+@pytest.mark.parametrize("read_only", [False, True], ids=["inspection", "read-only"])
+def test_epoch_24_non_schema_managing_open_is_non_mutating(tmp_path: Path, read_only: bool) -> None:
+    db_path = tmp_path / f"nonmutating-{'ro' if read_only else 'inspect'}.db"
+    url = _seed_current_database(db_path)
+    predecessor = create_engine(url)
+    _rewrite_as_epoch_24(predecessor)
+    predecessor.dispose()
+    before = _epoch_and_schema(db_path)
+
+    with pytest.raises(SchemaCompatibilityError, match=r"epoch.*24|idempotency.*index"):
+        LandscapeDB.from_url(url, create_tables=False, read_only=read_only)
+
+    assert _epoch_and_schema(db_path) == before
+
+
+def test_epoch_24_static_pool_failure_rolls_back_index_and_epoch(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "static-pool-rollback.db"
+    url = _seed_current_database(db_path)
+    predecessor = create_engine(url)
+    _rewrite_as_epoch_24(predecessor)
+    predecessor.dispose()
+    before = _epoch_and_schema(db_path)
+    statements: list[str] = []
+
+    class _CursorProxy:
+        def __init__(self, cursor: sqlite3.Cursor) -> None:
+            self._cursor = cursor
+
+        def execute(self, statement: str, parameters: Any = ()) -> _CursorProxy:
+            normalized = " ".join(statement.split())
+            self._cursor.execute(statement, parameters)
+            statements.append(normalized)
+            if normalized == "PRAGMA user_version = 25":
+                raise sqlite3.OperationalError("injected failure after epoch-25 index creation")
+            return self
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._cursor, name)
+
+    class _ConnectionProxy:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self._connection = connection
+
+        @property
+        def isolation_level(self) -> str | None:
+            return self._connection.isolation_level
+
+        @isolation_level.setter
+        def isolation_level(self, value: str | None) -> None:
+            self._connection.isolation_level = value
+
+        def cursor(self) -> _CursorProxy:
+            return _CursorProxy(self._connection.cursor())
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._connection, name)
+
+    def _creator() -> _ConnectionProxy:
+        return _ConnectionProxy(sqlite3.connect(db_path, check_same_thread=False))
+
+    expected_index_ddl = " ".join(landscape_database._SQLITE_EPOCH_25_ARTIFACT_INDEX_DDL.split())
+    with pytest.raises(sqlite3.OperationalError, match="after epoch-25 index creation"):
+        LandscapeDB.from_url(
+            url,
+            poolclass=StaticPool,
+            creator=_creator,
+        )
+
+    assert expected_index_ddl in statements
+    assert statements.index(expected_index_ddl) < statements.index("PRAGMA user_version = 25")
+    assert _epoch_and_schema(db_path) == before
+    assert before[0] == 24

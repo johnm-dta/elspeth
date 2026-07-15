@@ -1463,9 +1463,9 @@ countersigns it. Set `SCENARIO_A_COMPATIBILITY_RECORD_FILE` and
   "rollback_doctor_task_definition": "exact-rollback-doctor-task-definition-arn",
   "previous_package_version": "0.7.0",
   "schema_facts": {
-    "candidate": {"session_epoch": 27, "landscape_epoch": 24, "run_web_plugin_policy_present": true},
+    "candidate": {"session_epoch": 27, "landscape_epoch": 25, "run_web_plugin_policy_present": true},
     "previous": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": true},
-    "structural_changes": "landscape_epoch_23_to_24_token_ownership_fk",
+    "structural_changes": "landscape_epoch_23_to_25_token_ownership_and_artifact_idempotency",
     "semantics_only_changes": "none",
     "archive_export_decision": "required_before_forward_migration",
     "destructive_reset_required": false
@@ -1491,12 +1491,12 @@ Scenario A uses the same field set with `scenario_id: "A"`; empty strings for
 
 The controller binds the record to the manifest, image digest, exact task
 and doctor definitions, candidate and previous package/image identities,
-session epoch 27, Landscape epoch 24 and `run_web_plugin_policy` presence,
+session epoch 27, Landscape epoch 25 and `run_web_plugin_policy` presence,
 change/reset facts, decision, two distinct approvals, and expiry. It
 stores only a sanitized receipt and document hash. Reopen and revalidate the
 raw record before init-capable doctor, ordinary doctor, candidate deploy, and
 any later deployment action. The 0.7.0 image understands Landscape epoch 23,
-not epoch 24: the candidate can migrate an exact SQLite predecessor forward,
+not epochs 24 or 25: the candidate can migrate an exact SQLite predecessor forward,
 but the previous image cannot reopen the migrated database. Scenario B rollback
 is therefore forbidden after migration. Unknown or unapproved compatibility is NO-GO;
 expiry or identity drift is also NO-GO.
@@ -2553,24 +2553,27 @@ directly to `sanitize-evidence`; raw logs are never printed or persisted.
 
 `--init-schema` may initialize the session schema only when it is MISSING; a
 partially present session schema is STALE. It may initialize a missing
-Landscape schema, but it is not a general structural migration tool. An exact
-epoch-23 SQLite Landscape is the sole current exception: writable
-schema-managing startup validates the complete predecessor before checking out
-the raw migration connection. It then uses `BEGIN IMMEDIATE` to serialize the
-locked epoch recheck and `tokens` rebuild with the epoch-24 composite ownership
-FK, committing the schema plus epoch atomically. Read-only and
-`create_tables=False` inspection opens never migrate it. PostgreSQL has no
-runtime auto-migration: the schema owner must apply the approved epoch-24 DDL
-or recreate/initialize before the candidate starts. Aurora detection is
-structural-only: a semantics-only schema-epoch change can still appear CURRENT.
+Landscape schema, but it is not a general structural migration tool. Exact
+epoch-23 and epoch-24 SQLite Landscapes are the sole current exceptions.
+Writable schema-managing startup validates each complete predecessor before
+checking out the raw migration connection. It uses `BEGIN IMMEDIATE` first to
+serialize the epoch-24 `tokens` rebuild and composite ownership FK, then to add
+the epoch-25 partial unique artifact-idempotency index. Each schema change and
+its fixed epoch target commit atomically; duplicate non-null artifact keys are
+refused without choosing or deleting audit data. Read-only and
+`create_tables=False` inspection opens never migrate. PostgreSQL has no runtime
+auto-migration: the schema owner must apply the approved epoch-24 FK and
+epoch-25 partial-index DDL or recreate/initialize before the candidate starts.
+Aurora detection is structural-only: a semantics-only schema-epoch change can
+still appear CURRENT.
 
 Attach the approved release/schema compatibility record before deployment.
 AWS ECS validate-only startup must fail closed before uvicorn binds for
 missing, partial, stale, or incompatible state. Code rollback cannot undo an
 incompatible database schema. STALE/incompatible state requires the
 database-operator-owned archive decision and drop/recreate procedure followed
-by `--init-schema`; never automate it. Archive before the SQLite 23→24 forward
-migration. Once epoch 24 commits, rollback to the 0.7.0 epoch-23 image is
+by `--init-schema`; never automate it. Archive before the SQLite 23→24→25
+forward migration. Once epoch 24 or 25 commits, rollback to the 0.7.0 epoch-23 image is
 forbidden; restore the matched epoch-23 archive with the old image or deploy a
 newer schema-compatible image instead.
 
@@ -2908,7 +2911,7 @@ Retain only allowlisted checks, classes, counts, and hashes.
 ### 7. Prove rollback refusal without crossing the schema stop
 
 The current upgrade record proves the opposite of rollback authorization. Once
-the candidate has migrated Landscape from epoch 23 to 24, the 0.7.0 image must
+the candidate has migrated Landscape from epoch 23 through 24 to 25, the 0.7.0 image must
 never be deployed against that database. Scenario B therefore exercises a
 fail-closed rollback refusal and forward recovery: revalidate and persist the
 sanitized compatibility receipt, prove the candidate task remains the active
@@ -2930,7 +2933,7 @@ if test "$DEPLOYMENT_MODE" = upgrade; then
     .backward_compatible == false
     and .rollback_permitted == false
     and .schema_facts.previous.landscape_epoch == 23
-    and .schema_facts.candidate.landscape_epoch == 24
+    and .schema_facts.candidate.landscape_epoch == 25
   ' "$ROLLBACK_REFUSAL_RECEIPT" >/dev/null
   persist_sanitized_receipt "$ACTIVE_SCENARIO_ID" compatibility-record \
     "$COMPATIBILITY_RECORD_SHA256" "$ROLLBACK_REFUSAL_RECEIPT" >/dev/null
@@ -2948,7 +2951,7 @@ fi
 
 The compatibility receipt plus `candidate-after-rollback-refusal` evidence is
 the refusal/forward-recovery record. If the candidate is unhealthy, keep traffic
-drained and repair forward with epoch-24-compatible code, or restore the matched
+drained and repair forward with epoch-25-compatible code, or restore the matched
 epoch-23 database archive before deploying the previous image. Never roll old
 code over the migrated schema.
 

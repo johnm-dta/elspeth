@@ -187,7 +187,7 @@ before creating a run; a failed check returns a typed HTTP 409.
 Every web run records the policy hash, principal snapshot hash, authorized and
 available IDs, selected implementations, safe profile aliases, plugin code
 identities, and closed decision codes introduced in Landscape epoch 23 and
-retained in epoch 24. Readiness,
+retained in epoch 25. Readiness,
 errors, logs, telemetry, persisted state, and exports omit private profile
 bindings.
 
@@ -1019,7 +1019,27 @@ landscape:
 | `dump_to_jsonl_include_payloads` | bool | `false` | Include request/response bodies in journal |
 | `dump_to_jsonl_payload_base_path` | string | (from payload_store) | Payload store path for inlining |
 
-### Landscape schema epoch 24
+### Landscape schema epoch 25
+
+Landscape epoch 25 makes artifact logical-effect identity structural. Fresh
+SQLite and PostgreSQL schemas carry a partial unique index on
+`artifacts(run_id, idempotency_key)` for rows whose idempotency key is non-null.
+
+A writable SQLite Landscape database at exactly epoch 24 is upgraded in place
+on schema-managing initialization. ELSPETH validates the complete epoch-24
+shape before checking out the migration connection, takes `BEGIN IMMEDIATE`,
+and refuses to migrate if any non-null `(run_id, idempotency_key)` pair is
+duplicated. Otherwise the index and `user_version=25` commit atomically. An
+exact epoch-23 database takes the ordered 23→24 ownership migration followed by
+24→25. Read-only and inspection-only opens never migrate.
+
+PostgreSQL receives the partial unique index through the schema-owner path. An
+existing PostgreSQL schema missing it is stale and requires an approved
+operator migration or recreation; the runtime role remains DML-only. Code that
+only understands epoch 23 or 24 must not be rolled back over an epoch-25
+database.
+
+#### Historical epoch-24 token ownership
 
 Landscape epoch 24 makes the persisted row authoritative for token run
 ownership. Fresh SQLite and PostgreSQL schemas enforce

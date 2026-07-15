@@ -5238,7 +5238,7 @@ def test_compatibility_record_is_bound_to_resolved_scenario_and_stored_by_hash(t
                 "landscape_epoch": 23,
                 "run_web_plugin_policy_present": True,
             },
-            "structural_changes": "landscape_epoch_23_to_24_token_ownership_fk",
+            "structural_changes": "landscape_epoch_23_to_25_token_ownership_and_artifact_idempotency",
             "semantics_only_changes": "none",
             "archive_export_decision": "required_before_forward_migration",
             "destructive_reset_required": False,

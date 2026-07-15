@@ -20,13 +20,15 @@ from 26 to 27 to persist account-wide dismissal of the new freeform
 introduction. The integrated AWS runtime-readiness candidate also advances the
 Landscape audit schema from `SQLITE_SCHEMA_EPOCH` 22 to 23 for immutable web
 plugin-policy evidence. Database hardening then advances Landscape from 23 to
-24 with `tokens(row_id, run_id) -> rows(row_id, run_id)`. An exact epoch-23
-SQLite Landscape is automatically migrated only by writable schema-managing
-startup; PostgreSQL requires the approved schema-owner migration or recreation
-path, and older SQLite epochs retain their documented destructive boundary.
-Epoch-23 code cannot reopen an epoch-24 database, so application rollback after
-the migration is forbidden unless the matched pre-migration database archive is
-restored with the old image.
+24 with `tokens(row_id, run_id) -> rows(row_id, run_id)`, then to 25 with a
+partial unique index over non-null artifact logical-effect keys. An exact
+epoch-23 SQLite Landscape is automatically migrated through both ordered steps;
+an exact epoch-24 database takes only the artifact-index step. Migration occurs
+only during writable schema-managing startup. PostgreSQL requires the approved
+schema-owner migration or recreation path, and older SQLite epochs retain their
+documented destructive boundary. Epoch-23 and epoch-24 code cannot reopen an
+epoch-25 database, so application rollback after migration is forbidden unless
+the matched pre-migration database archive is restored with the old image.
 
 ### Added
 
@@ -71,11 +73,12 @@ restored with the old image.
   preferences.
 - **AWS deployments use an explicit compatibility boundary** — the supported
   profile is one web task at a time. An exact SQLite Landscape epoch 23 is
-  archived and automatically migrated forward to epoch 24; PostgreSQL follows
-  the approved schema-owner migration or recreation path. Older unsupported
+  archived and automatically migrated through epoch 24 to epoch 25; an exact
+  epoch-24 database takes the final artifact-index step. PostgreSQL follows the
+  approved schema-owner migration or recreation path. Older unsupported
   starting epochs retain their historical archive/export and drop/recreate
-  boundary. Mixed-version rollout and rollback to epoch-23 code after the
-  epoch-24 migration remain forbidden.
+  boundary. Mixed-version rollout and rollback to epoch-23 or epoch-24 code
+  after migration remain forbidden.
 
 ### Fixed
 

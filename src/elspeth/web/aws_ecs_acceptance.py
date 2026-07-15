@@ -7678,7 +7678,9 @@ def validate_compatibility_record(
             if scenario_id == "B"
             else None
         ),
-        "structural_changes": "landscape_epoch_23_to_24_token_ownership_fk" if scenario_id == "B" else "initial_create",
+        "structural_changes": (
+            "landscape_epoch_23_to_25_token_ownership_and_artifact_idempotency" if scenario_id == "B" else "initial_create"
+        ),
         "semantics_only_changes": "none",
         "archive_export_decision": "required_before_forward_migration" if scenario_id == "B" else "not_applicable",
         "destructive_reset_required": False,
@@ -7846,7 +7848,9 @@ def _validate_compatibility_receipt(
             if scenario_id == "B"
             else None
         ),
-        "structural_changes": "landscape_epoch_23_to_24_token_ownership_fk" if scenario_id == "B" else "initial_create",
+        "structural_changes": (
+            "landscape_epoch_23_to_25_token_ownership_and_artifact_idempotency" if scenario_id == "B" else "initial_create"
+        ),
         "semantics_only_changes": "none",
         "archive_export_decision": "required_before_forward_migration" if scenario_id == "B" else "not_applicable",
         "destructive_reset_required": False,

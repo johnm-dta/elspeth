@@ -22,9 +22,11 @@ coordinator completes Plan 12 and performs the planned final fast-forward.
   documentation indexes identify the 0.7.1 line.
 - `CHANGELOG.md` contains the release branch's Composer notes and the integrated
   schema-cutover correction; Plan 12 still owns the final AWS programme entry.
-- `SESSION_SCHEMA_EPOCH` is 27 and `SQLITE_SCHEMA_EPOCH` is 24. The integrated
+- `SESSION_SCHEMA_EPOCH` is 27 and `SQLITE_SCHEMA_EPOCH` is 25. The integrated
   candidate requires the documented two-database cutover from 0.7.0; exact
-  epoch-23 SQLite Landscape databases take the narrow token-ownership migration.
+  epoch-23 SQLite Landscape databases take the ordered token-ownership and
+  artifact-idempotency migrations, while exact epoch-24 databases take only the
+  artifact-index step.
 - No 0.7.1 tag or final release candidate has been cut.
 
 ## In Flight

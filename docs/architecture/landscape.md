@@ -1,6 +1,6 @@
 # Landscape System Architecture
 
-Current as of 2026-07-14 for the 0.7.1 release line.
+Current as of 2026-07-16 for the 0.7.1 release line.
 
 Landscape is ELSPETH's audit database and lineage read model. It records run
 configuration, source rows, DAG nodes and edges, token lineage, node execution
@@ -21,7 +21,7 @@ Measured from this checkout on 2026-07-08:
 | Python lines in `src/elspeth/core/landscape/` | 22,078 |
 | SQLAlchemy Core tables | 29 |
 | MCP Landscape analysis tools | 27 |
-| Schema epoch | 22 |
+| Schema epoch | 25 |
 
 The inventory above is intentionally date-stamped. Re-run these checks before
 using the numbers in release material:
@@ -130,6 +130,14 @@ the same `(run_id, idempotency_key)` must repeat all immutable effect fields:
 `artifact_id` and `created_at`; a divergent retry raises a Tier-1 audit
 integrity error without overwriting the durable evidence. `artifact_id` and
 `created_at` are result identity fields, not caller-controlled conflict fields.
+
+Schema epoch 25 installs this partial unique index. Writable SQLite startup
+migrates an exact epoch-24 predecessor under `BEGIN IMMEDIATE`, refuses any
+existing duplicate non-null `(run_id, idempotency_key)` pair without choosing
+or deleting audit data, and commits the index and epoch stamp atomically. An
+exact epoch-23 database first takes the independently atomic token-ownership
+migration to epoch 24, then this epoch-25 step. Read-only and inspection-only
+opens never migrate. PostgreSQL uses the approved schema-owner path.
 
 This repository contract deduplicates audit registration after an effect is
 described. Production sink execution currently omits the key, and artifact

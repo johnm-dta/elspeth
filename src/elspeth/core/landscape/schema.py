@@ -150,6 +150,9 @@ def _optional_enum_in_check(column_name: str, enum_type: type[StrEnum]) -> str:
 #        a mismatch preflight; all older epochs retain the recreate boundary.
 #   25 → Artifact logical-effect idempotency: non-null artifact keys are unique
 #        within a run, so retries converge on one immutable audit identity.
+#        Populated exact epoch-24 SQLite databases receive a narrow,
+#        transactional partial-index migration after a duplicate preflight;
+#        exact epoch-23 databases take the ordered 23→24→25 chain.
 SQLITE_SCHEMA_EPOCH = 25
 
 schema_identity_table = create_schema_identity_table(metadata)

@@ -78,6 +78,7 @@ def _rewrite_tokens_as_epoch_23(engine: Engine) -> None:
         cursor.execute("CREATE INDEX ix_tokens_expand_group_id ON tokens (expand_group_id)")
         cursor.execute("CREATE INDEX ix_tokens_row_id ON tokens (row_id)")
         cursor.execute("CREATE INDEX ix_tokens_run_id ON tokens (run_id)")
+        cursor.execute("DROP INDEX IF EXISTS uq_artifacts_run_idempotency_key")
         cursor.execute("PRAGMA user_version = 23")
         raw.commit()
         cursor.execute("PRAGMA foreign_keys = ON")
@@ -295,8 +296,8 @@ def _injected_migration_db(
     return db
 
 
-def test_epoch_24_declares_token_row_run_ownership_for_sqlite_and_postgres() -> None:
-    assert SQLITE_SCHEMA_EPOCH == 24
+def test_current_epoch_preserves_epoch_24_token_row_run_ownership_for_sqlite_and_postgres() -> None:
+    assert SQLITE_SCHEMA_EPOCH == 25
     assert (
         "tokens",
         ("row_id", "run_id"),
@@ -365,7 +366,7 @@ def test_epoch_23_database_migrates_atomically_and_matches_fresh_schema(tmp_path
     migrated = LandscapeDB.from_url(migrated_url)
     try:
         with migrated.engine.connect() as conn:
-            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 24
+            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 25
             token_row = conn.exec_driver_sql(
                 "SELECT row_id, run_id FROM tokens WHERE token_id = ?",
                 (token_id,),
@@ -446,7 +447,7 @@ def test_epoch_23_concurrent_openers_handle_predecessor_validation_race(
         assert errors == []
         assert len(opened) == 2
         with opened[0].engine.connect() as conn:
-            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 24
+            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 25
         assert _token_row_run_fk(opened[0].engine) == [("row_id", "row_id"), ("run_id", "run_id")]
     finally:
         for db in opened:
@@ -472,7 +473,7 @@ def test_epoch_23_migration_succeeds_with_single_connection_queue_pool(tmp_path:
     try:
         assert isinstance(migrated.engine.pool, QueuePool)
         with migrated.engine.connect() as conn:
-            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 24
+            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 25
         assert _token_row_run_fk(migrated.engine) == [("row_id", "row_id"), ("run_id", "run_id")]
     finally:
         migrated.close()

@@ -187,11 +187,28 @@ _EPOCH_24_TOKEN_ROW_RUN_FK: tuple[str, tuple[str, ...], str, tuple[str, ...]] = 
 )
 
 
-def _sqlite_epoch_23_shape_metadata() -> MetaData:
-    """Return current metadata with only the epoch-24 token FK removed."""
+_SQLITE_EPOCH_25_ARTIFACT_INDEX_NAME = "uq_artifacts_run_idempotency_key"
+_SQLITE_EPOCH_25_ARTIFACT_INDEX_DDL = (
+    f"CREATE UNIQUE INDEX {_SQLITE_EPOCH_25_ARTIFACT_INDEX_NAME} ON artifacts (run_id, idempotency_key) WHERE idempotency_key IS NOT NULL"
+)
+_EPOCH_25_ARTIFACT_INDEX = ("artifacts", _SQLITE_EPOCH_25_ARTIFACT_INDEX_NAME)
+
+
+def _sqlite_epoch_24_shape_metadata() -> MetaData:
+    """Return current metadata with only the epoch-25 artifact index removed."""
     predecessor = MetaData()
     for table in metadata.tables.values():
         table.to_metadata(predecessor)
+
+    artifacts = predecessor.tables["artifacts"]
+    artifact_index = next(index for index in artifacts.indexes if index.name == _SQLITE_EPOCH_25_ARTIFACT_INDEX_NAME)
+    artifacts.indexes.discard(artifact_index)
+    return predecessor
+
+
+def _sqlite_epoch_23_shape_metadata() -> MetaData:
+    """Return epoch-24 predecessor metadata with the token ownership FK removed."""
+    predecessor = _sqlite_epoch_24_shape_metadata()
 
     tokens = predecessor.tables["tokens"]
     constraint = next(
@@ -1150,23 +1167,28 @@ class LandscapeDB:
     def _migrate_sqlite_schema(self) -> None:
         """Apply explicitly supported forward-only SQLite migrations.
 
-        Epoch 24 is intentionally narrow: only a structurally complete epoch-23
-        database is eligible, and only ``tokens`` is rebuilt. Older epochs,
-        partial/foreign schemas, read-only opens, and inspection-only opens are
-        left untouched for the compatibility validator to reject.
-
-        The rebuild follows SQLite's constraint-migration discipline:
-        the exact predecessor shape is validated before checking out the raw
-        migration connection, ``foreign_keys`` is disabled before
-        ``BEGIN IMMEDIATE``, the epoch is re-read under the write lock, the data
-        and schema change plus ``user_version`` bump commit atomically, a full
-        ``foreign_key_check`` gates commit, and FK enforcement is restored on
-        the pooled connection before it is returned.
+        Supported migrations are an ordered chain with fixed target epochs:
+        epoch 23 rebuilds ``tokens`` and commits epoch 24, then epoch 24 adds
+        the artifact idempotency index and commits epoch 25. Each step performs
+        its own exact-shape preflight and write-lock epoch recheck. Older
+        epochs, partial/foreign schemas, read-only opens, and inspection-only
+        opens are left untouched for the compatibility validator to reject.
         """
         if not self.connection_string.startswith("sqlite") or self._read_only:
             return
-        if self._get_sqlite_schema_epoch() != 23:
+
+        for _step in range(2):
+            epoch = self._get_sqlite_schema_epoch()
+            if epoch == 23:
+                self._migrate_sqlite_epoch_23_to_24()
+                continue
+            if epoch == 24:
+                self._migrate_sqlite_epoch_24_to_25()
+                continue
             return
+
+    def _migrate_sqlite_epoch_23_to_24(self) -> None:
+        """Rebuild epoch-23 tokens with the run-scoped ownership FK."""
 
         from sqlalchemy import inspect
 
@@ -1186,6 +1208,7 @@ class LandscapeDB:
                 allowed_sqlite_epochs=frozenset({23}),
                 shape_metadata=_sqlite_epoch_23_shape_metadata(),
                 ignored_missing_composite_foreign_keys=frozenset({_EPOCH_24_TOKEN_ROW_RUN_FK}),
+                ignored_missing_indexes=frozenset({_EPOCH_25_ARTIFACT_INDEX}),
             )
         except SchemaCompatibilityError as validation_error:
             try:
@@ -1196,7 +1219,7 @@ class LandscapeDB:
                     f"{type(epoch_error).__name__}: {epoch_error}"
                 )
                 raise validation_error.with_traceback(validation_error.__traceback__) from None
-            if current_epoch == SQLITE_SCHEMA_EPOCH:
+            if current_epoch in (24, 25):
                 return
             raise
 
@@ -1214,7 +1237,7 @@ class LandscapeDB:
 
             cursor.execute("BEGIN IMMEDIATE")
             locked_epoch = int(cursor.execute("PRAGMA user_version").fetchone()[0])
-            if locked_epoch == SQLITE_SCHEMA_EPOCH:
+            if locked_epoch in (24, 25):
                 # Another process completed the same migration while this
                 # opener waited for SQLite's single-writer lock.
                 raw.rollback()
@@ -1275,7 +1298,7 @@ class LandscapeDB:
                         f"Epoch-24 migration produced foreign-key violations; refusing to commit: {foreign_key_violations[:10]!r}"
                     )
 
-                cursor.execute(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+                cursor.execute("PRAGMA user_version = 24")
                 raw.commit()
         except Exception as exc:
             primary_error = exc
@@ -1342,12 +1365,132 @@ class LandscapeDB:
         if close_error is not None:
             raise AuditIntegrityError("Epoch-24 migration failed to close its SQLite connection cleanly") from close_error
 
+    def _migrate_sqlite_epoch_24_to_25(self) -> None:
+        """Add the artifact idempotency index and atomically stamp epoch 25."""
+        from sqlalchemy import inspect
+
+        existing_tables = set(inspect(self.engine).get_table_names())
+        if not existing_tables:
+            return
+
+        # Validate the exact predecessor before checking out the raw migration
+        # connection. This is required for QueuePool(size=1), and prevents a
+        # StaticPool inspector checkout from rolling back the migration txn.
+        try:
+            self._validate_schema(
+                allowed_sqlite_epochs=frozenset({24}),
+                shape_metadata=_sqlite_epoch_24_shape_metadata(),
+                ignored_missing_indexes=frozenset({_EPOCH_25_ARTIFACT_INDEX}),
+            )
+        except SchemaCompatibilityError as validation_error:
+            try:
+                current_epoch = self._get_sqlite_schema_epoch()
+            except Exception as epoch_error:
+                validation_error.add_note(
+                    "Epoch-25 migration could not re-read the epoch after predecessor validation failed: "
+                    f"{type(epoch_error).__name__}: {epoch_error}"
+                )
+                raise validation_error.with_traceback(validation_error.__traceback__) from None
+            if current_epoch == 25:
+                return
+            raise
+
+        raw = self.engine.raw_connection()
+        cursor = raw.cursor()
+        primary_error: Exception | None = None
+        primary_traceback: TracebackType | None = None
+        close_error: Exception | None = None
+        invalidate_connection = False
+        try:
+            cursor.execute("BEGIN IMMEDIATE")
+            locked_epoch = int(cursor.execute("PRAGMA user_version").fetchone()[0])
+            if locked_epoch == 25:
+                # Another process completed the migration while this opener
+                # waited for SQLite's single-writer lock.
+                raw.rollback()
+            elif locked_epoch != 24:
+                raise SchemaCompatibilityError(
+                    "Epoch-25 migration lost its predecessor precondition after acquiring the write lock: "
+                    f"expected epoch 24, observed {locked_epoch}."
+                )
+            else:
+                duplicate = cursor.execute(
+                    """
+                    SELECT run_id, idempotency_key, COUNT(*)
+                    FROM artifacts
+                    WHERE idempotency_key IS NOT NULL
+                    GROUP BY run_id, idempotency_key
+                    HAVING COUNT(*) > 1
+                    ORDER BY run_id, idempotency_key
+                    LIMIT 1
+                    """
+                ).fetchone()
+                if duplicate is not None:
+                    run_id, idempotency_key, count = duplicate
+                    raise AuditIntegrityError(
+                        "Epoch-25 migration found duplicate artifact idempotency records "
+                        f"for run_id={run_id!r}, idempotency_key={idempotency_key!r} "
+                        f"({count} rows). Refusing to choose or delete Tier-1 audit data; "
+                        "an operator must reconcile the duplicate records before retrying."
+                    )
+
+                cursor.execute(_SQLITE_EPOCH_25_ARTIFACT_INDEX_DDL)
+                cursor.execute("PRAGMA user_version = 25")
+                raw.commit()
+        except Exception as exc:
+            primary_error = exc
+            primary_traceback = exc.__traceback__
+            try:
+                raw.rollback()
+            except Exception as rollback_error:
+                invalidate_connection = True
+                exc.add_note(
+                    "Epoch-25 migration rollback also failed; the physical connection was invalidated: "
+                    f"{type(rollback_error).__name__}: {rollback_error}"
+                )
+        finally:
+            if invalidate_connection:
+                try:
+                    raw.invalidate()
+                except Exception as invalidate_error:
+                    if primary_error is not None:
+                        primary_error.add_note(
+                            "Epoch-25 migration could not invalidate an uncertain physical connection: "
+                            f"{type(invalidate_error).__name__}: {invalidate_error}"
+                        )
+            try:
+                raw.close()
+            except Exception as exc:
+                close_error = exc
+                try:
+                    raw.invalidate()
+                except Exception as invalidate_error:
+                    cleanup_note = (
+                        "Epoch-25 migration connection close failed and the uncertain physical connection could not be "
+                        f"invalidated: close={type(exc).__name__}: {exc}; "
+                        f"invalidate={type(invalidate_error).__name__}: {invalidate_error}"
+                    )
+                    exc.add_note(cleanup_note)
+                else:
+                    cleanup_note = (
+                        "Epoch-25 migration connection close failed; the uncertain physical connection was invalidated: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                if primary_error is not None:
+                    primary_error.add_note(cleanup_note)
+
+        if primary_error is not None:
+            raise primary_error.with_traceback(primary_traceback)
+        if close_error is not None:
+            raise AuditIntegrityError("Epoch-25 migration failed to close its SQLite connection cleanly") from close_error
+
     def _get_sqlite_schema_epoch(self) -> int:
         """Return SQLite schema epoch from PRAGMA user_version.
 
         Uses SQLite's built-in schema version slot as a lightweight marker for
-        intentional pre-1.0 schema breaks and the narrow epoch-23-to-24
-        migration implemented by :meth:`_migrate_sqlite_schema`.
+        intentional pre-1.0 schema breaks and the ordered epoch-23-to-24 and
+        epoch-24-to-25 migrations implemented by
+        :meth:`_migrate_sqlite_schema`.
         """
         if not self.connection_string.startswith("sqlite"):
             return 0
@@ -1371,8 +1514,8 @@ class LandscapeDB:
         """Stamp compatible SQLite databases with the current schema epoch.
 
         New databases get the epoch immediately after create_all(). Existing
-        compatible databases without an epoch are stamped in place. The one
-        explicitly supported predecessor migration runs before this method;
+        compatible databases without an epoch are stamped in place. The
+        explicitly supported predecessor migrations run before this method;
         any other populated database carrying an older non-zero epoch is
         rejected at the one-way schema boundary. Call this only from
         schema-managing paths; read-only/inspection opens must not mutate the
@@ -1430,6 +1573,7 @@ class LandscapeDB:
         allowed_sqlite_epochs: frozenset[int] = frozenset(),
         shape_metadata: MetaData | None = None,
         ignored_missing_composite_foreign_keys: frozenset[tuple[str, tuple[str, ...], str, tuple[str, ...]]] = frozenset(),
+        ignored_missing_indexes: frozenset[tuple[str, str]] = frozenset(),
     ) -> None:
         """Validate that existing database has the required schema.
 
@@ -1443,10 +1587,11 @@ class LandscapeDB:
                 elements, or if an encrypted database is opened without the
                 correct passphrase.
 
-        ``allowed_sqlite_epochs``, ``shape_metadata``, and
-        ``ignored_missing_composite_foreign_keys`` exist only for a migration's
-        read-only predecessor preflight. Ordinary callers must use the current
-        schema defaults.
+        ``allowed_sqlite_epochs``, ``shape_metadata``,
+        ``ignored_missing_composite_foreign_keys``, and
+        ``ignored_missing_indexes`` exist only for a migration's read-only
+        predecessor preflight. Ordinary callers must use the current schema
+        defaults.
         """
         from sqlalchemy import inspect
         from sqlalchemy.exc import OperationalError
@@ -1597,6 +1742,8 @@ class LandscapeDB:
         missing_indexes: list[tuple[str, str]] = []
 
         for table_name, index_name in _REQUIRED_INDEXES:
+            if (table_name, index_name) in ignored_missing_indexes:
+                continue
             if table_name not in existing_tables:
                 continue
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select, update
+from sqlalchemy.engine import Connection
 
 from elspeth.contracts import NodeStateStatus, NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.audit import TokenRef
@@ -9,6 +11,7 @@ from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.schema import node_states_table, token_outcomes_table
 from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run, register_test_node
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
@@ -994,6 +997,181 @@ class TestRecordTokenOutcome:
         fetched = factory.data_flow.get_token_outcome(token.token_id)
         assert fetched is not None
         assert fetched.recorded_at is not None
+
+
+class TestRecordTokenOutcomeAtomicity:
+    """Cross-table validation and outcome insertion share one write boundary."""
+
+    def test_repository_owned_call_threads_one_write_connection_through_validation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _db, factory = _setup()
+        _row, token = _make_row(factory)
+        outcomes = factory.data_flow.outcomes
+        ownership_connections: list[Connection | None] = []
+        invariant_connections: list[Connection | None] = []
+        original_ownership = outcomes._ownership.validate_token_run_ownership
+        original_invariants = outcomes._validate_cross_table_invariants
+
+        def capture_ownership(ref: TokenRef, *, conn: Connection | None = None) -> None:
+            ownership_connections.append(conn)
+            original_ownership(ref, conn=conn)
+
+        def capture_invariants(
+            ref: TokenRef,
+            outcome: TerminalOutcome | None,
+            path: TerminalPath,
+            *,
+            sink_name: str | None,
+            sink_node_id: str | None,
+            artifact_id: str | None,
+            conn: Connection | None = None,
+        ) -> None:
+            invariant_connections.append(conn)
+            original_invariants(
+                ref,
+                outcome,
+                path,
+                sink_name=sink_name,
+                sink_node_id=sink_node_id,
+                artifact_id=artifact_id,
+                conn=conn,
+            )
+
+        monkeypatch.setattr(outcomes._ownership, "validate_token_run_ownership", capture_ownership)
+        monkeypatch.setattr(outcomes, "_validate_cross_table_invariants", capture_invariants)
+
+        factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="output",
+        )
+
+        assert ownership_connections == invariant_connections
+        assert len(ownership_connections) == 1
+        assert ownership_connections[0] is not None
+
+    def test_injected_failure_rolls_back_validation_side_effect_and_outcome(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db, factory = _setup()
+        _row, token = _make_row(factory)
+        register_test_node(factory.data_flow, "run-1", "sink-atomic", node_type=NodeType.SINK, plugin_name="sink")
+        state = factory.execution.begin_node_state(
+            token_id=token.token_id,
+            node_id="sink-atomic",
+            run_id="run-1",
+            step_index=0,
+            input_data={},
+        )
+        outcomes = factory.data_flow.outcomes
+        original_invariants = outcomes._validate_cross_table_invariants
+
+        def fail_after_validation_write(
+            ref: TokenRef,
+            outcome: TerminalOutcome | None,
+            path: TerminalPath,
+            *,
+            sink_name: str | None,
+            sink_node_id: str | None,
+            artifact_id: str | None,
+            conn: Connection | None = None,
+        ) -> None:
+            original_invariants(
+                ref,
+                outcome,
+                path,
+                sink_name=sink_name,
+                sink_node_id=sink_node_id,
+                artifact_id=artifact_id,
+                conn=conn,
+            )
+            mutation = (
+                update(node_states_table)
+                .where(node_states_table.c.state_id == state.state_id)
+                .values(status=NodeStateStatus.COMPLETED.value)
+            )
+            if conn is None:
+                # This is the pre-fix shape: validation runs outside the
+                # outcome transaction, so its side effect commits independently.
+                with db.write_connection() as separate_conn:
+                    separate_conn.execute(mutation)
+            else:
+                conn.execute(mutation)
+            raise RuntimeError("injected after cross-table validation")
+
+        monkeypatch.setattr(outcomes, "_validate_cross_table_invariants", fail_after_validation_write)
+
+        with pytest.raises(RuntimeError, match="injected after cross-table validation"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="output",
+            )
+
+        with db.read_only_connection() as conn:
+            persisted_status = conn.execute(
+                select(node_states_table.c.status).where(node_states_table.c.state_id == state.state_id)
+            ).scalar_one()
+            persisted_outcomes = conn.execute(
+                select(token_outcomes_table.c.outcome_id).where(token_outcomes_table.c.token_id == token.token_id)
+            ).all()
+        assert persisted_status == NodeStateStatus.OPEN.value
+        assert persisted_outcomes == []
+
+    def test_caller_supplied_connection_carries_validation_insert_and_outer_rollback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db, factory = _setup()
+        _row, token = _make_row(factory)
+        outcomes = factory.data_flow.outcomes
+        seen_connections: list[Connection | None] = []
+        original_invariants = outcomes._validate_cross_table_invariants
+
+        def capture_invariants(
+            ref: TokenRef,
+            outcome: TerminalOutcome | None,
+            path: TerminalPath,
+            *,
+            sink_name: str | None,
+            sink_node_id: str | None,
+            artifact_id: str | None,
+            conn: Connection | None = None,
+        ) -> None:
+            seen_connections.append(conn)
+            original_invariants(
+                ref,
+                outcome,
+                path,
+                sink_name=sink_name,
+                sink_node_id=sink_node_id,
+                artifact_id=artifact_id,
+                conn=conn,
+            )
+
+        monkeypatch.setattr(outcomes, "_validate_cross_table_invariants", capture_invariants)
+
+        with pytest.raises(RuntimeError, match="outer transaction rollback"), db.write_connection() as caller_conn:
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="output",
+                conn=caller_conn,
+            )
+            assert seen_connections == [caller_conn]
+            raise RuntimeError("outer transaction rollback")
+
+        with db.read_only_connection() as conn:
+            persisted_outcomes = conn.execute(
+                select(token_outcomes_table.c.outcome_id).where(token_outcomes_table.c.token_id == token.token_id)
+            ).all()
+        assert persisted_outcomes == []
 
 
 class TestGetTokenOutcome:

@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Row as SQLAlchemyRow
 from sqlalchemy.exc import SQLAlchemyError
@@ -30,6 +30,7 @@ from elspeth.core.landscape._helpers import now
 from elspeth.core.landscape.data_flow.ownership import RowTokenOwnership
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.model_loaders import TokenOutcomeLoader
+from elspeth.core.landscape.ports import LandscapeConnectionProvider
 from elspeth.core.landscape.schema import (
     artifacts_table,
     batches_table,
@@ -48,11 +49,13 @@ class TokenOutcomeRepository:
 
     def __init__(
         self,
+        db: LandscapeConnectionProvider,
         ops: DatabaseOps,
         *,
         token_outcome_loader: TokenOutcomeLoader,
         ownership: RowTokenOwnership,
     ) -> None:
+        self._db = db
         self._ops = ops
         self._token_outcome_loader = token_outcome_loader
         self._ownership = ownership
@@ -69,6 +72,113 @@ class TokenOutcomeRepository:
         if not rows:
             return None
         return rows[0]
+
+    @staticmethod
+    def _execute_lock_query(conn: Connection, query: Any, *, operation: str) -> list[Any]:
+        """Execute one PostgreSQL row-lock query with recorder-safe errors."""
+        try:
+            return list(conn.execute(query).fetchall())
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(f"{operation} failed — database rejected audit lock query: {type(exc).__name__}") from exc
+
+    def _lock_token_for_outcome(self, ref: TokenRef, *, conn: Connection) -> None:
+        """Take the first lock in the outcome-validation lock order.
+
+        PostgreSQL needs a stable token row before evaluating I1c/I3
+        cross-table witnesses. The lock also blocks a concurrent
+        ``node_states`` insert: its composite FK must take a conflicting
+        key-share lock on this token. SQLite ignores ``FOR UPDATE`` because
+        ``BEGIN IMMEDIATE`` already owns the file's write slot for the complete
+        validation+insert boundary.
+        """
+        query = (
+            select(tokens_table.c.token_id)
+            .where(tokens_table.c.token_id == ref.token_id)
+            .order_by(tokens_table.c.token_id)
+            .with_for_update(of=tokens_table)
+        )
+        self._execute_lock_query(conn, query, operation="record_token_outcome token lock")
+
+    def _lock_cross_table_witnesses(
+        self,
+        ref: TokenRef,
+        outcome: TerminalOutcome | None,
+        path: TerminalPath,
+        *,
+        artifact_id: str | None,
+        conn: Connection,
+    ) -> None:
+        """Lock PostgreSQL witnesses in table/primary-key order.
+
+        The canonical order is ``tokens`` (already locked by the caller), then
+        ``node_states.state_id``, then ``artifacts.artifact_id``.  Lock every
+        existing state for the token so an I3-negative witness cannot change
+        from FAILED/OPEN to COMPLETED.  The token lock prevents a missing state
+        from appearing through a concurrent FK-mediated insert.
+        """
+        if conn.dialect.name != "postgresql":
+            return
+
+        pair = (outcome, path)
+        if pair not in {
+            (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK),
+            (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED),
+        }:
+            return
+
+        artifact_state_id: str | None = None
+        if pair == (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK) and artifact_id is not None:
+            artifact_state_query = (
+                select(artifacts_table.c.produced_by_state_id)
+                .where(artifacts_table.c.artifact_id == artifact_id)
+                .where(artifacts_table.c.run_id == ref.run_id)
+            )
+            artifact_state_row = self._execute_fetchone(artifact_state_query, conn=conn)
+            if artifact_state_row is None:
+                raise AuditIntegrityError(
+                    f"ADR-019 I1c violation for token {ref.token_id}: artifact_id={artifact_id!r} "
+                    "did not exist when outcome validation acquired its witness locks."
+                )
+            artifact_state_id = artifact_state_row.produced_by_state_id
+
+        state_predicate = and_(
+            node_states_table.c.token_id == ref.token_id,
+            node_states_table.c.run_id == ref.run_id,
+        )
+        if artifact_state_id is not None:
+            state_predicate = or_(state_predicate, node_states_table.c.state_id == artifact_state_id)
+        state_lock_query = (
+            select(node_states_table.c.state_id)
+            .where(state_predicate)
+            .order_by(node_states_table.c.state_id)
+            .with_for_update(of=node_states_table)
+        )
+        self._execute_lock_query(conn, state_lock_query, operation="record_token_outcome node-state witness lock")
+
+        if artifact_id is None:
+            return
+        artifact_lock_query = (
+            select(artifacts_table.c.artifact_id, artifacts_table.c.produced_by_state_id)
+            .where(artifacts_table.c.artifact_id == artifact_id)
+            .where(artifacts_table.c.run_id == ref.run_id)
+            .order_by(artifacts_table.c.artifact_id)
+            .with_for_update(of=artifacts_table)
+        )
+        locked_artifacts = self._execute_lock_query(
+            conn,
+            artifact_lock_query,
+            operation="record_token_outcome artifact witness lock",
+        )
+        if not locked_artifacts:
+            raise AuditIntegrityError(
+                f"ADR-019 I1c violation for token {ref.token_id}: artifact_id={artifact_id!r} "
+                "disappeared while outcome validation acquired its witness locks."
+            )
+        if locked_artifacts and artifact_state_id is not None and locked_artifacts[0].produced_by_state_id != artifact_state_id:
+            raise AuditIntegrityError(
+                f"ADR-019 I1c violation for token {ref.token_id}: artifact_id={artifact_id!r} "
+                "changed its producing node_state during outcome validation."
+            )
 
     def _validate_outcome_fields(
         self,
@@ -141,6 +251,9 @@ class TokenOutcomeRepository:
         with a completed sink node-state for the same token.
         """
         pair = (outcome, path)
+
+        if conn is not None:
+            self._lock_cross_table_witnesses(ref, outcome, path, artifact_id=artifact_id, conn=conn)
 
         if pair == (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK):
             if sink_node_id is None:
@@ -307,51 +420,59 @@ class TokenOutcomeRepository:
             error_hash=error_hash,
         )
 
-        # Validate token belongs to the specified run (Tier 1 invariant)
-        self._ownership.validate_token_run_ownership(ref, conn=conn)
-        self._validate_cross_table_invariants(
-            ref,
-            outcome,
-            path,
-            sink_name=sink_name,
-            sink_node_id=sink_node_id,
-            artifact_id=artifact_id,
-            conn=conn,
-        )
+        def _record_on(active_conn: Connection) -> str:
+            # Every Tier-1 read and the dependent insert use this exact
+            # transaction. Repository-owned calls enter through
+            # write_connection(), which is BEGIN IMMEDIATE on SQLite.
+            if (outcome, path) in {
+                (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK),
+                (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED),
+            }:
+                self._lock_token_for_outcome(ref, conn=active_conn)
+            self._ownership.validate_token_run_ownership(ref, conn=active_conn)
+            self._validate_cross_table_invariants(
+                ref,
+                outcome,
+                path,
+                sink_name=sink_name,
+                sink_node_id=sink_node_id,
+                artifact_id=artifact_id,
+                conn=active_conn,
+            )
 
-        outcome_id = f"out_{generate_id()[:12]}"
-        completed = outcome is not None
-        context_json = canonical_json(context) if context is not None else None
-
-        stmt = token_outcomes_table.insert().values(
-            outcome_id=outcome_id,
-            run_id=ref.run_id,
-            token_id=ref.token_id,
-            outcome=outcome.value if outcome is not None else None,
-            path=path.value,
-            completed=1 if completed else 0,
-            recorded_at=now(),
-            sink_name=sink_name,
-            batch_id=batch_id,
-            fork_group_id=fork_group_id,
-            join_group_id=join_group_id,
-            expand_group_id=expand_group_id,
-            error_hash=error_hash,
-            context_json=context_json,
-        )
-        if conn is None:
-            self._ops.execute_insert(stmt)
-        else:
+            outcome_id = f"out_{generate_id()[:12]}"
+            completed = outcome is not None
+            context_json = canonical_json(context) if context is not None else None
+            stmt = token_outcomes_table.insert().values(
+                outcome_id=outcome_id,
+                run_id=ref.run_id,
+                token_id=ref.token_id,
+                outcome=outcome.value if outcome is not None else None,
+                path=path.value,
+                completed=1 if completed else 0,
+                recorded_at=now(),
+                sink_name=sink_name,
+                batch_id=batch_id,
+                fork_group_id=fork_group_id,
+                join_group_id=join_group_id,
+                expand_group_id=expand_group_id,
+                error_hash=error_hash,
+                context_json=context_json,
+            )
             try:
-                result = conn.execute(stmt)
+                result = active_conn.execute(stmt)
             except SQLAlchemyError as exc:
                 raise LandscapeRecordError(
                     f"record_token_outcome failed for token_id={ref.token_id!r} — database rejected audit write: {type(exc).__name__}"
                 ) from exc
             if result.rowcount == 0:
                 raise LandscapeRecordError(f"record_token_outcome: zero rows affected for token_id={ref.token_id!r} — audit write failed")
+            return outcome_id
 
-        return outcome_id
+        if conn is not None:
+            return _record_on(conn)
+        with self._db.write_connection() as active_conn:
+            return _record_on(active_conn)
 
     def find_orphaned_transient_parents(self, run_id: str) -> list[SQLAlchemyRow[Any]]:
         """Find I1a parent tokens with no child token outcome witnesses."""

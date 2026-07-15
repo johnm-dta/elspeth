@@ -104,7 +104,7 @@ class DataFlowRepository:
         self._payload_store = payload_store
         self.ownership = RowTokenOwnership(ops)
         self.tokens = RowTokenRepository(db, ops, ownership=self.ownership, payload_store=payload_store)
-        self.outcomes = TokenOutcomeRepository(ops, token_outcome_loader=token_outcome_loader, ownership=self.ownership)
+        self.outcomes = TokenOutcomeRepository(db, ops, token_outcome_loader=token_outcome_loader, ownership=self.ownership)
         self.graph = GraphAuditRepository(ops, node_loader=node_loader, edge_loader=edge_loader)
         self.errors = ErrorAuditRepository(
             ops,

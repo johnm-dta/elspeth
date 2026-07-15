@@ -349,6 +349,138 @@ class TestStep3Handler:
     switched to `passthrough` to avoid coupling the test to that drift.
     """
 
+    @pytest.mark.parametrize(
+        ("tutorial", "proposal_profile", "expected_profile"),
+        [
+            (True, None, "tutorial-default"),
+            (True, "alpha", "tutorial-default"),
+            (False, "alpha", "alpha"),
+        ],
+    )
+    def test_guided_chain_applies_operator_llm_profile_selection(
+        self,
+        tutorial: bool,
+        proposal_profile: str | None,
+        expected_profile: str,
+    ) -> None:
+        """The guided solver does not own provider bindings.
+
+        A tutorial proposal may correctly ask for the public ``llm`` transform
+        without knowing the operator's opaque profile alias.  The commit seam
+        must bind that node to the tutorial profile selected in the request's
+        policy snapshot before running the canonical set-pipeline validation.
+        Live guided sessions may still choose another operator-approved alias.
+        """
+        from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+        from elspeth.web.composer.guided.profile import EMPTY_PROFILE, TUTORIAL_PROFILE
+        from elspeth.web.composer.guided.state_machine import ChainProposal
+        from elspeth.web.composer.guided.steps import handle_step_3_chain_accept
+        from elspeth.web.config import WebSettings
+        from elspeth.web.plugin_policy.availability import build_plugin_snapshot
+        from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
+        from elspeth.web.plugin_policy.profiles import RuntimeWebPluginConfig
+
+        settings = WebSettings(
+            composer_max_composition_turns=4,
+            composer_max_discovery_turns=4,
+            composer_timeout_seconds=60,
+            composer_rate_limit_per_minute=20,
+            shareable_link_signing_key=b"0123456789abcdef0123456789abcdef",
+            llm_profiles={
+                "alpha": {
+                    "provider": "bedrock",
+                    "model": "bedrock/apac.amazon.nova-micro-v1:0",
+                    "region_name": "ap-southeast-1",
+                },
+                "tutorial-default": {
+                    "provider": "bedrock",
+                    "model": "bedrock/apac.amazon.nova-lite-v1:0",
+                    "region_name": "ap-southeast-1",
+                },
+            },
+            tutorial_llm_profile="tutorial-default",
+        )
+        runtime = RuntimeWebPluginConfig.from_settings(settings)
+        policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+        profiles = OperatorProfileRegistry(policy=policy, settings=runtime)
+        full_catalog = create_catalog_service()
+
+        class _NoSecrets:
+            def has_server_ref(self, name: str) -> bool:
+                return False
+
+            def has_user_ref(self, principal: str, name: str) -> bool:
+                return False
+
+        snapshot = build_plugin_snapshot(
+            policy=policy,
+            catalog=full_catalog,
+            profiles=profiles,
+            principal_scope="local:tutorial-user",
+            secret_inventory=_NoSecrets(),
+            generation_key=b"guided-tutorial-profile-test-key",
+        )
+        catalog = PolicyCatalogView(full_catalog, snapshot, profiles)
+        session = GuidedSession.initial(profile=TUTORIAL_PROFILE if tutorial else EMPTY_PROFILE)
+
+        step_1 = handle_step_1_source(
+            state=_empty_state(),
+            session=session,
+            catalog=catalog,
+            plugin_snapshot=snapshot,
+            resolved=SourceResolved(
+                plugin="csv",
+                options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["text"]}},
+                observed_columns=("text",),
+                sample_rows=({"text": "hello"},),
+            ),
+        )
+        step_2 = handle_step_2_sink(
+            state=step_1.state,
+            session=step_1.session,
+            catalog=catalog,
+            plugin_snapshot=snapshot,
+            resolved=SinkResolved(
+                outputs=(
+                    SinkOutputResolved(
+                        plugin="json",
+                        options={"path": "out.jsonl", "schema": {"mode": "observed"}},
+                        required_fields=(),
+                        schema_mode="observed",
+                    ),
+                ),
+            ),
+        )
+        llm_options: dict[str, object] = {
+            "prompt_template": "Summarise {{ row.text }}",
+            "response_field": "summary",
+            "required_input_fields": ["text"],
+            "schema": {"mode": "observed"},
+        }
+        if proposal_profile is not None:
+            llm_options["profile"] = proposal_profile
+        proposal = ChainProposal(
+            steps=(
+                {
+                    "plugin": "llm",
+                    "options": llm_options,
+                    "rationale": "summarise each row",
+                },
+            ),
+            why="summarise the tutorial input",
+        )
+
+        result = handle_step_3_chain_accept(
+            state=step_2.state,
+            session=step_2.session,
+            proposal=proposal,
+            catalog=catalog,
+            plugin_snapshot=snapshot,
+        )
+
+        assert result.tool_result.success is True, result.tool_result.validation.errors
+        assert result.state.nodes[0].options["profile"] == expected_profile
+
     def test_chain_accepted_commits_and_redirects_to_wire(self) -> None:
         from elspeth.web.composer.guided.protocol import GuidedStep
         from elspeth.web.composer.guided.state_machine import (

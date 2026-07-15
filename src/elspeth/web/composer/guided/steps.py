@@ -24,6 +24,7 @@ from sqlalchemy import Engine
 from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.guided.errors import InvariantError
+from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE
 from elspeth.web.composer.guided.protocol import BLOB_REF_PATH_PREFIX, GuidedStep
 from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
@@ -48,7 +49,7 @@ from elspeth.web.composer.tools import (
 )
 from elspeth.web.composer.yaml_generator import generate_public_yaml
 from elspeth.web.paths import allowed_source_directories, resolve_data_path
-from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
 
 
 @dataclass(frozen=True, slots=True)
@@ -574,10 +575,20 @@ def handle_step_3_chain_accept(
 
     n = len(proposal.steps)
     node_args: list[dict[str, Any]] = []
+    selected_profiles = dict(plugin_snapshot.selected_profile_aliases)
     for idx, step in enumerate(proposal.steps):
         input_label = "chain_in" if idx == 0 else f"chain_{idx - 1}"
         on_success_label = "main" if idx == n - 1 else f"chain_{idx}"
         options = dict(step["options"])
+        selected_profile = selected_profiles.get(PluginId("transform", str(step["plugin"])))
+        if selected_profile is not None and (session.profile == TUTORIAL_PROFILE or "profile" not in options):
+            # Provider bindings are operator-owned. The guided solver may omit
+            # the opaque alias entirely; and the tutorial must always use the
+            # specifically configured tutorial profile rather than an
+            # arbitrary usable alternative. Live guided sessions retain an
+            # explicit allowed choice but receive the operator-selected default
+            # when the model did not choose one.
+            options["profile"] = selected_profile
         node_args.append(
             {
                 "id": f"guided_xform_{idx}",

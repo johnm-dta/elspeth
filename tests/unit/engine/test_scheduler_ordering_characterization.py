@@ -354,7 +354,7 @@ def test_pending_sink_parked_token_does_not_block_later_tokens_and_drains_afterw
         row_payload_json=payload,
         sink_name="sink-a",
         outcome="success",
-        path="completed",
+        path="default_flow",
         error_hash=None,
         error_message=None,
         now=now + timedelta(seconds=2),

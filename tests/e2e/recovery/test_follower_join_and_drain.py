@@ -608,7 +608,7 @@ class TestFollowerDispositions:
             row_payload_json=TokenSchedulerRepository.serialize_row_payload(PipelineRow(data, _observed_contract(data))),
             sink_name="output",
             outcome="success",
-            path="completed",
+            path="default_flow",
             error_hash=None,
             error_message=None,
             now=clock.now_utc(),

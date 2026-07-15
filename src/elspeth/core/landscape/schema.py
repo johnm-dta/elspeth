@@ -30,6 +30,7 @@ from sqlalchemy import (
     text,
 )
 
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
 from elspeth.contracts.types import NODE_ID_MAX_LENGTH
 from elspeth.core.schema_identity import create_schema_identity_table
@@ -566,6 +567,57 @@ Index(
     sqlite_where=token_work_items_table.c.node_id.is_(None),
     postgresql_where=token_work_items_table.c.node_id.is_(None),
 )
+
+
+def pending_sink_bundle_clause() -> ColumnElement[bool]:
+    """Return the complete durable sink-redrive subtype predicate.
+
+    ``PENDING_SINK`` is not merely a status: the dedicated redrive path must
+    be able to rebuild a legal sink-bound ``RowResult`` without replaying its
+    producer.  The opaque row payload and sink identity must therefore be
+    present, the persisted outcome/path pair must be one of the four
+    sink-bound terminal pairs, and pair-specific evidence must be complete.
+
+    Keep this predicate at the schema boundary so claim selection and its CAS
+    UPDATE use the exact same SQL on SQLite and PostgreSQL.  Payload *shape*
+    validation remains the separately owned scheduler-payload contract; this
+    subtype guard only rejects the representable empty payload sentinel.
+    """
+    no_error_evidence = and_(
+        token_work_items_table.c.pending_error_hash.is_(None),
+        token_work_items_table.c.pending_error_message.is_(None),
+    )
+    return and_(
+        token_work_items_table.c.row_payload_json != "",
+        token_work_items_table.c.pending_sink_name.is_not(None),
+        token_work_items_table.c.pending_sink_name != "",
+        or_(
+            and_(
+                token_work_items_table.c.pending_outcome == TerminalOutcome.SUCCESS.value,
+                token_work_items_table.c.pending_path == TerminalPath.DEFAULT_FLOW.value,
+                no_error_evidence,
+            ),
+            and_(
+                token_work_items_table.c.pending_outcome == TerminalOutcome.SUCCESS.value,
+                token_work_items_table.c.pending_path == TerminalPath.GATE_ROUTED.value,
+                no_error_evidence,
+            ),
+            and_(
+                token_work_items_table.c.pending_outcome == TerminalOutcome.FAILURE.value,
+                token_work_items_table.c.pending_path == TerminalPath.ON_ERROR_ROUTED.value,
+                token_work_items_table.c.pending_error_hash.is_not(None),
+                token_work_items_table.c.pending_error_hash != "",
+                token_work_items_table.c.pending_error_message.is_not(None),
+            ),
+            and_(
+                token_work_items_table.c.pending_outcome == TerminalOutcome.SUCCESS.value,
+                token_work_items_table.c.pending_path == TerminalPath.COALESCED.value,
+                token_work_items_table.c.join_group_id.is_not(None),
+                token_work_items_table.c.join_group_id != "",
+                no_error_evidence,
+            ),
+        ),
+    )
 
 
 def blocked_barrier_hold_clause() -> ColumnElement[bool]:

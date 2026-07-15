@@ -418,7 +418,7 @@ def test_complete_barrier_passthrough_handoff_counts_toward_blocked_coverage() -
                 row_payload_json=payload,
                 sink_name="out",
                 outcome="success",
-                path="completed",
+                path="default_flow",
             )
         ],
         emitted_ready=[],
@@ -568,7 +568,7 @@ def test_complete_barrier_handed_off_outside_snapshot_is_tier1() -> None:
                     row_payload_json=payload,
                     sink_name="out",
                     outcome="success",
-                    path="completed",
+                    path="default_flow",
                 )
             ],
             emitted_ready=[],
@@ -740,7 +740,7 @@ def test_complete_barrier_rejects_consumed_token_also_emitted() -> None:
                     row_payload_json=payload,
                     sink_name="out",
                     outcome="success",
-                    path="completed",
+                    path="default_flow",
                 )
             ],
             emitted_ready=[],
@@ -771,7 +771,7 @@ def test_wrappers_delegate_preserving_legacy_partial_release() -> None:
                 row_payload_json=payload,
                 sink_name="out",
                 outcome="success",
-                path="completed",
+                path="default_flow",
                 error_hash=None,
                 error_message=None,
             )
@@ -930,7 +930,7 @@ def test_complete_barrier_combined_lanes_one_call() -> None:
         consumed_token_ids=["t1", "t2"],
         emitted_pending_sink=[
             # Passthrough: t3 holds a BLOCKED row under the barrier.
-            BarrierEmission(token_id="t3", row_payload_json=payload, sink_name="out", outcome="success", path="completed"),
+            BarrierEmission(token_id="t3", row_payload_json=payload, sink_name="out", outcome="success", path="default_flow"),
             # Fresh terminal-lane insert: t-agg-out has no BLOCKED row.
             BarrierEmission(
                 token_id="t-agg-out",

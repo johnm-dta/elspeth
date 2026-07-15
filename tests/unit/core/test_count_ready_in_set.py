@@ -107,7 +107,7 @@ def test_mixed_statuses_counts_only_ready() -> None:
         row_payload_json=_PAYLOAD,
         sink_name="sink-a",
         outcome="success",
-        path="completed",
+        path="default_flow",
         error_hash=None,
         error_message=None,
         now=NOW + timedelta(seconds=1),

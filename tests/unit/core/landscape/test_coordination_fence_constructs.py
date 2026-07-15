@@ -26,7 +26,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import CheckConstraint, insert, select, update
 
-from elspeth.contracts import NodeType, PipelineRow, RunStatus
+from elspeth.contracts import NodeType, PipelineRow, RunStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import RunLeadershipLostError
 from elspeth.contracts.schema_contract import SchemaContract
@@ -151,7 +151,15 @@ def _seed_pending_sink_item(db: LandscapeDB, run_id: str, *, sequence: int = 0) 
         conn.execute(
             update(token_work_items_table)
             .where(token_work_items_table.c.work_item_id == work_item_id)
-            .values(status=TokenWorkStatus.PENDING_SINK.value, updated_at=NOW + timedelta(seconds=1))
+            .values(
+                status=TokenWorkStatus.PENDING_SINK.value,
+                pending_sink_name="sink-a",
+                pending_outcome=TerminalOutcome.SUCCESS.value,
+                pending_path=TerminalPath.DEFAULT_FLOW.value,
+                pending_error_hash=None,
+                pending_error_message=None,
+                updated_at=NOW + timedelta(seconds=1),
+            )
         )
     return work_item_id
 
@@ -494,7 +502,7 @@ class TestDispositionMembershipFence:
                 row_payload_json="{}",
                 sink_name="sink-a",
                 outcome="success",
-                path="completed",
+                path=TerminalPath.DEFAULT_FLOW.value,
                 error_hash=None,
                 error_message=None,
                 now=NOW,

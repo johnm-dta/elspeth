@@ -25,7 +25,21 @@ from elspeth.core.landscape.run_coordination_repository import record_coordinati
 from elspeth.core.landscape.scheduler.events import SchedulerEventStore
 from elspeth.core.landscape.scheduler.fencing import fenced_or_plain_write
 from elspeth.core.landscape.scheduler.work_items import item_from_mapping, work_item_id
-from elspeth.core.landscape.schema import claim_verb_fence_clause, run_workers_table, token_work_items_table
+from elspeth.core.landscape.schema import (
+    claim_verb_fence_clause,
+    pending_sink_bundle_clause,
+    run_workers_table,
+    token_work_items_table,
+)
+
+
+def _incomplete_pending_sink_bundle_error(*, run_id: str, work_item_id: str) -> AuditIntegrityError:
+    return AuditIntegrityError(
+        f"Scheduler claim_pending_sink refused run_id={run_id!r} work_item_id={work_item_id!r}: "
+        "PENDING_SINK row does not carry a complete durable sink bundle. Required: non-empty row payload and sink name; "
+        "a legal pending_outcome/pending_path sink pair; no pending_error_hash/pending_error_message for successful paths; "
+        "both pending_error_hash and pending_error_message for ON_ERROR_ROUTED; and join_group_id for COALESCED."
+    )
 
 
 class SchedulerLeaseRepository:
@@ -218,10 +232,11 @@ class SchedulerLeaseRepository:
     ) -> TokenWorkItem | None:
         """Claim a sink-bound token whose transform work is already durable."""
         lease_expires_at = now + timedelta(seconds=lease_seconds)
+        complete_bundle = pending_sink_bundle_clause()
         with begin_write(self._engine) as conn:
             row = (
                 conn.execute(
-                    select(token_work_items_table)
+                    select(token_work_items_table, complete_bundle.label("_pending_sink_bundle_complete"))
                     .where(token_work_items_table.c.run_id == run_id)
                     .where(token_work_items_table.c.status == TokenWorkStatus.PENDING_SINK.value)
                     .order_by(
@@ -239,6 +254,8 @@ class SchedulerLeaseRepository:
             )
             if row is None:
                 return None
+            if not row["_pending_sink_bundle_complete"]:
+                raise _incomplete_pending_sink_bundle_error(run_id=run_id, work_item_id=row["work_item_id"])
             result = conn.execute(
                 update(token_work_items_table)
                 .where(
@@ -246,6 +263,11 @@ class SchedulerLeaseRepository:
                         token_work_items_table.c.work_item_id == row["work_item_id"],
                         token_work_items_table.c.run_id == run_id,
                         token_work_items_table.c.status == TokenWorkStatus.PENDING_SINK.value,
+                        # Admission is repeated inside the CAS.  A peer that
+                        # corrupts the bundle after the diagnostic SELECT but
+                        # before this UPDATE cannot turn malformed work into a
+                        # leased redrive or emit a claim event.
+                        complete_bundle,
                         # Membership fence (ADR-030 §G, slice 4): same discipline
                         # as claim_ready — absent claimants are refused once the
                         # run has any registered worker; evicted/departed claimants
@@ -266,13 +288,19 @@ class SchedulerLeaseRepository:
                 # Same absent-vs-evicted logic as _claim_ready_row: absent
                 # unregistered claimants return None with zero mutation, while
                 # registered-then-evicted claimants raise the multi-worker signal.
-                still_pending = conn.execute(
-                    select(token_work_items_table.c.work_item_id)
-                    .where(token_work_items_table.c.work_item_id == row["work_item_id"])
-                    .where(token_work_items_table.c.run_id == run_id)
-                    .where(token_work_items_table.c.status == TokenWorkStatus.PENDING_SINK.value)
-                ).first()
+                still_pending = (
+                    conn.execute(
+                        select(token_work_items_table, complete_bundle.label("_pending_sink_bundle_complete"))
+                        .where(token_work_items_table.c.work_item_id == row["work_item_id"])
+                        .where(token_work_items_table.c.run_id == run_id)
+                        .where(token_work_items_table.c.status == TokenWorkStatus.PENDING_SINK.value)
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
                 if still_pending is not None:
+                    if not still_pending["_pending_sink_bundle_complete"]:
+                        raise _incomplete_pending_sink_bundle_error(run_id=run_id, work_item_id=row["work_item_id"])
                     worker_status = conn.execute(
                         select(run_workers_table.c.status)
                         .where(run_workers_table.c.worker_id == lease_owner)

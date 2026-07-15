@@ -1848,8 +1848,10 @@ def test_scheduler_claim_ready_returns_none_when_selected_row_was_claimed_by_pee
 
 
 def test_scheduler_claim_pending_sink_returns_none_when_selected_row_was_claimed_by_peer() -> None:
+    from elspeth.contracts.scheduler import SchedulerEventType
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
+    from elspeth.core.landscape.schema import scheduler_events_table
 
     engine = _make_tier1_engine()
     metadata.create_all(engine)
@@ -1874,7 +1876,7 @@ def test_scheduler_claim_pending_sink_returns_none_when_selected_row_was_claimed
         row_payload_json=payload,
         sink_name="sink-a",
         outcome="success",
-        path="completed",
+        path="default_flow",
         error_hash=None,
         error_message=None,
         now=now + timedelta(seconds=1),
@@ -1912,8 +1914,15 @@ def test_scheduler_claim_pending_sink_returns_none_when_selected_row_was_claimed
                 token_work_items_table.c.work_item_id == item.work_item_id
             )
         ).one()
+        caller_claim_events = conn.execute(
+            select(scheduler_events_table.c.event_id).where(
+                scheduler_events_table.c.run_id == "run-1",
+                scheduler_events_table.c.event_type == SchedulerEventType.CLAIM_PENDING_SINK.value,
+            )
+        ).all()
     assert row.status == TokenWorkStatus.LEASED.value
     assert row.lease_owner == "worker-racer"
+    assert caller_claim_events == []
 
 
 def test_scheduler_claim_ready_two_workers_claim_distinct_items() -> None:
@@ -2623,7 +2632,7 @@ def test_scheduler_unresolved_work_excludes_durable_sink_handoffs() -> None:
         row_payload_json=payload,
         sink_name="sink-a",
         outcome="success",
-        path="completed",
+        path="default_flow",
         error_hash=None,
         error_message=None,
         now=now + timedelta(seconds=1),

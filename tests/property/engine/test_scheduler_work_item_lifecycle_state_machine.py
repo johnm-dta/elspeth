@@ -49,7 +49,7 @@ from hypothesis import strategies as st
 from hypothesis.stateful import Bundle, RuleBasedStateMachine, invariant, rule
 from sqlalchemy import create_engine, insert, select
 
-from elspeth.contracts import NodeType
+from elspeth.contracts import NodeType, TerminalPath
 from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import AuditIntegrityError, RunLeadershipLostError
 from elspeth.contracts.scheduler import BlockedPendingSinkHandoff, TokenWorkStatus
@@ -349,7 +349,7 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
             row_payload_json=self.payload,
             sink_name=SINK_NAME,
             outcome="success",
-            path="completed",
+            path=TerminalPath.DEFAULT_FLOW.value,
             error_hash=None,
             error_message=None,
             now=now,
@@ -488,7 +488,7 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
                 row_payload_json=self.payload,
                 sink_name=SINK_NAME,
                 outcome="success",
-                path="completed",
+                path=TerminalPath.DEFAULT_FLOW.value,
                 error_hash=None,
                 error_message=None,
             )
@@ -660,7 +660,7 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
                 row_payload_json=self.payload,
                 sink_name=SINK_NAME,
                 outcome="success",
-                path="completed",
+                path=TerminalPath.DEFAULT_FLOW.value,
                 error_hash=None,
                 error_message=None,
                 now=now,
@@ -785,7 +785,7 @@ def test_expired_pending_sink_lease_recovers_in_place_preserving_attempt_and_wor
         row_payload_json=payload,
         sink_name=SINK_NAME,
         outcome="success",
-        path="completed",
+        path=TerminalPath.DEFAULT_FLOW.value,
         error_hash=None,
         error_message=None,
         now=now + timedelta(seconds=1),

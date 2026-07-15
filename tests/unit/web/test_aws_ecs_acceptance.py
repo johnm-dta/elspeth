@@ -15,7 +15,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import ClassVar, cast
+from typing import ClassVar
 
 import httpx
 import pytest
@@ -3012,8 +3012,6 @@ def _init_control_manifest(
         path,
         acceptance_run_id=run_id,
         candidate_sha="c" * 40,
-        release_pr_number="123",
-        ci_run_id="456789",
         aws_account_id="123456789012",
         aws_region="ap-southeast-2",
         scenario_a_inventory=str(scenario_a_preapply),
@@ -3151,7 +3149,7 @@ def test_control_manifest_init_update_validate_get_and_cleanup_assignments_are_c
     manifest = _init_control_manifest(path)
 
     assert path.stat().st_mode & 0o777 == 0o600
-    assert manifest["schema"] == "elspeth.aws-ecs-control-manifest.v4"
+    assert manifest["schema"] == "elspeth.aws-ecs-control-manifest.v5"
     acceptance.control_manifest_validate(
         path,
         acceptance_run_id="4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48",
@@ -4926,13 +4924,6 @@ def test_initial_evidence_export_binding_replays_after_cleanup_evidence_advances
     initial_path = checkpointed["evidence"]["export_receipt_path"]
     initial_hash = checkpointed["evidence"]["export_receipt_sha256"]
 
-    acceptance.gate_ledger_record_cleanup(
-        ledger_path,
-        check_id="task8.check01",
-        exit_status=0,
-        receipt_hash="e" * 64,
-        candidate_sha="c" * 40,
-    )
     receipt_path = tmp_path / "destroy-plan-receipt.json"
     receipt_path.write_text(json.dumps(_terraform_receipt(kind="terraform-destroy-plan", deletes=1)))
     os.chmod(receipt_path, 0o600)
@@ -4993,7 +4984,7 @@ def test_cleanup_evidence_finalize_is_two_phase_refuses_pending_and_clears_only_
     _gate_ledger_init(ledger_path)
     acceptance.gate_ledger_record(
         ledger_path,
-        check_id="task1.check01",
+        check_id="candidate",
         exit_status=0,
         receipt_hash="b" * 64,
         candidate_sha="c" * 40,
@@ -5196,7 +5187,7 @@ def test_cleanup_evidence_finalize_preserves_failed_deadline_as_a_valid_cleanup_
     _gate_ledger_init(ledger_path)
     acceptance.gate_ledger_record(
         ledger_path,
-        check_id="task1.check01",
+        check_id="candidate",
         exit_status=0,
         receipt_hash="b" * 64,
         candidate_sha="c" * 40,
@@ -5264,7 +5255,7 @@ def test_gate_ledger_records_idempotent_closed_checks_and_finalizes_checksum(tmp
     assert _gate_ledger_init(path) == initialized
     first = acceptance.gate_ledger_record(
         path,
-        check_id="task1.check01",
+        check_id="candidate",
         exit_status=0,
         receipt_hash="b" * 64,
         candidate_sha="c" * 40,
@@ -5274,7 +5265,7 @@ def test_gate_ledger_records_idempotent_closed_checks_and_finalizes_checksum(tmp
     )
     resumed = acceptance.gate_ledger_record(
         path,
-        check_id="task1.check01",
+        check_id="candidate",
         exit_status=0,
         receipt_hash="b" * 64,
         candidate_sha="c" * 40,
@@ -5284,29 +5275,10 @@ def test_gate_ledger_records_idempotent_closed_checks_and_finalizes_checksum(tmp
     )
     assert first == resumed
     assert len(first["records"]) == 1  # type: ignore[arg-type]
-
-    generated = acceptance.gate_ledger_record(
-        path,
-        check_id="task1.check02",
-        exit_status=0,
-        receipt_hash="d" * 64,
-        candidate_sha="c" * 40,
-        now=lambda: datetime(2026, 7, 14, 1, 2, 1, tzinfo=UTC),
-    )
-    generated_resume = acceptance.gate_ledger_record(
-        path,
-        check_id="task1.check02",
-        exit_status=0,
-        receipt_hash="d" * 64,
-        candidate_sha="c" * 40,
-        now=lambda: datetime(2026, 7, 14, 1, 2, 2, tzinfo=UTC),
-    )
-    assert generated == generated_resume
-    assert len(generated["records"]) == 2  # type: ignore[arg-type]
     _fill_gate_ledger_prefix(path)
     bound = json.loads(path.read_text())
     assert bound["candidate_sha"] == "c" * 40
-    assert bound["candidate_bound_record_count"] == 13
+    assert bound["candidate_bound_record_count"] == 1
     _fill_cleanup_gate_prefix(path)
     acceptance.gate_ledger_record_cleanup(
         path,
@@ -5332,7 +5304,7 @@ def test_gate_ledger_records_idempotent_closed_checks_and_finalizes_checksum(tmp
     with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_finalized"):
         acceptance.gate_ledger_record_cleanup(
             path,
-            check_id="task8.check05",
+            check_id="cleanup",
             exit_status=0,
             receipt_hash="d" * 64,
             candidate_sha="c" * 40,
@@ -5355,7 +5327,7 @@ def test_gate_ledger_rejects_conflicting_resume_and_invalid_or_secret_shaped_fie
         acceptance.gate_ledger_get(path, "records")
     acceptance.gate_ledger_record(
         path,
-        check_id="task1.check01",
+        check_id="candidate",
         exit_status=0,
         receipt_hash="b" * 64,
         candidate_sha="c" * 40,
@@ -5363,7 +5335,7 @@ def test_gate_ledger_rejects_conflicting_resume_and_invalid_or_secret_shaped_fie
     with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_conflict"):
         acceptance.gate_ledger_record(
             path,
-            check_id="task1.check01",
+            check_id="candidate",
             exit_status=1,
             receipt_hash="b" * 64,
             candidate_sha="c" * 40,
@@ -5372,7 +5344,7 @@ def test_gate_ledger_rejects_conflicting_resume_and_invalid_or_secret_shaped_fie
     with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_schema"):
         acceptance.gate_ledger_record(
             path,
-            check_id="task8.check01",
+            check_id="cleanup",
             exit_status=0,
             receipt_hash="b" * 64,
             candidate_sha="c" * 40,
@@ -5380,7 +5352,7 @@ def test_gate_ledger_rejects_conflicting_resume_and_invalid_or_secret_shaped_fie
     with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_schema"):
         acceptance.gate_ledger_record_cleanup(
             path,
-            check_id="task1.check01",
+            check_id="candidate",
             exit_status=0,
             receipt_hash="b" * 64,
             candidate_sha="c" * 40,
@@ -5388,7 +5360,7 @@ def test_gate_ledger_rejects_conflicting_resume_and_invalid_or_secret_shaped_fie
     with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_candidate"):
         acceptance.gate_ledger_record_cleanup(
             path,
-            check_id="task8.check01",
+            check_id="cleanup",
             exit_status=0,
             receipt_hash="b" * 64,
             candidate_sha="d" * 40,
@@ -5406,7 +5378,7 @@ def test_gate_ledger_rejects_conflicting_resume_and_invalid_or_secret_shaped_fie
     _gate_ledger_init(failed_path)
     acceptance.gate_ledger_record(
         failed_path,
-        check_id="task1.check01",
+        check_id="candidate",
         exit_status=1,
         receipt_hash="b" * 64,
         candidate_sha="c" * 40,
@@ -5430,7 +5402,7 @@ def test_gate_ledger_enforces_candidate_bind_and_cleanup_phase_boundaries(tmp_pa
     with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_phase"):
         acceptance.gate_ledger_record(
             unbound_path,
-            check_id="task2.check01",
+            check_id="static",
             exit_status=0,
             receipt_hash="b" * 64,
             candidate_sha="c" * 40,
@@ -5439,14 +5411,14 @@ def test_gate_ledger_enforces_candidate_bind_and_cleanup_phase_boundaries(tmp_pa
     acceptance.gate_ledger_bind_candidate(unbound_path, candidate_sha="c" * 40)
     acceptance.gate_ledger_record(
         unbound_path,
-        check_id="task2.check01",
+        check_id="static",
         exit_status=0,
         receipt_hash="b" * 64,
         candidate_sha="c" * 40,
     )
     acceptance.gate_ledger_record_cleanup(
         unbound_path,
-        check_id="task8.check01",
+        check_id="cleanup",
         exit_status=0,
         receipt_hash="d" * 64,
         candidate_sha="c" * 40,
@@ -5456,7 +5428,7 @@ def test_gate_ledger_enforces_candidate_bind_and_cleanup_phase_boundaries(tmp_pa
     with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_phase"):
         acceptance.gate_ledger_record(
             unbound_path,
-            check_id="task2.check02",
+            check_id="tests",
             exit_status=0,
             receipt_hash="e" * 64,
             candidate_sha="c" * 40,
@@ -5464,58 +5436,3 @@ def test_gate_ledger_enforces_candidate_bind_and_cleanup_phase_boundaries(tmp_pa
 
     with pytest.raises(acceptance.AcceptanceCheckError, match="gate_ledger_conflict"):
         _gate_ledger_init(unbound_path)
-
-
-def test_cleanup_gate_replays_stable_rows_after_unrelated_manifest_checkpoints(tmp_path: Path) -> None:
-    manifest_path = tmp_path / "control.json"
-    manifest = _init_control_manifest(manifest_path)
-    ledger_path = Path(manifest["gate_ledger_path"])
-    _gate_ledger_init(ledger_path)
-    _bind_gate_ledger_candidate(ledger_path)
-    run_id = cast(str, manifest["acceptance_run_id"])
-    resume_hash = hashlib.sha256(f"{run_id}\n{'c' * 40}\n{ledger_path}\n".encode()).hexdigest()
-    first = acceptance.gate_ledger_record_cleanup(
-        ledger_path,
-        check_id="task8.check01",
-        exit_status=0,
-        receipt_hash=resume_hash,
-        candidate_sha="c" * 40,
-    )
-    acceptance.control_manifest_update(manifest_path, cleanup_checkpoint="orphan_sweep:failed")
-    assert (
-        acceptance.gate_ledger_record_cleanup(
-            ledger_path,
-            check_id="task8.check01",
-            exit_status=0,
-            receipt_hash=resume_hash,
-            candidate_sha="c" * 40,
-        )
-        == first
-    )
-    for check_id in ("task8.check02", "task8.check03"):
-        acceptance.gate_ledger_record_cleanup(
-            ledger_path,
-            check_id=check_id,
-            exit_status=0,
-            receipt_hash=hashlib.sha256(check_id.encode()).hexdigest(),
-            candidate_sha="c" * 40,
-        )
-    owner_hash = hashlib.sha256(b"confirmed\nconfirmed\n").hexdigest()
-    owner_row = acceptance.gate_ledger_record_cleanup(
-        ledger_path,
-        check_id="task8.check04",
-        exit_status=0,
-        receipt_hash=owner_hash,
-        candidate_sha="c" * 40,
-    )
-    acceptance.control_manifest_update(manifest_path, cleanup_checkpoint="local_images:confirmed")
-    assert (
-        acceptance.gate_ledger_record_cleanup(
-            ledger_path,
-            check_id="task8.check04",
-            exit_status=0,
-            receipt_hash=owner_hash,
-            candidate_sha="c" * 40,
-        )
-        == owner_row
-    )

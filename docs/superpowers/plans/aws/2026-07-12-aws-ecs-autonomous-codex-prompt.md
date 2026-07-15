@@ -3,6 +3,11 @@
 You are the autonomous implementation and integration coordinator for the
 complete ELSPETH AWS ECS runtime-readiness program.
 
+Project applicability correction: Wardline is suite-installed but is not
+enabled for Elspeth because the project has no Wardline markers. Do not run
+Wardline or create evidence for it. Hosted CI, candidate PRs, and temporary
+remote refs are also outside this program; verification is local plus live AWS.
+
 Repository:
 
 ```text
@@ -77,7 +82,7 @@ for unrelated planning work during Stages 1–8; they are out of scope and their
 movement or dirty state is not a program blocker. Do not inspect, clean, reset,
 stash, commit, or otherwise manage that concurrent work, and do not rebase the
 program branch merely to chase it. Documentation-only changes outside AWS
-program plans, reviews, designs, and specifications, CI/security policy,
+program plans, reviews, designs, and specifications, repository policy,
 generated contracts, runtime code, and tests are non-substantive and are
 simply absorbed at the Stage 9 reconciliation. Every non-documentation change
 is substantive. Documentation
@@ -101,20 +106,20 @@ Immediately before Plan 12 freezes its candidate, reconcile the then-current
 preserving all slice close anchors in ancestry. Resolve conflicts on the
 program branch, rerun the complete affected-area checkpoint, and record the
 consumed tip as `RECONCILED_RELEASE_SHA`. Only then freeze `CANDIDATE_SHA`.
-After one unchanged candidate passes Plan 12 Tasks 1–8, require
+After one unchanged candidate passes Plan 12 Tasks 1–6, require
 `release/0.7.1` still to equal `RECONCILED_RELEASE_SHA`, then fast-forward it
 to that exact candidate SHA. The final release update itself creates no merge
 commit. Verify release HEAD equals the tested candidate, the program worktree
 and final release-update surface are clean, and every slice close SHA is a
-release ancestor before Task 9 may issue GO or close Plan 12, Wave 4, or the
-milestone. If the release tip advances after reconciliation, invalidate the
+release ancestor before Task 7 may issue GO or close Plan 12. If the release
+tip advances after reconciliation, invalidate the
 candidate. If external mutation has begun or `CLEANUP_REQUIRED=1`, complete
-Plan 12 Task 8 evidence export and every independent cleanup attempt before
+Plan 12 Task 6 evidence export and every independent cleanup attempt before
 changing program HEAD or reconciling again; cleanup failure is NO-GO and
 forbids restart. Then preserve the concurrent release work, reconcile it, and
 restart Plan 12 Task 1.
 
-## 3. Sprint verification and CI cadence override
+## 3. Sprint verification cadence override
 
 This section is an operator-approved override to repeated verification
 cadence. It does not weaken any rule or acceptance criterion.
@@ -123,7 +128,7 @@ cadence. It does not weaken any rule or acceptance criterion.
 
 - Use TDD.
 - Run every relevant focused unit, integration, property, frontend, Docker,
-  PostgreSQL, live, static, typing, trust, Wardline, coverage, manifest,
+  PostgreSQL, live, static, typing, trust, coverage, manifest,
   packaging, and affected-area test in proportion to the change.
 - Add regression tests for every fixed defect.
 - Run cheap formatting, compilation, typing, or targeted policy checks when
@@ -132,9 +137,9 @@ cadence. It does not weaken any rule or acceptance criterion.
   `pytest tests/`, or an equivalent command that collects the whole
   repository. Focused `uv run pytest <explicit paths/selectors>` commands are
   required throughout implementation.
-- Do not run the complete custom CI matrix after every commit or slice.
+- Do not run the complete verification matrix after every commit or slice.
 - You may use `git commit --no-verify` when repeated hooks would execute the
-  complete custom CI machinery; still run the plan's required focused hooks
+  complete custom validation machinery; still run the plan's required focused hooks
   and gates explicitly.
 - Do not edit hook configuration to avoid hooks.
 
@@ -152,26 +157,25 @@ Major checkpoints are:
 3. Stages 5–6 universal policy and Guardrails integrated.
 4. Stage 7 integrated doctor proof complete.
 5. Plan 10 integrated.
-6. The final Plan 12 candidate prepared.
 
 At each checkpoint:
 
 1. Derive the affected test matrix from the plans, changed files, Loomweave,
-   Warpline where available, and `.github/workflows/ci.yaml`.
+   Warpline where available, and the owning plan contracts.
 2. Include the full focused test sets for every slice completed since the
    previous checkpoint.
 3. Include applicable Ruff, format, mypy, `elspeth-lints`, trust-tier,
-   trust-boundary, Wardline, frontend, lockfile, manifest, golden, packaging,
+   trust-boundary, frontend, lockfile, manifest, golden, packaging,
    Docker, and PostgreSQL checks.
 4. Do not silently deselect or skip required tests.
 5. Fix every failure at its owning implementation surface.
 6. Re-run the failed and affected sets until the checkpoint is green.
 
-Never weaken, delete, baseline, suppress, waive, or broaden a CI, lint,
-security, trust, Wardline, manifest, contract, or coverage rule to make a
+Never weaken, delete, baseline, suppress, waive, or broaden a test, lint,
+security, trust, manifest, contract, or coverage rule to make a
 checkpoint pass.
 
-During final washup, freeze one candidate SHA and execute Plan 12 Tasks 1–8 on
+During final washup, freeze one candidate SHA and execute Plan 12 Tasks 1–6 on
 that exact SHA, including the literal command
 `uv run pytest tests/ -v -m ""` and every other required closeout gate. Any
 code, documentation, lockfile, or generated-file change invalidates all
@@ -232,8 +236,7 @@ Before Stage 1:
 
 ### Stage 1 — parallel foundations
 
-1. `elspeth-8166b310e7` — restore the signed-tier, trust-boundary, and
-   Wardline baseline.
+1. `elspeth-8166b310e7` — restore the signed-tier and trust-boundary baseline.
 2. `elspeth-b9e8b5d24b` — Plan 01, AWS ECS deployment contract.
 3. `elspeth-9070fb0a45` — Plan 02, PostgreSQL schema support.
 
@@ -242,7 +245,6 @@ Special rules:
 - Agents never receive signing keys and never sign trust metadata.
 - Signature repair remains an operator action.
 - Plan 02 owns the first `uv.lock` regeneration.
-- Never narrow, baseline, or waive Wardline findings.
 - Plans 01 and 02 may continue while the baseline lane awaits operator or
   tooling action.
 - Run Major Checkpoint 1 after all three lanes integrate.
@@ -376,28 +378,25 @@ Before release reconciliation:
 - verify version and SHA boundaries;
 - establish named infrastructure, database, identity, release, evidence, and
   cleanup operators;
-- verify required AWS, Docker, Terraform, browser, CI, and evidence
+- verify required AWS, Docker, Terraform, browser, and evidence
   facilities.
 
-Plan 12 owns exact-version local and hosted gates, platform-bound image proof,
+Plan 12 owns exact-version local gates, platform-bound image proof,
 live Aurora/EFS/ECS/ALB, task-role S3/Bedrock/Guardrails, Cognito/OIDC,
 Landscape-correlated CloudWatch/X-Ray, rollback, durable sanitized evidence,
 teardown, and final GO/NO-GO.
 
 Run the reconciliation affected-area checkpoint before candidate freeze. Then
-bind the final reviewed Plan 12 checksum and initialize its protected gate
+bind the final reviewed Plan 12 checksum and initialize its protected phase
 ledger under Task 1. Initialize the candidate-bound control manifest only at
 Plan 12's documented point before the first external mutation. Use Task 1 to
-freeze the candidate, run Major Checkpoint 6 on that exact SHA before Task 2,
-and run the complete unfiltered repository-wide suite plus every other Plan 12
-Task 1–8 gate on that unchanged SHA.
+freeze the candidate, then run Plan 12 Tasks 2–6 on that unchanged SHA.
 
 Only Plan 12 may declare runtime GO. GO is limited to the exact tested source
 SHA, image digest, and platform. Do not describe it as approval for rebuilt,
 cross-platform, or durably published artifacts.
 
-Use `feat/aws-ecs-program` or a candidate-derived immutable exact-SHA temporary
-ref for hosted CI. Never push or update `release/0.7.1` before Tasks 1–8 pass.
+Never push or update `release/0.7.1` before Tasks 1–6 pass.
 
 ## 6. Serialized ownership chains
 
@@ -461,7 +460,7 @@ Never broaden scope opportunistically, overwrite unrelated work, hand-edit
 gate, provide signing credentials to agents, accept skipped mandatory tests,
 expose secrets or raw content in evidence, infer unavailable enrichment means
 clean, or claim runtime GO before the tested candidate has been fast-forwarded
-unchanged into `release/0.7.1` after Plan 12 Tasks 1–8.
+unchanged into `release/0.7.1` after Plan 12 Tasks 1–6.
 
 ## 8. Long-running-agent resilience
 

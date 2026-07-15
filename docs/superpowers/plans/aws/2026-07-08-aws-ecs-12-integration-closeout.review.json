@@ -1,188 +1,62 @@
 {
   "verdict": "APPROVED",
-  "scope_verdict": "GO_TO_EXECUTE_AFTER_ALL_DEPENDENCIES",
-  "summary": "Plan 12 is execution-ready after all 19 prerequisites close on feat/aws-ecs-program. The repaired Plan 10 handoff now makes every credited ECS task definition and Guardrail receipt prove the exact protected seven-setting inventory and exercises the same five-case policy contract through backend and frontend paths. Task 1 freezes one candidate, Major Checkpoint 6 runs on that exact SHA before Task 2, and Tasks 1 through 8 test it unchanged; Task 9 alone performs the final release transition.",
+  "scope_verdict": "GO_TO_EXECUTE",
+  "summary": "Plan 12 is execution-ready as a seven-task AWS integration closeout. Tasks 1 through 4 freeze and qualify one candidate, Task 5 deploys and exercises that candidate in two isolated AWS scenarios, Task 6 tears down every disposable surface, and Task 7 performs the exact-SHA release transition and ends the program. Hosted CI, Wardline, per-checkbox proof rows, post-plan checkpoints, and parent milestone closeout are outside this plan.",
   "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md",
-  "reviewed_at": "2026-07-14T18:39:49Z",
+  "plan_sha256": "1e23bf4e1ab5bc1073e22cec2dee65ee80d8258242585730a601c7bdaf9f333f",
+  "reviewed_at": "2026-07-15T00:34:48Z",
   "review_basis": {
     "branch": "feat/aws-ecs-program",
-    "head": "c66231eb06df5a67421ff3649c7d561fdf3ac250",
-    "baseline": "Fresh full-current review of the Plan 12 consumers after the final Plan 10 protected-policy repair. The review reconciled canonical tutorial evidence, exact seven-setting scenario inventory, task-definition consumers, Guardrail receipt extraction and storage, five-case backend/frontend parity, and preserved the already-approved Stage 9 and Task 1 through Task 9 order."
+    "base_head": "b5501a58a4bc96794dbb7fb26d9fc84d51008b80",
+    "process": "One full post-plan review by the coordinator and two independent read-only reviewers, limited to material execution blockers."
   },
   "blocking_issues": [],
   "warnings": [
     {
-      "id": "R12-1",
-      "status": "DEPENDENCY",
-      "detail": "Filigree elspeth-05396fed38 remains pending, unassigned, and correctly blocked. Plan review did not claim or transition it. Execution starts only after all 19 pre-closeout tracker steps are done, then atomically starts Plan 12 under the named integration coordinator."
-    },
-    {
-      "id": "R12-2",
-      "status": "EXTERNAL_PREREQUISITES",
-      "detail": "Execution requires named infrastructure, database, identity, release, evidence, and emergency-cleanup operators; two isolated remote-state Terraform stacks; an approved AWS account/region/ECR repository; Aurora/EFS/ECS/ALB/Cognito/S3/Bedrock permissions; Docker; Node 22; frontend-locked Playwright/Chromium; and a durable encrypted evidence destination. Missing authority or infrastructure is BLOCKED/NO-GO."
-    },
-    {
-      "id": "R12-3",
-      "status": "SCOPE_BOUNDARY",
-      "detail": "The approved program scope intentionally does not treat temporary acceptance images as durable release artifacts. Plan 12 GO covers only the tested source/runtime contract, TARGET_PLATFORM, and recorded digest. A rebuilt or other-platform digest must repeat artifact/live acceptance and pass scan, SBOM, provenance, and signature gates before publication."
-    },
-    {
-      "id": "R12-4",
-      "status": "SYNTHETIC_ROLLBACK_BASELINE",
-      "detail": "Scenario B qualifies a source-complete synthetic rollback rehearsal image built from the recorded pre-Plan-10 SHA. This proves code/schema rollback behavior, not historical production-artifact retention. The final verdict now states that distinction explicitly."
+      "id": "R12-EXTERNAL",
+      "status": "EXTERNAL_INPUTS_REQUIRED",
+      "detail": "Live execution still requires the approved AWS credentials, account and region, ECR repository, two bound Terraform scenarios, operator approvals, test identity, and cleanup authority. Their absence is a real Task 5 blocker, not a reason to add local proof work."
     }
   ],
   "resolved_findings": [
     {
-      "id": "B12-1",
+      "id": "R12-1",
       "status": "RESOLVED",
-      "resolution": "Replaced the impossible PR exact-SHA assertion with an unmerged release PR plus a guarded temporary RC push ref; CI, CodeQL, and signed-allowlist workflows must all succeed on the exact candidate SHA, PR checks must be green, and the ref is compare-deleted on success or failure."
+      "resolution": "Corrected cleanup-evidence-finalize calls to the controller's --file and --ledger interface."
     },
     {
-      "id": "B12-2",
+      "id": "R12-2",
       "status": "RESOLVED",
-      "resolution": "Moved executable Filigree dependency closure before version mutation, added atomic Plan-12 start/exact-owner resume, and added NO-GO comment versus GO-only comment/close behavior."
+      "resolution": "Restored the minimum runnable ECR, saved-plan Terraform, scenario binding, destroy, cleanup checkpoint, and finalizer path in the canonical deployment runbook."
     },
     {
-      "id": "B12-3",
+      "id": "R12-3",
       "status": "RESOLVED",
-      "resolution": "Closed the circular provisioning order: durable cleanup state is initialized first, run-scoped images are built/pushed and resolved to digests second, reviewed saved Terraform plans consume those digests third, and task definitions are verified after exact-plan apply."
-    },
-    {
-      "id": "B12-4",
-      "status": "RESOLVED",
-      "resolution": "Bound each external stack to a clean IaC commit, Terraform/provider lock, remote encrypted locked backend, hashed state key, workspace, AWS account/region, vars hash, and disjoint scenario binding hash; exact saved plans and reviewed destroy plans are applied with no-op proof."
-    },
-    {
-      "id": "B12-5",
-      "status": "RESOLVED",
-      "resolution": "Made ECR tags acceptance-run scoped and pre-existing-tag fail-closed; verified account/region/repository identity; armed durable cleanup before the first push; and replaced the forbidden password pipe with a dedicated protected aws_ecr_login secret consumer."
-    },
-    {
-      "id": "B12-6",
-      "status": "RESOLVED",
-      "resolution": "Added a mode-0600 atomic control manifest and gate ledger, exact lifecycle helper ownership in Plan 10, separately namespaced scenario inventories, per-surface checkpoints, fresh-process cleanup/verdict loading, and an audited cleanup-only path after deadline expiry."
-    },
-    {
-      "id": "B12-7",
-      "status": "RESOLVED",
-      "resolution": "Persisted sanitized Terraform plan/no-op/destroy receipts and signed approval references before mutation, kept raw plans protected and ephemeral, and added two-phase checksum-verified final evidence export whose commit atomically clears cleanup_required only after all required surfaces are confirmed."
-    },
-    {
-      "id": "B12-8",
-      "status": "RESOLVED",
-      "resolution": "Added deadline-derived acceptance and cleanup wrappers, a reserved 90-minute cleanup budget, an auditable emergency cleanup horizon after expiry, bounded AWS/Terraform/orphan/Docker operations, and fail-closed Docker present/absent/error classification."
-    },
-    {
-      "id": "B12-9",
-      "status": "RESOLVED",
-      "resolution": "Defined sentinel-framed ECS Exec receipts and a local exact-schema extractor for every candidate-task S3 and Bedrock check; missing, duplicate, malformed, wrong-task/SHA/scenario, oversized, or failed receipts now block."
-    },
-    {
-      "id": "B12-10",
-      "status": "RESOLVED",
-      "resolution": "Added mechanical ECS Exec task-role ssmmessages permissions, private-network reachability, optional KMS/session-log checks, and preserved the rule that Exec root cannot prove non-root EFS/local-auth behavior."
-    },
-    {
-      "id": "B12-11",
-      "status": "RESOLVED",
-      "resolution": "Pinned the live OIDC runner to Node 22, npm ci, the frontend lock's Playwright version, locally installed Chromium, exactly one dedicated spec, and a clean candidate before mutation."
-    },
-    {
-      "id": "B12-12",
-      "status": "RESOLVED",
-      "resolution": "Made the Aurora connection budget executable per scenario with exact AWS/RDS DBClusterIdentifier Maximum samples, non-empty numeric datapoints, signed max_connections, sanitized high-water receipts, and both budget/headroom inequalities in Definition of Done."
-    },
-    {
-      "id": "B12-13",
-      "status": "RESOLVED",
-      "resolution": "Corrected asynchronous ECS task-definition cleanup semantics: no ACTIVE run-scoped revisions, receipts for transition through INACTIVE and delete request, zero dependants, and absent or owner-tracked DELETE_IN_PROGRESS state."
-    },
-    {
-      "id": "B12-14",
-      "status": "RESOLVED",
-      "resolution": "Separated CI_RUN_ID from APP_RUN_ID, durably bound PR/CI identities for fresh-shell verdict recovery, and added remote release-branch, PR, exact run, temporary ref, local/GitHub/remote tag absence checks before GO."
-    },
-    {
-      "id": "B12-15",
-      "status": "RESOLVED",
-      "resolution": "Made Tasks 1-7 fail-fast under Bash strict mode, repaired the Docker-history credential absence check so grep/read/history errors cannot pass as absence, and isolated Docker login cleanup so it cannot overwrite the run-level trap."
-    },
-    {
-      "id": "B12-16",
-      "status": "RESOLVED",
-      "resolution": "Narrowed the final GO and cross-plan/spec/index contracts so deletion and later rebuilding cannot masquerade as build-once artifact acceptance: only an equal recorded digest can inherit the target-platform live result; any different or other-platform digest repeats acceptance."
-    },
-    {
-      "id": "B12-17",
-      "status": "RESOLVED",
-      "resolution": "Separated the pre-candidate release reconciliation checkpoint from Major Checkpoint 6, made conflict resume reconstruct exact HEAD/ORIG_HEAD and MERGE_HEAD anchors without resampling release, and required Task 8 cleanup before any post-mutation HEAD change or rereconciliation."
-    },
-    {
-      "id": "B12-18",
-      "status": "RESOLVED",
-      "resolution": "Concurrent main-checkout and release-branch documentation is out of scope during Stages 1-8. Stage 9 absorbs unrelated documentation, while every non-documentation change and any AWS program plan, review, design, specification, CI/security policy, generated contract, runtime, or test change triggers impact and evidence handling."
-    },
-    {
-      "id": "B12-19",
-      "status": "RESOLVED",
-      "resolution": "The full contract repair binds durable Plan/program/release anchors, uses 76 ordered success rows plus four caller cleanup rows and finalizer-owned task8.check05, aggregates missing evidence paths without abandoning independent teardown, requires a new ledger after cleanup starts, preserves historical exports, checkpoints exact retained telemetry monotonically, and recovers the terminal-row-before-manifest-commit interruption window."
-    },
-    {
-      "id": "B12-20",
-      "status": "RESOLVED",
-      "resolution": "Plan 12 now consumes manifest-validated task-definition ARNs for all candidate, doctor, verifier, rollback, and previous-image paths, while Guardrail receipt extraction and persistence independently require the same policy-binding digest."
-    }
-  ],
-  "reviewer_summaries": {
-    "reality": {
-      "status": "APPROVED_AFTER_REPAIRS",
-      "blocking": 0
-    },
-    "architecture_and_security": {
-      "status": "APPROVED_AFTER_REPAIRS",
-      "blocking": 0
-    },
-    "quality_and_systems": {
-      "status": "APPROVED_AFTER_REPAIRS",
-      "blocking": 0
-    },
-    "synthesis_and_current_head": {
-      "status": "APPROVED_AFTER_REPAIRS",
-      "blocking": 0
-    }
-  },
-  "review_history": [
-    {
-      "reviewed_at": "2026-07-12T07:33:37Z",
-      "verdict": "APPROVED_AFTER_CROSS_PLAN_REPAIR",
-      "summary": "Round 6 added the exact 19-step closure inventory, epoch-23 compatibility binding, reusable live_aws zero-skip Guardrail proof, and Plans 15A-15C ownership without weakening existing closeout gates."
-    },
-    {
-      "reviewed_at": "2026-07-12T04:15:00Z",
-      "verdict": "CHANGES_REQUESTED",
-      "summary": "Initial review found an impossible exact-SHA PR assertion, circular image/Terraform ordering, shell-only cleanup state, mutable/unbound external IaC, unsafe destroy, colliding ECR tags and run IDs, unverifiable ECS Exec output, incomplete expiry/interruption recovery, and ambiguous artifact/task-definition closeout semantics."
-    },
-    {
-      "reviewed_at": "2026-07-13T04:57:30Z",
-      "verdict": "APPROVED_AFTER_ORCHESTRATION_REPAIR",
-      "summary": "Plan 12 now consumes a reviewed release reconciliation anchor, keeps pre-freeze reconciliation distinct from candidate-bound Major Checkpoint 6, and finishes cleanup before any post-mutation rereconciliation."
-    },
-    {
-      "reviewed_at": "2026-07-14T16:54:37Z",
-      "verdict": "APPROVED_AFTER_CONTRACT_REPAIR",
-      "summary": "Fresh full-plan review returned GO on the complete current Plan 12 and Stage 9 after multiple repair passes. All 81 rows, cleanup resumption, evidence preservation, exact retained telemetry, and the single Task 9 release transition reconcile mechanically."
+      "resolution": "Moved retained CloudWatch and X-Ray completeness enforcement before the live phase can pass."
     }
   ],
   "verification": [
-    "Three independent reviewers returned APPROVED after repairs.",
-    "All 75 Bash or shell fences in the four amended orchestration documents parse with bash -n; Markdown fences are balanced and all 24 local links resolve.",
-    "A synthetic divergent-release repository exercised conflict-class exit, fresh-shell HEAD/ORIG_HEAD and MERGE_HEAD reconstruction, staged-resolution checks, merge commit, and preserved ancestry successfully.",
-    "git diff --check passes; direct AWS invocation, unsafe destroy -auto-approve, stale tag templates, RUN_ID collision, forbidden aws_capture login pipe, and || true bypass markers are absent.",
-    "Current CI/CodeQL/allowlist triggers, gh/filigree command options, Terraform saved-plan contract, exact Filigree dependency set, and fresh Loomweave repository state were checked.",
-    "Plan 12 remains pending, unassigned, and dependency-controlled; this review did not claim, transition, implement, push, merge, tag, or deploy it.",
-    "fresh full-current review returned GO after 257 focused tests, Ruff check and format, mypy, 48 backtick plus 2 tilde Plan 12 Bash fences, 24 Stage 9 Bash fences, 16 deployment-runbook Bash fences, and git diff --check",
-    "final protected-policy handoff review returned GO with 4654 backend and 2324 frontend tests passing"
+    "Both independent reviewers approved the repaired lean plan with no remaining execution blocker.",
+    "Plan 12 and deployment-runbook Bash fences pass bash -n.",
+    "250 focused acceptance-controller and deployment-runbook tests pass.",
+    "Ruff check, Ruff format check, strict mypy for the controller, and git diff --check pass.",
+    "Plan 12 is 495 lines, down from the prior 3244-line form, while real deployment and teardown commands remain in the reusable runbook."
   ],
-  "plan_sha256": "622241408e07374e447de2b2b169bb0641ecad03fdb7d5bd5d5caefe1a22adbe"
+  "review_history": [
+    {
+      "reviewed_at": "2026-07-15T00:34:48Z",
+      "verdict": "APPROVED_AFTER_LEAN_REPAIR",
+      "summary": "The full-plan review removed process-only choreography and repaired the three concrete gaps that would have prevented live AWS deployment or cleanup."
+    }
+  ],
+  "reviewer_summaries": {
+    "execution": {
+      "status": "APPROVED",
+      "blocking": 0
+    },
+    "controller_and_cleanup": {
+      "status": "APPROVED_AFTER_REPAIRS",
+      "blocking": 0
+    }
+  }
 }

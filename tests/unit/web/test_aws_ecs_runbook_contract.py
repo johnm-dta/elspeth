@@ -16,16 +16,10 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNBOOK = REPO_ROOT / "docs" / "runbooks" / "aws-ecs-deployment.md"
 RUNBOOK_INDEX = REPO_ROOT / "docs" / "runbooks" / "index.md"
 DOCKER_GUIDE = REPO_ROOT / "docs" / "guides" / "docker.md"
-PLAN12 = REPO_ROOT / "docs" / "superpowers" / "plans" / "aws" / "2026-07-08-aws-ecs-12-integration-closeout.md"
-RUN_SHEET = REPO_ROOT / "docs" / "superpowers" / "plans" / "aws" / "2026-07-12-aws-ecs-orchestration-run-sheet.md"
 
 
 def _text() -> str:
     return RUNBOOK.read_text(encoding="utf-8")
-
-
-def _plan12_text() -> str:
-    return PLAN12.read_text(encoding="utf-8")
 
 
 def _fences(language: str) -> list[str]:
@@ -78,7 +72,6 @@ def test_runbook_preserves_task_local_nonessential_healthy_sidecar() -> None:
 
 def test_runbook_consumes_complete_web_plugin_policy_handoff() -> None:
     text = _text()
-    plan12 = _plan12_text()
 
     for required in (
         "ELSPETH_WEB__PLUGIN_ALLOWLIST",
@@ -97,7 +90,6 @@ def test_runbook_consumes_complete_web_plugin_policy_handoff() -> None:
         "run_web_plugin_policy",
     ):
         assert required in text
-        assert required in plan12
 
     assert "register a new task-definition revision" in text
     assert "force a new deployment" in text
@@ -608,141 +600,6 @@ def test_runbook_projects_cognito_before_capture_and_persists_local_evidence_pat
     capture = text.index("aws_ecs_acceptance capture", state_create)
     assert state_create < state_update < capture
     assert "--receipt-stdin" in text
-
-
-def test_plan12_executes_protected_scenario_order_and_durable_cleanup_contract() -> None:
-    text = _plan12_text()
-    assert re.search(r"aws_capture\s+(?!aws\b)", text) is None
-    assert "run_acceptance_tf_bounded" not in text
-    assert "run_cleanup_bounded terraform" not in text
-    assert re.search(r"(?m)^\s*terraform\s+-chdir", text) is None
-    assert text.count("load_scenario A") >= 7 and text.count("load_scenario B") >= 8
-    replacement = text[text.index("ORIGINAL_TASK_ARN=") : text.index("Complete the runbook's 20 consecutive")]
-    assert replacement.index("verify-api") < replacement.index("PAYLOAD_TASK_ARN") < replacement.index("run_candidate_role_checks")
-    assert text.index('--oidc-evidence-dir "$OIDC_EVIDENCE_DIR"') < text.index("COGNITO_CLIENT_PREFLIGHT=")
-    assert text.index('--acceptance-state-path "$ACCEPTANCE_STATE"') < text.index("aws_ecs_acceptance capture")
-    assert '"$SCENARIO_A_TF_BINDING_FILE"' in text and '"$SCENARIO_B_TF_BINDING_FILE"' in text
-    assert "elspeth.aws-ecs-evidence-export.v1" in text
-    assert '--evidence-export-receipt "$EVIDENCE_EXPORT_RECEIPT"' in text
-    assert '--final-evidence-export-receipt "$FINAL_EVIDENCE_EXPORT_RECEIPT"' in text
-    assert "elspeth.aws-ecs-scenario-inventory.v5" in text
-    assert "elspeth.aws-ecs-control-manifest.v4" in text
-    assert "elspeth.aws-ecs-retained-evidence.v1" in text
-    assert "control-manifest bind-retained-evidence" in text
-    assert "control-manifest bind-scenario" in text
-    assert "gate-ledger bind-candidate" in text
-    assert "IDENTITY_CLEANUP_CONFIRMED" not in text
-    assert "SHARED_RESOURCE_CLEANUP_CONFIRMED" not in text
-    assert "PRECLEANUP_EVIDENCE_EXPORT_CONFIRMED" not in text
-    assert text.index("record_cleanup_gate_check task8.check04") < text.index(
-        '--final-evidence-export-receipt "$FINAL_EVIDENCE_EXPORT_RECEIPT"'
-    )
-    assert "emergency_horizon_started_or_renewed" not in text
-    for task, count in {1: 13, 2: 8, 3: 7, 4: 2, 5: 10, 6: 6, 7: 30, 8: 5}.items():
-        assert f"task{task}.check01" in text
-        assert f"task{task}.check{count:02d}" in text
-
-
-def test_plan12_binds_each_resolved_inventory_in_apply_order_and_preserves_noop_identity() -> None:
-    text = _plan12_text()
-    apply_function = text[text.index("plan_and_apply_scenario()") : text.index("export SCENARIO_A_RESOLVED_INVENTORY")]
-    assert apply_function.index('noop_plan_sha="$(sha256sum "$plan"') < apply_function.index(
-        '--terraform-noop-receipt "$scenario_id:$noop_plan_sha:$durable_receipt"'
-    )
-    assert apply_function.index('--terraform-noop-receipt "$scenario_id:$noop_plan_sha:$durable_receipt"') < apply_function.index(
-        "control-manifest bind-scenario"
-    )
-    assert apply_function.index("approval-require-current") < apply_function.index('terraform_capture -chdir="$dir" apply')
-    calls_start = text.index("export SCENARIO_A_RESOLVED_INVENTORY")
-    scenario_calls = text[calls_start : text.index("load_scenario A", calls_start)]
-    assert scenario_calls.index("plan_and_apply_scenario scenario_a A") < scenario_calls.index("plan_and_apply_scenario scenario_b B")
-    assert '"$SCENARIO_A_RESOLVED_INVENTORY"' in scenario_calls
-    assert '"$SCENARIO_B_RESOLVED_INVENTORY"' in scenario_calls
-    assert text.index("record_gate_check task1.check13") < text.index("gate-ledger bind-candidate")
-    destroy = text[text.index("destroy_acceptance_stack()") : text.index("ORPHAN_SWEEP_CONFIRMED=0")]
-    assert destroy.index("approval-require-current") < destroy.index('terraform_capture -chdir="$dir" apply')
-
-
-def test_plan12_task8_rows_are_retryable_and_task9_finalizes_only_on_go() -> None:
-    text = _plan12_text()
-    task8 = text[text.index("### Task 8:") : text.index("### Task 9:")]
-    assert task8.count("- [ ]") == 5
-    mapping = (
-        "`task8.check01` is protected cleanup resume",
-        "`task8.check02` is the initial",
-        "`task8.check03` is the preserved original",
-        "`task8.check04` is identity/shared-resource",
-        "`task8.check05` is successful aggregate coordinator completion",
-    )
-    assert all(marker in task8 for marker in mapping)
-    for check_id in range(1, 5):
-        assert f"record_cleanup_gate_check task8.check{check_id:02d} 0" in task8
-    assert "TASK8_CLEANUP_EXIT" not in task8
-    assert 'record_gate_check task8.check04 "$TASK8_CLEANUP_EXIT"' not in task8
-    assert task8.index("record_cleanup_gate_check()") < task8.index("record_cleanup_gate_check task8.check01")
-    assert 'sha256sum "$CONTROL_MANIFEST"' not in task8
-    assert "--field cleanup_states | sha256sum" not in task8
-    assert "--field acceptance_run_id" in task8
-    assert "TASK8_PREFLIGHT_FAILURES" in task8
-    task9 = text[text.index("### Task 9:") :]
-    no_go = task9[task9.index("Return **NO-GO**") : task9.index("On GO only")]
-    go = task9[task9.index("On GO only") :]
-    assert "gate-ledger finalize" not in no_go
-    assert "Failures before Task 9's evidence-freeze\n  step leave the ledger unfinalized" in no_go
-    assert "preserve the finalized\n  ledger" in no_go
-    assert "does not mutate it" in go
-
-
-def test_plan12_records_every_checkbox_against_the_frozen_candidate_and_durable_anchors() -> None:
-    text = _plan12_text()
-    task1 = text[text.index("### Task 1:") : text.index("### Task 2:")]
-    ledger_init = task1[task1.index("gate-ledger init") : task1.index("record_gate_check task1.check01")]
-    assert '--plan-sha256 "$PLAN12_SHA256"' in ledger_init
-    assert '--program-base-sha "$PROGRAM_BASE_SHA"' in ledger_init
-    assert '--reconciled-release-sha "$RECONCILED_RELEASE_SHA"' in ledger_init
-    assert task1.index('export CANDIDATE_SHA="$(git rev-parse HEAD)"') < task1.index("record_gate_check task1.check01")
-    assert 'record_gate_check task1.check06 0 "$TASK1_CANDIDATE_RECEIPT_HASH"' in task1
-    assert task1.index("record_gate_check task1.check13") < task1.index("gate-ledger bind-candidate")
-    for task, count in {1: 13, 2: 8, 3: 7, 4: 2, 5: 10, 6: 6, 7: 30}.items():
-        for check in range(1, count + 1):
-            assert f"record_gate_check task{task}.check{check:02d} 0" in text
-    for check in range(1, 5):
-        assert f"record_cleanup_gate_check task8.check{check:02d} 0" in text
-
-
-def test_plan12_uses_durable_reverse_dependency_edges_and_one_idempotent_release_transition() -> None:
-    text = _plan12_text()
-    assert "filigree show elspeth-0674a06468 --json | jq -e '.blocks | index(\"elspeth-7d1f35e3d8\")'" in text
-    assert "filigree show elspeth-7fe6aa531f --json | jq -e '.blocks | index(\"elspeth-7d1f35e3d8\")'" in text
-    assert "elspeth-7d1f35e3d8 --json | jq -e '(.blocked_by" not in text
-
-    task9 = text[text.index("### Task 9:") :]
-    assert 'RECONCILED_RELEASE_SHA="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger get' in task9
-    assert 'case "$LOCAL_RELEASE_SHA" in' in task9
-    assert 'case "$REMOTE_RELEASE_SHA" in' in task9
-    assert '"MERGED:release/0.7.1:feat/aws-ecs-program:$CANDIDATE_SHA"' in task9
-    assert task9.index("gate-ledger finalize") < task9.index('merge --ff-only "$CANDIDATE_SHA"')
-
-    stage9 = RUN_SHEET.read_text(encoding="utf-8").split("### Stage 9:", maxsplit=1)[1]
-    assert 'merge --ff-only "$CANDIDATE_SHA"' not in stage9
-    assert "Plan 12 Task 9 owns the single idempotent release transition" in stage9
-
-
-def test_plan12_binds_post_observation_evidence_without_reopening_resource_inventories() -> None:
-    text = _plan12_text()
-    retained = text.index("Immediately after **every** positive telemetry proof")
-    task7 = text.index("### Task 7:")
-    task8 = text.index("### Task 8:")
-    assert task7 < retained < task8
-    retained_section = text[retained : retained + 1800]
-    assert "resource inventories remain immutable" in retained_section
-    assert "elspeth.aws-ecs-retained-evidence.v1" in retained_section
-    assert "Immediately after **every** positive telemetry proof" in text
-    assert 'bind_retained_checkpoint "$RETAINED_EVIDENCE_RECEIPT" complete' in retained_section
-
-    helper = text[text.index("run_candidate_role_check()") : text.index("run_candidate_role_checks()")]
-    assert helper.index("persist_sanitized_receipt") < helper.index("checkpoint_operator_retained_evidence")
-    assert helper.index("checkpoint_operator_retained_evidence") < helper.index('rm -f "$receipt_file"')
 
 
 def test_runbook_verifies_the_initialized_remote_backend_identity() -> None:

@@ -7,6 +7,12 @@
 > `superpowers:verification-before-completion` before every close and final
 > fast-forward. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Project applicability correction:** Wardline is suite-installed but is not
+> enabled for Elspeth because the project has no Wardline markers. Do not run
+> it, stop on it, or create evidence for it. Hosted CI, candidate
+> PRs, and temporary remote refs are likewise outside this program. Stage 9
+> uses local verification plus live AWS only.
+
 **Goal:** Execute the complete AWS ECS runtime-readiness program in dependency
 order on `feat/aws-ecs-program`, hand one immutable candidate to Plan 12 for
 final live GO/NO-GO acceptance, then fast-forward that exact tested SHA into
@@ -25,7 +31,7 @@ an ancestor of the current program tip and its focused program-branch handoff
 gates are green.
 
 **Tech Stack:** Git worktrees, Filigree milestone
-`elspeth-6343920a47`, Python/uv, Node/npm, Docker/testcontainers, Wardline,
+`elspeth-6343920a47`, Python/uv, Node/npm, Docker/testcontainers,
 ELSPETH trust-tier gates, Terraform, AWS ECS/Aurora/EFS/ALB/Cognito/S3/Bedrock,
 CloudWatch/X-Ray, and the plan-specific verification commands.
 
@@ -76,9 +82,9 @@ successful Plan 12 closeout may issue AWS runtime GO.
 > branch activity through Stages 1–8. Immediately before Plan 12 freezes its
 > candidate, reconcile the then-current `release/0.7.1` tip into the program
 > branch, rerun the affected-area checkpoint, and bind that consumed tip.
-> After Tasks 1–8 pass on one unchanged SHA, require the release tip still to
+> After Tasks 1–6 pass on one unchanged SHA, require the release tip still to
 > equal that reconciliation anchor and fast-forward it to the exact tested SHA
-> before Task 9 issues GO. Stop on any condition in section 11 rather than
+> before Task 7 issues GO. Stop on any condition in section 11 rather than
 > guessing or weakening a gate.
 
 ## 2. Authority and non-negotiable rules
@@ -111,8 +117,8 @@ successful Plan 12 closeout may issue AWS runtime GO.
    weaken audit ordering, replace audit evidence with telemetry, or retain raw
    provider/user content in operational evidence.
 10. **No security bypasses:** no waiver, baseline, allowlist broadening,
-    threshold reduction, skipped mandatory lane, or partial, inert, or
-    unanchored Wardline scan may turn a failing gate green.
+    threshold reduction, or skipped mandatory lane may turn a failing gate
+    green.
 11. **Operator-held authority stays operator-held:** agents diagnose signed
     trust metadata but never receive signing keys or self-sign repairs.
 12. **Current-scope defects stay in scope:** do not hide an implementation gap
@@ -141,51 +147,12 @@ successful Plan 12 closeout may issue AWS runtime GO.
     or repeatedly failing work to `xhigh`. If the surface cannot set effort,
     state it in the dispatch and use the highest supported setting without
     blocking solely on that limitation.
-16. **Authoritative Wardline invocation override:** every plan-local Wardline
-    command is invocation-shape overridden by the following standard command,
-    while preserving the owning plan's gate timing, finding severity, repair,
-    and acceptance semantics:
-
-    ```bash
-    test "$(wardline --version)" = "wardline, version 1.3.1"
-    PYTHONPATH="$PWD" wardline scan . \
-      --trust-pack config.wardline.elspeth_pack \
-      --allow-custom-packs \
-      --fail-on ERROR \
-      --fail-on-unanalyzed \
-      --format agent-summary \
-      --output /tmp/aws-wardline-agent-summary.json
-    jq -e '
-      .schema == "wardline-agent-summary-1" and
-      .gate.verdict == "PASSED" and
-      .gate.tripped == false and
-      .gate.exit_class == 0 and
-      .summary.active_defects == 0 and
-      .summary.unanalyzed == 0 and
-      .resolution.inert == false and
-      .resolution.recognized_boundaries > 0 and
-      all(.engine_facts[]?;
-        .rule_id != "WLN-ENGINE-FUNCTION-SKIPPED" and
-        .rule_id != "WLN-ENGINE-PYDANTIC-DISCOVERY-LIMIT")
-    ' /tmp/aws-wardline-agent-summary.json >/dev/null
-    ```
-
-    This is an orchestration/tooling invocation override, not a security
-    waiver. The baseline must first integrate the pack through
-    `config/wardline/elspeth_pack.py` and `weft.toml`. Pre-baseline slices may
-    gather diagnostic evidence, but they cannot close on an inert scan. The
-    exact 1.3.1 preflight stops loader/schema drift for re-review; the jq
-    assertion is the complete-analysis contract beyond the CLI unanalyzed
-    sub-gate. The `/tmp` summary is diagnostic only; durable evidence stores
-    only sanitized pass/fail counts. Plan-specific output, format, or emission
-    options may be appended only when they preserve these standard flags and
-    this assertion.
-17. **Baseline signing freeze:** from the final signed-entry diagnosis through
+16. **Baseline signing freeze:** from the final signed-entry diagnosis through
     operator repair, post-repair diagnosis, baseline gates, baseline commit,
     and baseline close, freeze all program-worktree code/config mutation.
     Preserve queued sibling work, commits, and checkpoints intact, but pause
     their integration and further mutation until the baseline closes.
-18. **Concurrent release planning is out of scope until Stage 9:** after the
+17. **Concurrent release planning is out of scope until Stage 9:** after the
     program worktree exists, do not inspect, clean, reset, stash, commit, or
     otherwise manage `/home/john/elspeth` or concurrent `release/0.7.1`
     planning. Release movement or a dirty main checkout during Stages 1–8 is
@@ -194,7 +161,7 @@ successful Plan 12 closeout may issue AWS runtime GO.
     tip before candidate freeze; movement after that reconciliation
     invalidates the candidate and restarts Plan 12 Task 1. Documentation-only
     changes outside AWS program plans, reviews, designs, and specifications,
-    CI/security policy, generated contracts, runtime code, and tests are
+    repository policy, generated contracts, runtime code, and tests are
     non-substantive: absorb them at the Stage 9 merge and do not reopen slices.
     Every non-documentation change is
     substantive. Documentation that touches any of those named program
@@ -286,12 +253,10 @@ successful Plan 12 closeout may issue AWS runtime GO.
   Before Baseline dispatch, reconcile the live structured tracker contract for
   `elspeth-8166b310e7` and `elspeth-c0103e6c88`; prose comments are not a
   substitute. Baseline structured targets/verification must include
-  `state.py`, the exact direct boundary-test node, `config/wardline/elspeth_pack.py`,
-  `weft.toml`, `config/wardline/verify_elspeth_pack_contract.py`, the signed
-  metadata directory as operator-owned scope, the Section 2 authoritative
-  command, and its version/non-inert/complete-analysis jq acceptance. 08A
-  structured targets/verification must remove `state.py`, the direct boundary
-  test, fingerprint repair, pack/config files, and baseline signing work. Use
+  `state.py`, the exact direct boundary-test node, and the signed metadata
+  directory as operator-owned scope. 08A structured targets/verification must
+  remove `state.py`, the direct boundary test, fingerprint repair, and baseline
+  signing work. Use
   the tracker-supported structured update surface, refresh both issues with
   `filigree show ... --json`, and stop dispatch until the live fields match
   this split exactly. This run-sheet edit does not itself mutate the tracker.
@@ -399,7 +364,6 @@ successful Plan 12 closeout may issue AWS runtime GO.
 
   - signed trust-metadata repair;
   - Docker/testcontainers;
-  - GitHub CI and temporary exact-SHA refs;
   - PostgreSQL/Aurora schema ownership and retention approval;
   - AWS/Terraform/ECR/ECS/EFS/ALB/Cognito/S3/Bedrock/CloudWatch permissions;
   - protected evidence storage and emergency cleanup.
@@ -411,14 +375,14 @@ successful Plan 12 closeout may issue AWS runtime GO.
   export AUTHORITY_MATRIX="${AUTHORITY_MATRIX:?set protected mode-0600 authority matrix path}"
   jq -e '
     .schema == "elspeth.aws-ecs-authority-matrix.v1" and
-    (.authorities | type == "array" and length == 7) and
+    (.authorities | type == "array" and length == 6) and
     all(.authorities[];
       (keys | sort) == ["authorized","available","owner_label","surface"] and
-      (.surface | IN("trust_signing","docker","github_ci","database_retention","aws_runtime","evidence_storage","cleanup")) and
+      (.surface | IN("trust_signing","docker","database_retention","aws_runtime","evidence_storage","cleanup")) and
       (.owner_label | type == "string" and test("^[A-Za-z0-9._-]{1,64}$")) and
       (.authorized | type == "boolean") and (.available | type == "boolean")
     ) and
-    ([.authorities[].surface] | unique | length == 7)
+    ([.authorities[].surface] | unique | length == 6)
   ' "$AUTHORITY_MATRIX" >/dev/null
   test "$(stat -c '%a' "$AUTHORITY_MATRIX")" = "600"
   ```
@@ -555,14 +519,9 @@ release, and close instructions as stated in rule 13.
 
   The verification-baseline close is historical evidence, not a permanent
   waiver. Before each baseline-dependent dispatch, and after any
-  trust-boundary-sensitive change, run the current trust-tier,
-  trust-boundary, and full Wardline gates from the clean program worktree,
-  using the Section 2 standard pack command. Signed binding drift returns to
-  the named operator. Wardline requires both exit 0 and non-inert anchored
-  coverage. A missing or untrusted pack, zero recognized or anchored
-  boundaries, unanalyzed source units/files, either prohibited formal
-  incomplete-analysis fact, missing current engine metrics, an active ERROR+
-  defect, exit 1, or exit 2 blocks dispatch.
+  trust-boundary-sensitive change, run the current trust-tier and
+  trust-boundary gates from the clean program worktree. Signed binding drift
+  returns to the named operator.
 
 - [ ] **Step 3: Atomically start or validate exact-owner resume**
 
@@ -650,11 +609,9 @@ release, and close instructions as stated in rule 13.
   sheet and do not execute them again. Use TDD. Run all relevant focused unit,
   integration,
   property, frontend, Docker, PostgreSQL, live, static, typing, trust,
-  Wardline, coverage, manifest, packaging, and affected-area checks in
+  coverage, manifest, packaging, and affected-area checks in
   proportion to the change. Hold only the complete unfiltered repository suite
-  until Plan 12 final washup. Every Wardline check uses the Section 2 standard
-  pack command and requires exit 0 plus non-inert anchored coverage; the
-  invocation override does not weaken the owning plan's gate semantics.
+  until Plan 12 final washup.
 
   Refresh claim liveness after each completed plan task and at least hourly
   during long checks. After each task, add a sanitized
@@ -718,7 +675,8 @@ integrated result.
 - [ ] **Step 2: Run the complete focused handoff on the program tip**
 
   Rerun the plan's complete final focused verification block on PROGRAM_TIP,
-  plus any additional affected checks derived from Loomweave, Warpline, and CI
+  plus any additional affected checks derived from Loomweave, Warpline, and
+  the owning plan
   ownership. Mandatory Docker/live lanes execute with zero skips where the plan
   requires them. Create /tmp/$ISSUE_ID-integrated-verification.json with schema
   elspeth.aws-ecs-integrated-verification.v1, program_tip, and a non-empty
@@ -729,9 +687,9 @@ integrated result.
   implementation prerequisite. Plan 01 and Plan 02 may be claimed,
   implemented, tested, and committed in parallel with Baseline. However, no
   non-Baseline slice, including Plan 01 or Plan 02, may enter Step 3 until the
-  Baseline close commit is in current program ancestry and a fresh Section 2
-  standard Wardline command plus jq assertion passes on that exact program
-  tip. This closure rule does not add or imply a tracker dependency edge.
+  Baseline close commit is in current program ancestry and the current
+  trust-tier and trust-boundary gates pass on that exact program tip. This
+  closure rule does not add or imply a tracker dependency edge.
 
   `IMPLEMENTATION_SHA` normally equals `PROGRAM_TIP`. An ancestor-only match is
   permitted solely because the shared program lineage may have admitted later
@@ -816,11 +774,6 @@ Exit conditions:
 - Plan 02 owns and regenerates the initial PostgreSQL `uv.lock` change.
 - Signed-tier diagnosis is clean or operator-repaired; no agent signs.
 - Trust-boundary tests/scope/tier pass.
-- The exact Section 2 standard Wardline command and its immediately following
-  jq assertion pass on the integrated Stage-1 tip. A missing or untrusted
-  pack, zero recognized boundaries, `INERT`, unanalyzed source units/files,
-  either prohibited formal incomplete-analysis fact, missing metrics, an
-  active ERROR+ defect, exit 1, or exit 2 blocks the stage.
 
 ### Stage 2: Parallel early consumers
 
@@ -1002,7 +955,7 @@ git diff --name-status "$RELEASE_RECONCILIATION_BASE_SHA" "$RECONCILED_RELEASE_S
 Review and classify that exact release-only commit/path inventory before
 continuing. Documentation-only paths outside the named substantive surfaces
 are non-substantive. Any non-documentation path, or documentation touching an
-AWS program plan, review, design, or specification, CI/security policy,
+AWS program plan, review, design, or specification, repository policy,
 generated contract, runtime code, or test, is substantive and must enter the
 impact/evidence protocol below. If the substantive delta affects Plan 10
 itself or any prerequisite already consumed by closed Plan 10,
@@ -1049,16 +1002,14 @@ and validates the exact reviewed anchors from `HEAD`/`ORIG_HEAD` and
 never resample a moving release ref, choose one branch wholesale, or discard
 unrelated work. If the delta
 changes any completed slice's
-implementation, AWS program plan, review, design, or specification, CI gate,
+implementation, AWS program plan, review, design, specification, repository gate,
 generated artifact, or security boundary not covered by the Stage 8 special
 case, apply Section 10
 evidence invalidation and re-execute the affected owners/descendants before
 Plan 12. Planning-only changes outside the AWS program still require the
 reconciliation affected-area checkpoint but do not reopen unrelated slices.
-Re-run the complete plan/review checksum inventory and every check derived
-from the reconciled delta. This is not Major Checkpoint 6: do not freeze a
-candidate until this reconciliation checkpoint passes and the program
-worktree is clean.
+Re-run the checks derived from the reconciled delta. Do not freeze a candidate
+until this reconciliation checkpoint passes and the program worktree is clean.
 
 After reconciliation and any required owner/descendant re-execution, refresh
 the authoritative prerequisite and ancestry proof on the final program tip:
@@ -1081,40 +1032,32 @@ sidecar update, and a reviewed planning commit on the program branch. Plan 12
 never consumes stale approval.
 
 Only now bind the final reviewed Plan 12 checksum and initialize its protected
-gate ledger under Task 1. Initialize the candidate-bound control manifest at
+phase ledger under Task 1. Initialize the candidate-bound control manifest at
 Plan 12's documented point before the first external mutation, not before
 reconciliation or candidate freeze.
 
-Atomically start Wave 4 or validate its exact coordinator-owned resume using
-the current feat/aws-ecs-program@PROGRAM_TIP anchor. Then follow Plan 12 Task 1
-to prepare and freeze CANDIDATE_SHA. The gate ledger binds the program branch,
+Validate the exact coordinator-owned Plan 12 resume using the current
+feat/aws-ecs-program@PROGRAM_TIP anchor. Then follow Plan 12 Task 1 to prepare
+and freeze CANDIDATE_SHA. The phase ledger binds the program branch,
 PROGRAM_BASE_SHA, RECONCILED_RELEASE_SHA, and CANDIDATE_SHA.
 
-Run Major Checkpoint 6 on that frozen `CANDIDATE_SHA` before Plan 12 Task 2.
-Any failure returns to the owning surface under Section 10, and any resulting
-change invalidates the candidate and restarts Plan 12 Task 1.
-
-Run Tasks 1–8 on that one unchanged candidate. This final washup explicitly
+Run Tasks 1–6 on that one unchanged candidate. This final washup explicitly
 includes the exact complete-suite command:
 
 ~~~bash
 uv run pytest tests/ -v -m ""
 ~~~
 
-It also includes every other local, coverage, static, trust, Wardline, image,
-hosted CI, live AWS, rollback, evidence-export, and cleanup gate required by
-Plan 12. Use feat/aws-ecs-program or a candidate-derived immutable exact-SHA
-temporary ref for hosted CI; never push or update release/0.7.1 early. Any
+It also includes every other local, coverage, static, trust, image, live AWS,
+rollback, evidence-export, and cleanup gate required by Plan 12. Never push or
+update release/0.7.1 early. Any
 code, documentation, lockfile, generated-file, or candidate-SHA change
 invalidates all candidate evidence and restarts Task 1. Evidence from
-different SHAs may never be combined. The Wardline washup uses the Section 2
-standard pack command and requires exit 0 plus non-inert anchored coverage;
-missing or stale metrics, formal incomplete-analysis facts, and active ERROR+
-defects invalidate that evidence.
+different SHAs may never be combined.
 
-After Tasks 1–8 pass and cleanup is complete, hand control directly to Task 9.
-Plan 12 Task 9 owns the single idempotent release transition. The run sheet
-performs no release mutation of its own; it only confirms the inputs Task 9
+After Tasks 1–6 pass and cleanup is complete, hand control directly to Task 7.
+Plan 12 Task 7 owns the single idempotent release transition. The run sheet
+performs no release mutation of its own; it only confirms the inputs Task 7
 must reconstruct from the protected ledger:
 
 ~~~bash
@@ -1125,21 +1068,18 @@ test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger get
 test "$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger get --file "$GATE_LEDGER" --field candidate_sha)" = "$CANDIDATE_SHA"
 ~~~
 
-Task 9 first re-reads all 19 prerequisite issues and requires each close SHA
-to be an ancestor of the candidate. It then freezes the complete ledger and
-advances local and remote `release/0.7.1` through the closed
+Task 7 freezes the complete ledger and advances local and remote
+`release/0.7.1` through the closed
 `{RECONCILED_RELEASE_SHA,CANDIDATE_SHA}` state machine. Only after that single
-transition and the release-ancestry audit may Task 9 issue GO, close Plan 12 with
-release/0.7.1@CANDIDATE_SHA, close Wave 4, and close milestone
-elspeth-6343920a47 at the same release anchor.
+transition and the release-ancestry audit may Task 7 issue GO and close Plan 12
+with release/0.7.1@CANDIDATE_SHA.
 
 A release tip that moves after reconciliation invalidates the candidate. If
-external mutation has begun or `CLEANUP_REQUIRED=1`, finish Plan 12 Task 8's
+external mutation has begun or `CLEANUP_REQUIRED=1`, finish Plan 12 Task 6's
 evidence export and every independent cleanup attempt before changing program
 HEAD or starting another reconciliation; cleanup failure is NO-GO and forbids
 restart. Then preserve the concurrent work, merge the new tip into the program
-branch, repeat the reconciliation impact audit, restart Plan 12 Task 1, and
-rerun Major Checkpoint 6 on the newly frozen candidate before Task 2. A
+branch, repeat the reconciliation impact audit, and restart Plan 12 Task 1. A
 non-fast-forward final update, dirty final release-update
 surface, failed ancestry audit, missing cleanup, or changed candidate is
 NO-GO. Preserve the release branch at its last verified state and report the
@@ -1174,11 +1114,6 @@ At every stage barrier:
       executed with zero skips; intentionally deferred task-role/live proof is
       still explicitly owned by Plan 10 or Plan 12.
 - [ ] Signed-tier diagnosis and operator repairs are complete where required.
-- [ ] The exact Section 2 standard Wardline command and its immediately
-      following jq assertion passed on the stage-exit tip. A missing or
-      untrusted pack, zero recognized boundaries, `INERT`, unanalyzed source
-      units/files, either prohibited formal incomplete-analysis fact, missing
-      metrics, or an active ERROR+ defect blocks stage exit.
 - [ ] `uv lock --check` passes; the current lock owner is correct.
 - [ ] `git diff --check` passes, the program worktree is clean, and
   `PROGRAM_BASE_SHA` remains in its ancestry. Do not inspect or gate on the
@@ -1187,43 +1122,8 @@ At every stage barrier:
 - [ ] No successor was claimed before its program-branch dependency anchors
   and focused handoff evidence passed.
 
-After the audit, the coordinator may close an active phase only when a fresh
-milestone snapshot proves every one of that phase's children done. Use the
-current program anchor for Waves 1–3; Wave 4 closes only after the final
-fast-forward and uses the tested release anchor. Never skip an unfinished child:
-
-```bash
-filigree plan elspeth-6343920a47 --json --detail full > /tmp/aws-ecs-plan.json
-for phase_id in elspeth-db28fb3293 elspeth-da8e5447c8 elspeth-ab8f9e11d9 elspeth-ef74690eb2; do
-    PHASE_JSON="$(jq -c --arg id "$phase_id" '.phases[] | select(.phase.issue_id == $id)' /tmp/aws-ecs-plan.json)"
-    PHASE_STATUS="$(jq -r '.phase.status' <<<"$PHASE_JSON")"
-    if jq -e '(.steps | length > 0) and all(.steps[]; .status_category == "done")' <<<"$PHASE_JSON" >/dev/null; then
-        if test "$PHASE_STATUS" = active; then
-            if test "$phase_id" = elspeth-ef74690eb2; then
-                test "$(git -C /home/john/elspeth rev-parse release/0.7.1)" = "$CANDIDATE_SHA"
-                PHASE_ANCHOR="release/0.7.1@$CANDIDATE_SHA"
-            else
-                PHASE_ANCHOR="feat/aws-ecs-program@$(git -C "$PROGRAM_WORKTREE" rev-parse HEAD)"
-            fi
-            filigree close "$phase_id" \
-              --expected-assignee "$AWS_ECS_COORDINATOR" \
-              --actor "$AWS_ECS_COORDINATOR" \
-              --commit "$PHASE_ANCHOR" \
-              --reason "all phase children integrated on the program lineage and closed"
-        else
-            test "$(jq -r '.phase.status_category' <<<"$PHASE_JSON")" = done
-        fi
-    fi
-done
-```
-
-On Plan 12 GO, close Wave 4 after Plan 12, then close milestone
-`elspeth-6343920a47` with `release/0.7.1@$CANDIDATE_SHA` after verifying that
-the candidate is still the release HEAD, using
-`--expected-assignee "$AWS_ECS_COORDINATOR"`. On NO-GO, reopened work, or
-incomplete cleanup, keep the affected phase and milestone active. Heartbeat the
-active milestone and every active phase under the exact coordinator assignee
-at each dispatch and stage barrier.
+Plan 12 closure is the endpoint for this job. Parent phase and milestone
+administration are not additional closeout requirements.
 
 ## 10. Failure, reopen, and evidence invalidation
 
@@ -1234,24 +1134,23 @@ its descendants. Release the claim only for an explicit owner handoff. Do not
 close as partial, convert an in-scope defect to an observation, or weaken a
 gate.
 
-### Baseline-reopen Wardline evidence overlay
+### Baseline-reopen trust evidence overlay
 
-Reopening Baseline freezes dispatch and pauses every Wardline-evidence-dependent
-closure, without adding tracker DAG edges. It invalidates all prior Wardline
-handoffs, including Plan 01, Plan 02, and their hard-DAG descendants even when
-they are not Baseline descendants in the Section 4 graph. Preserve every
-implementation commit and checkpoint; pause work in progress rather than
-discarding it. Reopen affected closed issues in reverse topological order,
-including Plan 01/02 and their hard descendants, while treating this paragraph
-as an evidence-invalidation overlay rather than a dependency rewrite.
+Reopening Baseline freezes dispatch and pauses every baseline-evidence-dependent
+closure, without adding tracker DAG edges. It invalidates prior trust-tier and
+trust-boundary handoffs, including Plan 01, Plan 02, and their hard-DAG
+descendants even when they are not Baseline descendants in the Section 4 graph.
+Preserve every implementation commit and checkpoint; pause work in progress
+rather than discarding it. Reopen affected closed issues in reverse topological
+order, including Plan 01/02 and their hard descendants, while treating this
+paragraph as an evidence-invalidation overlay rather than a dependency rewrite.
 
 Repair and reclose Baseline first. Then exact-owner resume each paused or
 reopened issue, integrate its preserved implementation on the current program
-lineage, rerun its complete focused handoff, and run the exact Section 2
-standard Wardline command plus jq assertion at that affected issue's exact tip.
-Reclose affected issues in topological order with fresh anchors. No prior
-Wardline result survives a Baseline reopen, and no affected closure resumes
-until Baseline is reclosed and the fresh exact-tip standard scan passes.
+lineage, rerun its complete focused handoff, and rerun the trust-tier and
+trust-boundary gates at that affected issue's exact tip. Reclose affected issues
+in topological order with fresh anchors. No prior baseline trust result survives
+a Baseline reopen.
 
 ### After a program-branch commit or close
 
@@ -1299,9 +1198,9 @@ assert len(topological) == len(by_id), "live milestone DAG contains a cycle"
 descendants: set[str] = set()
 baseline_id = "elspeth-8166b310e7"
 if owner == baseline_id:
-    # Baseline owns the Wardline evidence substrate. Its reopen invalidates
-    # every prior slice handoff, including independent roots Plan 01/02 and
-    # their descendants, without changing the tracker DAG.
+    # Baseline owns the signed-tier and trust-boundary evidence substrate. Its
+    # reopen invalidates every prior slice handoff, including independent roots
+    # Plan 01/02 and their descendants, without changing the tracker DAG.
     descendants = set(by_id) - {owner}
 else:
     pending = list(children[owner])
@@ -1401,10 +1300,6 @@ Stop and surface the exact owner/remedy when any of these occurs:
 - required operator, credential, Docker, AWS, Terraform, browser, or evidence
   facility unavailable;
 - required test skipped, deselected, xfailed, or not collected;
-- Wardline pack missing or untrusted; `INERT`; zero recognized or anchored
-  boundaries; unanalyzed source units/files; a prohibited formal
-  incomplete-analysis fact; missing current engine metrics; an active ERROR+
-  defect; exit 1; or exit 2;
 - signed metadata drift without operator-authorized repair;
 - lockfile or generated-golden ownership collision;
 - potential secret, raw provider response, prompt/content, URL, ARN, account,
@@ -1412,7 +1307,7 @@ Stop and surface the exact owner/remedy when any of these occurs:
 - S3 registration without 08A, Guardrail registration without 15B,
   request-path DDL without 11, or redirectable operator telemetry without 14;
 - Plan-10 rollback baseline recorded after Plan-10 edits;
-- Plan-12 local/remote/CI/task/image SHA mismatch; or
+- Plan-12 local/task/image SHA mismatch; or
 - release movement after Stage 9 reconciliation without candidate
   invalidation, re-reconciliation, and a Task 1 restart; or
 - incomplete external cleanup/evidence export.

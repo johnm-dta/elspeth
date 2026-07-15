@@ -442,7 +442,7 @@ IaC worktree so the clean-tree check remains meaningful.
 Define these wrappers before the first Terraform plan, receipt, scenario load,
 or cleanup call. The acceptance module validates the mode-0600 control
 manifest and emits only hashes or its closed shell-assignment allowlist.
-The manifest schema is `elspeth.aws-ecs-control-manifest.v4`; it preserves
+The manifest schema is `elspeth.aws-ecs-control-manifest.v5`; it preserves
 each scenario's original pre-apply path/hash separately from the resolved
 resource inventory and binds post-observation retained evidence independently.
 `ELSPETH_ACCEPTANCE_APPROVAL_KEYRING` names a mode-0600 protected JSON document
@@ -477,9 +477,9 @@ bind mode-0600 `elspeth.aws-ecs-retained-evidence.v1` receipts monotonically.
 Every positive
 operator-telemetry proof exposes its exact allowlisted metric query and X-Ray
 trace ID; the controller immediately creates and binds a new immutable strict-
-superset checkpoint before any later live operation. After Task 7, revalidate
-the latest bound checkpoint with `--require-complete` so both scenarios have
-non-empty matching counts.
+superset checkpoint before any later live operation. Before Plan 12 records
+the `live` phase, revalidate the latest bound checkpoint with
+`--require-complete` so both scenarios have non-empty matching counts.
 Omitted fields, duplicate identities, count/identity disagreement, drift from
 either pre-mutation hash, or a foreign run/scenario fail closed.
 
@@ -569,6 +569,245 @@ finalize_cleanup_evidence() {
       --file "$CONTROL_MANIFEST" --ledger "$GATE_LEDGER" --phase prepare
   fi
 }
+
+# These transitions are the minimum interruption-safe state for a live run.
+# Call each one immediately after the named operation succeeds, never before.
+arm_external_cleanup() {
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+    --file "$CONTROL_MANIFEST" --cleanup-required true \
+    --ecr-registry "$ECR_REGISTRY" --ecr-repository "$ECR_REPOSITORY" \
+    --ecr-baseline-tag "$ROLLBACK_BASELINE_TAG" --ecr-candidate-tag "$CANDIDATE_TAG"
+}
+
+checkpoint_ecr_digests() {
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+    --file "$CONTROL_MANIFEST" \
+    --ecr-baseline-digest "$ROLLBACK_BASELINE_DIGEST" \
+    --ecr-candidate-digest "$IMAGE_DIGEST"
+}
+
+checkpoint_terraform_plan() {
+  local scenario_id="$1" plan_sha="$2" receipt_hash="$3" approval_hash="$4"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+    --file "$CONTROL_MANIFEST" \
+    --terraform-plan-receipt "$scenario_id:$plan_sha:$receipt_hash:$approval_hash"
+}
+
+checkpoint_terraform_apply() {
+  local scenario_id="$1" plan_sha="$2" receipt_hash="$3" approval_hash="$4"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+    --file "$CONTROL_MANIFEST" \
+    --terraform-applied "$scenario_id:$plan_sha:$receipt_hash:$approval_hash"
+}
+
+checkpoint_terraform_noop_and_bind() {
+  local scenario_id="$1" noop_plan_sha="$2" receipt_hash="$3" inventory="$4"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+    --file "$CONTROL_MANIFEST" \
+    --terraform-noop-receipt "$scenario_id:$noop_plan_sha:$receipt_hash"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest bind-scenario \
+    --file "$CONTROL_MANIFEST" --scenario-id "$scenario_id" --inventory "$inventory"
+}
+
+checkpoint_cleanup() {
+  local surface="$1" state="$2"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+    --file "$CONTROL_MANIFEST" --cleanup-checkpoint "$surface:$state"
+}
+
+bind_initial_evidence_export() {
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+    --file "$CONTROL_MANIFEST" --evidence-export-receipt "$1"
+}
+
+bind_final_evidence_export() {
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest update \
+    --file "$CONTROL_MANIFEST" --final-evidence-export-receipt "$1"
+}
+
+load_cleanup_state() {
+  local assignments
+  assignments="$(mktemp -p /tmp elspeth-cleanup-state.XXXXXX)"
+  chmod 600 "$assignments"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest load-cleanup \
+    --file "$CONTROL_MANIFEST" --shell-assignments >"$assignments"
+  . "$assignments"
+  rm -f -- "$assignments"
+}
+
+remove_local_acceptance_images() {
+  local ref
+  for ref in \
+    elspeth:ecs-rollback-baseline \
+    elspeth:ecs-0.7.1-closeout \
+    "$ECR_REGISTRY/$ECR_REPOSITORY:$ROLLBACK_BASELINE_TAG" \
+    "$ECR_REGISTRY/$ECR_REPOSITORY:$CANDIDATE_TAG" \
+    "$ROLLBACK_BASELINE_IMAGE" \
+    "$CANDIDATE_IMAGE"; do
+    test -n "$ref" || continue
+    docker image inspect "$ref" >/dev/null 2>&1 && docker image rm "$ref" >/dev/null || true
+    docker image inspect "$ref" >/dev/null 2>&1 && return 1
+  done
+}
+
+remove_local_acceptance_evidence() {
+  if test -n "${ACCEPTANCE_STATE:-}"; then
+    case "$ACCEPTANCE_STATE" in /tmp/*) rm -f -- "$ACCEPTANCE_STATE" ;; *) return 1 ;; esac
+  fi
+  if test -n "${OIDC_EVIDENCE_DIR:-}"; then
+    case "$OIDC_EVIDENCE_DIR" in /tmp/*) rm -rf -- "$OIDC_EVIDENCE_DIR" ;; *) return 1 ;; esac
+  fi
+}
+```
+
+Use these transitions around the real deployment, not as a substitute for it:
+
+1. Reserve unique run-scoped ECR tags, call `arm_external_cleanup`, then push.
+2. Resolve and verify both registry digests, then call
+   `checkpoint_ecr_digests`.
+3. For Scenario A and then Scenario B, store the sanitized plan receipt and
+   signed approval, call `checkpoint_terraform_plan`, recheck the approval,
+   apply that exact saved plan, and call `checkpoint_terraform_apply`.
+4. Run a no-change plan, store its sanitized receipt, create the protected
+   resolved inventory, and call `checkpoint_terraform_noop_and_bind` before
+   loading or exercising the scenario.
+
+The controller will reject calls made out of order or against a different
+candidate, run, state binding, receipt, approval, inventory, tag, or digest.
+
+### Temporary image publication
+
+The acceptance run uses unique temporary tags for both the Plan 10 rollback
+baseline and the frozen candidate. The control manifest is armed before the
+first push so interruption always routes to cleanup:
+
+```bash
+set -Eeuo pipefail
+test -n "${ROLLBACK_BASELINE_SHA:?restore the Plan 10 baseline SHA}"
+test "$ROLLBACK_BASELINE_SHA" != "$CANDIDATE_SHA"
+git merge-base --is-ancestor "$ROLLBACK_BASELINE_SHA" "$CANDIDATE_SHA"
+test "${TARGET_PLATFORM:?}" = linux/amd64 || test "$TARGET_PLATFORM" = linux/arm64
+
+git archive "$ROLLBACK_BASELINE_SHA" | docker buildx build \
+  --platform "$TARGET_PLATFORM" --load \
+  --label "org.opencontainers.image.revision=$ROLLBACK_BASELINE_SHA" \
+  -t elspeth:ecs-rollback-baseline -
+
+export ECR_REGISTRY="${ECR_REGISTRY:?set approved account registry host}"
+export ECR_REPOSITORY="${ECR_REPOSITORY:?set approved repository name}"
+export ROLLBACK_BASELINE_TAG="acceptance-${ACCEPTANCE_RUN_ID}-baseline-${ROLLBACK_BASELINE_SHA}"
+export CANDIDATE_TAG="acceptance-${ACCEPTANCE_RUN_ID}-0.7.1-${CANDIDATE_SHA}"
+
+test "$(aws_capture aws sts get-caller-identity --query Account --output text)" = "$AWS_ACCOUNT_ID"
+REPOSITORY_IDENTITY="$(aws_capture aws ecr describe-repositories \
+  --region "$AWS_REGION" --repository-names "$ECR_REPOSITORY" \
+  --query 'repositories[0].{registryId:registryId,repositoryUri:repositoryUri}' --output json)"
+jq -e --arg account "$AWS_ACCOUNT_ID" --arg uri "$ECR_REGISTRY/$ECR_REPOSITORY" \
+  '.registryId == $account and .repositoryUri == $uri' <<<"$REPOSITORY_IDENTITY" >/dev/null
+
+for tag in "$ROLLBACK_BASELINE_TAG" "$CANDIDATE_TAG"; do
+  listing="$(aws_capture aws ecr list-images --region "$AWS_REGION" \
+    --repository-name "$ECR_REPOSITORY" --filter tagStatus=TAGGED --output json)"
+  jq -e --arg tag "$tag" '[.imageIds[] | select(.imageTag == $tag)] | length == 0' \
+    <<<"$listing" >/dev/null
+done
+
+arm_external_cleanup
+(
+  export DOCKER_CONFIG="$(mktemp -d)"
+  chmod 700 "$DOCKER_CONFIG"
+  trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
+  aws_ecr_login "$ECR_REGISTRY" "$AWS_REGION"
+  docker tag elspeth:ecs-rollback-baseline \
+    "$ECR_REGISTRY/$ECR_REPOSITORY:$ROLLBACK_BASELINE_TAG"
+  docker tag elspeth:ecs-0.7.1-closeout \
+    "$ECR_REGISTRY/$ECR_REPOSITORY:$CANDIDATE_TAG"
+  docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$ROLLBACK_BASELINE_TAG"
+  docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$CANDIDATE_TAG"
+  docker logout "$ECR_REGISTRY"
+)
+
+export ROLLBACK_BASELINE_DIGEST="$(aws_capture aws ecr describe-images \
+  --region "$AWS_REGION" --repository-name "$ECR_REPOSITORY" \
+  --image-ids imageTag="$ROLLBACK_BASELINE_TAG" \
+  --query 'imageDetails[0].imageDigest' --output text)"
+export IMAGE_DIGEST="$(aws_capture aws ecr describe-images \
+  --region "$AWS_REGION" --repository-name "$ECR_REPOSITORY" \
+  --image-ids imageTag="$CANDIDATE_TAG" \
+  --query 'imageDetails[0].imageDigest' --output text)"
+test -n "$ROLLBACK_BASELINE_DIGEST" && test "$ROLLBACK_BASELINE_DIGEST" != None
+test -n "$IMAGE_DIGEST" && test "$IMAGE_DIGEST" != None
+export ROLLBACK_BASELINE_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY@$ROLLBACK_BASELINE_DIGEST"
+export CANDIDATE_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY@$IMAGE_DIGEST"
+checkpoint_ecr_digests
+```
+
+### Saved-plan apply and scenario binding
+
+Apply Scenario A completely before Scenario B. Terraform plan files may
+contain secrets: keep them mode 0600 under `/tmp`, apply only the reviewed
+saved plan, and delete them immediately. The durable receipt is a sanitized
+projection and hash, not the plan itself.
+
+```bash
+plan_and_apply_scenario() {
+  local scenario_id="$1" directory="$2" vars="$3" expected_binding="$4"
+  local binding_file="$5" resolved_inventory="$6"
+  local work plan receipt plan_sha receipt_hash approval_hash noop_sha
+  work="$(mktemp -d -p /tmp "elspeth-${scenario_id}-tf.XXXXXX")"
+  chmod 700 "$work"
+  plan="$work/apply.tfplan"
+  receipt="$work/apply.receipt.json"
+
+  terraform_capture -chdir="$directory" init -input=false -lock-timeout=5m >/dev/null
+  verify_tf_binding "$scenario_id" "$directory" "$vars" "$expected_binding" "$binding_file"
+  terraform_capture -chdir="$directory" validate >/dev/null
+  terraform_capture -chdir="$directory" plan -input=false -lock-timeout=5m \
+    -var-file="$vars" -var="acceptance_run_id=$ACCEPTANCE_RUN_ID" \
+    -var="scenario_id=$scenario_id" -var="candidate_image=$CANDIDATE_IMAGE" \
+    -var="rollback_baseline_image=$ROLLBACK_BASELINE_IMAGE" -out="$plan" >/dev/null
+  chmod 600 "$plan"
+  terraform_capture -chdir="$directory" show -json "$plan" | \
+    uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+      sanitize-evidence --kind terraform-plan >"$receipt"
+  chmod 600 "$receipt"
+  plan_sha="$(sha256sum "$plan" | awk '{print $1}')"
+  receipt_hash="$(persist_sanitized_receipt "$scenario_id" terraform-plan "$plan_sha" "$receipt")"
+  approval_hash="$(require_signed_tf_plan_approval "$scenario_id" "$receipt_hash")"
+  checkpoint_terraform_plan "$scenario_id" "$plan_sha" "$receipt_hash" "$approval_hash"
+  uv run --frozen python -m elspeth.web.aws_ecs_acceptance approval-require-current \
+    --file "$CONTROL_MANIFEST" --scenario-id "$scenario_id" --kind terraform-plan \
+    --plan-receipt-hash "$receipt_hash" --approval-hash "$approval_hash"
+  terraform_capture -chdir="$directory" apply -input=false -lock-timeout=5m "$plan" >/dev/null
+  checkpoint_terraform_apply "$scenario_id" "$plan_sha" "$receipt_hash" "$approval_hash"
+
+  plan="$work/noop.tfplan"
+  receipt="$work/noop.receipt.json"
+  terraform_capture -chdir="$directory" plan -input=false -lock-timeout=5m \
+    -detailed-exitcode -var-file="$vars" \
+    -var="acceptance_run_id=$ACCEPTANCE_RUN_ID" -var="scenario_id=$scenario_id" \
+    -var="candidate_image=$CANDIDATE_IMAGE" \
+    -var="rollback_baseline_image=$ROLLBACK_BASELINE_IMAGE" -out="$plan" >/dev/null
+  chmod 600 "$plan"
+  terraform_capture -chdir="$directory" show -json "$plan" | \
+    uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+      sanitize-evidence --kind terraform-plan >"$receipt"
+  chmod 600 "$receipt"
+  noop_sha="$(sha256sum "$plan" | awk '{print $1}')"
+  receipt_hash="$(persist_sanitized_receipt "$scenario_id" terraform-noop "$noop_sha" "$receipt")"
+  checkpoint_terraform_noop_and_bind "$scenario_id" "$noop_sha" \
+    "$receipt_hash" "$resolved_inventory"
+  rm -rf -- "$work"
+}
+
+plan_and_apply_scenario A "$SCENARIO_A_TF_DIR" "$SCENARIO_A_TF_VARS" \
+  "$SCENARIO_A_TF_BINDING_SHA" "$SCENARIO_A_TF_BINDING_FILE" \
+  "$SCENARIO_A_RESOLVED_INVENTORY"
+load_scenario A
+plan_and_apply_scenario B "$SCENARIO_B_TF_DIR" "$SCENARIO_B_TF_VARS" \
+  "$SCENARIO_B_TF_BINDING_SHA" "$SCENARIO_B_TF_BINDING_FILE" \
+  "$SCENARIO_B_RESOLVED_INVENTORY"
+load_scenario B
 ```
 
 ## Authentication and secret injection
@@ -1618,17 +1857,142 @@ On success, failure, interruption, or timeout:
 6. Clear `CLEANUP_REQUIRED=0` only after all independent surfaces pass.
 
 ```bash
-run_orphan_sweep >"$SANITIZED_ORPHAN_RECEIPT"
+set -o pipefail
+load_cleanup_state
+bind_initial_evidence_export "$EVIDENCE_EXPORT_RECEIPT"
+cleanup_failures=()
 
+destroy_scenario() {
+  local scenario_id="$1" directory="$2" vars="$3" binding="$4"
+  local binding_file="$5" approval_file="$6" surface="$7"
+  if (
+    set -Eeuo pipefail
+    work="$(mktemp -d -p /tmp "elspeth-${scenario_id}-destroy.XXXXXX")"
+    chmod 700 "$work"
+    trap 'rm -rf -- "$work"' EXIT
+    plan="$work/destroy.tfplan"
+    receipt="$work/destroy.receipt.json"
+    terraform_capture -chdir="$directory" init -input=false -lock-timeout=5m >/dev/null
+    verify_tf_binding "$scenario_id" "$directory" "$vars" "$binding" "$binding_file"
+    state_before="$(terraform_capture -chdir="$directory" state list)"
+    if test -z "$state_before"; then
+      exit 0
+    fi
+    terraform_capture -chdir="$directory" plan -destroy -input=false -lock-timeout=5m \
+      -var-file="$vars" -var="acceptance_run_id=$ACCEPTANCE_RUN_ID" \
+      -var="scenario_id=$scenario_id" -var="candidate_image=$CANDIDATE_IMAGE" \
+      -var="rollback_baseline_image=$ROLLBACK_BASELINE_IMAGE" -out="$plan" >/dev/null
+    chmod 600 "$plan"
+    terraform_capture -chdir="$directory" show -json "$plan" | \
+      uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+        sanitize-evidence --kind terraform-destroy-plan >"$receipt"
+    chmod 600 "$receipt"
+    plan_sha="$(sha256sum "$plan" | awk '{print $1}')"
+    receipt_hash="$(persist_sanitized_receipt "$scenario_id" terraform-destroy-plan "$plan_sha" "$receipt")"
+    approval_hash="$(uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
+      approval-verify --file "$CONTROL_MANIFEST" --scenario-id "$scenario_id" \
+      --kind terraform-destroy-plan --plan-receipt-hash "$receipt_hash" \
+      --approval-file "$approval_file")"
+    uv run --frozen python -m elspeth.web.aws_ecs_acceptance approval-require-current \
+      --file "$CONTROL_MANIFEST" --scenario-id "$scenario_id" \
+      --kind terraform-destroy-plan --plan-receipt-hash "$receipt_hash" \
+      --approval-hash "$approval_hash"
+    terraform_capture -chdir="$directory" apply -input=false -lock-timeout=5m "$plan" >/dev/null
+    test -z "$(terraform_capture -chdir="$directory" state list)"
+  ); then
+    checkpoint_cleanup "$surface" confirmed
+  else
+    checkpoint_cleanup "$surface" failed || true
+    return 1
+  fi
+}
+
+delete_ecr_tag() {
+  local label="$1" tag="$2" surface="ecr_$1" listing count result
+  if (
+    set -Eeuo pipefail
+    listing="$(aws_capture aws ecr list-images --region "$AWS_REGION" \
+      --repository-name "$ECR_REPOSITORY" --filter tagStatus=TAGGED --output json)"
+    count="$(jq --arg tag "$tag" '[.imageIds[] | select(.imageTag == $tag)] | length' <<<"$listing")"
+    test "$count" = 0 || test "$count" = 1
+    if test "$count" = 1; then
+      result="$(aws_capture aws ecr batch-delete-image --region "$AWS_REGION" \
+        --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$tag")"
+      jq -e '(.failures | length) == 0 and (.imageIds | length) == 1' <<<"$result" >/dev/null
+    fi
+    listing="$(aws_capture aws ecr list-images --region "$AWS_REGION" \
+      --repository-name "$ECR_REPOSITORY" --filter tagStatus=TAGGED --output json)"
+    jq -e --arg tag "$tag" '[.imageIds[] | select(.imageTag == $tag)] | length == 0' \
+      <<<"$listing" >/dev/null
+  ); then
+    checkpoint_cleanup "$surface" confirmed
+  else
+    checkpoint_cleanup "$surface" failed || true
+    return 1
+  fi
+}
+
+if ! destroy_scenario A "$SCENARIO_A_TF_DIR" "$SCENARIO_A_TF_VARS" \
+  "$SCENARIO_A_TF_BINDING_SHA" "$SCENARIO_A_TF_BINDING_FILE" \
+  "$SCENARIO_A_DESTROY_APPROVAL_FILE" terraform_scenario_a; then
+  cleanup_failures+=(terraform_scenario_a)
+fi
+if ! destroy_scenario B "$SCENARIO_B_TF_DIR" "$SCENARIO_B_TF_VARS" \
+  "$SCENARIO_B_TF_BINDING_SHA" "$SCENARIO_B_TF_BINDING_FILE" \
+  "$SCENARIO_B_DESTROY_APPROVAL_FILE" terraform_scenario_b; then
+  cleanup_failures+=(terraform_scenario_b)
+fi
+
+if SANITIZED_ORPHAN_RECEIPT="$(mktemp -p /tmp elspeth-orphan.XXXXXX)" && \
+  chmod 600 "$SANITIZED_ORPHAN_RECEIPT" && \
+  run_orphan_sweep >"$SANITIZED_ORPHAN_RECEIPT"; then
+  checkpoint_cleanup orphan_sweep confirmed
+else
+  checkpoint_cleanup orphan_sweep failed || true
+  cleanup_failures+=(orphan_sweep)
+fi
+
+if ! delete_ecr_tag baseline "$ROLLBACK_BASELINE_TAG"; then
+  cleanup_failures+=(ecr_baseline)
+fi
+if ! delete_ecr_tag candidate "$CANDIDATE_TAG"; then
+  cleanup_failures+=(ecr_candidate)
+fi
+
+if test "${#cleanup_failures[@]}" -ne 0; then
+  printf 'cleanup failures: %s\n' "${cleanup_failures[*]}" >&2
+  exit 1
+fi
+```
+
+Identity and shared-resource cleanup are owner actions rather than shell
+substitutes. After validating their signed completion/restoration receipts,
+call `checkpoint_cleanup identity_cleanup confirmed` and
+`checkpoint_cleanup shared_resource_cleanup confirmed`. Failed or timed-out
+owner actions are checkpointed `failed`; they do not prevent the independent
+Terraform, orphan-sweep, and ECR attempts above.
+
+The evidence owner binds an initial export before deletion and a distinct
+final export after the cleanup receipts exist. Plan 12 then prepares final
+cleanup evidence, removes local images and temporary evidence through
+`remove_local_acceptance_images` and `remove_local_acceptance_evidence`,
+checkpoints those operations, and commits the finalizer. No checkpoint may be
+marked `confirmed` until its real operation and absence/recovery check pass.
+
+```bash
+bind_final_evidence_export "$FINAL_EVIDENCE_EXPORT_RECEIPT"
+checkpoint_cleanup evidence_export confirmed
 finalize_cleanup_evidence prepare
-# Remove only the approved local evidence paths after durable export and the
-# prepared receipt have both succeeded, then checkpoint local_evidence.
+checkpoint_cleanup final_evidence_prepare confirmed
+remove_local_acceptance_images
+checkpoint_cleanup local_images confirmed
+remove_local_acceptance_evidence
+checkpoint_cleanup local_evidence confirmed
+uv run --frozen python -c 'from datetime import UTC, datetime; import os; assert datetime.now(UTC) <= datetime.fromisoformat(os.environ["ACCEPTANCE_TEARDOWN_DEADLINE_UTC"].replace("Z", "+00:00"))'
+checkpoint_cleanup teardown_deadline confirmed
 finalize_cleanup_evidence commit
-
 uv run --frozen python -m elspeth.web.aws_ecs_acceptance control-manifest validate \
-  --file "$CONTROL_MANIFEST" \
-  --cleanup-only \
-  --require-cleanup-cleared
+  --file "$CONTROL_MANIFEST" --cleanup-only --require-cleanup-cleared
 ```
 
 Terraform state-empty alone is insufficient after partial apply. The orphan

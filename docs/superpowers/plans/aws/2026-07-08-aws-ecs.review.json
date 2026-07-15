@@ -1,165 +1,45 @@
 {
-  "review": "AWS ECS runtime-readiness plan set — round 11 Plan 10 protected-policy acceptance repair",
   "date": "2026-07-15",
-  "reviewed_at": "2026-07-14T18:39:49Z",
-  "object": "docs/superpowers/plans/aws AWS ECS plan/review set, orchestration run sheet, and runtime-readiness/universal-policy designs @ feat/aws-ecs-program",
-  "process": "Fresh independent full-plan review of the final Plan 10 protected-policy acceptance repair in the isolated program worktree, covering canonical tutorial state, all seven protected settings, task-definition and receipt trust anchors, the shared five-case backend/frontend policy matrix, real direct and guided authoring, executable evidence ordering, shell fences, JSON, whitespace, and SHA256 bindings. CI, Wardline, and security review were outside this repair pass.",
-  "verdict": "APPROVED_WITH_WARNINGS",
-  "scope_verdict": "GO_TO_IMPLEMENT",
+  "reviewed_at": "2026-07-15T00:34:48Z",
+  "object": "Lean Plan 12 and Stage 9 execution contract",
+  "verdict": "APPROVED",
+  "scope_verdict": "GO_TO_EXECUTE_PLAN_12",
   "runtime_verdict": "PENDING_PLAN_12",
-  "verdict_summary": "GO after committing and reclosing the repaired Plan 10 contract, then resume Plan 12 in the prescribed order. The final frozen-tree review found no remaining protected-setting, tutorial, task-definition, receipt-binding, policy-matrix, authoring, evidence, or resume blocker. Runtime GO remains pending completion of the external Plan 12 acceptance sequence.",
+  "verdict_summary": "The reviewed program endpoint is Plan 12 Task 7. The closeout retains the real local, image, live AWS, teardown, and exact-SHA release path while deleting hosted CI, Wardline, fine-grained proof rows, the extra final checkpoint, and parent phase or milestone administration.",
   "source_sha256": {
-    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-autonomous-codex-prompt.md": "40d103810fa11916dda54f665376774cc26a2c69efc333531b0c12942f33744f",
-    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md": "749f37b3d6780ffbe81d831401ccf62b2e695b397364dd4bd6fea4f0e82fdb6b",
+    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-autonomous-codex-prompt.md": "0d9b3a147bee5343968eb1fd335d95f9cb3a2429a00ee9b7c0e48e2d572e8a35",
+    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md": "ffc5104ef96fbc3547aef4110d7e69d8b844fa8a7e60d9dfc4b8f7446b698fb0",
     "docs/superpowers/plans/aws/2026-07-08-aws-ecs-00-overview.md": "6cea4243755db7575dbb5ac992136248f67268fcf8bdc105ada91e51d655c7c9",
     "docs/superpowers/plans/aws/2026-07-08-aws-ecs-10-packaging-docker.md": "26db1f9b8476c37bde6d67d13fc20cf58d2eb70b712ea0e9a2122be2ddd93cb6",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md": "622241408e07374e447de2b2b169bb0641ecad03fdb7d5bd5d5caefe1a22adbe"
-  },
-  "reviewer_verdicts": {
-    "reality": "APPROVED_AFTER_REPAIRS",
-    "architecture": "APPROVED_AFTER_REPAIRS",
-    "quality_security": "APPROVED_AFTER_REPAIRS",
-    "systems_dependencies": "APPROVED_AFTER_REPAIRS",
-    "final_rechecks": "PLAN10_PROTECTED_POLICY_REPAIR_GO",
-    "orchestration_contract": "APPROVED",
-    "wardline_contract": "APPROVED"
+    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md": "1e23bf4e1ab5bc1073e22cec2dee65ee80d8258242585730a601c7bdaf9f333f"
   },
   "blocking": [],
   "non_blocking_residuals": [
-    {
-      "id": "R1",
-      "title": "Runtime acceptance remains external",
-      "disposition": "Plans 10/12 own real Aurora/ECS/task-role/Guardrail/telemetry execution and zero-skip proof; planning approval is not runtime GO."
-    },
-    {
-      "id": "R2",
-      "title": "Epoch 23 needs operator-controlled recreation for populated old Landscape databases",
-      "disposition": "Archive/export, destructive reset, compatibility approval, and rollback decisions remain database/release-operator responsibilities."
-    },
-    {
-      "id": "R3",
-      "title": "AWS harmful-content coverage lacks Azure self_harm parity",
-      "disposition": "The residual is explicit; equivalent coverage requires another approved control or an operator decision."
-    },
-    {
-      "id": "R4",
-      "title": "Hosted CI does not build the lean INSTALL_EXTRAS image",
-      "disposition": "Plan 10 and Plan 12 perform the real lean build/run; retain the existing overview strengthening follow-up."
-    }
+    "Live AWS execution awaits the approved operator credentials and external Terraform inputs."
   ],
   "repairs_verified": [
-    "Plan 15 was split into 15A text sink, 15B universal policy, and 15C thin Bedrock Guardrail implementation with separate tracker ownership and review artifacts.",
-    "The approved required core is CSV/JSON/text source and sink plus field_mapper, web_scrape, and operator-profiled LLM for the canonical tutorial; XML remains parked.",
-    "Plan 15A is byte-oriented, race-safe, multi-batch preserving, rollback-aware, and source-hash/golden/discovery complete.",
-    "Plan 15B binds policy to exact plugin code identities, resolves per-principal usable aliases without credential-scope shadowing, and keeps private lowering memory-only.",
-    "Plan 15B enforces the same snapshot at catalog, freeform, guided, recipes, import, validation, execution, delayed export, frontend cache, readiness, and audit boundaries while leaving CLI unrestricted.",
-    "Required prompt/content controls use typed input/output roles, fail-safe trust classification, and graph dominance/post-dominance; recommendation never auto-inserts topology.",
-    "Landscape epoch 23 has explicit SQLite and PostgreSQL old-populated refusal/recreate behavior, atomic policy evidence, audit-before-telemetry ordering, and release compatibility ownership.",
-    "Plan 15C recursively pins the installed ApplyGuardrail model, validates complete usage, blocks detect-only positives, accepts bounded 1..N intervention outputs, and discards provider text.",
-    "Full CLI catalog schemas remain explicit while web policy-view schemas expose only usable opaque aliases and safe options.",
-    "Plan 12 mechanically checks all 19 pre-closeout tracker steps: 18 application slices plus the verification-baseline task; the live milestone has 20 steps including closeout.",
-    "PROGRAM_BASE_SHA is the immutable Stages 1-8 ancestry marker; unrelated concurrent documentation is not inspected or gated until Stage 9.",
-    "Stage 9 inventories and classifies the release-only delta before merge, reconstructs conflict-resume anchors without resampling release, and preserves all historical close anchors.",
-    "Plan 10 itself and consumed prerequisites use the owner-approved replacement-lineage protocol when a substantive reconciliation delta invalidates the historical baseline.",
-    "The reconciliation affected-area checkpoint precedes Task 1; Major Checkpoint 6 runs only on the frozen candidate before Task 2, and external cleanup precedes any post-mutation rereconciliation.",
-    "Plan 10 now re-verifies the historically bound initial evidence export against its immutable receipt even after cleanup receipts and the cleanup ledger advance.",
-    "Plan 12 requires a fresh cleanup ledger after any Task 8 start, exact allowlisted retained-metric queries plus deterministic trace evidence, and immutable strict-superset operator-evidence checkpoints before live CloudWatch deletion.",
-    "Retained evidence validation now binds the exact acceptance namespace and sentinel dimensions, enforces equal metric/trace evidence counts, and resumes safely across an interruption between terminal cleanup-ledger persistence and manifest finalization.",
-    "Canonical tutorial acceptance now exercises captured tutorial topology and requires typed fail-closed policy errors when tutorial-required controls are unavailable.",
-    "Every candidate, doctor, verifier, rollback, and previous task definition is byte-for-byte bound to the manifest inventory for all seven protected settings, the policy-binding digest, live Bedrock model, and AWS region.",
-    "Guardrail execution receipts and receipt persistence independently bind the protected policy digest before evidence can be credited.",
-    "One shared five-case fixture now drives exact backend and frontend policy projections, including real direct, guided, YAML import, runtime, and delayed-export behavior; public operator-profile aliases lower through the production catalog path."
+    "Seven ordered Plan 12 tasks with Task 7 as the endpoint.",
+    "Runnable ECR publication, A then B saved-plan apply, live acceptance, independent teardown, and exact-SHA release flow.",
+    "Coarse six-phase ledger and hosted-CI-free control manifest.",
+    "Retained telemetry completeness before the live phase.",
+    "No Wardline execution for this project."
   ],
+  "reviewer_verdicts": {
+    "execution": "APPROVED",
+    "controller_and_cleanup": "APPROVED_AFTER_REPAIRS",
+    "coordinator": "APPROVED"
+  },
   "verification": [
-    "git diff --check passes",
-    "balanced Markdown fences across all four amended orchestration documents",
-    "all 75 Bash or shell fences in those documents pass bash -n",
-    "all 24 local links in those documents resolve",
-    "all AWS ECS review artifacts parse as JSON",
-    "targeted stale-term searches found no RELEASE_START_SHA or paused-release instruction in the amended documents",
-    "a synthetic divergent-release repository passed conflict-class exit, fresh-shell anchor reconstruction, staged resolution, reconciliation commit, and preserved ancestry",
-    "independent orchestration-contract and Wardline reviewers returned APPROVED after repair",
-    "every reviewed source SHA256 matches its refreshed sidecar or aggregate source_sha256 binding",
-    "257 focused acceptance, runbook-contract, and operator-telemetry tests pass",
-    "Ruff check, Ruff format-check, and mypy for the acceptance controller pass",
-    "all 48 Plan 12 backtick Bash fences, 2 Plan 12 tilde Bash fences, 16 canonical-runbook Bash fences, and 24 Stage 9 run-sheet Bash fences pass syntax validation",
-    "fresh independent full Plan 10 and full Plan 12/Stage 9 reviewers returned GO with no remaining correctness, idempotency, cleanup, evidence, or resume blocker",
-    "final frozen-tree Plan 10 review returned GO after exact raw-fixture/live-backend projection equality closed the last label/order substitution counterexample",
-    "4654 backend tests and 2324 frontend tests pass on the reviewed tree",
-    "Ruff check, Ruff format-check, mypy, and git diff --check pass on the reviewed tree"
-  ],
-  "reviewed_files": [
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-00-overview.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-01-deployment-contract.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-02-postgres-schema-support.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-03-doctor-cli.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-04-validate-only-startup.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-05-readiness-endpoint.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-06-s3-source.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-07-s3-sink.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-08-s3-endpoint-gate.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-09-bedrock-provider.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-10-packaging-docker.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-11-landscape-write-gate.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-13-cognito-authorization-origin.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-14-cloudwatch-operator-telemetry.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-15a-text-sink.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-15b-universal-web-plugin-policy.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-15c-bedrock-guardrail-shields.md",
-    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md",
-    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-autonomous-codex-prompt.md",
-    "docs/superpowers/specs/2026-07-08-aws-ecs-runtime-readiness-design.md",
-    "docs/superpowers/specs/2026-07-12-universal-web-plugin-policy-design.md"
+    "250 focused tests pass.",
+    "Plan and runbook Bash fences pass bash -n.",
+    "Ruff, format check, strict mypy, JSON parsing, source hashes, and git diff --check pass."
   ],
   "review_history": [
     {
-      "round": 5,
-      "date": "2026-07-12",
-      "verdict": "APPROVED_WITH_WARNINGS",
-      "summary": "Telemetry and Guardrails expansion identified the need for AWS operational telemetry and explicit AWS-native prompt/content controls."
-    },
-    {
-      "round": "6-initial",
-      "date": "2026-07-12",
-      "verdict": "CHANGES_REQUESTED",
-      "summary": "The universal-policy pass found text-sink rollback/race defects, under-bound per-alias and private-config policy evidence, incomplete cache/trust/schema controls, response-model guesses, and stale dependency/closeout metadata."
-    },
-    {
-      "round": 6,
-      "date": "2026-07-12",
-      "verdict": "APPROVED_WITH_WARNINGS",
-      "summary": "All blockers were repaired; final independent re-reviews returned GO for Plans 15A, 15B, and 15C."
-    },
-    {
-      "round": 7,
-      "date": "2026-07-12",
-      "verdict": "APPROVED_WITH_WARNINGS",
-      "summary": "All AWS plan/review artifacts moved into the aws folder; path-bearing repository and tracker references were repaired; an orchestration run sheet now pins the live 20-step DAG, integration-before-close protocol, stage barriers, rollback baseline, and Plan 12 handoff."
-    },
-    {
-      "round": 8,
-      "date": "2026-07-12",
-      "verdict": "APPROVED_WITH_WARNINGS",
-      "summary": "The single-worktree autonomous model was independently re-reviewed after repair. The release-ancestry stop condition, stale start-next/merge/rebase wording, full-suite timing, exact-SHA CI path, and review hash bindings now agree across the prompt, run sheet, Plan 00, Plan 10, and Plan 12."
-    },
-    {
-      "round": 9,
-      "date": "2026-07-13",
-      "verdict": "APPROVED_WITH_WARNINGS",
-      "summary": "The worktree-only Stages 1-8 contract and explicit Stage 9 release reconciliation were independently re-reviewed. Conflict resume, substantive documentation classification, Plan 10 replacement lineage, candidate-bound Major Checkpoint 6, cleanup-before-rereconciliation, and review hashes now agree."
-    },
-    {
-      "round": 10,
+      "round": 12,
       "date": "2026-07-15",
-      "verdict": "APPROVED_WITH_WARNINGS",
-      "summary": "The repaired Plan 10 and Plan 12 acceptance contract was independently re-reviewed in full. Historical evidence replay, exact retained telemetry, two-stream cleanup-ledger freshness, immutable evidence checkpointing, cleanup crash recovery, and all refreshed review hashes now agree."
-    },
-    {
-      "round": 11,
-      "date": "2026-07-15",
-      "verdict": "APPROVED_WITH_WARNINGS",
-      "summary": "The final Plan 10 protected-policy acceptance repair was independently re-reviewed on the frozen tree. Canonical tutorial state, seven-setting task-definition binding, receipt binding, exact five-case backend/frontend parity, and real direct/guided authoring now agree; the full focused backend and frontend suites are green."
+      "verdict": "APPROVED",
+      "summary": "Plan 12 was reduced to delivery-critical work and independently rechecked after the executable AWS lifecycle was restored to the canonical runbook."
     }
   ]
 }

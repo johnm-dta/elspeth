@@ -276,8 +276,6 @@ _CONTROL_MANIFEST_FIELDS = frozenset(
         "schema",
         "acceptance_run_id",
         "candidate_sha",
-        "release_pr_number",
-        "ci_run_id",
         "aws",
         "scenarios",
         "gate_ledger_path",
@@ -314,18 +312,15 @@ _GATE_LEDGER_FIELDS = frozenset(
     }
 )
 _GATE_RECORD_FIELDS = frozenset({"check_id", "candidate_sha", "started_at", "ended_at", "exit_status", "receipt_hash"})
-_REQUIRED_GATE_CHECK_COUNTS = {1: 13, 2: 8, 3: 7, 4: 2, 5: 10, 6: 6, 7: 30, 8: 5}
-_REQUIRED_GATE_CHECK_ORDER = tuple(
-    f"task{task}.check{number:02d}" for task, count in _REQUIRED_GATE_CHECK_COUNTS.items() for number in range(1, count + 1)
-)
+_SUCCESS_GATE_CHECK_ORDER = ("candidate", "static", "tests", "image", "live")
+_CLEANUP_GATE_CHECK_ORDER = ("cleanup",)
+_REQUIRED_GATE_CHECK_ORDER = (*_SUCCESS_GATE_CHECK_ORDER, *_CLEANUP_GATE_CHECK_ORDER)
 _REQUIRED_GATE_CHECK_IDS = frozenset(_REQUIRED_GATE_CHECK_ORDER)
-_TASK1_GATE_CHECK_ORDER = _REQUIRED_GATE_CHECK_ORDER[: _REQUIRED_GATE_CHECK_COUNTS[1]]
-_SUCCESS_GATE_CHECK_ORDER = tuple(check_id for check_id in _REQUIRED_GATE_CHECK_ORDER if not check_id.startswith("task8."))
-_CLEANUP_GATE_CHECK_ORDER = tuple(check_id for check_id in _REQUIRED_GATE_CHECK_ORDER if check_id.startswith("task8."))
+_TASK1_GATE_CHECK_ORDER = ("candidate",)
 _GATE_LEDGER_GET_FIELDS = frozenset(
     {"branch", "starting_sha", "plan_sha256", "program_base_sha", "reconciled_release_sha", "candidate_sha"}
 )
-_TERMINAL_GATE_CHECK_ID = "task8.check05"
+_TERMINAL_GATE_CHECK_ID = "cleanup"
 SCENARIO_ASSIGNMENT_NAMES = (
     "ACTIVE_SCENARIO_ID",
     "ACCEPTANCE_RUN_ID",
@@ -3550,7 +3545,7 @@ def _control_timestamp(value: object) -> datetime:
 def _validate_control_manifest(payload: object) -> dict[str, object]:
     if not isinstance(payload, dict) or set(payload) != _CONTROL_MANIFEST_FIELDS:
         raise AcceptanceCheckError("control_manifest_schema")
-    if payload["schema"] != "elspeth.aws-ecs-control-manifest.v4":
+    if payload["schema"] != "elspeth.aws-ecs-control-manifest.v5":
         raise AcceptanceCheckError("control_manifest_schema")
     try:
         _canonical_uuid(payload["acceptance_run_id"], label="control manifest run identity")
@@ -3558,11 +3553,6 @@ def _validate_control_manifest(payload: object) -> dict[str, object]:
         raise AcceptanceCheckError("control_manifest_schema") from None
     candidate_sha = payload["candidate_sha"]
     if type(candidate_sha) is not str or _GIT_SHA_PATTERN.fullmatch(candidate_sha) is None:
-        raise AcceptanceCheckError("control_manifest_schema")
-    if type(payload["release_pr_number"]) is not int or payload["release_pr_number"] <= 0:
-        raise AcceptanceCheckError("control_manifest_schema")
-    ci_run_id = payload["ci_run_id"]
-    if type(ci_run_id) is not str or re.fullmatch(r"[1-9][0-9]{0,19}", ci_run_id) is None:
         raise AcceptanceCheckError("control_manifest_schema")
     aws = payload["aws"]
     if not isinstance(aws, dict) or set(aws) != {"account_id", "region"}:
@@ -4808,8 +4798,6 @@ def control_manifest_init(
     *,
     acceptance_run_id: str,
     candidate_sha: str,
-    release_pr_number: str,
-    ci_run_id: str,
     aws_account_id: str,
     aws_region: str,
     scenario_a_inventory: str,
@@ -4823,10 +4811,6 @@ def control_manifest_init(
 ) -> dict[str, object]:
     """Create one fresh, closed, interruption-safe Plan 12 control manifest."""
 
-    try:
-        pr_number = int(release_pr_number, 10)
-    except ValueError:
-        raise AcceptanceCheckError("control_manifest_schema") from None
     scenario_a_document = _validate_scenario_inventory(
         _read_protected_document(Path(scenario_a_inventory), check="scenario_inventory_file"),
         scenario_id="A",
@@ -4874,11 +4858,9 @@ def control_manifest_init(
         raise AcceptanceCheckError("tf_binding_binding")
     timestamp = _utc_timestamp(now())
     manifest: dict[str, object] = {
-        "schema": "elspeth.aws-ecs-control-manifest.v4",
+        "schema": "elspeth.aws-ecs-control-manifest.v5",
         "acceptance_run_id": acceptance_run_id,
         "candidate_sha": candidate_sha,
-        "release_pr_number": pr_number,
-        "ci_run_id": ci_run_id,
         "aws": {"account_id": aws_account_id, "region": aws_region},
         "scenarios": {
             "A": {
@@ -7718,7 +7700,7 @@ def _validate_gate_record_stream(records: object, order: tuple[str, ...]) -> lis
 def _validate_gate_ledger(payload: object) -> dict[str, object]:
     if not isinstance(payload, dict) or set(payload) != _GATE_LEDGER_FIELDS:
         raise AcceptanceCheckError("gate_ledger_schema")
-    if payload["schema"] != "elspeth.aws-ecs-gate-ledger.v3":
+    if payload["schema"] != "elspeth.aws-ecs-gate-ledger.v4":
         raise AcceptanceCheckError("gate_ledger_schema")
     branch = payload["branch"]
     starting_sha = payload["starting_sha"]
@@ -7819,7 +7801,7 @@ def gate_ledger_init(
         raise AcceptanceCheckError("gate_ledger_conflict")
     timestamp = _utc_timestamp(now())
     ledger: dict[str, object] = {
-        "schema": "elspeth.aws-ecs-gate-ledger.v3",
+        "schema": "elspeth.aws-ecs-gate-ledger.v4",
         "branch": branch,
         "starting_sha": starting_sha,
         "plan_sha256": plan_sha256,
@@ -8113,8 +8095,6 @@ def build_parser() -> argparse.ArgumentParser:
         "file",
         "acceptance-run-id",
         "candidate-sha",
-        "release-pr-number",
-        "ci-run-id",
         "aws-account-id",
         "aws-region",
         "scenario-a-inventory",
@@ -8323,8 +8303,6 @@ def main(argv: list[str] | None = None) -> int:
                     path,
                     acceptance_run_id=args.acceptance_run_id,
                     candidate_sha=args.candidate_sha,
-                    release_pr_number=args.release_pr_number,
-                    ci_run_id=args.ci_run_id,
                     aws_account_id=args.aws_account_id,
                     aws_region=args.aws_region,
                     scenario_a_inventory=args.scenario_a_inventory,

@@ -179,9 +179,10 @@ def build_row_processor(
       instead ``follower_barrier_node_ids`` carries the aggregation node ID
       set so batch-aware transforms are intercepted and mark_blocked (§B).
     - source_plugin: FOLLOWER gets ``None`` (no source ingest).
-    - lease owner: an explicit ``scheduler_lease_owner`` wins (the follower's
-      registered worker identity, §A.1); otherwise the coordination token's
-      worker_id; otherwise None (RowProcessor mints its own).
+    - lease owner: a follower supplies its registered worker identity (§A.1);
+      a leader uses the coordination token's worker_id and RowProcessor rejects
+      any distinct explicit identity; otherwise None (tokenless direct harness,
+      for which RowProcessor mints its own non-maintenance identity).
     - run_coordination: derived from token presence — a follower passes
       ``coordination_token=None``, so it never receives the §C.2 housekeeping
       repository. RowProcessor validates the FOLLOWER invariants fail-closed.
@@ -349,9 +350,9 @@ def build_row_processor(
         scheduler_heartbeat_seconds=scheduler_heartbeat_seconds,
         coordination_token=coordination_token,
         # §C.2 path 1 (slice 4): leader housekeeping sweep — evict dead
-        # non-leader members then reap their expired item leases. None when
-        # no coordination substrate (follower build, N=1, or direct
-        # repository-level construction).
+        # non-leader members then reap their expired item leases. None for a
+        # follower or tokenless direct construction; absence never selects
+        # unfenced recovery, and production leader maintenance requires token.
         run_coordination=factory.run_coordination if coordination_token is not None else None,
         follower_barrier_node_ids=follower_barrier_node_ids,
         mode=mode,

@@ -27,7 +27,7 @@ Slice-4 liveness-aware reap tests (§A.5/§C.1, design :140/221-224):
    (c) status='active' + stale heartbeat.
 6. The stall budget arm reaps a live-heartbeat-but-wedged owner and emits
    ``worker_stalled`` in the same transaction.
-7. The unfenced/test arm (token=None, no run_workers rows) behaves
+7. The explicitly named legacy adapter (no run_workers rows) behaves
    identically to pre-slice-4 — legacy reap, no new restrictions.
 """
 
@@ -227,7 +227,7 @@ def test_sweep_recovers_every_expired_lease_exactly_once_and_never_live_leases()
         assert claimed.token_id == token_id
 
     sweep_at = now + timedelta(seconds=60)
-    assert repo.recover_expired_leases(run_id=RUN_ID, now=sweep_at, caller_owner="resume-sweeper") == 3
+    assert repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=sweep_at, caller_owner="resume-sweeper") == 3
 
     states = _work_item_states(engine)
     for token_id in expired_tokens:
@@ -248,7 +248,7 @@ def test_sweep_recovers_every_expired_lease_exactly_once_and_never_live_leases()
     assert all(event["caller_owner"] == "resume-sweeper" for event in events)
 
     # Idempotent: a second sweep finds nothing left to recover.
-    assert repo.recover_expired_leases(run_id=RUN_ID, now=sweep_at, caller_owner="resume-sweeper") == 0
+    assert repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=sweep_at, caller_owner="resume-sweeper") == 0
     assert len(_recovery_events(engine)) == 3
 
     # The recovered continuations are claimable in ingest order; the live
@@ -301,7 +301,7 @@ def test_sweep_recovery_order_is_ingest_sequence_then_step_index_then_work_item_
         assert repo.claim_ready(run_id=RUN_ID, lease_owner="worker-a", lease_seconds=30, now=now) is not None
 
     sweep_at = now + timedelta(seconds=60)
-    assert repo.recover_expired_leases(run_id=RUN_ID, now=sweep_at, caller_owner="resume-sweeper") == 4
+    assert repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=sweep_at, caller_owner="resume-sweeper") == 4
 
     tied_pair = sorted(("token-y", "token-z"), key=lambda token_id: items[token_id].work_item_id)
     recovery_order = [event["token_id"] for event in _recovery_events(engine)]
@@ -331,7 +331,7 @@ def test_expired_lease_is_invisible_to_its_own_holders_sweep() -> None:
 
     # worker-a's sweep recovers ONLY worker-b's expired lease; its own expired
     # lease stays LEASED under worker-a (invisible to its own holder).
-    assert repo.recover_expired_leases(run_id=RUN_ID, now=sweep_at, caller_owner="worker-a") == 1
+    assert repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=sweep_at, caller_owner="worker-a") == 1
     states = _work_item_states(engine)
     assert states["token-1"]["status"] == TokenWorkStatus.READY.value
     assert states["token-1"]["attempt"] == 2
@@ -340,10 +340,10 @@ def test_expired_lease_is_invisible_to_its_own_holders_sweep() -> None:
     assert states["token-0"]["lease_owner"] == "worker-a"
 
     # Repeating its own sweep never reaps it.
-    assert repo.recover_expired_leases(run_id=RUN_ID, now=sweep_at, caller_owner="worker-a") == 0
+    assert repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=sweep_at, caller_owner="worker-a") == 0
 
     # A different lease_owner — the resume-sweep identity — recovers it.
-    assert repo.recover_expired_leases(run_id=RUN_ID, now=sweep_at, caller_owner="resume-sweeper") == 1
+    assert repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=sweep_at, caller_owner="resume-sweeper") == 1
     states = _work_item_states(engine)
     assert states["token-0"]["status"] == TokenWorkStatus.READY.value
     assert states["token-0"]["attempt"] == 2
@@ -489,9 +489,7 @@ def test_live_registered_owner_expired_lease_is_revived_not_reaped() -> None:
     # live_owner's heartbeat is fresh (owner_registry_dead is False) and the
     # lease has NOT passed the stall budget (only 40 s past lease_expires_at).
     reaped = repo.recover_expired_leases(
-        run_id=RUN_ID,
         now=sweep_at,
-        caller_owner=leader_id,
         coordination_token=token,
         grace_seconds=_SWEEP_GRACE,
         stall_budget_seconds=_STALL_BUDGET,
@@ -575,9 +573,7 @@ def test_dead_registered_owner_expired_lease_is_reaped(owner_status: str, heartb
     sweep_at = now + timedelta(seconds=_LEASE_SECONDS + 10)
 
     reaped = repo.recover_expired_leases(
-        run_id=RUN_ID,
         now=sweep_at,
-        caller_owner=leader_id,
         coordination_token=token,
         grace_seconds=_SWEEP_GRACE,
         stall_budget_seconds=_STALL_BUDGET,
@@ -627,9 +623,7 @@ def test_stall_budget_reaps_live_owner_and_emits_worker_stalled() -> None:
     sweep_at = now + timedelta(seconds=_LEASE_SECONDS + stall_budget + 10)
 
     reaped = repo.recover_expired_leases(
-        run_id=RUN_ID,
         now=sweep_at,
-        caller_owner=leader_id,
         coordination_token=token,
         grace_seconds=_SWEEP_GRACE,
         stall_budget_seconds=stall_budget,
@@ -650,12 +644,11 @@ def test_stall_budget_reaps_live_owner_and_emits_worker_stalled() -> None:
     assert stalled_events[0]["leader_epoch"] == _EPOCH
 
 
-def test_unfenced_no_registry_arm_preserves_legacy_reap() -> None:
-    """§C.1 unfenced arm re-pin: token=None + no run_workers rows means
-    owner_registry_dead is TRUE for all rows (no EXISTS match), so reap
-    behaves exactly as the pre-slice-4 form — all expired-lease rows are
-    rotated regardless of liveness, no new restrictions applied.
-    This re-pins the baseline contract for the slice 1-3 test paths.
+def test_named_legacy_adapter_without_registry_preserves_reap_semantics() -> None:
+    """§C.1 named legacy adapter re-pin: it deliberately does not consult
+    run_workers, so all expired leases not owned by its explicit caller are
+    rotated regardless of registry liveness. This re-pins the baseline
+    contract for direct slice 1-3 repository harnesses.
     """
     engine = _make_scheduler_engine()
     repo = TokenSchedulerRepository(engine)
@@ -672,14 +665,13 @@ def test_unfenced_no_registry_arm_preserves_legacy_reap() -> None:
 
     sweep_at = now + timedelta(seconds=60)
 
-    # Unfenced sweep (token=None): all three must be reaped.
-    reaped = repo.recover_expired_leases(
+    # Explicit legacy sweep: all three must be reaped.
+    reaped = repo.recover_expired_leases_legacy_unfenced(
         run_id=RUN_ID,
         now=sweep_at,
         caller_owner="resume-sweeper",
-        coordination_token=None,  # unfenced — no fence, no registry check
     )
-    assert reaped == 3, "unfenced/no-registry arm must reap all expired items (legacy behavior)"
+    assert reaped == 3, "named legacy adapter must reap all expired items not owned by its explicit caller"
 
     states = _work_item_states(engine)
     for token_id in token_ids:

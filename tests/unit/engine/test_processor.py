@@ -499,13 +499,12 @@ class TestConstructorErrorEdgeMap:
         assert first._scheduler_lease_owner == _TEST_LEADER_WORKER_ID
         assert second._scheduler_lease_owner == _TEST_LEADER_WORKER_ID
 
-    def test_explicit_scheduler_lease_owner_is_honored(self) -> None:
-        """Tests and controlled workers can still provide a stable lease-owner identity."""
+    def test_explicit_scheduler_lease_owner_must_match_coordination_token(self) -> None:
+        """A leader cannot hold scheduler leases under a second identity."""
         _, factory = _make_factory()
 
-        processor = _make_processor(factory, scheduler=factory.scheduler, scheduler_lease_owner="worker-a")
-
-        assert processor._scheduler_lease_owner == "worker-a"
+        with pytest.raises(OrchestrationInvariantError, match=r"scheduler_lease_owner.*coordination_token\.worker_id"):
+            _make_processor(factory, scheduler=factory.scheduler, scheduler_lease_owner="worker-a")
 
     def test_navigator_is_constructed_from_traversal_context_factory(self) -> None:
         """RowProcessor should not re-derive DAGNavigator internals at the call site."""
@@ -3793,10 +3792,10 @@ class TestDurableSchedulerResumeDrain:
     def _seed_parked_on_error_pending_sink(self, *, error_hash: str | None) -> tuple[Any, Any, Any]:
         """Seed a durable ON_ERROR_ROUTED PENDING_SINK row via production verbs.
 
-        Returns (db, factory, processor) where processor is a FRESH resume
-        processor ("resume-worker") that has not yet drained. Both identities
-        are registered run_workers (the factory's run already registers its
-        leader, so unregistered claimants would be membership-fenced).
+        Returns (db, factory, processor) where processor is a fresh leader
+        processor that has not yet drained. The crashed worker remains a
+        distinct registered member; strict recovery identity is the leader
+        identity carried by the coordination token.
         """
         db, factory = _make_factory()
         transform_node = NodeID("transform-1")
@@ -3850,7 +3849,7 @@ class TestDurableSchedulerResumeDrain:
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="resume-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         return db, factory, processor
 
@@ -3936,7 +3935,7 @@ class TestDurableSchedulerResumeDrain:
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="worker-evictable",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
         success_result = TransformResult.success(
@@ -3950,7 +3949,7 @@ class TestDurableSchedulerResumeDrain:
             with db.engine.begin() as conn:
                 conn.execute(
                     update(run_workers_table)
-                    .where(run_workers_table.c.worker_id == "worker-evictable")
+                    .where(run_workers_table.c.worker_id == _TEST_LEADER_WORKER_ID)
                     .values(status="evicted", evicted_at=datetime.now(UTC))
                 )
             return (success_result, token, None)
@@ -3968,7 +3967,7 @@ class TestDurableSchedulerResumeDrain:
                 )
             ).one()
         assert item_row.status == "leased", "evicted worker's disposition must not commit"
-        assert item_row.lease_owner == "worker-evictable"
+        assert item_row.lease_owner == _TEST_LEADER_WORKER_ID
 
     def test_sink_bound_scheduler_work_terminalizes_only_after_sink_callback(self) -> None:
         """Sink-bound work remains durable until sink outcome recording completes."""
@@ -4112,7 +4111,7 @@ class TestDurableSchedulerResumeDrain:
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="resume-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         with patch.object(resumed_processor._transform_executor, "execute_transform", side_effect=AssertionError("transform replayed")):
             results = resumed_processor.drain_scheduled_work(ctx)
@@ -4133,7 +4132,7 @@ class TestDurableSchedulerResumeDrain:
                 )
             ).one()
         assert status == "leased"
-        assert lease_owner == "resume-worker"
+        assert lease_owner == _TEST_LEADER_WORKER_ID
 
     def test_pending_sink_resume_repairs_already_outcomed_row_without_reemitting_sink(self) -> None:
         """A terminal token outcome is the resume witness; do not emit the sink externally again."""
@@ -4175,7 +4174,7 @@ class TestDurableSchedulerResumeDrain:
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="crashed-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
         final_token = TokenInfo(
@@ -4205,7 +4204,7 @@ class TestDurableSchedulerResumeDrain:
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="resume-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         with patch.object(resumed_processor._transform_executor, "execute_transform", side_effect=AssertionError("transform replayed")):
             results = resumed_processor.drain_scheduled_work(ctx)
@@ -4228,7 +4227,7 @@ class TestDurableSchedulerResumeDrain:
             ).scalar_one()
         assert status == "terminal"
         assert lease_owner is None
-        assert terminal_event_owner == "resume-worker"
+        assert terminal_event_owner == _TEST_LEADER_WORKER_ID
 
     def test_resume_drains_all_pending_sink_rows_in_single_call(self) -> None:
         """Multiple pre-existing PENDING_SINK rows must all drain in a single resume call.
@@ -4277,9 +4276,10 @@ class TestDurableSchedulerResumeDrain:
                 available_at=datetime.now(UTC),
             )
 
-        # Stage 1: simulate the crashed worker that drove the transform to
-        # success on every token. Each token ends in PENDING_SINK because
-        # sink durability never completed.
+        # Stage 1: fabricate the durable image left by a leader that drove the
+        # transform to success and then crashed before sink durability. This
+        # test isolates pending-sink replay, so both processors use the
+        # fixture's same token-bound leader identity.
         transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
         crashed_processor = _make_processor(
             factory,
@@ -4287,7 +4287,7 @@ class TestDurableSchedulerResumeDrain:
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="crashed-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
 
@@ -4313,19 +4313,19 @@ class TestDurableSchedulerResumeDrain:
                 conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == "test-run")).scalars().all()
             )
         assert sorted(statuses) == ["pending_sink"] * 3, (
-            f"Expected three PENDING_SINK rows after the crashed worker drained transform work; got {sorted(statuses)}."
+            f"Expected three PENDING_SINK rows after the pre-crash drain; got {sorted(statuses)}."
         )
 
-        # Stage 2: fresh resume worker. The bug: only one PENDING_SINK row
-        # emits a RowResult; the other two stay PENDING_SINK because the gate
-        # blocks the recovery branch after the first claim.
+        # Stage 2: fresh recovery processor. The bug: only one PENDING_SINK
+        # row emits a RowResult; the other two stay PENDING_SINK because the
+        # gate blocks the recovery branch after the first claim.
         resume_processor = _make_processor(
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="resume-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         with patch.object(
             resume_processor._transform_executor,
@@ -4343,7 +4343,7 @@ class TestDurableSchedulerResumeDrain:
             statuses_after = (
                 conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == "test-run")).scalars().all()
             )
-        # Every row is now LEASED by the resume worker awaiting the sink
+        # Every row is now LEASED by the token-bound leader awaiting the sink
         # callback; none remain in PENDING_SINK status.
         assert sorted(statuses_after) == ["leased"] * 3
 
@@ -4371,7 +4371,7 @@ class TestDurableSchedulerResumeDrain:
             schema_config=_DYNAMIC_SCHEMA,
         )
 
-        # Two pre-existing pending-sink rows from a prior crashed worker.
+        # Two pre-existing pending-sink rows representing a prior crash image.
         pre_existing_token_ids: list[str] = []
         for idx in range(2):
             source_payload = make_row({"value": idx})
@@ -4400,14 +4400,15 @@ class TestDurableSchedulerResumeDrain:
         transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
         ctx = make_context(landscape=factory.plugin_audit_writer())
 
-        # Stage 1: crashed worker pushes the pre-existing rows to PENDING_SINK.
+        # Stage 1: the first processor pushes the pre-existing rows to
+        # PENDING_SINK before the simulated crash window.
         crashed_processor = _make_processor(
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="crashed-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
 
         def crashed_executor(*, transform, token, ctx, attempt=0):
@@ -4423,7 +4424,7 @@ class TestDurableSchedulerResumeDrain:
         with patch.object(crashed_processor._transform_executor, "execute_transform", side_effect=crashed_executor):
             crashed_processor.drain_scheduled_work(ctx)
 
-        # Stage 2: enqueue a brand new READY token that the resume worker
+        # Stage 2: enqueue a brand new READY token that the recovery processor
         # will process to completion (ending in PENDING_SINK durably and
         # emitting one sink-bound RowResult).
         fresh_payload = make_row({"value": 99})
@@ -4448,22 +4449,22 @@ class TestDurableSchedulerResumeDrain:
             available_at=datetime.now(UTC),
         )
 
-        # Stage 3: resume worker drains everything in one call. Pre-existing
-        # rows recover via _row_result_from_pending_sink; the fresh row
-        # processes through the transform and emits the sink-bound RowResult
-        # directly. Neither path may emit the same token twice.
+        # Stage 3: a fresh recovery processor drains everything in one call.
+        # Pre-existing rows recover via _row_result_from_pending_sink; the
+        # fresh row processes through the transform and emits the sink-bound
+        # RowResult directly. Neither path may emit the same token twice.
         resume_processor = _make_processor(
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="resume-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
 
         def resume_executor(*, transform, token, ctx, attempt=0):
             # Pre-existing tokens must NOT re-enter the transform (their
-            # transform work is durable from the crashed worker).
+            # transform work is durable from the pre-crash drain).
             assert token.token_id == fresh_token_id, f"transform replayed for {token.token_id!r} during recovery drain"
             return (
                 TransformResult.success(
@@ -5720,7 +5721,7 @@ class TestDurableSchedulerResumeDrain:
                 ),
             },
             scheduler=factory.scheduler,
-            scheduler_lease_owner="resume-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         with patch.object(
             resumed_processor._transform_executor,
@@ -5744,7 +5745,7 @@ class TestDurableSchedulerResumeDrain:
                 ).where(token_work_items_table.c.token_id.in_(flushed_token_ids))
             ).all()
         assert {(row.token_id, row.status, row.lease_owner) for row in resumed_rows} == {
-            (token_id, "leased", "resume-worker") for token_id in flushed_token_ids
+            (token_id, "leased", _TEST_LEADER_WORKER_ID) for token_id in flushed_token_ids
         }
 
     def test_drain_scheduled_work_no_longer_refuses_on_peer_lease(self) -> None:
@@ -5759,7 +5760,7 @@ class TestDurableSchedulerResumeDrain:
 
         This test was previously ``test_drain_refuses_when_peer_worker_holds_active_lease``
         and asserted an ``AuditIntegrityError`` raise. It now asserts the
-        OPPOSITE: ``drain_scheduled_work`` must NOT raise. Worker B's drain
+        OPPOSITE: ``drain_scheduled_work`` must NOT raise. The leader's drain
         enters the claim loop, finds the row still LEASED under peer-worker-A
         (``claim_ready`` returns None — no READY rows), and exits cleanly with
         an empty result list.
@@ -5809,23 +5810,23 @@ class TestDurableSchedulerResumeDrain:
         assert peer_claim is not None
         assert peer_claim.lease_owner == "peer-worker-A"
 
-        # Worker B's drain now logs the peer diagnostic but does NOT raise.
-        worker_b_processor = _make_processor(
+        # The token-bound leader logs the peer diagnostic but does NOT raise.
+        leader_processor = _make_processor(
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: _make_mock_transform(node_id=str(transform_node), on_success="default")},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="peer-worker-B",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
 
         # No raise: peer lease is diagnostic, not a refusal.
-        results = worker_b_processor.drain_scheduled_work(ctx)
+        results = leader_processor.drain_scheduled_work(ctx)
         # claim_ready found no READY rows (row is LEASED under peer-worker-A).
         assert results == []
 
-        # Peer's row is still owned by peer-worker-A — B's drain was a no-op.
+        # Peer's row is still owned by peer-worker-A — the leader drain was a no-op.
         from sqlalchemy import select
 
         from elspeth.core.landscape.schema import token_work_items_table
@@ -5895,13 +5896,13 @@ class TestDurableSchedulerResumeDrain:
             make_row({"value": 1, "resumed": True}),
             success_reason={"action": "resume_drain"},
         )
-        worker_b_processor = _make_processor(
+        leader_processor = _make_processor(
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: _make_mock_transform(node_id=str(transform_node), on_success="default")},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="recovery-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
             clock=clock,
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
@@ -5909,10 +5910,10 @@ class TestDurableSchedulerResumeDrain:
         def executor_side_effect(*, transform, token, ctx, attempt=0):
             return (success_result, token, None)
 
-        with patch.object(worker_b_processor._transform_executor, "execute_transform", side_effect=executor_side_effect):
-            results = worker_b_processor.drain_scheduled_work(ctx)
+        with patch.object(leader_processor._transform_executor, "execute_transform", side_effect=executor_side_effect):
+            results = leader_processor.drain_scheduled_work(ctx)
 
-        # Expired peer lease was recovered; row drained under recovery-worker.
+        # Expired peer lease was recovered; row drained under the token-bound leader.
         assert len(results) == 1
         assert results[0].token.token_id == "token-stale-peer"
 
@@ -5956,10 +5957,9 @@ class TestDurableSchedulerResumeDrain:
         )
 
         # The caller's lease_owner pre-claims the row before the drain entry.
-        _register_test_worker(factory, "own-worker")
         factory.scheduler.claim_ready(
             run_id="test-run",
-            lease_owner="own-worker",
+            lease_owner=_TEST_LEADER_WORKER_ID,
             lease_seconds=600,
             now=datetime.now(UTC),
         )
@@ -5970,7 +5970,7 @@ class TestDurableSchedulerResumeDrain:
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: _make_mock_transform(node_id=str(transform_node), on_success="default")},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="own-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
 

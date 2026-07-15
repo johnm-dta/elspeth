@@ -62,13 +62,15 @@ def legacy_unfenced_recover_expired_leases_write(
 ) -> AbstractContextManager[Connection]:
     """Return the named legacy transaction for direct-harness lease recovery.
 
-    ``recover_expired_leases`` is intentionally still callable without a
-    coordination seat by direct repository/integration harnesses that build a
-    crashed image under unregistered worker identities.  Keeping this helper
-    token-free and recovery-specific makes the unfenced choice visible at the
-    sole authorized source call site without trusting a caller-supplied verb.
+    ``recover_expired_leases_legacy_unfenced`` is intentionally callable
+    without a coordination seat by direct repository/integration harnesses
+    that build a crashed image under unregistered worker identities. Keeping
+    this helper token-free and recovery-specific makes the unfenced choice
+    visible at the sole authorized source call site without trusting a
+    caller-supplied verb.
 
-    The later decision between a strict public leader-recovery API and a
-    separately named public unfenced API is outside this helper split.
+    Only ``SchedulerLeaseRepository.recover_expired_leases_legacy_unfenced``
+    may call this low-level helper; the strict public recovery API never
+    selects transactions from optional authority.
     """
     return begin_write(engine)

@@ -407,9 +407,7 @@ class TestEvictionBeforeReapOrdering:
 
         # Step 2: reap. The owner is now status='evicted' → owner_registry_dead (arm b).
         reaped = scheduler.recover_expired_leases(
-            run_id=RUN_ID,
             now=sweep_at,
-            caller_owner=leader_id,
             coordination_token=token,
             grace_seconds=GRACE,
             stall_budget_seconds=1.0,  # very short budget to force reap regardless

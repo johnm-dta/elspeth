@@ -391,21 +391,31 @@ class TokenSchedulerRepository:
     def recover_expired_leases(
         self,
         *,
-        run_id: str,
         now: datetime,
-        caller_owner: str,
-        coordination_token: CoordinationToken | None = None,
+        coordination_token: CoordinationToken,
         grace_seconds: float = DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
         stall_budget_seconds: float = DEFAULT_ITEM_STALL_BUDGET_SECONDS,
     ) -> int:
         """Return expired LEASED work to READY (see :meth:`SchedulerLeaseRepository.recover_expired_leases`)."""
         return self.leases.recover_expired_leases(
-            run_id=run_id,
             now=now,
-            caller_owner=caller_owner,
             coordination_token=coordination_token,
             grace_seconds=grace_seconds,
             stall_budget_seconds=stall_budget_seconds,
+        )
+
+    def recover_expired_leases_legacy_unfenced(
+        self,
+        *,
+        run_id: str,
+        now: datetime,
+        caller_owner: str,
+    ) -> int:
+        """Recover expired leases for pre-coordination direct harnesses only."""
+        return self.leases.recover_expired_leases_legacy_unfenced(
+            run_id=run_id,
+            now=now,
+            caller_owner=caller_owner,
         )
 
     def heartbeat_lease(

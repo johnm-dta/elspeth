@@ -625,7 +625,7 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
             and item.lease_expires_at < now
             and item.lease_owner != caller_owner
         ]
-        recovered = self.repo.recover_expired_leases(run_id=RUN_ID, now=now, caller_owner=caller_owner)
+        recovered = self.repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=now, caller_owner=caller_owner)
         assert recovered == len(expected)
         if not expected:
             return
@@ -815,7 +815,7 @@ def test_expired_pending_sink_lease_recovers_in_place_preserving_attempt_and_wor
     assert reclaimed.attempt == 1
 
     expired_at = now + timedelta(seconds=LEASE_SECONDS + 3)
-    assert repo.recover_expired_leases(run_id=RUN_ID, now=expired_at, caller_owner="worker-b") == 1
+    assert repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=expired_at, caller_owner="worker-b") == 1
 
     with engine.connect() as conn:
         row = (

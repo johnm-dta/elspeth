@@ -164,7 +164,7 @@ durable row (`SCREAM` invariant in the drain loop).
 | `branch_name`, `fork_group_id`, `join_group_id`, `expand_group_id` | `String(128)` | Token lineage carried into the durable row. |
 | `coalesce_node_id`, `coalesce_name` | `String(NODE_ID_COLUMN_LENGTH)` / `String(128)` | Resume-target for coalesce cursors. |
 | `attempt` | `Integer` NOT NULL | Incremented when `recover_expired_leases` reaps a non-`PENDING_SINK` row; preserved for `PENDING_SINK`. |
-| `lease_owner` | `String(128)` | `row-processor:<run_id>:<uuid>` of the worker holding the row. Required non-empty when `status='LEASED'` (see check constraint). |
+| `lease_owner` | `String(128)` | Registered `worker:<run_id>:<uuid>` identity holding the row in production; direct legacy repository harnesses may use an explicit opaque identity. Required non-empty when `status='LEASED'` (see check constraint). |
 | `lease_expires_at` | `DateTime(tz)` | Used by `recover_expired_leases`; CAS predicate. |
 | `available_at` | `DateTime(tz)` NOT NULL | Earliest claim time (delayed-retry support). |
 | `created_at`, `updated_at` | `DateTime(tz)` NOT NULL | Audit timestamps. |
@@ -188,7 +188,8 @@ Indexes:
   legacy lease-recovery index.
 - `ix_token_work_items_recovery` on `(run_id, status, lease_owner,
   lease_expires_at)` — covering index for the multi-worker drain sweep
-  (`recover_expired_leases` filters `lease_owner != caller_owner`).
+  (strict `recover_expired_leases` scopes the query to the token's
+  `run_id` and filters `lease_owner != coordination_token.worker_id`).
 - `uq_token_work_items_terminal_identity` partial unique on
   `(run_id, token_id, attempt)` where `node_id IS NULL` — exactly one
   terminal-handoff row per attempt.

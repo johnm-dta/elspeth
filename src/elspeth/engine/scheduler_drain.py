@@ -82,13 +82,14 @@ class ProcessorMode(enum.Enum):
     run_coordination is None and scheduler_lease_owner_registered``) that
     reverse-derived "is this a follower" from constructor sentinels — an
     invisible-default hazard: any future change to the None-sentinel meaning
-    would have silently flipped a follower into the unfenced legacy reap arm.
+    would have silently flipped a follower into leader maintenance.
 
-    LEADER (the default) covers every non-follower construction: the fenced
-    leader, the N=1 arm, and direct repository-level test construction.
-    Within LEADER mode, behavior still keys on the GENUINE presence/absence
-    of ``coordination_token`` / ``run_coordination`` (the §C.2 evict sweep
-    and the fenced-vs-legacy reap arm), exactly as before.
+    LEADER (the default) is the production maintenance role. Lease recovery
+    always requires ``coordination_token`` and uses the strict fenced API;
+    ``run_coordination`` presence only controls whether the §C.2 dead-member
+    eviction sweep precedes recovery. Pre-coordination repository and crash-
+    image harnesses bypass ``ProcessorMode`` and call the explicitly named
+    ``recover_expired_leases_legacy_unfenced`` adapter directly.
 
     FOLLOWER is drain-only (ADR-030 §C.3): ``claim_ready`` only, never
     pending-sink recovery, never the §C.2 housekeeping sweep, never
@@ -340,20 +341,17 @@ class SchedulerDrainCoordinator:
         ADR-030 §C.2/§C.3 (slice 5): followers run NO maintenance at all —
         the explicit ``ProcessorMode.FOLLOWER`` stored at construction
         (elspeth-577179bba1) returns 0 up front.  Followers must not run
-        ``recover_expired_leases``: their ``coordination_token`` is None, so
-        the call would take the UNFENCED/LEGACY arm — that arm
-        unconditionally reaps ALL expired non-caller leases, defeating the
-        liveness-aware gate that protects the leader's and peers' in-flight
-        item leases from spurious rotation (§A.5/§C.1).  Followers are
-        drain-only workers; lease recovery and eviction are the leader's
-        responsibility (§C.2 path 1, §C.3: "followers drain what is
+        ``recover_expired_leases``: the strict API now refuses their missing
+        token before any transaction, and the explicit mode guard preserves
+        the stronger policy that followers do not attempt maintenance at all.
+        Followers are drain-only workers; lease recovery and eviction are the
+        leader's responsibility (§C.2 path 1, §C.3: "followers drain what is
         claimable, then idle/exit").
 
-        Within LEADER mode, behavior keys on GENUINE presence: the evict
-        sweep is gated on ``_coordination_token`` + ``_run_coordination``
-        being set, and a None-token construction (N=1 test arm, direct repo
-        construction) still reaps via the legacy unfenced arm — exactly as
-        before the mode flag replaced the old triple-None follower inference.
+        Within LEADER mode the token is required before either maintenance
+        write. Pre-coordination repository/crash-image harnesses use the
+        explicitly named legacy recovery adapter directly; production
+        maintenance never selects an unfenced write from an optional token.
         """
         if self._mode is ProcessorMode.FOLLOWER:
             # Identical to the old post-evict-sweep skip: a follower's
@@ -363,22 +361,24 @@ class SchedulerDrainCoordinator:
             self._scheduler_drains_since_maintenance = 0
             return 0
 
+        coordination_token = self._processor._require_coordination_token()
+
         # §C.2 path 1: leader evicts dead non-leader members before reaping.
         # Individual, not bulk — one evict_worker call per dead member (§B.4,
         # §C.2 :233). evict_worker is idempotent (benign skip on CAS miss).
-        if self._coordination_token is not None and self._run_coordination is not None:
+        if self._run_coordination is not None:
             from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS
 
             grace = DEFAULT_RUN_LIVENESS_WINDOW_SECONDS
             dead_members = self._run_coordination.dead_non_leader_workers(
                 run_id=self._run_id,
-                leader_worker_id=self._coordination_token.worker_id,
+                leader_worker_id=coordination_token.worker_id,
                 now=now,
                 grace_seconds=grace,
             )
             for target_worker_id in dead_members:
                 self._run_coordination.evict_worker(
-                    token=self._coordination_token,
+                    token=coordination_token,
                     target_worker_id=target_worker_id,
                     now=now,
                     grace_seconds=grace,
@@ -386,10 +386,8 @@ class SchedulerDrainCoordinator:
                 )
 
         recovered = self._scheduler.recover_expired_leases(
-            run_id=self._run_id,
             now=now,
-            caller_owner=self._scheduler_lease_owner,
-            coordination_token=self._coordination_token,
+            coordination_token=coordination_token,
         )
         self._scheduler_drains_since_maintenance = 0
         return recovered
@@ -751,9 +749,7 @@ class SchedulerDrainCoordinator:
 
             now = self._clock.now_utc()
             self._scheduler.recover_expired_leases(
-                run_id=self._run_id,
                 now=now,
-                caller_owner=self._scheduler_lease_owner,
                 coordination_token=coordination_token,
             )
             repaired = self._scheduler.terminalize_pending_sinks_with_terminal_outcomes(

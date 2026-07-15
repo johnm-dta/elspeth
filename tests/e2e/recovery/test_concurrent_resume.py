@@ -235,7 +235,7 @@ class TestExpiredLeaseReclaimUnderContention:
         # re-claims at attempt=2 with a long lease... and dies holding it.
         clock.advance(120)  # token-4's 60s lease is expired; token-3's 300s is not
         assert (
-            crashed.repo.recover_expired_leases(
+            crashed.repo.recover_expired_leases_legacy_unfenced(
                 run_id=crashed.run_id,
                 now=clock.now_utc(),
                 caller_owner="row-processor:prior-attempt-sweeper",
@@ -444,9 +444,7 @@ class TestTwoResumesSameRunId:
         # ---- the winner completes normally under its token ----
         assert (
             crashed.repo.recover_expired_leases(
-                run_id=crashed.run_id,
                 now=clock.now_utc(),
-                caller_owner=winner_id,
                 coordination_token=winner_token,
             )
             == 1
@@ -1175,9 +1173,7 @@ class TestTwoResumesSameRunId:
         # finalizes.  The D quiescence predicate (no READY/LEASED/PENDING_SINK
         # rows except the crashed one recovered first) must be satisfied.
         recovered = crashed.repo.recover_expired_leases(
-            run_id=crashed.run_id,
             now=clock.now_utc(),
-            caller_owner=leader_id,
             coordination_token=leader_token,
         )
         assert recovered == 1, "exactly one expired lease recovered (crashed-worker-1)"

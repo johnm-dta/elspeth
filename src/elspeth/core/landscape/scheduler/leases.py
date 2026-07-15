@@ -8,6 +8,8 @@ peer-lease probe. Extracted from ``TokenSchedulerRepository``
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import datetime, timedelta
 
 from sqlalchemy import ColumnElement, and_, literal, or_, select, true, update
@@ -23,7 +25,11 @@ from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkItem, Token
 from elspeth.core.landscape.database import WRITE_INTENT_OPTION, Tier1Engine, begin_write
 from elspeth.core.landscape.run_coordination_repository import record_coordination_event
 from elspeth.core.landscape.scheduler.events import SchedulerEventStore
-from elspeth.core.landscape.scheduler.fencing import fenced_write, legacy_unfenced_recover_expired_leases_write
+from elspeth.core.landscape.scheduler.fencing import (
+    fenced_write,
+    legacy_unfenced_recover_expired_leases_write,
+    require_coordination_token,
+)
 from elspeth.core.landscape.scheduler.work_items import item_from_mapping, work_item_id
 from elspeth.core.landscape.schema import (
     active_worker_fence_clause,
@@ -370,14 +376,12 @@ class SchedulerLeaseRepository:
     def recover_expired_leases(
         self,
         *,
-        run_id: str,
         now: datetime,
-        caller_owner: str,
-        coordination_token: CoordinationToken | None = None,
+        coordination_token: CoordinationToken,
         grace_seconds: float = DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
         stall_budget_seconds: float = DEFAULT_ITEM_STALL_BUDGET_SECONDS,
     ) -> int:
-        """Return expired LEASED work to READY for retry by another worker.
+        """Return expired LEASED work to READY under current leader authority.
 
         ``coordination_token`` (ADR-030 §C.4 row 8): the repair sweep is a
         LEADER verb — the verify-and-extend epoch fence runs as the first
@@ -404,11 +408,6 @@ class SchedulerLeaseRepository:
            ``worker_stalled`` coordination event in the SAME transaction,
            naming the owner and the reaped item (§A.5 :145).
 
-        **UNFENCED/TEST ARM CONTRACT (re-pin):** when ``coordination_token``
-        is None the lease_owner has no registry row → ``owner_registry_dead``
-        is TRUE for every row → reap behaves exactly as the pre-slice-4 form.
-        Preserves all slice 1-3 tests that call without a token.
-
         **N=1 IMPROVEMENT (re-pin):** a single live leader beating its own
         seat+row keeps ``owner_registry_dead`` FALSE for its own in-flight
         items, so a long LLM call's expired item lease is NO LONGER reapable
@@ -420,9 +419,9 @@ class SchedulerLeaseRepository:
         created before the crashed worker lost its lease is not replayed under
         the same ``(token_id, node_id, attempt)`` audit identity.
 
-        ``caller_owner`` is the lease_owner of the caller making the recovery
-        sweep (every RowProcessor instance owns a unique
-        ``row-processor:<run_id>:<uuid>`` identity). Leases owned by this caller
+        Run scope and caller identity are derived from ``coordination_token``;
+        strict callers cannot redirect a valid leader seat at another run or
+        attribute the sweep to a different worker. Leases owned by the leader
         are skipped: a worker must never reap its own still-running lease.
         Any token processing step that exceeds the lease window (LLM/HTTP
         pipelines exceed the default with regularity) would otherwise have its
@@ -435,6 +434,99 @@ class SchedulerLeaseRepository:
         future a peer worker), not the caller's own work. See
         filigree elspeth-941f1508f5.
         """
+        coordination_token = require_coordination_token(coordination_token, verb="recover_expired_leases")
+        run_id = coordination_token.run_id
+        caller_owner = coordination_token.worker_id
+        grace_threshold = now - timedelta(seconds=grace_seconds)
+        owner_registry_dead: ColumnElement[bool] = ~(
+            select(run_workers_table.c.worker_id)
+            .where(
+                run_workers_table.c.worker_id == token_work_items_table.c.lease_owner,
+                run_workers_table.c.status == "active",
+                run_workers_table.c.heartbeat_expires_at >= grace_threshold,
+            )
+            .exists()
+        )
+        stall_threshold = now - timedelta(seconds=stall_budget_seconds)
+        lease_stalled: ColumnElement[bool] = token_work_items_table.c.lease_expires_at < stall_threshold
+        reap_eligible: ColumnElement[bool] = or_(owner_registry_dead, lease_stalled)
+
+        def record_worker_stalled_event(conn: Connection, row: RowMapping) -> None:
+            owner_is_dead = bool(row["owner_is_dead"])
+            if owner_is_dead or row["lease_owner"] is None:
+                return
+            record_coordination_event(
+                conn,
+                run_id=run_id,
+                event_type="worker_stalled",
+                worker_id=row["lease_owner"],
+                leader_epoch=coordination_token.leader_epoch,
+                recorded_at=now,
+                context={
+                    "reaped_work_item_id": row["work_item_id"],
+                    "previous_work_item_id": row["work_item_id"],
+                    "reason": "item_stall_budget",
+                },
+            )
+
+        return self._recover_expired_leases(
+            run_id=run_id,
+            now=now,
+            caller_owner=caller_owner,
+            owner_registry_dead=owner_registry_dead,
+            reap_eligible=reap_eligible,
+            write_transaction=fenced_write(
+                self._engine,
+                coordination_token=coordination_token,
+                now=now,
+                verb="recover_expired_leases",
+            ),
+            record_worker_stalled_event=record_worker_stalled_event,
+        )
+
+    def recover_expired_leases_legacy_unfenced(
+        self,
+        *,
+        run_id: str,
+        now: datetime,
+        caller_owner: str,
+    ) -> int:
+        """Recover direct-harness leases without coordination authority.
+
+        This named compatibility adapter preserves pre-coordination crash-image
+        and repository harnesses.  It deliberately skips worker-registry
+        liveness because those harnesses either have no registry rows or use a
+        clock domain that does not match their setup heartbeats.
+
+        Liveness thresholds are absent by construction: legacy recovery does
+        not consult the worker registry.
+        """
+
+        def ignore_worker_stalled_event(conn: Connection, row: RowMapping) -> None:
+            del conn, row
+
+        return self._recover_expired_leases(
+            run_id=run_id,
+            now=now,
+            caller_owner=caller_owner,
+            owner_registry_dead=literal(True),
+            reap_eligible=true(),
+            write_transaction=legacy_unfenced_recover_expired_leases_write(self._engine),
+            record_worker_stalled_event=ignore_worker_stalled_event,
+        )
+
+    def _recover_expired_leases(
+        self,
+        *,
+        run_id: str,
+        now: datetime,
+        caller_owner: str,
+        owner_registry_dead: ColumnElement[bool],
+        reap_eligible: ColumnElement[bool],
+        write_transaction: AbstractContextManager[Connection],
+        record_worker_stalled_event: Callable[[Connection, RowMapping], None],
+    ) -> int:
+        """Apply the shared lease rotation algorithm under explicit authority."""
         # Predicate symmetric across the SELECT and UPDATE to close two
         # multi-worker race classes (filigree elspeth-28aaa36a62, G1 P2):
         #
@@ -469,64 +561,6 @@ class SchedulerLeaseRepository:
             token_work_items_table.c.lease_owner != caller_owner,
         )
 
-        # §A.5/§C.1: liveness-aware gate — ONLY applied when
-        # ``coordination_token`` is not None (the fenced/leader path).
-        #
-        # UNFENCED/TEST ARM (coordination_token is None): the caller operates
-        # outside the coordination substrate.  Production resume drains now
-        # require a token before reaching lease recovery; this legacy arm
-        # remains load-bearing for direct harnesses, including:
-        #   (a) integration tests that inject a MockClock with timestamps in a
-        #       different epoch than the real-clock ``heartbeat_expires_at`` rows
-        #       written by ``begin_run``/``worker_heartbeat``.
-        #   (b) direct repository-level construction in tests with no
-        #       run_workers rows at all.
-        # In all cases, the time-domain mismatch between the ``now`` argument
-        # and the stored ``heartbeat_expires_at`` values would cause the liveness
-        # predicate to fire spuriously.  We therefore SKIP the predicate
-        # entirely on the unfenced path and reap all expired non-caller leases
-        # unconditionally — the pre-slice-4 ("legacy") behavior.
-        #
-        # FENCED PATH (coordination_token is not None): apply the full
-        # liveness-aware gate.  Arms of owner_registry_dead:
-        #   (a) absent row → no EXISTS match → dead;
-        #   (b) status in ('evicted','departed') → status!='active' → dead;
-        #   (c) status='active' + stale heartbeat → heartbeat<now-grace → dead;
-        #   (d) status='active' + fresh heartbeat → MATCH → LIVE → excluded.
-        if coordination_token is not None:
-            _grace_threshold = now - timedelta(seconds=grace_seconds)
-            owner_registry_dead: ColumnElement[bool] = ~(
-                select(run_workers_table.c.worker_id)
-                .where(
-                    run_workers_table.c.worker_id == token_work_items_table.c.lease_owner,
-                    run_workers_table.c.status == "active",
-                    run_workers_table.c.heartbeat_expires_at >= _grace_threshold,
-                )
-                .exists()
-            )
-            # §A.5: stall arm — owner IS registry-live but drain loop is wedged.
-            # The item has been expired far past the stall budget, so we reap it
-            # and emit worker_stalled in the same transaction.
-            _stall_threshold = now - timedelta(seconds=stall_budget_seconds)
-            lease_stalled: ColumnElement[bool] = token_work_items_table.c.lease_expires_at < _stall_threshold
-            reap_eligible: ColumnElement[bool] = or_(owner_registry_dead, lease_stalled)
-        else:
-            # Legacy/unfenced arm: unconditionally reap all expired non-caller
-            # leases; liveness predicate skipped to avoid epoch mismatch.
-            owner_registry_dead = literal(True)
-            lease_stalled = literal(False)
-            reap_eligible = true()
-
-        write_transaction = (
-            legacy_unfenced_recover_expired_leases_write(self._engine)
-            if coordination_token is None
-            else fenced_write(
-                self._engine,
-                coordination_token=coordination_token,
-                now=now,
-                verb="recover_expired_leases",
-            )
-        )
         with write_transaction as conn:
             expired_rows = conn.execute(
                 select(
@@ -612,21 +646,7 @@ class SchedulerLeaseRepository:
                     # that path; emitting worker_stalled for it is redundant
                     # and violates the invariant (every non-evicted rotation
                     # is explained by stalled, not double-evented).
-                    owner_is_dead = bool(row["owner_is_dead"])
-                    if not owner_is_dead and row["lease_owner"] is not None and coordination_token is not None:
-                        record_coordination_event(
-                            conn,
-                            run_id=run_id,
-                            event_type="worker_stalled",
-                            worker_id=row["lease_owner"],
-                            leader_epoch=coordination_token.leader_epoch,
-                            recorded_at=now,
-                            context={
-                                "reaped_work_item_id": row["work_item_id"],
-                                "previous_work_item_id": row["work_item_id"],
-                                "reason": "item_stall_budget",
-                            },
-                        )
+                    record_worker_stalled_event(conn, row)
                 recovered += result.rowcount
         return recovered
 

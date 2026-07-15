@@ -249,10 +249,10 @@ def _lower_busy_timeout(engine: Tier1Engine, ms: int = 100) -> None:
         raw.close()
 
 
-def test_explicit_none_preserves_pre_coordination_direct_harness_recovery(
+def test_named_legacy_adapter_preserves_pre_coordination_direct_harness_recovery(
     engines: tuple[Tier1Engine, Tier1Engine],
 ) -> None:
-    """The load-bearing None arm remains available to direct harnesses that
+    """The named legacy adapter remains available to direct harnesses that
     have no coordination seat and must recover a crashed owner's lease.
     """
     engine, _ = engines
@@ -263,11 +263,10 @@ def test_explicit_none_preserves_pre_coordination_direct_harness_recovery(
     with engine.connect() as conn:
         assert conn.execute(select(run_coordination_table.c.run_id)).first() is None
 
-    recovered = repo.recover_expired_leases(
+    recovered = repo.recover_expired_leases_legacy_unfenced(
         run_id=RUN_ID,
         now=SWEEP_AT,
         caller_owner="direct-harness-sweeper",
-        coordination_token=None,
     )
 
     assert recovered == 1
@@ -397,7 +396,7 @@ def test_claim_ready_probing_mid_sweep_is_lock_excluded_until_recovery_commits(
             mid_sweep_outcomes.append(exc)
 
     try:
-        recovered = sweep_repo.recover_expired_leases(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper")
+        recovered = sweep_repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper")
     finally:
         event.remove(sweep_engine, "after_cursor_execute", claimant_probes_mid_sweep)
 
@@ -461,11 +460,11 @@ def test_peer_recovery_in_select_update_window_is_lock_excluded_and_loses_cleanl
         # Peer sweep attempts a competing recovery on a separate engine while
         # the caller's sweep is between its SELECT and its per-row UPDATE.
         with pytest.raises(OperationalError, match="database is locked") as excinfo:
-            peer_repo.recover_expired_leases(run_id=RUN_ID, now=SWEEP_AT, caller_owner="peer-sweeper")
+            peer_repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=SWEEP_AT, caller_owner="peer-sweeper")
         peer_outcomes.append(excinfo.value)
 
     try:
-        winner_recovered = sweep_repo.recover_expired_leases(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper")
+        winner_recovered = sweep_repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper")
     finally:
         event.remove(sweep_engine, "before_cursor_execute", peer_recovers_mid_sweep)
 
@@ -474,7 +473,7 @@ def test_peer_recovery_in_select_update_window_is_lock_excluded_and_loses_cleanl
 
     # Serialized loser path after the commit: nothing left to recover (clean
     # 0, no event), and the rotated attempt is claimable by the peer.
-    assert peer_repo.recover_expired_leases(run_id=RUN_ID, now=SWEEP_AT, caller_owner="peer-sweeper") == 0
+    assert peer_repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=SWEEP_AT, caller_owner="peer-sweeper") == 0
     peer_claim = peer_repo.claim_ready(run_id=RUN_ID, lease_owner="peer-claimant", lease_seconds=300, now=SWEEP_AT)
     assert peer_claim is not None and peer_claim.attempt == 2
 
@@ -573,7 +572,7 @@ def test_crash_mid_sweep_rolls_back_atomically_and_repeat_sweep_completes(
 
     try:
         with pytest.raises(RuntimeError, match="simulated crash mid-recovery-sweep"):
-            repo.recover_expired_leases(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper")
+            repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper")
     finally:
         event.remove(engine, "before_cursor_execute", crash_mid_sweep)
     assert update_count[0] == crash_before_update_number, "Crash fired at the intended per-row UPDATE"
@@ -613,7 +612,7 @@ def test_crash_mid_sweep_rolls_back_atomically_and_repeat_sweep_completes(
     )
 
     # A repeated sweep completes recovery for every item.
-    assert repo.recover_expired_leases(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper") == 3
+    assert repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper") == 3
     final_states = _work_item_states(engine)
     for token_id in token_ids:
         assert final_states[token_id]["status"] == TokenWorkStatus.READY.value

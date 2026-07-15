@@ -144,10 +144,11 @@ Every state transition that consumes a lease takes an
 `expected_lease_owner: str` keyword argument and rejects the
 transition if the row's `lease_owner` does not match. `mark_terminal`,
 `mark_pending_sink`, `mark_blocked`, and `mark_failed`
-all enforce this. `recover_expired_leases` filters by `lease_owner !=
-caller_owner` so a worker can never reap its own still-running lease.
-The CAS pattern is what makes "two workers, same row" impossible to
-silently corrupt — the loser of a race raises
+all enforce this. Strict `recover_expired_leases` derives caller identity
+from the leader token and filters by
+`lease_owner != coordination_token.worker_id`, so a worker can never reap
+its own still-running lease. The CAS pattern is what makes "two workers,
+same row" impossible to silently corrupt — the loser of a race raises
 `AuditIntegrityError`, not a stale write.
 
 ## Decision
@@ -191,9 +192,13 @@ it.
    underlying SQL UPDATE includes the matching predicate. The CAS
    loser raises `AuditIntegrityError` with a message naming the
    `work_item_id`, the expected owner, and the actual row count
-   matched. `recover_expired_leases(run_id, now, caller_owner)`
-   excludes `lease_owner = caller_owner` to prevent a worker from
-   reaping its own still-running lease — the G1 fix, recorded below.
+   matched. Strict `recover_expired_leases(now, coordination_token)`
+   derives both run scope and caller identity from the leader token and
+   excludes `lease_owner = coordination_token.worker_id` to prevent a
+   worker from reaping its own still-running lease. Direct repository
+   harnesses that deliberately build tokenless crash images use the
+   separately named `recover_expired_leases_legacy_unfenced` adapter —
+   the G1 fix and subsequent fencing split recorded below.
 
 5. **Attempt rotation on lease expiry.** When
    `recover_expired_leases` reaps an expired lease that was *not* in
@@ -245,7 +250,7 @@ it.
     separate decision whose preconditions are enumerated below.**
     The load-bearing invariants (CAS on every state-changing
     transition, deterministic `work_item_id`, deterministic claim
-    ordering, `caller_owner`-aware lease recovery) are written
+    ordering, coordination-token-scoped lease recovery) are written
     for the multi-worker case; N=1 is a degenerate execution of
     the same contract. The scheduler column shape is final.
 
@@ -371,12 +376,14 @@ it.
   terminalization transitions are immutable, exportable
   facts, including from/to `lease_expires_at` evidence for
   lease recovery and heartbeat loss.
-- **`recover_expired_leases` requires a unique `caller_owner`
-  per process.** Each `RowProcessor` generates a
-  `row-processor:<run_id>:<uuid>` identity (docstring at
-  `scheduler_repository.py:921-935`); operators cannot reuse
-  owner strings across processes. G27.x (elspeth-34d83daedc)
-  makes the contract type-mechanical.
+- **Strict lease recovery requires a valid leader coordination token.**
+  The token's `run_id` and `worker_id` are the recovery scope and caller
+  identity; callers cannot redirect either value. Production leaders also
+  hold scheduler leases under that same registered worker identity, and
+  `RowProcessor` rejects a distinct explicit lease owner. Only direct
+  repository/integration harnesses may opt into the separately named
+  `recover_expired_leases_legacy_unfenced` adapter with explicit run and
+  caller values.
 - **PRAGMA discipline is load-bearing — more so under
   multi-worker.** The scheduler shares `db.engine` with the
   audit recorder; the WAL, busy_timeout, and foreign_keys
@@ -429,7 +436,9 @@ this list.
 
 1. **Lease ownership semantics (G1 / elspeth-941f1508f5,
    commit `3025168b2`). Done.** `recover_expired_leases`
-   filters `lease_owner != caller_owner`. At N=1 this
+   originally added an explicit `caller_owner` and filtered
+   `lease_owner != caller_owner`; the strict API now derives that identity
+   from its leader token. At N=1 this
    prevents a worker stealing its own in-flight lease back
    on the next drain iteration when an LLM call exceeds
    the lease window.
@@ -476,11 +485,12 @@ this list.
    (schema epochs 16–17) records every transition — enqueue,
    claim, recovery, lease-loss, terminalization — with from/to
    status, attempt, lease owner, and `lease_expires_at`
-   evidence. The landed schema records worker identity as the
-   opaque `lease_owner` / `caller_owner` strings
-   (`row-processor:<run_id>:<uuid>`); ADR-030 (Precondition
-   #9) settles the N>1 identity as `worker:<run_id>:<uuid>`
-   owner strings — extending, not changing, those semantics.
+   evidence. The schema records worker identity as opaque
+   `lease_owner` / `caller_owner` strings; ADR-030 (Precondition
+   #9) settles the production identity as the registered
+   `worker:<run_id>:<uuid>` identity carried by the leader token.
+   Direct tokenless repository harnesses remain explicit through the
+   separately named legacy adapter.
 
 7. **Runbook for lease recovery (G19 /
    elspeth-559bce3459). Authored for N=1; N>1 rewrite
@@ -1074,11 +1084,11 @@ for the move.
 
 The branch's three P0 correctness bugs (G1, G3, G2) demonstrate
 that the scheduler primitive is *correct in design but easy to
-get wrong in disciplinary detail*. The CAS discipline, the
-`caller_owner` lease-recovery rule, the `PENDING_SINK` recovery
-exemption, and the `expected_lease_owner` parameter on every
-transition are non-negotiable invariants — future contributors
-extending the scheduler must preserve them or extend this ADR.
+get wrong in disciplinary detail*. The CAS discipline, token-derived
+strict recovery scope and self-reap exclusion, the `PENDING_SINK`
+recovery exemption, and the `expected_lease_owner` parameter on every
+transition are non-negotiable invariants — future contributors extending
+the scheduler must preserve them or extend this ADR.
 The *RC6 Preconditions* list above is how the branch is brought
 from "scheduler primitive shipped" to "RC6 multi-source +
 multi-worker publish-ready."

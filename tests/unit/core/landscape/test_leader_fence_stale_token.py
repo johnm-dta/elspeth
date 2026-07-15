@@ -70,6 +70,7 @@ from elspeth.core.landscape.schema import (
 from tests.fixtures.landscape import make_landscape_db
 
 RUN_ID = "run-fence-1"
+OTHER_RUN_ID = "run-fence-2"
 WORKER = f"worker:{RUN_ID}:deadbeef"
 NOW = datetime(2026, 6, 12, 12, 0, 0, tzinfo=UTC)
 NODE_ID = "transform-1"
@@ -217,6 +218,88 @@ def _barrier_mutation_snapshot(db: LandscapeDB) -> dict[str, tuple[tuple[object,
         return {table.name: tuple(tuple(row) for row in conn.execute(select(table))) for table in tables}
 
 
+def _lease_recovery_mutation_snapshot(db: LandscapeDB) -> dict[str, tuple[tuple[object, ...], ...]]:
+    """Capture every durable surface strict lease recovery can mutate."""
+    tables = (
+        token_work_items_table,
+        scheduler_events_table,
+        run_coordination_table,
+        run_coordination_events_table,
+    )
+    with db.engine.connect() as conn:
+        return {table.name: tuple(tuple(row) for row in conn.execute(select(table))) for table in tables}
+
+
+def _lease_recovery_run_snapshot(db: LandscapeDB, run_id: str) -> dict[str, tuple[tuple[object, ...], ...]]:
+    """Capture recovery-mutable rows for one run."""
+    tables = (
+        token_work_items_table,
+        scheduler_events_table,
+        run_coordination_table,
+        run_coordination_events_table,
+    )
+    with db.engine.connect() as conn:
+        return {table.name: tuple(tuple(row) for row in conn.execute(select(table).where(table.c.run_id == run_id))) for table in tables}
+
+
+def _seed_other_run_expired_lease(db: LandscapeDB, repo: TokenSchedulerRepository) -> str:
+    token_id = "token-other-run"
+    row_id = "row-other-run"
+    with db.engine.begin() as conn:
+        conn.execute(
+            insert(runs_table).values(
+                run_id=OTHER_RUN_ID,
+                started_at=NOW,
+                config_hash="cfg",
+                settings_json="{}",
+                canonical_version="v1",
+                status=RunStatus.RUNNING.value,
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
+            )
+        )
+        for node_id, node_type in ((SOURCE_NODE_ID, NodeType.SOURCE), (NODE_ID, NodeType.TRANSFORM)):
+            conn.execute(
+                insert(nodes_table).values(
+                    run_id=OTHER_RUN_ID,
+                    node_id=node_id,
+                    plugin_name="test",
+                    node_type=node_type.value,
+                    plugin_version="1.0",
+                    determinism="deterministic",
+                    config_hash="cfg",
+                    config_json="{}",
+                    registered_at=NOW,
+                )
+            )
+        conn.execute(
+            insert(rows_table).values(
+                row_id=row_id,
+                run_id=OTHER_RUN_ID,
+                source_node_id=SOURCE_NODE_ID,
+                row_index=0,
+                source_row_index=0,
+                ingest_sequence=0,
+                source_data_hash="hash-other-run",
+                created_at=NOW,
+            )
+        )
+        conn.execute(insert(tokens_table).values(token_id=token_id, row_id=row_id, run_id=OTHER_RUN_ID, created_at=NOW))
+    repo.enqueue_ready(
+        run_id=OTHER_RUN_ID,
+        token_id=token_id,
+        row_id=row_id,
+        node_id=NODE_ID,
+        step_index=1,
+        ingest_sequence=0,
+        row_payload_json=_payload_json(),
+        available_at=NOW,
+    )
+    claimed = repo.claim_ready(run_id=OTHER_RUN_ID, lease_owner="other-run-crashed-worker", lease_seconds=60, now=NOW)
+    assert claimed is not None and claimed.token_id == token_id
+    return token_id
+
+
 def _enqueue_and_claim(db: LandscapeDB, repo: TokenSchedulerRepository, *, sequence: int, owner: str) -> tuple[str, str, str]:
     """READY → LEASED row for ``owner``; returns (token_id, row_id, work_item_id)."""
     token_id, row_id = _seed_row_and_token(db, sequence=sequence)
@@ -266,6 +349,49 @@ class TestMissingTokenBarrierRefusals:
 
         assert transactions == [], "missing authority must be refused before opening a transaction"
         assert _barrier_mutation_snapshot(db) == before
+
+    def test_recover_expired_leases_runtime_none_refuses_before_transaction(
+        self,
+        db: LandscapeDB,
+        token: CoordinationToken,
+    ) -> None:
+        repo = TokenSchedulerRepository(db.engine)
+        _token_id, _row_id, _work_item_id = _enqueue_and_claim(db, repo, sequence=0, owner="peer-worker")
+        before = _barrier_mutation_snapshot(db)
+        transactions: list[object] = []
+
+        def record_begin(conn: object) -> None:
+            transactions.append(conn)
+
+        event.listen(db.engine, "begin", record_begin)
+        try:
+            with pytest.raises(TypeError, match="coordination_token"):
+                repo.recover_expired_leases(
+                    now=NOW + timedelta(seconds=120),
+                    coordination_token=None,  # type: ignore[arg-type]  # runtime trust-boundary regression
+                )
+        finally:
+            event.remove(db.engine, "begin", record_begin)
+
+        assert transactions == [], "missing authority must be refused before opening a transaction"
+        assert _barrier_mutation_snapshot(db) == before
+
+    def test_named_legacy_recovery_adapter_recovers_direct_harness_lease(
+        self,
+        db: LandscapeDB,
+        token: CoordinationToken,
+    ) -> None:
+        repo = TokenSchedulerRepository(db.engine)
+        token_id, _row_id, _work_item_id = _enqueue_and_claim(db, repo, sequence=0, owner="direct-harness")
+
+        recovered = repo.recover_expired_leases_legacy_unfenced(
+            run_id=RUN_ID,
+            now=NOW + timedelta(seconds=120),
+            caller_owner=WORKER,
+        )
+
+        assert recovered == 1
+        assert _work_item_row(db, token_id)["status"] == TokenWorkStatus.READY.value
 
     def test_terminal_wrapper_runtime_none_refuses_before_transaction(self, db: LandscapeDB, token: CoordinationToken) -> None:
         repo = TokenSchedulerRepository(db.engine)
@@ -327,6 +453,96 @@ class TestMissingTokenBarrierRefusals:
 
         assert transactions == [], "missing authority must be refused before opening a transaction"
         assert _barrier_mutation_snapshot(db) == before
+
+
+class TestStrictRecoveryScopeBinding:
+    """Strict recovery derives run and caller scope from its authority token."""
+
+    def test_supported_call_only_recovers_token_run(self, db: LandscapeDB, token: CoordinationToken) -> None:
+        repo = TokenSchedulerRepository(db.engine)
+        run_token_id, _row_id, _work_item_id = _enqueue_and_claim(db, repo, sequence=0, owner="peer-worker")
+        with db.engine.begin() as conn:
+            conn.execute(
+                update(run_workers_table)
+                .where(run_workers_table.c.run_id == RUN_ID)
+                .where(run_workers_table.c.worker_id == "peer-worker")
+                .values(status="departed", departed_at=NOW)
+            )
+        other_token_id = _seed_other_run_expired_lease(db, repo)
+        other_run_before = _lease_recovery_run_snapshot(db, OTHER_RUN_ID)
+
+        recovered = repo.recover_expired_leases(
+            now=NOW + timedelta(seconds=61),
+            coordination_token=token,
+        )
+
+        assert recovered == 1
+        with db.engine.connect() as conn:
+            status_rows = conn.execute(
+                select(token_work_items_table.c.token_id, token_work_items_table.c.status).where(
+                    token_work_items_table.c.token_id.in_((run_token_id, other_token_id))
+                )
+            ).all()
+            statuses = {row.token_id: row.status for row in status_rows}
+        assert statuses == {
+            run_token_id: TokenWorkStatus.READY.value,
+            other_token_id: TokenWorkStatus.LEASED.value,
+        }
+        assert _lease_recovery_run_snapshot(db, OTHER_RUN_ID) == other_run_before
+
+    def test_cross_run_scope_argument_refuses_before_transaction(self, db: LandscapeDB, token: CoordinationToken) -> None:
+        repo = TokenSchedulerRepository(db.engine)
+        _seed_other_run_expired_lease(db, repo)
+        before = _lease_recovery_mutation_snapshot(db)
+        transactions: list[object] = []
+
+        def record_begin(conn: object) -> None:
+            transactions.append(conn)
+
+        event.listen(db.engine, "begin", record_begin)
+        try:
+            with pytest.raises(TypeError, match="run_id"):
+                repo.recover_expired_leases(
+                    run_id=OTHER_RUN_ID,
+                    now=NOW + timedelta(seconds=61),
+                    caller_owner=WORKER,
+                    coordination_token=token,
+                )
+        finally:
+            event.remove(db.engine, "begin", record_begin)
+
+        assert transactions == [], "caller-supplied run scope must be refused before BEGIN"
+        assert _lease_recovery_mutation_snapshot(db) == before
+
+    def test_caller_owner_argument_refuses_before_transaction(self, db: LandscapeDB, token: CoordinationToken) -> None:
+        repo = TokenSchedulerRepository(db.engine)
+        _token_id, _row_id, _work_item_id = _enqueue_and_claim(db, repo, sequence=0, owner="peer-worker")
+        with db.engine.begin() as conn:
+            conn.execute(
+                update(run_workers_table)
+                .where(run_workers_table.c.run_id == RUN_ID)
+                .where(run_workers_table.c.worker_id == "peer-worker")
+                .values(status="departed", departed_at=NOW)
+            )
+        before = _lease_recovery_mutation_snapshot(db)
+        transactions: list[object] = []
+
+        def record_begin(conn: object) -> None:
+            transactions.append(conn)
+
+        event.listen(db.engine, "begin", record_begin)
+        try:
+            with pytest.raises(TypeError, match="caller_owner"):
+                repo.recover_expired_leases(
+                    now=NOW + timedelta(seconds=61),
+                    caller_owner="different-leader-identity",
+                    coordination_token=token,
+                )
+        finally:
+            event.remove(db.engine, "begin", record_begin)
+
+        assert transactions == [], "caller-supplied recovery identity must be refused before BEGIN"
+        assert _lease_recovery_mutation_snapshot(db) == before
 
 
 class TestStaleTokenFenceRefusals:
@@ -445,9 +661,7 @@ class TestStaleTokenFenceRefusals:
         sweep_time = NOW + timedelta(seconds=120)  # the peer lease (60 s) is expired
         with pytest.raises(RunLeadershipLostError):
             repo.recover_expired_leases(
-                run_id=RUN_ID,
                 now=sweep_time,
-                caller_owner=WORKER,
                 coordination_token=token,
             )
         row = _work_item_row(db, token_id)

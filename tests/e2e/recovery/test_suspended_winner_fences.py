@@ -627,9 +627,7 @@ class TestSuspendedWinnerFences:
 
         with pytest.raises(RunLeadershipLostError):
             crashed.repo.recover_expired_leases(
-                run_id=crashed.run_id,
                 now=clock.now_utc(),
-                caller_owner=WORKER_OLD,
                 coordination_token=token_old,
             )
 
@@ -643,9 +641,7 @@ class TestSuspendedWinnerFences:
         # Positive control: the current leader's sweep recovers it.
         assert (
             crashed.repo.recover_expired_leases(
-                run_id=crashed.run_id,
                 now=clock.now_utc(),
-                caller_owner=USURPER,
                 coordination_token=current,
             )
             == 1

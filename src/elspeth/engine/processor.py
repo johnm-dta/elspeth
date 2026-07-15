@@ -409,16 +409,16 @@ class RowProcessor:
             coordination_token: Leader fencing token (epoch 21, ADR-030).
                 Carried by value for the slice-2 step-4 fenced verbs this
                 processor drives (repair sweep, recover_expired_leases, the
-                fenced ingest verb). When provided, the orchestrator also
+                fenced ingest verb). Strict recovery derives both run scope
+                and caller identity from this token. The orchestrator also
                 passes ``scheduler_lease_owner=token.worker_id`` — the §A.1
-                registered worker identity IS the lease owner; the
-                ``row-processor:{run_id}:{uuid}`` mint below remains the
-                fallback for direct repository-level construction.
+                registered worker identity IS the lease owner. A distinct
+                leader lease owner is rejected at construction.
             run_coordination: Optional RunCoordinationRepository for leader
                 housekeeping (§C.2 path 1, slice 4): enumerating dead non-leader
                 workers and calling ``evict_worker`` for each. None = no
-                housekeeping sweep (N=1 without the coordination substrate, or
-                direct repository-level construction in tests).
+                dead-member enumeration; it never selects unfenced recovery,
+                and leader maintenance still requires ``coordination_token``.
             follower_barrier_node_ids: ADR-030 §B (slice 5, follower aggregation
                 barrier hand-off): frozenset of aggregation node IDs that this
                 follower must NOT execute locally.  When a batch-aware transform
@@ -428,9 +428,10 @@ class RowProcessor:
                 (§B.2: trigger evaluation is leader-only).  Non-follower
                 processors leave this None (no-op path).
             mode: Explicit processor role (elspeth-577179bba1). LEADER (the
-                default) covers the fenced leader, the N=1 arm, and direct
-                repository-level construction — within it, behavior still
-                keys on genuine coordination_token/run_coordination presence.
+                default) is the production role: maintenance requires
+                ``coordination_token`` and always uses strict recovery. Direct
+                tokenless harnesses recover through the repository's named
+                legacy adapter rather than this processor mode.
                 FOLLOWER is validated fail-closed below: it requires
                 ``coordination_token=None``, ``run_coordination=None``, and
                 an explicit ``scheduler_lease_owner``; it gates the public
@@ -543,6 +544,16 @@ class RowProcessor:
         # the lease owner is a run_workers identity. Production paths pass the
         # owner explicitly; direct tests often pass only the coordination token,
         # whose worker_id is the same registered leader identity.
+        if (
+            mode is ProcessorMode.LEADER
+            and coordination_token is not None
+            and scheduler_lease_owner is not None
+            and scheduler_lease_owner != coordination_token.worker_id
+        ):
+            raise OrchestrationInvariantError(
+                "ProcessorMode.LEADER requires scheduler_lease_owner to equal coordination_token.worker_id; "
+                "leader-fenced recovery derives caller identity from the token and must not hold leases under a second identity."
+            )
         resolved_scheduler_lease_owner = scheduler_lease_owner
         if resolved_scheduler_lease_owner is None and coordination_token is not None:
             resolved_scheduler_lease_owner = coordination_token.worker_id
@@ -705,8 +716,10 @@ class RowProcessor:
         """The leader fencing token bound at construction (ADR-030).
 
         Exposed so source-iteration helpers (quarantine ingest) can thread it
-        into their own fenced rows writes. None only for direct
-        repository-level construction (the unfenced legacy arm).
+        into their own fenced row writes. None for follower processors and
+        tokenless direct harness construction. Neither case selects unfenced
+        recovery: followers skip maintenance, while recovery-specific direct
+        harnesses call the named repository legacy adapter outside RowProcessor.
         """
         return self._coordination_token
 
@@ -3240,12 +3253,12 @@ class RowProcessor:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _require_coordination_token(self) -> CoordinationToken:
-        """The leader fencing token, REQUIRED for the slice-3 adoption verbs."""
+        """Return the authority required by every leader-fenced scheduler verb."""
         if self._coordination_token is None:
             raise OrchestrationInvariantError(
-                "Journal-first barrier intake requires the leader coordination token (ADR-030 §E.2): "
-                "adopt_blocked_barrier_item / adopt_coalesce_branch_losses are fenced verbs with no "
-                "unfenced arm. Construct RowProcessor with coordination_token — the orchestrator "
+                "Leader-fenced scheduler operations require the coordination token (ADR-030): "
+                "lease recovery and barrier adoption have no unfenced production arm. "
+                "Construct RowProcessor with coordination_token — the orchestrator "
                 "binds it at begin_run (epoch 1) or at the resume takeover CAS."
             )
         return self._coordination_token

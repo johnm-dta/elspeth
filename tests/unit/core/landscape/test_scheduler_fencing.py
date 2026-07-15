@@ -22,6 +22,7 @@ from elspeth.contracts.errors import RunLeadershipLostError
 from elspeth.core.landscape.database import LandscapeDB, Tier1Engine
 from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
 from elspeth.core.landscape.scheduler import BarrierJournalRepository, fencing
+from elspeth.core.landscape.scheduler.leases import SchedulerLeaseRepository
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.core.landscape.schema import run_coordination_table, run_workers_table, runs_table
 from tests.fixtures.landscape import make_landscape_db
@@ -30,6 +31,7 @@ RUN_ID = "run-scheduler-fencing"
 WORKER_ID = f"worker:{RUN_ID}:leader"
 NOW = datetime(2026, 7, 16, 12, 0, 0, tzinfo=UTC)
 LEGACY_RECOVERY_HELPER = "legacy_unfenced_recover_expired_leases_write"
+LEGACY_RECOVERY_METHOD = "recover_expired_leases_legacy_unfenced"
 
 
 class _StrictFencedWrite(Protocol):
@@ -121,6 +123,37 @@ def _legacy_recovery_references(source: str, *, filename: str = "<mutation>") ->
     visitor = _LegacyReferenceVisitor(filename, aliases=_legacy_recovery_aliases(tree))
     visitor.visit(tree)
     return visitor.references
+
+
+def _method_attribute_references(
+    source: str,
+    *,
+    method_name: str,
+    filename: str = "<mutation>",
+) -> list[tuple[str, str | None]]:
+    tree = ast.parse(source)
+    references: list[tuple[str, str | None]] = []
+    function_stack: list[str] = []
+
+    class Visitor(ast.NodeVisitor):
+        def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+            function_stack.append(node.name)
+            self.generic_visit(node)
+            function_stack.pop()
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self._visit_function(node)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self._visit_function(node)
+
+        def visit_Attribute(self, node: ast.Attribute) -> None:
+            if isinstance(node.ctx, ast.Load) and node.attr == method_name:
+                references.append((filename, function_stack[-1] if function_stack else None))
+            self.generic_visit(node)
+
+    Visitor().visit(tree)
+    return references
 
 
 def _strict_fenced_write() -> _StrictFencedWrite:
@@ -228,6 +261,17 @@ def test_barrier_wrapper_type_contract_requires_authority(
     method_name: str,
 ) -> None:
     method = cast(FunctionType, getattr(repository_type, method_name))
+
+    _assert_required_coordination_parameter(method)
+
+
+@pytest.mark.parametrize("repository_type", [SchedulerLeaseRepository, TokenSchedulerRepository])
+def test_strict_recovery_api_requires_non_optional_authority(repository_type: type[object]) -> None:
+    method = cast(FunctionType, repository_type.recover_expired_leases)
+    parameters = inspect.signature(method).parameters
+
+    assert "run_id" not in parameters
+    assert "caller_owner" not in parameters
     _assert_required_coordination_parameter(method)
 
 
@@ -265,6 +309,14 @@ def test_required_coordination_parameter_rejects_wrong_runtime_binding(monkeypat
 
     with pytest.raises(AssertionError):
         _assert_required_coordination_parameter(cast(FunctionType, probe))
+
+
+@pytest.mark.parametrize("repository_type", [SchedulerLeaseRepository, TokenSchedulerRepository])
+def test_legacy_recovery_api_is_explicitly_named_and_has_no_authority_selector(repository_type: type[object]) -> None:
+    method = getattr(repository_type, LEGACY_RECOVERY_METHOD, None)
+
+    assert method is not None
+    assert "coordination_token" not in inspect.signature(method).parameters
 
 
 def test_strict_helper_accepts_current_token_and_commits() -> None:
@@ -399,7 +451,7 @@ def test_legacy_helper_source_contract_detects_reference_mutations(source: str) 
     assert set(references) == {("<mutation>", "probe")}
 
 
-def test_legacy_helper_reference_is_isolated_to_lease_recovery_across_package() -> None:
+def test_legacy_helper_reference_is_isolated_to_named_legacy_adapter_across_package() -> None:
     package_dir = Path(elspeth.__file__).parent
     references: list[tuple[str, str | None]] = []
 
@@ -411,7 +463,23 @@ def test_legacy_helper_reference_is_isolated_to_lease_recovery_across_package() 
             )
         )
 
-    assert references == [("core/landscape/scheduler/leases.py", "recover_expired_leases")]
+    assert references == [("core/landscape/scheduler/leases.py", LEGACY_RECOVERY_METHOD)]
+
+
+def test_production_sources_do_not_call_legacy_recovery_adapter() -> None:
+    package_dir = Path(elspeth.__file__).parent
+    references: list[tuple[str, str | None]] = []
+
+    for path in package_dir.rglob("*.py"):
+        references.extend(
+            _method_attribute_references(
+                path.read_text(),
+                method_name=LEGACY_RECOVERY_METHOD,
+                filename=str(path.relative_to(package_dir)),
+            )
+        )
+
+    assert references == [("core/landscape/scheduler_repository.py", LEGACY_RECOVERY_METHOD)]
 
 
 def test_scheduler_sources_have_no_optional_authority_transaction_selector() -> None:

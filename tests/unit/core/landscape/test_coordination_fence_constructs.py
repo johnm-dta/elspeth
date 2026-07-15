@@ -697,7 +697,7 @@ class TestHeartbeatLeaseMembershipFence:
         _insert_run(db, RUN_1)
         _insert_worker(db, worker_id="worker-a", run_id=RUN_1, status="active")
         repo, work_item_id = self._leased_item(db, worker_id="worker-a")
-        recovered = repo.recover_expired_leases(
+        recovered = repo.recover_expired_leases_legacy_unfenced(
             run_id=RUN_1,
             now=NOW + timedelta(seconds=61),
             caller_owner="worker-reaper",

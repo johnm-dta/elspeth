@@ -313,7 +313,7 @@ def test_recover_expired_leases_records_attempt_bump_and_previous_work_item() ->
     claimed = repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now)
     assert claimed is not None
 
-    recovered = repo.recover_expired_leases(
+    recovered = repo.recover_expired_leases_legacy_unfenced(
         run_id="run-1",
         now=now + timedelta(seconds=31),
         caller_owner="worker-b",
@@ -414,7 +414,7 @@ def test_heartbeat_lease_lost_records_event_when_expired_lease_was_recovered() -
     )
     claimed = repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now)
     assert claimed is not None
-    recovered = repo.recover_expired_leases(
+    recovered = repo.recover_expired_leases_legacy_unfenced(
         run_id="run-1",
         now=now + timedelta(seconds=31),
         caller_owner="worker-b",

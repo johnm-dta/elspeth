@@ -176,9 +176,7 @@ class TestLivenessAwareReap:
         # The crashed worker's heartbeat is far in the past (stale by many
         # grace windows) — owner_registry_dead arm (c).
         reaped = crashed.repo.recover_expired_leases(
-            run_id=crashed.run_id,
             now=sweep_at,
-            caller_owner="sweep-leader",
             coordination_token=leader_token,
             grace_seconds=_GRACE,
             stall_budget_seconds=_STALL_BUDGET,
@@ -241,9 +239,7 @@ class TestLivenessAwareReap:
         assert status == "evicted"
 
         reaped = crashed.repo.recover_expired_leases(
-            run_id=crashed.run_id,
             now=sweep_at,
-            caller_owner="sweep-leader-2",
             coordination_token=leader_token,
             grace_seconds=_GRACE,
             stall_budget_seconds=_STALL_BUDGET,
@@ -308,9 +304,7 @@ class TestLivenessAwareReap:
 
         # The sweep must NOT reap the live-owner's expired item.
         reaped = crashed.repo.recover_expired_leases(
-            run_id=crashed.run_id,
             now=sweep_at,
-            caller_owner="sweep-leader-3",
             coordination_token=leader_token,
             grace_seconds=_GRACE,
             stall_budget_seconds=_STALL_BUDGET,  # budget not exceeded: only 30s past expiry
@@ -409,9 +403,7 @@ class TestLivenessAwareReap:
         )
 
         reaped = crashed.repo.recover_expired_leases(
-            run_id=crashed.run_id,
             now=sweep_at,
-            caller_owner="sweep-leader-4",
             coordination_token=leader_token,
             grace_seconds=_GRACE,
             stall_budget_seconds=short_stall_budget,

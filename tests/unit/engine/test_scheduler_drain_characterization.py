@@ -26,9 +26,9 @@ unchanged against both the pre-move and post-move trees:
    SCHEDULER_MAINTENANCE_INTERVAL drains; the FOLLOWER-mode build skips lease
    recovery entirely (ADR-030 §C.3 — the explicit ProcessorMode from
    elspeth-577179bba1, replacing the old triple-None sentinel inference),
-   while the legacy/unregistered build — and any LEADER-mode build, including
-   the old registered-owner-without-token sentinel shape — reaps via the
-   unfenced arm.
+   while any LEADER-mode build requires a coordination token before recovery;
+   direct pre-coordination repository harnesses use the separately named
+   legacy adapter instead of production maintenance.
 
 The observables are durable scheduler rows, returned RowResults, and the
 verb order recorded by a delegating scheduler wrapper — not processor
@@ -359,7 +359,7 @@ def test_recovery_drain_recovers_parked_pending_sinks_before_claiming_ready() ->
 
 
 def test_recovery_drain_requires_token_before_lease_recovery() -> None:
-    """The production resume drain must not reach the legacy None recovery arm."""
+    """A tokenless leader drain refuses before calling strict recovery."""
     processor, spy, setup, _clock = _build(lease_owner=None, register_leader=None)
 
     spy.calls.clear()
@@ -603,8 +603,8 @@ def test_non_recovery_drains_run_maintenance_every_interval() -> None:
     processor._drain_scheduler_claims(ctx=ctx, pending_items={}, recover_pending_sinks=False)
     recoveries = spy.calls_for("recover_expired_leases")
     assert len(recoveries) == 1
-    assert recoveries[0]["caller_owner"] == LEADER_OWNER
-    assert recoveries[0]["coordination_token"] is not None
+    assert set(recoveries[0]) == {"now", "coordination_token"}
+    assert recoveries[0]["coordination_token"].worker_id == LEADER_OWNER
 
 
 def test_immediate_enqueue_routes_registered_worker_to_strict_and_unregistered_to_explicit_legacy() -> None:
@@ -672,34 +672,28 @@ def test_immediate_enqueue_routing_ast_and_legacy_production_references_are_pinn
     ]
 
 
-def test_follower_build_skips_lease_recovery_and_legacy_build_reaps_unfenced() -> None:
+def test_follower_build_skips_recovery_and_leader_without_token_refuses() -> None:
     """ADR-030 §C.3: the FOLLOWER-mode build must NOT run
-    recover_expired_leases; the legacy/unregistered build reaps via the
-    unfenced (coordination_token=None) arm.
+    recover_expired_leases; a LEADER-mode build must hold a token.
 
     elspeth-577179bba1 made follower-ness an explicit ProcessorMode instead
     of the old triple-None inference (token=None + run_coordination=None +
     registered lease owner). The production follower build passes
-    mode=FOLLOWER; a LEADER-mode construction with the SAME sentinel shape
-    now reaps via the legacy arm — a deliberate semantics change confined to
-    non-production constructions (production's only registered-owner-without-
-    token build IS the follower builder)."""
+    mode=FOLLOWER and returns before the strict token boundary. Direct
+    pre-coordination tests recover through the named repository adapter, not
+    by downgrading this production maintenance path."""
     follower, follower_spy, _fsetup, _fclock = _build(lease_owner="follower-1", mode=ProcessorMode.FOLLOWER)
     assert follower.reap_expired_peer_leases() == 0
     assert follower_spy.calls_for("recover_expired_leases") == [], "follower builds must never reap peer leases"
 
     legacy, legacy_spy, _lsetup, _lclock = _build(lease_owner=None, register_leader=None)
-    legacy.reap_expired_peer_leases()
-    recoveries = legacy_spy.calls_for("recover_expired_leases")
-    assert len(recoveries) == 1
-    assert recoveries[0]["coordination_token"] is None
+    with pytest.raises(OrchestrationInvariantError, match="coordination token"):
+        legacy.reap_expired_peer_leases()
+    assert legacy_spy.calls_for("recover_expired_leases") == []
 
-    # Inverse pin for the semantics change: the old sentinel shape WITHOUT
-    # the explicit mode is a LEADER-mode build and reaps via the legacy
-    # unfenced arm — follower-ness is no longer inferred from the sentinels.
+    # The old sentinel shape WITHOUT the explicit mode remains a LEADER-mode
+    # build, but it cannot select an unfenced transaction from missing authority.
     sentinel_shape, sentinel_spy, _ssetup, _sclock = _build(lease_owner="follower-1")
-    sentinel_shape.reap_expired_peer_leases()
-    sentinel_recoveries = sentinel_spy.calls_for("recover_expired_leases")
-    assert len(sentinel_recoveries) == 1
-    assert sentinel_recoveries[0]["coordination_token"] is None
-    assert sentinel_recoveries[0]["caller_owner"] == "follower-1"
+    with pytest.raises(OrchestrationInvariantError, match="coordination token"):
+        sentinel_shape.reap_expired_peer_leases()
+    assert sentinel_spy.calls_for("recover_expired_leases") == []

@@ -1418,7 +1418,7 @@ def test_scheduler_claims_ready_work_and_recovers_expired_leases() -> None:
 
     assert repo.claim_ready(run_id="run-1", lease_owner="worker-b", lease_seconds=30, now=now) is None
 
-    recovered = repo.recover_expired_leases(
+    recovered = repo.recover_expired_leases_legacy_unfenced(
         run_id="run-1",
         now=now + timedelta(seconds=31),
         caller_owner="worker-b",
@@ -1510,7 +1510,7 @@ def test_scheduler_recover_expired_leases_skips_caller_owned_leases() -> None:
 
     # Both leases are now expired from the clock's perspective. The caller is
     # still mid-iteration — its lease must NOT be recovered.
-    recovered = repo.recover_expired_leases(
+    recovered = repo.recover_expired_leases_legacy_unfenced(
         run_id="run-1",
         now=now + timedelta(seconds=31),
         caller_owner=caller_owner,
@@ -1630,7 +1630,7 @@ def test_scheduler_recover_expired_leases_skips_pending_sink_row_with_fresh_leas
             ),
         )
 
-    recovered = repo.recover_expired_leases(run_id="run-1", now=sweep_time, caller_owner="worker-sweeper")
+    recovered = repo.recover_expired_leases_legacy_unfenced(run_id="run-1", now=sweep_time, caller_owner="worker-sweeper")
     assert raced is True
     # With the fix, the UPDATE's ``lease_expires_at < now`` predicate spots the
     # peer's fresh lease and matches zero rows; without it, ``recovered`` would
@@ -1702,7 +1702,7 @@ def test_scheduler_recover_expired_leases_reaps_null_owner_wedged_row() -> None:
         )
         conn.exec_driver_sql("PRAGMA ignore_check_constraints = OFF")
 
-    recovered = repo.recover_expired_leases(
+    recovered = repo.recover_expired_leases_legacy_unfenced(
         run_id="run-1",
         now=now + timedelta(seconds=120),
         caller_owner="worker-sweeper",
@@ -1742,7 +1742,7 @@ def test_scheduler_claimed_transition_rejects_stale_lease_owner_after_reclaim(tr
     assert first_claim is not None
     assert first_claim.work_item_id == item.work_item_id
 
-    recovered = repo.recover_expired_leases(
+    recovered = repo.recover_expired_leases_legacy_unfenced(
         run_id="run-1",
         now=now + timedelta(seconds=31),
         caller_owner="worker-b",
@@ -3195,7 +3195,7 @@ def test_scheduler_heartbeat_lease_prevents_peer_reaper_from_reaping_alive_slow_
         now=now + timedelta(seconds=25),
         membership_fenced=False,
     )
-    recovered = repo.recover_expired_leases(
+    recovered = repo.recover_expired_leases_legacy_unfenced(
         run_id="run-1",
         now=now + timedelta(seconds=28),
         caller_owner=peer_owner,
@@ -3238,7 +3238,7 @@ def test_scheduler_heartbeat_lease_does_not_block_reaping_dead_worker() -> None:
     assert claimed is not None
 
     # No heartbeat call — the dead worker never wakes up to extend its lease.
-    recovered = repo.recover_expired_leases(
+    recovered = repo.recover_expired_leases_legacy_unfenced(
         run_id="run-1",
         now=now + timedelta(seconds=31),
         caller_owner=peer_owner,
@@ -3285,7 +3285,7 @@ def test_scheduler_heartbeat_lease_raises_lease_lost_when_lease_was_reaped() -> 
 
     # Peer reaps the lease while the (no-longer-dead, just slow) worker is
     # still in-flight. The reaper rewrites work_item_id under a bumped attempt.
-    repo.recover_expired_leases(
+    repo.recover_expired_leases_legacy_unfenced(
         run_id="run-1",
         now=now + timedelta(seconds=31),
         caller_owner=peer_owner,

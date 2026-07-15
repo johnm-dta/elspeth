@@ -178,7 +178,7 @@ def _persist_blocked_scheduler_work(
     """
     _persist_token_for_scheduler(factory, token, ingest_sequence=ingest_sequence)
     now = processor._clock.now_utc()
-    item = processor._scheduler.enqueue_ready_claimed(
+    item = processor._scheduler.enqueue_ready_claimed_legacy_unfenced(
         run_id=processor.run_id,
         token_id=token.token_id,
         row_id=token.row_id,
@@ -740,7 +740,7 @@ class TestConstructorErrorEdgeMap:
         token = TokenInfo(row_id="row-ghost", token_id="tok-ghost", row_data=payload)
         _persist_token_for_scheduler(factory, token, ingest_sequence=0)
         ghost_now = datetime.now(UTC)
-        ghost_item = factory.scheduler.enqueue_ready_claimed(
+        ghost_item = factory.scheduler.enqueue_ready_claimed_legacy_unfenced(
             run_id="test-run",
             token_id="tok-ghost",
             row_id="row-ghost",

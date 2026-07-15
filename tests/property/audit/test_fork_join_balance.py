@@ -2487,7 +2487,7 @@ class TestForkRecoveryInvariant:
         # (BarrierRecoveryCoordinator.restore_from_journal ← list_blocked_barrier_items).
         held_first_node = str(graph.get_transform_id_map()[branch_index_by_name[held_branch_name]])
         seed_now = datetime.now(UTC)
-        held_item = scheduler_repo.enqueue_ready_claimed(
+        held_item = scheduler_repo.enqueue_ready_claimed_legacy_unfenced(
             run_id=run_id,
             token_id=held_branch.token_id,
             row_id=row_id,
@@ -5396,7 +5396,7 @@ class TestForkRecoveryInvariant:
             ).scalar_one()
         scheduler_repo = RecorderFactory(db).scheduler
         seed_now = datetime.now(UTC)
-        seeded_item = scheduler_repo.enqueue_ready_claimed(
+        seeded_item = scheduler_repo.enqueue_ready_claimed_legacy_unfenced(
             run_id=run_id,
             token_id=buffered_child.token_id,
             row_id=row_id,
@@ -5710,7 +5710,7 @@ class TestForkRecoveryInvariant:
         for c in children:
             env = _envelope(c.token_data_ref)
             leaf_payload = _PipelineRow(dict(env["data"]), _SchemaContract.from_checkpoint(dict(env["contract"])))
-            seeded_item = scheduler_repo.enqueue_ready_claimed(
+            seeded_item = scheduler_repo.enqueue_ready_claimed_legacy_unfenced(
                 run_id=run_id,
                 token_id=c.token_id,
                 row_id=row_id,

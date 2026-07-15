@@ -24,11 +24,12 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import CheckConstraint, insert, select, update
+from sqlalchemy import CheckConstraint, delete, insert, select, update
 
 from elspeth.contracts import NodeType, PipelineRow, RunStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.coordination import CoordinationToken
-from elspeth.contracts.errors import RunLeadershipLostError
+from elspeth.contracts.errors import RunLeadershipLostError, RunWorkerEvictedError
+from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape.database import LandscapeDB, begin_write
 from elspeth.core.landscape.run_coordination_repository import (
@@ -39,11 +40,13 @@ from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.core.landscape.schema import (
     active_worker_fence_clause,
     claim_verb_fence_clause,
+    metadata,
     nodes_table,
     rows_table,
     run_coordination_table,
     run_workers_table,
     runs_table,
+    scheduler_events_table,
     token_work_items_table,
     tokens_table,
 )
@@ -162,6 +165,49 @@ def _seed_pending_sink_item(db: LandscapeDB, run_id: str, *, sequence: int = 0) 
             )
         )
     return work_item_id
+
+
+def _seed_unscheduled_item(db: LandscapeDB, run_id: str, *, sequence: int) -> dict[str, object]:
+    """Insert the durable row/token prerequisites for one not-yet-queued item."""
+    token_id = f"token-{run_id}-{sequence}"
+    row_id = f"row-{run_id}-{sequence}"
+    with db.engine.begin() as conn:
+        conn.execute(
+            insert(rows_table).values(
+                row_id=row_id,
+                run_id=run_id,
+                source_node_id=SOURCE_NODE_ID,
+                row_index=sequence,
+                source_row_index=sequence,
+                ingest_sequence=sequence,
+                source_data_hash=f"hash-{row_id}",
+                created_at=NOW,
+            )
+        )
+        conn.execute(insert(tokens_table).values(token_id=token_id, row_id=row_id, run_id=run_id, created_at=NOW))
+    return {
+        "run_id": run_id,
+        "token_id": token_id,
+        "row_id": row_id,
+        "node_id": NODE_ID,
+        "step_index": 1,
+        "ingest_sequence": sequence,
+        "row_payload_json": TokenSchedulerRepository.serialize_row_payload(
+            PipelineRow({"id": sequence}, SchemaContract(mode="OBSERVED", fields=(), locked=True))
+        ),
+        "available_at": NOW,
+        "lease_seconds": 60,
+        "now": NOW,
+    }
+
+
+def _full_durable_snapshot(db: LandscapeDB) -> dict[str, tuple[tuple[object, ...], ...]]:
+    """Backend-portable value snapshot of every durable Landscape table."""
+    with db.engine.connect() as conn:
+        return {
+            table.name: tuple(sorted((tuple(row) for row in conn.execute(select(table)).all()), key=repr))
+            for table in metadata.sorted_tables
+        }
 
 
 class TestActiveWorkerFenceClause:
@@ -366,6 +412,132 @@ class TestClaimVerbFenceClause:
         _insert_worker(db, worker_id="worker-active", run_id=RUN_1, status="active")
         claimed = repo.claim_ready(run_id=RUN_1, lease_owner="worker-active", lease_seconds=60, now=NOW)
         assert claimed is not None, "active worker must succeed"
+
+
+class TestEnqueueReadyClaimedMembershipFence:
+    """The standalone enqueue-and-claim path is strict; legacy is explicit."""
+
+    @pytest.mark.parametrize("caller_status", [None, "evicted"], ids=["absent", "evicted"])
+    def test_absent_or_evicted_identity_is_refused_with_full_zero_mutation(
+        self,
+        db: LandscapeDB,
+        caller_status: str | None,
+    ) -> None:
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-active", run_id=RUN_1, status="active")
+        caller = "worker-absent" if caller_status is None else "worker-evicted"
+        if caller_status is not None:
+            _insert_worker(db, worker_id=caller, run_id=RUN_1, status=caller_status)
+        enqueue = _seed_unscheduled_item(db, RUN_1, sequence=10)
+        before = _full_durable_snapshot(db)
+
+        with pytest.raises(RunWorkerEvictedError) as exc_info:
+            TokenSchedulerRepository(db.engine).enqueue_ready_claimed(**enqueue, lease_owner=caller)
+
+        assert exc_info.value.worker_id == caller
+        assert exc_info.value.run_id == RUN_1
+        assert _full_durable_snapshot(db) == before
+
+    def test_active_member_enqueues_claims_and_records_both_events(self, db: LandscapeDB) -> None:
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-active", run_id=RUN_1, status="active")
+        enqueue = _seed_unscheduled_item(db, RUN_1, sequence=11)
+
+        claimed = TokenSchedulerRepository(db.engine).enqueue_ready_claimed(**enqueue, lease_owner="worker-active")
+
+        assert claimed.status is TokenWorkStatus.LEASED
+        assert claimed.lease_owner == "worker-active"
+        with db.engine.connect() as conn:
+            event_types = set(
+                conn.execute(select(scheduler_events_table.c.event_type).where(scheduler_events_table.c.run_id == RUN_1)).scalars()
+            )
+        assert event_types == {SchedulerEventType.ENQUEUE.value, SchedulerEventType.CLAIM_READY.value}
+
+    def test_active_member_future_item_stays_ready_without_misreported_eviction(self, db: LandscapeDB) -> None:
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-active", run_id=RUN_1, status="active")
+        enqueue = _seed_unscheduled_item(db, RUN_1, sequence=15)
+        future = NOW + timedelta(seconds=60)
+        enqueue["available_at"] = future
+
+        scheduled = TokenSchedulerRepository(db.engine).enqueue_ready_claimed(**enqueue, lease_owner="worker-active")
+
+        assert scheduled.status is TokenWorkStatus.READY
+        assert scheduled.lease_owner is None
+        assert scheduled.available_at == future
+        with db.engine.connect() as conn:
+            event_types = set(
+                conn.execute(select(scheduler_events_table.c.event_type).where(scheduler_events_table.c.run_id == RUN_1)).scalars()
+            )
+        assert event_types == {SchedulerEventType.ENQUEUE.value}
+
+    def test_explicit_legacy_unfenced_helper_preserves_n0_test_mode(self, db: LandscapeDB) -> None:
+        _insert_run(db, RUN_1)
+        enqueue = _seed_unscheduled_item(db, RUN_1, sequence=12)
+
+        claimed = TokenSchedulerRepository(db.engine).enqueue_ready_claimed_legacy_unfenced(
+            **enqueue,
+            lease_owner="legacy-test-owner",
+        )
+
+        assert claimed.status is TokenWorkStatus.LEASED
+        assert claimed.lease_owner == "legacy-test-owner"
+
+    def test_membership_cas_rolls_back_when_member_is_evicted_after_entry_guard(
+        self,
+        db: LandscapeDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The claim UPDATE rechecks membership after the initial strict guard."""
+        from elspeth.core.landscape.scheduler import queue as queue_module
+
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-active", run_id=RUN_1, status="active")
+        enqueue = _seed_unscheduled_item(db, RUN_1, sequence=13)
+        before = _full_durable_snapshot(db)
+        real_insert = queue_module.insert_work_item_idempotent
+
+        def evict_then_insert(*args: object, **kwargs: object) -> bool:
+            conn = args[0]
+            conn.execute(
+                update(run_workers_table).where(run_workers_table.c.worker_id == "worker-active").values(status="evicted", evicted_at=NOW)
+            )
+            return real_insert(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(queue_module, "insert_work_item_idempotent", evict_then_insert)
+
+        with pytest.raises(RunWorkerEvictedError):
+            TokenSchedulerRepository(db.engine).enqueue_ready_claimed(**enqueue, lease_owner="worker-active")
+
+        assert _full_durable_snapshot(db) == before
+
+    def test_strict_membership_cas_rolls_back_when_sole_member_is_deleted_after_entry_guard(
+        self,
+        db: LandscapeDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Production enqueue must not fall through to the lenient N=0 claim arm."""
+        from elspeth.core.landscape.scheduler import queue as queue_module
+
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-active", run_id=RUN_1, status="active")
+        enqueue = _seed_unscheduled_item(db, RUN_1, sequence=14)
+        before = _full_durable_snapshot(db)
+        real_insert = queue_module.insert_work_item_idempotent
+
+        def delete_member_then_insert(*args: object, **kwargs: object) -> bool:
+            conn = args[0]
+            conn.execute(delete(run_workers_table).where(run_workers_table.c.worker_id == "worker-active"))
+            return real_insert(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(queue_module, "insert_work_item_idempotent", delete_member_then_insert)
+
+        with pytest.raises(RunWorkerEvictedError) as exc_info:
+            TokenSchedulerRepository(db.engine).enqueue_ready_claimed(**enqueue, lease_owner="worker-active")
+
+        assert exc_info.value.worker_id == "worker-active"
+        assert exc_info.value.run_id == RUN_1
+        assert _full_durable_snapshot(db) == before
 
 
 class TestVerifyAndExtendLeaderFence:

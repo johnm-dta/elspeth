@@ -984,7 +984,12 @@ class SchedulerDrainCoordinator:
         available_at = self._clock.now_utc()
         fields = self._work_codec.ready_fields(item)
         if claim_immediately:
-            scheduled = self._scheduler.enqueue_ready_claimed(
+            enqueue_claimed = (
+                self._scheduler.enqueue_ready_claimed
+                if self._scheduler_lease_owner_registered
+                else self._scheduler.enqueue_ready_claimed_legacy_unfenced
+            )
+            scheduled = enqueue_claimed(
                 run_id=self._run_id,
                 token_id=fields.token_id,
                 row_id=fields.row_id,

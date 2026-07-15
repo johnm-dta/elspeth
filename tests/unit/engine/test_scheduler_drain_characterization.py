@@ -41,7 +41,9 @@ leave delegates behind.
 
 from __future__ import annotations
 
+import ast
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -61,6 +63,7 @@ from elspeth.engine.clock import MockClock
 from elspeth.engine.processor import SCHEDULER_MAINTENANCE_INTERVAL, DAGTraversalContext, RowProcessor
 from elspeth.engine.scheduler_drain import ProcessorMode
 from elspeth.engine.spans import SpanFactory
+from elspeth.engine.work_items import WorkItem
 from tests.fixtures.landscape import RecorderSetup, leader_coordination_token, make_recorder_with_run, register_test_node
 
 NODE_ID = "normalize"
@@ -90,6 +93,8 @@ class _RecordingScheduler:
             "mark_terminal",
             "mark_blocked",
             "heartbeat_lease",
+            "enqueue_ready_claimed",
+            "enqueue_ready_claimed_legacy_unfenced",
         }
     )
 
@@ -205,6 +210,21 @@ def _enqueue_ready(
     )
     token_info = TokenInfo(row_id=row.row_id, token_id=token.token_id, row_data=PipelineRow({"id": sequence}, _CONTRACT))
     return item.work_item_id, token_info
+
+
+def _unscheduled_work_item(setup: RecorderSetup, *, sequence: int) -> WorkItem:
+    row, token = setup.data_flow.create_row_with_token(
+        run_id=setup.run_id,
+        source_node_id=setup.source_node_id,
+        row_index=sequence,
+        data={"id": sequence},
+        source_row_index=sequence,
+        ingest_sequence=sequence,
+    )
+    return WorkItem(
+        token=TokenInfo(row_id=row.row_id, token_id=token.token_id, row_data=PipelineRow({"id": sequence}, _CONTRACT)),
+        current_node_id=NodeID(NODE_ID),
+    )
 
 
 def _park_pending_sink(
@@ -496,6 +516,71 @@ def test_non_recovery_drains_run_maintenance_every_interval() -> None:
     assert len(recoveries) == 1
     assert recoveries[0]["caller_owner"] == LEADER_OWNER
     assert recoveries[0]["coordination_token"] is not None
+
+
+def test_immediate_enqueue_routes_registered_worker_to_strict_and_unregistered_to_explicit_legacy() -> None:
+    registered, registered_spy, registered_setup, _clock = _build(lease_owner=LEADER_OWNER)
+    registered_pending: dict[str, WorkItem] = {}
+    registered_spy.calls.clear()
+
+    registered_item = registered._scheduler_drain.enqueue_work_item(
+        _unscheduled_work_item(registered_setup, sequence=20),
+        registered_pending,
+        claim_immediately=True,
+    )
+
+    assert registered_item.status is TokenWorkStatus.LEASED
+    assert registered_spy.verbs() == ["enqueue_ready_claimed"]
+    assert registered_item.work_item_id in registered_pending
+
+    legacy, legacy_spy, legacy_setup, _clock = _build(lease_owner=None, register_leader=None)
+    legacy_pending: dict[str, WorkItem] = {}
+    legacy_spy.calls.clear()
+
+    legacy_item = legacy._scheduler_drain.enqueue_work_item(
+        _unscheduled_work_item(legacy_setup, sequence=21),
+        legacy_pending,
+        claim_immediately=True,
+    )
+
+    assert legacy_item.status is TokenWorkStatus.LEASED
+    assert legacy_spy.verbs() == ["enqueue_ready_claimed_legacy_unfenced"]
+    assert legacy_item.work_item_id in legacy_pending
+
+
+def test_immediate_enqueue_routing_ast_and_legacy_production_references_are_pinned() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    drain_path = repo_root / "src/elspeth/engine/scheduler_drain.py"
+    drain_tree = ast.parse(drain_path.read_text(encoding="utf-8"), filename=str(drain_path))
+    enqueue_method = next(node for node in ast.walk(drain_tree) if isinstance(node, ast.FunctionDef) and node.name == "enqueue_work_item")
+    route = next(
+        node
+        for node in ast.walk(enqueue_method)
+        if isinstance(node, ast.IfExp)
+        and isinstance(node.body, ast.Attribute)
+        and node.body.attr == "enqueue_ready_claimed"
+        and isinstance(node.orelse, ast.Attribute)
+        and node.orelse.attr == "enqueue_ready_claimed_legacy_unfenced"
+    )
+    assert ast.unparse(route.test) == "self._scheduler_lease_owner_registered"
+
+    legacy_references: list[tuple[str, str]] = []
+    for source_path in (repo_root / "src/elspeth").rglob("*.py"):
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or node.attr != "enqueue_ready_claimed_legacy_unfenced":
+                continue
+            cursor: ast.AST | None = node
+            while cursor is not None and not isinstance(cursor, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                cursor = parents.get(cursor)
+            assert isinstance(cursor, (ast.FunctionDef, ast.AsyncFunctionDef))
+            legacy_references.append((str(source_path.relative_to(repo_root)), cursor.name))
+
+    assert sorted(legacy_references) == [
+        ("src/elspeth/core/landscape/scheduler_repository.py", "enqueue_ready_claimed_legacy_unfenced"),
+        ("src/elspeth/engine/scheduler_drain.py", "enqueue_work_item"),
+    ]
 
 
 def test_follower_build_skips_lease_recovery_and_legacy_build_reaps_unfenced() -> None:

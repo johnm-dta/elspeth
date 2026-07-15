@@ -26,6 +26,7 @@ from elspeth.core.landscape.scheduler.events import SchedulerEventStore
 from elspeth.core.landscape.scheduler.fencing import fenced_or_plain_write
 from elspeth.core.landscape.scheduler.work_items import item_from_mapping, work_item_id
 from elspeth.core.landscape.schema import (
+    active_worker_fence_clause,
     claim_verb_fence_clause,
     pending_sink_bundle_clause,
     run_workers_table,
@@ -108,6 +109,7 @@ class SchedulerLeaseRepository:
         lease_seconds: int,
         now: datetime,
         membership_fenced: bool = False,
+        strict_membership_fenced: bool = False,
     ) -> RowMapping | None:
         """CAS update to claim a READY row under a lease.
 
@@ -117,10 +119,15 @@ class SchedulerLeaseRepository:
         registered for the run at all (N=0/unit-test mode). When workers ARE
         registered, an absent caller gets rowcount=0 with zero mutation and an
         evicted/departed caller gets rowcount=0 plus the re-probe below raises
-        ``RunWorkerEvictedError``. Internal callers
-        (``SchedulerQueueRepository.enqueue_ready_claimed_on``, ``ingest_row_with_initial_claim``) pass
-        the default ``False`` because they operate inside a broader fenced
-        transaction whose leadership CAS is the outer guard.
+        ``RunWorkerEvictedError``.
+
+        ``strict_membership_fenced=True`` is reserved for the standalone
+        production enqueue-and-claim path. It uses the strict
+        ``active_worker_fence_clause`` with no N=0 arm, so membership removal
+        between that verb's entry guard and this UPDATE is refused and rolls
+        back the whole transaction. Other internal callers pass both defaults
+        as ``False`` because they are explicitly legacy or operate inside a
+        broader leader-fenced transaction.
         """
         lease_expires_at = now + timedelta(seconds=lease_seconds)
         where_clauses = and_(
@@ -129,7 +136,12 @@ class SchedulerLeaseRepository:
             token_work_items_table.c.status == TokenWorkStatus.READY.value,
             token_work_items_table.c.available_at <= now,
         )
-        if membership_fenced:
+        if strict_membership_fenced:
+            where_clauses = and_(
+                where_clauses,
+                active_worker_fence_clause(worker_id=lease_owner, run_id=run_id),
+            )
+        elif membership_fenced:
             # Membership fence (ADR-030 §G, slice 4): the claimant must hold
             # an active run_workers row OR the run has no registered workers
             # at all (N=0 / unit-test mode — see claim_verb_fence_clause).
@@ -151,7 +163,7 @@ class SchedulerLeaseRepository:
             )
         )
         if result.rowcount == 0:
-            if membership_fenced:
+            if strict_membership_fenced or membership_fenced:
                 # Distinguish "empty queue" (row raced away — legitimate None)
                 # from "membership fence failed" (this worker is no longer active).
                 # The SELECT above found the row; re-probe the fence only.
@@ -162,6 +174,11 @@ class SchedulerLeaseRepository:
                     .where(token_work_items_table.c.status == TokenWorkStatus.READY.value)
                 ).first()
                 if still_ready is not None:
+                    if strict_membership_fenced:
+                        worker_active = conn.execute(select(active_worker_fence_clause(worker_id=lease_owner, run_id=run_id))).scalar()
+                        if not worker_active:
+                            raise RunWorkerEvictedError(worker_id=lease_owner, run_id=run_id)
+                        return None
                     # Row is still READY but the UPDATE matched 0 rows.  Two cases:
                     #
                     # (a) Worker EXISTS with status != 'active' (evicted/departed):

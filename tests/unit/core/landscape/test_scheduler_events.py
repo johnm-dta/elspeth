@@ -197,7 +197,7 @@ def test_enqueue_ready_claimed_records_enqueue_and_claim_events_in_one_operation
     now = datetime.now(UTC)
     payload = _insert_scheduler_prerequisites(engine, now=now)
 
-    claimed = repo.enqueue_ready_claimed(
+    claimed = repo.enqueue_ready_claimed_legacy_unfenced(
         run_id="run-1",
         token_id="token-1",
         row_id="row-1",

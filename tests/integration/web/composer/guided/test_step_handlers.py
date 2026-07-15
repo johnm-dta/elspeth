@@ -350,17 +350,18 @@ class TestStep3Handler:
     """
 
     @pytest.mark.parametrize(
-        ("tutorial", "proposal_profile", "expected_profile"),
+        ("tutorial", "proposal_profile", "include_private_binding", "expected_profile"),
         [
-            (True, None, "tutorial-default"),
-            (True, "alpha", "tutorial-default"),
-            (False, "alpha", "alpha"),
+            (True, None, True, "tutorial-default"),
+            (True, "alpha", False, "tutorial-default"),
+            (False, "alpha", False, "alpha"),
         ],
     )
     def test_guided_chain_applies_operator_llm_profile_selection(
         self,
         tutorial: bool,
         proposal_profile: str | None,
+        include_private_binding: bool,
         expected_profile: str,
     ) -> None:
         """The guided solver does not own provider bindings.
@@ -459,6 +460,18 @@ class TestStep3Handler:
         }
         if proposal_profile is not None:
             llm_options["profile"] = proposal_profile
+        if include_private_binding:
+            # Real composer models can still emit the legacy executable
+            # binding even though the web policy exposes only the opaque
+            # profile alias. The commit seam must discard these operator-owned
+            # values rather than letting them poison every repair attempt.
+            llm_options.update(
+                {
+                    "provider": "openrouter",
+                    "model": "anthropic/claude-haiku-4.5",
+                    "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                }
+            )
         proposal = ChainProposal(
             steps=(
                 {
@@ -480,6 +493,9 @@ class TestStep3Handler:
 
         assert result.tool_result.success is True, result.tool_result.validation.errors
         assert result.state.nodes[0].options["profile"] == expected_profile
+        assert "provider" not in result.state.nodes[0].options
+        assert "model" not in result.state.nodes[0].options
+        assert "api_key" not in result.state.nodes[0].options
 
     def test_chain_accepted_commits_and_redirects_to_wire(self) -> None:
         from elspeth.web.composer.guided.protocol import GuidedStep

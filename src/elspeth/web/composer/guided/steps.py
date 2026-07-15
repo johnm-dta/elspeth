@@ -48,8 +48,11 @@ from elspeth.web.composer.tools import (
     _sync_get_blob_by_storage_path,
 )
 from elspeth.web.composer.yaml_generator import generate_public_yaml
+from elspeth.web.interpretation_state import AUTHORING_METADATA_OPTION_KEYS
 from elspeth.web.paths import allowed_source_directories, resolve_data_path
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
+
+_PROFILE_AUTHORING_METADATA_OPTION_KEYS = AUTHORING_METADATA_OPTION_KEYS | {"resolved_prompt_template_hash"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +72,33 @@ class StepHandlerResult:
     state: CompositionState
     session: GuidedSession
     tool_result: ToolResult
+
+
+def _normalize_profiled_options(
+    catalog: PolicyCatalogView,
+    plugin_id: PluginId,
+    options: Mapping[str, Any],
+    *,
+    profile: object,
+) -> dict[str, Any]:
+    """Keep only public options plus audit metadata for an operator-profiled plugin.
+
+    The guided solver is untrusted and can emit legacy executable binding
+    fields even though the policy catalog exposes only an opaque profile
+    alias. Those provider/model/credential values are operator-owned: discard
+    them at the commit seam and let the profile resolver supply the executable
+    binding later. Unknown non-public fields are discarded for the same
+    reason, while interpretation metadata remains attached to the authored
+    node for its review gates.
+    """
+    public_schema = catalog.get_schema(plugin_id.kind, plugin_id.name).json_schema
+    properties = public_schema.get("properties")
+    if not isinstance(properties, Mapping) or "profile" not in properties:
+        raise InvariantError(f"selected operator profile has no public profile schema for plugin {plugin_id}")
+    allowed = set(properties) | _PROFILE_AUTHORING_METADATA_OPTION_KEYS
+    normalized = {name: value for name, value in options.items() if name in allowed}
+    normalized["profile"] = profile
+    return normalized
 
 
 @trust_boundary(
@@ -580,15 +610,17 @@ def handle_step_3_chain_accept(
         input_label = "chain_in" if idx == 0 else f"chain_{idx - 1}"
         on_success_label = "main" if idx == n - 1 else f"chain_{idx}"
         options = dict(step["options"])
-        selected_profile = selected_profiles.get(PluginId("transform", str(step["plugin"])))
-        if selected_profile is not None and (session.profile == TUTORIAL_PROFILE or "profile" not in options):
+        plugin_id = PluginId("transform", str(step["plugin"]))
+        selected_profile = selected_profiles.get(plugin_id)
+        if selected_profile is not None:
             # Provider bindings are operator-owned. The guided solver may omit
             # the opaque alias entirely; and the tutorial must always use the
             # specifically configured tutorial profile rather than an
             # arbitrary usable alternative. Live guided sessions retain an
             # explicit allowed choice but receive the operator-selected default
             # when the model did not choose one.
-            options["profile"] = selected_profile
+            profile = selected_profile if session.profile == TUTORIAL_PROFILE or "profile" not in options else options["profile"]
+            options = _normalize_profiled_options(catalog, plugin_id, options, profile=profile)
         node_args.append(
             {
                 "id": f"guided_xform_{idx}",

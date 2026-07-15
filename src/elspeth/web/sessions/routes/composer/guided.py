@@ -1756,6 +1756,7 @@ async def post_guided_respond(
                         composer_service=request.app.state.composer_service,
                         advisor_checkpoint_max_passes=settings.composer_advisor_checkpoint_max_passes,
                         settings=settings,
+                        profile_registry=request.app.state.operator_profile_registry,
                     )
                 except WireConfirmRejectedError as exc:
                     # Wire-stage confirm against an invalid pipeline: a

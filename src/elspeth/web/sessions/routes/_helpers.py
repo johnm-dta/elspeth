@@ -151,6 +151,7 @@ from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter, get_rate_limiter
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
 from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
+from elspeth.web.plugin_policy.validation import PluginPolicyValidationResult, validate_plugin_policy
 from elspeth.web.sessions._auto_title import maybe_auto_title_session
 from elspeth.web.sessions._guided_solve_chain import solve_chain_with_auto_drop
 from elspeth.web.sessions._guided_step_chat import (
@@ -2996,6 +2997,47 @@ def _maybe_fence_advisor_findings(findings_text: str) -> str:
     return _fence_advisor_findings(findings_text)
 
 
+def _wire_policy_validation(
+    state: CompositionState,
+    *,
+    plugin_snapshot: PluginAvailabilitySnapshot,
+    profile_registry: OperatorProfileRegistry | None,
+) -> PluginPolicyValidationResult:
+    """Lower private operator bindings only for wire-stage validation."""
+    return validate_plugin_policy(
+        state,
+        snapshot=plugin_snapshot,
+        profile_registry=profile_registry,
+    )
+
+
+def _build_policy_aware_wire_turn(
+    state: CompositionState,
+    *,
+    plugin_snapshot: PluginAvailabilitySnapshot,
+    profile_registry: OperatorProfileRegistry | None,
+    catalog: PolicyCatalogView | None = None,
+    advisor_findings: str | None = None,
+    signoff_outcome: str | None = None,
+    passes_remaining: int | None = None,
+) -> Turn:
+    """Render public topology with contracts probed against executable options."""
+    policy_validation = _wire_policy_validation(
+        state,
+        plugin_snapshot=plugin_snapshot,
+        profile_registry=profile_registry,
+    )
+    validation_state = state if policy_validation.findings else policy_validation.executable_state
+    return build_step_4_wire_turn(
+        state,
+        catalog=catalog,
+        validation_state=validation_state,
+        advisor_findings=advisor_findings,
+        signoff_outcome=signoff_outcome,
+        passes_remaining=passes_remaining,
+    )
+
+
 def _emit_wire_turn(
     *,
     state: CompositionState,
@@ -3003,13 +3045,19 @@ def _emit_wire_turn(
     recorder: BufferingRecorder,
     user_id: str,
     payload_store: Any,
+    plugin_snapshot: PluginAvailabilitySnapshot,
+    profile_registry: OperatorProfileRegistry | None,
     prev_step: GuidedStep | None = None,
     advance_reason: str | None = None,
     next_turn: Turn | None = None,
 ) -> tuple[GuidedSession, Turn]:
     """Emit the STEP_4_WIRE confirm_wiring turn."""
     if next_turn is None:
-        next_turn = build_step_4_wire_turn(state)
+        next_turn = _build_policy_aware_wire_turn(
+            state,
+            plugin_snapshot=plugin_snapshot,
+            profile_registry=profile_registry,
+        )
     payload_hash = stable_hash(next_turn["payload"])
     new_record = TurnRecord(
         step=GuidedStep.STEP_4_WIRE,
@@ -3064,6 +3112,7 @@ async def _dispatch_guided_respond(
     composer_service: ComposerService | None = None,  # compatibility default; tutorial profile fails closed on None (P5.6)
     advisor_checkpoint_max_passes: int | None = None,  # compatibility default; tutorial profile requires positive int (P5.6)
     settings: WebSettings | None = None,  # compatibility default; supplies composer_max_discovery_turns when wired
+    profile_registry: OperatorProfileRegistry | None = None,
 ) -> tuple[CompositionState, GuidedSession, Any | None]:
     """Dispatch a guided respond to the correct step handler and next-turn emitter.
 
@@ -3942,6 +3991,8 @@ async def _dispatch_guided_respond(
                             recorder=recorder,
                             user_id=user_id,
                             payload_store=payload_store,
+                            plugin_snapshot=plugin_snapshot,
+                            profile_registry=profile_registry,
                             prev_step=GuidedStep.STEP_3_TRANSFORMS,
                             advance_reason="auto_advanced",
                         )
@@ -3984,6 +4035,8 @@ async def _dispatch_guided_respond(
                     recorder=recorder,
                     user_id=user_id,
                     payload_store=payload_store,
+                    plugin_snapshot=plugin_snapshot,
+                    profile_registry=profile_registry,
                     prev_step=GuidedStep.STEP_3_TRANSFORMS,
                     advance_reason="user_advanced",
                 )
@@ -4127,8 +4180,10 @@ async def _dispatch_guided_respond(
                 advisor_findings = (
                     blocked.errors[0].message if blocked.errors else "Advisor sign-off service or pass budget is not configured."
                 )
-                next_turn = build_step_4_wire_turn(
+                next_turn = _build_policy_aware_wire_turn(
                     state,
+                    plugin_snapshot=plugin_snapshot,
+                    profile_registry=profile_registry,
                     catalog=catalog,
                     advisor_findings=advisor_findings,
                     signoff_outcome=SignoffOutcome.BLOCKED_UNAVAILABLE.value,
@@ -4140,6 +4195,8 @@ async def _dispatch_guided_respond(
                     recorder=recorder,
                     user_id=user_id,
                     payload_store=payload_store,
+                    plugin_snapshot=plugin_snapshot,
+                    profile_registry=profile_registry,
                 )
                 return state, guided, next_turn
 
@@ -4175,8 +4232,10 @@ async def _dispatch_guided_respond(
                     findings=decision.findings_text,
                 )
                 on_demand_blocked_findings = blocked.errors[0].message if blocked.errors else decision.findings_text
-            next_turn = build_step_4_wire_turn(
+            next_turn = _build_policy_aware_wire_turn(
                 state,
+                plugin_snapshot=plugin_snapshot,
+                profile_registry=profile_registry,
                 catalog=catalog,
                 advisor_findings=on_demand_blocked_findings or _maybe_fence_advisor_findings(decision.findings_text),
                 signoff_outcome=decision.outcome.value,
@@ -4192,6 +4251,8 @@ async def _dispatch_guided_respond(
                 recorder=recorder,
                 user_id=user_id,
                 payload_store=payload_store,
+                plugin_snapshot=plugin_snapshot,
+                profile_registry=profile_registry,
             )
             return state, guided, next_turn
 
@@ -4232,7 +4293,24 @@ async def _dispatch_guided_respond(
         # not run here: the composition is unchanged by a rejected confirm, so
         # there is nothing to reconcile — the client keeps its current wire
         # turn (whose payload already carries the contracts + warnings).
-        validation = state.validate()
+        policy_validation = _wire_policy_validation(
+            state,
+            plugin_snapshot=plugin_snapshot,
+            profile_registry=profile_registry,
+        )
+        if policy_validation.findings:
+            raise WireConfirmRejectedError(
+                step=GuidedStep.STEP_4_WIRE.value,
+                issues=tuple(
+                    ValidationEntry(
+                        component=finding.component_id or "pipeline",
+                        message=finding.message,
+                        severity="high",
+                    ).to_dict()
+                    for finding in policy_validation.findings
+                ),
+            )
+        validation = policy_validation.executable_state.validate()
         if not validation.is_valid:
             raise WireConfirmRejectedError(
                 step=GuidedStep.STEP_4_WIRE.value,
@@ -4258,8 +4336,10 @@ async def _dispatch_guided_respond(
                 findings="Advisor sign-off service or pass budget is not configured.",
             )
             advisor_findings = blocked.errors[0].message if blocked.errors else "Advisor sign-off service or pass budget is not configured."
-            next_turn = build_step_4_wire_turn(
+            next_turn = _build_policy_aware_wire_turn(
                 state,
+                plugin_snapshot=plugin_snapshot,
+                profile_registry=profile_registry,
                 catalog=catalog,
                 advisor_findings=advisor_findings,
                 signoff_outcome=SignoffOutcome.BLOCKED_UNAVAILABLE.value,
@@ -4336,8 +4416,10 @@ async def _dispatch_guided_respond(
                 findings=decision.findings_text,
             )
             blocked_findings = blocked.errors[0].message if blocked.errors else decision.findings_text
-        next_turn = build_step_4_wire_turn(
+        next_turn = _build_policy_aware_wire_turn(
             state,
+            plugin_snapshot=plugin_snapshot,
+            profile_registry=profile_registry,
             catalog=catalog,
             advisor_findings=blocked_findings or _maybe_fence_advisor_findings(decision.findings_text),
             signoff_outcome=decision.outcome.value,

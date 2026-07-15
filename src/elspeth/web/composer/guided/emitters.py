@@ -498,6 +498,7 @@ def build_step_4_wire_turn(
     state: CompositionState,
     *,
     catalog: CatalogServiceProtocol | None = None,
+    validation_state: CompositionState | None = None,
     advisor_findings: str | None = None,
     signoff_outcome: str | None = None,
     passes_remaining: int | None = None,
@@ -510,7 +511,10 @@ def build_step_4_wire_turn(
     not, so its absence is what keeps the advisor-off tutorial cost-copy-free).
     """
     del catalog  # Reserved for future catalog-backed presentation enrichment.
-    validation = state.validate()
+    # The topology is always the public, persisted composition. Operator-profile
+    # bindings exist only in a lowered in-memory state supplied by the route;
+    # use that copy for executable contract probes without exposing it here.
+    validation = (validation_state or state).validate()
     payload: WireStageData = {
         "topology": _build_wire_topology(state),
         "edge_contracts": [ec.to_dict() for ec in validation.edge_contracts],

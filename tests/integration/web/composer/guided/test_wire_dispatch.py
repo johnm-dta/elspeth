@@ -31,7 +31,11 @@ from elspeth.web.composer.guided.steps import (
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
-from elspeth.web.sessions.routes._helpers import _dispatch_guided_respond, _summarize_guided_response
+from elspeth.web.sessions.routes._helpers import (
+    _build_policy_aware_wire_turn,
+    _dispatch_guided_respond,
+    _summarize_guided_response,
+)
 from tests.fixtures.stores import MockPayloadStore
 
 
@@ -140,6 +144,112 @@ def _wire_ready_session(*, valid: bool = True) -> tuple[CompositionState, Guided
     return result.state, result.session, catalog, payload_store
 
 
+def _profiled_wire_ready_session() -> tuple[CompositionState, GuidedSession, PolicyCatalogView, Any, MockPayloadStore]:
+    """Build the live wire-stage shape: public alias persisted, binding private."""
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+    from elspeth.web.config import WebSettings
+    from elspeth.web.plugin_policy.availability import build_plugin_snapshot
+    from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
+    from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
+
+    settings = WebSettings(
+        composer_max_composition_turns=4,
+        composer_max_discovery_turns=4,
+        composer_timeout_seconds=60,
+        composer_rate_limit_per_minute=20,
+        shareable_link_signing_key=b"0123456789abcdef0123456789abcdef",
+        llm_profiles={
+            "tutorial": {
+                "provider": "bedrock",
+                "model": "bedrock/zai.glm-5",
+                "region_name": "ap-northeast-1",
+            }
+        },
+        tutorial_llm_profile="tutorial",
+    )
+    runtime = RuntimeWebPluginConfig.from_settings(settings)
+    policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+    profiles = OperatorProfileRegistry(policy=policy, settings=runtime)
+    full_catalog = create_catalog_service()
+
+    class _NoSecrets:
+        def has_server_ref(self, name: str) -> bool:
+            return False
+
+        def has_user_ref(self, principal: str, name: str) -> bool:
+            return False
+
+    snapshot = build_plugin_snapshot(
+        policy=policy,
+        catalog=full_catalog,
+        profiles=profiles,
+        principal_scope="local:tutorial-user",
+        secret_inventory=_NoSecrets(),
+        generation_key=b"wire-profile-lowering-test-key",
+    )
+    catalog = PolicyCatalogView(full_catalog, snapshot, profiles)
+    session = GuidedSession.initial(profile=TUTORIAL_PROFILE)
+    step_1 = handle_step_1_source(
+        state=_empty_state(),
+        session=session,
+        catalog=catalog,
+        plugin_snapshot=snapshot,
+        resolved=SourceResolved(
+            plugin="csv",
+            options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["text"]}},
+            observed_columns=("text",),
+            sample_rows=({"text": "hello"},),
+        ),
+    )
+    step_2 = handle_step_2_sink(
+        state=step_1.state,
+        session=step_1.session,
+        catalog=catalog,
+        plugin_snapshot=snapshot,
+        resolved=SinkResolved(
+            outputs=(
+                SinkOutputResolved(
+                    plugin="json",
+                    options={"path": "out.jsonl", "schema": {"mode": "observed"}},
+                    required_fields=("summary",),
+                    schema_mode="observed",
+                ),
+            ),
+        ),
+    )
+    proposal = ChainProposal(
+        steps=(
+            {
+                "plugin": "llm",
+                "options": {
+                    "prompt_template": "Summarise {{ row.text }}",
+                    "response_field": "summary",
+                    "required_input_fields": ["text"],
+                    "schema": {
+                        "mode": "observed",
+                        "required_fields": ["text"],
+                        "guaranteed_fields": ["text", "summary"],
+                    },
+                },
+                "rationale": "summarise each row",
+            },
+        ),
+        why="summarise the tutorial input",
+    )
+    result = handle_step_3_chain_accept(
+        state=step_2.state,
+        session=step_2.session,
+        proposal=proposal,
+        catalog=catalog,
+        plugin_snapshot=snapshot,
+    )
+    assert result.tool_result.success is True, result.tool_result.validation.errors
+    assert result.state.nodes[0].options["profile"] == "tutorial"
+    assert "provider" not in result.state.nodes[0].options
+    assert "model" not in result.state.nodes[0].options
+    return result.state, result.session, catalog, profiles, MockPayloadStore()
+
+
 async def _dispatch(
     state: CompositionState,
     guided: GuidedSession,
@@ -150,6 +260,7 @@ async def _dispatch(
     current_turn_type: TurnType,
     turn_response: TurnResponse,
     recorder: BufferingRecorder | None = None,
+    profile_registry: Any | None = None,
 ) -> tuple[CompositionState, GuidedSession, Any | None, BufferingRecorder]:
     recorder = recorder or BufferingRecorder()
     state2, guided2, next_turn = await _dispatch_guided_respond(
@@ -170,6 +281,7 @@ async def _dispatch(
         model="test-model",
         temperature=None,
         seed=None,
+        profile_registry=profile_registry,
     )
     return state2, guided2, next_turn, recorder
 
@@ -277,6 +389,43 @@ async def test_confirm_wiring_stamps_completed_terminal() -> None:
     assert next_turn is None
     assert guided2.terminal is not None
     assert guided2.terminal.kind is TerminalKind.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_confirm_wiring_lowers_operator_profile_only_for_validation() -> None:
+    """Wire confirmation validates the executable binding, not its public alias."""
+    state, wire_session, catalog, profiles, payload_store = _profiled_wire_ready_session()
+    authored_validation = state.validate()
+    assert authored_validation.is_valid is False
+    assert any("Missing fields: [summary]" in error.message for error in authored_validation.errors)
+    wire_turn = _build_policy_aware_wire_turn(
+        state,
+        plugin_snapshot=catalog.snapshot,
+        profile_registry=profiles,
+        catalog=catalog,
+    )
+    assert wire_turn["payload"]["edge_contracts"]
+    assert all(contract["satisfied"] for contract in wire_turn["payload"]["edge_contracts"])
+
+    _state2, guided2, next_turn, _recorder = await _dispatch(
+        state,
+        wire_session,
+        catalog,
+        payload_store=payload_store,
+        current_step=GuidedStep.STEP_4_WIRE,
+        current_turn_type=TurnType.CONFIRM_WIRING,
+        turn_response=_valid_confirm_body(),
+        profile_registry=profiles,
+    )
+
+    assert next_turn is None
+    assert guided2.terminal is not None
+    assert guided2.terminal.kind is TerminalKind.COMPLETED
+    assert state.nodes[0].options["profile"] == "tutorial"
+    assert "provider" not in state.nodes[0].options
+    assert "model" not in state.nodes[0].options
+    assert "profile: tutorial" in guided2.terminal.pipeline_yaml
+    assert "zai.glm-5" not in guided2.terminal.pipeline_yaml
 
 
 def test_confirm_wiring_invalid_pipeline_returns_failed_tool_result_without_terminal() -> None:

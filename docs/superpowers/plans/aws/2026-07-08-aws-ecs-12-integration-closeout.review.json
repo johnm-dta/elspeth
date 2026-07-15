@@ -3,12 +3,12 @@
   "scope_verdict": "GO_TO_EXECUTE",
   "summary": "Plan 12 is execution-ready as a seven-task AWS integration closeout. Tasks 1 through 4 freeze and qualify one candidate, Task 5 deploys and exercises that candidate in two isolated AWS scenarios, Task 6 tears down every disposable surface, and Task 7 performs the exact-SHA release transition and ends the program. Hosted CI, Wardline, per-checkbox proof rows, post-plan checkpoints, and parent milestone closeout are outside this plan.",
   "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md",
-  "plan_sha256": "c923a9070e7571dc08fe8b38b0b0211a4a24715f031e00492e24c9a5032dc3c8",
-  "reviewed_at": "2026-07-15T00:34:48Z",
+  "plan_sha256": "ffaa5d8b4994246fb62f9390fded1d2950b290212bcba0ef7cb6dd0337c1140a",
+  "reviewed_at": "2026-07-15T14:14:47Z",
   "review_basis": {
     "branch": "feat/aws-ecs-program",
-    "base_head": "5a4652afd0ebc3c82f1e58a3ddbdc5e192268db1",
-    "process": "One full post-plan review by the coordinator and two independent read-only reviewers, limited to material execution blockers."
+    "base_head": "7dbe0da97a3bdad66d3024e4070d750422d3749a",
+    "process": "The previously approved review was rebound after a focused material-delta review of the lean closeout and fresh-account cleanup corrections."
   },
   "blocking_issues": [],
   "warnings": [

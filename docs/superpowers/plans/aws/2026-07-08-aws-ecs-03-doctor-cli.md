@@ -67,11 +67,17 @@ Use raw `settings.payload_store_path`. Derive the blob directory with `allowed_s
 - `bedrock_provider`: lazily import `_PROVIDERS` and require `bedrock`; this is an explicit narrow private-registry read until the provider registry publishes a public capability accessor. Catch sanitized `Exception`, not only `ImportError`.
 - `aws_operator_telemetry`: require the AWS ECS effective telemetry policy to resolve to one enabled generic `otlp` exporter at the fixed task-local endpoint, empty headers, explicit bounded resource identity, and `lifecycle` or `rows` granularity. Never print the endpoint or effective config.
 - `bedrock_guardrail_plugins`: require both `aws_bedrock_prompt_shield` and `aws_bedrock_content_safety` plus the provider-neutral prompt-shield/content-safety capability mapping. This is registration/config-shape proof only; Plan 12 owns the live task-role call.
+
 - `psycopg_dependency`, `boto3_dependency`, `ijson_dependency`, and
   `jinja2_dependency`: independently call `importlib.import_module` and
   independently catch sanitized `Exception`. The latter three prove the final
   source+sink `aws` extra, rather than letting plugin discovery's lazy imports
   mask an incomplete production install.
+
+Plan 03 must not call or duplicate Plan 15C's `guardrails_live_check`: its
+ownership ends at static plugin/profile configuration shape. Plan 10 adapts the
+reusable checker into the candidate-task acceptance command, and Plan 12 owns
+executing that proof against each candidate and deciding GO/NO-GO.
 
 The CLI command lazily imports `_settings_from_env`, `ContractCheck`, `collect_checks`, and `sanitize_error`. Settings construction failure becomes the sole `settings_load` check. `collect_checks` retains a last-resort `doctor_internal_error` conversion, but ordinary filesystem, plugin, dependency, target, engine, probe, and init failures are caught at their own check boundary so successful checks are not discarded. Render JSON with `dataclasses.asdict`; text uses `OK`/`FAIL` lines.
 

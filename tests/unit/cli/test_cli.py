@@ -251,8 +251,8 @@ landscape:
         result = runner.invoke(app, ["resume", "fake-run-id", "-s", str(settings_file)])
 
         assert result.exit_code == 1, f"Expected exit code 1, got {result.exit_code}. Output: {result.output}"
-        assert "does not appear to be an ELSPETH audit database" in result.output, (
-            f"Expected clear error about missing tables, got: {result.output}"
+        assert "contains foreign tables and cannot be opened as an ELSPETH audit database" in result.output, (
+            f"Expected clear error about foreign tables, got: {result.output}"
         )
         # Must NOT have crashed with a traceback
         assert "Traceback" not in result.output, f"Should not show traceback: {result.output}"
@@ -1188,7 +1188,7 @@ sinks:
 
         settings_file, _db_path = self._make_settings_with_landscape_db(tmp_path)
         settings_file.write_text(settings_file.read_text().replace("output.json", "output.jsonl"))
-        (tmp_path / "payloads").mkdir()
+        (tmp_path / "payloads").mkdir(mode=0o700)
 
         run_id = "run-source-not-exhausted-50cec0a02a"
         mock_resume_point = MagicMock(spec=ResumePoint)

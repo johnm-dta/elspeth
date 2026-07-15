@@ -229,6 +229,21 @@ class TestAzureOpenAIConfig:
         assert config.api_key == "azure-api-key"
         assert config.prompt_template == "Analyze: {{ row.text }}"
 
+    def test_http_loopback_endpoint_is_available_for_local_compatible_servers(self) -> None:
+        config = AzureOpenAIConfig.from_dict(
+            {
+                "deployment_name": "local-compatible-server",
+                "endpoint": "http://127.0.0.1:8001",
+                "api_key": "local-test-key",
+                "model": "gpt-4",
+                "prompt_template": "{{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+                "required_input_fields": [],
+            }
+        )
+
+        assert config.endpoint == "http://127.0.0.1:8001"
+
     def test_default_api_version(self) -> None:
         """Config has default api_version of 2024-10-21."""
         config = AzureOpenAIConfig.from_dict(

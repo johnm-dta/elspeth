@@ -26,6 +26,7 @@ from elspeth.web.composer.tools.declarations import (
     ToolDeclaration,
     ToolKind,
 )
+from elspeth.web.provider_config_policy import web_aws_s3_endpoint_url_policy_error
 
 
 # Tier-3 argument-shape models.  Secret tools are POLICY-driven in the
@@ -223,6 +224,9 @@ def _execute_wire_secret_ref(
             return _failure_result(state, f"Source '{source_name}' not found.")
         patched_options = dict(deep_thaw(source.options))
         patched_options[option_key] = marker
+        endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(source.plugin, patched_options)
+        if endpoint_policy_error is not None:
+            return _failure_result(state, endpoint_policy_error)
         placement_error = _secret_ref_placement_error("source", source.plugin, patched_options)
         if placement_error is not None:
             return _failure_result(state, placement_error)
@@ -262,6 +266,9 @@ def _execute_wire_secret_ref(
             return _failure_result(state, f"Output '{target_id}' not found.")
         patched_options = dict(deep_thaw(output.options))
         patched_options[option_key] = marker
+        endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(output.plugin, patched_options)
+        if endpoint_policy_error is not None:
+            return _failure_result(state, endpoint_policy_error)
         placement_error = _secret_ref_placement_error("sink", output.plugin, patched_options)
         if placement_error is not None:
             return _failure_result(state, placement_error)

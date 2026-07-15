@@ -4,7 +4,8 @@
       {
         "enum": [
           "azure",
-          "openrouter"
+          "openrouter",
+          "bedrock"
         ],
         "kind": "enum",
         "label": "provider",
@@ -613,6 +614,277 @@
         "required": false,
         "visible_when": {
           "equals": "openrouter",
+          "field": "provider"
+        }
+      },
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema",
+        "nullable": false,
+        "required": true,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Required Input Fields",
+        "name": "required_input_fields",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "description": "LiteLLM Bedrock model id in bedrock/<id> form",
+        "kind": "text",
+        "label": "Model",
+        "name": "model",
+        "nullable": false,
+        "required": true,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Multi-query specs (None = single-query mode)",
+        "kind": "json-value",
+        "label": "Queries",
+        "name": "queries",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "description": "Jinja2 prompt template",
+        "kind": "text",
+        "label": "Prompt Template",
+        "name": "prompt_template",
+        "nullable": false,
+        "required": true,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Optional system prompt",
+        "kind": "text",
+        "label": "System Prompt",
+        "name": "system_prompt",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 0.0,
+        "description": "Sampling temperature",
+        "kind": "number-float",
+        "label": "Temperature",
+        "name": "temperature",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Maximum tokens in response",
+        "kind": "number-int",
+        "label": "Max Tokens",
+        "name": "max_tokens",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "default": "llm_response",
+        "description": "Field name for LLM response in output",
+        "kind": "text",
+        "label": "Response Field",
+        "name": "response_field",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Lookup data loaded from YAML file",
+        "kind": "json-object",
+        "label": "Lookup",
+        "name": "lookup",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Prompt template file path for audit (None if inline)",
+        "kind": "text",
+        "label": "Prompt Template Source",
+        "name": "prompt_template_source",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Lookup file path for audit (None if no lookup)",
+        "kind": "text",
+        "label": "Lookup Source",
+        "name": "lookup_source",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "System prompt file path for audit (None if inline)",
+        "kind": "text",
+        "label": "System Prompt Source",
+        "name": "system_prompt_source",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 1,
+        "description": "Number of concurrent requests (1 = sequential)",
+        "kind": "number-int",
+        "label": "Pool Size",
+        "name": "pool_size",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 0,
+        "description": "Minimum dispatch delay in milliseconds",
+        "kind": "number-int",
+        "label": "Min Dispatch Delay Ms",
+        "name": "min_dispatch_delay_ms",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 5000,
+        "description": "Maximum dispatch delay in milliseconds",
+        "kind": "number-int",
+        "label": "Max Dispatch Delay Ms",
+        "name": "max_dispatch_delay_ms",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 2.0,
+        "description": "Backoff multiplier on capacity error",
+        "kind": "number-float",
+        "label": "Backoff Multiplier",
+        "name": "backoff_multiplier",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 50,
+        "description": "Recovery step in milliseconds",
+        "kind": "number-int",
+        "label": "Recovery Step Ms",
+        "name": "recovery_step_ms",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "default": 3600,
+        "description": "Max seconds to retry capacity errors",
+        "kind": "number-int",
+        "label": "Max Capacity Retry Seconds",
+        "name": "max_capacity_retry_seconds",
+        "nullable": false,
+        "required": false,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "AWS region override; default AWS region resolution otherwise",
+        "kind": "text",
+        "label": "Region Name",
+        "name": "region_name",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "bedrock",
+          "field": "provider"
+        }
+      },
+      {
+        "default": null,
+        "description": "Tier 2 tracing (langfuse only)",
+        "kind": "json-object",
+        "label": "Tracing",
+        "name": "tracing",
+        "nullable": true,
+        "required": false,
+        "visible_when": {
+          "equals": "bedrock",
           "field": "provider"
         }
       }

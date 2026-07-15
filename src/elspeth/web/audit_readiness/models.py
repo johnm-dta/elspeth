@@ -23,6 +23,17 @@ ReadinessRowId = Literal[
 # Panel glyphs: ok→✓, warning→⚠, error→✗, not_applicable→—.
 ReadinessStatus = Literal["ok", "warning", "error", "not_applicable"]
 
+PluginPolicyReadinessRowId = Literal[
+    "policy_compilation",
+    "required_core",
+    "local_capability_configuration",
+    "live_health",
+    "tutorial_profile",
+    "tutorial_required_control_coverage",
+]
+
+_EXPECTED_PLUGIN_POLICY_ROW_IDS: frozenset[str] = frozenset(get_args(PluginPolicyReadinessRowId))
+
 _EXPECTED_ROW_IDS: frozenset[str] = frozenset(get_args(ReadinessRowId))
 
 
@@ -39,6 +50,33 @@ class ReadinessRow(_StrictResponse):
     component_ids: tuple[str, ...]
 
 
+class PluginPolicyReadinessRow(_StrictResponse):
+    """One sanitized process/request plugin-policy readiness signal."""
+
+    id: PluginPolicyReadinessRowId
+    label: str = Field(min_length=1)
+    status: ReadinessStatus
+    summary: str = Field(min_length=1)
+    detail: str | None
+
+
+class PluginPolicyReadinessSnapshot(_StrictResponse):
+    """The fixed policy/tutorial readiness matrix exposed to web surfaces."""
+
+    rows: tuple[PluginPolicyReadinessRow, ...]
+    tutorial_ready: bool
+
+    @model_validator(mode="after")
+    def _check_row_completeness(self) -> Self:
+        ids = [row.id for row in self.rows]
+        if len(ids) != len(set(ids)):
+            raise ValueError(f"duplicate plugin-policy readiness row ids: {ids}")
+        missing = _EXPECTED_PLUGIN_POLICY_ROW_IDS - set(ids)
+        if missing:
+            raise ValueError(f"plugin-policy readiness missing required rows: {sorted(missing)}")
+        return self
+
+
 class AuditReadinessSnapshot(_StrictResponse):
     """Aggregated payload for the audit-readiness panel."""
 
@@ -50,6 +88,7 @@ class AuditReadinessSnapshot(_StrictResponse):
     # The frontend uses this for structured component attribution rather than
     # reconstructing a lossy ValidationResult from the validation row.
     validation_result: ValidationResult
+    plugin_policy_readiness: PluginPolicyReadinessSnapshot | None = None
 
     @model_validator(mode="after")
     def _check_row_completeness(self) -> Self:

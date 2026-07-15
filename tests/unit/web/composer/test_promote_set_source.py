@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import (
     ConfigFieldSummary,
@@ -28,7 +29,8 @@ from elspeth.web.catalog.schemas import (
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import _execute_set_source
-from elspeth.web.composer.tools._common import ToolContext
+from elspeth.web.composer.tools._common import ToolContext as _ToolContext
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 
 def _empty_state() -> CompositionState:
@@ -64,6 +66,14 @@ def _mock_catalog() -> MagicMock:
         ),
     ]
     return catalog
+
+
+def ToolContext(*, catalog: CatalogService) -> _ToolContext:
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return _ToolContext(
+        catalog=PolicyCatalogView.for_trained_operator(catalog, snapshot),
+        plugin_snapshot=snapshot,
+    )
 
 
 class TestPromoteSetSourceArgErrorRouting:

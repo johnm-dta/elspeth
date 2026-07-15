@@ -18,16 +18,19 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided.chat_solver import maybe_resolve_step_2_sink_chat
 from elspeth.web.composer.guided.resolved import SinkResolved
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 
 
 def _empty_state() -> CompositionState:
@@ -53,6 +56,26 @@ class _SinkCatalog:
 
 def _catalog() -> CatalogService:
     return _SinkCatalog()
+
+
+def _policy_context() -> tuple[PolicyCatalogView, PluginAvailabilitySnapshot]:
+    catalog = _catalog()
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash="guided-sink-policy",
+        principal_scope="local:alice",
+        available=frozenset({PluginId("sink", "json")}),
+        unavailable=(),
+        selected=(),
+        usable_profile_aliases=(),
+        selected_profile_aliases=(),
+        binding_generation_fingerprint="guided-sink-generation",
+    )
+    profiles = MagicMock(spec=OperatorProfileRegistry)
+    profiles.public_schema.side_effect = lambda _plugin_id, schema, **_kwargs: schema
+    return PolicyCatalogView(catalog, snapshot, profiles), snapshot
+
+
+_POLICY_CATALOG, _PLUGIN_SNAPSHOT = _policy_context()
 
 
 def _tool_call(call_id: str, name: str, arguments: dict[str, Any]) -> SimpleNamespace:
@@ -100,7 +123,8 @@ async def test_sink_loop_lists_sinks_then_resolves() -> None:
             seed=None,
             recorder=recorder,
             state=_empty_state(),
-            catalog=_catalog(),
+            catalog=_POLICY_CATALOG,
+            plugin_snapshot=_PLUGIN_SNAPSHOT,
             user_id="u1",
         )
 
@@ -151,7 +175,8 @@ async def test_sink_loop_refuses_to_dispatch_mutation_tool() -> None:
             temperature=None,
             seed=None,
             state=_empty_state(),
-            catalog=_catalog(),
+            catalog=_POLICY_CATALOG,
+            plugin_snapshot=_PLUGIN_SNAPSHOT,
             user_id="u1",
         )
 
@@ -193,7 +218,8 @@ async def test_sink_loop_threads_parallel_tool_calls() -> None:
             seed=None,
             recorder=recorder,
             state=_empty_state(),
-            catalog=_catalog(),
+            catalog=_POLICY_CATALOG,
+            plugin_snapshot=_PLUGIN_SNAPSHOT,
             user_id="u1",
         )
 
@@ -228,7 +254,8 @@ async def test_sink_loop_returns_none_at_iteration_cap() -> None:
             seed=None,
             recorder=recorder,
             state=_empty_state(),
-            catalog=_catalog(),
+            catalog=_POLICY_CATALOG,
+            plugin_snapshot=_PLUGIN_SNAPSHOT,
             user_id="u1",
             max_discovery_iters=3,
         )
@@ -272,7 +299,8 @@ async def test_sink_loop_malformed_discovery_args_classify_malformed_response() 
             seed=None,
             recorder=recorder,
             state=_empty_state(),
-            catalog=_catalog(),
+            catalog=_POLICY_CATALOG,
+            plugin_snapshot=_PLUGIN_SNAPSHOT,
             user_id="u1",
         )
 
@@ -311,7 +339,8 @@ async def test_sink_loop_progress_events_advance_through_discovery_and_resolve()
             temperature=None,
             seed=None,
             state=_empty_state(),
-            catalog=_catalog(),
+            catalog=_POLICY_CATALOG,
+            plugin_snapshot=_PLUGIN_SNAPSHOT,
             user_id="u1",
             progress=_capture_progress,
         )

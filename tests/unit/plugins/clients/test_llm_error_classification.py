@@ -408,3 +408,38 @@ class TestAzureSpecificCodes:
 
         for error in azure_errors:
             assert (_classify_llm_error(error) in _RETRYABLE_CLASSES) is True, f"Failed for: {error}"
+
+
+class _StatusCodeError(Exception):
+    def __init__(self, message: str, status_code: object) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class _RaisingStatusCodeError(Exception):
+    @property
+    def status_code(self) -> int:
+        raise AssertionError("status_code property must not be invoked")
+
+
+class TestBedrockSpecificShapes:
+    """Pin LiteLLM's real Bedrock wrapper text and status metadata."""
+
+    def test_bedrock_context_window_wrapper_is_context_length(self) -> None:
+        error = Exception("BedrockException: Context Window Error - Input is too long for requested model.")
+
+        assert _classify_llm_error(error) == "context_length"
+
+    def test_bedrock_service_unavailable_hardcoded_503_is_server(self) -> None:
+        error = _StatusCodeError("BedrockException - Internal server error", status_code=503)
+
+        assert _classify_llm_error(error) == "server"
+
+    @pytest.mark.parametrize("status_code", [None, True, "503", [], {}])
+    def test_non_exact_int_status_metadata_is_not_server(self, status_code: object) -> None:
+        error = _StatusCodeError("BedrockException - Internal server error", status_code=status_code)
+
+        assert _classify_llm_error(error) == "unknown"
+
+    def test_status_code_property_is_not_invoked(self) -> None:
+        assert _classify_llm_error(_RaisingStatusCodeError("BedrockException - Internal server error")) == "unknown"

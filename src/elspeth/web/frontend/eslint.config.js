@@ -13,7 +13,13 @@ export default tseslint.config(
     ],
   },
   {
-    files: ["src/**/*.{ts,tsx}", "vite.config.ts"],
+    files: [
+      "src/**/*.{ts,tsx}",
+      "vite.config.ts",
+      "playwright.oidc.config.ts",
+      "tests/e2e/aws-ecs-oidc.staging.spec.ts",
+      "tests/e2e/harness/oidc-*.ts",
+    ],
     linterOptions: {
       reportUnusedDisableDirectives: "off",
     },

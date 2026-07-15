@@ -84,7 +84,7 @@ src/elspeth/telemetry/
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Pipeline thread enqueues events (non-blocking). Export thread consumes and dispatches (background). Only `_events_dropped` counter requires locking (both threads write).
+Pipeline thread enqueues events (non-blocking). Export thread consumes and dispatches (background). The aggregate `_events_dropped` counter and its queue-only `_queue_drops` subset require locking because both threads write them.
 
 ---
 
@@ -374,6 +374,7 @@ telemetry:
 {
     "events_emitted": int,           # Successfully exported
     "events_dropped": int,           # Queue full or all exporters failed
+    "queue_drops": int,              # Enqueue/backpressure losses only
     "exporter_failures": {name: count},
     "consecutive_total_failures": int,
     "queue_depth": int,

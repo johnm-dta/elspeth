@@ -23,6 +23,7 @@ from uuid import UUID
 from elspeth.contracts.composer_slots import SlotSpec
 from elspeth.contracts.composer_slots import SlotType as SlotType
 from elspeth.contracts.freeze import freeze_fields
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,8 @@ class RecipeSpec:
     slots: Mapping[str, SlotSpec]
     build: Callable[[Mapping[str, Any]], Mapping[str, Any]]
     """Pure function: validated slots → set_pipeline-compatible args dict."""
+    required_plugins: frozenset[PluginId] = frozenset()
+    alternative_plugin_groups: tuple[frozenset[PluginId], ...] = ()
 
     def __post_init__(self) -> None:
         # ``frozen=True`` only blocks attribute reassignment; the underlying
@@ -160,23 +163,9 @@ _RECIPE1_SLOTS: Final[dict[str, SlotSpec]] = {
         slot_type="str",
         description="Jinja2 template for the LLM prompt; reference row fields as {{ row['col'] }}",
     ),
-    "model": SlotSpec(
+    "profile": SlotSpec(
         slot_type="str",
-        description="LLM model identifier (e.g., 'anthropic/claude-sonnet-4.6'); use list_models to discover",
-    ),
-    "api_key_secret": SlotSpec(
-        slot_type="str",
-        description=(
-            "Name of an inventory secret to wire into the LLM 'api_key' option as "
-            "a deferred {secret_ref} marker. Discover names via list_secret_refs; "
-            "verify with validate_secret_ref. Literal credential strings are rejected."
-        ),
-    ),
-    "provider": SlotSpec(
-        slot_type="str",
-        required=False,
-        default="openrouter",
-        description="LLM provider — only 'openrouter' is wired by this recipe (Azure needs deployment_name/endpoint, which the recipe does not provide)",
+        description="Opaque operator-approved LLM profile alias from the public llm schema",
     ),
     "label_field": SlotSpec(
         slot_type="str",
@@ -206,28 +195,8 @@ _RECIPE1_SLOTS: Final[dict[str, SlotSpec]] = {
 }
 
 
-def _require_openrouter_provider(slots: Mapping[str, Any]) -> None:
-    """These recipes wire only the OpenRouter LLM provider.
-
-    The ``provider`` slot once advertised ``'azure'`` too, but the recipes emit
-    only ``provider``/``model``/``api_key`` — never the ``deployment_name`` +
-    ``endpoint`` that ``AzureOpenAIConfig`` requires, and ``validate_slots``
-    rejects extra slots, so an Azure selection cannot materialise a valid
-    pipeline. Fail loud and early with an actionable message rather than deep in
-    config validation with an opaque "missing Azure fields" error.
-    """
-    provider = slots["provider"]
-    if provider != "openrouter":
-        raise RecipeValidationError(
-            f"recipe provider {provider!r} is not supported — this recipe wires only 'openrouter'. "
-            "For Azure OpenAI, compose the pipeline directly (an llm node with provider='azure', "
-            "deployment_name and endpoint) rather than via apply_pipeline_recipe."
-        )
-
-
 def _build_classify_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
     """Build set_pipeline args for the classify-rows-llm-jsonl recipe."""
-    _require_openrouter_provider(slots)
     # ``blob_id`` is a TOP-LEVEL key of ``source`` (sibling of ``options``),
     # NOT a member of ``options``. ``_execute_set_pipeline`` reads it via
     # ``src_args.get("blob_id")`` and feeds it to ``_resolve_source_blob``,
@@ -256,12 +225,10 @@ def _build_classify_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
                 "on_success": "labelled",
                 "on_error": "discard",
                 "options": {
-                    "provider": slots["provider"],
-                    "model": slots["model"],
-                    "api_key": {"secret_ref": slots["api_key_secret"]},
+                    "profile": slots["profile"],
                     "prompt_template": slots["classifier_template"],
                     "response_field": slots["label_field"],
-                    "schema": {"mode": "observed"},
+                    "schema": {"mode": "observed", "fields": None},
                     "required_input_fields": required_input_fields,
                 },
             }
@@ -618,23 +585,9 @@ _RECIPE_WEB_SCRAPE_SLOTS: Final[dict[str, SlotSpec]] = {
         slot_type="str",
         description="Resolved URL-row source plugin carried from match_recipe; must be 'json' or 'csv'. Direct apply callers pass the materialised source plugin explicitly.",
     ),
-    "model": SlotSpec(
+    "profile": SlotSpec(
         slot_type="str",
-        description="LLM model identifier (e.g., 'anthropic/claude-sonnet-4.6'); use list_models to discover",
-    ),
-    "api_key_secret": SlotSpec(
-        slot_type="str",
-        description=(
-            "Name of an inventory secret to wire into the LLM 'api_key' option as "
-            "a deferred {secret_ref} marker. Discover names via list_secret_refs; "
-            "verify with validate_secret_ref. Literal credential strings are rejected."
-        ),
-    ),
-    "provider": SlotSpec(
-        slot_type="str",
-        required=False,
-        default="openrouter",
-        description="LLM provider — only 'openrouter' is wired by this recipe (Azure needs deployment_name/endpoint, which the recipe does not provide)",
+        description="Opaque operator-approved LLM profile alias",
     ),
     "rating_template": SlotSpec(
         slot_type="str",
@@ -700,7 +653,6 @@ def _build_web_scrape_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
     (elspeth-abb2cb0931); the existing medium-severity prompt-shield advisory
     is left to fire from validate() — the recipe MUST NOT suppress it.
     """
-    _require_openrouter_provider(slots)
     # Function-level imports: recipes.py is imported by recipe_match.py and the
     # tools plane; hoisting these to module scope risks a circular import.
     from elspeth.contracts.composer_interpretation import InterpretationKind
@@ -770,9 +722,7 @@ def _build_web_scrape_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
                 "on_success": "rated",
                 "on_error": "discard",
                 "options": {
-                    "provider": slots["provider"],
-                    "model": slots["model"],
-                    "api_key": {"secret_ref": slots["api_key_secret"]},
+                    "profile": slots["profile"],
                     "prompt_template": slots["rating_template"],
                     "response_field": "rating",
                     "schema": {"mode": "observed"},
@@ -840,6 +790,7 @@ _RECIPES: Final[dict[str, RecipeSpec]] = {
         ),
         slots=_RECIPE1_SLOTS,
         build=_build_classify_recipe,
+        required_plugins=frozenset({PluginId("source", "csv"), PluginId("transform", "llm"), PluginId("sink", "json")}),
     ),
     "split-by-numeric-threshold": RecipeSpec(
         name="split-by-numeric-threshold",
@@ -852,6 +803,7 @@ _RECIPES: Final[dict[str, RecipeSpec]] = {
         ),
         slots=_RECIPE2_SLOTS,
         build=_build_threshold_recipe,
+        required_plugins=frozenset({PluginId("source", "csv"), PluginId("transform", "type_coerce"), PluginId("sink", "json")}),
     ),
     "fork-coalesce-truncate-jsonl": RecipeSpec(
         name="fork-coalesce-truncate-jsonl",
@@ -868,6 +820,14 @@ _RECIPES: Final[dict[str, RecipeSpec]] = {
         ),
         slots=_RECIPE3_SLOTS,
         build=_build_fork_coalesce_truncate_recipe,
+        required_plugins=frozenset(
+            {
+                PluginId("source", "csv"),
+                PluginId("transform", "passthrough"),
+                PluginId("transform", "truncate"),
+                PluginId("sink", "json"),
+            }
+        ),
     ),
     "web-scrape-llm-rate-jsonl": RecipeSpec(
         name="web-scrape-llm-rate-jsonl",
@@ -883,12 +843,49 @@ _RECIPES: Final[dict[str, RecipeSpec]] = {
         ),
         slots=_RECIPE_WEB_SCRAPE_SLOTS,
         build=_build_web_scrape_recipe,
+        required_plugins=frozenset(
+            {
+                PluginId("transform", "web_scrape"),
+                PluginId("transform", "llm"),
+                PluginId("transform", "field_mapper"),
+                PluginId("sink", "json"),
+            }
+        ),
+        alternative_plugin_groups=(frozenset({PluginId("source", "csv"), PluginId("source", "json")}),),
     ),
 }
 
 
-def list_recipes() -> list[dict[str, Any]]:
-    """Return discovery metadata for every registered recipe."""
+def unavailable_recipe_plugin(
+    recipe: RecipeSpec,
+    snapshot: PluginAvailabilitySnapshot,
+    *,
+    raw_slots: Mapping[str, Any] | None = None,
+) -> PluginId | None:
+    """Return the first unavailable dependency, or ``None`` when usable."""
+    for plugin_id in sorted(recipe.required_plugins):
+        if plugin_id not in snapshot.available:
+            return plugin_id
+    if raw_slots is not None and isinstance(raw_slots.get("source_plugin"), str):
+        try:
+            selected_source = PluginId("source", raw_slots["source_plugin"])
+        except ValueError as exc:
+            raise RecipeValidationError("recipe source_plugin must be a registered source plugin id") from exc
+        if selected_source not in snapshot.available:
+            return selected_source
+    if raw_slots is not None and isinstance(raw_slots.get("profile"), str):
+        llm_id = PluginId("transform", "llm")
+        aliases_by_plugin = dict(snapshot.usable_profile_aliases)
+        if llm_id in aliases_by_plugin and raw_slots["profile"] not in aliases_by_plugin[llm_id]:
+            return llm_id
+    for alternatives in recipe.alternative_plugin_groups:
+        if alternatives.isdisjoint(snapshot.available):
+            return min(alternatives)
+    return None
+
+
+def list_recipes(snapshot: PluginAvailabilitySnapshot) -> list[dict[str, Any]]:
+    """Return discovery metadata for recipes usable in this snapshot."""
     return [
         {
             "name": spec.name,
@@ -899,11 +896,17 @@ def list_recipes() -> list[dict[str, Any]]:
                     "required": s.required,
                     "default": s.default,
                     "description": s.description,
+                    **(
+                        {"choices": list(dict(snapshot.usable_profile_aliases).get(PluginId("transform", "llm"), ()))}
+                        if slot_name == "profile"
+                        else {}
+                    ),
                 }
                 for slot_name, s in spec.slots.items()
             },
         }
         for spec in _RECIPES.values()
+        if unavailable_recipe_plugin(spec, snapshot) is None
     ]
 
 

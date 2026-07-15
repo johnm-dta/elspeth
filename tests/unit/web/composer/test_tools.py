@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call, patch
 from uuid import uuid4
 
 import pytest
@@ -18,11 +18,11 @@ from sqlalchemy.pool import StaticPool
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import stable_hash
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import (
     ConfigFieldSummary,
     PluginSchemaInfo,
-    PluginSecretRequirement,
     PluginSummary,
 )
 from elspeth.web.composer.state import (
@@ -35,6 +35,7 @@ from elspeth.web.composer.state import (
     ValidationSummary,
 )
 from elspeth.web.composer.tools import (
+    ToolContext,
     ToolResult,
     _apply_merge_patch,
     _compute_validation_delta,
@@ -42,9 +43,11 @@ from elspeth.web.composer.tools import (
     _failure_result,
     _inject_prior_validation,
     _prevalidate_plugin_options,
-    execute_tool,
     get_expression_grammar,
     get_tool_definitions,
+)
+from elspeth.web.composer.tools import (
+    execute_tool as _execute_tool,
 )
 from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationReadiness, ValidationResult
 from elspeth.web.interpretation_state import (
@@ -53,6 +56,14 @@ from elspeth.web.interpretation_state import (
     PROMPT_TEMPLATE_PARTS_KEY,
     SOURCE_AUTHORING_KEY,
 )
+from elspeth.web.plugin_policy.models import (
+    PluginAvailability,
+    PluginAvailabilitySnapshot,
+    PluginId,
+    PluginUnavailableReason,
+)
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
+from elspeth.web.provider_config_policy import AWS_S3_ENDPOINT_URL_POLICY_ERROR
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -118,6 +129,58 @@ def _empty_state() -> CompositionState:
     )
 
 
+_AWS_S3_ENDPOINT_SENTINEL = "https://composer-canary.attacker.invalid/private"
+
+
+def _aws_s3_source_state() -> CompositionState:
+    return CompositionState(
+        source=SourceSpec(
+            plugin="aws_s3",
+            on_success="main",
+            options={},
+            on_validation_failure="discard",
+        ),
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=7,
+    )
+
+
+def _aws_s3_output_state() -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(
+            OutputSpec(
+                name="main",
+                plugin="aws_s3",
+                options={},
+                on_write_failure="discard",
+            ),
+        ),
+        metadata=PipelineMetadata(),
+        version=7,
+    )
+
+
+def _assert_aws_s3_endpoint_url_rejected(
+    result: ToolResult,
+    original_state: CompositionState,
+    *,
+    forbidden_value: str = _AWS_S3_ENDPOINT_SENTINEL,
+) -> None:
+    assert result.success is False
+    assert result.updated_state is original_state
+    assert result.updated_state.version == original_state.version
+    assert result.data is not None
+    assert result.data["error"] == AWS_S3_ENDPOINT_URL_POLICY_ERROR
+    assert forbidden_value not in repr(result.data)
+    assert forbidden_value not in repr(result.validation)
+
+
 def _default_source(state: CompositionState) -> SourceSpec | None:
     return state.sources.get("source")
 
@@ -160,11 +223,32 @@ def _mock_catalog() -> MagicMock:
             plugin_type="source",
             config_fields=[],
         ),
+        PluginSummary(name="aws_s3", description="S3 source", plugin_type="source", config_fields=[]),
     ]
     catalog.list_transforms.return_value = [
         PluginSummary(
             name="passthrough",
             description="Uppercase transform",
+            plugin_type="transform",
+            config_fields=[],
+        ),
+        PluginSummary(name="field_mapper", description="Field mapper", plugin_type="transform", config_fields=[]),
+        PluginSummary(name="llm", description="LLM transform", plugin_type="transform", config_fields=[]),
+        PluginSummary(name="web_scrape", description="Web scrape", plugin_type="transform", config_fields=[]),
+        PluginSummary(name="batch_replicate", description="Batch replicate", plugin_type="transform", config_fields=[]),
+        PluginSummary(name="batch_stats", description="Batch stats", plugin_type="transform", config_fields=[]),
+        PluginSummary(
+            name="batch_distribution_profile",
+            description="Batch distribution profile",
+            plugin_type="transform",
+            config_fields=[],
+        ),
+        PluginSummary(name="line_explode", description="Line explode", plugin_type="transform", config_fields=[]),
+        PluginSummary(name="rag_retrieval", description="RAG retrieval", plugin_type="transform", config_fields=[]),
+        PluginSummary(name="value_transform", description="Value transform", plugin_type="transform", config_fields=[]),
+        PluginSummary(
+            name="azure_prompt_shield",
+            description="Prompt injection shield",
             plugin_type="transform",
             config_fields=[],
         ),
@@ -176,6 +260,10 @@ def _mock_catalog() -> MagicMock:
             plugin_type="sink",
             config_fields=[],
         ),
+        PluginSummary(name="json", description="JSON sink", plugin_type="sink", config_fields=[]),
+        PluginSummary(name="text", description="Text sink", plugin_type="sink", config_fields=[]),
+        PluginSummary(name="aws_s3", description="S3 sink", plugin_type="sink", config_fields=[]),
+        PluginSummary(name="database", description="Database sink", plugin_type="sink", config_fields=[]),
     ]
     catalog.get_schema.return_value = PluginSchemaInfo(
         name="csv",
@@ -185,6 +273,199 @@ def _mock_catalog() -> MagicMock:
         knob_schema={"fields": []},
     )
     return catalog
+
+
+def execute_tool(
+    tool_name: str,
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    **kwargs: Any,
+) -> ToolResult:
+    """Invoke the strict dispatcher through an explicit test trust boundary."""
+    supplied_snapshot = kwargs.pop("plugin_snapshot", None)
+    if isinstance(catalog, PolicyCatalogView):
+        if not isinstance(supplied_snapshot, PluginAvailabilitySnapshot):
+            raise AssertionError("policy catalog tests must supply their exact snapshot")
+        policy_catalog = catalog
+        snapshot = supplied_snapshot
+    else:
+        if supplied_snapshot is not None:
+            raise AssertionError("a snapshot requires its matching policy catalog")
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+        policy_catalog = PolicyCatalogView.for_trained_operator(catalog, snapshot)
+    return _execute_tool(
+        tool_name,
+        arguments,
+        state,
+        policy_catalog,
+        plugin_snapshot=snapshot,
+        **kwargs,
+    )
+
+
+def _trained_tool_context(catalog: CatalogService | None = None, **kwargs: Any) -> Any:
+    full_catalog = catalog or _mock_catalog()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(full_catalog)
+    return ToolContext(
+        catalog=PolicyCatalogView.for_trained_operator(full_catalog, snapshot),
+        plugin_snapshot=snapshot,
+        **kwargs,
+    )
+
+
+def _restricted_policy_pair(
+    catalog: CatalogService,
+    plugin_id: PluginId,
+    reason: PluginUnavailableReason = PluginUnavailableReason.NOT_AUTHORIZED,
+) -> tuple[PolicyCatalogView, PluginAvailabilitySnapshot]:
+    unrestricted = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash="restricted-test-policy",
+        principal_scope="local:test-user",
+        available=unrestricted.available - {plugin_id},
+        unavailable=(PluginAvailability(plugin_id, reason),),
+        selected=unrestricted.selected,
+        usable_profile_aliases=(),
+        selected_profile_aliases=(),
+        binding_generation_fingerprint="restricted-test-generation",
+    )
+    return PolicyCatalogView(catalog, snapshot, MagicMock(spec=OperatorProfileRegistry)), snapshot
+
+
+def test_direct_upsert_cannot_name_hidden_registered_plugin() -> None:
+    """A direct dispatcher call cannot bypass the request policy view."""
+    catalog = _mock_catalog()
+    policy_catalog, snapshot = _restricted_policy_pair(catalog, PluginId("transform", "azure_prompt_shield"))
+
+    result = execute_tool(
+        "upsert_node",
+        {
+            "id": "shield",
+            "node_type": "transform",
+            "plugin": "azure_prompt_shield",
+            "input": "main",
+            "on_success": "clean",
+            "options": {"schema": {"mode": "observed"}},
+        },
+        _empty_state(),
+        policy_catalog,
+        plugin_snapshot=snapshot,
+    )
+
+    assert result.success is False
+    assert result.data["error_code"] == "plugin_not_enabled"
+    assert result.updated_state.version == 1
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "plugin_id"),
+    [
+        (
+            "set_source",
+            {"plugin": "aws_s3", "on_success": "main", "options": {}, "on_validation_failure": "discard"},
+            PluginId("source", "aws_s3"),
+        ),
+        (
+            "upsert_node",
+            {
+                "id": "aggregate",
+                "node_type": "aggregation",
+                "plugin": "batch_stats",
+                "input": "rows",
+                "on_success": "main",
+                "options": {},
+                "trigger": {"records": 10},
+            },
+            PluginId("transform", "batch_stats"),
+        ),
+        (
+            "set_output",
+            {"sink_name": "main", "plugin": "database", "options": {}, "on_write_failure": "discard"},
+            PluginId("sink", "database"),
+        ),
+        (
+            "set_pipeline",
+            {
+                "source": {
+                    "plugin": "aws_s3",
+                    "on_success": "main",
+                    "options": {},
+                    "on_validation_failure": "discard",
+                },
+                "nodes": [],
+                "edges": [],
+                "outputs": [],
+            },
+            PluginId("source", "aws_s3"),
+        ),
+    ],
+)
+def test_canonical_mutations_reject_hidden_registered_plugins(
+    tool_name: str,
+    arguments: dict[str, Any],
+    plugin_id: PluginId,
+) -> None:
+    catalog = _mock_catalog()
+    view, snapshot = _restricted_policy_pair(catalog, plugin_id)
+
+    result = execute_tool(tool_name, arguments, _empty_state(), view, plugin_snapshot=snapshot)
+
+    assert result.success is False
+    assert result.data["error_code"] == "plugin_not_enabled"
+    catalog.post_call_hints.assert_not_called()
+
+
+def test_historical_hidden_component_can_be_removed_or_replaced() -> None:
+    catalog = _mock_catalog()
+    hidden_id = PluginId("transform", "azure_prompt_shield")
+    view, snapshot = _restricted_policy_pair(catalog, hidden_id)
+    state = CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id="shield",
+                node_type="transform",
+                plugin="azure_prompt_shield",
+                input="rows",
+                on_success="main",
+                on_error="discard",
+                options={},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+    removed = execute_tool("remove_node", {"id": "shield"}, state, view, plugin_snapshot=snapshot)
+    replaced = execute_tool(
+        "upsert_node",
+        {
+            "id": "shield",
+            "node_type": "transform",
+            "plugin": "passthrough",
+            "input": "rows",
+            "on_success": "main",
+            "on_error": "discard",
+            "options": {"schema": {"mode": "observed"}},
+        },
+        state,
+        view,
+        plugin_snapshot=snapshot,
+    )
+
+    assert removed.success is True
+    assert removed.updated_state.nodes == ()
+    assert replaced.success is True
+    assert replaced.updated_state.nodes[0].plugin == "passthrough"
 
 
 def _session_engine_with_session() -> tuple[Any, str]:
@@ -441,15 +722,211 @@ class TestPreviewPipelineSemanticContracts:
 
     def test_summary_includes_semantic_contracts(self) -> None:
         from elspeth.web.composer.tools import _execute_preview_pipeline
-        from elspeth.web.composer.tools._common import ToolContext
         from tests.unit.web.composer.test_semantic_validator import _wardline_state
 
         state = _wardline_state(text_separator=" ")
-        result = _execute_preview_pipeline({}, state, ToolContext(catalog=_mock_catalog()))
+        result = _execute_preview_pipeline({}, state, _trained_tool_context())
         assert "semantic_contracts" in result.data
         assert len(result.data["semantic_contracts"]) == 1
         assert result.data["semantic_contracts"][0]["outcome"] == "conflict"
         assert result.data["semantic_contracts"][0]["consumer_plugin"] == "line_explode"
+
+
+class TestAwsS3EndpointUrlComposerPolicy:
+    def test_aws_s3_set_source_rejects_endpoint_url_without_mutating_state(self) -> None:
+        state = _empty_state()
+
+        result = execute_tool(
+            "set_source",
+            {
+                "plugin": "aws_s3",
+                "on_success": "main",
+                "options": {"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL},
+                "on_validation_failure": "discard",
+            },
+            state,
+            _mock_catalog(),
+        )
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+
+    def test_aws_s3_patch_source_options_rejects_endpoint_url_without_mutating_state(self) -> None:
+        state = _aws_s3_source_state()
+
+        result = execute_tool(
+            "patch_source_options",
+            {"patch": {"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL}},
+            state,
+            _mock_catalog(),
+        )
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+
+    def test_aws_s3_set_output_rejects_endpoint_url_without_mutating_state(self) -> None:
+        state = _empty_state()
+
+        result = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "aws_s3",
+                "options": {"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL},
+                "on_write_failure": "discard",
+            },
+            state,
+            _mock_catalog(),
+        )
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+
+    def test_aws_s3_patch_output_options_rejects_endpoint_url_without_mutating_state(self) -> None:
+        state = _aws_s3_output_state()
+
+        result = execute_tool(
+            "patch_output_options",
+            {"sink_name": "main", "patch": {"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL}},
+            state,
+            _mock_catalog(),
+        )
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+
+    def test_aws_s3_set_pipeline_named_source_rejects_endpoint_url_without_mutating_state(self) -> None:
+        state = _empty_state()
+        args = _valid_pipeline_args()
+        args.pop("source")
+        args["sources"] = {
+            "archive": {
+                "plugin": "aws_s3",
+                "on_success": "main",
+                "options": {"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL},
+                "on_validation_failure": "discard",
+            }
+        }
+        args["nodes"] = []
+        args["edges"] = []
+
+        result = execute_tool("set_pipeline", args, state, _mock_catalog())
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+
+    def test_aws_s3_set_pipeline_legacy_source_rejects_endpoint_url_without_mutating_state(self) -> None:
+        state = _empty_state()
+        args = _valid_pipeline_args()
+        args["source"]["plugin"] = "aws_s3"
+        args["source"]["options"] = {"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL}
+
+        result = execute_tool("set_pipeline", args, state, _mock_catalog())
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+
+    def test_aws_s3_set_pipeline_output_rejects_endpoint_url_without_mutating_state(self) -> None:
+        state = _empty_state()
+        args = _valid_pipeline_args()
+        args["outputs"][0]["plugin"] = "aws_s3"
+        args["outputs"][0]["options"] = {"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL}
+
+        result = execute_tool("set_pipeline", args, state, _mock_catalog())
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+
+    def test_aws_s3_apply_pipeline_recipe_delegation_rejects_endpoint_url_without_mutating_state(self) -> None:
+        state = _empty_state()
+        args = _valid_pipeline_args()
+        args["source"]["plugin"] = "aws_s3"
+        args["source"]["options"] = {"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL}
+
+        with patch("elspeth.web.composer.tools.sessions.apply_recipe", return_value=args):
+            result = execute_tool(
+                "apply_pipeline_recipe",
+                {"recipe_name": "aws_s3_policy_fixture", "slots": {}},
+                state,
+                _mock_catalog(),
+            )
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+
+    def test_aws_s3_set_source_from_blob_rejects_raw_endpoint_url_before_lookup(self) -> None:
+        state = _empty_state()
+
+        with patch("elspeth.web.composer.tools.sources._resolve_source_blob") as mock_resolve:
+            mock_resolve.side_effect = AssertionError("blob lookup must not run")
+            result = execute_tool(
+                "set_source_from_blob",
+                {
+                    "blob_id": str(uuid4()),
+                    "plugin": "aws_s3",
+                    "on_success": "main",
+                    "options": {"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL},
+                },
+                state,
+                _mock_catalog(),
+            )
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+        mock_resolve.assert_not_called()
+
+    def test_aws_s3_set_source_from_blob_rejects_resolved_endpoint_url_without_mutating_state(self) -> None:
+        from elspeth.web.composer.tools.sources import _execute_set_source_from_blob, _ResolvedSourceBlob
+
+        state = _empty_state()
+        resolved = _ResolvedSourceBlob(
+            plugin="aws_s3",
+            options={"endpoint_url": _AWS_S3_ENDPOINT_SENTINEL},
+            payload={
+                "blob_id": str(uuid4()),
+                "filename": "input.jsonl",
+                "mime_type": "application/jsonl",
+                "size_bytes": 1,
+                "content_hash": _STUB_SHA256,
+            },
+            creation_modality=CreationModality.VERBATIM,
+        )
+
+        with patch("elspeth.web.composer.tools.sources._resolve_source_blob", return_value=resolved):
+            result = _execute_set_source_from_blob(
+                {"blob_id": str(uuid4()), "on_success": "main", "options": {}},
+                state,
+                _trained_tool_context(),
+            )
+
+        _assert_aws_s3_endpoint_url_rejected(result, state)
+
+    @pytest.mark.parametrize(
+        ("target", "target_id", "state_factory"),
+        [
+            ("source", None, _aws_s3_source_state),
+            ("output", "main", _aws_s3_output_state),
+        ],
+    )
+    def test_aws_s3_wire_secret_ref_rejects_endpoint_url_without_mutating_state(
+        self,
+        target: str,
+        target_id: str | None,
+        state_factory: Callable[[], CompositionState],
+    ) -> None:
+        state = state_factory()
+        secret_name = "ENDPOINT_URL_SECRET_CANARY"
+        secret_service = _SecretServiceDouble()
+        secret_service.has_ref.return_value = True
+        arguments: dict[str, Any] = {
+            "name": secret_name,
+            "target": target,
+            "option_key": "endpoint_url",
+        }
+        if target_id is not None:
+            arguments["target_id"] = target_id
+
+        result = execute_tool(
+            "wire_secret_ref",
+            arguments,
+            state,
+            _mock_catalog(),
+            secret_service=secret_service,
+            user_id="test-user",
+        )
+
+        _assert_aws_s3_endpoint_url_rejected(result, state, forbidden_value=secret_name)
 
 
 class TestSetSource:
@@ -617,7 +1094,7 @@ class TestSetSource:
         assert _default_source(result.updated_state) is None  # unchanged
         assert result.updated_state.version == 1
         assert result.data is not None
-        assert "foobar" in result.data["error"].lower()
+        assert result.data["error_code"] == "plugin_not_installed"
 
     def test_set_source_rejects_manual_blob_ref_in_options(self) -> None:
         """Closes elspeth-07089fbaa3 (write defense, branch a).
@@ -2337,19 +2814,19 @@ class TestDiscoveryTools:
         catalog = _mock_catalog()
         result = execute_tool("list_sources", {}, _empty_state(), catalog)
         assert result.success is True
-        catalog.list_sources.assert_called_once()
+        assert catalog.list_sources.call_count == 2  # snapshot construction + dispatch
 
     def test_list_transforms_delegates(self) -> None:
         catalog = _mock_catalog()
         result = execute_tool("list_transforms", {}, _empty_state(), catalog)
         assert result.success is True
-        catalog.list_transforms.assert_called_once()
+        assert catalog.list_transforms.call_count == 2  # snapshot construction + dispatch
 
     def test_list_sinks_delegates(self) -> None:
         catalog = _mock_catalog()
         result = execute_tool("list_sinks", {}, _empty_state(), catalog)
         assert result.success is True
-        catalog.list_sinks.assert_called_once()
+        assert catalog.list_sinks.call_count == 2  # snapshot construction + dispatch
 
     def test_get_plugin_schema_delegates(self) -> None:
         catalog = _mock_catalog()
@@ -2360,38 +2837,22 @@ class TestDiscoveryTools:
             catalog,
         )
         assert result.success is True
-        catalog.get_schema.assert_called_once_with("source", "csv")
+        assert catalog.get_schema.call_args_list == [call("source", "csv"), call("source", "csv")]
 
-    def test_list_transforms_hides_secret_required_plugin_without_declared_candidate(self) -> None:
-        from elspeth.contracts.secrets import SecretInventoryItem
-
+    def test_list_transforms_hides_snapshot_unavailable_plugin(self) -> None:
         catalog = _mock_catalog()
-        catalog.list_transforms.return_value = [
-            *catalog.list_transforms.return_value,
-            PluginSummary(
-                name="azure_prompt_shield",
-                description="Prompt injection shield",
-                plugin_type="transform",
-                config_fields=[
-                    ConfigFieldSummary(name="api_key", type="string", required=True),
-                    ConfigFieldSummary(name="endpoint", type="string", required=True),
-                ],
-                secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
-            ),
-        ]
-        secret_service = _SecretServiceDouble()
-        secret_service.list_refs.return_value = [
-            SecretInventoryItem(name="OPENROUTER_API_KEY", scope="user", available=True),
-        ]
-        secret_service.has_ref.side_effect = lambda _user_id, name: name == "OPENROUTER_API_KEY"
+        policy_catalog, snapshot = _restricted_policy_pair(
+            catalog,
+            PluginId("transform", "azure_prompt_shield"),
+            PluginUnavailableReason.CREDENTIAL_MISSING,
+        )
 
         result = execute_tool(
             "list_transforms",
             {},
             _empty_state(),
-            catalog,
-            secret_service=secret_service,
-            user_id="test-user",
+            policy_catalog,
+            plugin_snapshot=snapshot,
         )
 
         assert result.success is True
@@ -2399,107 +2860,59 @@ class TestDiscoveryTools:
         assert "passthrough" in names
         assert "azure_prompt_shield" not in names
 
-    def test_list_transforms_shows_secret_required_plugin_when_declared_candidate_available(self) -> None:
-        from elspeth.contracts.secrets import SecretInventoryItem
-
+    def test_list_transforms_shows_snapshot_available_plugin(self) -> None:
         catalog = _mock_catalog()
-        catalog.list_transforms.return_value = [
-            *catalog.list_transforms.return_value,
-            PluginSummary(
-                name="azure_prompt_shield",
-                description="Prompt injection shield",
-                plugin_type="transform",
-                config_fields=[
-                    ConfigFieldSummary(name="api_key", type="string", required=True),
-                    ConfigFieldSummary(name="endpoint", type="string", required=True),
-                ],
-                secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
-            ),
-        ]
-        secret_service = _SecretServiceDouble()
-        secret_service.list_refs.return_value = [
-            SecretInventoryItem(name="AZURE_CONTENT_SAFETY_KEY", scope="server", available=True),
-        ]
-        secret_service.has_ref.side_effect = lambda _user_id, name: name == "AZURE_CONTENT_SAFETY_KEY"
 
         result = execute_tool(
             "list_transforms",
             {},
             _empty_state(),
             catalog,
-            secret_service=secret_service,
-            user_id="test-user",
         )
 
         assert result.success is True
         names = {item.name for item in result.data}
         assert "azure_prompt_shield" in names
 
-    def test_get_plugin_schema_rejects_secret_required_plugin_without_declared_candidate(self) -> None:
+    def test_get_plugin_schema_rejects_snapshot_unavailable_plugin(self) -> None:
         catalog = _mock_catalog()
-        catalog.get_schema.return_value = PluginSchemaInfo(
-            name="azure_prompt_shield",
-            plugin_type="transform",
-            description="Prompt injection shield",
-            json_schema={
-                "type": "object",
-                "properties": {
-                    "api_key": {"type": "string"},
-                    "endpoint": {"type": "string"},
-                },
-                "required": ["api_key", "endpoint"],
-            },
-            knob_schema={"fields": []},
-            secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
+        policy_catalog, snapshot = _restricted_policy_pair(
+            catalog,
+            PluginId("transform", "azure_prompt_shield"),
+            PluginUnavailableReason.CREDENTIAL_MISSING,
         )
-        secret_service = _SecretServiceDouble()
-        secret_service.has_ref.return_value = False
 
         result = execute_tool(
             "get_plugin_schema",
             {"plugin_type": "transform", "name": "azure_prompt_shield"},
             _empty_state(),
-            catalog,
-            secret_service=secret_service,
-            user_id="test-user",
+            policy_catalog,
+            plugin_snapshot=snapshot,
         )
 
         assert result.success is False
-        assert "azure_prompt_shield" in result.data["error"]
-        assert "AZURE_CONTENT_SAFETY_KEY" in result.data["error"]
+        assert result.data["error_code"] == "credential_unavailable"
+        assert "azure_prompt_shield" not in result.data["error"]
 
-    def test_get_plugin_assistance_rejects_secret_required_plugin_without_declared_candidate(self) -> None:
+    def test_get_plugin_assistance_rejects_snapshot_unavailable_plugin(self) -> None:
         catalog = _mock_catalog()
-        catalog.get_schema.return_value = PluginSchemaInfo(
-            name="azure_prompt_shield",
-            plugin_type="transform",
-            description="Prompt injection shield",
-            json_schema={
-                "type": "object",
-                "properties": {
-                    "api_key": {"type": "string"},
-                    "endpoint": {"type": "string"},
-                },
-                "required": ["api_key", "endpoint"],
-            },
-            knob_schema={"fields": []},
-            secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
+        policy_catalog, snapshot = _restricted_policy_pair(
+            catalog,
+            PluginId("transform", "azure_prompt_shield"),
+            PluginUnavailableReason.CREDENTIAL_MISSING,
         )
-        secret_service = _SecretServiceDouble()
-        secret_service.has_ref.return_value = False
 
         result = execute_tool(
             "get_plugin_assistance",
             {"plugin_type": "transform", "plugin_name": "azure_prompt_shield"},
             _empty_state(),
-            catalog,
-            secret_service=secret_service,
-            user_id="test-user",
+            policy_catalog,
+            plugin_snapshot=snapshot,
         )
 
         assert result.success is False
-        assert "azure_prompt_shield" in result.data["error"]
-        assert "AZURE_CONTENT_SAFETY_KEY" in result.data["error"]
+        assert result.data["error_code"] == "credential_unavailable"
+        assert "azure_prompt_shield" not in result.data["error"]
 
     def test_get_expression_grammar_is_static(self) -> None:
         grammar = get_expression_grammar()
@@ -4975,13 +5388,11 @@ class TestUpdateBlobRollbackPreservesPrimaryException:
             patch.object(Path, "write_bytes", _tripwire_write_bytes),
             pytest.raises(RuntimeError, match=primary_message) as exc_info,
         ):
-            from elspeth.web.composer.tools._common import ToolContext as _UpdateBlobCtx
-
             _execute_update_blob(
                 {"blob_id": self.blob_id, "content": "x" * 100},
                 state,
-                _UpdateBlobCtx(
-                    catalog=catalog,
+                _trained_tool_context(
+                    catalog,
                     session_engine=self.engine,
                     session_id=self.session_id,
                     **_verbatim_blob_context(self.engine, self.session_id, "x" * 100),
@@ -5028,13 +5439,11 @@ class TestUpdateBlobRollbackPreservesPrimaryException:
             patch("elspeth.web.composer.tools.blobs._check_blob_quota", side_effect=_raise_primary),
             pytest.raises(RuntimeError, match=primary_message) as exc_info,
         ):
-            from elspeth.web.composer.tools._common import ToolContext as _UpdateBlobCtx
-
             _execute_update_blob(
                 {"blob_id": self.blob_id, "content": "x" * 100},
                 state,
-                _UpdateBlobCtx(
-                    catalog=catalog,
+                _trained_tool_context(
+                    catalog,
                     session_engine=self.engine,
                     session_id=self.session_id,
                     **_verbatim_blob_context(self.engine, self.session_id, "x" * 100),
@@ -7461,6 +7870,19 @@ class TestSetPipeline:
         ]
         return catalog
 
+    def _catalog_with_text_sink(self) -> MagicMock:
+        catalog = _mock_catalog()
+        catalog.list_sinks.return_value = [
+            *catalog.list_sinks.return_value,
+            PluginSummary(
+                name="text",
+                description="Line-oriented text file sink",
+                plugin_type="sink",
+                config_fields=[],
+            ),
+        ]
+        return catalog
+
     def test_set_pipeline_creates_valid_state(self) -> None:
         state = _empty_state()
         catalog = _mock_catalog()
@@ -7548,6 +7970,24 @@ class TestSetPipeline:
         assert '"schema": {"mode": "observed"}' in error
         assert '"collision_policy": "auto_increment"' in error
         assert '"on_write_failure": "discard"' in error
+
+    def test_set_pipeline_missing_text_output_options_returns_runnable_repair_hint(self) -> None:
+        state = _empty_state()
+        catalog = self._catalog_with_text_sink()
+        args = _valid_pipeline_args()
+        args["source"]["options"]["path"] = "/data/blobs/in.csv"
+        del args["outputs"][0]["options"]
+        args["outputs"][0]["plugin"] = "text"
+
+        result = execute_tool("set_pipeline", args, state, catalog, data_dir="/data")
+
+        assert result.success is False
+        error = result.data["error"]
+        assert '"plugin": "text"' in error
+        assert '"path": "outputs/main.txt"' in error
+        assert '"field": "line_text"' in error
+        assert '"mode": "write"' in error
+        assert '"collision_policy": "auto_increment"' in error
 
     def test_set_pipeline_failure_leads_validation_with_rejection_reason(self) -> None:
         """Regression for composer session 58d7ede3 round 6.
@@ -9390,7 +9830,7 @@ class TestGetPluginAssistance:
             catalog,
         )
         assert result.success is False
-        assert "no_such_plugin_xyz" in result.data["error"]
+        assert result.data["error_code"] == "plugin_not_installed"
 
     def test_invalid_plugin_type_returns_failure(self) -> None:
         """plugin_type is validated up-front; mistyped value surfaces as failure."""
@@ -13077,7 +13517,6 @@ class TestToolContextSecretServiceTyping:
 
     def test_tool_context_accepts_protocol_implementor(self) -> None:
         """ToolContext.secret_service must accept any WebSecretResolver."""
-        from elspeth.web.composer.tools._common import ToolContext
 
         class _ResolverStub:
             def list_refs(self, user_id: str) -> list[Any]:
@@ -13089,7 +13528,7 @@ class TestToolContextSecretServiceTyping:
             def resolve(self, user_id: str, name: str) -> None:
                 return None
 
-        ctx = ToolContext(catalog=MagicMock(spec=CatalogService), secret_service=_ResolverStub())
+        ctx = _trained_tool_context(secret_service=_ResolverStub())
         # Field is reachable, typed, and forwards the structural surface.
         assert ctx.secret_service is not None
         assert ctx.secret_service.has_ref("u1", "missing") is False
@@ -13097,9 +13536,7 @@ class TestToolContextSecretServiceTyping:
 
     def test_tool_context_secret_service_defaults_to_none(self) -> None:
         """Non-secret-aware callers (legacy direct tests) construct with None."""
-        from elspeth.web.composer.tools._common import ToolContext
-
-        ctx = ToolContext(catalog=MagicMock(spec=CatalogService))
+        ctx = _trained_tool_context()
         assert ctx.secret_service is None
 
 

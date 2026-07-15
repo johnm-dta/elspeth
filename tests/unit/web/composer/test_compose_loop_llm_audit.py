@@ -282,7 +282,7 @@ def _composer_available_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_text_only_success_records_llm_call_metadata() -> None:
-    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+    service = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=_make_settings())
     state = _empty_state()
     llm_response = _make_llm_response(content="Done.")
 
@@ -313,7 +313,7 @@ async def test_text_only_success_records_llm_call_metadata() -> None:
 
 @pytest.mark.asyncio
 async def test_success_records_provider_cost_from_usage_metadata() -> None:
-    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+    service = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=_make_settings())
     state = _empty_state()
     llm_response = _make_llm_response(content="Done.", cost=0.0037)
 
@@ -327,7 +327,7 @@ async def test_success_records_provider_cost_from_usage_metadata() -> None:
 
 @pytest.mark.asyncio
 async def test_success_records_provider_reasoning_metadata() -> None:
-    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+    service = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=_make_settings())
     state = _empty_state()
     reasoning_details = [{"type": "reasoning.text", "text": "selected set_pipeline"}]
     thinking_blocks = [{"type": "thinking", "thinking": "checked required output options"}]
@@ -353,7 +353,7 @@ async def test_success_records_provider_reasoning_metadata() -> None:
 
 @pytest.mark.asyncio
 async def test_malformed_provider_cost_is_recorded_as_unavailable() -> None:
-    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+    service = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=_make_settings())
     state = _empty_state()
     llm_response = _make_llm_response(content="Done.", cost="not-a-number")
 
@@ -367,7 +367,7 @@ async def test_malformed_provider_cost_is_recorded_as_unavailable() -> None:
 
 @pytest.mark.asyncio
 async def test_unset_sampling_is_omitted_and_reflected_in_audit() -> None:
-    service = ComposerServiceImpl(
+    service = ComposerServiceImpl.for_trained_operator(
         catalog=_mock_catalog(),
         settings=_make_settings(composer_model="anthropic/claude-3-5-sonnet-20241022"),
     )
@@ -386,7 +386,7 @@ async def test_unset_sampling_is_omitted_and_reflected_in_audit() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_call_then_final_response_records_both_llm_calls() -> None:
-    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+    service = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=_make_settings())
     state = _empty_state()
     tool_turn = _make_llm_response(
         tool_calls=[
@@ -422,7 +422,7 @@ async def test_tool_call_then_final_response_records_both_llm_calls() -> None:
 
 @pytest.mark.asyncio
 async def test_deadline_timeout_records_llm_call_on_convergence_error() -> None:
-    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+    service = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=_make_settings())
     state = _empty_state()
 
     async def timeout_llm(*_args: Any, **_kwargs: Any) -> _FakeLLMResponse:
@@ -443,7 +443,7 @@ async def test_deadline_timeout_records_llm_call_on_convergence_error() -> None:
 async def test_bad_request_records_redacted_llm_call_on_service_error() -> None:
     from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
 
-    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+    service = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=_make_settings())
     bad_request = LiteLLMBadRequestError(message="bad request leaked detail", model="bad", llm_provider="test")
 
     with (
@@ -463,7 +463,7 @@ async def test_bad_request_records_redacted_llm_call_on_service_error() -> None:
 
 @pytest.mark.asyncio
 async def test_unclassified_provider_exception_records_api_error_call() -> None:
-    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+    service = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=_make_settings())
 
     with (
         patch(
@@ -485,7 +485,7 @@ async def test_unclassified_provider_exception_records_api_error_call() -> None:
 
 @pytest.mark.asyncio
 async def test_empty_choices_records_malformed_response() -> None:
-    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+    service = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=_make_settings())
     empty_response = _FakeLLMResponse(choices=[], usage=SimpleNamespace(prompt_tokens=3, completion_tokens=None, total_tokens=3))
 
     with (
@@ -505,7 +505,7 @@ async def test_empty_choices_records_malformed_response() -> None:
 
 @pytest.mark.asyncio
 async def test_cancelled_model_call_records_cancelled_status() -> None:
-    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+    service = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=_make_settings())
     cancelled = asyncio.CancelledError()
 
     with (

@@ -24,6 +24,7 @@ export interface AuthConfig {
   oidc_issuer: string | null;
   oidc_client_id: string | null;
   authorization_endpoint: string | null;
+  token_endpoint?: string | null;
 }
 
 /**
@@ -180,6 +181,7 @@ export interface CompositionState {
   validation_errors?: string[];
   validation_warnings?: ValidationEntryDTO[];
   validation_suggestions?: ValidationEntryDTO[];
+  plugin_policy_findings?: PluginPolicyFinding[];
 }
 
 /** A version history entry for CompositionState. */
@@ -328,6 +330,48 @@ export interface PluginSchemaInfo {
   plugin_type: "source" | "transform" | "sink";
   description: string;
   json_schema: Record<string, unknown>;
+}
+
+export type PluginPolicyCapability = "llm" | "prompt_shield" | "content_safety";
+export type PluginPolicyControlMode = "recommend" | "required";
+
+export interface PluginPolicyResponse {
+  principal_scope: string;
+  snapshot_fingerprint: string;
+  policy_hash: string;
+  available_plugin_ids: string[];
+  capability_groups: Array<{
+    capability: PluginPolicyCapability;
+    available_plugin_ids: string[];
+  }>;
+  selections: Array<{
+    capability: PluginPolicyCapability;
+    plugin_id: string | null;
+  }>;
+  control_modes: Array<{
+    capability: PluginPolicyCapability;
+    mode: PluginPolicyControlMode;
+  }>;
+}
+
+export interface PluginSnapshotResponse<T> {
+  data: T;
+  snapshotFingerprint: string;
+}
+
+export type PluginPolicyUnavailableReason =
+  | "plugin_not_enabled"
+  | "plugin_not_installed"
+  | "plugin_unavailable"
+  | "credential_unavailable"
+  | "profile_unavailable";
+
+/** Sanitized current-policy finding for a persisted component. */
+export interface PluginPolicyFinding {
+  component_id: string;
+  plugin_id: string;
+  reason_code: PluginPolicyUnavailableReason;
+  snapshot_fingerprint: string;
 }
 
 // ── Validation ──────────────────────────────────────────────────────────────
@@ -874,6 +918,7 @@ export interface ApiError {
   provider_detail?: string;
   provider_status_code?: number;
   validation_errors?: ValidationError[];
+  snapshot_fingerprint?: string;
 }
 
 export interface SystemStatus {
@@ -882,6 +927,9 @@ export interface SystemStatus {
   composer_provider: string | null;
   composer_reason: string | null;
   composer_missing_keys: string[];
+  plugin_policy_readiness?: PluginPolicyReadinessSnapshot;
+  tutorial_ready?: boolean;
+  tutorial_reason?: string | null;
   /**
    * The backend's configured compose wall clock
    * (ELSPETH_WEB__COMPOSER_TIMEOUT_SECONDS). The SPA derives its compose
@@ -890,6 +938,27 @@ export interface SystemStatus {
    * server always sends it.
    */
   composer_timeout_seconds?: number;
+}
+
+export type PluginPolicyReadinessRowId =
+  | "policy_compilation"
+  | "required_core"
+  | "local_capability_configuration"
+  | "live_health"
+  | "tutorial_profile"
+  | "tutorial_required_control_coverage";
+
+export interface PluginPolicyReadinessRow {
+  id: PluginPolicyReadinessRowId;
+  label: string;
+  status: "ok" | "warning" | "error" | "not_applicable";
+  summary: string;
+  detail: string | null;
+}
+
+export interface PluginPolicyReadinessSnapshot {
+  rows: readonly PluginPolicyReadinessRow[];
+  tutorial_ready: boolean;
 }
 
 // ── Blob Manager ────────────────────────────────────────────────────────────
@@ -1005,6 +1074,7 @@ export interface AuditReadinessSnapshot {
   checked_at: string;
   rows: readonly ReadinessRow[];
   validation_result: ValidationResult;
+  plugin_policy_readiness?: PluginPolicyReadinessSnapshot | null;
 }
 
 export interface AuditReadinessExplain {

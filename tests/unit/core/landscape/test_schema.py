@@ -4,8 +4,11 @@
 from datetime import UTC, datetime
 from enum import StrEnum
 
+import pytest
+
 import elspeth.core.landscape.schema as schema
 from elspeth.contracts import Determinism
+from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
 from elspeth.core.landscape.schema import (
     RunSourceLifecycleState,
@@ -82,6 +85,46 @@ class TestEnumCheckConstraints:
         assert _check_sql("token_work_items", "ck_token_work_items_lease_owner_required_when_leased") == (
             f"(status = {leased} AND lease_owner IS NOT NULL AND length(lease_owner) > 0) OR status != {leased}"
         )
+
+
+class TestWebPluginPolicyEvidence:
+    """Epoch-23 web-policy evidence is canonical and contains no private bindings."""
+
+    @staticmethod
+    def _evidence(**overrides: object) -> WebPluginPolicyEvidence:
+        values: dict[str, object] = {
+            "schema_version": 1,
+            "policy_hash": "a" * 64,
+            "snapshot_hash": "b" * 64,
+            "authorized_plugin_ids": ("sink:json", "source:csv", "transform:llm"),
+            "available_plugin_ids": ("sink:json", "source:csv", "transform:llm"),
+            "control_modes": (("content_safety", "recommend"), ("llm", "required")),
+            "selected_implementations": (("content_safety", None), ("llm", "transform:llm")),
+            "selected_profile_aliases": (("transform:llm", "tutorial"),),
+            "plugin_code_identities": (
+                ("sink:json", "1.0.0", "sha256:1111111111111111"),
+                ("source:csv", "1.0.0", "sha256:2222222222222222"),
+                ("transform:llm", "1.0.0", "sha256:3333333333333333"),
+            ),
+            "binding_generation_fingerprint": "c" * 64,
+            "decision_codes": ("policy_allowed",),
+        }
+        values.update(overrides)
+        return WebPluginPolicyEvidence(**values)  # type: ignore[arg-type]
+
+    def test_accepts_canonical_audit_safe_evidence(self) -> None:
+        assert self._evidence().decision_codes == ("policy_allowed",)
+
+    def test_rejects_noncanonical_hashes_and_sets(self) -> None:
+        with pytest.raises(ValueError, match="policy_hash"):
+            self._evidence(policy_hash="A" * 64)
+        with pytest.raises(ValueError, match="canonical"):
+            self._evidence(authorized_plugin_ids=("source:csv", "sink:json"))
+
+    @pytest.mark.parametrize("alias", ["API_KEY", "provider/model", "private.profile", " tutorial"])
+    def test_rejects_private_or_nonopaque_profile_aliases(self, alias: str) -> None:
+        with pytest.raises(ValueError, match="profile alias"):
+            self._evidence(selected_profile_aliases=(("transform:llm", alias),))
 
 
 class TestNodesDeterminismColumn:

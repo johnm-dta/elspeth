@@ -34,6 +34,7 @@ from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
@@ -45,8 +46,9 @@ from elspeth.web.composer.redaction import (
 from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import _execute_create_blob
-from elspeth.web.composer.tools._common import ToolContext
+from elspeth.web.composer.tools._common import ToolContext as _ToolContext
 from elspeth.web.composer.tools.blobs import _blob_creation_provenance
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -70,6 +72,16 @@ def _mock_catalog() -> MagicMock:
     # test actually consults it.  spec=CatalogService keeps the mock honest
     # against future protocol changes (I8 — test-analyst review remediation).
     return MagicMock(spec=CatalogService)
+
+
+def ToolContext(*, catalog: CatalogService, **kwargs: Any) -> _ToolContext:
+    """Build the explicit policy context required by promoted handlers."""
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return _ToolContext(
+        catalog=PolicyCatalogView.for_trained_operator(catalog, snapshot),
+        plugin_snapshot=snapshot,
+        **kwargs,
+    )
 
 
 def _session_engine_with_session() -> tuple[Any, str]:

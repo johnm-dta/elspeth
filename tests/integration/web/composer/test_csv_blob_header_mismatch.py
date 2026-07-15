@@ -13,9 +13,11 @@ from sqlalchemy.pool import StaticPool
 
 from elspeth.plugins.infrastructure.manager import PluginManager
 from elspeth.web.blobs.service import content_hash
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.service import CatalogServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import execute_tool
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -24,10 +26,12 @@ _HEADER_MISMATCH_CODE = "csv_source_blob_header_mismatch"
 _HEADER_RESOLUTION_ERROR_CODE = "csv_source_field_resolution_error"
 
 
-def _catalog() -> CatalogServiceImpl:
+def _catalog() -> PolicyCatalogView:
     manager = PluginManager()
     manager.register_builtin_plugins()
-    return CatalogServiceImpl(manager)
+    full_catalog = CatalogServiceImpl(manager)
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(full_catalog)
+    return PolicyCatalogView.for_trained_operator(full_catalog, snapshot)
 
 
 def _empty_state() -> CompositionState:
@@ -118,6 +122,7 @@ def _state_with_blob_source(
         },
         _empty_state(),
         catalog,
+        plugin_snapshot=catalog.snapshot,
         session_engine=engine,
         session_id=session_id,
     )
@@ -138,17 +143,20 @@ def _state_with_blob_source(
         },
         result.updated_state,
         catalog,
+        plugin_snapshot=catalog.snapshot,
     )
     assert result.success is True, result.data
     return result.updated_state
 
 
 def _preview_data(engine: Engine, session_id: str, state: CompositionState) -> dict[str, Any]:
+    catalog = _catalog()
     result = execute_tool(
         "preview_pipeline",
         {},
         state,
-        _catalog(),
+        catalog,
+        plugin_snapshot=catalog.snapshot,
         session_engine=engine,
         session_id=session_id,
     )

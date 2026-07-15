@@ -5,14 +5,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
-import json
 import os
 import sys
 import time
 import weakref
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
+from uuid import UUID
 
 import httpx
 import structlog
@@ -21,11 +22,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from opentelemetry import metrics
-from opentelemetry.exporter.prometheus import PrometheusMetricReader
-from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.metrics import Counter, Histogram
 from opentelemetry.util.types import AttributeValue
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -38,7 +38,7 @@ from elspeth.contracts.secrets import (
     FingerprintKeyMissingError,
     SecretDecryptionError,
 )
-from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.plugins.transforms.llm.model_catalog import (
@@ -46,13 +46,24 @@ from elspeth.plugins.transforms.llm.model_catalog import (
     read_openrouter_catalog_snapshot_id,
 )
 from elspeth.web.audit_readiness.routes import create_audit_readiness_router
-from elspeth.web.audit_readiness.service import ReadinessService
+from elspeth.web.audit_readiness.service import ReadinessService, build_boot_plugin_policy_readiness
 from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.auth.local import LocalAuthProvider
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.protocol import AuthProvider
 from elspeth.web.auth.routes import create_auth_router
-from elspeth.web.auth.urls import validate_oidc_authorization_endpoint, validate_oidc_issuer
+from elspeth.web.auth.urls import (
+    oidc_browser_endpoint_origin,
+    validate_oidc_browser_endpoints,
+    validate_oidc_issuer,
+)
+from elspeth.web.aws_ecs_startup import (
+    _CONNECT_TIMEOUT_SECONDS,
+    AwsEcsSchemaNotReadyError,
+    enforce_aws_ecs_contract,
+    require_runtime_directories_mounted,
+    validate_only_schema_or_raise,
+)
 from elspeth.web.blobs.routes import create_blobs_router
 from elspeth.web.blobs.service import BlobServiceImpl
 from elspeth.web.catalog.routes import catalog_router
@@ -61,8 +72,9 @@ from elspeth.web.composer.progress import ComposerProgressRegistry
 from elspeth.web.composer.service import ComposerServiceImpl
 from elspeth.web.composer.tutorial_abandon_routes import create_tutorial_abandon_router
 from elspeth.web.composer.tutorial_run_routes import create_tutorial_run_router
-from elspeth.web.config import WebSettings, _allow_insecure_test_keys
+from elspeth.web.config import WebSettings, _allow_insecure_test_keys, settings_from_env
 from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.deployment_contract import DEPLOYMENT_TARGET_AWS_ECS
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.routes import create_execution_router
 from elspeth.web.execution.runtime_preflight import RuntimePreflightCoordinator
@@ -70,15 +82,29 @@ from elspeth.web.execution.service import ExecutionServiceImpl
 from elspeth.web.execution.websocket_ticket import WebSocketTicketStore
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.middleware.request_id import RequestIdMiddleware
+from elspeth.web.operator_telemetry import bootstrap_operator_telemetry
 from elspeth.web.preferences.routes import create_preferences_router
 from elspeth.web.preferences.service import CorruptPreferencesError, PreferencesService
+from elspeth.web.readiness import (
+    ReadinessCache,
+    ReadinessProbeRunner,
+    overall_timeout_report,
+    readiness_report,
+)
+from elspeth.web.schema_probe import postgres_engine_kwargs
 from elspeth.web.secrets.routes import create_secrets_router
 from elspeth.web.secrets.server_store import ServerSecretStore
 from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
 from elspeth.web.secrets.user_store import UserSecretStore
 from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError, AuditStoryNotRecordedError
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.protocol import AuditAccessLogWriteError, RunAlreadyActiveError, RunRecord, StaleComposeStateError
+from elspeth.web.sessions.protocol import (
+    LANDSCAPE_RECONCILIATION_PENDING_SUFFIX,
+    AuditAccessLogWriteError,
+    RunAlreadyActiveError,
+    RunRecord,
+    StaleComposeStateError,
+)
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
@@ -87,31 +113,16 @@ from elspeth.web.shareable_reviews.routes import create_shareable_reviews_router
 from elspeth.web.shareable_reviews.service import ShareableReviewService
 from elspeth.web.shareable_reviews.signer import ShareTokenSigner
 
-# B1-r3: Wire a real MeterProvider at module-import time (process-global per
-# OTel design — NOT inside create_app, which may be called multiple times in
-# tests). Without this, get_meter() returns OTel's NoOpMeter and every
-# counter.add() call is silently discarded. The PrometheusMetricReader backs
-# the /metrics exposition endpoint mounted in create_app() below.
-#
-# Side effect on existing counters: after this commit,
-# composer.preferences.patch_total, composer.redaction.*, composer.service.*,
-# composer.tools.*, and blobs.* all start emitting real data. These counters
-# were always correctly instrumented — they were just exporting to /dev/null
-# because no provider was set. The first production deploy after this commit
-# will surface metrics that were previously invisible. This is observability
-# landing, not a regression.
-_PROMETHEUS_READER = PrometheusMetricReader()
-metrics.set_meter_provider(MeterProvider(metric_readers=[_PROMETHEUS_READER]))
-_COMPOSER_BOOT_CONFIG_COUNTER = metrics.get_meter(__name__).create_counter(
-    "composer.boot_config",
-    description="Composer effective sampling config recorded at boot",
-)
-_COMPOSER_BOOT_CONFIG_PROBE_LATENCY = metrics.get_meter(__name__).create_histogram(
-    "composer.boot_config.probe_latency_ms",
-    description="Composer boot config probe latency in milliseconds",
-    unit="ms",
-)
+# Assigned by create_app only after the idempotent process MeterProvider
+# bootstrap. Keeping these names module-level preserves the existing lifespan
+# test seams without creating instruments as an import side effect.
+_COMPOSER_BOOT_CONFIG_COUNTER: Counter
+_COMPOSER_BOOT_CONFIG_PROBE_LATENCY: Histogram
 _COMPOSER_BOOT_PROBE_TIMEOUT_SECONDS = 5.0
+# Reserve bounded headroom inside the public five-second readiness contract
+# for timeout finalization, redacted logging, JSON serialization, and ASGI
+# response dispatch. The shared cache task remains shielded from this waiter.
+_READINESS_ROUTE_COMPUTE_TIMEOUT_SECONDS = 4.5
 
 _RETRYABLE_STORAGE_ERRNOS: frozenset[int] = frozenset(
     {
@@ -127,26 +138,46 @@ def _dispose_session_engine(engine: Engine) -> None:
     engine.dispose()
 
 
-class _AuthorizationEndpointDiscoveryDocument(BaseModel):
-    """Minimal OIDC discovery shape required by the web app."""
+def _close_readiness_runner(runner: ReadinessProbeRunner) -> None:
+    """Close readiness workers for app instances that never run lifespan."""
+    runner.close()
 
+
+class _BrowserEndpointDiscoveryDocument(BaseModel):
+    """Minimal OIDC discovery shape required by the browser login flow."""
+
+    model_config = ConfigDict(hide_input_in_errors=True)
+    issuer: str
     authorization_endpoint: str
+    token_endpoint: str
 
-    @field_validator("authorization_endpoint")
+    @field_validator("issuer", "authorization_endpoint", "token_endpoint")
     @classmethod
-    def _validate_authorization_endpoint(cls, value: str) -> str:
+    def _validate_nonblank(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("authorization_endpoint must not be blank")
+            raise ValueError("discovery browser endpoint field must not be blank")
         return value
 
 
-def _validate_authorization_endpoint_discovery_document(discovery: object, *, issuer: str) -> str:
-    """Validate the discovery document shape and return authorization_endpoint."""
+def _validate_browser_endpoint_discovery_document(
+    discovery: object,
+    *,
+    issuer: str,
+    allowed_origins: tuple[str, ...] = (),
+) -> tuple[str, str]:
+    """Validate discovery issuer and return its exact browser endpoint pair."""
     try:
-        document = _AuthorizationEndpointDiscoveryDocument.model_validate(discovery)
+        document = _BrowserEndpointDiscoveryDocument.model_validate(discovery)
     except ValidationError as exc:
-        raise ValueError("OIDC discovery document must provide a non-empty string 'authorization_endpoint'") from exc
-    return validate_oidc_authorization_endpoint(document.authorization_endpoint, issuer=issuer)
+        raise ValueError("OIDC discovery document failed required browser endpoint shape check") from exc
+    if document.issuer != issuer:
+        raise ValueError("OIDC discovery document failed exact issuer check")
+    return validate_oidc_browser_endpoints(
+        document.authorization_endpoint,
+        document.token_endpoint,
+        issuer=issuer,
+        allowed_origins=allowed_origins,
+    )
 
 
 def _parse_worker_count(raw_value: str, *, signal_name: str) -> int:
@@ -159,33 +190,61 @@ def _parse_worker_count(raw_value: str, *, signal_name: str) -> int:
         ) from exc
 
 
-def _finalize_orphaned_landscape_runs(landscape_url: str, cancelled_runs: list[RunRecord]) -> int:
-    """Mark Landscape rows interrupted for session runs cancelled as orphans."""
-    landscape_run_ids: list[str] = []
-    seen: set[str] = set()
+def _finalize_orphaned_landscape_runs(
+    landscape_url: str,
+    cancelled_runs: list[RunRecord],
+    *,
+    create_tables: bool = True,
+) -> tuple[frozenset[UUID], frozenset[UUID]]:
+    """Idempotently reconcile candidates and classify complete versus absent."""
+    complete_run_ids: set[UUID] = set()
+    absent_run_ids: set[UUID] = set()
+    by_landscape_id: dict[str, list[UUID]] = {}
     for run in cancelled_runs:
-        if run.landscape_run_id is None or run.landscape_run_id in seen:
+        if run.landscape_run_id is None:
+            complete_run_ids.add(run.id)
             continue
-        seen.add(run.landscape_run_id)
-        landscape_run_ids.append(run.landscape_run_id)
+        by_landscape_id.setdefault(run.landscape_run_id, []).append(run.id)
 
-    if not landscape_run_ids:
-        return 0
+    if not by_landscape_id:
+        return frozenset(complete_run_ids), frozenset()
 
-    finalized = 0
-    with LandscapeDB.from_url(landscape_url) as landscape_db:
+    with LandscapeDB.from_url(landscape_url, create_tables=create_tables) as landscape_db:
         lifecycle = RecorderFactory(landscape_db).run_lifecycle
-        for landscape_run_id in landscape_run_ids:
+        for landscape_run_id, session_run_ids in by_landscape_id.items():
             landscape_run = lifecycle.get_run(landscape_run_id)
             if landscape_run is None:
-                raise AuditIntegrityError(
-                    f"Orphan cleanup cancelled a session run with landscape_run_id={landscape_run_id!r}, "
-                    "but no matching Landscape run row exists."
-                )
+                absent_run_ids.update(session_run_ids)
+                continue
             if landscape_run.status == RunStatus.RUNNING:
                 lifecycle.complete_run(landscape_run_id, RunStatus.INTERRUPTED)
-                finalized += 1
-    return finalized
+            complete_run_ids.update(session_run_ids)
+    if absent_run_ids:
+        structlog.get_logger().error(
+            "orphan_landscape_run_absent",
+            outcome="absent",
+            count=len(absent_run_ids),
+            operator_action="investigate audit-row absence",
+        )
+    return frozenset(complete_run_ids), frozenset(absent_run_ids)
+
+
+async def _reconcile_pending_landscape_runs(
+    session_service: SessionServiceImpl,
+    landscape_url: str,
+    *,
+    create_tables: bool,
+) -> None:
+    candidates = await session_service.list_pending_landscape_reconciliations()
+    complete_run_ids, absent_run_ids = _finalize_orphaned_landscape_runs(
+        landscape_url,
+        candidates,
+        create_tables=create_tables,
+    )
+    await session_service.mark_landscape_reconciliation_outcomes(
+        complete_run_ids=complete_run_ids,
+        absent_run_ids=absent_run_ids,
+    )
 
 
 async def _periodic_orphan_cleanup(
@@ -196,6 +255,7 @@ async def _periodic_orphan_cleanup(
     interval_seconds: int,
     max_age_seconds: int,
     landscape_url: str | None = None,
+    create_tables: bool = True,
 ) -> None:
     """Background task that periodically cancels orphaned runs.
 
@@ -214,6 +274,8 @@ async def _periodic_orphan_cleanup(
     slog = structlog.get_logger()
     while True:
         await asyncio.sleep(interval_seconds)
+        cancelled = 0
+        live_run_ids: frozenset[str] = frozenset()
         try:
             live_run_ids = execution_service.get_live_run_ids()
             if landscape_url is None:
@@ -226,16 +288,15 @@ async def _periodic_orphan_cleanup(
                 cancelled_runs = await session_service.cancel_all_orphaned_run_records(
                     max_age_seconds=max_age_seconds,
                     exclude_run_ids=live_run_ids,
-                    reason="Orphaned by periodic cleanup — no active executor thread",
+                    reason=(f"Orphaned by periodic cleanup — no active executor thread {LANDSCAPE_RECONCILIATION_PENDING_SUFFIX}"),
                 )
-                _finalize_orphaned_landscape_runs(landscape_url, cancelled_runs)
                 cancelled = len(cancelled_runs)
-            if cancelled:
-                telemetry.orphaned_runs_cancelled_total.add(
-                    cancelled,
-                    attributes={"source": "periodic", "excluded_live_runs": len(live_run_ids)},
+                await _reconcile_pending_landscape_runs(
+                    session_service,
+                    landscape_url,
+                    create_tables=create_tables,
                 )
-        except (SQLAlchemyError, OSError) as cleanup_exc:
+        except (SQLAlchemyError, OSError, SchemaCompatibilityError) as cleanup_exc:
             # Narrow catch — only recoverable audit/IO failures are
             # absorbed so the loop retries on the next interval.
             # SQLAlchemyError covers DB-layer transients raised from
@@ -268,6 +329,11 @@ async def _periodic_orphan_cleanup(
                 "periodic_orphan_cleanup_failed",
                 exc_class=type(cleanup_exc).__name__,
             )
+        if cancelled:
+            telemetry.orphaned_runs_cancelled_total.add(
+                cancelled,
+                attributes={"source": "periodic", "excluded_live_runs": len(live_run_ids)},
+            )
 
 
 @asynccontextmanager
@@ -287,11 +353,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Single-process server: every non-terminal run is orphaned after restart.
     # No age filter — cancel ALL pending/running runs immediately.
     settings: WebSettings = app.state.settings
+    create_landscape_tables = settings.deployment_target != DEPLOYMENT_TARGET_AWS_ECS
     session_service = app.state.session_service
-    cancelled_runs = await session_service.cancel_all_orphaned_run_records(
-        reason="Orphaned by server restart — no active process",
-    )
-    _finalize_orphaned_landscape_runs(settings.get_landscape_url(), cancelled_runs)
+    cancelled_runs: list[RunRecord] = []
+    try:
+        cancelled_runs = await session_service.cancel_all_orphaned_run_records(
+            reason=f"Orphaned by server restart — no active process {LANDSCAPE_RECONCILIATION_PENDING_SUFFIX}",
+        )
+        await _reconcile_pending_landscape_runs(
+            session_service,
+            settings.get_landscape_url(),
+            create_tables=create_landscape_tables,
+        )
+    except (SQLAlchemyError, OSError, SchemaCompatibilityError) as cleanup_exc:
+        slog.error(
+            "lifespan_orphan_cleanup_failed",
+            exc_class=type(cleanup_exc).__name__,
+        )
     cancelled = len(cancelled_runs)
     if cancelled:
         app.state.sessions_telemetry.orphaned_runs_cancelled_total.add(
@@ -299,7 +377,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             attributes={"source": "startup", "excluded_live_runs": 0},
         )
 
-    # Resolve OIDC authorization_endpoint from discovery or explicit config
+    # Resolve the paired browser endpoints from discovery or explicit config.
     if settings.auth_provider in ("oidc", "entra"):
         if settings.oidc_issuer:
             issuer = validate_oidc_issuer(settings.oidc_issuer)
@@ -308,26 +386,33 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         else:
             raise SystemExit("FATAL: OIDC discovery requires either oidc_issuer or entra_tenant_id to derive the issuer URL.")
 
-        if settings.oidc_authorization_endpoint:
-            app.state.oidc_authorization_endpoint = validate_oidc_authorization_endpoint(
+        if settings.oidc_authorization_endpoint and settings.oidc_token_endpoint:
+            authorization_endpoint, token_endpoint = validate_oidc_browser_endpoints(
                 settings.oidc_authorization_endpoint,
+                settings.oidc_token_endpoint,
                 issuer=issuer,
+                allowed_origins=settings.oidc_authorization_allowed_origins,
             )
+            app.state.oidc_authorization_endpoint = authorization_endpoint
+            app.state.oidc_token_endpoint = token_endpoint
         else:
             discovery_url = f"{issuer}/.well-known/openid-configuration"
             try:
                 async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
                     resp = await client.get(discovery_url)
                     resp.raise_for_status()
-                    app.state.oidc_authorization_endpoint = _validate_authorization_endpoint_discovery_document(
+                    authorization_endpoint, token_endpoint = _validate_browser_endpoint_discovery_document(
                         resp.json(),
                         issuer=issuer,
+                        allowed_origins=settings.oidc_authorization_allowed_origins,
                     )
+                    app.state.oidc_authorization_endpoint = authorization_endpoint
+                    app.state.oidc_token_endpoint = token_endpoint
             except (httpx.HTTPError, ValueError) as exc:
                 raise SystemExit(
-                    f"FATAL: OIDC discovery failed for issuer {issuer!r}: {exc}. "
-                    f"Either fix the issuer URL or set oidc_authorization_endpoint explicitly."
-                ) from exc
+                    f"FATAL: OIDC discovery failed browser endpoint check ({type(exc).__name__}). "
+                    "Configure a valid explicit authorization_endpoint/token_endpoint pair or fix discovery."
+                ) from None
 
     # Sub-5: Construct ProgressBroadcaster and ExecutionServiceImpl
     # These require a running event loop, which is only available here.
@@ -344,6 +429,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         telemetry=app.state.sessions_telemetry,
         blob_service=app.state.blob_service,
         secret_service=app.state.scoped_secret_resolver,
+        plugin_snapshot_factory=app.state.plugin_snapshot_factory.for_user_id,
+        operator_profile_registry=app.state.operator_profile_registry,
+        web_plugin_policy=app.state.web_plugin_policy,
     )
     app.state.execution_service = execution_service
 
@@ -359,6 +447,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         session_service=session_service,
         scoped_secret_resolver=app.state.scoped_secret_resolver,
         settings=settings,
+        web_plugin_policy=app.state.web_plugin_policy,
+        plugin_snapshot_factory=app.state.plugin_snapshot_factory.for_user_id,
+        operator_profile_registry=app.state.operator_profile_registry,
+        tutorial_profile=settings.tutorial_llm_profile,
     )
 
     # ShareableReviewService — Phase 6A completion gestures.
@@ -517,6 +609,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             interval_seconds=settings.orphan_run_check_interval_seconds,
             max_age_seconds=settings.orphan_run_max_age_seconds,
             landscape_url=settings.get_landscape_url(),
+            create_tables=create_landscape_tables,
         )
     )
 
@@ -528,71 +621,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         with contextlib.suppress(asyncio.CancelledError):
             await orphan_task
 
+        app.state.readiness_probe_runner.close()
+
         # Shutdown execution service thread pool without blocking the loop:
         # worker cleanup still schedules terminal-state writes back onto it.
         await execution_service.shutdown()
+        # Tier-2 operator telemetry stops only after all audited execution work
+        # has drained. Expected collector outages are bounded/redacted inside
+        # the runtime and can never rewrite a committed Landscape record.
+        await app.state.operator_telemetry.shutdown()
         # Tear down the process-wide run_sync_in_worker pool before disposing
         # the engine, so no worker thread races a query against a disposed pool.
         from elspeth.web.async_workers import shutdown_async_workers
 
         await shutdown_async_workers()
         app.state.session_engine.dispose()
-
-
-# Fields that accept JSON-encoded collection values from environment variables.
-# Add any new tuple-typed WebSettings fields here so _settings_from_env()
-# JSON-decodes them.  Scalar fields (str, int, float, Path) are handled by Pydantic.
-_JSON_COLLECTION_FIELDS: frozenset[str] = frozenset({"cors_origins", "server_secret_allowlist"})
-
-
-def _settings_from_env() -> WebSettings:
-    """Construct WebSettings from ELSPETH_WEB__* environment variables.
-
-    Called when create_app() is invoked without explicit settings (e.g.,
-    by uvicorn's factory protocol).  The CLI sets these env vars before
-    calling uvicorn.run().
-
-    Collection-typed fields are JSON-decoded via ``_JSON_COLLECTION_FIELDS``.
-    The JSON literal ``null`` is decoded to ``None`` for all fields — this is
-    the env-var convention for "clear this optional setting."  Pydantic rejects
-    ``None`` for non-nullable fields. Unknown setting names are rejected before
-    model construction so deployment typos fail startup with the original
-    environment variable name. All other scalar values pass as raw strings; Pydantic coerces
-    str→int, str→float, str→Path automatically.
-    """
-    kwargs: dict[str, object] = {}
-    prefix = "ELSPETH_WEB__"
-    for key, value in os.environ.items():
-        if key.startswith(prefix):
-            field_name = key[len(prefix) :].lower()
-            if field_name not in WebSettings.model_fields:
-                raise RuntimeError(f"Unknown ELSPETH_WEB__ setting: {key}")
-            if field_name in _JSON_COLLECTION_FIELDS:
-                # These fields are tuple-typed on WebSettings; the env-var
-                # convention is a JSON-encoded array. A non-JSON value cannot
-                # become a valid collection, so falling back to the raw string
-                # would only defer to a confusing downstream Pydantic
-                # "not a valid tuple" error. Per the web trust model, malformed
-                # startup config is a hard failure — refuse to start with a
-                # message that names the offending variable.
-                try:
-                    parsed = json.loads(value)
-                except (json.JSONDecodeError, ValueError) as exc:
-                    raise RuntimeError(
-                        f"ELSPETH_WEB__{field_name.upper()} must be valid JSON (a JSON array for collection-typed settings), got {value!r}."
-                    ) from exc
-                kwargs[field_name] = tuple(parsed) if isinstance(parsed, list) else parsed
-            elif value == "null":
-                kwargs[field_name] = None
-            else:
-                kwargs[field_name] = value
-    # DC-2 FIX-L: ``shareable_link_signing_key`` is typed ``SecretBytes`` on
-    # the model, but the env-var ingest path passes a str (base64-encoded)
-    # which a ``mode="before"`` validator on the field decodes to bytes.
-    # Mypy can't see through Pydantic's pre-validators, so the **kwargs
-    # widening is reported as a type error here. The cast is safe because
-    # Pydantic raises ``ValidationError`` on any mismatch at runtime.
-    return WebSettings(**kwargs)  # type: ignore[arg-type]
 
 
 class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
@@ -655,6 +698,41 @@ class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+_SPA_CSP_PREFIX = (
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "font-src 'self'; img-src 'self' data:; "
+    "connect-src 'self' ws://localhost:* wss://localhost:*"
+)
+
+
+class _BrowserDocumentHeadersMiddleware(BaseHTTPMiddleware):
+    """Apply callback secrecy headers and the runtime OIDC connect policy."""
+
+    async def dispatch(self, request: StarletteRequest, call_next):  # type: ignore[no-untyped-def]
+        response = await call_next(request)
+        content_type = response.headers.get("content-type", "")
+        if not content_type.lower().startswith("text/html"):
+            return response
+
+        connect_origin: str | None = None
+        token_endpoint = getattr(request.app.state, "oidc_token_endpoint", None)
+        if isinstance(token_endpoint, str):
+            token_origin = oidc_browser_endpoint_origin(token_endpoint)
+            request_port = request.url.port
+            default_port = 443 if request.url.scheme == "https" else 80
+            request_host = request.url.hostname or ""
+            request_origin = f"{request.url.scheme}://{request_host.lower()}"
+            if request_port not in (None, default_port):
+                request_origin += f":{request_port}"
+            if token_origin != request_origin:
+                connect_origin = token_origin
+
+        response.headers["Content-Security-Policy"] = _SPA_CSP_PREFIX if connect_origin is None else f"{_SPA_CSP_PREFIX} {connect_origin}"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+
 def create_app(settings: WebSettings | None = None) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -666,9 +744,29 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         Configured FastAPI instance with CORS middleware and health endpoint.
     """
     if settings is None:
-        settings = _settings_from_env()
+        settings = settings_from_env()
+
+    # Reject an incomplete AWS deployment policy before installing the
+    # process-global provider. A failed first create_app() must not strand a
+    # later corrected AWS boot on a Prometheus-only provider.
+    if settings.deployment_target == DEPLOYMENT_TARGET_AWS_ECS:
+        enforce_aws_ecs_contract(settings)
+
+    operator_runtime = bootstrap_operator_telemetry(settings)
+    operator_meter = metrics.get_meter(__name__)
+    global _COMPOSER_BOOT_CONFIG_COUNTER, _COMPOSER_BOOT_CONFIG_PROBE_LATENCY
+    _COMPOSER_BOOT_CONFIG_COUNTER = operator_meter.create_counter(
+        "composer.boot_config",
+        description="Composer effective sampling config recorded at boot",
+    )
+    _COMPOSER_BOOT_CONFIG_PROBE_LATENCY = operator_meter.create_histogram(
+        "composer.boot_config.probe_latency_ms",
+        description="Composer boot config probe latency in milliseconds",
+        unit="ms",
+    )
 
     app = FastAPI(title="ELSPETH Web", version="0.1.0", lifespan=lifespan)
+    app.state.operator_telemetry = operator_runtime
 
     @app.exception_handler(AuditIntegrityError)
     async def _audit_integrity_error_handler(_request: Request, exc: AuditIntegrityError) -> JSONResponse:
@@ -809,22 +907,56 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     # is acceptable: the response carries the standard 413 semantics and
     # a body-too-large rejection has no useful pairing to a slog event.
     app.add_middleware(_BodySizeLimitMiddleware)
+    app.add_middleware(_BrowserDocumentHeadersMiddleware)
 
     app.state.settings = settings
 
-    # Ensure data directory and subdirectories exist before any DB access.
-    # get_landscape_url() defaults to data_dir/runs/audit.db — SQLite does
-    # not create parent directories, so we must ensure runs/ exists too.
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
-    (settings.data_dir / "runs").mkdir(exist_ok=True)
+    aws_session_engine: Engine | None = None
+    if settings.deployment_target == DEPLOYMENT_TARGET_AWS_ECS:
+        require_runtime_directories_mounted(settings)
+        raw_session_url = settings.session_db_url
+        assert raw_session_url is not None
+        try:
+            aws_session_engine = create_session_engine(
+                raw_session_url,
+                connect_args={"connect_timeout": _CONNECT_TIMEOUT_SECONDS},
+                **postgres_engine_kwargs(raw_session_url),
+            )
+        except (SQLAlchemyError, ImportError):
+            raise AwsEcsSchemaNotReadyError(
+                "AWS ECS session_schema engine could not be constructed. Run 'elspeth doctor aws-ecs' for full diagnostics."
+            ) from None
+        try:
+            validate_only_schema_or_raise(settings, aws_session_engine)
+        except BaseException:
+            aws_session_engine.dispose()
+            raise
+        weakref.finalize(app, _dispose_session_engine, aws_session_engine)
+    else:
+        # Ensure data directory and subdirectories exist before any DB access.
+        # get_landscape_url() defaults to data_dir/runs/audit.db — SQLite does
+        # not create parent directories, so we must ensure runs/ exists too.
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+        (settings.data_dir / "runs").mkdir(exist_ok=True)
 
     # --- Catalog ---
     app.state.catalog_service = create_catalog_service()
-    app.include_router(
-        catalog_router,
-        prefix="/api/catalog",
-        dependencies=[Depends(get_current_user)],
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+    from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
+    from elspeth.web.plugin_policy.profiles import RuntimeWebPluginConfig
+
+    app.state.runtime_web_plugin_config = RuntimeWebPluginConfig.from_settings(settings)
+    app.state.web_plugin_policy = compile_web_plugin_policy(
+        registry=get_shared_plugin_manager(),
+        settings=app.state.runtime_web_plugin_config,
     )
+    from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
+
+    app.state.operator_profile_registry = OperatorProfileRegistry(
+        policy=app.state.web_plugin_policy,
+        settings=app.state.runtime_web_plugin_config,
+    )
+    app.include_router(catalog_router, prefix="/api/catalog")
 
     # --- Auth provider setup ---
     auth_provider: AuthProvider
@@ -844,6 +976,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
             audience=settings.oidc_audience,
             jwks_cache_ttl_seconds=settings.jwks_cache_ttl_seconds,
             jwks_failure_retry_seconds=settings.jwks_failure_retry_seconds,
+            audience_claim=settings.oidc_audience_claim,
         )
     elif settings.auth_provider == "entra":
         from elspeth.web.auth.entra import EntraAuthProvider
@@ -860,7 +993,8 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         raise RuntimeError(f"Unsupported auth provider: {settings.auth_provider}")
     app.state.auth_provider = auth_provider
     app.state.auth_audit_recorder = AuthAuditRecorder.from_settings(settings)
-    app.state.oidc_authorization_endpoint = None  # Set by lifespan for OIDC/Entra
+    app.state.oidc_authorization_endpoint = settings.oidc_authorization_endpoint
+    app.state.oidc_token_endpoint = settings.oidc_token_endpoint
 
     # W16/S3: Secret key production guard -- hard crash
     if settings.secret_key == "change-me-in-production" and not _allow_insecure_test_keys(settings.host):
@@ -871,13 +1005,16 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         )
 
     # --- Session database setup ---
-    session_db_url = settings.get_session_db_url()
-    session_engine = create_session_engine(session_db_url)
-    initialize_session_schema(session_engine)
-    session_db_path = session_engine.url.database
-    if session_engine.dialect.name == "sqlite" and session_db_path not in (None, ":memory:"):
-        session_engine.dispose()
-    weakref.finalize(app, _dispose_session_engine, session_engine)
+    if aws_session_engine is not None:
+        session_engine = aws_session_engine
+    else:
+        session_db_url = settings.get_session_db_url()
+        session_engine = create_session_engine(session_db_url, **postgres_engine_kwargs(session_db_url))
+        initialize_session_schema(session_engine)
+        session_db_path = session_engine.url.database
+        if session_engine.dialect.name == "sqlite" and session_db_path not in (None, ":memory:"):
+            session_engine.dispose()
+        weakref.finalize(app, _dispose_session_engine, session_engine)
 
     # Build the sessions-telemetry container ONCE per process and share it
     # across every consumer (SessionServiceImpl, ExecutionServiceImpl, and
@@ -895,6 +1032,10 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     )
     app.state.session_service = session_service
     app.state.session_engine = session_engine  # available to guided step handlers
+    readiness_probe_runner = ReadinessProbeRunner()
+    app.state.readiness_probe_runner = readiness_probe_runner
+    app.state.readiness_cache = ReadinessCache()
+    weakref.finalize(app, _close_readiness_runner, readiness_probe_runner)
 
     # --- Preferences service ---
     # Per-user composer settings (default_composer_mode, banner_dismissed_at,
@@ -912,8 +1053,22 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     # --- Secret service ---
     user_secret_store = UserSecretStore(session_engine, settings.secret_key)
     server_secret_store = ServerSecretStore(settings.server_secret_allowlist)
+    app.state.user_secret_store = user_secret_store
+    app.state.server_secret_store = server_secret_store
     app.state.secret_service = WebSecretService(user_secret_store, server_secret_store)
     app.state.scoped_secret_resolver = ScopedSecretResolver(app.state.secret_service, settings.auth_provider)
+    from elspeth.web.plugin_policy.availability import RequestPluginSnapshotFactory
+
+    app.state.plugin_snapshot_factory = RequestPluginSnapshotFactory(
+        policy=app.state.web_plugin_policy,
+        catalog=app.state.catalog_service,
+        profiles=app.state.operator_profile_registry,
+        auth_provider=settings.auth_provider,
+        secret_service=app.state.secret_service,
+        server_store=server_secret_store,
+        user_store=user_secret_store,
+        generation_key=settings.secret_key.encode("utf-8"),
+    )
 
     # --- Composer service (singleton, not per-request) ---
     runtime_preflight_coordinator = RuntimePreflightCoordinator()
@@ -925,6 +1080,8 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         session_engine=session_engine,
         secret_service=app.state.scoped_secret_resolver,
         runtime_preflight_coordinator=runtime_preflight_coordinator,
+        plugin_snapshot_factory=app.state.plugin_snapshot_factory.for_user_id,
+        operator_profile_registry=app.state.operator_profile_registry,
     )
     app.state.composer_availability = app.state.composer_service.get_availability()
     app.state.composer_progress_registry = ComposerProgressRegistry()
@@ -1160,15 +1317,42 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/api/ready")
+    async def ready(request: Request) -> JSONResponse:
+        async def compute():  # type: ignore[no-untyped-def]
+            return await readiness_report(
+                request.app.state.settings,
+                request.app.state.session_engine,
+                request.app.state.readiness_probe_runner,
+            )
+
+        try:
+            async with asyncio.timeout(_READINESS_ROUTE_COMPUTE_TIMEOUT_SECONDS):
+                report = await request.app.state.readiness_cache.get(compute)
+        except TimeoutError:
+            report = overall_timeout_report()
+        return JSONResponse(
+            status_code=200 if report.ready else 503,
+            content={"ready": report.ready, "checks": [asdict(check) for check in report.checks]},
+        )
+
     @app.get("/api/system/status")
     async def system_status() -> dict[str, object]:
         composer = app.state.composer_availability
+        plugin_policy_readiness = build_boot_plugin_policy_readiness(
+            policy=app.state.web_plugin_policy,
+            settings=app.state.runtime_web_plugin_config,
+        )
+        tutorial_profile_row = next(row for row in plugin_policy_readiness.rows if row.id == "tutorial_profile")
         return {
             "composer_available": composer.available,
             "composer_model": composer.model,
             "composer_provider": composer.provider,
             "composer_reason": composer.reason,
             "composer_missing_keys": list(composer.missing_keys),
+            "plugin_policy_readiness": plugin_policy_readiness.model_dump(mode="json"),
+            "tutorial_ready": plugin_policy_readiness.tutorial_ready,
+            "tutorial_reason": None if plugin_policy_readiness.tutorial_ready else tutorial_profile_row.summary,
             # The SPA derives its compose abort ceiling from this at boot:
             # client cap = wall clock + client grace, keeping the backend's
             # structured 422 ahead of the client abort for ANY configured
@@ -1184,9 +1368,9 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     # the non-slash variant, returning 404 because no `metrics` file exists
     # in dist/. Route handlers match before mounts in Starlette, so this
     # also wins precedence over the SPA catch-all regardless of order.
-    # Backed by the process-level _PROMETHEUS_READER wired at module import;
-    # all OTel counters/histograms registered via metrics.get_meter() feed
-    # into this endpoint automatically via the global REGISTRY.
+    # Backed by the retained process-level Prometheus reader; all OTel
+    # counters/histograms registered via metrics.get_meter() feed into this
+    # endpoint automatically via the global REGISTRY.
     @app.get("/metrics", include_in_schema=False, dependencies=[Depends(get_current_user)])
     def _prometheus_metrics() -> Response:
         # ``generate_latest()`` walks the global REGISTRY; a corrupted

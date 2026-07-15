@@ -183,6 +183,7 @@ def test_fresh_run_sweep_crash_finalizes_failed_and_preserves_evidence(
         auth_provider_type=None,
         openrouter_catalog_sha256: str = "0" * 64,
         openrouter_catalog_source: str = "bundled",
+        web_plugin_policy_evidence=None,
     ):
         # Epoch 21: _initialize_database_phase returns the CoordinationToken
         # minted with the run's leader seat alongside (factory, run).
@@ -196,6 +197,7 @@ def test_fresh_run_sweep_crash_finalizes_failed_and_preserves_evidence(
             auth_provider_type=auth_provider_type,
             openrouter_catalog_sha256=openrouter_catalog_sha256,
             openrouter_catalog_source=openrouter_catalog_source,
+            web_plugin_policy_evidence=web_plugin_policy_evidence,
         )
         captured["run_id"] = run.run_id
         captured["token_id"] = plant(factory, run.run_id)

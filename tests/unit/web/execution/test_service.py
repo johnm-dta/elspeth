@@ -35,6 +35,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from elspeth.contracts.enums import CreationModality, RunStatus
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import stable_hash
+from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.run_result import RunResult
 from elspeth.core.config import (
     CheckpointSettings,
@@ -45,7 +46,9 @@ from elspeth.core.config import (
 from elspeth.core.dag.graph import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.schema import run_attributions_table, runs_table
+from elspeth.telemetry.manager import TelemetryManager
 from elspeth.web.blobs.protocol import BlobFinalizationResult, BlobRecord, BlobServiceProtocol
+from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.errors import PipelineValidationError
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.schemas import (
@@ -60,7 +63,14 @@ from elspeth.web.execution.schemas import (
     ValidationResult,
 )
 from elspeth.web.execution.service import ExecutionServiceImpl
+from elspeth.web.execution.validation import validate_pipeline as _real_validate_pipeline
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY
+from elspeth.web.plugin_policy.models import (
+    PluginAvailability,
+    PluginAvailabilitySnapshot,
+    PluginId,
+    PluginUnavailableReason,
+)
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.protocol import (
     LEGAL_RUN_TRANSITIONS,
@@ -82,6 +92,7 @@ class _WebSettingsStub:
     """Settings collaborator for execution-service tests."""
 
     def __init__(self) -> None:
+        self.deployment_target = "default"
         self.landscape_url = "sqlite:///test_audit.db"
         self.payload_store_path = Path("/tmp/test_payloads")
         self.landscape_passphrase = None
@@ -267,6 +278,10 @@ def _mock_pipeline_settings() -> SimpleNamespace:
     objects for the runtime conversion boundary.
     """
     return SimpleNamespace(
+        sources={},
+        transforms=[],
+        aggregations=[],
+        sinks={},
         gates=[],
         coalesce=[],
         queues={},
@@ -435,7 +450,7 @@ def service(
 ) -> Iterator[ExecutionServiceImpl]:
     # AC #17: All Run CRUD goes through SessionService — no direct DB access.
     yaml_generator = _YamlGeneratorStub()
-    svc = ExecutionServiceImpl(
+    svc = ExecutionServiceImpl.for_trained_operator(
         loop=mock_loop,
         broadcaster=broadcaster,
         settings=mock_settings,
@@ -518,6 +533,143 @@ class TestExecutionFlow:
         }
 
     @pytest.mark.asyncio
+    async def test_execute_freezes_snapshot_and_distinct_configs_before_submission(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: _WebSettingsStub,
+        tmp_path: Path,
+    ) -> None:
+        session_id = uuid4()
+        (tmp_path / "blobs").mkdir()
+        (tmp_path / "outputs").mkdir()
+        source_path = tmp_path / "blobs" / "input.txt"
+        output_path = tmp_path / "outputs" / "output.jsonl"
+        source_path.write_text("Ada\n", encoding="utf-8")
+        mock_settings.data_dir = tmp_path
+        state_record = _composition_state_record(
+            session_id=session_id,
+            source_path=source_path,
+            output_path=output_path,
+            nodes=[],
+        )
+        mock_session_service.get_current_state.return_value = state_record
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+        service._plugin_snapshot_factory = lambda _user_id: snapshot
+        completed: Future[None] = Future()
+        completed.set_result(None)
+
+        with patch.object(service._executor, "submit", return_value=completed) as submit:
+            await service.execute(session_id=session_id, user_id="alice")
+
+        submitted_args = submit.call_args.args
+        assert submitted_args[4].plugin_snapshot is snapshot
+        assert submitted_args[4].executable_config is not submitted_args[4].audit_safe_config
+
+    @pytest.mark.asyncio
+    async def test_execute_lowers_profile_only_into_frozen_executable_config(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: _WebSettingsStub,
+        tmp_path: Path,
+    ) -> None:
+        from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+        from elspeth.web.composer import yaml_generator
+        from elspeth.web.config import WebSettings
+        from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
+        from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
+
+        private_model = "bedrock/anthropic.claude-3-haiku-20240307-v1:0"
+        private_region = "ap-southeast-2"
+        web_settings = WebSettings(
+            data_dir=tmp_path,
+            composer_max_composition_turns=4,
+            composer_max_discovery_turns=4,
+            composer_timeout_seconds=60,
+            composer_rate_limit_per_minute=20,
+            shareable_link_signing_key=b"0123456789abcdef0123456789abcdef",
+            llm_profiles={
+                "tutorial": {
+                    "provider": "bedrock",
+                    "model": private_model,
+                    "region_name": private_region,
+                }
+            },
+        )
+        runtime_policy = RuntimeWebPluginConfig.from_settings(web_settings)
+        policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime_policy)
+        profiles = OperatorProfileRegistry(policy=policy, settings=runtime_policy)
+        unrestricted = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+        snapshot = PluginAvailabilitySnapshot.create(
+            policy_hash=policy.policy_hash,
+            principal_scope="test:alice",
+            available=unrestricted.available,
+            unavailable=(),
+            selected=unrestricted.selected,
+            usable_profile_aliases=((PluginId("transform", "llm"), ("tutorial",)),),
+            selected_profile_aliases=((PluginId("transform", "llm"), "tutorial"),),
+            binding_generation_fingerprint="runtime-policy-generation",
+        )
+        session_id = uuid4()
+        (tmp_path / "blobs").mkdir()
+        (tmp_path / "outputs").mkdir()
+        source_path = tmp_path / "blobs" / "input.txt"
+        source_path.write_text("Ada\n", encoding="utf-8")
+        mock_settings.data_dir = tmp_path
+        mock_session_service.get_current_state.return_value = _composition_state_record(
+            session_id=session_id,
+            source_path=source_path,
+            output_path=tmp_path / "outputs" / "output.jsonl",
+            nodes=[
+                {
+                    "id": "summarise",
+                    "node_type": "transform",
+                    "plugin": "llm",
+                    "input": "source_rows",
+                    "on_success": "out",
+                    "on_error": "discard",
+                    "options": {
+                        "profile": "tutorial",
+                        "prompt_template": "Summarise {{ row }}",
+                        "schema": {"mode": "observed", "fields": None},
+                        "required_input_fields": [],
+                        INTERPRETATION_REQUIREMENTS_KEY: [
+                            {
+                                "id": "prompt_template_review:summarise",
+                                "kind": "llm_prompt_template",
+                                "user_term": "llm_prompt_template:summarise",
+                                "status": "resolved",
+                                "draft": "Summarise {{ row }}",
+                                "event_id": "prompt-template-accepted:summarise",
+                                "accepted_value": "Summarise {{ row }}",
+                                "accepted_artifact_hash": None,
+                                "resolved_prompt_template_hash": stable_hash("Summarise {{ row }}"),
+                            }
+                        ],
+                    },
+                }
+            ],
+        )
+        service._yaml_generator = yaml_generator
+        service._plugin_snapshot_factory = lambda _user_id: snapshot
+        service._operator_profile_registry = profiles
+        completed: Future[None] = Future()
+        completed.set_result(None)
+
+        with patch.object(service._executor, "submit", return_value=completed) as submit:
+            await service.execute(session_id=session_id, user_id="alice")
+
+        frozen = submit.call_args.args[4]
+        executable = json.dumps(frozen.executable_config, default=dict)
+        audit_safe = json.dumps(frozen.audit_safe_config, default=dict)
+        assert private_model in executable
+        assert private_region in executable
+        assert "tutorial" in audit_safe
+        assert private_model not in audit_safe
+        assert private_region not in audit_safe
+
+    @pytest.mark.asyncio
     async def test_execute_rejects_invalid_pipeline_before_run_creation(
         self, service: ExecutionServiceImpl, mock_session_service: MagicMock
     ) -> None:
@@ -564,6 +716,95 @@ class TestExecutionFlow:
         # Carries the structured errors for the route to surface as a 422.
         assert exc_info.value.errors
         assert exc_info.value.errors[0].component_id == "rate"
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_saved_now_disabled_plugin_before_run_or_constructor(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: _WebSettingsStub,
+        tmp_path: Path,
+    ) -> None:
+        session_id = uuid4()
+        (tmp_path / "blobs").mkdir()
+        (tmp_path / "outputs").mkdir()
+        source_path = tmp_path / "blobs" / "input.txt"
+        source_path.write_text("Ada\n", encoding="utf-8")
+        mock_settings.data_dir = tmp_path
+        mock_session_service.get_current_state.return_value = _composition_state_record(
+            session_id=session_id,
+            source_path=source_path,
+            output_path=tmp_path / "outputs" / "output.jsonl",
+            nodes=[],
+        )
+        unrestricted = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+        disabled = PluginId("sink", "json")
+        snapshot = PluginAvailabilitySnapshot.create(
+            policy_hash="runtime-policy",
+            principal_scope="test:alice",
+            available=unrestricted.available - {disabled},
+            unavailable=(PluginAvailability(disabled, PluginUnavailableReason.NOT_AUTHORIZED),),
+            selected=unrestricted.selected,
+            usable_profile_aliases=(),
+            selected_profile_aliases=(),
+            binding_generation_fingerprint="runtime-policy-generation",
+        )
+        service._plugin_snapshot_factory = lambda _user_id: snapshot
+
+        with (
+            patch("elspeth.web.execution.validation.validate_pipeline", side_effect=_real_validate_pipeline),
+            patch("elspeth.web.execution.validation.instantiate_runtime_plugins") as instantiate,
+            patch.object(service._executor, "submit") as submit,
+            pytest.raises(PipelineValidationError),
+        ):
+            await service.execute(session_id=session_id, user_id="alice")
+
+        mock_session_service.create_run.assert_not_awaited()
+        instantiate.assert_not_called()
+        submit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_aws_s3_endpoint_url_before_run_or_provider_instantiation(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        endpoint_sentinel = "https://provider-canary.attacker.invalid/private"
+        state_record = mock_session_service.get_current_state.return_value
+        state_record.source = {
+            "plugin": "aws_s3",
+            "on_success": "out",
+            "options": {"endpoint_url": endpoint_sentinel},
+            "on_validation_failure": "discard",
+        }
+        state_record.sources = None
+        state_record.nodes = []
+        state_record.edges = []
+        state_record.outputs = [
+            {
+                "name": "out",
+                "plugin": "json",
+                "options": {},
+                "on_write_failure": "discard",
+            }
+        ]
+
+        with (
+            patch("elspeth.web.execution.validation.validate_pipeline", side_effect=_real_validate_pipeline),
+            patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load,
+            patch("elspeth.web.execution.validation.instantiate_runtime_plugins") as mock_instantiate,
+            patch.object(service._executor, "submit") as mock_submit,
+            pytest.raises(PipelineValidationError) as exc_info,
+        ):
+            await service.execute(session_id=state_record.session_id)
+
+        assert mock_session_service.create_run.await_count == 0
+        mock_load.assert_not_called()
+        mock_instantiate.assert_not_called()
+        mock_submit.assert_not_called()
+        assert exc_info.value.errors[0].error_code == "aws_s3_endpoint_url_not_allowed"
+        assert endpoint_sentinel not in str(exc_info.value)
+        assert endpoint_sentinel not in repr(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_execute_allows_valid_pipeline_through_the_gate(
@@ -1225,6 +1466,111 @@ sinks:
         assert attribution_row.auth_provider_type == "local"
         assert output_path.exists()
 
+    def test_aws_web_run_persists_effective_operator_telemetry_before_events(
+        self,
+        service: ExecutionServiceImpl,
+        mock_settings: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        source_path = tmp_path / "input.txt"
+        source_path.write_text("alpha\n", encoding="utf-8")
+        output_path = tmp_path / "out.jsonl"
+        run_id = str(uuid4())
+        mock_settings.deployment_target = "aws-ecs"
+        mock_settings.operator_telemetry_service_name = "elspeth-web-test"
+        mock_settings.operator_telemetry_environment = "test"
+        mock_settings.operator_telemetry_release = "git-test"
+        mock_settings.operator_telemetry_ecs_cluster = "elspeth-test"
+        mock_settings.operator_telemetry_ecs_service = "elspeth-web"
+        mock_settings.operator_telemetry_task_definition_family = "elspeth-web-task"
+        mock_settings.operator_telemetry_task_definition_revision = "1"
+        mock_settings.operator_pipeline_telemetry_granularity = "lifecycle"
+        mock_settings.landscape_url = f"sqlite:///{tmp_path / 'audit.db'}"
+        mock_settings.payload_store_path = tmp_path / "payloads"
+        initialized_db = LandscapeDB.from_url(mock_settings.landscape_url)
+        initialized_db.close()
+        pipeline_yaml = f"""
+sources:
+  primary:
+    plugin: text
+    on_success: output
+    options:
+      path: {source_path}
+      column: value
+      on_validation_failure: discard
+      schema:
+        mode: fixed
+        fields:
+        - "value: str"
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: {output_path}
+      format: jsonl
+      mode: write
+      schema:
+        mode: observed
+telemetry:
+  enabled: true
+  granularity: full
+  fail_on_total_exporter_failure: true
+  exporters:
+  - name: otlp
+    options:
+      endpoint: https://authored.invalid:4317
+      headers:
+        authorization: authored-secret
+"""
+
+        # This integration test exercises Landscape persistence and ordering;
+        # transport delivery itself is covered by test_operator_telemetry.py.
+        telemetry_manager = create_autospec(TelemetryManager, instance=True)
+        telemetry_manager.health_metrics = {"events_dropped": 3, "queue_drops": 1}
+        with (
+            patch("elspeth.telemetry.create_telemetry_manager", return_value=telemetry_manager),
+            patch("elspeth.web.operator_telemetry.record_operator_pipeline_queue_drops") as record_queue_drops,
+        ):
+            service._run_pipeline(run_id, pipeline_yaml, threading.Event())
+
+        telemetry_manager.close.assert_called_once_with()
+        record_queue_drops.assert_called_once_with(1)
+
+        db = LandscapeDB.from_url(mock_settings.landscape_url, create_tables=False)
+        try:
+            with db.read_only_connection() as conn:
+                row = conn.execute(select(runs_table.c.settings_json, runs_table.c.config_hash).where(runs_table.c.run_id == run_id)).one()
+        finally:
+            db.close()
+
+        persisted = json.loads(row.settings_json)
+        telemetry = persisted["telemetry"]
+        assert telemetry["enabled"] is True
+        assert telemetry["granularity"] == "lifecycle"
+        assert telemetry["fail_on_total_exporter_failure"] is False
+        assert telemetry["exporters"] == [
+            {
+                "name": "otlp",
+                "options": {
+                    "batch_size": 100,
+                    "cloud_provider": "aws",
+                    "deployment_environment": "test",
+                    "endpoint": "http://127.0.0.1:4317",
+                    "headers": {},
+                    "aws_ecs_cluster_name": "elspeth-test",
+                    "aws_ecs_service_name": "elspeth-web",
+                    "aws_ecs_task_family": "elspeth-web-task",
+                    "aws_ecs_task_revision": "1",
+                    "service_name": "elspeth-web-test",
+                    "service_version": "git-test",
+                },
+            }
+        ]
+        assert row.config_hash == stable_hash(persisted)
+        assert "authored.invalid" not in row.settings_json
+        assert "authored-secret" not in row.settings_json
+
     def test_web_scrape_pipeline_receives_rate_limit_registry(
         self,
         service: ExecutionServiceImpl,
@@ -1375,7 +1721,7 @@ class TestB2ShutdownEvent:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_shutdown_event_passed_to_orchestrator_run(
         self,
@@ -1413,6 +1759,10 @@ class TestB2ShutdownEvent:
         assert orch_run_call[1].get("run_id") == str(run_id), (
             "Run diagnostics require the web run UUID to be the Landscape run_id while the run is still active."
         )
+        evidence = orch_run_call[1].get("web_plugin_policy_evidence")
+        assert isinstance(evidence, WebPluginPolicyEvidence)
+        assert evidence.snapshot_hash
+        assert evidence.decision_codes == ("policy_allowed",)
 
         running_calls = [call for call in mock_session_service.update_run_status.await_args_list if call.kwargs.get("status") == "running"]
         assert running_calls
@@ -1434,12 +1784,12 @@ class TestB3Construction:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_landscape_db_constructed_from_settings(
         self,
         mock_payload_cls: MagicMock,
-        mock_landscape_cls: MagicMock,
+        mock_open_landscape: MagicMock,
         mock_graph_cls: MagicMock,
         mock_instantiate: MagicMock,
         mock_load: MagicMock,
@@ -1460,8 +1810,8 @@ class TestB3Construction:
         ):
             service._run_pipeline(str(uuid4()), "yaml", threading.Event())
 
-        # B3: LandscapeDB constructed from settings URL
-        mock_landscape_cls.assert_called_once_with(connection_string="sqlite:///test_audit.db", passphrase=None)
+        # B3: LandscapeDB opened through the deployment-gated factory.
+        mock_open_landscape.assert_called_once_with(service._settings)
         # B3: PayloadStore constructed from settings path
         mock_payload_cls.assert_called_once_with(base_path=Path("/tmp/test_payloads"))
 
@@ -1469,7 +1819,7 @@ class TestB3Construction:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_rate_limit_config_uses_web_data_dir(
         self,
@@ -1518,7 +1868,7 @@ class TestInlineBlobRuntimePreflight:
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.service.build_validated_runtime_graph")
     @patch("elspeth.web.execution.service.load_settings_from_config_dict")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_run_pipeline_resolves_inline_content_and_records_audit_before_settings_load(
         self,
@@ -1639,7 +1989,7 @@ sinks:
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.service.build_validated_runtime_graph")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_audit_write_failure_prevents_settings_load(
         self,
@@ -1702,7 +2052,7 @@ sinks:
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.service.build_validated_runtime_graph")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_oversized_inline_content_metadata_fails_before_blob_read(
         self,
@@ -1770,7 +2120,7 @@ sinks:
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.service.build_validated_runtime_graph")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_aggregate_inline_content_metadata_fails_before_blob_read(
         self,
@@ -1850,7 +2200,7 @@ sinks:
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.service.build_validated_runtime_graph")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_hash_mismatch_increments_zero_threshold_counter_without_run_id_label(
         self,
@@ -1923,7 +2273,7 @@ sinks:
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.service.build_validated_runtime_graph")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_run_pipeline_rejects_cross_session_inline_blob_uniformly(
         self,
@@ -2022,7 +2372,7 @@ class TestWebRuntimeConfigLoading:
     """Web execution rejects file-backed config options before runtime graph construction."""
 
     @patch("elspeth.web.execution.service.build_validated_runtime_graph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_file_backed_template_options_fail_before_runtime_graph(
         self,
@@ -2073,7 +2423,7 @@ class TestB7ExceptionHandling:
     Layer 2: future.add_done_callback() logs as safety net.
     """
 
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_keyboard_interrupt_skips_failed_status_update(
         self,
@@ -2097,7 +2447,7 @@ class TestB7ExceptionHandling:
         assert len(calls) == 1  # Only the initial "running" call
         assert calls[0][1].get("status") == "running"
 
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_system_exit_skips_failed_status_update(
         self,
@@ -2126,7 +2476,7 @@ class TestB7ExceptionHandling:
         event = threading.Event()
         service._shutdown_events[run_id] = event
 
-        with patch("elspeth.web.execution.service.LandscapeDB") as mock_db:
+        with patch("elspeth.web.execution.service.open_landscape_db") as mock_db:
             mock_db.side_effect = RuntimeError("boom")
             with pytest.raises(RuntimeError):
                 service._run_pipeline(run_id, "yaml", event)
@@ -2193,7 +2543,7 @@ class TestB7ExceptionHandling:
             service._on_pipeline_done(future)
             mock_slog.error.assert_not_called()
 
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_pydantic_validation_error_emits_schema_contract_diagnostic(
         self,
@@ -2324,7 +2674,7 @@ class TestCancelMechanism:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_cancelled_run_broadcasts_cancelled_event(
         self,
@@ -2380,7 +2730,7 @@ class TestCancelMechanism:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_graceful_shutdown_forwards_row_counts(
         self,
@@ -2444,7 +2794,7 @@ class TestCancelMechanism:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_completed_run_not_misclassified_when_event_set_late(
         self,
@@ -2504,7 +2854,7 @@ class TestCancelMechanism:
 
     # ── Race condition: cancel() before _run_pipeline starts ──────────
 
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_run_pipeline_exits_gracefully_when_already_cancelled(
         self,
@@ -2532,7 +2882,7 @@ class TestCancelMechanism:
         # Only the one failed "running" attempt — no "failed" status update
         assert mock_session_service.update_run_status.call_count == 1
 
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_run_pipeline_early_shutdown_skips_setup(
         self,
@@ -2559,7 +2909,7 @@ class TestCancelMechanism:
         assert len(status_calls) == 1
         assert "cancelled" in str(status_calls[0])
 
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_run_pipeline_reraises_valueerror_when_not_cancelled(
         self,
@@ -2578,7 +2928,7 @@ class TestCancelMechanism:
         with pytest.raises(ValueError, match="completed"):
             service._run_pipeline(run_id, "yaml", threading.Event())
 
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_running_transition_does_not_swallow_non_illegal_value_errors(
         self,
@@ -2820,7 +3170,7 @@ class TestCompletionPathExternalCancellation:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_run_pipeline_exits_gracefully_when_completed_but_db_cancelled(
         self,
@@ -2877,7 +3227,7 @@ class TestCompletionPathExternalCancellation:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_cancelled_compensating_event_broadcast_on_external_cancel(
         self,
@@ -2940,7 +3290,7 @@ class TestCompletionPathExternalCancellation:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_external_cancel_finalizes_output_blobs_as_error(
         self,
@@ -3002,7 +3352,7 @@ class TestCompletionPathExternalCancellation:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_completion_guard_reraises_for_non_cancelled_status(
         self,
@@ -3046,7 +3396,7 @@ class TestCompletionPathExternalCancellation:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_completion_guard_does_not_swallow_non_illegal_value_errors(
         self,
@@ -3213,7 +3563,7 @@ class TestPostCompletionExceptionRecovery:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_post_completion_broadcast_crash_skips_failed_status_update(
         self,
@@ -3300,7 +3650,7 @@ class TestPostCompletionExceptionRecovery:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_post_completion_with_failures_also_skips_failed_status_update(
         self,
@@ -3367,7 +3717,7 @@ class TestPostCompletionExceptionRecovery:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_post_completion_get_run_probe_failure_falls_through(
         self,
@@ -3444,7 +3794,7 @@ class TestPostCompletionExceptionRecovery:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_post_completion_probe_failure_with_legal_transitions_preserves_original_exception(
         self,
@@ -3565,7 +3915,7 @@ class TestPostCompletionExceptionRecovery:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_post_completion_get_run_probe_value_error_propagates(
         self,
@@ -3658,7 +4008,7 @@ class TestPostCompletionExceptionRecovery:
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_running_state_exception_still_records_failed(
         self,
@@ -4404,7 +4754,7 @@ class TestB8AsyncBridging:
     ) -> None:
         """_call_async() schedules coroutine and returns its result."""
         mock_loop = MagicMock(spec=asyncio.AbstractEventLoop)
-        svc = ExecutionServiceImpl(
+        svc = ExecutionServiceImpl.for_trained_operator(
             loop=mock_loop,
             broadcaster=broadcaster,
             settings=mock_settings,
@@ -4433,7 +4783,7 @@ class TestB8AsyncBridging:
     ) -> None:
         """If the coroutine raises, _call_async re-raises from future.result()."""
         mock_loop = MagicMock(spec=asyncio.AbstractEventLoop)
-        svc = ExecutionServiceImpl(
+        svc = ExecutionServiceImpl.for_trained_operator(
             loop=mock_loop,
             broadcaster=broadcaster,
             settings=mock_settings,
@@ -4460,7 +4810,7 @@ class TestB8AsyncBridging:
     ) -> None:
         """R6 fix: _call_async raises TimeoutError after 30s, preventing deadlock."""
         mock_loop = MagicMock(spec=asyncio.AbstractEventLoop)
-        svc = ExecutionServiceImpl(
+        svc = ExecutionServiceImpl.for_trained_operator(
             loop=mock_loop,
             broadcaster=broadcaster,
             settings=mock_settings,
@@ -4491,7 +4841,7 @@ class TestAsyncShutdown:
     ) -> None:
         """Regression: draining the executor must not strand worker _call_async calls."""
         loop = asyncio.get_running_loop()
-        svc = ExecutionServiceImpl(
+        svc = ExecutionServiceImpl.for_trained_operator(
             loop=loop,
             broadcaster=ProgressBroadcaster(loop),
             settings=mock_settings,
@@ -4549,7 +4899,7 @@ class TestAsyncShutdown:
 class TestRunningStatusFailure:
     """W15: What happens when the initial status update to 'running' fails."""
 
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_running_status_failure_marks_run_failed(
         self,
@@ -4604,7 +4954,7 @@ class TestVerifyRunOwnership:
         settings.landscape_url = "sqlite:///test.db"
         settings.payload_store_path = Path("/tmp/test")
 
-        svc = ExecutionServiceImpl(
+        svc = ExecutionServiceImpl.for_trained_operator(
             loop=mock_loop,
             broadcaster=broadcaster,
             settings=settings,
@@ -5937,7 +6287,7 @@ class TestEdgeCompatibility:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_validate_edge_compatibility_called(
         self,
@@ -5972,7 +6322,7 @@ class TestEdgeCompatibility:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_edge_compatibility_failure_crashes_pipeline(
         self,
@@ -6040,7 +6390,7 @@ class TestFinalizeOutputBlobsCatchWidening:
     def _make_service_with_blob(
         self, blob_service: BlobServiceProtocol, mock_settings: MagicMock, mock_session_service: MagicMock
     ) -> ExecutionServiceImpl:
-        svc = ExecutionServiceImpl(
+        svc = ExecutionServiceImpl.for_trained_operator(
             loop=MagicMock(spec=asyncio.AbstractEventLoop),
             broadcaster=MagicMock(spec=ProgressBroadcaster),
             settings=mock_settings,
@@ -6124,7 +6474,7 @@ class TestTerminalOrderingInvariant:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_single_terminal_when_finalize_raises_blob_not_found(
         self,
@@ -6160,7 +6510,7 @@ class TestTerminalOrderingInvariant:
         blob_service = _blob_service_stub()
         blob_service.finalize_run_output_blobs.side_effect = BlobNotFoundError("blob-vanished")
 
-        svc = ExecutionServiceImpl(
+        svc = ExecutionServiceImpl.for_trained_operator(
             loop=MagicMock(spec=asyncio.AbstractEventLoop),
             broadcaster=mock_broadcaster,
             settings=mock_settings,
@@ -6187,7 +6537,7 @@ class TestTerminalOrderingInvariant:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_externally_cancelled_run_emits_single_cancelled_terminal(
         self,
@@ -6228,7 +6578,7 @@ class TestTerminalOrderingInvariant:
         mock_session_service.update_run_status.side_effect = _selective_update
         mock_session_service.get_run.return_value = _run_record_stub(status="cancelled")
 
-        svc = ExecutionServiceImpl(
+        svc = ExecutionServiceImpl.for_trained_operator(
             loop=MagicMock(spec=asyncio.AbstractEventLoop),
             broadcaster=mock_broadcaster,
             settings=mock_settings,

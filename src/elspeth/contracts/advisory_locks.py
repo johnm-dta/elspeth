@@ -1,8 +1,8 @@
 """PostgreSQL advisory-lock classid registry.
 
 PostgreSQL exposes two flavours of advisory locks: the
-single-argument form (one int8 namespace, cluster-wide) and the
-two-argument form (two int4 namespaces, also cluster-wide but
+single-argument form (one int8 namespace per connecting database) and the
+two-argument form (two int4 namespaces, also database-scoped but
 partitioned by the first argument -- the *classid*). ELSPETH uses
 the two-argument form exclusively so that each subsystem holding
 advisory locks gets its own classid namespace, avoiding cross-
@@ -51,3 +51,8 @@ from __future__ import annotations
 # lock that serialises persist_compose_turn / save_composition_state /
 # set_active_state writers within a single Postgres cluster.
 ELSPETH_SESSIONS_LOCK_CLASSID: int = 0x454C5350
+
+# 0x53434845 = ASCII "SCHE". Session and Landscape initialization use the
+# same classid and target so distinct schemas in one connecting database are
+# deliberately over-serialized during bootstrap.
+ELSPETH_SCHEMA_INIT_LOCK_CLASSID: int = 0x53434845

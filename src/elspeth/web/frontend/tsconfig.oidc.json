@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "esModuleInterop": true,
+    "types": ["node", "vitest/globals"]
+  },
+  "include": [
+    "playwright.oidc.config.ts",
+    "tests/e2e/aws-ecs-oidc.staging.spec.ts",
+    "tests/e2e/harness/oidc-evidence.ts",
+    "tests/e2e/harness/oidc-evidence.test.ts",
+    "tests/e2e/harness/oidc-redacting-reporter.ts",
+    "tests/e2e/harness/oidc-redacting-reporter.test.ts"
+  ]
+}

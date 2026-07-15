@@ -17,11 +17,11 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from collections.abc import Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Any, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from uuid import UUID
 
 import structlog
@@ -33,6 +33,8 @@ from elspeth.contracts.audit import SecretResolutionInput
 from elspeth.contracts.cli import ProgressEvent
 from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import GracefulShutdownError
+from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.core.blobs_inline import (
     BLOB_INLINE_AGGREGATE_BYTE_CAP,
@@ -44,13 +46,12 @@ from elspeth.core.blobs_inline import (
 )
 from elspeth.core.config import load_bounded_pipeline_yaml, load_settings_from_config_dict, load_settings_from_yaml_string
 from elspeth.core.events import EventBus
-from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.run_lifecycle_repository import is_valid_sha256_hex
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.core.secrets import SecretResolutionError
 from elspeth.engine.orchestrator.core import Orchestrator
 from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
-from elspeth.plugins.infrastructure.runtime_factory import make_sink_factory
+from elspeth.engine.orchestrator.types import PipelineConfig
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import (
@@ -81,9 +82,14 @@ from elspeth.web.execution.fanout_guard import (
     annotate_pipeline_yaml_with_fanout_guard,
     evaluate_execution_fanout_guard,
 )
-from elspeth.web.execution.preflight import build_validated_runtime_graph, resolve_runtime_yaml_paths
+from elspeth.web.execution.preflight import (
+    audit_safe_resolved_config,
+    build_validated_runtime_graph,
+    make_policy_bound_sink_factory,
+    resolve_runtime_yaml_paths,
+)
 from elspeth.web.execution.progress import BroadcastResult, ProgressBroadcaster
-from elspeth.web.execution.protocol import ExecutionService, StateAccessError, YamlGenerator
+from elspeth.web.execution.protocol import ExecutionService, FrozenRunSettings, StateAccessError, YamlGenerator
 from elspeth.web.execution.schemas import (
     CancelledData,
     CompletedData,
@@ -99,6 +105,10 @@ from elspeth.web.execution.schemas import (
     ValidationResult,
 )
 from elspeth.web.interpretation_state import InterpretationReviewPending, materialize_state_for_execution
+from elspeth.web.landscape_access import open_landscape_db
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, WebPluginPolicy
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
+from elspeth.web.plugin_policy.validation import validate_plugin_policy
 from elspeth.web.provider_config_policy import web_llm_retry_budget_policy_error, web_rag_provider_config_policy_error
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.protocol import (
@@ -112,6 +122,9 @@ from elspeth.web.sessions.protocol import (
 )  # B1: canonical definition
 from elspeth.web.sessions.telemetry import _SessionsTelemetry
 
+if TYPE_CHECKING:
+    from elspeth.core.landscape.database import LandscapeDB
+
 slog = structlog.get_logger()
 _meter = metrics.get_meter(__name__)
 _BLOB_INLINE_HASH_MISMATCH_TOTAL = _meter.create_counter(
@@ -122,6 +135,38 @@ _BLOB_INLINE_AUDIT_ROW_TIER1_VIOLATION_TOTAL = _meter.create_counter(
     name="composer.blob_inline.audit_row_tier1_violation_total",
     description="resolved inline blob ref produced no audit row; SLO threshold = 0",
 )
+
+
+def _build_web_plugin_policy_evidence(
+    *,
+    snapshot: PluginAvailabilitySnapshot,
+    policy: WebPluginPolicy | None,
+) -> WebPluginPolicyEvidence:
+    """Project the immutable request snapshot into the sanitized L0 audit DTO."""
+    if policy is None:
+        authorized = snapshot.available | frozenset(item.plugin_id for item in snapshot.unavailable)
+        identities: tuple[tuple[str, str, str], ...] = ()
+    else:
+        if snapshot.policy_hash != policy.policy_hash:
+            raise RuntimeError("plugin snapshot policy hash does not match the boot-time policy")
+        authorized = policy.authorized
+        identities = tuple((str(plugin_id), version, source_hash) for plugin_id, version, source_hash in policy.plugin_code_identities)
+    return WebPluginPolicyEvidence(
+        schema_version=policy.schema_version if policy is not None else 1,
+        policy_hash=snapshot.policy_hash,
+        snapshot_hash=snapshot.snapshot_hash,
+        authorized_plugin_ids=tuple(sorted(map(str, authorized))),
+        available_plugin_ids=tuple(sorted(map(str, snapshot.available))),
+        control_modes=tuple(sorted((capability.value, mode.value) for capability, mode in snapshot.control_modes)),
+        selected_implementations=tuple(
+            sorted((capability.value, None if plugin_id is None else str(plugin_id)) for capability, plugin_id in snapshot.selected)
+        ),
+        selected_profile_aliases=tuple(sorted((str(plugin_id), alias) for plugin_id, alias in snapshot.selected_profile_aliases)),
+        plugin_code_identities=tuple(sorted(identities)),
+        binding_generation_fingerprint=snapshot.binding_generation_fingerprint,
+        decision_codes=("policy_allowed",),
+    )
+
 
 T = TypeVar("T")
 
@@ -262,6 +307,9 @@ def _partial_completion_message(
 # from catching exceptions raised here.
 
 
+_TRAINED_OPERATOR_COMPOSITION_ROOT = object()
+
+
 class ExecutionServiceImpl:
     """Pipeline execution service with ThreadPoolExecutor backend.
 
@@ -291,7 +339,18 @@ class ExecutionServiceImpl:
         telemetry: _SessionsTelemetry,
         blob_service: BlobServiceProtocol | None = None,
         secret_service: WebSecretResolver | None = None,
+        plugin_snapshot_factory: Callable[[str], PluginAvailabilitySnapshot] | None,
+        operator_profile_registry: OperatorProfileRegistry | None,
+        web_plugin_policy: WebPluginPolicy | None,
+        _composition_root: object | None = None,
     ) -> None:
+        trained_operator_mode = _composition_root is _TRAINED_OPERATOR_COMPOSITION_ROOT
+        if plugin_snapshot_factory is None:
+            raise TypeError("plugin_snapshot_factory must be provided")
+        if operator_profile_registry is None and not trained_operator_mode:
+            raise TypeError("operator_profile_registry must be provided")
+        if web_plugin_policy is None and not trained_operator_mode:
+            raise TypeError("web_plugin_policy must be provided")
         self._loop = loop
         self._broadcaster = broadcaster
         self._settings = settings
@@ -300,6 +359,10 @@ class ExecutionServiceImpl:
         self._telemetry = telemetry
         self._blob_service = blob_service
         self._secret_service = secret_service
+        self._plugin_snapshot_factory = plugin_snapshot_factory
+        self._operator_profile_registry = operator_profile_registry
+        self._web_plugin_policy = web_plugin_policy
+        self._trained_operator_mode = trained_operator_mode
         # AC #17: No run_repository — all Run CRUD delegates to SessionService
         # via create_run(), update_run_status(), get_active_run(), get_run().
         # R6 expanded params: landscape_run_id, pipeline_yaml, rows_processed,
@@ -307,6 +370,7 @@ class ExecutionServiceImpl:
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._shutdown_events: dict[str, threading.Event] = {}
         self._shutdown_events_lock = threading.Lock()
+
         # Per-session asyncio lock to prevent TOCTOU on the active-run check.
         # Keyed by session_id string; lazily created, cleaned up on session
         # deletion via cleanup_session_lock().
@@ -320,6 +384,28 @@ class ExecutionServiceImpl:
         # dropping the audit field.
         self._openrouter_catalog_sha256: str | None = None
         self._openrouter_catalog_source: str | None = None
+
+    @classmethod
+    def for_trained_operator(cls, **kwargs: Any) -> ExecutionServiceImpl:
+        """Explicit non-web composition root with unrestricted local policy context."""
+        from elspeth.web.dependencies import create_catalog_service
+
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+        return cls(
+            plugin_snapshot_factory=lambda _user_id: snapshot,
+            operator_profile_registry=None,
+            web_plugin_policy=None,
+            _composition_root=_TRAINED_OPERATOR_COMPOSITION_ROOT,
+            **kwargs,
+        )
+
+    def _plugin_snapshot_for_user(self, user_id: str | None, *, operation: str) -> PluginAvailabilitySnapshot:
+        """Resolve policy context without treating missing wiring as a mode switch."""
+        if user_id is None:
+            if not self._trained_operator_mode:
+                raise RuntimeError(f"Authenticated user_id is required for web plugin policy {operation}.")
+            user_id = "trained-operator"
+        return self._plugin_snapshot_factory(user_id)
 
     def set_openrouter_catalog_snapshot(self, *, sha256: str, source: str) -> None:
         """Record the boot-time OpenRouter catalog snapshot id.
@@ -664,6 +750,8 @@ class ExecutionServiceImpl:
         # runtime-only by design. Local import mirrors the /validate path (W18 load-order).
         from elspeth.web.execution.validation import validate_pipeline
 
+        plugin_snapshot = self._plugin_snapshot_for_user(user_id, operation="execution")
+
         preflight_result = validate_pipeline(
             composition_state,
             self._settings,
@@ -671,6 +759,8 @@ class ExecutionServiceImpl:
             secret_service=self._secret_service,
             user_id=user_id,
             session_id=str(session_id),
+            plugin_snapshot=plugin_snapshot,
+            profile_registry=self._operator_profile_registry,
         )
         if not preflight_result.is_valid:
             raise PipelineValidationError(
@@ -678,13 +768,23 @@ class ExecutionServiceImpl:
                 readiness=preflight_result.readiness,
             )
 
+        policy_result = validate_plugin_policy(
+            composition_state,
+            snapshot=plugin_snapshot,
+            profile_registry=self._operator_profile_registry,
+        )
+        if policy_result.findings:
+            raise RuntimeError("Plugin policy validation diverged between execution preflight and runtime preparation.")
+
         pipeline_yaml = self._yaml_generator.generate_yaml(composition_state)
+        executable_pipeline_yaml = self._yaml_generator.generate_yaml(policy_result.executable_state)
 
         # Resolve relative source/sink paths to absolute in the YAML so
         # plugins see the same paths the allowlist approved.  Without this,
         # plugins call PathConfig.resolved_path() with no base_dir, which
         # resolves relative paths against CWD — not data_dir.
         pipeline_yaml = resolve_runtime_yaml_paths(pipeline_yaml, str(self._settings.data_dir))
+        executable_pipeline_yaml = resolve_runtime_yaml_paths(executable_pipeline_yaml, str(self._settings.data_dir))
 
         # Pre-validate blob_ref UUID before creating the run record.
         # UUID() can raise ValueError on malformed strings; if that happens
@@ -753,6 +853,17 @@ class ExecutionServiceImpl:
             if fanout_ack_token != fanout_guard.ack_token:
                 raise ExecutionFanoutGuardRequired(fanout_guard)
             pipeline_yaml = annotate_pipeline_yaml_with_fanout_guard(pipeline_yaml, fanout_guard)
+            executable_pipeline_yaml = annotate_pipeline_yaml_with_fanout_guard(executable_pipeline_yaml, fanout_guard)
+
+        audit_safe_config = load_bounded_pipeline_yaml(pipeline_yaml)
+        executable_config = load_bounded_pipeline_yaml(executable_pipeline_yaml)
+        if type(audit_safe_config) is not dict or type(executable_config) is not dict:
+            raise TypeError("YamlGenerator.generate_yaml() must produce a mapping for runtime preparation")
+        frozen_run_settings = FrozenRunSettings(
+            plugin_snapshot=plugin_snapshot,
+            executable_config=cast(dict[str, Any], executable_config),
+            audit_safe_config=cast(dict[str, Any], audit_safe_config),
+        )
 
         # B9 fix: create_run() generates its own UUID internally and returns
         # a RunRecord. Read the run_id back from the returned record so our
@@ -788,6 +899,7 @@ class ExecutionServiceImpl:
                 str(run_id),
                 pipeline_yaml,
                 shutdown_event,
+                frozen_run_settings,
                 user_id,
                 auth_provider_type,
             )
@@ -938,6 +1050,8 @@ class ExecutionServiceImpl:
 
         from elspeth.web.execution.validation import validate_pipeline
 
+        plugin_snapshot = self._plugin_snapshot_for_user(user_id, operation="validation")
+
         def _blob_get_metadata(blob_id: UUID) -> BlobRecord | None:
             if self._blob_service is None:
                 return None
@@ -961,6 +1075,8 @@ class ExecutionServiceImpl:
                     user_id=user_id,
                     blob_get_metadata=_blob_get_metadata,
                     session_id=str(session_id) if session_id is not None else None,
+                    plugin_snapshot=plugin_snapshot,
+                    profile_registry=self._operator_profile_registry,
                 ),
             ),
         )
@@ -1018,6 +1134,7 @@ class ExecutionServiceImpl:
         run_id: str,
         pipeline_yaml: str,
         shutdown_event: threading.Event,
+        frozen_run_settings: FrozenRunSettings | None = None,
         user_id: str | None = None,
         auth_provider_type: str | None = None,
     ) -> _RunPipelineOutcome:
@@ -1097,26 +1214,41 @@ class ExecutionServiceImpl:
             # with max_workers=1 (no concurrent access) but wasteful — each run
             # creates a new SQLAlchemy engine. Acceptable for MVP; consider
             # sharing a single instance if profiling shows connection overhead.
-            landscape_db = LandscapeDB(
-                connection_string=self._settings.get_landscape_url(),
-                passphrase=self._settings.landscape_passphrase,
-            )
+            landscape_db = open_landscape_db(self._settings)
             payload_store = FilesystemPayloadStore(base_path=self._settings.get_payload_store_path())
 
             # Resolve secret refs before writing YAML to temp file.
             # Resolved values exist only in this thread's local memory — the
             # original pipeline_yaml (persisted in the Run record) is untouched.
-            resolved_dict: dict[str, Any] | None = None
+            if frozen_run_settings is None:
+                if not self._trained_operator_mode:
+                    raise RuntimeError("Web execution requires frozen request policy settings")
+                plugin_snapshot = self._plugin_snapshot_for_user(None, operation="execution")
+                executable_config: dict[str, Any] | None = None
+                audit_safe_config: dict[str, Any] | None = None
+            else:
+                plugin_snapshot = frozen_run_settings.plugin_snapshot
+                executable_config = cast(dict[str, Any], deep_thaw(frozen_run_settings.executable_config))
+                audit_safe_config = cast(dict[str, Any], deep_thaw(frozen_run_settings.audit_safe_config))
+
+            resolved_dict: dict[str, Any] | None = executable_config
             secret_resolution_inputs: list[SecretResolutionInput] = []
-            inline_blob_candidate = "blob_ref" in pipeline_yaml and "inline_content" in pipeline_yaml
-            needs_config_tree = (self._secret_service is not None and user_id is not None) or inline_blob_candidate
+            inline_blob_candidate = (
+                bool(_discover_blob_content_refs(executable_config))
+                if executable_config is not None
+                else "blob_ref" in pipeline_yaml and "inline_content" in pipeline_yaml
+            )
+            needs_config_tree = (
+                executable_config is not None or (self._secret_service is not None and user_id is not None) or inline_blob_candidate
+            )
             if needs_config_tree:
-                config_dict = load_bounded_pipeline_yaml(pipeline_yaml)
-                if type(config_dict) is not dict:
-                    raise TypeError(
-                        f"generate_yaml() produced non-dict YAML (got {type(config_dict).__name__}) — this is a bug in the YAML generator"
-                    )
-                resolved_dict = cast(dict[str, Any], config_dict)
+                if resolved_dict is None:
+                    config_dict = load_bounded_pipeline_yaml(pipeline_yaml)
+                    if type(config_dict) is not dict:
+                        raise TypeError(
+                            f"generate_yaml() produced non-dict YAML (got {type(config_dict).__name__}) — this is a bug in the YAML generator"
+                        )
+                    resolved_dict = cast(dict[str, Any], config_dict)
 
                 if self._secret_service is not None and user_id is not None:
                     from elspeth.core.secrets import resolve_secret_refs
@@ -1258,7 +1390,26 @@ class ExecutionServiceImpl:
                 settings = load_settings_from_yaml_string(pipeline_yaml, expand_env_vars=False)
             else:
                 settings = load_settings_from_config_dict(resolved_dict, expand_env_vars=False)
-            runtime_graph = build_validated_runtime_graph(settings)
+
+            # AWS ECS web execution is governed by operator-owned telemetry
+            # routing. Apply the fixed task-local policy before graph/config
+            # assembly: PipelineConfig.config therefore contains the sanitized
+            # effective policy, Landscape.begin_run persists it and its hash,
+            # and only then may RunStarted telemetry fire. The original YAML in
+            # the sessions database remains the authored-policy comparison
+            # surface; no authored endpoint/header/credential enters Landscape.
+            from elspeth.web.operator_telemetry import apply_operator_pipeline_telemetry
+
+            settings = apply_operator_pipeline_telemetry(settings, self._settings)
+            if audit_safe_config is None:
+                parsed_audit_config = load_bounded_pipeline_yaml(pipeline_yaml)
+                if type(parsed_audit_config) is dict:
+                    audit_safe_config = cast(dict[str, Any], parsed_audit_config)
+            runtime_graph = build_validated_runtime_graph(
+                settings,
+                plugin_snapshot=plugin_snapshot,
+                audit_safe_settings=audit_safe_config,
+            )
             bundle = runtime_graph.plugin_bundle
             graph = runtime_graph.graph
 
@@ -1277,6 +1428,15 @@ class ExecutionServiceImpl:
                 settings=settings,
                 graph=graph,
             )
+            if isinstance(pipeline_config, PipelineConfig) and audit_safe_config is not None:
+                pipeline_config = replace(
+                    pipeline_config,
+                    config=audit_safe_resolved_config(
+                        settings,
+                        audit_safe_settings=audit_safe_config,
+                        plugin_snapshot=plugin_snapshot,
+                    ),
+                )
 
             # Set up EventBus to bridge ProgressEvent -> RunEvent -> broadcaster.
             # _to_run_event is a pure mapping (system code) — let it crash.
@@ -1347,12 +1507,19 @@ class ExecutionServiceImpl:
                 payload_store=payload_store,
                 secret_resolutions=secret_resolution_inputs or None,
                 shutdown_event=shutdown_event,  # B2: NEVER omit this
-                sink_factory=make_sink_factory(settings),
+                sink_factory=make_policy_bound_sink_factory(
+                    settings,
+                    plugin_snapshot=plugin_snapshot,
+                ),
                 run_id=run_id,
                 initiated_by_user_id=user_id,
                 auth_provider_type=auth_provider_type,
                 openrouter_catalog_sha256=catalog_sha,
                 openrouter_catalog_source=catalog_source,
+                web_plugin_policy_evidence=_build_web_plugin_policy_evidence(
+                    snapshot=plugin_snapshot,
+                    policy=self._web_plugin_policy,
+                ),
             )
 
             # Orchestrator.run() returns normally ONLY on completion.
@@ -1781,6 +1948,10 @@ class ExecutionServiceImpl:
                 rate_limit_registry.close()
             if telemetry_manager is not None:
                 telemetry_manager.close()
+                if self._settings.deployment_target == "aws-ecs":
+                    from elspeth.web.operator_telemetry import record_operator_pipeline_queue_drops
+
+                    record_operator_pipeline_queue_drops(telemetry_manager.health_metrics["queue_drops"])
             self._broadcaster.cleanup_run(run_id)
         return None
 

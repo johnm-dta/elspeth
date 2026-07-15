@@ -20,8 +20,10 @@ from typing import ClassVar
 from uuid import uuid4
 
 import pytest
+from jsonschema import Draft202012Validator
 
 import elspeth.web.composer.recipes as recipes_module
+from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 from elspeth.web.composer.recipes import (
     RecipeSpec,
     RecipeValidationError,
@@ -31,6 +33,11 @@ from elspeth.web.composer.recipes import (
     list_recipes,
     recipe_catalog_content_hash,
 )
+from elspeth.web.config import WebSettings
+from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
 
 # --------------------------------------------------------------------------
 # Registry surface
@@ -39,7 +46,8 @@ from elspeth.web.composer.recipes import (
 
 class TestRecipeRegistry:
     def test_registered_recipes(self) -> None:
-        names = {r["name"] for r in list_recipes()}
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+        names = {r["name"] for r in list_recipes(snapshot)}
         assert names == {
             "classify-rows-llm-jsonl",
             "split-by-numeric-threshold",
@@ -56,12 +64,46 @@ class TestRecipeRegistry:
         assert get_recipe("nonexistent") is None
 
     def test_list_recipes_includes_slot_metadata(self) -> None:
-        for entry in list_recipes():
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+        for entry in list_recipes(snapshot):
             assert "slots" in entry
             for _slot_name, slot_meta in entry["slots"].items():
                 assert "type" in slot_meta
                 assert "required" in slot_meta
                 assert "description" in slot_meta
+
+    def test_classify_recipe_advertises_only_public_profile_binding(self) -> None:
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+        entry = next(item for item in list_recipes(snapshot) if item["name"] == "classify-rows-llm-jsonl")
+
+        assert "profile" in entry["slots"]
+        assert {"provider", "model", "api_key", "api_key_secret"}.isdisjoint(entry["slots"])
+
+    def test_recipe_listing_excludes_dependencies_missing_from_snapshot(self) -> None:
+        catalog = create_catalog_service()
+        unrestricted = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+        snapshot = PluginAvailabilitySnapshot.create(
+            policy_hash="recipe-policy",
+            principal_scope="local:alice",
+            available=unrestricted.available - {PluginId("transform", "llm")},
+            unavailable=(),
+            selected=unrestricted.selected,
+            usable_profile_aliases=(),
+            selected_profile_aliases=(),
+            binding_generation_fingerprint="recipe-policy-generation",
+        )
+
+        names = {entry["name"] for entry in list_recipes(snapshot)}
+
+        assert "classify-rows-llm-jsonl" not in names
+        assert "web-scrape-llm-rate-jsonl" not in names
+        assert "split-by-numeric-threshold" in names
+        assert "fork-coalesce-truncate-jsonl" in names
+
+    def test_dynamic_source_recipe_declares_csv_or_json_alternative(self) -> None:
+        spec = get_recipe("web-scrape-llm-rate-jsonl")
+        assert spec is not None
+        assert spec.alternative_plugin_groups == (frozenset({PluginId("source", "csv"), PluginId("source", "json")}),)
 
 
 # --------------------------------------------------------------------------
@@ -148,8 +190,7 @@ class TestBlobIdSlotValidation:
             {
                 "source_blob_id": bid,
                 "classifier_template": "Classify: {{ row['text'] }}",
-                "model": "anthropic/claude-3.5-sonnet",
-                "api_key_secret": "OPENROUTER_API_KEY",
+                "profile": "tutorial",
             },
         )
         # blob_id is the top-level set_pipeline source argument (sibling of
@@ -160,6 +201,20 @@ class TestBlobIdSlotValidation:
         assert result["source"]["blob_id"] == bid
         assert "blob_id" not in result["source"]["options"]
 
+    def test_classify_recipe_builds_public_profile_options_only(self) -> None:
+        result = apply_recipe(
+            "classify-rows-llm-jsonl",
+            {
+                "source_blob_id": str(uuid4()),
+                "classifier_template": "Classify: {{ row['text'] }}",
+                "profile": "tutorial",
+            },
+        )
+
+        llm_options = result["nodes"][0]["options"]
+        assert llm_options["profile"] == "tutorial"
+        assert {"provider", "model", "api_key", "api_key_secret"}.isdisjoint(llm_options)
+
     def test_url_string_rejected_with_create_blob_hint(self) -> None:
         with pytest.raises(RecipeValidationError) as exc_info:
             apply_recipe(
@@ -167,8 +222,7 @@ class TestBlobIdSlotValidation:
                 {
                     "source_blob_id": "https://example.com/data.csv",
                     "classifier_template": "Classify: {{ row['text'] }}",
-                    "model": "anthropic/claude-3.5-sonnet",
-                    "api_key_secret": "OPENROUTER_API_KEY",
+                    "profile": "tutorial-default",
                 },
             )
         msg = str(exc_info.value)
@@ -183,8 +237,7 @@ class TestBlobIdSlotValidation:
                 {
                     "source_blob_id": "/tmp/data.csv",
                     "classifier_template": "Classify: {{ row['text'] }}",
-                    "model": "model",
-                    "api_key_secret": "OPENROUTER_API_KEY",
+                    "profile": "tutorial",
                 },
             )
 
@@ -195,8 +248,7 @@ class TestBlobIdSlotValidation:
                 {
                     "source_blob_id": 42,
                     "classifier_template": "Classify: {{ row['text'] }}",
-                    "model": "model",
-                    "api_key_secret": "OPENROUTER_API_KEY",
+                    "profile": "tutorial",
                 },
             )
 
@@ -258,7 +310,7 @@ class TestRequiredOptionalSlots:
                 "classify-rows-llm-jsonl",
                 {
                     "source_blob_id": str(uuid4()),
-                    "model": "model",
+                    "profile": "tutorial",
                 },
             )
 
@@ -268,27 +320,21 @@ class TestRequiredOptionalSlots:
             {
                 "source_blob_id": str(uuid4()),
                 "classifier_template": "tmpl",
-                "model": "m",
-                "api_key_secret": "OPENROUTER_API_KEY",
+                "profile": "tutorial",
             },
         )
-        # provider defaults to 'openrouter'
         llm_node = next(n for n in result["nodes"] if n["plugin"] == "llm")
-        assert llm_node["options"]["provider"] == "openrouter"
+        assert llm_node["options"]["profile"] == "tutorial"
         # label_field defaults to 'classification'
         assert llm_node["options"]["response_field"] == "classification"
 
-    def test_missing_required_api_key_secret_rejected(self) -> None:
-        """api_key_secret is required — operator must explicitly choose a
-        secret reference name (no sensible recipe-level default exists for
-        a deployment-specific secret)."""
-        with pytest.raises(RecipeValidationError, match="missing required slot 'api_key_secret'"):
+    def test_missing_required_profile_rejected(self) -> None:
+        with pytest.raises(RecipeValidationError, match="missing required slot 'profile'"):
             apply_recipe(
                 "classify-rows-llm-jsonl",
                 {
                     "source_blob_id": str(uuid4()),
                     "classifier_template": "tmpl",
-                    "model": "m",
                 },
             )
 
@@ -299,8 +345,7 @@ class TestRequiredOptionalSlots:
                 {
                     "source_blob_id": str(uuid4()),
                     "classifier_template": "tmpl",
-                    "model": "m",
-                    "api_key_secret": "OPENROUTER_API_KEY",
+                    "profile": "tutorial",
                     "fictitious_slot": "x",
                 },
             )
@@ -316,8 +361,7 @@ class TestClassifyRecipe:
         defaults = {
             "source_blob_id": str(uuid4()),
             "classifier_template": "Classify {{ row['subject'] }}",
-            "model": "anthropic/claude-3.5-sonnet",
-            "api_key_secret": "OPENROUTER_API_KEY",
+            "profile": "tutorial",
         }
         defaults.update(slots)
         return apply_recipe("classify-rows-llm-jsonl", defaults)
@@ -339,6 +383,36 @@ class TestClassifyRecipe:
         llm = next(n for n in result["nodes"] if n["plugin"] == "llm")
         assert llm["options"]["prompt_template"] == "Classify {{ row['subject'] }}"
         assert llm["options"]["response_field"] == "urgency"
+
+    def test_llm_options_satisfy_public_operator_profile_schema(self) -> None:
+        result = self._apply()
+        llm = next(node for node in result["nodes"] if node["plugin"] == "llm")
+        settings = WebSettings(
+            composer_max_composition_turns=4,
+            composer_max_discovery_turns=4,
+            composer_timeout_seconds=60,
+            composer_rate_limit_per_minute=20,
+            shareable_link_signing_key=b"0123456789abcdef0123456789abcdef",
+            llm_profiles={
+                "tutorial": {
+                    "provider": "bedrock",
+                    "model": "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+                }
+            },
+        )
+        runtime = RuntimeWebPluginConfig.from_settings(settings)
+        policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+        profiles = OperatorProfileRegistry(policy=policy, settings=runtime)
+        public_schema = profiles.public_schema(
+            PluginId("transform", "llm"),
+            create_catalog_service().get_schema("transform", "llm"),
+            available_aliases=("tutorial",),
+        ).json_schema
+
+        errors = list(Draft202012Validator(public_schema).iter_errors(llm["options"]))
+
+        assert errors == []
+        assert llm["options"]["schema"] == {"mode": "observed", "fields": None}
 
     def test_output_is_jsonl(self) -> None:
         result = self._apply(output_path="outputs/tickets.jsonl")
@@ -581,8 +655,7 @@ class TestWebScrapeRecipeBuild:
     _SLOTS: ClassVar[dict[str, str]] = {
         "source_blob_id": str(uuid4()),
         "source_plugin": "json",
-        "model": "anthropic/claude-sonnet-4.6",
-        "api_key_secret": "OPENROUTER_API_KEY",
+        "profile": "tutorial-default",
         "abuse_contact": "web-scrape-contact@dta.gov.au",
         "scraping_reason": "Tutorial exercise: fetch public pages for rating",
         "output_path": "outputs/ratings.jsonl",
@@ -795,8 +868,7 @@ class TestRecipeIntegrationWithSetPipeline:
             {
                 "source_blob_id": bid,
                 "classifier_template": "tmpl",
-                "model": "model",
-                "api_key_secret": "OPENROUTER_API_KEY",
+                "profile": "tutorial",
             },
         )
         # Top-level — set_pipeline consumes this in src_args.get('blob_id').
@@ -953,16 +1025,62 @@ class TestApplyRecipeEndToEnd:
             )
         return engine, session_id, blob_id, tmp_path
 
-    def _catalog(self):
+    def _policy_context(self):
         # Real PluginManager so set_pipeline's prevalidation sees authentic
         # schemas for csv/llm/type_coerce/json. Mocking the catalog would
         # mask the schema-validity contract under test here.
         from elspeth.plugins.infrastructure.manager import PluginManager
+        from elspeth.web.catalog.policy_view import PolicyCatalogView
         from elspeth.web.catalog.service import CatalogServiceImpl
+        from elspeth.web.config import WebSettings
+        from elspeth.web.plugin_policy.availability import build_plugin_snapshot
+        from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
+        from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
 
         pm = PluginManager()
         pm.register_builtin_plugins()
-        return CatalogServiceImpl(pm)
+        catalog = CatalogServiceImpl(pm)
+        settings = WebSettings(
+            composer_max_composition_turns=4,
+            composer_max_discovery_turns=4,
+            composer_timeout_seconds=60,
+            composer_rate_limit_per_minute=20,
+            shareable_link_signing_key=b"0123456789abcdef0123456789abcdef",
+            plugin_allowlist=(
+                "transform:passthrough",
+                "transform:truncate",
+                "transform:type_coerce",
+            ),
+            llm_profiles={
+                "tutorial-default": {
+                    "provider": "bedrock",
+                    "model": "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+                }
+            },
+        )
+        runtime = RuntimeWebPluginConfig.from_settings(settings)
+        policy = compile_web_plugin_policy(registry=pm, settings=runtime)
+        profiles = OperatorProfileRegistry(policy=policy, settings=runtime)
+
+        class _NoSecrets:
+            def has_server_ref(self, name: str) -> bool:
+                return False
+
+            def has_user_ref(self, principal: str, name: str) -> bool:
+                return False
+
+            def has_ref(self, principal: str, name: str) -> bool:
+                return False
+
+        snapshot = build_plugin_snapshot(
+            policy=policy,
+            catalog=catalog,
+            profiles=profiles,
+            principal_scope="local:test-user",
+            secret_inventory=_NoSecrets(),
+            generation_key=b"classify-recipe-policy-key",
+        )
+        return PolicyCatalogView(catalog, snapshot, profiles), snapshot
 
     def test_classify_recipe_passes_set_pipeline_prevalidation_and_drives_proof_step(self, _seeded) -> None:
         """The classify recipe must:
@@ -993,6 +1111,7 @@ class TestApplyRecipeEndToEnd:
             version=1,
         )
 
+        catalog, snapshot = self._policy_context()
         result = execute_tool(
             "apply_pipeline_recipe",
             {
@@ -1000,8 +1119,7 @@ class TestApplyRecipeEndToEnd:
                 "slots": {
                     "source_blob_id": blob_id,
                     "classifier_template": "Classify: {{ row['customer'] }}",
-                    "model": "anthropic/claude-3.5-sonnet",
-                    "api_key_secret": "OPENROUTER_API_KEY",
+                    "profile": "tutorial-default",
                     # Declare the field referenced in classifier_template
                     # explicitly. The LLMConfig validator demands an
                     # explicit list when the template references row.*;
@@ -1011,7 +1129,8 @@ class TestApplyRecipeEndToEnd:
                 },
             },
             empty,
-            self._catalog(),
+            catalog,
+            plugin_snapshot=snapshot,
             session_engine=engine,
             session_id=session_id,
         )
@@ -1035,13 +1154,12 @@ class TestApplyRecipeEndToEnd:
         # Any non-info diagnostic would be a real signal worth surfacing.
         assert all(d["severity"] != "blocking" for d in diagnostics), diagnostics
 
-        # The wired secret_ref marker must reach the stored node options
-        # — Pydantic prevalidation strips it temporarily, but the marker
-        # is preserved in the durable state for runtime resolution.
+        # Recipe output stays within the public operator-profile schema.
         classifier = next(n for n in new_state.nodes if n.plugin == "llm")
-        assert classifier.options["api_key"] == {"secret_ref": "OPENROUTER_API_KEY"}
+        assert classifier.options["profile"] == "tutorial-default"
+        assert {"provider", "model", "api_key", "api_key_secret"}.isdisjoint(classifier.options)
         # Schema option flows through prevalidation and is durable.
-        assert classifier.options["schema"] == {"mode": "observed"}
+        assert classifier.options["schema"] == {"mode": "observed", "fields": None}
 
     def test_threshold_recipe_passes_set_pipeline_prevalidation_and_drives_proof_step(self, _seeded) -> None:
         """The threshold recipe must:
@@ -1068,6 +1186,7 @@ class TestApplyRecipeEndToEnd:
             version=1,
         )
 
+        catalog, snapshot = self._policy_context()
         result = execute_tool(
             "apply_pipeline_recipe",
             {
@@ -1079,7 +1198,8 @@ class TestApplyRecipeEndToEnd:
                 },
             },
             empty,
-            self._catalog(),
+            catalog,
+            plugin_snapshot=snapshot,
             session_engine=engine,
             session_id=session_id,
         )
@@ -1117,7 +1237,7 @@ class TestApplyRecipeEndToEnd:
         from elspeth.web.composer import yaml_generator
         from elspeth.web.composer.state import CompositionState, PipelineMetadata
         from elspeth.web.composer.tools import execute_tool
-        from elspeth.web.execution.validation import validate_pipeline
+        from elspeth.web.execution.validation import validate_pipeline_for_trained_operator
 
         engine, session_id, blob_id, data_dir = _seeded
         empty = CompositionState(
@@ -1129,6 +1249,7 @@ class TestApplyRecipeEndToEnd:
             version=1,
         )
 
+        catalog, snapshot = self._policy_context()
         result = execute_tool(
             "apply_pipeline_recipe",
             {
@@ -1143,14 +1264,15 @@ class TestApplyRecipeEndToEnd:
                 },
             },
             empty,
-            self._catalog(),
+            catalog,
+            plugin_snapshot=snapshot,
             session_engine=engine,
             session_id=session_id,
         )
         assert result.success, getattr(result, "data", result)
         assert result.updated_state.validate().is_valid is True
 
-        runtime = validate_pipeline(
+        runtime = validate_pipeline_for_trained_operator(
             result.updated_state,
             SimpleNamespace(data_dir=data_dir),
             yaml_generator,
@@ -1235,6 +1357,7 @@ class TestApplyRecipeEndToEnd:
             version=4,
         )
 
+        catalog, snapshot = self._policy_context()
         result = execute_tool(
             "apply_pipeline_recipe",
             {
@@ -1246,7 +1369,8 @@ class TestApplyRecipeEndToEnd:
                 },
             },
             populated,
-            self._catalog(),
+            catalog,
+            plugin_snapshot=snapshot,
             session_engine=engine,
             session_id=session_id,
         )
@@ -1300,6 +1424,7 @@ class TestApplyRecipeEndToEnd:
             version=1,
         )
 
+        catalog, snapshot = self._policy_context()
         result = execute_tool(
             "apply_pipeline_recipe",
             {
@@ -1311,7 +1436,8 @@ class TestApplyRecipeEndToEnd:
                 },
             },
             empty,
-            self._catalog(),
+            catalog,
+            plugin_snapshot=snapshot,
             session_engine=engine,
             session_id=session_id,
         )
@@ -1361,6 +1487,7 @@ class TestApplyRecipeEndToEnd:
             version=1,
         )
 
+        catalog, snapshot = self._policy_context()
         result = execute_tool(
             "apply_pipeline_recipe",
             {
@@ -1372,7 +1499,8 @@ class TestApplyRecipeEndToEnd:
                 },
             },
             empty,
-            self._catalog(),
+            catalog,
+            plugin_snapshot=snapshot,
             session_engine=engine,
             session_id=session_id,
         )
@@ -1668,54 +1796,47 @@ def test_recipe_catalog_content_hash_is_deterministic() -> None:
 
 
 class TestRecipeProviderGuard:
-    """The LLM recipes wire only the OpenRouter provider.
-
-    The ``provider`` slot accepts a string, but these recipes emit only
-    provider/model/api_key on the llm node — never the deployment_name/endpoint
-    that AzureOpenAIConfig requires — so ``provider='azure'`` must fail loud at
-    build time (RecipeValidationError) rather than producing an unbuildable
-    Azure pipeline that dies in config validation with "missing Azure fields".
-    """
+    """LLM recipes expose only opaque operator-approved profile aliases."""
 
     _CLASSIFY_SLOTS: ClassVar[dict] = {
         "classifier_template": "Classify {{ row.text }}.",
-        "model": "anthropic/claude-sonnet-4.6",
-        "api_key_secret": "OPENROUTER_API_KEY",
+        "profile": "tutorial",
     }
     _WEB_SCRAPE_SLOTS: ClassVar[dict] = {
         "source_plugin": "json",
-        "model": "anthropic/claude-sonnet-4.6",
-        "api_key_secret": "OPENROUTER_API_KEY",
+        "profile": "tutorial-default",
         "abuse_contact": "noreply@dta.gov.au",
         "scraping_reason": "DTA technical demonstration",
     }
 
-    def test_classify_recipe_rejects_azure_provider(self) -> None:
-        with pytest.raises(RecipeValidationError, match="only 'openrouter'"):
+    def test_classify_recipe_rejects_raw_provider_binding(self) -> None:
+        with pytest.raises(RecipeValidationError, match=r"does not accept slot.*provider"):
             apply_recipe(
                 "classify-rows-llm-jsonl",
                 {"source_blob_id": str(uuid4()), **self._CLASSIFY_SLOTS, "provider": "azure"},
             )
 
-    def test_classify_recipe_builds_with_openrouter(self) -> None:
+    def test_classify_recipe_builds_with_opaque_profile(self) -> None:
         args = apply_recipe(
             "classify-rows-llm-jsonl",
-            {"source_blob_id": str(uuid4()), **self._CLASSIFY_SLOTS, "provider": "openrouter"},
+            {"source_blob_id": str(uuid4()), **self._CLASSIFY_SLOTS},
         )
         llm_node = next(node for node in args["nodes"] if node["plugin"] == "llm")
-        assert llm_node["options"]["provider"] == "openrouter"
+        assert llm_node["options"]["profile"] == "tutorial"
+        assert {"provider", "model", "api_key", "api_key_secret"}.isdisjoint(llm_node["options"])
 
-    def test_web_scrape_recipe_rejects_azure_provider(self) -> None:
-        with pytest.raises(RecipeValidationError, match="only 'openrouter'"):
+    def test_web_scrape_recipe_rejects_raw_provider_binding(self) -> None:
+        with pytest.raises(RecipeValidationError, match=r"does not accept slot.*provider"):
             apply_recipe(
                 "web-scrape-llm-rate-jsonl",
                 {"source_blob_id": str(uuid4()), **self._WEB_SCRAPE_SLOTS, "provider": "azure"},
             )
 
-    def test_web_scrape_recipe_builds_with_openrouter(self) -> None:
+    def test_web_scrape_recipe_builds_with_opaque_profile(self) -> None:
         args = apply_recipe(
             "web-scrape-llm-rate-jsonl",
-            {"source_blob_id": str(uuid4()), **self._WEB_SCRAPE_SLOTS, "provider": "openrouter"},
+            {"source_blob_id": str(uuid4()), **self._WEB_SCRAPE_SLOTS},
         )
         llm_node = next(node for node in args["nodes"] if node["plugin"] == "llm")
-        assert llm_node["options"]["provider"] == "openrouter"
+        assert llm_node["options"]["profile"] == "tutorial-default"
+        assert {"provider", "model", "api_key", "api_key_secret"}.isdisjoint(llm_node["options"])

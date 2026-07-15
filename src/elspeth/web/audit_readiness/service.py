@@ -4,7 +4,7 @@ No new validation logic. Layer: L3 (application).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any, Literal, Protocol, cast
@@ -16,12 +16,16 @@ from elspeth.contracts.composer_interpretation import (
     InterpretationSource,
 )
 from elspeth.contracts.enums import Determinism
+from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
 from elspeth.contracts.plugin_protocols import SinkProtocol, SourceProtocol, TransformProtocol
 from elspeth.contracts.secrets import SecretInventoryItem
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.audit_readiness.models import (
     AuditReadinessSnapshot,
+    PluginPolicyReadinessRow,
+    PluginPolicyReadinessSnapshot,
     ReadinessRow,
+    ReadinessStatus,
 )
 from elspeth.web.catalog.schemas import PluginKind
 from elspeth.web.composer.state import CompositionState
@@ -33,6 +37,15 @@ from elspeth.web.execution.schemas import (
     CHECK_OUTCOME_SKIPPED_AFTER_FAILURE,
     ValidationResult,
 )
+from elspeth.web.plugin_policy.compiler import REQUIRED_WEB_PLUGIN_IDS
+from elspeth.web.plugin_policy.models import (
+    PluginAvailabilitySnapshot,
+    PluginId,
+    PluginUnavailableReason,
+    WebPluginPolicy,
+)
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
+from elspeth.web.plugin_policy.validation import validate_plugin_policy
 from elspeth.web.sessions.converters import (
     state_from_record as _default_state_from_record,
 )
@@ -41,6 +54,224 @@ from elspeth.web.sessions.converters import (
 # dependency unidirectional (audit_readiness depends on the result shape,
 # not on validation's internal naming).
 _CHECK_IDENTITY_NODE_ADVISORY = "identity_node_advisory"
+_TUTORIAL_TRANSFORM_NAMES = frozenset({"web_scrape", "llm", "field_mapper"})
+
+
+def _tutorial_candidate(state: CompositionState) -> CompositionState | None:
+    """Return ``state`` only when it has the canonical tutorial shape."""
+    source_plugins = tuple(source.plugin for source in state.sources.values())
+    transform_plugins = tuple(node.plugin for node in state.nodes)
+    output_plugins = tuple(output.plugin for output in state.outputs)
+    if (
+        len(source_plugins) == 1
+        and source_plugins[0] in {"csv", "json"}
+        and len(transform_plugins) == len(_TUTORIAL_TRANSFORM_NAMES)
+        and set(transform_plugins) == _TUTORIAL_TRANSFORM_NAMES
+        and output_plugins == ("json",)
+    ):
+        return state
+    return None
+
+
+def build_plugin_policy_readiness(
+    *,
+    policy: WebPluginPolicy,
+    snapshot: PluginAvailabilitySnapshot,
+    tutorial_profile: str | None,
+    tutorial_state: CompositionState | None,
+    profile_registry: OperatorProfileRegistry | None,
+    live_probe_health: Mapping[str, bool] | None = None,
+    profile_credentials_checked: bool = True,
+) -> PluginPolicyReadinessSnapshot:
+    """Project distinct authorization, local-config, health, and tutorial rows.
+
+    Remote health is deliberately an input to this projection, never an input
+    to ``PluginAvailabilitySnapshot``.  A failed probe can make readiness
+    unhealthy without changing which plugins the request is authorized to use.
+    """
+    policy_row = PluginPolicyReadinessRow(
+        id="policy_compilation",
+        label="Plugin policy",
+        status="ok",
+        summary="Web plugin policy compiled",
+        detail=f"Policy schema {policy.schema_version}; fingerprint {policy.policy_hash[:12]}.",
+    )
+    core_complete = policy.required == REQUIRED_WEB_PLUGIN_IDS and policy.authorized >= REQUIRED_WEB_PLUGIN_IDS
+    core_row = PluginPolicyReadinessRow(
+        id="required_core",
+        label="Required web core",
+        status="ok" if core_complete else "error",
+        summary="Required web core is present" if core_complete else "Required web core is incomplete",
+        detail=None,
+    )
+
+    unavailable = {item.plugin_id: item.reason for item in snapshot.unavailable}
+    missing_local_optional = tuple(
+        sorted(
+            plugin_id
+            for plugin_id in policy.configured_optional
+            if unavailable.get(plugin_id)
+            in {
+                PluginUnavailableReason.NOT_INSTALLED,
+                PluginUnavailableReason.LOCAL_REQUIREMENT_MISSING,
+            }
+        )
+    )
+    selected = dict(snapshot.selected)
+    missing_required_controls = tuple(
+        capability.value
+        for capability, mode in snapshot.control_modes
+        if mode is ControlMode.REQUIRED and selected.get(capability) not in snapshot.available
+    )
+    local_status: ReadinessStatus
+    if missing_local_optional or missing_required_controls:
+        local_status = "error"
+        local_summary = "Enabled capability configuration is unavailable"
+        local_detail = "; ".join(
+            part
+            for part in (
+                f"Locally unavailable plugins: {', '.join(map(str, missing_local_optional))}" if missing_local_optional else "",
+                f"Required controls without an implementation: {', '.join(missing_required_controls)}" if missing_required_controls else "",
+            )
+            if part
+        )
+    elif policy.configured_optional:
+        local_status = "ok"
+        local_summary = "Enabled capability configuration is available"
+        local_detail = None
+    else:
+        local_status = "not_applicable"
+        local_summary = "No optional external capabilities are enabled"
+        local_detail = None
+    local_row = PluginPolicyReadinessRow(
+        id="local_capability_configuration",
+        label="Local capability configuration",
+        status=local_status,
+        summary=local_summary,
+        detail=local_detail,
+    )
+
+    health = dict(live_probe_health or {})
+    unhealthy = tuple(sorted(name for name, ready in health.items() if not ready))
+    if not health:
+        health_row = PluginPolicyReadinessRow(
+            id="live_health",
+            label="External provider health",
+            status="not_applicable",
+            summary="No live provider probes are owned by this deployment",
+            detail=None,
+        )
+    elif unhealthy:
+        health_row = PluginPolicyReadinessRow(
+            id="live_health",
+            label="External provider health",
+            status="error",
+            summary="One or more live provider probes are unhealthy",
+            detail=f"Unhealthy probes: {', '.join(unhealthy)}",
+        )
+    else:
+        health_row = PluginPolicyReadinessRow(
+            id="live_health",
+            label="External provider health",
+            status="ok",
+            summary="Owned live provider probes are healthy",
+            detail=None,
+        )
+
+    llm_id = PluginId("transform", "llm")
+    usable_aliases = dict(snapshot.usable_profile_aliases).get(llm_id, ())
+    tutorial_profile_status: ReadinessStatus
+    if tutorial_profile is None:
+        tutorial_profile_status = "error"
+        tutorial_profile_summary = "Tutorial LLM profile is not configured"
+    elif tutorial_profile not in usable_aliases:
+        tutorial_profile_status = "error"
+        tutorial_profile_summary = "Tutorial LLM profile is not credential-ready"
+    elif profile_credentials_checked:
+        tutorial_profile_status = "ok"
+        tutorial_profile_summary = "Tutorial LLM profile is credential-ready"
+    else:
+        tutorial_profile_status = "warning"
+        tutorial_profile_summary = "Tutorial LLM profile is configured; credentials are checked at launch"
+    tutorial_profile_row = PluginPolicyReadinessRow(
+        id="tutorial_profile",
+        label="Tutorial LLM profile",
+        status=tutorial_profile_status,
+        summary=tutorial_profile_summary,
+        detail=None,
+    )
+
+    if tutorial_state is None:
+        coverage_row = PluginPolicyReadinessRow(
+            id="tutorial_required_control_coverage",
+            label="Tutorial required controls",
+            status="not_applicable",
+            summary="Tutorial candidate has not been materialized",
+            detail=None,
+        )
+    else:
+        validation = validate_plugin_policy(
+            tutorial_state,
+            snapshot=snapshot,
+            profile_registry=profile_registry,
+        )
+        coverage_findings = validation.findings_for("required_control_coverage")
+        coverage_row = PluginPolicyReadinessRow(
+            id="tutorial_required_control_coverage",
+            label="Tutorial required controls",
+            status="error" if coverage_findings else "ok",
+            summary=("Tutorial is missing required control coverage" if coverage_findings else "Tutorial has required control coverage"),
+            detail=("\n".join(finding.message for finding in coverage_findings) if coverage_findings else None),
+        )
+
+    rows = (policy_row, core_row, local_row, health_row, tutorial_profile_row, coverage_row)
+    return PluginPolicyReadinessSnapshot(
+        rows=rows,
+        tutorial_ready=all(row.status != "error" for row in rows),
+    )
+
+
+def build_boot_plugin_policy_readiness(
+    *,
+    policy: WebPluginPolicy,
+    settings: RuntimeWebPluginConfig,
+) -> PluginPolicyReadinessSnapshot:
+    """Build the public boot-time view without claiming remote/user health.
+
+    Credential availability is principal-scoped and is rechecked by the
+    authenticated tutorial launch.  This static view answers only whether the
+    operator configured the tutorial alias and the process accepted policy.
+    """
+    llm_id = PluginId("transform", "llm")
+    configured_aliases = tuple(alias for alias, _profile in settings.llm_profiles)
+    tutorial_profile = settings.tutorial_llm_profile
+    selected_by_capability = dict(policy.preferences)
+    selected = tuple(
+        (
+            capability,
+            (llm_id if capability is PluginCapability.LLM else (selected_by_capability.get(capability) or (None,))[0]),
+        )
+        for capability in PluginCapability
+    )
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash=policy.policy_hash,
+        principal_scope="system:boot",
+        available=policy.authorized,
+        unavailable=(),
+        selected=selected,
+        usable_profile_aliases=((llm_id, configured_aliases),),
+        selected_profile_aliases=((llm_id, tutorial_profile),),
+        control_modes=policy.control_modes,
+        binding_generation_fingerprint=policy.policy_hash,
+    )
+    return build_plugin_policy_readiness(
+        policy=policy,
+        snapshot=snapshot,
+        tutorial_profile=tutorial_profile,
+        tutorial_state=None,
+        profile_registry=None,
+        profile_credentials_checked=False,
+    )
 
 
 @lru_cache(maxsize=1)
@@ -191,11 +422,19 @@ class ReadinessService:
         scoped_secret_resolver: _SecretServiceLike,
         settings: _SettingsLike,
         state_from_record: Callable[..., CompositionState] | None = None,
+        web_plugin_policy: WebPluginPolicy | None = None,
+        plugin_snapshot_factory: Callable[[str], PluginAvailabilitySnapshot] | None = None,
+        operator_profile_registry: OperatorProfileRegistry | None = None,
+        tutorial_profile: str | None = None,
     ) -> None:
         self._execution_service = execution_service
         self._session_service = session_service
         self._scoped_secret_resolver = scoped_secret_resolver
         self._settings = settings
+        self._web_plugin_policy = web_plugin_policy
+        self._plugin_snapshot_factory = plugin_snapshot_factory
+        self._operator_profile_registry = operator_profile_registry
+        self._tutorial_profile = tutorial_profile
         self._state_from_record: Callable[..., CompositionState] = (
             state_from_record if state_from_record is not None else _default_state_from_record
         )
@@ -267,6 +506,15 @@ class ReadinessService:
             ),
             _build_secrets_row(validation, inventory),
         )
+        policy_readiness = None
+        if self._web_plugin_policy is not None and self._plugin_snapshot_factory is not None:
+            policy_readiness = build_plugin_policy_readiness(
+                policy=self._web_plugin_policy,
+                snapshot=self._plugin_snapshot_factory(user_id),
+                tutorial_profile=self._tutorial_profile,
+                tutorial_state=_tutorial_candidate(state),
+                profile_registry=self._operator_profile_registry,
+            )
         # ``session_id`` is rendered as ``str`` in the JSON envelope; the
         # model's pydantic ``Field(min_length=1)`` accepts the canonical
         # 36-char UUID representation.
@@ -276,6 +524,7 @@ class ReadinessService:
             checked_at=checked_at,
             rows=rows,
             validation_result=validation,
+            plugin_policy_readiness=policy_readiness,
         )
 
 

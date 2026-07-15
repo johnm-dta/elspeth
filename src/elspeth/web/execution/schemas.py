@@ -31,6 +31,10 @@ RunEventType = Literal["progress", "error", "completed", "cancelled", "failed"]
 RUN_EVENT_TYPE_VALUES: frozenset[str] = frozenset(get_args(RunEventType))
 
 ValidationCheckName = Literal[
+    "plugin_enablement",
+    "operator_profile_options",
+    "required_control_availability",
+    "required_control_coverage",
     "path_allowlist",
     "web_scrape_network_policy",
     "secret_refs",
@@ -41,6 +45,7 @@ ValidationCheckName = Literal[
     "managed_identity_policy",
     "llm_retry_budget_policy",
     "llm_base_url_policy",
+    "aws_s3_endpoint_url_policy",
     "settings_load",
     "plugin_instantiation",
     "value_source_compliance",
@@ -53,6 +58,10 @@ ValidationCheckName = Literal[
 ]
 VALIDATION_CHECK_NAME_VALUES: frozenset[str] = frozenset(get_args(ValidationCheckName))
 
+CHECK_PLUGIN_ENABLEMENT: Final[ValidationCheckName] = "plugin_enablement"
+CHECK_OPERATOR_PROFILE_OPTIONS: Final[ValidationCheckName] = "operator_profile_options"
+CHECK_REQUIRED_CONTROL_AVAILABILITY: Final[ValidationCheckName] = "required_control_availability"
+CHECK_REQUIRED_CONTROL_COVERAGE: Final[ValidationCheckName] = "required_control_coverage"
 CHECK_PATH_ALLOWLIST: Final[ValidationCheckName] = "path_allowlist"
 CHECK_WEB_SCRAPE_NETWORK_POLICY: Final[ValidationCheckName] = "web_scrape_network_policy"
 CHECK_SECRET_REFS: Final[ValidationCheckName] = "secret_refs"
@@ -63,6 +72,7 @@ CHECK_BLOB_INLINE_REFS: Final[ValidationCheckName] = "blob_inline_refs"
 CHECK_MANAGED_IDENTITY_POLICY: Final[ValidationCheckName] = "managed_identity_policy"
 CHECK_LLM_RETRY_BUDGET_POLICY: Final[ValidationCheckName] = "llm_retry_budget_policy"
 CHECK_LLM_BASE_URL_POLICY: Final[ValidationCheckName] = "llm_base_url_policy"
+CHECK_AWS_S3_ENDPOINT_URL_POLICY: Final[ValidationCheckName] = "aws_s3_endpoint_url_policy"
 CHECK_SETTINGS: Final[ValidationCheckName] = "settings_load"
 RUNTIME_CHECK_PLUGIN_INSTANTIATION: Final[ValidationCheckName] = "plugin_instantiation"
 CHECK_VALUE_SOURCE_COMPLIANCE: Final[ValidationCheckName] = "value_source_compliance"
@@ -74,6 +84,10 @@ CHECK_STATE_EXISTS: Final[ValidationCheckName] = "state_exists"
 CHECK_ADVISOR_SIGNOFF: Final[ValidationCheckName] = "advisor_signoff"
 
 VALIDATION_BLOCKING_CHECK_NAMES: tuple[ValidationCheckName, ...] = (
+    CHECK_PLUGIN_ENABLEMENT,
+    CHECK_OPERATOR_PROFILE_OPTIONS,
+    CHECK_REQUIRED_CONTROL_AVAILABILITY,
+    CHECK_REQUIRED_CONTROL_COVERAGE,
     CHECK_PATH_ALLOWLIST,
     CHECK_WEB_SCRAPE_NETWORK_POLICY,
     CHECK_SECRET_REFS,
@@ -84,6 +98,7 @@ VALIDATION_BLOCKING_CHECK_NAMES: tuple[ValidationCheckName, ...] = (
     CHECK_MANAGED_IDENTITY_POLICY,
     CHECK_LLM_RETRY_BUDGET_POLICY,
     CHECK_LLM_BASE_URL_POLICY,
+    CHECK_AWS_S3_ENDPOINT_URL_POLICY,
     CHECK_SETTINGS,
     RUNTIME_CHECK_PLUGIN_INSTANTIATION,
     CHECK_VALUE_SOURCE_COMPLIANCE,

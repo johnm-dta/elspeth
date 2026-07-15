@@ -181,7 +181,7 @@ from elspeth.web.execution.accounting import load_run_accounting_from_db
 from elspeth.web.execution.progress import BroadcastResult
 from elspeth.web.execution.schemas import CompletedData
 from elspeth.web.execution.service import ExecutionServiceImpl
-from elspeth.web.execution.validation import validate_pipeline
+from elspeth.web.execution.validation import validate_pipeline_for_trained_operator
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.fixtures.base_classes import _TestSchema, as_sink, as_source, as_transform
@@ -1662,7 +1662,7 @@ class TestComposerRuntimeRouteTargetAgreement:
         """Run validate_pipeline on a CompositionState and return the
         route_target_resolution check detail. Asserts the failure happened on
         that specific check (not graph_structure, not schema_compatibility)."""
-        result = validate_pipeline(
+        result = validate_pipeline_for_trained_operator(
             state,
             TestComposerRuntimeRouteTargetAgreement._validation_settings(data_dir),
             composer_yaml_generator,
@@ -1855,7 +1855,7 @@ class TestComposerRuntimeRouteTargetAgreement:
             metadata=PipelineMetadata(),
             version=1,
         )
-        composer_result = validate_pipeline(state, self._validation_settings(tmp_path), composer_yaml_generator)
+        composer_result = validate_pipeline_for_trained_operator(state, self._validation_settings(tmp_path), composer_yaml_generator)
         assert composer_result.is_valid is False
         composer_messages = " | ".join(err.message for err in composer_result.errors)
         assert "missing_error_sink" in composer_messages
@@ -1982,7 +1982,7 @@ class TestComposerRuntimeRouteTargetAgreement:
             metadata=PipelineMetadata(),
             version=1,
         )
-        composer_result = validate_pipeline(state, self._validation_settings(tmp_path), composer_yaml_generator)
+        composer_result = validate_pipeline_for_trained_operator(state, self._validation_settings(tmp_path), composer_yaml_generator)
         assert composer_result.is_valid is False
         composer_messages = " | ".join(err.message for err in composer_result.errors)
         assert "missing_failsink" in composer_messages
@@ -2070,7 +2070,7 @@ class TestComposerRuntimeRouteTargetAgreement:
             metadata=PipelineMetadata(),
             version=1,
         )
-        composer_result = validate_pipeline(state, self._validation_settings(tmp_path), composer_yaml_generator)
+        composer_result = validate_pipeline_for_trained_operator(state, self._validation_settings(tmp_path), composer_yaml_generator)
         assert composer_result.is_valid is False
         composer_messages = " | ".join(err.message for err in composer_result.errors)
         assert "missing_route_sink" in composer_messages
@@ -2160,7 +2160,7 @@ class TestComposerRuntimeRouteTargetAgreement:
             metadata=PipelineMetadata(),
             version=1,
         )
-        result = validate_pipeline(
+        result = validate_pipeline_for_trained_operator(
             state,
             self._validation_settings(tmp_path),
             composer_yaml_generator,
@@ -2371,7 +2371,7 @@ class TestComposerRuntimeSecretRefAgreement:
             version=1,
         )
 
-        result = validate_pipeline(
+        result = validate_pipeline_for_trained_operator(
             state,
             self._validation_settings(tmp_path),
             composer_yaml_generator,
@@ -3046,7 +3046,7 @@ class TestComposerRuntimeFileSinkCollisionAgreement:
 
         state = self._build_state(csv_path, sink_path)
 
-        result = validate_pipeline(
+        result = validate_pipeline_for_trained_operator(
             state,
             self._validation_settings(tmp_path),
             composer_yaml_generator,
@@ -3072,7 +3072,7 @@ class TestComposerRuntimeFileSinkCollisionAgreement:
         assert not sink_path.exists()
 
         state = self._build_state(csv_path, sink_path)
-        result = validate_pipeline(
+        result = validate_pipeline_for_trained_operator(
             state,
             self._validation_settings(tmp_path),
             composer_yaml_generator,
@@ -3366,7 +3366,7 @@ sinks:
         # exercise the hash/audit-ordering assertions they actually target.
         session_service = _FakeSessionService(run=_RunSnapshot(session_id=uuid4()))
 
-        service = ExecutionServiceImpl(
+        service = ExecutionServiceImpl.for_trained_operator(
             loop=loop,
             broadcaster=cast(Any, _FakeProgressBroadcaster()),
             settings=settings,
@@ -3385,7 +3385,7 @@ sinks:
         blob_id = uuid4()
         state = self._state_with_inline_prompt(tmp_path, blob_id, "a" * 64)
 
-        result = validate_pipeline(
+        result = validate_pipeline_for_trained_operator(
             state,
             self._validation_settings(tmp_path),
             composer_yaml_generator,
@@ -3400,7 +3400,7 @@ sinks:
 
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.service.load_settings_from_config_dict")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_runtime_fails_closed_on_hash_mismatch_before_settings_load(
         self,
@@ -3434,7 +3434,7 @@ sinks:
         mock_orch_cls.assert_not_called()
 
     @patch("elspeth.web.execution.service.load_settings_from_config_dict")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_runtime_records_audit_hash_before_settings_load(
         self,

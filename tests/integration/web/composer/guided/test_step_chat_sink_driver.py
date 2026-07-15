@@ -11,11 +11,13 @@ from unittest.mock import patch
 import pytest
 
 from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import PluginKind
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.guided.chat_solver import Step2SinkChatOutcome, maybe_resolve_step_2_sink_chat
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions._guided_step_chat import (
     Step2SinkChatResult,
     resolve_step_2_sink_chat_with_auto_drop,
@@ -357,7 +359,11 @@ async def test_sink_wrapper_absorbs_malformed_discovery_args_into_synthetic_unav
     its transient set but the sink twin did not, so a model that emitted an
     *allowed* discovery tool with garbage arguments crashed the request.
     """
-    catalog = _FakeCatalogService(sinks=(PluginSummary(name="json", description="JSON Lines sink", plugin_type="sink", config_fields=[]),))
+    full_catalog = _FakeCatalogService(
+        sinks=(PluginSummary(name="json", description="JSON Lines sink", plugin_type="sink", config_fields=[]),)
+    )
+    plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(full_catalog)
+    catalog = PolicyCatalogView.for_trained_operator(full_catalog, plugin_snapshot)
     state = CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1)
     # ``list_sinks`` is an allowed discovery tool, but its arguments decode to a
     # non-object, so the production ``_execute_discovery_call`` raises
@@ -396,6 +402,7 @@ async def test_sink_wrapper_absorbs_malformed_discovery_args_into_synthetic_unav
             seed=None,
             state=state,
             catalog=catalog,
+            plugin_snapshot=plugin_snapshot,
         )
     assert isinstance(result, Step2SinkChatResult)
     assert result.sink_resolution is None

@@ -18,6 +18,7 @@ import pytest
 from sqlalchemy import func, insert, select
 
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.protocol import ToolArgumentError
@@ -37,6 +38,7 @@ from elspeth.web.composer.tools import (
 from elspeth.web.composer.tools import (
     execute_tool as _execute_tool,
 )
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, chat_messages_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -135,6 +137,17 @@ def execute_tool(
     session_id: str | None = None,
     **kwargs: Any,
 ) -> ToolResult:
+    supplied_snapshot = kwargs.pop("plugin_snapshot", None)
+    if isinstance(catalog, PolicyCatalogView):
+        if not isinstance(supplied_snapshot, PluginAvailabilitySnapshot):
+            raise AssertionError("policy catalog tests must supply their exact snapshot")
+        policy_catalog = catalog
+        snapshot = supplied_snapshot
+    else:
+        if supplied_snapshot is not None:
+            raise AssertionError("a snapshot requires its matching policy catalog")
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+        policy_catalog = PolicyCatalogView.for_trained_operator(catalog, snapshot)
     if (
         tool_name in {"create_blob", "update_blob"}
         and session_engine is not None
@@ -151,7 +164,8 @@ def execute_tool(
         tool_name,
         arguments,
         state,
-        catalog,
+        policy_catalog,
+        plugin_snapshot=snapshot,
         data_dir=data_dir,
         session_engine=session_engine,
         session_id=session_id,

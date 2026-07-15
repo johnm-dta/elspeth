@@ -33,7 +33,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.blobs import BlobRecord
 from elspeth.contracts.blobs_inline import BlobInlineValidationViolation
-from elspeth.contracts.secrets import SecretRefPlacementViolation, WebSecretResolver
+from elspeth.contracts.secrets import ScopedWebSecretResolver, SecretRefPlacementViolation, SecretScope, WebSecretResolver
 from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.blobs_inline import (
     BLOB_INLINE_AGGREGATE_BYTE_CAP,
@@ -46,6 +46,7 @@ from elspeth.core.dag.models import EdgeContractError, GraphValidationError, Gra
 from elspeth.core.secrets import (
     collect_credential_field_violations,
     collect_disallowed_secret_ref_markers,
+    parse_secret_ref_marker,
     redact_secret_refs_for_validation,
     resolve_secret_refs,
     secret_env_ref_name,
@@ -79,6 +80,7 @@ from elspeth.web.execution.preflight import (
 )
 from elspeth.web.execution.protocol import ValidationSettings, YamlGenerator
 from elspeth.web.execution.schemas import (
+    CHECK_AWS_S3_ENDPOINT_URL_POLICY,
     CHECK_BATCH_TRANSFORM_OPTIONS,
     CHECK_BLOB_INLINE_REFS,
     CHECK_IDENTITY_NODE_ADVISORY,
@@ -86,12 +88,16 @@ from elspeth.web.execution.schemas import (
     CHECK_LLM_BASE_URL_POLICY,
     CHECK_LLM_RETRY_BUDGET_POLICY,
     CHECK_MANAGED_IDENTITY_POLICY,
+    CHECK_OPERATOR_PROFILE_OPTIONS,
     CHECK_OUTCOME_SECRET_REFS_NO_REFS,
     CHECK_OUTCOME_SECRET_REFS_RESOLVED,
     CHECK_OUTCOME_SECRET_REFS_SKIPPED_NO_SERVICE,
     CHECK_OUTCOME_SECRET_REFS_UNRESOLVED,
     CHECK_OUTCOME_SKIPPED_AFTER_FAILURE,
     CHECK_PATH_ALLOWLIST,
+    CHECK_PLUGIN_ENABLEMENT,
+    CHECK_REQUIRED_CONTROL_AVAILABILITY,
+    CHECK_REQUIRED_CONTROL_COVERAGE,
     CHECK_ROUTE_TARGETS,
     CHECK_SECRET_REFS,
     CHECK_SEMANTIC_CONTRACTS,
@@ -100,6 +106,7 @@ from elspeth.web.execution.schemas import (
     CHECK_WEB_SCRAPE_NETWORK_POLICY,
     VALIDATION_BLOCKING_CHECK_NAMES,
     ValidationCheck,
+    ValidationCheckName,
     ValidationError,
     ValidationReadiness,
     ValidationReadinessBlocker,
@@ -113,7 +120,11 @@ from elspeth.web.interpretation_state import (
     materialize_state_for_authoring,
     materialize_state_for_execution,
 )
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
+from elspeth.web.plugin_policy.validation import PolicyValidationStage, validate_plugin_policy
 from elspeth.web.provider_config_policy import (
+    web_aws_s3_endpoint_url_policy_error,
     web_llm_base_url_policy_error,
     web_llm_retry_budget_policy_error,
     web_rag_provider_config_policy_error,
@@ -121,6 +132,10 @@ from elspeth.web.provider_config_policy import (
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_secret_ref_fields_text
 
 # ── Check names (ordered) ─────────────────────────────────────────────
+_CHECK_PLUGIN_ENABLEMENT = CHECK_PLUGIN_ENABLEMENT
+_CHECK_OPERATOR_PROFILE_OPTIONS = CHECK_OPERATOR_PROFILE_OPTIONS
+_CHECK_REQUIRED_CONTROL_AVAILABILITY = CHECK_REQUIRED_CONTROL_AVAILABILITY
+_CHECK_REQUIRED_CONTROL_COVERAGE = CHECK_REQUIRED_CONTROL_COVERAGE
 _CHECK_PATH_ALLOWLIST = CHECK_PATH_ALLOWLIST
 _CHECK_WEB_SCRAPE_NETWORK_POLICY = CHECK_WEB_SCRAPE_NETWORK_POLICY
 _CHECK_SECRET_REFS = CHECK_SECRET_REFS
@@ -131,6 +146,7 @@ _CHECK_INTERPRETATION_REVIEW = CHECK_INTERPRETATION_REVIEW
 _CHECK_MANAGED_IDENTITY_POLICY = CHECK_MANAGED_IDENTITY_POLICY
 _CHECK_LLM_RETRY_BUDGET_POLICY = CHECK_LLM_RETRY_BUDGET_POLICY
 _CHECK_LLM_BASE_URL_POLICY = CHECK_LLM_BASE_URL_POLICY
+_CHECK_AWS_S3_ENDPOINT_URL_POLICY = CHECK_AWS_S3_ENDPOINT_URL_POLICY
 _CHECK_SETTINGS = CHECK_SETTINGS
 _CHECK_PLUGINS = RUNTIME_CHECK_PLUGIN_INSTANTIATION
 _CHECK_VALUE_SOURCE_COMPLIANCE = CHECK_VALUE_SOURCE_COMPLIANCE
@@ -199,6 +215,13 @@ _CHECK_IDENTITY_NODE_ADVISORY = CHECK_IDENTITY_NODE_ADVISORY
 # work). The position is asserted by tests/unit/web/execution/test_validation.py
 # to prevent silent reordering.
 _ALL_CHECKS = list(VALIDATION_BLOCKING_CHECK_NAMES)
+
+_PLUGIN_POLICY_CHECKS: tuple[tuple[PolicyValidationStage, ValidationCheckName], ...] = (
+    ("plugin_enablement", _CHECK_PLUGIN_ENABLEMENT),
+    ("operator_profile_options", _CHECK_OPERATOR_PROFILE_OPTIONS),
+    ("required_control_availability", _CHECK_REQUIRED_CONTROL_AVAILABILITY),
+    ("required_control_coverage", _CHECK_REQUIRED_CONTROL_COVERAGE),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -645,15 +668,14 @@ def _find_identity_node_advisories(state: CompositionState) -> list[_IdentityFin
     return findings
 
 
-def _collect_secret_refs(obj: Any, env_ref_names: set[str] | None = None) -> list[str]:
-    """Walk a nested dict/list/Mapping structure and collect all secret_ref names."""
-    refs: list[str] = []
+def _collect_secret_refs(obj: Any, env_ref_names: set[str] | None = None) -> list[tuple[str, SecretScope | None]]:
+    """Collect deferred-secret names together with their requested scope."""
+    refs: list[tuple[str, SecretScope | None]] = []
     if isinstance(obj, Mapping):
-        if len(obj) == 1 and "secret_ref" in obj:
-            ref = obj["secret_ref"]
-            if isinstance(ref, str):
-                refs.append(ref)
-                return refs
+        marker = parse_secret_ref_marker(obj)
+        if marker is not None:
+            refs.append(marker)
+            return refs
         for v in obj.values():
             refs.extend(_collect_secret_refs(v, env_ref_names))
     elif isinstance(obj, (list, tuple)):
@@ -662,8 +684,22 @@ def _collect_secret_refs(obj: Any, env_ref_names: set[str] | None = None) -> lis
     else:
         ref = secret_env_ref_name(obj, env_ref_names or frozenset())
         if ref is not None:
-            refs.append(ref)
+            refs.append((ref, None))
     return refs
+
+
+def _secret_ref_exists(
+    secret_service: WebSecretResolver,
+    user_id: str,
+    secret_ref: tuple[str, SecretScope | None],
+) -> bool:
+    """Check a deferred reference without discarding an explicit scope."""
+    name, scope = secret_ref
+    if scope is None:
+        return secret_service.has_ref(user_id, name)
+    if not isinstance(secret_service, ScopedWebSecretResolver):
+        raise TypeError("Scoped secret marker requires a ScopedWebSecretResolver")
+    return secret_service.resolve_scoped(user_id, name, scope) is not None
 
 
 def _blob_inline_component_id(field_path: str) -> str | None:
@@ -777,6 +813,8 @@ def validate_pipeline(
     settings: ValidationSettings,
     yaml_generator: YamlGenerator,
     *,
+    plugin_snapshot: PluginAvailabilitySnapshot,
+    profile_registry: OperatorProfileRegistry | None,
     secret_service: WebSecretResolver | None = None,
     user_id: str | None = None,
     blob_get_metadata: Callable[[UUID], BlobRecord | None] | None = None,
@@ -795,7 +833,7 @@ def validate_pipeline(
     2. Generate YAML from CompositionState
     3. Load settings via load_settings_from_yaml_string() — resolve secret
        refs first if present, matching the execution service path exactly
-    4. instantiate_runtime_plugins(settings, preflight_mode=True)
+    4. instantiate_runtime_plugins(settings, plugin_snapshot=plugin_snapshot)
     5. build_runtime_graph(settings, bundle)
     6. graph.validate() + graph.validate_edge_compatibility()
 
@@ -821,6 +859,10 @@ def validate_pipeline(
         allow_pending_interpretation_placeholders: When true, composer
             authoring preflight masks unresolved ``{{interpretation:<term>}}``
             tokens before YAML generation. Runtime execution leaves this false.
+        plugin_snapshot: Frozen request policy/availability snapshot. Local
+            trained-operator callers may omit it; web callers must pass one.
+        profile_registry: Frozen operator-profile resolver registry. Required
+            when the snapshot exposes operator-profiled plugin aliases.
     """
     checks: list[ValidationCheck] = []
     errors: list[ValidationError] = []
@@ -866,6 +908,51 @@ def validate_pipeline(
                 detail="Pipeline is empty.",
             ),
         )
+
+    # Policy checks deliberately precede path, YAML, and runtime construction.
+    # The authored state remains audit-safe; only the in-memory copy returned
+    # by policy validation contains private operator-profile bindings.
+    policy_result = validate_plugin_policy(
+        state,
+        snapshot=plugin_snapshot,
+        profile_registry=profile_registry,
+    )
+    for stage, check_name in _PLUGIN_POLICY_CHECKS:
+        stage_findings = policy_result.findings_for(stage)
+        checks.append(
+            ValidationCheck(
+                name=check_name,
+                passed=not stage_findings,
+                detail=(f"{len(stage_findings)} plugin policy finding(s)." if stage_findings else f"{check_name} passed."),
+                affected_nodes=tuple(dict.fromkeys(finding.component_id for finding in stage_findings if finding.component_id is not None)),
+                outcome_code=None,
+            )
+        )
+        if stage_findings:
+            first_finding = stage_findings[0]
+            errors = [
+                ValidationError(
+                    component_id=item.component_id,
+                    component_type=item.component_type,
+                    message=item.message,
+                    suggestion="Choose an available plugin or repair the required control path, then validate again.",
+                    error_code=item.error_code,
+                )
+                for item in stage_findings
+            ]
+            _append_skipped_checks(checks, check_name)
+            return ValidationResult(
+                is_valid=False,
+                checks=checks,
+                errors=errors,
+                readiness=_blocked_readiness(
+                    code=first_finding.error_code,
+                    detail=first_finding.message,
+                    component_id=first_finding.component_id,
+                    component_type=first_finding.component_type,
+                ),
+            )
+    state = policy_result.executable_state
 
     # Step 1: Source + sink path allowlist check (C3/S2 defense-in-depth)
     # Local filesystem keys in source/sink options must resolve under allowed
@@ -1110,7 +1197,7 @@ def validate_pipeline(
     # with the runtime fingerprinting code path.  Reusing it here keeps
     # validate-time and runtime in lock-step — divergence would re-open the
     # parity gap this issue was filed to close.
-    all_refs: list[str] = []
+    all_refs: list[tuple[str, SecretScope | None]] = []
     env_ref_names: set[str] = set()
     fabricated_components: list[tuple[str | None, str | None, list[str]]] = []
     disallowed_secret_ref_components: list[tuple[str | None, str, str, list[SecretRefPlacementViolation]]] = []
@@ -1156,7 +1243,7 @@ def validate_pipeline(
             if disallowed:
                 disallowed_secret_ref_components.append((output.name, "sink", output.plugin, disallowed))
 
-        missing_refs = [ref for ref in all_refs if not secret_service.has_ref(user_id, ref)]
+        missing_refs = [ref[0] for ref in all_refs if not _secret_ref_exists(secret_service, user_id, ref)]
         if missing_refs or fabricated_components or disallowed_secret_ref_components:
             detail_parts: list[str] = []
             if missing_refs:
@@ -1627,6 +1714,87 @@ def validate_pipeline(
         )
     )
 
+    for source_name, source in state.sources.items():
+        endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(source.plugin, source.options)
+        if endpoint_policy_error is None:
+            continue
+        source_component = "source" if source_name == "source" else f"source:{source_name}"
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_AWS_S3_ENDPOINT_URL_POLICY,
+                passed=False,
+                detail=f"Source '{source_name}' sets aws_s3 endpoint_url in a web-authored pipeline",
+                affected_nodes=(source_component,),
+                outcome_code=None,
+            )
+        )
+        _append_skipped_checks(checks, _CHECK_AWS_S3_ENDPOINT_URL_POLICY)
+        return ValidationResult(
+            is_valid=False,
+            checks=checks,
+            errors=[
+                ValidationError(
+                    component_id=source_component,
+                    component_type="source",
+                    message=endpoint_policy_error,
+                    suggestion="Remove endpoint_url and use operator-controlled AWS configuration.",
+                    error_code="aws_s3_endpoint_url_not_allowed",
+                )
+            ],
+            readiness=_blocked_readiness(
+                code=_CHECK_AWS_S3_ENDPOINT_URL_POLICY,
+                detail=f"source {source_component} sets aws_s3 endpoint_url in a web-authored pipeline",
+                component_id=source_component,
+                component_type="source",
+            ),
+            semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+        )
+
+    for output in state.outputs:
+        endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(output.plugin, output.options)
+        if endpoint_policy_error is None:
+            continue
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_AWS_S3_ENDPOINT_URL_POLICY,
+                passed=False,
+                detail=f"Sink '{output.name}' sets aws_s3 endpoint_url in a web-authored pipeline",
+                affected_nodes=(output.name,),
+                outcome_code=None,
+            )
+        )
+        _append_skipped_checks(checks, _CHECK_AWS_S3_ENDPOINT_URL_POLICY)
+        return ValidationResult(
+            is_valid=False,
+            checks=checks,
+            errors=[
+                ValidationError(
+                    component_id=output.name,
+                    component_type="sink",
+                    message=endpoint_policy_error,
+                    suggestion="Remove endpoint_url and use operator-controlled AWS configuration.",
+                    error_code="aws_s3_endpoint_url_not_allowed",
+                )
+            ],
+            readiness=_blocked_readiness(
+                code=_CHECK_AWS_S3_ENDPOINT_URL_POLICY,
+                detail=f"sink {output.name} sets aws_s3 endpoint_url in a web-authored pipeline",
+                component_id=output.name,
+                component_type="sink",
+            ),
+            semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+        )
+
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_AWS_S3_ENDPOINT_URL_POLICY,
+            passed=True,
+            detail="No web-authored aws_s3 endpoint_url override",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
+
     # Step 3: Settings loading
     #
     # Always uses load_settings_from_yaml_string() — the same loader the
@@ -1755,7 +1923,7 @@ def validate_pipeline(
     #   but rejected by the walker; PLUGINS check passed, VALUE_SOURCE
     #   compliance check failed, downstream checks skipped via cascade.
     try:
-        bundle = instantiate_runtime_plugins(elspeth_settings, preflight_mode=True)
+        bundle = instantiate_runtime_plugins(elspeth_settings, plugin_snapshot=plugin_snapshot)
         checks.append(
             ValidationCheck(
                 name=_CHECK_PLUGINS,
@@ -2138,4 +2306,27 @@ def validate_pipeline(
         warnings=graph_warnings,
         readiness=_execution_ready(),
         semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+    )
+
+
+def validate_pipeline_for_trained_operator(
+    state: CompositionState,
+    settings: ValidationSettings,
+    yaml_generator: YamlGenerator,
+    **kwargs: Any,
+) -> ValidationResult:
+    """Explicit non-web validation root preserving CLI and local-tool neutrality."""
+    from elspeth.web.dependencies import create_catalog_service
+
+    plugin_snapshot = kwargs.pop("plugin_snapshot", None)
+    if plugin_snapshot is None:
+        plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+    profile_registry = kwargs.pop("profile_registry", None)
+    return validate_pipeline(
+        state,
+        settings,
+        yaml_generator,
+        plugin_snapshot=plugin_snapshot,
+        profile_registry=profile_registry,
+        **kwargs,
     )

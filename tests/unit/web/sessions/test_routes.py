@@ -50,8 +50,9 @@ from elspeth.web.composer.guided.state_machine import GuidedSession, GuidedStep,
 from elspeth.web.composer.progress import ComposerProgressRegistry
 from elspeth.web.composer.protocol import ComposerPluginCrashError, ComposerResult, ComposerService
 from elspeth.web.composer.redaction import REDACTED_BLOB_SOURCE_PATH
-from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationSummary
+from elspeth.web.composer.state import CompositionState, OutputSpec, PipelineMetadata, SourceSpec, ValidationSummary
 from elspeth.web.config import WebSettings
+from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.schemas import (
     RunAccounting,
     RunAccountingIntegrity,
@@ -66,6 +67,9 @@ from elspeth.web.execution.schemas import (
     ValidationResult as ValidationResultModel,
 )
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
+from elspeth.web.provider_config_policy import AWS_S3_ENDPOINT_URL_POLICY_ERROR
 from elspeth.web.sessions._guided_step_chat import Step1SourceChatResult, StepChatResult
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import (
@@ -469,6 +473,7 @@ def _make_progress_route_app(
     app.state.execution_service = _ExecutionServiceStub()
     app.state.composer_progress_registry = ComposerProgressRegistry()
     app.state.scoped_secret_resolver = None
+    _install_restricted_plugin_policy(app)
     app.include_router(create_session_router())
     return app, service
 
@@ -533,6 +538,7 @@ def _make_app(
     app.state.rate_limiter = ComposerRateLimiter(limit=100)
     app.state.composer_progress_registry = ComposerProgressRegistry()
     app.state.scoped_secret_resolver = None
+    _install_restricted_plugin_policy(app)
 
     # Minimal stub for execution service — delete_session coordinates with
     # the per-session execution lock and then cleans it up after archiving.
@@ -542,6 +548,28 @@ def _make_app(
     app.include_router(router)
 
     return app, service
+
+
+def _install_restricted_plugin_policy(app: FastAPI, *hidden: PluginId) -> PluginAvailabilitySnapshot:
+    """Install one deterministic principal policy on a hand-rolled route app."""
+    catalog = create_catalog_service()
+    unrestricted = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash="session-route-policy",
+        principal_scope="local:alice",
+        available=unrestricted.available - set(hidden),
+        unavailable=(),
+        selected=unrestricted.selected,
+        usable_profile_aliases=(),
+        selected_profile_aliases=(),
+        binding_generation_fingerprint="session-route-policy-generation",
+    )
+    app.state.catalog_service = catalog
+    profile_registry = MagicMock(spec=OperatorProfileRegistry)
+    profile_registry.public_schema.side_effect = lambda _plugin_id, full_schema, *, available_aliases: full_schema
+    app.state.operator_profile_registry = profile_registry
+    app.state.plugin_snapshot_factory = lambda _user: snapshot
+    return snapshot
 
 
 def test_get_composer_preferences_returns_defaults(test_client) -> None:
@@ -3632,8 +3660,32 @@ class TestMessageRoutes:
             name="csv",
             plugin_type="source",
             description="CSV source",
-            json_schema={"title": "CSV", "type": "object", "properties": {}},
-            knob_schema={"fields": []},
+            json_schema={
+                "title": "CSV",
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "schema": {"type": "object"},
+                },
+            },
+            knob_schema={
+                "fields": [
+                    {
+                        "name": "path",
+                        "label": "Path",
+                        "kind": "text",
+                        "required": True,
+                        "nullable": False,
+                    },
+                    {
+                        "name": "schema",
+                        "label": "Schema",
+                        "kind": "json-object",
+                        "required": True,
+                        "nullable": False,
+                    },
+                ]
+            },
         )
         app.state.catalog_service = catalog
         app.state.blob_service = MagicMock(spec=BlobServiceProtocol)
@@ -5040,6 +5092,205 @@ class TestYamlEndpoint:
     """Tests for GET /api/sessions/{id}/state/yaml."""
 
     @pytest.mark.asyncio
+    async def test_post_state_yaml_with_disabled_plugin_is_atomic(self, tmp_path: Path) -> None:
+        app, service = _make_app(tmp_path)
+        _install_restricted_plugin_policy(app, PluginId("sink", "database"))
+        client = TestClient(app)
+        session = await service.create_session("alice", "Policy atomicity", "local")
+        before = await service.save_composition_state(
+            session.id,
+            CompositionStateData(is_valid=True),
+            provenance="session_seed",
+        )
+        yaml_text = """
+sources:
+  source:
+    plugin: csv
+    on_success: main
+    options:
+      schema:
+        mode: observed
+    on_validation_failure: discard
+sinks:
+  main:
+    plugin: database
+    options: {}
+    on_write_failure: discard
+"""
+
+        response = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": yaml_text})
+
+        assert response.status_code == 422
+        assert response.json()["detail"]["error_code"] == "plugin_not_enabled"
+        after = await service.get_current_state(session.id)
+        assert after is not None
+        assert after.id == before.id
+        assert after.version == before.version
+
+    @pytest.mark.asyncio
+    async def test_saved_disabled_state_is_readable_and_exported_as_authored(self, tmp_path: Path) -> None:
+        app, service = _make_app(tmp_path)
+        snapshot = _install_restricted_plugin_policy(app, PluginId("transform", "llm"))
+        app.state.operator_profile_registry.lower_options.side_effect = AssertionError("export must not lower private bindings")
+        client = TestClient(app)
+        session = await service.create_session("alice", "Historical disabled plugin", "local")
+        await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                sources={
+                    "source": {
+                        "plugin": "csv",
+                        "on_success": "score",
+                        "options": {"schema": {"mode": "observed"}},
+                        "on_validation_failure": "discard",
+                    }
+                },
+                nodes=[
+                    {
+                        "id": "score",
+                        "node_type": "transform",
+                        "plugin": "llm",
+                        "input": "source",
+                        "on_success": "main",
+                        "on_error": "discard",
+                        "options": {
+                            "profile": "task-role",
+                            "prompt_template": "Score {{ row }}",
+                            "schema": {"mode": "observed"},
+                        },
+                    }
+                ],
+                outputs=[
+                    {
+                        "name": "main",
+                        "plugin": "json",
+                        "options": {"path": "outputs/scored.jsonl"},
+                        "on_write_failure": "discard",
+                    }
+                ],
+                metadata_={"name": "Historical disabled plugin", "description": None},
+                is_valid=False,
+            ),
+            provenance="session_seed",
+        )
+
+        state_response = client.get(f"/api/sessions/{session.id}/state")
+        export_response = client.get(f"/api/sessions/{session.id}/state/yaml")
+
+        assert state_response.status_code == 200
+        body = state_response.json()
+        assert body["nodes"][0]["plugin"] == "llm"
+        assert body["plugin_policy_findings"] == [
+            {
+                "component_id": "score",
+                "plugin_id": "transform:llm",
+                "reason_code": "plugin_not_enabled",
+                "snapshot_fingerprint": snapshot.snapshot_hash,
+            }
+        ]
+        assert export_response.status_code == 200
+        exported_yaml = export_response.json()["yaml"]
+        assert "plugin: llm" in exported_yaml
+        assert "profile: task-role" in exported_yaml
+        assert "bedrock" not in exported_yaml
+        assert "credential" not in exported_yaml
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_component", ["source", "sink"])
+    async def test_post_state_yaml_persists_aws_s3_endpoint_url_as_invalid(
+        self,
+        tmp_path: Path,
+        invalid_component: str,
+    ) -> None:
+        endpoint_sentinel = "https://yaml-canary.attacker.invalid/private"
+        source_options = {"endpoint_url": endpoint_sentinel} if invalid_component == "source" else {}
+        sink_options = {"endpoint_url": endpoint_sentinel} if invalid_component == "sink" else {}
+        yaml_text = yaml.safe_dump(
+            {
+                "sources": {
+                    "source": {
+                        "plugin": "aws_s3" if invalid_component == "source" else "csv",
+                        "on_success": "main",
+                        "options": source_options,
+                        "on_validation_failure": "discard",
+                    }
+                },
+                "sinks": {
+                    "main": {
+                        "plugin": "aws_s3" if invalid_component == "sink" else "json",
+                        "options": sink_options,
+                        "on_write_failure": "discard",
+                    }
+                },
+            }
+        )
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+        session = await service.create_session("alice", "AWS S3 policy import", "local")
+
+        response = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": yaml_text})
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["is_valid"] is False
+        assert body["validation_errors"] == [AWS_S3_ENDPOINT_URL_POLICY_ERROR]
+        assert endpoint_sentinel not in repr(body["validation_errors"])
+        record = await service.get_current_state(session.id)
+        assert record is not None
+        assert record.is_valid is False
+        assert list(record.validation_errors or ()) == [AWS_S3_ENDPOINT_URL_POLICY_ERROR]
+        assert endpoint_sentinel not in repr(record.validation_errors)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_component", ["source", "sink"])
+    async def test_e2e_seed_persists_aws_s3_endpoint_url_as_invalid(
+        self,
+        tmp_path: Path,
+        invalid_component: str,
+    ) -> None:
+        endpoint_sentinel = "https://seed-canary.attacker.invalid/private"
+        source = SourceSpec(
+            plugin="aws_s3" if invalid_component == "source" else "csv",
+            on_success="main",
+            options={"endpoint_url": endpoint_sentinel} if invalid_component == "source" else {},
+            on_validation_failure="discard",
+        )
+        output = OutputSpec(
+            name="main",
+            plugin="aws_s3" if invalid_component == "sink" else "json",
+            options={"endpoint_url": endpoint_sentinel} if invalid_component == "sink" else {},
+            on_write_failure="discard",
+        )
+        seeded_state = CompositionState(
+            source=source,
+            nodes=(),
+            edges=(),
+            outputs=(output,),
+            metadata=PipelineMetadata(name="AWS S3 policy seed"),
+            version=1,
+        )
+        app, service = _make_app(tmp_path)
+        app.state.settings = app.state.settings.model_copy(update={"e2e_state_seed_enabled": True})
+        client = TestClient(app)
+        session = await service.create_session("alice", "AWS S3 policy seed", "local")
+
+        response = client.post(
+            f"/api/sessions/{session.id}/state/e2e-seed",
+            json={"state": seeded_state.to_dict()},
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["is_valid"] is False
+        assert body["validation_errors"] == [AWS_S3_ENDPOINT_URL_POLICY_ERROR]
+        assert endpoint_sentinel not in repr(body["validation_errors"])
+        record = await service.get_current_state(session.id)
+        assert record is not None
+        assert record.is_valid is False
+        assert list(record.validation_errors or ()) == [AWS_S3_ENDPOINT_URL_POLICY_ERROR]
+        assert endpoint_sentinel not in repr(record.validation_errors)
+
+    @pytest.mark.asyncio
     async def test_post_state_yaml_imports_exported_runtime_yaml(self, tmp_path) -> None:
         """Replay can seed a fresh session from captured final_yaml.json."""
         app, service = _make_app(tmp_path)
@@ -5076,7 +5327,7 @@ sinks:
     on_write_failure: discard
 """
 
-        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
         with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
@@ -5127,7 +5378,7 @@ sinks:
     on_write_failure: discard
 """
 
-        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
         with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
@@ -5221,7 +5472,7 @@ sinks:
     on_write_failure: discard
 """
 
-        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
         with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
@@ -5283,7 +5534,7 @@ sinks:
     on_write_failure: discard
 """
 
-        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
         with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
@@ -5330,7 +5581,7 @@ sinks:
     on_write_failure: discard
 """
 
-        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
         with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
@@ -5367,7 +5618,7 @@ sinks:
     on_write_failure: discard
 """
 
-        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
         with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
@@ -5469,7 +5720,7 @@ sinks:
     on_write_failure: discard
 """
 
-        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
         with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
@@ -5787,7 +6038,7 @@ sinks:
             provenance="session_seed",
         )
 
-        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
         with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
@@ -5833,7 +6084,7 @@ sinks:
             provenance="session_seed",
         )
 
-        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
         with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
@@ -5907,7 +6158,7 @@ sinks:
             provenance="session_seed",
         )
 
-        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
         with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
@@ -5979,7 +6230,7 @@ sinks:
             provenance="session_seed",
         )
 
-        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
         with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
@@ -6030,7 +6281,7 @@ sinks:
 
         captured_states: list[CompositionState] = []
 
-        async def fake_runtime_preflight(state, *, settings, secret_service, user_id, session_id):
+        async def fake_runtime_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             captured_states.append(state)
             return ValidationResult(
                 is_valid=False,
@@ -6065,7 +6316,7 @@ sinks:
         )
         leaked_value = "REDACTED-preflight-error-canary"
 
-        async def fake_runtime_preflight(state, *, settings, secret_service, user_id, session_id):
+        async def fake_runtime_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             del state, settings, secret_service, user_id, session_id
             return ValidationResult(
                 is_valid=False,
@@ -6098,7 +6349,7 @@ sinks:
         )
         seen_session_ids: list[uuid.UUID] = []
 
-        async def capture_session_id(state, *, settings, secret_service, user_id, session_id):
+        async def capture_session_id(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             del state, settings, secret_service, user_id
             seen_session_ids.append(session_id)
             return ValidationResult(is_valid=True, checks=[], errors=[])
@@ -6127,7 +6378,7 @@ sinks:
             session.id, CompositionStateData(metadata_={"name": "Snapshot", "description": ""}, is_valid=True), provenance="session_seed"
         )
 
-        async def pass_preflight(state, *, settings, secret_service, user_id, session_id):
+        async def pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
         with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=pass_preflight):
@@ -6160,7 +6411,7 @@ sinks:
             errors=[ValidationError(component_id=None, component_type=None, message="bad runtime", suggestion=None, error_code=None)],
         )
 
-        async def fail_preflight(state, *, settings, secret_service, user_id, session_id):
+        async def fail_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             return failure
 
         with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=fail_preflight):
@@ -6190,7 +6441,7 @@ sinks:
 
         secret_canary = "this-text-must-not-appear-in-the-response-body"
 
-        async def boom(state, *, settings, secret_service, user_id, session_id):
+        async def boom(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             raise TimeoutError(secret_canary)
 
         with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=boom):
@@ -6244,7 +6495,7 @@ sinks:
             session.id, CompositionStateData(metadata_={"name": "Snapshot", "description": ""}, is_valid=True), provenance="session_seed"
         )
 
-        async def programmer_bug(state, *, settings, secret_service, user_id, session_id):
+        async def programmer_bug(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             # A real bug we'd see if e.g. a refactor accidentally broke
             # an attribute lookup inside validate_pipeline. AttributeError
             # is in the canonical "programmer bug" set per CLAUDE.md
@@ -6306,7 +6557,7 @@ sinks:
             provenance="session_seed",
         )
 
-        async def fake_runtime_preflight(state, *, settings, secret_service, user_id, session_id):
+        async def fake_runtime_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             assert secret_service is None
             # YAML export preflight must not receive the scoped resolver. It only
             # serializes the original state snapshot with the secret_ref marker.
@@ -6364,7 +6615,7 @@ sinks:
     on_write_failure: discard
 """
 
-        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
         with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
@@ -6420,7 +6671,7 @@ sinks:
 """
         malformed_yaml = valid_yaml.replace("  inbound: {}", "  inbound:\n    priority: 5")
 
-        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
         with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
@@ -7875,7 +8126,8 @@ def test_state_data_carries_structured_errors_before_save_for_atomicity() -> Non
     # structured-errors path under test is never exercised.
     state = _make_authoring_valid_partial("atomicity-test")
 
-    async def boom(state, *, settings, secret_service, user_id, session_id):
+    async def boom(state, *, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry):
+        del plugin_snapshot, profile_registry
         raise AttributeError("'NoneType' has no attribute 'something_that_failed'")
 
     with patch("elspeth.web.sessions.routes._helpers._runtime_preflight_for_state", side_effect=boom):
@@ -7886,6 +8138,8 @@ def test_state_data_carries_structured_errors_before_save_for_atomicity() -> Non
                 secret_service=None,
                 user_id="alice",
                 session_id="session-123",
+                plugin_snapshot=MagicMock(spec=PluginAvailabilitySnapshot),
+                profile_registry=MagicMock(spec=OperatorProfileRegistry),
                 runtime_preflight=None,
                 preflight_exception_policy="persist_invalid",
                 initial_version=None,
@@ -7912,6 +8166,8 @@ async def test_runtime_preflight_for_state_threads_session_id_to_validate_pipeli
 
     state = _make_authoring_valid_partial("runtime-wrapper-session")
     settings = SimpleNamespace(composer_runtime_preflight_timeout_seconds=1)
+    plugin_snapshot = MagicMock(spec=PluginAvailabilitySnapshot)
+    profile_registry = MagicMock(spec=OperatorProfileRegistry)
     seen_kwargs: list[dict[str, object]] = []
 
     async def fake_run_sync_in_worker(func, *args, **kwargs):
@@ -7928,6 +8184,8 @@ async def test_runtime_preflight_for_state_threads_session_id_to_validate_pipeli
         secret_service=None,
         user_id="alice",
         session_id="session-123",
+        plugin_snapshot=plugin_snapshot,
+        profile_registry=profile_registry,
     )
 
     assert seen_kwargs == [
@@ -7935,6 +8193,8 @@ async def test_runtime_preflight_for_state_threads_session_id_to_validate_pipeli
             "secret_service": None,
             "user_id": "alice",
             "session_id": "session-123",
+            "plugin_snapshot": plugin_snapshot,
+            "profile_registry": profile_registry,
         }
     ]
 
@@ -7947,8 +8207,8 @@ async def test_state_data_threads_session_id_to_runtime_preflight() -> None:
     state = _make_authoring_valid_partial("session-scoped-preflight")
     seen_session_ids: list[str] = []
 
-    async def capture_session_id(state, *, settings, secret_service, user_id, session_id):
-        del state, settings, secret_service, user_id
+    async def capture_session_id(state, *, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry):
+        del state, settings, secret_service, user_id, plugin_snapshot, profile_registry
         seen_session_ids.append(session_id)
         return ValidationResult(is_valid=True, checks=[], errors=[])
 
@@ -7959,6 +8219,8 @@ async def test_state_data_threads_session_id_to_runtime_preflight() -> None:
             secret_service=None,
             user_id="alice",
             session_id="session-123",
+            plugin_snapshot=MagicMock(spec=PluginAvailabilitySnapshot),
+            profile_registry=MagicMock(spec=OperatorProfileRegistry),
             runtime_preflight=None,
             preflight_exception_policy="persist_invalid",
             initial_version=None,
@@ -8071,6 +8333,8 @@ async def test_state_data_persists_structured_implicit_decisions_report() -> Non
         secret_service=None,
         user_id="alice",
         session_id="session-123",
+        plugin_snapshot=MagicMock(spec=PluginAvailabilitySnapshot),
+        profile_registry=MagicMock(spec=OperatorProfileRegistry),
         runtime_preflight=ValidationResult(is_valid=True, checks=[], errors=[]),
         preflight_exception_policy="raise",
         initial_version=1,
@@ -8125,6 +8389,8 @@ def test_runtime_preflight_failure_500_detail_does_not_promise_journal_traceback
             None,
             settings=object(),
             secret_service=None,
+            plugin_snapshot=MagicMock(spec=PluginAvailabilitySnapshot),
+            profile_registry=MagicMock(spec=OperatorProfileRegistry),
         ),
     )
 
@@ -8180,6 +8446,8 @@ async def test_state_data_from_composer_state_propagates_to_dict_errors() -> Non
             secret_service=None,
             user_id="user-1",
             session_id="session-123",
+            plugin_snapshot=MagicMock(spec=PluginAvailabilitySnapshot),
+            profile_registry=MagicMock(spec=OperatorProfileRegistry),
             runtime_preflight=None,
             preflight_exception_policy="persist_invalid",
             initial_version=None,
@@ -8509,7 +8777,7 @@ def test_compose_runtime_preflight_persists_partial_state(tmp_path) -> None:
     resp = client.post("/api/sessions", json={"title": "Test"})
     session_id = uuid.UUID(resp.json()["id"])
 
-    async def boom(state, *, settings, secret_service, user_id, session_id):
+    async def boom(state, *, settings, secret_service, user_id, session_id, **_policy_context):
         raise RuntimeError("preflight blew up during state persistence")
 
     with patch("elspeth.web.sessions.routes._helpers._runtime_preflight_for_state", side_effect=boom):
@@ -8582,7 +8850,7 @@ def test_recompose_runtime_preflight_persists_partial_state(tmp_path) -> None:
     finally:
         loop.close()
 
-    async def boom(state, *, settings, secret_service, user_id, session_id):
+    async def boom(state, *, settings, secret_service, user_id, session_id, **_policy_context):
         raise RuntimeError("preflight blew up on recompose")
 
     with patch("elspeth.web.sessions.routes._helpers._runtime_preflight_for_state", side_effect=boom):
@@ -8695,7 +8963,7 @@ def test_runtime_preflight_handler_records_exception_telemetry(tmp_path, monkeyp
     resp = client.post("/api/sessions", json={"title": "Telemetry"})
     session_id = uuid.UUID(resp.json()["id"])
 
-    async def boom(state, *, settings, secret_service, user_id, session_id):
+    async def boom(state, *, settings, secret_service, user_id, session_id, **_policy_context):
         raise RuntimeError("preflight crashed")
 
     with patch("elspeth.web.sessions.routes._helpers._runtime_preflight_for_state", side_effect=boom):
@@ -8941,7 +9209,8 @@ async def test_state_data_raise_arm_emits_telemetry_before_propagating() -> None
 
     state = _make_authoring_valid_partial("raise-arm-telemetry")
 
-    async def boom(state, *, settings, secret_service, user_id, session_id):
+    async def boom(state, *, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry):
+        del plugin_snapshot, profile_registry
         raise RuntimeError("preflight raised at primary site")
 
     with (
@@ -8955,6 +9224,8 @@ async def test_state_data_raise_arm_emits_telemetry_before_propagating() -> None
             secret_service=None,
             user_id="user-1",
             session_id="session-123",
+            plugin_snapshot=MagicMock(spec=PluginAvailabilitySnapshot),
+            profile_registry=MagicMock(spec=OperatorProfileRegistry),
             runtime_preflight=None,
             preflight_exception_policy="raise",
             initial_version=1,
@@ -9020,7 +9291,7 @@ def test_runtime_preflight_handler_save_failure_sets_partial_state_save_failed_f
     resp = client.post("/api/sessions", json={"title": "Save fail"})
     session_id = uuid.UUID(resp.json()["id"])
 
-    async def boom(state, *, settings, secret_service, user_id, session_id):
+    async def boom(state, *, settings, secret_service, user_id, session_id, **_policy_context):
         raise RuntimeError("preflight crashed before save")
 
     with patch("elspeth.web.sessions.routes._helpers._runtime_preflight_for_state", side_effect=boom):

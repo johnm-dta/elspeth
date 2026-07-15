@@ -36,7 +36,6 @@ from elspeth.web.composer.state import (
     SourceSpec,
     validate_composer_source_name,
 )
-from elspeth.web.composer.tools._availability import filter_secret_available_summaries
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
     _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
@@ -50,6 +49,7 @@ from elspeth.web.composer.tools._common import (
     _mutation_result,
     _options_with_pending_requirement,
     _pending_interpretation_requirement,
+    _plugin_policy_failure,
     _prevalidate_source,
     _resolver_owned_interpretation_requirement_error,
     _validate_plugin_name,
@@ -70,6 +70,7 @@ from elspeth.web.composer.tools.declarations import (
     ToolKind,
 )
 from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY, SourceAuthoringMetadata
+from elspeth.web.provider_config_policy import web_aws_s3_endpoint_url_policy_error
 from elspeth.web.sessions.models import blobs_table
 
 _INSPECT_SOURCE_MAX_BYTES = 8 * 1024
@@ -88,7 +89,7 @@ def _handle_list_sources(
     state: CompositionState,
     context: ToolContext,
 ) -> ToolResult:
-    return _discovery_result(state, filter_secret_available_summaries(context.catalog.list_sources(), context))
+    return _discovery_result(state, context.catalog.list_sources())
 
 
 _LIST_SOURCES_DECLARATION = ToolDeclaration(
@@ -464,10 +465,14 @@ def _execute_set_source(
     source_name = validated.source_name
     _validate_source_name_argument(source_name)
 
+    endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(plugin, options)
+    if endpoint_policy_error is not None:
+        return _failure_result(state, endpoint_policy_error)
+
     # Validate plugin exists in catalog
-    plugin_error = _validate_plugin_name(context.catalog, "source", plugin)
+    plugin_error = _validate_plugin_name(context, "source", plugin)
     if plugin_error is not None:
-        return _failure_result(state, plugin_error)
+        return _plugin_policy_failure(state, plugin_error)
 
     # Reject manual blob_ref injection.  The canonical write path for a
     # blob-backed source is set_source_from_blob, which forces the path to
@@ -563,6 +568,10 @@ def _execute_set_source_from_blob(
     source_name = validated.source_name
     _validate_source_name_argument(source_name)
 
+    endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(validated.plugin, validated.options)
+    if endpoint_policy_error is not None:
+        return _failure_result(state, endpoint_policy_error)
+
     # Caller options merge into the bound source's options, so a forged
     # "resolved" INVENTED_SOURCE requirement here would bypass human review even
     # though the blob path also re-stamps a pending requirement — guard at the
@@ -585,6 +594,10 @@ def _execute_set_source_from_blob(
     )
     if isinstance(resolved, ToolResult):
         return resolved
+
+    endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(resolved.plugin, resolved.options)
+    if endpoint_policy_error is not None:
+        return _failure_result(state, endpoint_policy_error)
 
     source = SourceSpec(
         plugin=resolved.plugin,
@@ -896,6 +909,9 @@ def _execute_patch_source_options(
             )
 
     new_options = _apply_merge_patch(current_source.options, patch)
+    endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(current_source.plugin, new_options)
+    if endpoint_policy_error is not None:
+        return _failure_result(state, endpoint_policy_error)
     credential_error = _credential_wiring_contract_failure(
         state,
         component_id=_source_component_id(source_name),

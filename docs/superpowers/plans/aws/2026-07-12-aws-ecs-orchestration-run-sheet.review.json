@@ -1,102 +1,40 @@
 {
-  "verdict": "APPROVED_WITH_WARNINGS",
-  "scope_verdict": "GO_TO_ORCHESTRATE",
-  "summary": "The run sheet is ready for orchestration. One coordinator owns one ignored feat/aws-ecs-program worktree, serializes all mutations, closes slices on truthful program-branch anchors, preserves the Plan 02 to 06 to 07 lock chain, runs the full suite only in final washup, and fast-forwards the exact tested candidate into release/0.7.1 before GO.",
+  "verdict": "APPROVED",
+  "scope_verdict": "GO_TO_EXECUTE_PLAN_12",
+  "runtime_verdict": "PENDING_PLAN_12",
+  "summary": "Stage 9 now reconciles release/0.7.1, runs the seven-task Plan 12 on one immutable candidate, and ends when Task 7 fast-forwards and closes Plan 12. The run sheet performs no separate release mutation, checkpoint, Wave 4 closure, or milestone closure.",
   "plan_file": "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md",
-  "plan_sha256": "cc0310767206c68db1700c47109bd221eb8930bcd03592b68aff4f61a53c6cba",
-  "reviewed_at": "2026-07-12T11:58:37Z",
+  "plan_sha256": "29f927478abdbc7b5d37bb7f1e43754097928cbd0434887c97a3774cf0436974",
+  "reviewed_at": "2026-07-15T00:34:48Z",
   "review_basis": {
-    "branch": "release/0.7.1",
-    "head": "b50b5da62a2fee91128e9993df0828f50feaf8fc",
-    "process": "Independent xhigh reality, architecture, quality/security, and systems re-review followed by source-diff inspection, stale-term search, checksum, link, JSON, shell-syntax, workflow-trigger, tracker-path, live-DAG, critical-path, and final-fast-forward checks."
+    "branch": "feat/aws-ecs-program",
+    "base_head": "5a4652afd0ebc3c82f1e58a3ddbdc5e192268db1",
+    "process": "Reviewed with the lean Plan 12, autonomous prompt, controller, and canonical AWS deployment runbook."
   },
   "blocking_issues": [],
-  "warnings": [
+  "warnings": [],
+  "resolved_findings": [
     {
       "id": "R-RUN-1",
-      "status": "EXTERNAL_AUTHORITY",
-      "detail": "Later stages still require named operator authority, Docker, hosted CI, AWS credentials and infrastructure, protected evidence storage, and cleanup capacity; absence is an explicit stop condition."
+      "status": "RESOLVED",
+      "resolution": "Removed active hosted-CI and Wardline authority surfaces from Stage 9."
     },
     {
       "id": "R-RUN-2",
-      "status": "RUNTIME_PENDING",
-      "detail": "Planning approval is not AWS runtime approval. Only Plan 12 may return GO for one exact source SHA, image digest, and platform after live proof and cleanup."
+      "status": "RESOLVED",
+      "resolution": "Removed the extra Major Checkpoint 6 and all Task 8, Task 9, Wave 4, and milestone closeout work after Plan 12."
     }
   ],
-  "resolved_findings": [
-    {
-      "id": "B-RUN-1",
-      "status": "RESOLVED",
-      "resolution": "The exact 20-node live DAG, direct prerequisites, critical path, conservative stage barriers, and serialized shared-surface ownership are machine-checked."
-    },
-    {
-      "id": "B-RUN-2",
-      "status": "RESOLVED",
-      "resolution": "The run sheet supersedes duplicate plan-local claim, worktree, branch, and close mechanics while retaining every implementation, test, evidence, staging, and commit checkbox."
-    },
-    {
-      "id": "B-RUN-3",
-      "status": "RESOLVED",
-      "resolution": "Plan 12 runs Tasks 1 through 8 on one frozen feat/aws-ecs-program candidate; Task 9 alone fast-forwards the paused release branch to that exact tested SHA before GO."
-    },
-    {
-      "id": "B-RUN-4",
-      "status": "RESOLVED",
-      "resolution": "Every plan is checksum-bound to its review sidecar; Plan 12 repeats that gate immediately before closeout so intentional downstream plan edits cannot consume stale approval."
-    },
-    {
-      "id": "B-RUN-5",
-      "status": "RESOLVED",
-      "resolution": "Slice and integrated evidence use closed schemas requiring zero exit, zero skips, full collected-test accounting, and an envelope bound to the current shared program tip."
-    },
-    {
-      "id": "B-RUN-6",
-      "status": "RESOLVED",
-      "resolution": "Fresh and interrupted work use exact-owner historical claim anchors, recover partial setup without abandoning WIP, heartbeat long leases, and close only after focused program-tip verification and anchor revalidation."
-    },
-    {
-      "id": "B-RUN-7",
-      "status": "RESOLVED",
-      "resolution": "Plan 10 atomically claims before source qualification, records one idempotent qualified-baseline receipt, preserves the historical baseline through its own commits, and hard-stops post-integration lineage reconstruction without owner approval."
-    },
-    {
-      "id": "B-RUN-8",
-      "status": "RESOLVED",
-      "resolution": "Reopen handling derives transitive descendants and affected phases from the refreshed live graph, reopens closed descendants in reverse topological order, invalidates their evidence, and re-executes topologically."
-    }
-  ],
-  "reviewer_summaries": {
-    "reality": {
-      "status": "APPROVED_AFTER_REPAIRS",
-      "blocking": 0
-    },
-    "quality_security": {
-      "status": "APPROVED_AFTER_REPAIRS",
-      "blocking": 0
-    },
-    "systems_dependencies": {
-      "status": "APPROVED_AFTER_REPAIRS",
-      "blocking": 0
-    }
-  },
   "verification": [
-    "all 18 dated program plans exist in docs/superpowers/plans/aws with 18 matching review sidecars",
-    "every plan_file exists and all 18 plan_sha256 values match",
-    "all local run-sheet links resolve",
-    "all AWS review JSON parses",
-    "all Markdown code fences are balanced",
-    "all 56 Bash or shell fences in the five reviewed sources pass bash -n",
-    "git diff --check passes",
-    "no pre-relocation AWS plan path remains in repository or live milestone data",
-    "live Filigree milestone contains exactly 20 expected steps and every direct dependency matches",
-    "live Plan 03B tracker scope owns Tasks 3-4 and the complete handoff",
-    "read-only descendant derivation produces a valid reverse-topological worklist and affected-phase set"
+    "Stage 9 delegates Tasks 1 through 6 and the sole Task 7 release transition to Plan 12.",
+    "Plan 12 closure is explicitly the endpoint for this job.",
+    "Run-sheet Bash syntax and git diff --check pass."
   ],
   "review_history": [
     {
-      "reviewed_at": "2026-07-12T08:52:19Z",
-      "verdict": "CHANGES_REQUESTED",
-      "summary": "Initial orchestration reviews found duplicate claim/worktree/close mechanics, an invalid Plan 12 feature-worktree path, pre-qualification Plan 10 baseline recording, stale review/evidence risks, and incomplete descendant reopen handling."
+      "reviewed_at": "2026-07-15T00:34:48Z",
+      "verdict": "APPROVED_AFTER_LEAN_REPAIR",
+      "summary": "Stage 9 was reduced to the work required to deliver, clean up, release, and close the AWS integration."
     }
   ]
 }

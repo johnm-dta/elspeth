@@ -14,6 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 
 from elspeth.contracts.enums import DerivedAuditCharacteristics
+from elspeth.contracts.plugin_capabilities import CapabilityDeclaration, ControlMode, PluginCapability, WebConfigAuthority
 
 PluginKind = Literal["source", "transform", "sink"]
 
@@ -75,6 +76,8 @@ class PluginSummary(_StrictResponse):
     usage_when_not_to_use: str | None = None
     example_use: str | None = None
     capability_tags: tuple[str, ...] = ()
+    web_config_authority: WebConfigAuthority = WebConfigAuthority.USER_CONFIGURABLE
+    policy_capabilities: tuple[CapabilityDeclaration, ...] = ()
     audit_characteristics: DerivedAuditCharacteristics = ()
 
     # JIT-hints Phase 1: discovery-time composer hints. Populated from
@@ -113,3 +116,30 @@ class PluginSchemaInfo(_StrictResponse):
     # Mirrors PluginSummary.secret_requirements on the full-schema surface so
     # get_plugin_schema and get_plugin_assistance can enforce the same gate.
     secret_requirements: tuple[PluginSecretRequirement, ...] = ()
+    web_config_authority: WebConfigAuthority = WebConfigAuthority.USER_CONFIGURABLE
+    policy_capabilities: tuple[CapabilityDeclaration, ...] = ()
+
+
+class PluginPolicyCapabilityGroup(_StrictResponse):
+    capability: PluginCapability
+    available_plugin_ids: tuple[str, ...]
+
+
+class PluginPolicySelection(_StrictResponse):
+    capability: PluginCapability
+    plugin_id: str | None
+
+
+class PluginPolicyControlMode(_StrictResponse):
+    capability: PluginCapability
+    mode: ControlMode
+
+
+class PluginPolicyResponse(_StrictResponse):
+    principal_scope: str
+    snapshot_fingerprint: str
+    policy_hash: str
+    available_plugin_ids: tuple[str, ...]
+    capability_groups: tuple[PluginPolicyCapabilityGroup, ...]
+    selections: tuple[PluginPolicySelection, ...]
+    control_modes: tuple[PluginPolicyControlMode, ...]

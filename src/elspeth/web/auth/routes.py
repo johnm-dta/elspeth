@@ -131,10 +131,11 @@ class AuthConfigResponse(_StrictResponse):
     oidc_issuer: str | None = None
     oidc_client_id: str | None = None
     authorization_endpoint: str | None = None
+    token_endpoint: str | None = None
 
 
-def _mark_token_response_uncacheable(response: Response) -> None:
-    """Bearer-token responses must not be retained by shared or browser caches."""
+def _mark_sensitive_auth_response_uncacheable(response: Response) -> None:
+    """Bearer-token and live authority responses must not be retained by caches."""
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
 
@@ -267,7 +268,7 @@ def create_auth_router() -> APIRouter:
             access_token=token,
             issuance_path="login",
         )
-        _mark_token_response_uncacheable(response)
+        _mark_sensitive_auth_response_uncacheable(response)
         return TokenResponse(access_token=token)
 
     @router.post(
@@ -349,7 +350,7 @@ def create_auth_router() -> APIRouter:
             access_token=token,
             issuance_path="register",
         )
-        _mark_token_response_uncacheable(response)
+        _mark_sensitive_auth_response_uncacheable(response)
         return TokenResponse(access_token=token)
 
     @router.post("/verify-email", response_model=TokenResponse)
@@ -380,7 +381,7 @@ def create_auth_router() -> APIRouter:
             access_token=token,
             issuance_path="email_verification",
         )
-        _mark_token_response_uncacheable(response)
+        _mark_sensitive_auth_response_uncacheable(response)
         return TokenResponse(access_token=token)
 
     @router.post("/token", response_model=TokenResponse)
@@ -429,23 +430,25 @@ def create_auth_router() -> APIRouter:
             access_token=new_token,
             issuance_path="refresh",
         )
-        _mark_token_response_uncacheable(response)
+        _mark_sensitive_auth_response_uncacheable(response)
         return TokenResponse(access_token=new_token)
 
     @router.get("/config", response_model=AuthConfigResponse)
-    async def auth_config(request: Request) -> AuthConfigResponse:
+    async def auth_config(request: Request, response: Response) -> AuthConfigResponse:
         """Return auth configuration for frontend discovery.
 
         This endpoint is unauthenticated -- the frontend needs it
         before any login flow.
         """
         settings: WebSettings = request.app.state.settings
+        _mark_sensitive_auth_response_uncacheable(response)
         return AuthConfigResponse(
             provider=settings.auth_provider,
             registration_mode=settings.registration_mode,
             oidc_issuer=settings.oidc_issuer,
             oidc_client_id=settings.oidc_client_id,
             authorization_endpoint=request.app.state.oidc_authorization_endpoint,
+            token_endpoint=request.app.state.oidc_token_endpoint,
         )
 
     @router.get("/me", response_model=UserProfileResponse)

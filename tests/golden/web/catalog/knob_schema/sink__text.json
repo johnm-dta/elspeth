@@ -1,0 +1,74 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Filesystem path for the source input or sink output, resolved relative to the run data directory.",
+        "kind": "text",
+        "label": "Path",
+        "name": "path",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Optional local output collision policy. 'fail_if_exists' refuses an existing write target; 'auto_increment' picks a free sibling path; 'append_or_create' is valid with append mode.",
+        "enum": [
+          "fail_if_exists",
+          "auto_increment",
+          "append_or_create"
+        ],
+        "kind": "enum",
+        "label": "Collision Policy",
+        "name": "collision_policy",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "description": "String field written as one line per row.",
+        "kind": "text",
+        "label": "Field",
+        "name": "field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": "utf-8",
+        "description": "Character encoding used for every emitted line.",
+        "enum": [
+          "utf-8",
+          "ascii",
+          "latin-1",
+          "cp1252"
+        ],
+        "kind": "enum",
+        "label": "Encoding",
+        "name": "encoding",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "write",
+        "description": "Write a new output or append lines to an existing output.",
+        "enum": [
+          "write",
+          "append"
+        ],
+        "kind": "enum",
+        "label": "Mode",
+        "name": "mode",
+        "nullable": false,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "sink",
+  "plugin_name": "text"
+}

@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
 
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.state_machine import (
     GuidedSession,
@@ -29,6 +31,8 @@ from elspeth.web.composer.guided.steps import (
 )
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 
 
 def _empty_state() -> CompositionState:
@@ -43,11 +47,56 @@ def _empty_state() -> CompositionState:
     )
 
 
+def _restricted_policy(hidden: PluginId) -> tuple[PolicyCatalogView, PluginAvailabilitySnapshot]:
+    catalog = create_catalog_service()
+    unrestricted = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash="guided-policy",
+        principal_scope="local:alice",
+        available=unrestricted.available - {hidden},
+        unavailable=(),
+        selected=unrestricted.selected,
+        usable_profile_aliases=(),
+        selected_profile_aliases=(),
+        binding_generation_fingerprint="guided-policy-generation",
+    )
+    return PolicyCatalogView(catalog, snapshot, MagicMock(spec=OperatorProfileRegistry)), snapshot
+
+
+def _trained_policy() -> tuple[PolicyCatalogView, PluginAvailabilitySnapshot]:
+    catalog = create_catalog_service()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return PolicyCatalogView.for_trained_operator(catalog, snapshot), snapshot
+
+
 class TestStep1Handler:
+    def test_direct_submission_cannot_commit_disabled_source(self) -> None:
+        state = _empty_state()
+        session = GuidedSession.initial()
+        catalog, snapshot = _restricted_policy(PluginId("source", "csv"))
+
+        result = handle_step_1_source(
+            state=state,
+            session=session,
+            resolved=SourceResolved(
+                plugin="csv",
+                options={"path": "data.csv", "schema": {"mode": "observed"}},
+                observed_columns=("a",),
+                sample_rows=({"a": "1"},),
+            ),
+            catalog=catalog,
+            plugin_snapshot=snapshot,
+        )
+
+        assert result.tool_result.success is False
+        assert result.tool_result.data["error_code"] == "plugin_not_enabled"
+        assert result.state is state
+        assert result.session is session
+
     def test_commits_source_to_state_on_success(self) -> None:
         state = _empty_state()
         session = GuidedSession.initial()
-        catalog = create_catalog_service()
+        catalog, snapshot = _trained_policy()
 
         result = handle_step_1_source(
             state=state,
@@ -59,6 +108,7 @@ class TestStep1Handler:
                 sample_rows=({"a": "1", "b": "2"},),
             ),
             catalog=catalog,
+            plugin_snapshot=snapshot,
         )
 
         assert isinstance(result, StepHandlerResult)
@@ -78,7 +128,7 @@ class TestStep1Handler:
         so the commit still succeeds."""
         state = _empty_state()
         session = GuidedSession.initial()
-        catalog = create_catalog_service()
+        catalog, snapshot = _trained_policy()
 
         result = handle_step_1_source(
             state=state,
@@ -91,6 +141,7 @@ class TestStep1Handler:
                 on_validation_failure="quarantine_sink",
             ),
             catalog=catalog,
+            plugin_snapshot=snapshot,
         )
 
         assert result.tool_result.success is True
@@ -101,7 +152,7 @@ class TestStep1Handler:
     def test_returns_failure_unchanged_session_when_plugin_unknown(self) -> None:
         state = _empty_state()
         session = GuidedSession.initial()
-        catalog = create_catalog_service()
+        catalog, snapshot = _trained_policy()
 
         result = handle_step_1_source(
             state=state,
@@ -113,6 +164,7 @@ class TestStep1Handler:
                 sample_rows=(),
             ),
             catalog=catalog,
+            plugin_snapshot=snapshot,
         )
 
         assert result.tool_result.success is False
@@ -134,6 +186,7 @@ class TestStep1Handler:
             json.dumps([{"line": "alpha"}, {"line": "beta"}]),
             encoding="utf-8",
         )
+        catalog, snapshot = _trained_policy()
 
         result = handle_step_1_source(
             state=_empty_state(),
@@ -144,7 +197,8 @@ class TestStep1Handler:
                 observed_columns=(),
                 sample_rows=(),
             ),
-            catalog=create_catalog_service(),
+            catalog=catalog,
+            plugin_snapshot=snapshot,
             data_dir=str(data_dir),
         )
 
@@ -165,6 +219,7 @@ class TestStep1Handler:
             raise AssertionError("outside allowlist path was inspected")
 
         monkeypatch.setattr("elspeth.web.composer.guided.steps.observed_columns_from_path", _fail_if_called)
+        catalog, snapshot = _trained_policy()
 
         result = handle_step_1_source(
             state=_empty_state(),
@@ -175,7 +230,8 @@ class TestStep1Handler:
                 observed_columns=(),
                 sample_rows=(),
             ),
-            catalog=create_catalog_service(),
+            catalog=catalog,
+            plugin_snapshot=snapshot,
             data_dir=str(data_dir),
         )
 
@@ -189,12 +245,13 @@ class TestStep2Handler:
         # Then Step 2 attaches a json output named "main".
         state = _empty_state()
         session = GuidedSession.initial()
-        catalog = create_catalog_service()
+        catalog, snapshot = _trained_policy()
 
         step_1 = handle_step_1_source(
             state=state,
             session=session,
             catalog=catalog,
+            plugin_snapshot=snapshot,
             resolved=SourceResolved(
                 plugin="csv",
                 options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["a"]}},
@@ -208,6 +265,7 @@ class TestStep2Handler:
             state=step_1.state,
             session=step_1.session,
             catalog=catalog,
+            plugin_snapshot=snapshot,
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
@@ -228,7 +286,7 @@ class TestStep2Handler:
 
     def test_returns_failure_unchanged_when_plugin_unknown(self) -> None:
         state = _empty_state()
-        catalog = create_catalog_service()
+        catalog, snapshot = _trained_policy()
 
         # _execute_set_output validates plugin-name first, before any source
         # presence check — so this exercises the failure path on empty state.
@@ -236,6 +294,7 @@ class TestStep2Handler:
             state=state,
             session=GuidedSession.initial(),
             catalog=catalog,
+            plugin_snapshot=snapshot,
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
@@ -253,7 +312,7 @@ class TestStep2Handler:
         assert result.session.step_2_result is None
 
     def test_refuses_empty_outputs(self) -> None:
-        catalog = create_catalog_service()
+        catalog, snapshot = _trained_policy()
 
         with pytest.raises(InvariantError, match="empty list"):
             handle_step_2_sink(
@@ -261,6 +320,7 @@ class TestStep2Handler:
                 session=GuidedSession.initial(),
                 resolved=SinkResolved(outputs=()),
                 catalog=catalog,
+                plugin_snapshot=snapshot,
             )
 
     def test_sink_options_rejects_malformed_present_schema(self) -> None:
@@ -298,12 +358,13 @@ class TestStep3Handler:
 
         state = _empty_state()
         session = GuidedSession.initial()
-        catalog = create_catalog_service()
+        catalog, snapshot = _trained_policy()
 
         step_1 = handle_step_1_source(
             state=state,
             session=session,
             catalog=catalog,
+            plugin_snapshot=snapshot,
             resolved=SourceResolved(
                 plugin="csv",
                 options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
@@ -317,6 +378,7 @@ class TestStep3Handler:
             state=step_1.state,
             session=step_1.session,
             catalog=catalog,
+            plugin_snapshot=snapshot,
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
@@ -345,6 +407,7 @@ class TestStep3Handler:
             state=step_2.state,
             session=step_2.session,
             catalog=catalog,
+            plugin_snapshot=snapshot,
             proposal=proposal,
         )
 
@@ -370,11 +433,12 @@ class TestStep3Handler:
         from elspeth.web.composer.guided.state_machine import ChainProposal
         from elspeth.web.composer.guided.steps import handle_step_3_chain_accept
 
-        catalog = create_catalog_service()
+        catalog, snapshot = _trained_policy()
         step_1 = handle_step_1_source(
             state=_empty_state(),
             session=GuidedSession.initial(),
             catalog=catalog,
+            plugin_snapshot=snapshot,
             resolved=SourceResolved(
                 plugin="json",
                 options={"path": "urls.json", "schema": {"mode": "observed", "guaranteed_fields": ["url"]}},
@@ -386,6 +450,7 @@ class TestStep3Handler:
             state=step_1.state,
             session=step_1.session,
             catalog=catalog,
+            plugin_snapshot=snapshot,
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
@@ -421,6 +486,7 @@ class TestStep3Handler:
             state=step_2.state,
             session=step_2.session,
             catalog=catalog,
+            plugin_snapshot=snapshot,
             proposal=proposal,
         )
 
@@ -444,11 +510,12 @@ class TestStep3Handler:
         from elspeth.web.composer.guided.state_machine import ChainProposal
         from elspeth.web.composer.guided.steps import handle_step_3_chain_accept
 
-        catalog = create_catalog_service()
+        catalog, snapshot = _trained_policy()
         step_1 = handle_step_1_source(
             state=_empty_state(),
             session=GuidedSession.initial(),
             catalog=catalog,
+            plugin_snapshot=snapshot,
             resolved=SourceResolved(
                 plugin="csv",
                 options={"path": "inventory.csv", "schema": {"mode": "observed", "guaranteed_fields": ["quantity"]}},
@@ -460,6 +527,7 @@ class TestStep3Handler:
             state=step_1.state,
             session=step_1.session,
             catalog=catalog,
+            plugin_snapshot=snapshot,
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
@@ -490,6 +558,7 @@ class TestStep3Handler:
             state=step_2.state,
             session=step_2.session,
             catalog=catalog,
+            plugin_snapshot=snapshot,
             proposal=proposal,
         )
 
@@ -510,11 +579,12 @@ class TestStep3Handler:
         from elspeth.web.composer.guided.state_machine import ChainProposal
         from elspeth.web.composer.guided.steps import handle_step_3_chain_accept
 
-        catalog = create_catalog_service()
+        catalog, snapshot = _trained_policy()
         step_1 = handle_step_1_source(
             state=_empty_state(),
             session=GuidedSession.initial(),
             catalog=catalog,
+            plugin_snapshot=snapshot,
             resolved=SourceResolved(
                 plugin="csv",
                 options={"path": "inventory.csv", "schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
@@ -526,6 +596,7 @@ class TestStep3Handler:
             state=step_1.state,
             session=step_1.session,
             catalog=catalog,
+            plugin_snapshot=snapshot,
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
@@ -558,6 +629,7 @@ class TestStep3Handler:
             state=step_2.state,
             session=step_2.session,
             catalog=catalog,
+            plugin_snapshot=snapshot,
             proposal=proposal,
         )
 
@@ -570,11 +642,12 @@ class TestStep3Handler:
         from elspeth.web.composer.guided.state_machine import ChainProposal
         from elspeth.web.composer.guided.steps import handle_step_3_chain_accept
 
-        catalog = create_catalog_service()
+        catalog, snapshot = _trained_policy()
         step_1 = handle_step_1_source(
             state=_empty_state(),
             session=GuidedSession.initial(),
             catalog=catalog,
+            plugin_snapshot=snapshot,
             resolved=SourceResolved(
                 plugin="json",
                 options={"path": "rows.json", "schema": {"mode": "observed", "guaranteed_fields": ["line"]}},
@@ -586,6 +659,7 @@ class TestStep3Handler:
             state=step_1.state,
             session=step_1.session,
             catalog=catalog,
+            plugin_snapshot=snapshot,
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
@@ -602,6 +676,7 @@ class TestStep3Handler:
             state=step_2.state,
             session=step_2.session,
             catalog=catalog,
+            plugin_snapshot=snapshot,
             proposal=ChainProposal(steps=(), why="source rows already match the output"),
         )
 
@@ -620,11 +695,13 @@ class TestStep3Handler:
             steps=({"plugin": "passthrough", "options": {"schema": {"mode": "observed"}}, "rationale": "x"},),
             why="x",
         )
+        catalog, snapshot = _trained_policy()
         with pytest.raises(InvariantError, match=r"no.*source|committed source"):
             handle_step_3_chain_accept(
                 state=_empty_state(),
                 session=GuidedSession.initial(),
-                catalog=create_catalog_service(),
+                catalog=catalog,
+                plugin_snapshot=snapshot,
                 proposal=proposal,
             )
 
@@ -642,12 +719,13 @@ class TestTerminalStampInvariant:
 
         state = _empty_state()
         session = GuidedSession.initial()
-        catalog = create_catalog_service()
+        catalog, snapshot = _trained_policy()
 
         step_1 = handle_step_1_source(
             state=state,
             session=session,
             catalog=catalog,
+            plugin_snapshot=snapshot,
             resolved=SourceResolved(
                 plugin="csv",
                 options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
@@ -659,6 +737,7 @@ class TestTerminalStampInvariant:
             state=step_1.state,
             session=step_1.session,
             catalog=catalog,
+            plugin_snapshot=snapshot,
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
@@ -692,6 +771,7 @@ class TestTerminalStampInvariant:
                 ),
             ),
             catalog=catalog,
+            plugin_snapshot=snapshot,
             proposal=proposal,
         )
 
@@ -790,6 +870,7 @@ class TestStep1ObservedColumnsDerivation:
 
     def test_derives_observed_columns_from_blob_when_empty(self, _seeded_json_urls) -> None:
         engine, session_id, storage_path = _seeded_json_urls
+        catalog, snapshot = _trained_policy()
         result = handle_step_1_source(
             state=_empty_state(),
             session=GuidedSession.initial(),
@@ -799,7 +880,8 @@ class TestStep1ObservedColumnsDerivation:
                 observed_columns=(),
                 sample_rows=(),
             ),
-            catalog=create_catalog_service(),
+            catalog=catalog,
+            plugin_snapshot=snapshot,
             data_dir=None,
             session_engine=engine,
             session_id=session_id,
@@ -813,6 +895,7 @@ class TestStep1ObservedColumnsDerivation:
 
     def test_keeps_observed_columns_when_llm_supplied_them(self, _seeded_json_urls) -> None:
         engine, session_id, storage_path = _seeded_json_urls
+        catalog, snapshot = _trained_policy()
         result = handle_step_1_source(
             state=_empty_state(),
             session=GuidedSession.initial(),
@@ -822,7 +905,8 @@ class TestStep1ObservedColumnsDerivation:
                 observed_columns=("url", "extra"),
                 sample_rows=(),
             ),
-            catalog=create_catalog_service(),
+            catalog=catalog,
+            plugin_snapshot=snapshot,
             data_dir=None,
             session_engine=engine,
             session_id=session_id,
@@ -837,6 +921,7 @@ class TestStep1ObservedColumnsDerivation:
         # commit must restore the real path so the pipeline can read the blob.
         engine, session_id, storage_path = _seeded_json_urls
         blob_id = storage_path.split("/")[-1].split("_", 1)[0]
+        catalog, snapshot = _trained_policy()
         result = handle_step_1_source(
             state=_empty_state(),
             session=GuidedSession.initial(),
@@ -846,7 +931,8 @@ class TestStep1ObservedColumnsDerivation:
                 observed_columns=("url",),
                 sample_rows=(),
             ),
-            catalog=create_catalog_service(),
+            catalog=catalog,
+            plugin_snapshot=snapshot,
             data_dir=None,
             session_engine=engine,
             session_id=session_id,
@@ -863,6 +949,7 @@ class TestStep1ObservedColumnsDerivation:
         # A sentinel that resolves to no blob must fail loudly, never commit a
         # broken blob: path that the run cannot open.
         engine, session_id, _ = _seeded_json_urls
+        catalog, snapshot = _trained_policy()
         with pytest.raises(InvariantError):
             handle_step_1_source(
                 state=_empty_state(),
@@ -873,7 +960,8 @@ class TestStep1ObservedColumnsDerivation:
                     observed_columns=("url",),
                     sample_rows=(),
                 ),
-                catalog=create_catalog_service(),
+                catalog=catalog,
+                plugin_snapshot=snapshot,
                 data_dir=None,
                 session_engine=engine,
                 session_id=session_id,

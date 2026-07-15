@@ -11,6 +11,7 @@ from uuid import UUID
 import pytest
 
 from elspeth.contracts.blobs_inline import is_widened_blob_ref
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.state import (
@@ -20,8 +21,11 @@ from elspeth.web.composer.state import (
     PipelineMetadata,
     SourceSpec,
 )
-from elspeth.web.composer.tools import ToolResult, execute_tool, get_tool_definitions
+from elspeth.web.composer.tools import ToolResult, get_tool_definitions
+from elspeth.web.composer.tools import execute_tool as _execute_tool
 from elspeth.web.composer.yaml_generator import generate_pipeline_dict
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+from elspeth.web.provider_config_policy import AWS_S3_ENDPOINT_URL_POLICY_ERROR
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -101,6 +105,29 @@ def _named_sources_state() -> CompositionState:
     )
 
 
+def _aws_s3_endpoint_state() -> CompositionState:
+    return CompositionState(
+        source=SourceSpec(
+            plugin="aws_s3",
+            on_success="main",
+            options={},
+            on_validation_failure="discard",
+        ),
+        nodes=(),
+        edges=(),
+        outputs=(
+            OutputSpec(
+                name="main",
+                plugin="aws_s3",
+                options={},
+                on_write_failure="discard",
+            ),
+        ),
+        metadata=PipelineMetadata(),
+        version=5,
+    )
+
+
 class _Catalog:
     def list_sources(self) -> list[PluginSummary]:
         return [
@@ -137,6 +164,25 @@ class _Catalog:
 
 def _catalog() -> CatalogService:
     return cast(CatalogService, _Catalog())
+
+
+def execute_tool(
+    tool_name: str,
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    **kwargs: Any,
+) -> ToolResult:
+    """Invoke the strict dispatcher with an explicit trained-operator snapshot."""
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return _execute_tool(
+        tool_name,
+        arguments,
+        state,
+        PolicyCatalogView.for_trained_operator(catalog, snapshot),
+        plugin_snapshot=snapshot,
+        **kwargs,
+    )
 
 
 @pytest.fixture()
@@ -246,6 +292,34 @@ class TestListComposerBlobs:
 
 
 class TestWireBlobInlineRef:
+    @pytest.mark.parametrize("field_path", ["source.options.endpoint_url", "output:main.options.endpoint_url"])
+    def test_aws_s3_endpoint_url_field_is_rejected_without_mutating_state(
+        self,
+        blob_env: dict[str, Any],
+        field_path: str,
+    ) -> None:
+        blob = _create_blob(blob_env, content="inline endpoint canary")
+        state = _aws_s3_endpoint_state()
+
+        result = execute_tool(
+            "wire_blob_inline_ref",
+            {
+                "field_path": field_path,
+                "blob_id": blob.data["blob_id"],
+            },
+            state,
+            _catalog(),
+            data_dir=blob_env["data_dir"],
+            session_engine=blob_env["engine"],
+            session_id=blob_env["session_id"],
+        )
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert result.updated_state.version == 5
+        assert result.data["error"] == AWS_S3_ENDPOINT_URL_POLICY_ERROR
+        assert blob.data["blob_id"] not in result.data["error"]
+
     def test_authors_marker_with_authoritative_pinned_hash(self, blob_env: dict[str, Any]) -> None:
         blob = _create_blob(blob_env, content="Pinned prompt")
         state = _inline_ref_state()

@@ -1,0 +1,88 @@
+"""Non-mutating Landscape schema-state classification tests."""
+
+from __future__ import annotations
+
+import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
+
+from elspeth.core.landscape.database import LandscapeSchemaShape, probe_schema_shape
+from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata
+
+
+@pytest.fixture
+def engine() -> Engine:
+    value = create_engine("sqlite:///:memory:")
+    yield value
+    value.dispose()
+
+
+def _create_full(engine: Engine) -> None:
+    metadata.create_all(engine)
+
+
+def test_zero_user_tables_are_empty(engine: Engine) -> None:
+    assert probe_schema_shape(engine) is LandscapeSchemaShape.EMPTY
+
+
+def test_tableless_incompatible_epoch_is_divergent(engine: Engine) -> None:
+    with engine.begin() as conn:
+        conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH + 1}")
+    assert probe_schema_shape(engine) is LandscapeSchemaShape.DIVERGENT
+
+
+@pytest.mark.parametrize("with_landscape", [False, True])
+def test_unrelated_table_is_foreign(engine: Engine, *, with_landscape: bool) -> None:
+    if with_landscape:
+        _create_full(engine)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE unrelated (id INTEGER PRIMARY KEY)"))
+    assert probe_schema_shape(engine) is LandscapeSchemaShape.FOREIGN
+
+
+def test_full_metadata_matches(engine: Engine) -> None:
+    _create_full(engine)
+    assert probe_schema_shape(engine) is LandscapeSchemaShape.MATCHES
+
+
+@pytest.mark.parametrize("table_name", ["auth_events", "run_attributions"])
+def test_missing_additive_table_is_incomplete(engine: Engine, table_name: str) -> None:
+    _create_full(engine)
+    with engine.begin() as conn:
+        conn.exec_driver_sql(f"DROP TABLE {table_name}")
+    assert probe_schema_shape(engine) is LandscapeSchemaShape.INCOMPLETE
+
+
+def test_missing_additive_index_is_incomplete(engine: Engine) -> None:
+    _create_full(engine)
+    with engine.begin() as conn:
+        conn.exec_driver_sql("DROP INDEX ix_tokens_run_id")
+    assert probe_schema_shape(engine) is LandscapeSchemaShape.INCOMPLETE
+
+
+def test_missing_core_table_is_divergent(engine: Engine) -> None:
+    _create_full(engine)
+    with engine.begin() as conn:
+        conn.exec_driver_sql("DROP TABLE validation_errors")
+    assert probe_schema_shape(engine) is LandscapeSchemaShape.DIVERGENT
+
+
+def test_additive_gap_plus_surviving_shape_error_is_divergent(engine: Engine) -> None:
+    _create_full(engine)
+    with engine.begin() as conn:
+        conn.exec_driver_sql("DROP TABLE auth_events")
+        conn.exec_driver_sql("ALTER TABLE runs ADD COLUMN unexpected TEXT")
+    assert probe_schema_shape(engine) is LandscapeSchemaShape.DIVERGENT
+
+
+@pytest.mark.parametrize("epoch", [1, SQLITE_SCHEMA_EPOCH + 1])
+def test_incompatible_nonzero_epoch_is_divergent(engine: Engine, epoch: int) -> None:
+    _create_full(engine)
+    with engine.begin() as conn:
+        conn.exec_driver_sql(f"PRAGMA user_version = {epoch}")
+    assert probe_schema_shape(engine) is LandscapeSchemaShape.DIVERGENT
+
+
+def test_connection_probe_reuses_supplied_connection(engine: Engine) -> None:
+    with engine.connect() as conn:
+        assert probe_schema_shape(conn) is LandscapeSchemaShape.EMPTY

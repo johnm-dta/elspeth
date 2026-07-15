@@ -6,15 +6,29 @@ import {
   _resetNarrativeModeCacheForTesting,
 } from "./useNarrativeMode";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useAuthStore } from "@/stores/authStore";
+import { usePluginCatalogStore } from "@/stores/pluginCatalogStore";
 import * as apiClient from "@/api/client";
 
 const TAGGED = { name: "batch_classifier_metrics", capability_tags: ["narrative-summary"] } as any;
 const UNTAGGED = { name: "passthrough", capability_tags: [] } as any;
 
 function _stubCatalog(transforms: any[], sources: any[] = [], sinks: any[] = []) {
-  vi.spyOn(apiClient, "listTransforms").mockResolvedValue(transforms);
-  vi.spyOn(apiClient, "listSources").mockResolvedValue(sources);
-  vi.spyOn(apiClient, "listSinks").mockResolvedValue(sinks);
+  vi.spyOn(apiClient, "fetchPluginPolicy").mockResolvedValue({
+    data: {
+      principal_scope: "local:alice",
+      snapshot_fingerprint: "narrative-snapshot",
+      policy_hash: "narrative-policy",
+      available_plugin_ids: [],
+      capability_groups: [],
+      selections: [],
+      control_modes: [],
+    },
+    snapshotFingerprint: "narrative-snapshot",
+  });
+  vi.spyOn(apiClient, "listTransforms").mockResolvedValue({ data: transforms, snapshotFingerprint: "narrative-snapshot" });
+  vi.spyOn(apiClient, "listSources").mockResolvedValue({ data: sources, snapshotFingerprint: "narrative-snapshot" });
+  vi.spyOn(apiClient, "listSinks").mockResolvedValue({ data: sinks, snapshotFingerprint: "narrative-snapshot" });
 }
 
 function _setComposition(state: any) {
@@ -25,6 +39,18 @@ describe("useNarrativeMode", () => {
   beforeEach(() => {
     _resetNarrativeModeCacheForTesting();
     vi.restoreAllMocks();
+    usePluginCatalogStore.getState().clear();
+    useAuthStore.setState({
+      token: "narrative-token",
+      user: {
+        user_id: "alice",
+        username: "alice",
+        display_name: "Alice",
+        email: null,
+        groups: [],
+      },
+      isLoading: false,
+    });
     useSessionStore.setState({ compositionState: null } as never);
   });
 
@@ -103,8 +129,8 @@ describe("useNarrativeMode", () => {
 
   it("falls back to narrativeMode=false when the catalog fetch fails", async () => {
     vi.spyOn(apiClient, "listTransforms").mockRejectedValue(new Error("network"));
-    vi.spyOn(apiClient, "listSources").mockResolvedValue([]);
-    vi.spyOn(apiClient, "listSinks").mockResolvedValue([]);
+    vi.spyOn(apiClient, "listSources").mockResolvedValue({ data: [], snapshotFingerprint: "narrative-snapshot" });
+    vi.spyOn(apiClient, "listSinks").mockResolvedValue({ data: [], snapshotFingerprint: "narrative-snapshot" });
     _setComposition({
       sources: {},
       nodes: [{ id: "n1", node_type: "transform", plugin: "anything", input: "src", on_success: null, on_error: null, options: {} }],
@@ -148,9 +174,8 @@ describe("useNarrativeMode", () => {
   });
 
   it("caches the catalog across renders (does not re-fetch)", async () => {
-    const transformsSpy = vi.spyOn(apiClient, "listTransforms").mockResolvedValue([TAGGED]);
-    vi.spyOn(apiClient, "listSources").mockResolvedValue([]);
-    vi.spyOn(apiClient, "listSinks").mockResolvedValue([]);
+    _stubCatalog([TAGGED]);
+    const transformsSpy = vi.mocked(apiClient.listTransforms);
     const { result: r1, rerender } = renderHook(() => useNarrativeMode());
     await waitFor(() => expect(r1.current.isLoading).toBe(false));
     expect(transformsSpy).toHaveBeenCalledTimes(1);

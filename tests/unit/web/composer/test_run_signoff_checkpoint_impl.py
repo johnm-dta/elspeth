@@ -106,7 +106,7 @@ def _state() -> CompositionState:
 
 @pytest.mark.asyncio
 async def test_run_signoff_delegates_to_end_checkpoint() -> None:
-    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+    service = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=_make_settings())
     verdict = AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN: looks good")
     checkpoint = _AdvisorCheckpointFake(return_value=verdict)
     service._run_advisor_checkpoint = checkpoint
@@ -127,7 +127,7 @@ async def test_run_signoff_delegates_to_end_checkpoint() -> None:
 
 @pytest.mark.asyncio
 async def test_run_signoff_progress_defaults_none() -> None:
-    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+    service = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=_make_settings())
     checkpoint = _AdvisorCheckpointFake(
         return_value=AdvisorCheckpointVerdict(
             ok=False,

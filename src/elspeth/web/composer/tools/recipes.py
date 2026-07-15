@@ -31,8 +31,7 @@ def _execute_list_recipes(
     context: ToolContext,
 ) -> ToolResult:
     """Return discovery metadata for every registered pipeline recipe."""
-    del context  # unused; signature uniformity with the other handlers.
-    return _discovery_result(state, {"recipes": list_recipes()})
+    return _discovery_result(state, {"recipes": list_recipes(context.plugin_snapshot)})
 
 
 _LIST_RECIPES_DECLARATION = ToolDeclaration(

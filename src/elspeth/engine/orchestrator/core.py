@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.config.runtime import RuntimeCheckpointConfig, RuntimeConcurrencyConfig
     from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.payload_store import PayloadStore
+    from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
     from elspeth.contracts.preflight import PreflightResult
     from elspeth.core.checkpoint import CheckpointManager
     from elspeth.core.config import ElspethSettings
@@ -182,6 +183,7 @@ class Orchestrator:
         auth_provider_type: str | None = None,
         openrouter_catalog_sha256: str,
         openrouter_catalog_source: str,
+        web_plugin_policy_evidence: WebPluginPolicyEvidence | None = None,
     ) -> tuple[RecorderFactory, Any, CoordinationToken]:
         """DATABASE-phase delegator (test seam — see RunLifecycleCoordinator)."""
         return self._run_lifecycle.initialize_database_phase(
@@ -193,6 +195,7 @@ class Orchestrator:
             auth_provider_type=auth_provider_type,
             openrouter_catalog_sha256=openrouter_catalog_sha256,
             openrouter_catalog_source=openrouter_catalog_source,
+            web_plugin_policy_evidence=web_plugin_policy_evidence,
         )
 
     def run(
@@ -211,6 +214,7 @@ class Orchestrator:
         auth_provider_type: str | None = None,
         openrouter_catalog_sha256: str | None = None,
         openrouter_catalog_source: str | None = None,
+        web_plugin_policy_evidence: WebPluginPolicyEvidence | None = None,
     ) -> RunResult:
         """Execute a pipeline run.
 
@@ -256,6 +260,7 @@ class Orchestrator:
             auth_provider_type=auth_provider_type,
             openrouter_catalog_sha256=openrouter_catalog_sha256,
             openrouter_catalog_source=openrouter_catalog_source,
+            web_plugin_policy_evidence=web_plugin_policy_evidence,
             # Bound AT CALL TIME (not construction) so monkeypatch.setattr on
             # the class and patch.object on this instance keep intercepting.
             initialize_database_phase=self._initialize_database_phase,

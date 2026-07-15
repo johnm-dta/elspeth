@@ -1101,6 +1101,9 @@ that preserves the removed linear-chain authoring model.
 - `docs/guides/user-manual.md`
 - `docs/superpowers/specs/2026-07-13-two-llm-colour-hybrid-pipeline-design.md`
 - `docs/superpowers/plans/2026-07-13-two-llm-colour-hybrid-demo-run-sheet.md`
-- `docs-archive/2026-06-28-docs-cleanout/docs/superpowers/specs/2026-05-11-composer-guided-mode-design.md`
-- `docs-archive/2026-06-28-docs-cleanout/docs/superpowers/specs/2026-06-25-llm-primary-guided-creation-design.md`
-- `docs-archive/2026-07-08-docs-cleanout/docs/superpowers/specs/2026-06-30-guided-mode-reframe-design.md`
+- Historical `docs/superpowers/specs/2026-05-11-composer-guided-mode-design.md`
+  (available through git history)
+- Historical `docs/superpowers/specs/2026-06-25-llm-primary-guided-creation-design.md`
+  (available through git history)
+- Historical `docs/superpowers/specs/2026-06-30-guided-mode-reframe-design.md`
+  (available through git history)

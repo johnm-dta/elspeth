@@ -2,20 +2,30 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, cast
 
 import jwt as pyjwt
+import structlog
 from fastapi import Request
+from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
+from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable
+from elspeth.web.landscape_access import landscape_create_tables_allowed
 
 if TYPE_CHECKING:
     from elspeth.web.config import WebSettings
+
+
+_slog = structlog.get_logger(__name__)
 
 
 MAX_AUTH_AUDIT_TEXT_LENGTH = 512
@@ -65,6 +75,13 @@ class AuthAuditWriter(Protocol):
         username: str | None,
         exception_class: str | None,
     ) -> None: ...
+
+
+class AuthAuditOperation(StrEnum):
+    LOGIN_SUCCESS = "login_success"
+    TOKEN_ISSUED = "token_issued"
+    AUTH_FAILURE = "auth_failure"
+    LOGIN_FAILURE = "login_failure"
 
 
 def _bounded_text(value: str | None, *, max_length: int = MAX_AUTH_AUDIT_TEXT_LENGTH) -> str | None:
@@ -155,13 +172,32 @@ class AuthAuditRecorder:
 
     landscape_url: str
     landscape_passphrase: str | None
+    create_tables: bool
 
     @classmethod
     def from_settings(cls, settings: WebSettings) -> AuthAuditRecorder:
         return cls(
             landscape_url=settings.get_landscape_url(),
             landscape_passphrase=settings.landscape_passphrase,
+            create_tables=landscape_create_tables_allowed(settings),
         )
+
+    @contextmanager
+    def _open_landscape(self, operation: AuthAuditOperation) -> Iterator[LandscapeDB]:
+        try:
+            with LandscapeDB.from_url(
+                self.landscape_url,
+                passphrase=self.landscape_passphrase,
+                create_tables=self.create_tables,
+            ) as db:
+                yield db
+        except (SchemaCompatibilityError, LandscapeRecordError, SQLAlchemyError, OSError) as exc:
+            _slog.error(
+                "auth_audit_write_failed",
+                operation=operation,
+                exception_class=type(exc).__name__,
+            )
+            raise
 
     def record_login_success(
         self,
@@ -171,7 +207,7 @@ class AuthAuditRecorder:
         user_id: str,
         username: str,
     ) -> None:
-        with LandscapeDB.from_url(self.landscape_url, passphrase=self.landscape_passphrase) as db:
+        with self._open_landscape(AuthAuditOperation.LOGIN_SUCCESS) as db:
             RecorderFactory(db).auth_audit.record_login_outcome(
                 outcome="success",
                 provider=provider,
@@ -194,7 +230,7 @@ class AuthAuditRecorder:
         access_token: str,
         issuance_path: str,
     ) -> None:
-        with LandscapeDB.from_url(self.landscape_url, passphrase=self.landscape_passphrase) as db:
+        with self._open_landscape(AuthAuditOperation.TOKEN_ISSUED) as db:
             RecorderFactory(db).auth_audit.record_token_issued(
                 provider=provider,
                 user_id=user_id,
@@ -223,7 +259,7 @@ class AuthAuditRecorder:
         metadata = _request_metadata(request)
         metadata["failure_stage"] = failure_stage
         metadata["exception_class"] = exception_class
-        with LandscapeDB.from_url(self.landscape_url, passphrase=self.landscape_passphrase) as db:
+        with self._open_landscape(AuthAuditOperation.AUTH_FAILURE) as db:
             RecorderFactory(db).auth_audit.record_auth_failure(
                 provider=provider,
                 user_id=user_id,
@@ -243,7 +279,7 @@ class AuthAuditRecorder:
         username: str,
         failure_category: str,
     ) -> None:
-        with LandscapeDB.from_url(self.landscape_url, passphrase=self.landscape_passphrase) as db:
+        with self._open_landscape(AuthAuditOperation.LOGIN_FAILURE) as db:
             RecorderFactory(db).auth_audit.record_login_outcome(
                 outcome="failure",
                 provider=provider,

@@ -54,6 +54,7 @@ from ._helpers import (
     _publish_progress,
     _record_composer_request_terminal,
     _record_composer_runtime_preflight_telemetry,
+    _request_plugin_policy_context,
     _safe_frame_strings,
     _state_data_from_composer_state,
     _state_from_record,
@@ -173,6 +174,8 @@ def register_message_routes(router: APIRouter) -> None:
             # send (elspeth-e08063c3a5). ``/recompose`` already seeds
             # from the head; this keeps the two routes symmetric.
             compose_base_state_id = state_record.id if state_record is not None else None
+            _policy_catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
+            profile_registry = request.app.state.operator_profile_registry
 
             # 1b. Detect guided→freeform mode transition (spec §8.2).
             # The first freeform chat turn after guided_session.terminal is set
@@ -323,6 +326,8 @@ def register_message_routes(router: APIRouter) -> None:
                         compose_base_state_id,
                         settings=settings,
                         secret_service=request.app.state.scoped_secret_resolver,
+                        plugin_snapshot=plugin_snapshot,
+                        profile_registry=profile_registry,
                     )
                     raise HTTPException(status_code=422, detail=response_body) from exc
                 except LiteLLMAuthError as exc:
@@ -472,6 +477,8 @@ def register_message_routes(router: APIRouter) -> None:
                         compose_base_state_id,
                         settings=settings,
                         secret_service=request.app.state.scoped_secret_resolver,
+                        plugin_snapshot=plugin_snapshot,
+                        profile_registry=profile_registry,
                     )
                     await _publish_progress(
                         progress_registry,
@@ -540,6 +547,8 @@ def register_message_routes(router: APIRouter) -> None:
                         compose_base_state_id,
                         settings=settings,
                         secret_service=request.app.state.scoped_secret_resolver,
+                        plugin_snapshot=plugin_snapshot,
+                        profile_registry=profile_registry,
                     )
                     raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
                 except ComposerServiceError as exc:
@@ -637,6 +646,8 @@ def register_message_routes(router: APIRouter) -> None:
                             secret_service=request.app.state.scoped_secret_resolver,
                             user_id=str(user.user_id),
                             session_id=session.id,
+                            plugin_snapshot=plugin_snapshot,
+                            profile_registry=profile_registry,
                             runtime_preflight=result.runtime_preflight,
                             preflight_exception_policy="raise",
                             initial_version=state.version,
@@ -676,6 +687,8 @@ def register_message_routes(router: APIRouter) -> None:
                             compose_base_state_id,
                             settings=settings,
                             secret_service=request.app.state.scoped_secret_resolver,
+                            plugin_snapshot=plugin_snapshot,
+                            profile_registry=profile_registry,
                         )
                         raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
                     await _publish_progress(

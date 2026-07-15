@@ -202,7 +202,7 @@ async def test_compose_loop_records_success_arg_error_plugin_crash_sequence() ->
     """
     catalog = _mock_catalog()
     settings = _make_settings()
-    service = ComposerServiceImpl(catalog=catalog, settings=settings)
+    service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
     state = _empty_state()
 
     # Three LLM turns — one tool_call each. The arguments here only need
@@ -328,7 +328,7 @@ async def test_compose_loop_records_assertion_error_before_reraise() -> None:
     """
     catalog = _mock_catalog()
     settings = _make_settings()
-    service = ComposerServiceImpl(catalog=catalog, settings=settings)
+    service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
     state = _empty_state()
 
     turn = _make_llm_response(
@@ -412,7 +412,7 @@ async def test_compose_loop_crashes_when_success_canonical_json_fails() -> None:
     """
     catalog = _mock_catalog()
     settings = _make_settings()
-    service = ComposerServiceImpl(catalog=catalog, settings=settings)
+    service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
     state = _empty_state()
 
     mutated_state = replace(state, version=2)
@@ -486,7 +486,7 @@ async def test_timeout_after_successful_tool_carries_audit_invocations() -> None
     """
     catalog = _mock_catalog()
     settings = _make_settings()
-    service = ComposerServiceImpl(catalog=catalog, settings=settings)
+    service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
     state = _empty_state()
 
     mutated_state = replace(state, version=2)
@@ -553,7 +553,7 @@ async def test_preview_runtime_preflight_failure_records_tool_invocation() -> No
     """
     catalog = _mock_catalog()
     settings = _make_settings()
-    service = ComposerServiceImpl(catalog=catalog, settings=settings)
+    service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
     state = _empty_state()
 
     turn = _make_llm_response(
@@ -623,7 +623,7 @@ async def test_dispatch_records_plugin_crash_on_cancelled_error() -> None:
     """
     catalog = _mock_catalog()
     settings = _make_settings()
-    service = ComposerServiceImpl(catalog=catalog, settings=settings)
+    service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
     state = _empty_state()
 
     turn = _make_llm_response(
@@ -686,7 +686,7 @@ async def test_compose_loop_records_arg_error_for_non_finite_object_arguments() 
     """
     catalog = _mock_catalog()
     settings = _make_settings()
-    service = ComposerServiceImpl(catalog=catalog, settings=settings)
+    service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
     state = _empty_state()
 
     turn1 = _make_llm_response(
@@ -729,7 +729,7 @@ async def test_compose_loop_records_arg_error_for_non_finite_non_object_argument
     """Top-level Infinity must use the non-object ARG_ERROR audit path."""
     catalog = _mock_catalog()
     settings = _make_settings()
-    service = ComposerServiceImpl(catalog=catalog, settings=settings)
+    service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
     state = _empty_state()
 
     turn1 = _make_llm_response(
@@ -902,7 +902,7 @@ class TestComposerDiscoveryAuditPreservesResult:
         """
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         discovery_result = _discovery_result(tool_name, state, catalog)
@@ -975,7 +975,7 @@ class TestComposerDiscoveryAuditPreservesResult:
         """
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         discovery_result = _discovery_result(tool_name, state, catalog)

@@ -186,7 +186,7 @@ class TestDiscoverAllPlugins:
     """Test discovery across all plugin directories."""
 
     def test_discover_all_sources(self) -> None:
-        """Verify all sources are discovered including azure."""
+        """Verify all sources are discovered including AWS and Azure."""
         from elspeth.plugins.infrastructure.discovery import discover_all_plugins
 
         discovered = discover_all_plugins()
@@ -195,6 +195,7 @@ class TestDiscoverAllPlugins:
         assert "csv" in source_names
         assert "json" in source_names
         assert "null" in source_names
+        assert "aws_s3" in source_names
         # Azure blob source lives in plugins/azure/
         assert "azure_blob" in source_names
         assert "web_source" not in source_names
@@ -215,6 +216,8 @@ class TestDiscoverAllPlugins:
         # Azure transforms live in plugins/transforms/azure/ (subdirectory!)
         assert "azure_content_safety" in transform_names, f"Missing azure_content_safety in {transform_names}"
         assert "azure_prompt_shield" in transform_names, f"Missing azure_prompt_shield in {transform_names}"
+        assert "aws_bedrock_prompt_shield" in transform_names, f"Missing aws_bedrock_prompt_shield in {transform_names}"
+        assert "aws_bedrock_content_safety" in transform_names, f"Missing aws_bedrock_content_safety in {transform_names}"
 
     def test_discover_all_sinks(self) -> None:
         """Verify all sinks are discovered including azure."""
@@ -225,6 +228,7 @@ class TestDiscoverAllPlugins:
         sink_names = [cls.name for cls in discovered["sinks"]]  # type: ignore[attr-defined]
         assert "csv" in sink_names
         assert "json" in sink_names
+        assert "text" in sink_names
         assert "database" in sink_names
 
     def test_no_duplicate_names_within_type(self) -> None:
@@ -249,11 +253,9 @@ class TestDiscoverAllPlugins:
         from elspeth.plugins.infrastructure.discovery import discover_all_plugins
 
         # Expected counts verified during migration from hookimpl files
-        EXPECTED_SOURCE_COUNT = 6  # csv, json, null, azure_blob, dataverse, text
-        EXPECTED_TRANSFORM_COUNT = (
-            29  # 22 standard transforms + 2 azure safety + azure_document_intelligence + llm + rag_retrieval + blob_fetch + blob_csv_expand
-        )
-        EXPECTED_SINK_COUNT = 6  # csv, json, database, azure_blob, dataverse, chroma_sink
+        EXPECTED_SOURCE_COUNT = 7  # csv, json, null, aws_s3, azure_blob, dataverse, text
+        EXPECTED_TRANSFORM_COUNT = 31  # Existing 29 plus two AWS Bedrock Guardrail transforms
+        EXPECTED_SINK_COUNT = 8  # csv, json, text, database, aws_s3, azure_blob, dataverse, chroma_sink
 
         discovered = discover_all_plugins()
 
@@ -800,9 +802,9 @@ class TestDualSysModulesRegistration:
         assert passthrough_cls.__module__ == original_module.__name__
 
     def test_canonical_alias_registered_after_fresh_load(self, tmp_path: Path) -> None:
-        """After loading a file under the elspeth package tree, the canonical
-        name is registered in sys.modules as an alias.
-        """
+        """Fresh discovery leaves the canonical module normally importable."""
+        import importlib
+
         from elspeth.plugins.infrastructure.discovery import _discover_in_file
 
         # Build a valid elspeth package tree in tmp_path
@@ -839,10 +841,14 @@ class TestDualSysModulesRegistration:
 
         canonical = "elspeth.plugins.transforms.test_fresh_load_plugin"
         synthetic = f"elspeth.plugins._discovered.transforms.{plugin_file.stem}"
+        parent = importlib.import_module("elspeth.plugins.transforms")
+        child_name = plugin_file.stem
 
         # Ensure neither name exists before discovery
         sys.modules.pop(canonical, None)
         sys.modules.pop(synthetic, None)
+        if child_name in vars(parent):
+            delattr(parent, child_name)
 
         try:
             _discover_in_file(plugin_file, BaseTransform)
@@ -853,7 +859,17 @@ class TestDualSysModulesRegistration:
             assert canonical in sys.modules, f"Canonical alias {canonical!r} not registered in sys.modules"
             # Both must point to the SAME module object
             assert sys.modules[synthetic] is sys.modules[canonical], "Synthetic and canonical sys.modules entries must be the same object"
+            # Standard import machinery also binds a child module on its parent
+            # package.  Discovery must preserve that contract even though it
+            # loads the file through a synthetic name first.
+            assert getattr(parent, child_name) is sys.modules[canonical]
+            namespace: dict[str, object] = {}
+            exec(f"import {canonical} as imported", namespace)
+            assert namespace["imported"] is sys.modules[canonical]
         finally:
+            canonical_module = sys.modules.get(canonical)
+            if canonical_module is not None and getattr(parent, child_name, None) is canonical_module:
+                delattr(parent, child_name)
             sys.modules.pop(canonical, None)
             sys.modules.pop(synthetic, None)
 

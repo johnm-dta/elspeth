@@ -118,7 +118,12 @@ dev = [
     # HTTP mocking
     "respx>=0.23,<1",  # httpx mocking for web scrape tests
     "testcontainers[postgres]>=4.0,<5",  # Docker-backed Postgres for CL-PP-11 dialect-portability tests
+    "psycopg[binary]>=3.2,<4",  # Production PostgreSQL driver (psycopg v3)
     "psycopg2-binary>=2.9,<3",  # Postgres DB-API driver for testcontainer lane (pre-built libpq wheel; testcontainers' default driver= is psycopg2)
+]
+
+postgres = [
+    "psycopg[binary]>=3.2,<4",
 ]
 
 llm = [
@@ -137,6 +142,13 @@ azure = [
     "azure-monitor-opentelemetry-exporter>=1.0.0b46,<2",  # b46+ fixes LogData import error  # Azure Monitor / App Insights telemetry
     "azure-monitor-opentelemetry>=1.8,<2",  # Azure Monitor OpenTelemetry Distro — required for azure_ai tracing
     "jinja2>=3.1,<4",  # Template engine for path templating
+]
+
+aws = [
+    "boto3>=1.40,<2",
+    "botocore[crt]>=1.40,<2",
+    "ijson>=3.3,<4",
+    "jinja2>=3.1,<4",
 ]
 
 mcp = [
@@ -202,6 +214,7 @@ all = [
     "asgi-lifespan>=2.1,<3",
     "respx>=0.23,<1",
     "testcontainers[postgres]>=4.0,<5",
+    "psycopg[binary]>=3.2,<4",
     "psycopg2-binary>=2.9,<3",
     # llm dependencies
     "jinja2>=3.1,<4",
@@ -212,6 +225,10 @@ all = [
     "azure-identity>=1.25,<2",
     "azure-keyvault-secrets>=4.11,<5",
     "azure-monitor-opentelemetry-exporter>=1.0.0b46,<2",  # b46+ fixes LogData import error
+    # aws dependencies
+    "boto3>=1.40,<2",
+    "botocore[crt]>=1.40,<2",
+    "ijson>=3.3,<4",
     # mcp dependencies
     "mcp>=1.27,<2",
     # tracing dependencies
@@ -349,6 +366,9 @@ exclude = [
 module = [
     "opentelemetry.*",
     "azure.*",
+    "boto3.*",
+    "botocore.*",
+    "ijson.*",
     "ddtrace.*",
     "sqlcipher3.*",
 ]
@@ -433,6 +453,7 @@ markers = [
     "chaosllm: Configure ChaosLLM server for the test (preset=None, **kwargs)",
     "testcontainer: marks tests requiring Docker via testcontainers-python (deselect with '-m \"not testcontainer\"')",
     "fingerprint_baseline: Plan A baseline capture/verify across all elspeth-lints rules",
+    "live_aws: marks opt-in tests that call live AWS services with operator-approved fixtures",
 ]
 # Load .env file for integration tests (API keys)
 env_files = [".env"]

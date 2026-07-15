@@ -26,7 +26,6 @@ from elspeth.web.composer.state import (
     _validate_gate_route_parity,
     queue_node_contract_error,
 )
-from elspeth.web.composer.tools._availability import filter_secret_available_summaries
 from elspeth.web.composer.tools._common import (
     ToolContext,
     ToolResult,
@@ -37,7 +36,8 @@ from elspeth.web.composer.tools._common import (
     _failure_result,
     _mutation_result,
     _options_with_default_llm_reviews,
-    _prevalidate_transform,
+    _plugin_policy_failure,
+    _prevalidate_transform_for_context,
     _runtime_owned_llm_option_error,
     _validate_aggregation_trigger,
     _validate_mutation_arguments,
@@ -109,7 +109,7 @@ def _handle_list_transforms(
     state: CompositionState,
     context: ToolContext,
 ) -> ToolResult:
-    return _discovery_result(state, filter_secret_available_summaries(context.catalog.list_transforms(), context))
+    return _discovery_result(state, context.catalog.list_transforms())
 
 
 _LIST_TRANSFORMS_DECLARATION = ToolDeclaration(
@@ -127,7 +127,7 @@ def _handle_list_sinks(
     state: CompositionState,
     context: ToolContext,
 ) -> ToolResult:
-    return _discovery_result(state, filter_secret_available_summaries(context.catalog.list_sinks(), context))
+    return _discovery_result(state, context.catalog.list_sinks())
 
 
 _LIST_SINKS_DECLARATION = ToolDeclaration(
@@ -509,9 +509,9 @@ def _execute_upsert_node(
     # structural, not plugin-driven), so the "and plugin is not None" guard covers them.
     # NodeSpec documents this: "plugin: Plugin name. None for gates and coalesces."
     if node_type in ("transform", "aggregation") and plugin is not None:
-        plugin_error = _validate_plugin_name(context.catalog, "transform", plugin)
+        plugin_error = _validate_plugin_name(context, "transform", plugin)
         if plugin_error is not None:
-            return _failure_result(state, plugin_error)
+            return _plugin_policy_failure(state, plugin_error)
 
         batch_placement_error = _batch_aware_placement_error(node_id, node_type, plugin, validated.output_mode)
         if batch_placement_error is not None:
@@ -526,7 +526,7 @@ def _execute_upsert_node(
             plugin=plugin,
             options=node_options,
         )
-        prevalidation_error = _prevalidate_transform(plugin, review_options)
+        prevalidation_error = _prevalidate_transform_for_context(context, plugin, review_options)
         if prevalidation_error is not None:
             return _failure_result(state, prevalidation_error)
 
@@ -866,7 +866,7 @@ def _execute_patch_node_options(
         return credential_error
 
     if current.node_type in ("transform", "aggregation") and current.plugin is not None:
-        prevalidation_error = _prevalidate_transform(current.plugin, new_options)
+        prevalidation_error = _prevalidate_transform_for_context(context, current.plugin, new_options)
         if prevalidation_error is not None:
             return _failure_result(state, prevalidation_error)
 

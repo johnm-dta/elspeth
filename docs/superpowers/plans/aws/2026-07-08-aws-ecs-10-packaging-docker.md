@@ -18,9 +18,10 @@ from the runbooks index and Docker guide.
 `/home/john/elspeth/.worktrees/aws-ecs-program` worktree on
 `feat/aws-ecs-program`. The orchestration run sheet supersedes any generic
 per-plan worktree, branch, claim, merge, or close convention. Task 0 freezes
-the clean current program tip before any Plan 10 edit; the paused
-`release/0.7.1` branch is not the rollback baseline and remains unchanged until
-Plan 12 completes Tasks 1–8 and performs the final exact-SHA fast-forward.
+the clean current program tip before any Plan 10 edit; release-branch movement
+is outside this plan. Run-sheet Stage 9 later fixes and reconciles the release
+tip as `RECONCILED_RELEASE_SHA`. Plan 12 then requires that ref to remain fixed
+through Tasks 1–8; Task 9 alone performs the final exact-SHA fast-forward.
 
 **Depends on:** every implementation slice in Plans 01–09, 11, 13–14, and 15A–15C,
 including both split slices of Plans 03 and 08. This broad dependency is
@@ -36,6 +37,31 @@ explicit Bedrock prompt/content shields. Plan 10 consumes those results; it
 never text-merges or independently reconstructs `uv.lock`.
 
 **Deviations:** the brief's `web` extra is `webui` in `pyproject.toml:152`; used throughout. The shared GHCR/ACR image's default (`--extra all`, `Dockerfile:52,60`) stays unchanged — Azure Container Apps' Ansible deploy pulls that image (`docs/runbooks/ansible-ubuntu-deployment.md:2271`) and needs its Azure plugin pack. Production extras become an opt-in `INSTALL_EXTRAS` build arg for a lean ECS image instead, matching the spec's `webui,llm,aws,postgres` example.
+
+**Plan 15B handoff:** bind the rollback baseline only after the complete 15B
+acceptance commit is present. The image must preserve the core-only default,
+kind-qualified optional allowlist, ordered capability preferences, opaque LLM
+profiles, usable tutorial profile with fail-closed typed-409 required-control
+coverage gate, and Landscape epoch-23
+`run_web_plugin_policy` evidence. ECS task configuration supplies the complete
+settings bundle documented in `docs/reference/configuration.md`:
+`ELSPETH_WEB__PLUGIN_ALLOWLIST`, `ELSPETH_WEB__PLUGIN_PREFERENCES`,
+`ELSPETH_WEB__PLUGIN_CONTROL_MODES`, `ELSPETH_WEB__LLM_PROFILES`,
+`ELSPETH_WEB__TUTORIAL_LLM_PROFILE`,
+`ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES`, and
+`ELSPETH_WEB__BEDROCK_GUARDRAIL_DEFAULT_PROFILES`. Changing any member requires
+registering a new task-definition revision and forcing a new deployment; an
+ECS Exec override is not a rollout. Acceptance must recheck the six-row
+`GET /api/system/status` readiness contract and the authenticated typed HTTP
+409 tutorial launch gate. The in-task Guardrail proof must also bind the exact
+effective policy and protected seven-setting hash, privately correlate the
+tutorial model/region with the live Bedrock target, retain the intentional
+tutorial coverage blocker and immutable Guardrail versions, bind the required
+prompt/content control aliases, and atomically store/read back the Landscape
+`run_web_plugin_policy` evidence into its sanitized receipt.
+The rollback candidate must understand epoch 23 and the same profile/policy
+schema. Do not qualify an epoch-22 image after the database has been recreated
+at epoch 23.
 
 **Global Constraints (spec §Packaging, §ECS Probe Wiring, §Local State And Auth, §Bedrock LLM Readiness):**
 - "a production install with only production extras, for example web, llm, aws, and postgres. Dev and test dependencies, including testcontainers, should not be required in the final runtime image."
@@ -345,7 +371,8 @@ temporary acceptance artifact.
 `verify-bedrock`, `verify-bedrock-guardrails`, `verify-operator-telemetry`,
 `extract-exec-receipt`, `sanitize-evidence`,
 `control-manifest`, `gate-ledger`, `receipt-store`, `approval-verify`,
-`scenario-load`, `orphan-sweep`, and `cleanup-evidence-finalize`.
+`scenario-load`, `validate-task-definition-policy`, `orphan-sweep`, and
+`cleanup-evidence-finalize`.
 This is
 operator tooling shipped in the production package so the exact same module
 can drive the public API from the release workspace and validate payload/EFS
@@ -438,7 +465,9 @@ state from inside the running task. It is not an HTTP endpoint and exposes no
 - [ ] Implement `verify-payloads --landscape-run-id ID` for execution in a
   dedicated one-shot `PAYLOAD_VERIFIER_TASK_DEFINITION`, using the candidate
   digest, same PostgreSQL/EFS settings, explicit `user: "1000:1000"`, and a
-  Python module entrypoint. Do not use ECS Exec: it runs as root and would mask
+  single Python module entrypoint `python -m elspeth.web.aws_ecs_acceptance`;
+  ECS command overrides contain only the subcommand and arguments. Do not use
+  ECS Exec: it runs as root and would mask
   the non-root EFS permission contract. Load `WebSettings` through the same generic environment
   loader as the app; open the configured landscape DB read-only with the
   configured passphrase; select every non-null `rows.source_data_ref` for the
@@ -454,7 +483,8 @@ state from inside the running task. It is not an HTTP endpoint and exposes no
   auth's EFS SQLite contract is one-task/one-process; opening it through ECS
   Exec beside uvicorn is forbidden. The verifier task definition uses the
   candidate digest and same EFS/settings, overrides the Docker image entrypoint
-  explicitly to `python -m elspeth.web.aws_ecs_acceptance verify-local-auth`,
+  once to `python -m elspeth.web.aws_ecs_acceptance`, and uses
+  `verify-local-auth` as its command,
   and is checked like the doctor task. Load settings, require
   `auth_provider == "local"`, require
   `data_dir / "auth.db"` exists, open it read-only, and require
@@ -497,19 +527,51 @@ state from inside the running task. It is not an HTTP endpoint and exposes no
   arguments or emit their resolved values. Require safe and approved
   attack/content sentinel outcomes, `guard_content` on every request, and
   blocking when `detected=true` even if AWS detect mode returns top-level
-  `NONE`. Prove each external call is present in Landscape before its
-  payload-free operator telemetry; emit only the reusable receipt's plugin ID,
-  safe alias, booleans, request-id presence, hashes, and timestamps.
+  `NONE`. Before either call, compile the candidate task's complete
+  seven-setting web policy bundle through the application's ordinary resolver.
+  Recompute and require the protected scenario inventory's policy-binding
+  hash. Require the tutorial profile's private model and region to equal the
+  live Bedrock smoke target and resolved AWS region, while keeping both out of
+  the receipt. Require the tutorial profile to be usable but the canonical
+  core-only tutorial to remain fail-closed with
+  `tutorial_required_control_coverage`; do not auto-insert controls. Require
+  both Bedrock controls to be locally available and operator-preferred,
+  both modes to be `required`, and both default opaque profile aliases to
+  match the live inputs. Persist that exact `WebPluginPolicyEvidence`
+  atomically with the acceptance run, read it back from Landscape, and fail on
+  any difference. Prove each external call is present in Landscape before its
+  payload-free operator telemetry. The sanitized receipt adds only
+  `policy_hash`, `snapshot_hash`, policy-binding hash, tutorial-profile-ready
+  and intentional tutorial-blocker fields, tutorial/target-LLM IDs, selected
+  plugin IDs, safe aliases, required modes, immutable numeric Guardrail
+  versions, and `landscape_evidence: true`; it never emits model, Guardrail
+  identifier/region, raw setting, or provider values.
+  The controller-side `validate-task-definition-policy` command reads each
+  returned candidate, doctor, payload-verifier, local-auth-verifier, previous,
+  and rollback-doctor task-definition document and compares the named
+  container's seven raw settings, binding hash, live model, and AWS region
+  byte-for-byte with the protected bound scenario inventory. A substituted
+  bundle with a freshly substituted self-consistent hash is a failure.
   Preserve Plan 15C's exact live-test contract in the runbook/controller lane:
   marker `live_aws`, env gate
   `ELSPETH_RUN_LIVE_BEDROCK_GUARDRAILS=1`, and command
   `uv run --extra aws pytest tests/integration/plugins/transforms/aws/test_bedrock_guardrails_live.py -m live_aws -q -rs`.
+  The protected environment also supplies the application-owned
+  `ELSPETH_WEB__PLUGIN_ALLOWLIST` and
+  `ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES`, plus
+  `ELSPETH_LIVE_BEDROCK_{PROMPT,CONTENT}_PROFILE_ALIAS`,
+  `ELSPETH_LIVE_BEDROCK_{PROMPT,CONTENT}_{SAFE,BLOCKED}_TEXT`, and
+  `ELSPETH_LIVE_BEDROCK_{PROMPT,CONTENT}_EXPECTED_VERSION`. Values are never
+  copied into command arguments, receipts, logs, or evidence.
   The test must fail (not skip) when the env gate is set but an approved
   alias/fixture/policy input is absent. Unit tests pin this command and the
   acceptance subcommand to the same reusable checker. The runbook captures
   output through the protected wrapper, requires a non-zero passed count, and
   rejects the words `skipped` or `deselected`; `pytest -rs` reporting alone is
-  not a zero-skip assertion. Plan 12 executes both.
+  not a zero-skip assertion. Adapt the Plan 15C callable directly rather than
+  forking its request/parser/receipt logic. Plan 10 owns the acceptance-module,
+  task-role/IAM, image, task-definition, and runbook integration; Plan 12
+  executes both proofs and owns the verdict.
 - [ ] Implement `verify-operator-telemetry`. Emit a uniquely hashed web metric,
   run one lifecycle-only pipeline, then use bounded AWS API polling to locate
   the metric and `RunStarted`/`RunFinished` trace for the exact run correlation.
@@ -517,13 +579,22 @@ state from inside the running task. It is not an HTTP endpoint and exposes no
   Scan the sanitized signal projection for prompt/content/credential sentinels,
   and add a disposable negative lane proving a collector outage leaves the
   already committed Landscape record intact while export health degrades.
-  Raw CloudWatch/X-Ray responses are never printed or persisted.
+  A positive closed receipt includes only the exact allowlisted CloudWatch
+  metric query (with its acceptance-run/scenario namespace) and deterministic
+  X-Ray trace ID. `control-manifest checkpoint-operator-evidence` consumes that
+  receipt and creates plus binds the next immutable strict-superset retained-
+  evidence checkpoint before the live helper returns. Raw CloudWatch/X-Ray
+  responses are never printed or persisted.
 - [ ] Give `verify-s3` and `verify-bedrock` one shared ECS-Exec transport
   contract. Their only process output is exactly one bounded
   `ELSPETH_ACCEPTANCE_RECEIPT_V1:<base64url-json>` sentinel whose decoded JSON
   has a closed schema, names the requested check, and has `ok: true`. The
   local `extract-exec-receipt` binds it to the expected candidate SHA, exact
-  task ARN, and scenario ID in the sanitized evidence envelope. The runbook's
+  task ARN, and scenario ID in the sanitized evidence envelope. For
+  `verify-bedrock-guardrails`, it additionally requires the receipt's
+  `plugin_policy.binding_sha256` to equal the controller's protected inventory
+  value, and `receipt-store` repeats that manifest-backed comparison before
+  persistence. The runbook's
   `run_candidate_role_checks` captures the interactive Session Manager stream
   without terminal echo, requires exactly one sentinel, decodes and validates
   it locally, and persists only the sanitized receipt. Missing, duplicate,
@@ -532,7 +603,9 @@ state from inside the running task. It is not an HTTP endpoint and exposes no
   credential, ARN, model, URL, or raw-error sentinel can escape either the
   remote process or local extractor.
 - [ ] Implement a durable, interruption-safe `control-manifest` helper for
-  Plan 12. `init`, `update`, `validate`, closed-field `get`, and `load-cleanup` operate on an
+  Plan 12. `init`, `update`, `validate`, `bind-scenario`,
+  `bind-retained-evidence`, `checkpoint-operator-evidence`, closed-field `get`,
+  and `load-cleanup` operate on an
   owner-only mode-0600 regular file using no-follow reads, a same-directory
   exclusive temporary file, fsync, and atomic replace. The closed schema binds
   the acceptance run ID, candidate SHA, release PR number, exact-SHA CI run
@@ -571,12 +644,19 @@ state from inside the running task. It is not an HTTP endpoint and exposes no
   wrong-run/scenario, expired approval, interruption, idempotent-resume, and
   redaction tests; the runbook contract test proves all wrapper names are
   defined before first use.
-- [ ] Implement `gate-ledger init|record|finalize` with the same protected-file
-  discipline. A record contains only a stable command/check ID, candidate SHA,
-  start/end UTC, exit status, and sanitized receipt/output hash; it never
-  stores an expanded command line or raw stdout/stderr. Plan 12 records every
-  Task 1–8 checkbox, finalizes a checksum manifest, and exports that manifest
-  as the exact-command/exit-status evidence ledger.
+- [ ] Implement `gate-ledger init|get|record|record-cleanup|bind-candidate|finalize`
+  with the same protected-file discipline. Initialization durably binds the
+  reviewed Plan 12 SHA-256, immutable program-base SHA, reconciled-release
+  SHA, branch, and starting SHA; closed-field `get` reconstructs only those
+  non-secret anchors plus the bound candidate for process-safe resume. A
+  record contains only a stable command/check ID, candidate SHA, start/end UTC,
+  exit status, and sanitized receipt/output hash; it never stores an expanded
+  command line or raw stdout/stderr. Tasks 1–7 use one strict success stream;
+  Task 8 uses an independent strict cleanup stream so a post-mutation Task 7
+  failure can still complete and prove teardown without fabricating skipped
+  success rows. Plan 12 records every Task 1–8 checkbox, finalizes one checksum
+  over both streams, and exports that manifest as the exact-command/exit-status
+  evidence ledger.
 - [ ] Implement `sanitize-evidence --kind web-log|doctor-log|deployment-event|task-definition|terraform-plan|terraform-destroy-plan`.
   It reads a bounded JSON document from stdin and emits a closed, allowlisted
   receipt containing only timestamps, event/check/class names, severities,

@@ -460,7 +460,23 @@ def validate_headers_value(v: str | dict[str, str] | None) -> str | dict[str, st
     raise ValueError(f"headers must be 'normalized', 'original', or a dict mapping, got {type(v).__name__}")
 
 
-class SinkPathConfig(PathConfig):
+class LocalFileSinkConfig(PathConfig):
+    """Base for local file sinks with schema, path, and collision policy."""
+
+    _plugin_component_type: ClassVar[str | None] = "sink"
+
+    collision_policy: OutputCollisionPolicy | None = Field(
+        default=None,
+        description=(
+            "Optional local output collision policy. "
+            "'fail_if_exists' refuses an existing write target; "
+            "'auto_increment' picks a free sibling path; "
+            "'append_or_create' is valid with append mode."
+        ),
+    )
+
+
+class SinkPathConfig(LocalFileSinkConfig):
     """Base config for file-based sink plugins with header output mode.
 
     Extends PathConfig to add header output configuration for output formatting.
@@ -479,15 +495,6 @@ class SinkPathConfig(PathConfig):
     headers: str | dict[str, str] | None = Field(
         default=None,
         description=("Header output mode: 'normalized', 'original', or {field: header} mapping"),
-    )
-    collision_policy: OutputCollisionPolicy | None = Field(
-        default=None,
-        description=(
-            "Optional local output collision policy. "
-            "'fail_if_exists' refuses an existing write target; "
-            "'auto_increment' picks a free sibling path; "
-            "'append_or_create' is valid with append mode."
-        ),
     )
 
     @field_validator("headers")

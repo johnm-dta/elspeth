@@ -20,7 +20,7 @@ via ``_make_app``.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import structlog
@@ -31,8 +31,11 @@ from sqlalchemy.pool import StaticPool
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.config import WebSettings
+from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.schemas import ValidationError, ValidationReadiness, ValidationResult
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import composer_completion_events_table
 from elspeth.web.sessions.protocol import CompositionStateData
@@ -100,6 +103,11 @@ def _make_app_with_telemetry(tmp_path: Path) -> tuple[FastAPI, SessionServiceImp
     app.state.composer_progress_registry = None
     app.state.scoped_secret_resolver = None
     app.state.execution_service = None
+    catalog = create_catalog_service()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    app.state.catalog_service = catalog
+    app.state.operator_profile_registry = MagicMock(spec=OperatorProfileRegistry)
+    app.state.plugin_snapshot_factory = lambda _user: snapshot
 
     app.include_router(create_session_router())
     return app, service
@@ -143,8 +151,10 @@ async def test_export_yaml_route_emits_completion_counter(tmp_path: Path) -> Non
         provenance="session_seed",
     )
 
-    async def _pass_preflight(state, *, settings, secret_service, user_id, session_id):  # type: ignore[no-untyped-def]
-        del state, settings, secret_service, user_id, session_id
+    async def _pass_preflight(  # type: ignore[no-untyped-def]
+        state, *, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry
+    ):
+        del state, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry
         return ValidationResult(is_valid=True, checks=[], errors=[], readiness=_ready_readiness())
 
     # Baseline.
@@ -196,8 +206,10 @@ async def test_export_yaml_route_runtime_preflight_failure_does_not_emit(tmp_pat
         provenance="session_seed",
     )
 
-    async def _fail_preflight(state, *, settings, secret_service, user_id, session_id):  # type: ignore[no-untyped-def]
-        del state, settings, secret_service, user_id, session_id
+    async def _fail_preflight(  # type: ignore[no-untyped-def]
+        state, *, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry
+    ):
+        del state, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry
         return ValidationResult(
             is_valid=False,
             checks=[],

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI, HTTPException, Request
@@ -53,6 +54,19 @@ class _CountingAuthAuditRecorder:
 
     def record_auth_failure(self, *args, **kwargs) -> None:
         self.failures.append(kwargs)
+
+
+class _AuditWriteFailure(OSError):
+    pass
+
+
+class _RaisingAuthAuditRecorder:
+    def __init__(self) -> None:
+        self.failures: list[dict[str, object]] = []
+
+    def record_auth_failure(self, *args, **kwargs) -> None:
+        self.failures.append(kwargs)
+        raise _AuditWriteFailure("audit persistence unavailable")
 
 
 def _make_app(
@@ -213,6 +227,21 @@ class TestGetCurrentUser:
 
         assert exc_info.value.status_code == 401
         assert exc_info.value.detail == "Token expired"
+
+    @pytest.mark.parametrize("provider_type", ["oidc", "entra"])
+    async def test_nonlocal_auth_failure_propagates_audit_write_failure(self, provider_type: str) -> None:
+        provider = _FakeAuthProvider(error=AuthenticationError("Token expired"))
+        recorder = _RaisingAuthAuditRecorder()
+        app = _make_app(provider, recorder=recorder)
+        app.state.settings = SimpleNamespace(auth_provider=provider_type)
+        request = _make_request(provider, "Bearer expired-token", app=app)
+
+        with pytest.raises(_AuditWriteFailure):
+            await get_current_user(request)
+
+        assert len(recorder.failures) == 1
+        assert recorder.failures[0]["provider"] == provider_type
+        assert recorder.failures[0]["failure_stage"] == "authenticate"
 
     async def test_authentication_error_rate_limits_audit_writes(self) -> None:
         provider = _FakeAuthProvider(error=AuthenticationError("Token expired"))

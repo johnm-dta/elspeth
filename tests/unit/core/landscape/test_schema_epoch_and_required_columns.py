@@ -1,4 +1,4 @@
-"""Schema epoch + required-columns + provenance-write guards (epoch 22)."""
+"""Schema epoch + required-columns + provenance-write guards (epoch 23)."""
 
 from __future__ import annotations
 
@@ -14,14 +14,40 @@ from elspeth.core.landscape.schema import (
     metadata,
     node_states_table,
     routing_events_table,
+    run_web_plugin_policy_table,
     token_work_items_table,
     tokens_table,
 )
 from tests.fixtures.landscape import make_recorder_with_run
 
 
-def test_epoch_is_twenty_two() -> None:
-    assert SQLITE_SCHEMA_EPOCH == 22
+def test_epoch_is_twenty_three() -> None:
+    assert SQLITE_SCHEMA_EPOCH == 23
+
+
+def test_epoch_23_web_plugin_policy_table_is_one_to_one_with_runs() -> None:
+    assert "run_web_plugin_policy" in metadata.tables
+    assert run_web_plugin_policy_table.primary_key.columns.keys() == ["run_id"]
+    assert {column.name for column in run_web_plugin_policy_table.columns} == {
+        "run_id",
+        "schema_version",
+        "policy_hash",
+        "snapshot_hash",
+        "authorized_plugin_ids_json",
+        "available_plugin_ids_json",
+        "control_modes_json",
+        "selected_implementations_json",
+        "selected_profile_aliases_json",
+        "plugin_code_identities_json",
+        "binding_generation_fingerprint",
+        "decision_codes_json",
+    }
+
+
+def test_required_columns_include_epoch_23_web_plugin_policy_evidence() -> None:
+    required = set(_REQUIRED_COLUMNS)
+    for column in run_web_plugin_policy_table.columns:
+        assert ("run_web_plugin_policy", column.name) in required
 
 
 def test_token_work_items_has_barrier_blocked_at() -> None:

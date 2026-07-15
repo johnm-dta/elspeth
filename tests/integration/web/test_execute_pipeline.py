@@ -43,7 +43,7 @@ def work_dir(tmp_path: Path) -> Path:
     audit_dir = tmp_path / "runs"
     audit_dir.mkdir()
     payloads_dir = tmp_path / "payloads"
-    payloads_dir.mkdir()
+    payloads_dir.mkdir(mode=0o700)
     return tmp_path
 
 

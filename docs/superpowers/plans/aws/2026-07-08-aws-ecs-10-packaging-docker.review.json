@@ -1,20 +1,20 @@
 {
   "verdict": "APPROVED",
-  "scope_verdict": "GO_TO_IMPLEMENT_AFTER_DEPENDENCIES",
-  "summary": "Plan 10 is implementation-ready after its Filigree dependencies close on the shared program branch. Its rollback baseline is the clean pre-Plan-10 feat/aws-ecs-program tip, while release/0.7.1 remains paused until Plan 12. The plan retains the validated lean image, executable runbook, bounded redacted acceptance tooling, task-role proof, and cleanup-before-GO controls.",
+  "scope_verdict": "GO_TO_IMPLEMENT",
+  "summary": "Plan 10 is implementation-complete and independently re-reviewed after the protected-policy acceptance repair. Canonical tutorial state, all seven protected settings, every credited task definition, Guardrail receipts, and the shared five-case backend/frontend policy matrix are now exact and regression-covered through real direct and guided authoring. No correctness, binding, parity, evidence, or resume blocker remains.",
   "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-10-packaging-docker.md",
-  "reviewed_at": "2026-07-12T11:58:37Z",
+  "reviewed_at": "2026-07-14T18:39:49Z",
   "review_basis": {
-    "branch": "release/0.7.1",
-    "head": "b50b5da62a2fee91128e9993df0828f50feaf8fc",
-    "baseline": "Plan 10, the repaired run sheet, Plan 00, Plan 12, the live Filigree DAG, shell examples, links, and source hashes were rechecked. The Plan 10 rollback baseline remains pre-edit program-branch source evidence and is not the paused release tip or durable publication evidence."
+    "branch": "feat/aws-ecs-program",
+    "head": "c66231eb06df5a67421ff3649c7d561fdf3ac250",
+    "baseline": "Fresh full-current review of the final uncommitted Plan 10 protected-policy repair in the isolated feat/aws-ecs-program worktree. The review covered canonical tutorial capture, seven-setting manifest inventory, all task-definition consumers, Guardrail receipt extraction and persistence, the shared five-case backend/frontend matrix, real direct/guided/YAML authoring, runtime and delayed export gates, and exact raw-fixture/live-backend projection equality."
   },
   "blocking_issues": [],
   "warnings": [
     {
       "id": "R10-1",
-      "status": "DEPENDENCY",
-      "detail": "Filigree elspeth-6285c29c07 remains pending, unassigned, and correctly blocked by every earlier implementation slice. Task 0 must not record the rollback-baseline SHA until those dependencies are done and the integrated tree is clean."
+      "status": "RESOLVED",
+      "detail": "Filigree elspeth-6285c29c07 is in progress under the Plan 10 repair owner. The fresh full review authorizes re-close after the reviewed repair is committed on feat/aws-ecs-program."
     },
     {
       "id": "R10-2",
@@ -102,6 +102,21 @@
       "id": "B10-14",
       "status": "RESOLVED",
       "resolution": "Plan 10 and Plan 12 Filigree fields now name the real file set, force-new/baseline/non-root/task-role/platform/evidence/cleanup obligations, while both issues remain unclaimed and untransitioned."
+    },
+    {
+      "id": "B10-15",
+      "status": "RESOLVED",
+      "resolution": "The full contract repair makes initial evidence-export replay historical and idempotent, binds exact positive telemetry query/sentinel/namespace/trace identities through immutable strict-superset checkpoints in both Plan 12 and the canonical runbook, enforces paired retained counts, seals cleanup attempts, and resumes safely when task8.check05 is written before the manifest commit."
+    },
+    {
+      "id": "B10-16",
+      "status": "RESOLVED",
+      "resolution": "The acceptance controller and runbook bind every candidate, doctor, verifier, rollback, and previous task definition byte-for-byte to the protected scenario inventory for seven settings, policy binding, live model, and region; Guardrail receipts are checked again when extracted and persisted."
+    },
+    {
+      "id": "B10-17",
+      "status": "RESOLVED",
+      "resolution": "A single five-case fixture now proves exact live backend and frontend policy projections plus real direct, guided, YAML import, validation, execution, and delayed-export outcomes; public operator-profile aliases lower through the production catalog path."
     }
   ],
   "reviewer_summaries": {
@@ -130,16 +145,36 @@
     "POSIX INSTALL_EXTRAS validation executed against valid, empty, whitespace, leading-option, uppercase, glob, and metacharacter inputs",
     "task-definition health command parsed as JSON",
     "Plan 10 and Plan 12 tracker fields updated through typed Filigree MCP without claim or status transition",
+    "Current Plan 10 differs from the reviewed PROGRAM_BASE_SHA only by the completed Plan 15B policy/schema handoff and Plan 15C reusable Guardrail proof handoff; the exact delta was re-reviewed with no new blocker",
+    "All 18 preceding milestone items have valid feat/aws-ecs-program close anchors that are ancestors of af4aece2c90285264f887f3646e48f12ed27227e",
     "review JSON parsed with jq",
     "git diff --check",
-    "three independent specialist re-reviews plus current-HEAD synthesis reported zero remaining blockers"
+    "three independent specialist re-reviews plus current-HEAD synthesis reported zero remaining blockers",
+    "fresh full-current Plan 10 review returned GO after 257 focused tests, Ruff check and format, mypy, runbook and Plan 12 Bash syntax checks, and git diff --check",
+    "final frozen-tree review returned GO after exact raw-fixture/live-backend projection equality closed the final substitution counterexample",
+    "4654 backend tests and 2324 frontend tests pass; Ruff check, Ruff format-check, mypy, and git diff --check are clean"
   ],
   "review_history": [
     {
       "reviewed_at": "2026-07-11T22:40:00Z",
       "verdict": "CHANGES_REQUESTED",
       "summary": "Initial review found unsafe extras parsing, stale/non-executable health wiring, unbound architecture, unforced desired-zero launches, missing rollback-baseline schema initialization, root-masked EFS and concurrent SQLite verification, no ECS task-role S3 proof, raw evidence paths, incomplete OIDC isolation, absent EventBridge delivery proof, premature image promotion, and state-empty-only cleanup."
+    },
+    {
+      "reviewed_at": "2026-07-14T03:38:15Z",
+      "verdict": "APPROVED",
+      "summary": "Re-reviewed the exact post-review Plan 15B and 15C handoff delta and all 18 live close anchors. The additions correctly preserve implemented policy/schema compatibility and reuse the completed Guardrail checker without changing task order, rollback-baseline semantics, or Plan 12 ownership."
+    },
+    {
+      "reviewed_at": "2026-07-14T16:54:37Z",
+      "verdict": "APPROVED_AFTER_CONTRACT_REPAIR",
+      "summary": "Fresh full-plan review found and repaired canonical-runbook telemetry drift, non-exact retained queries, mismatched metric/trace counts, historical export replay failure, cleanup ledger phase hazards, and the terminal-row-before-manifest-commit crash window. Independent re-review returned GO with 257 focused tests and all static/syntax checks clean."
+    },
+    {
+      "reviewed_at": "2026-07-14T18:39:49Z",
+      "verdict": "APPROVED_AFTER_PROTECTED_POLICY_REPAIR",
+      "summary": "Final frozen-tree re-review returned GO. Canonical tutorial semantics, exact seven-setting task-definition and receipt trust anchors, full five-case backend/frontend parity, and real authoring paths are closed with 4654 backend and 2324 frontend tests passing."
     }
   ],
-  "plan_sha256": "3bb971d0db88f1575c362f970f37c80728ee064d58207e285c9d2726d32ba4f6"
+  "plan_sha256": "26db1f9b8476c37bde6d67d13fc20cf58d2eb70b712ea0e9a2122be2ddd93cb6"
 }

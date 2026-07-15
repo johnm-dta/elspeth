@@ -24,7 +24,11 @@ from elspeth.web.audit_readiness.models import (
     AuditReadinessExplain,
     AuditReadinessSnapshot,
 )
-from elspeth.web.audit_readiness.service import CompositionStateNotFoundError, ReadinessService
+from elspeth.web.audit_readiness.service import (
+    CompositionStateNotFoundError,
+    ReadinessService,
+    build_boot_plugin_policy_readiness,
+)
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.composer.telemetry_phase8 import record_audit_fetch_failure
@@ -126,6 +130,10 @@ def create_audit_readiness_router() -> APIRouter:
                 narrative=build_narrative(
                     state,
                     retention_days=settings.payload_store_retention_days,
+                    plugin_policy_readiness=build_boot_plugin_policy_readiness(
+                        policy=request.app.state.web_plugin_policy,
+                        settings=request.app.state.runtime_web_plugin_config,
+                    ),
                 ),
             )
         except Exception:

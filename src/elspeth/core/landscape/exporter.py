@@ -47,6 +47,7 @@ from elspeth.contracts.export_records import (
     TokenParentExportRecord,
     TransformErrorExportRecord,
     ValidationErrorExportRecord,
+    WebPluginPolicyExportRecord,
 )
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import canonical_json
@@ -61,6 +62,8 @@ class ExportReadModel(Protocol):
     def get_run(self, run_id: str) -> Any | None: ...
 
     def get_run_attribution(self, run_id: str) -> tuple[str, str] | None: ...
+
+    def get_web_plugin_policy_evidence(self, run_id: str) -> Any | None: ...
 
     def get_secret_resolutions_for_run(self, run_id: str) -> list[Any]: ...
 
@@ -110,6 +113,9 @@ class RecorderFactoryExportReadModel:
 
     def get_run_attribution(self, run_id: str) -> tuple[str, str] | None:
         return self._factory.run_lifecycle.get_run_attribution(run_id)
+
+    def get_web_plugin_policy_evidence(self, run_id: str) -> Any | None:
+        return self._factory.run_lifecycle.get_web_plugin_policy_evidence(run_id)
 
     def get_secret_resolutions_for_run(self, run_id: str) -> list[Any]:
         return self._factory.run_lifecycle.get_secret_resolutions_for_run(run_id)
@@ -398,6 +404,25 @@ class LandscapeExporter:
             "reproducibility_grade": run.reproducibility_grade.value if run.reproducibility_grade is not None else None,
         }
         yield run_record
+
+        policy_evidence = self._read_model.get_web_plugin_policy_evidence(run_id)
+        if policy_evidence is not None:
+            policy_record: WebPluginPolicyExportRecord = {
+                "record_type": "web_plugin_policy",
+                "run_id": run_id,
+                "schema_version": policy_evidence.schema_version,
+                "policy_hash": policy_evidence.policy_hash,
+                "snapshot_hash": policy_evidence.snapshot_hash,
+                "authorized_plugin_ids": list(policy_evidence.authorized_plugin_ids),
+                "available_plugin_ids": list(policy_evidence.available_plugin_ids),
+                "control_modes": [list(item) for item in policy_evidence.control_modes],
+                "selected_implementations": [list(item) for item in policy_evidence.selected_implementations],
+                "selected_profile_aliases": [list(item) for item in policy_evidence.selected_profile_aliases],
+                "plugin_code_identities": [list(item) for item in policy_evidence.plugin_code_identities],
+                "binding_generation_fingerprint": policy_evidence.binding_generation_fingerprint,
+                "decision_codes": list(policy_evidence.decision_codes),
+            }
+            yield policy_record
 
         # Secret resolutions (run-level provenance for Key Vault secrets)
         for resolution in self._read_model.get_secret_resolutions_for_run(run_id):

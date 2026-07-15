@@ -1188,10 +1188,10 @@ runs_table = Table(
 # unrelated to its actual status). Mirrors the project pattern at
 # ``uq_chat_messages_tool_call_id`` above where both keys are set.
 #
-# The schema validator (sessions/schema.py:_validate_named_indexes) only
-# compares index NAMES, not WHERE clauses, so a future drift between the
-# two predicates would not be caught by ``initialize_session_schema``.
-# That validator-coverage gap is tracked separately.
+# The shared schema-shape collector validates the live index's name, ordered
+# columns, uniqueness, and dialect-specific WHERE predicate.  The session
+# validator additionally enforces model-side sqlite/postgresql predicate
+# symmetry before inspecting either runtime dialect.
 Index(
     "uq_runs_one_active_per_session",
     runs_table.c.session_id,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 import structlog
@@ -16,6 +17,8 @@ from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.progress import ComposerProgressRegistry
 from elspeth.web.config import WebSettings
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -86,6 +89,11 @@ def _make_app(tmp_path, user_id="alice"):
     app.state.session_service = service
     app.state.session_engine = engine
     app.state.catalog_service = _CatalogServiceFake()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(app.state.catalog_service)
+    profiles = MagicMock(spec=OperatorProfileRegistry)
+    profiles.public_schema.side_effect = lambda _plugin_id, schema, *, available_aliases: schema
+    app.state.operator_profile_registry = profiles
+    app.state.plugin_snapshot_factory = lambda _user: snapshot
     app.state.settings = WebSettings(
         data_dir=tmp_path,
         composer_max_composition_turns=15,

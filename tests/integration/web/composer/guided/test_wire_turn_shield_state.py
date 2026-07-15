@@ -28,6 +28,7 @@ from fastapi import FastAPI
 from sqlalchemy.pool import StaticPool
 
 from elspeth.core.payload_store import FilesystemPayloadStore
+from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.routes import create_blobs_router
@@ -39,6 +40,9 @@ from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.interpretation_state import PROMPT_SHIELD_AVAILABLE_DRAFT, PROMPT_SHIELD_WARNING_DRAFT
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
+from elspeth.web.plugin_policy.availability import build_plugin_snapshot
+from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
+from elspeth.web.plugin_policy.profiles import LocalRequirementResult, OperatorProfileRegistry, RuntimeWebPluginConfig
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -94,9 +98,16 @@ def _make_guided_app(
         composer_timeout_seconds=85.0,
         composer_rate_limit_per_minute=100,
         shareable_link_signing_key=b"\x00" * 32,
+        plugin_allowlist=("transform:passthrough", "transform:azure_prompt_shield"),
+        llm_profiles={
+            "task-role": {
+                "provider": "bedrock",
+                "model": "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+            }
+        },
     )
     catalog = create_catalog_service()
-    composer_service = ComposerServiceImpl(
+    composer_service = ComposerServiceImpl.for_trained_operator(
         catalog=catalog,
         settings=settings,
         sessions_service=session_service,
@@ -120,6 +131,48 @@ def _make_guided_app(
     app.state.scoped_secret_resolver = scoped_secret_resolver
     app.state.rate_limiter = ComposerRateLimiter(limit=100)
     app.state.catalog_service = catalog
+    runtime_policy = RuntimeWebPluginConfig.from_settings(settings)
+    app.state.web_plugin_policy = compile_web_plugin_policy(
+        registry=get_shared_plugin_manager(),
+        settings=runtime_policy,
+    )
+    base_profiles = OperatorProfileRegistry(
+        policy=app.state.web_plugin_policy,
+        settings=runtime_policy,
+    )
+
+    class _FullSchemaProfiles:
+        """Keep this legacy LLM-authoring fixture full-schema while exposing real profile availability."""
+
+        def public_schema(self, _plugin_id, full_schema, *, available_aliases):
+            return full_schema
+
+        def profile_availability(self, plugin_id, *, principal, inventory):
+            return base_profiles.profile_availability(plugin_id, principal=principal, inventory=inventory)
+
+        def check_local_requirements(self, plugin_id, alias):
+            del plugin_id, alias
+            return LocalRequirementResult(available=True)
+
+    class _SnapshotInventory:
+        def has_server_ref(self, name: str) -> bool:
+            return scoped_secret_resolver is not None and scoped_secret_resolver.has_ref("alice", name)
+
+        def has_user_ref(self, principal: str, name: str) -> bool:
+            return scoped_secret_resolver is not None and scoped_secret_resolver.has_ref("alice", name)
+
+        def has_ref(self, principal: str, name: str) -> bool:
+            return scoped_secret_resolver is not None and scoped_secret_resolver.has_ref("alice", name)
+
+    app.state.operator_profile_registry = _FullSchemaProfiles()
+    app.state.plugin_snapshot_factory = lambda user: build_plugin_snapshot(
+        policy=app.state.web_plugin_policy,
+        catalog=catalog,
+        profiles=app.state.operator_profile_registry,
+        principal_scope=f"local:{user.user_id}",
+        secret_inventory=_SnapshotInventory(),
+        generation_key=b"guided-shield-policy-key",
+    )
     app.state.composer_recorder = BufferingRecorder()
     app.state.composer_progress_registry = ComposerProgressRegistry()
 

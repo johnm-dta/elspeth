@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type { UserProfile, ApiError } from "../types/index";
 import * as api from "../api/client";
 import { usePreferencesStore } from "./preferencesStore";
+import { usePluginCatalogStore } from "./pluginCatalogStore";
 
 const TOKEN_KEY = "auth_token";
 
@@ -41,6 +42,7 @@ export const useAuthStore = create<AuthState>((set) => ({
       set({ token: access_token });
 
       const user = await api.fetchCurrentUser();
+      usePluginCatalogStore.getState().clear();
       set({ user, isLoading: false });
       return true;
     } catch (err) {
@@ -50,12 +52,14 @@ export const useAuthStore = create<AuthState>((set) => ({
           ? "Invalid username or password."
           : apiErr.detail ?? "Login failed. Please try again.";
       set({ token: null, user: null, loginError: message, isLoading: false });
+      usePluginCatalogStore.getState().clear();
       localStorage.removeItem(TOKEN_KEY);
       return false;
     }
   },
 
   async loginWithToken(token: string) {
+    usePluginCatalogStore.getState().clear();
     localStorage.setItem(TOKEN_KEY, token);
     set({ token, loginError: null, isLoading: true });
     try {
@@ -74,6 +78,7 @@ export const useAuthStore = create<AuthState>((set) => ({
 
   async logout() {
     localStorage.removeItem(TOKEN_KEY);
+    usePluginCatalogStore.getState().clear();
     set({ token: null, user: null, loginError: null, isLoading: false });
     const [
       { useSessionStore },
@@ -99,11 +104,13 @@ export const useAuthStore = create<AuthState>((set) => ({
   async loadFromStorage() {
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) {
+      usePluginCatalogStore.getState().clear();
       usePreferencesStore.getState().reset();
       set({ isLoading: false });
       return;
     }
     set({ token });
+    usePluginCatalogStore.getState().clear();
     try {
       const user = await api.fetchCurrentUser();
       set({ user, isLoading: false });

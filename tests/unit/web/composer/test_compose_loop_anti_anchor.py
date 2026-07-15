@@ -139,7 +139,7 @@ async def test_three_identical_arg_error_failures_inject_hint_before_fourth_turn
     after the third tool result.
     """
     catalog = _mock_catalog()
-    service = ComposerServiceImpl(catalog=catalog, settings=_make_settings())
+    service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=_make_settings())
     state = _empty_state()
 
     identical_args = {"patch": {"name": "Anchored Build"}}
@@ -189,7 +189,7 @@ async def test_three_identical_arg_error_failures_inject_hint_before_fourth_turn
 async def test_three_distinct_arg_error_failures_inject_drift_hint_before_fourth_turn() -> None:
     """Same-tool failed payload drift must also reach the model before surrender."""
     catalog = _mock_catalog()
-    service = ComposerServiceImpl(catalog=catalog, settings=_make_settings())
+    service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=_make_settings())
     state = _empty_state()
 
     turns = [
@@ -247,7 +247,7 @@ async def test_discovery_success_between_mutation_failures_does_not_break_anchor
     Asserts that turn 6's LLM call sees the [ELSPETH-SYSTEM-HINT].
     """
     catalog = _mock_catalog()
-    service = ComposerServiceImpl(catalog=catalog, settings=_make_settings())
+    service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=_make_settings())
     state = _empty_state()
 
     identical_args = {"patch": {"name": "Anchored Across Discoveries"}}
@@ -325,7 +325,7 @@ async def test_mutation_success_breaks_anchor() -> None:
     hint must NOT fire (only 2 consecutive failures post-success).
     """
     catalog = _mock_catalog()
-    service = ComposerServiceImpl(catalog=catalog, settings=_make_settings())
+    service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=_make_settings())
     state = _empty_state()
 
     args = {"patch": {"name": "Two-Then-Reset"}}
@@ -379,7 +379,7 @@ async def test_mutation_success_breaks_anchor() -> None:
 async def test_two_identical_failures_do_not_inject_hint() -> None:
     """Below threshold (N=3) the hint must not fire."""
     catalog = _mock_catalog()
-    service = ComposerServiceImpl(catalog=catalog, settings=_make_settings())
+    service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=_make_settings())
     state = _empty_state()
 
     args = {"patch": {"name": "Two Strikes"}}

@@ -12,25 +12,21 @@
  * * The catalog (lists of transforms/sources/sinks fetched on app boot)
  *   — for each plugin's `capability_tags`.
  *
- * The catalog is loaded lazily via the existing `listTransforms` /
- * `listSources` / `listSinks` API calls. The hook caches the catalog
- * lookup on the first call and reuses it for subsequent renders; it
- * does NOT subscribe to a Zustand store because no catalog store
- * exists pre-Phase-6 (the catalog is rendered ad-hoc by CatalogDrawer
- * via local component state). Phase 6B introduces a minimal singleton
- * cache inside this hook rather than adding a new store.
+ * The principal/fingerprint-scoped plugin catalog store owns the list and
+ * schema caches. This hook consumes only that store, so auth or policy changes
+ * cannot leave a module-global catalog from another principal in memory.
  *
  * Per plan 19b §"Scope boundaries": the opt-in is binary at the plugin
  * level. There is no per-plugin tuning of narrative mode. If any
  * pipeline plugin opts in, the entire result view switches.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 
-import { listSinks, listSources, listTransforms } from "@/api/client";
+import { useAuthStore } from "@/stores/authStore";
+import { usePluginCatalogStore } from "@/stores/pluginCatalogStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { sortedSourceEntries } from "@/utils/compositionState";
-import type { PluginSummary } from "@/types/api";
 
 const NARRATIVE_SUMMARY_TAG = "narrative-summary";
 
@@ -39,35 +35,9 @@ interface CatalogTagMap {
   [pluginName: string]: readonly string[];
 }
 
-let _cachedCatalog: CatalogTagMap | null = null;
-let _cachedCatalogPromise: Promise<CatalogTagMap> | null = null;
-
-async function _loadCatalog(): Promise<CatalogTagMap> {
-  if (_cachedCatalog !== null) return _cachedCatalog;
-  if (_cachedCatalogPromise !== null) return _cachedCatalogPromise;
-  _cachedCatalogPromise = (async () => {
-    const [sources, transforms, sinks] = await Promise.all([
-      listSources(),
-      listTransforms(),
-      listSinks(),
-    ]);
-    const out: CatalogTagMap = {};
-    for (const plugin of [...sources, ...transforms, ...sinks] as PluginSummary[]) {
-      // PluginSummary.capability_tags is typed as `string[]`; default to []
-      // for plugins shipped before Phase 6 where the wire field was added.
-      out[plugin.name] = plugin.capability_tags ?? [];
-    }
-    _cachedCatalog = out;
-    return out;
-  })();
-  return _cachedCatalogPromise;
-}
-
-/** Test helper: drops the catalog cache so unit tests can stub
- *  listTransforms etc. with fresh data per test. */
+/** Compatibility test helper retained for existing hook tests. */
 export function _resetNarrativeModeCacheForTesting(): void {
-  _cachedCatalog = null;
-  _cachedCatalogPromise = null;
+  usePluginCatalogStore.getState().clear();
 }
 
 export interface UseNarrativeModeResult {
@@ -79,35 +49,29 @@ export interface UseNarrativeModeResult {
 
 export function useNarrativeMode(): UseNarrativeModeResult {
   const compositionState = useSessionStore((s) => s.compositionState);
-  const [catalog, setCatalog] = useState<CatalogTagMap | null>(_cachedCatalog);
-  const [isLoading, setIsLoading] = useState<boolean>(_cachedCatalog === null);
+  const principal = useAuthStore((s) => s.user?.user_id ?? null);
+  const sources = usePluginCatalogStore((s) => s.sources);
+  const transforms = usePluginCatalogStore((s) => s.transforms);
+  const sinks = usePluginCatalogStore((s) => s.sinks);
+  const storeLoading = usePluginCatalogStore((s) => s.isLoading);
+  const catalogError = usePluginCatalogStore((s) => s.error);
+  const loadCatalog = usePluginCatalogStore((s) => s.load);
 
   useEffect(() => {
-    if (_cachedCatalog !== null) {
-      setCatalog(_cachedCatalog);
-      setIsLoading(false);
-      return;
+    if (principal !== null) void loadCatalog({ principal });
+  }, [loadCatalog, principal]);
+
+  const catalog = useMemo<CatalogTagMap | null>(() => {
+    if (sources === null || transforms === null || sinks === null) return null;
+    const tags: CatalogTagMap = {};
+    for (const plugin of [...sources, ...transforms, ...sinks]) {
+      tags[plugin.name] = plugin.capability_tags ?? [];
     }
-    let cancelled = false;
-    setIsLoading(true);
-    _loadCatalog()
-      .then((loaded) => {
-        if (cancelled) return;
-        setCatalog(loaded);
-        setIsLoading(false);
-      })
-      .catch(() => {
-        // Catalog fetch failed — fall back to non-narrative mode. The
-        // results view's default rendering still works without the
-        // catalog; only the narrative branch is gated.
-        if (cancelled) return;
-        setCatalog({});
-        setIsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    return tags;
+  }, [sources, transforms, sinks]);
+
+  const isLoading =
+    principal !== null && (storeLoading || (catalog === null && catalogError === null));
 
   const narrativeMode = useMemo(() => {
     if (catalog === null || compositionState === null) return false;

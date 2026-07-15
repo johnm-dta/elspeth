@@ -9,6 +9,8 @@ from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.secrets import collect_credential_field_violations
 from elspeth.web.blobs.protocol import BlobNotFoundError
+from elspeth.web.catalog.policy_view import PolicyCatalogView
+from elspeth.web.catalog.schemas import PluginKind
 from elspeth.web.composer.state import CompositionState, SourceSpec
 from elspeth.web.composer.yaml_generator import reattach_guided_blob_refs_for_public_export
 from elspeth.web.composer.yaml_importer import (
@@ -18,6 +20,7 @@ from elspeth.web.composer.yaml_importer import (
 )
 from elspeth.web.interpretation_state import parse_interpretation_requirements
 from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS, allowed_source_directories, resolve_data_path
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId, PluginUnavailableReason
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields
 
 from .._helpers import (
@@ -45,6 +48,7 @@ from .._helpers import (
     _get_composer_progress_registry,
     _get_session_compose_lock_registry,
     _record_composer_runtime_preflight_telemetry,
+    _request_plugin_policy_context,
     _runtime_preflight_for_state,
     _state_data_from_composer_state,
     _state_from_record,
@@ -61,6 +65,49 @@ from .._helpers import (
 )
 
 router = APIRouter()
+
+
+def _composition_plugin_policy_findings(
+    state: CompositionState,
+    catalog: PolicyCatalogView,
+) -> list[tuple[str, str, PluginUnavailableReason]]:
+    """Return closed current-policy findings without fetching plugin schemas."""
+    components: list[tuple[str, PluginKind, str]] = [
+        *((name, "source", source.plugin) for name, source in state.sources.items()),
+        *((node.id, "transform", node.plugin) for node in state.nodes if node.plugin is not None),
+        *((output.name, "sink", output.plugin) for output in state.outputs),
+    ]
+    findings: list[tuple[str, str, PluginUnavailableReason]] = []
+    for component_id, kind, plugin_name in components:
+        try:
+            plugin_id = PluginId(kind, plugin_name)
+        except ValueError:
+            findings.append((component_id, f"{kind}:{plugin_name}", PluginUnavailableReason.NOT_INSTALLED))
+            continue
+        reason = catalog.unavailable_reason(plugin_id)
+        if reason is not None:
+            findings.append((component_id, str(plugin_id), reason))
+    return findings
+
+
+def _reject_imported_plugin_policy(
+    state: CompositionState,
+    catalog: PolicyCatalogView,
+    snapshot: PluginAvailabilitySnapshot,
+) -> None:
+    findings = _composition_plugin_policy_findings(state, catalog)
+    if not findings:
+        return
+    component_id, plugin_id, reason = findings[0]
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "error_code": reason.value,
+            "component_id": component_id,
+            "plugin_id": plugin_id,
+            "snapshot_fingerprint": snapshot.snapshot_hash,
+        },
+    )
 
 
 class StateYamlResponse(TypedDict, total=False):
@@ -393,10 +440,11 @@ async def get_current_state(
     """Get the current (highest-version) composition state."""
     session = await _verify_session_ownership(session_id, user, request)
     service = request.app.state.session_service
+    catalog, _snapshot = _request_plugin_policy_context(request, user)
     state = await service.get_current_state(session.id)
     if state is None:
         return None
-    return _state_response(state)
+    return _state_response(state, policy_catalog=catalog)
 
 
 @router.get(
@@ -413,8 +461,9 @@ async def get_state_versions(
     """Get composition state versions for a session."""
     session = await _verify_session_ownership(session_id, user, request)
     service = request.app.state.session_service
+    catalog, _snapshot = _request_plugin_policy_context(request, user)
     versions = await service.get_state_versions(session.id, limit=limit, offset=offset)
-    return [_state_response(v) for v in versions]
+    return [_state_response(v, policy_catalog=catalog) for v in versions]
 
 
 @router.post(
@@ -434,6 +483,7 @@ async def revert_state(
     """
     session = await _verify_session_ownership(session_id, user, request)
     service = request.app.state.session_service
+    catalog, _snapshot = _request_plugin_policy_context(request, user)
 
     try:
         new_state = await service.set_active_state(
@@ -455,7 +505,7 @@ async def revert_state(
         writer_principal="route_system_message",
     )
 
-    return _state_response(new_state)
+    return _state_response(new_state, policy_catalog=catalog)
 
 
 @router.post(
@@ -470,12 +520,14 @@ async def import_state_yaml(
 ) -> CompositionStateResponse:
     """Seed a session's composition state from exported runtime YAML."""
     session = await _verify_session_ownership(session_id, user, request)
+    catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
     compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session.id))
     async with compose_lock:
         try:
             imported_state = composition_state_from_runtime_yaml(body.yaml)
         except RuntimeYamlImportError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _reject_imported_plugin_policy(imported_state, catalog, plugin_snapshot)
         imported_state = await _state_with_imported_source_blobs(
             imported_state,
             source_blob_ids=body.source_blob_ids,
@@ -504,6 +556,8 @@ async def import_state_yaml(
             secret_service=request.app.state.scoped_secret_resolver,
             user_id=str(user.user_id),
             session_id=session.id,
+            plugin_snapshot=plugin_snapshot,
+            profile_registry=request.app.state.operator_profile_registry,
             runtime_preflight=None,
             preflight_exception_policy="persist_invalid",
             initial_version=imported_state.version,
@@ -520,7 +574,7 @@ async def import_state_yaml(
             state=imported_state,
             composition_state_id=UUID(str(state_record.id)),
         )
-        return _state_response(state_record)
+        return _state_response(state_record, policy_catalog=catalog)
 
 
 # Provenance sentinel for interpretation events surfaced by the YAML import
@@ -642,6 +696,7 @@ async def seed_state_for_e2e(
         raise HTTPException(status_code=404, detail="Not found")
 
     session = await _verify_session_ownership(session_id, user, request)
+    catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
 
     try:
         body = SeedCompositionStateRequest.model_validate(await request.json())
@@ -654,6 +709,7 @@ async def seed_state_for_e2e(
             seeded_state = CompositionState.from_dict(body.state)
         except (KeyError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail="Invalid composition state JSON") from exc
+        _reject_imported_plugin_policy(seeded_state, catalog, plugin_snapshot)
 
         _reject_unbound_blob_storage_sources(
             seeded_state,
@@ -676,6 +732,8 @@ async def seed_state_for_e2e(
             secret_service=request.app.state.scoped_secret_resolver,
             user_id=str(user.user_id),
             session_id=session.id,
+            plugin_snapshot=plugin_snapshot,
+            profile_registry=request.app.state.operator_profile_registry,
             runtime_preflight=None,
             preflight_exception_policy="persist_invalid",
             initial_version=seeded_state.version,
@@ -686,7 +744,7 @@ async def seed_state_for_e2e(
             state_data,
             provenance="session_seed",
         )
-        return _state_response(state_record)
+        return _state_response(state_record, policy_catalog=catalog)
 
 
 def _reattach_guided_blob_refs(state: CompositionState) -> CompositionState:
@@ -714,6 +772,51 @@ def _reattach_guided_blob_refs(state: CompositionState) -> CompositionState:
     return reattach_guided_blob_refs_for_public_export(state)
 
 
+async def _require_yaml_export_preflight(
+    state: CompositionState,
+    *,
+    request: Request,
+    session_id: UUID,
+    plugin_snapshot: PluginAvailabilitySnapshot,
+) -> None:
+    """Keep the existing export preflight for currently available states."""
+    try:
+        runtime_validation = await _runtime_preflight_for_state(
+            state,
+            settings=request.app.state.settings,
+            secret_service=None,
+            user_id=None,
+            session_id=session_id,
+            plugin_snapshot=plugin_snapshot,
+            profile_registry=request.app.state.operator_profile_registry,
+        )
+    except (
+        TimeoutError,
+        OSError,
+        PluginConfigError,
+        PluginNotFoundError,
+        GraphValidationError,
+    ) as exc:
+        _record_composer_runtime_preflight_telemetry(
+            "exception",
+            source="yaml_export",
+            exception_class=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="Runtime preflight could not complete; YAML export aborted.",
+        ) from exc
+    _record_composer_runtime_preflight_telemetry(
+        "passed" if runtime_validation.is_valid else "failed",
+        source="yaml_export",
+    )
+    if not runtime_validation.is_valid:
+        raise HTTPException(
+            status_code=409,
+            detail="Current composition state failed runtime preflight. Fix validation errors before exporting YAML.",
+        )
+
+
 @router.get("/{session_id}/state/yaml")
 async def get_state_yaml(
     session_id: UUID,
@@ -738,68 +841,17 @@ async def get_state_yaml(
     if state_record is None:
         raise HTTPException(status_code=404, detail="No composition state exists")
     state = _state_from_record(state_record)
-    try:
-        runtime_validation = await _runtime_preflight_for_state(
+    policy_catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
+    # Historical states must remain exportable in their authored, public form
+    # even when a component is no longer enabled.  Do not instantiate or lower
+    # such a component merely to serialize it for repair elsewhere.
+    if not _composition_plugin_policy_findings(state, policy_catalog):
+        await _require_yaml_export_preflight(
             state,
-            settings=request.app.state.settings,
-            secret_service=None,
-            user_id=None,
+            request=request,
             session_id=session.id,
+            plugin_snapshot=plugin_snapshot,
         )
-    except (
-        TimeoutError,
-        OSError,
-        PluginConfigError,
-        PluginNotFoundError,
-        GraphValidationError,
-    ) as exc:
-        # Narrowed per CLAUDE.md offensive-programming policy. This
-        # tuple covers the user-fixable preflight failure modes:
-        #
-        # * TimeoutError — asyncio.wait_for exceeded
-        #   composer_runtime_preflight_timeout_seconds. Operator
-        #   action: increase timeout or fix the slow plugin.
-        # * OSError — filesystem error during plugin instantiation
-        #   (file not found, permission denied, broken pipe, etc.).
-        #   Operator action: fix the file/permissions.
-        # * PluginConfigError / PluginNotFoundError — the user's
-        #   pipeline references a misconfigured or missing plugin.
-        #   Operator action: fix the pipeline config.
-        # * GraphValidationError — the pipeline graph is structurally
-        #   invalid (validate_pipeline normally absorbs this, but
-        #   it's listed here for defense-in-depth in case a future
-        #   refactor lets it escape).
-        #
-        # Programmer-bug classes (AttributeError, TypeError,
-        # KeyError, RuntimeError, ImportError, etc.) are deliberately
-        # NOT caught — they propagate to FastAPI's default 500
-        # handler so operators see real tracebacks rather than the
-        # misleading "fix your pipeline" 409 message. The
-        # exception-counter is reserved for the user-fixable bucket
-        # so dashboards measure real preflight failure rate, not
-        # bugs we introduced ourselves.
-        _record_composer_runtime_preflight_telemetry(
-            "exception",
-            source="yaml_export",
-            exception_class=type(exc).__name__,
-        )
-        raise HTTPException(
-            status_code=409,
-            detail="Runtime preflight could not complete; YAML export aborted.",
-        ) from exc
-    _record_composer_runtime_preflight_telemetry(
-        "passed" if runtime_validation.is_valid else "failed",
-        source="yaml_export",
-    )
-    if not runtime_validation.is_valid:
-        # Deliberately a generic message: the YAML-export 409 must not echo
-        # preflight error prose (commit "fix: prevent YAML export secret
-        # leaks"). With secret_service=None the fabricated-secret check is
-        # skipped, so a literally-typed credential is not redacted and could
-        # otherwise surface through plugin validation prose. See
-        # test_get_state_yaml_does_not_echo_preflight_error_messages.
-        detail = "Current composition state failed runtime preflight. Fix validation errors before exporting YAML."
-        raise HTTPException(status_code=409, detail=detail)
     # elspeth-b5ee205720: reconstitute blob_ref for guided blob-backed sources
     # (stripped from committed options; retained only in the GuidedSession
     # snapshot) so BOTH export egress channels below — the public-YAML storage-path

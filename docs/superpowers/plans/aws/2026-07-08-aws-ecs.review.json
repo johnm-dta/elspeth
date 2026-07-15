@@ -1,127 +1,46 @@
 {
-  "review": "AWS ECS runtime-readiness plan set — round 8 single-worktree autonomous handoff",
-  "date": "2026-07-12",
-  "reviewed_at": "2026-07-12T11:58:37Z",
-  "object": "docs/superpowers/plans/aws AWS ECS plan/review set, orchestration run sheet, and runtime-readiness/universal-policy designs @ release/0.7.1",
-  "process": "Independent xhigh re-review of the repaired autonomous prompt, run sheet, Plan 00, Plan 10, and Plan 12 using reality, architecture, quality/security, systems, documentation-testing, supply-chain, worktree, and verification lenses. The current diff, full resulting sources, all AWS plan-folder orchestration references, live Filigree DAG and critical path, workflow triggers, shell fences, links, JSON, whitespace, stale terms, and SHA256 bindings were checked.",
-  "verdict": "APPROVED_WITH_WARNINGS",
-  "scope_verdict": "GO_TO_IMPLEMENT",
+  "date": "2026-07-15",
+  "reviewed_at": "2026-07-15T00:34:48Z",
+  "object": "Lean Plan 12 and Stage 9 execution contract",
+  "verdict": "APPROVED",
+  "scope_verdict": "GO_TO_EXECUTE_PLAN_12",
   "runtime_verdict": "PENDING_PLAN_12",
-  "verdict_summary": "GO to execute the dependency DAG in one ignored feat/aws-ecs-program worktree. All slice mutations and tracker transitions are serialized, the full unfiltered suite is held until final washup, and runtime GO still requires one unchanged candidate to pass Plan 12 Tasks 1 through 8, cleanup, exact-SHA hosted CI, and the final no-merge-commit fast-forward into release/0.7.1.",
+  "verdict_summary": "The reviewed program endpoint is Plan 12 Task 7. The closeout retains the real local, image, live AWS, teardown, and exact-SHA release path while deleting hosted CI, Wardline, fine-grained proof rows, the extra final checkpoint, and parent phase or milestone administration.",
   "source_sha256": {
-    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-autonomous-codex-prompt.md": "cd8a63cf02cca9aa2d71e61448634d8e1e405e33e805420246f109510cca9940",
-    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md": "cc0310767206c68db1700c47109bd221eb8930bcd03592b68aff4f61a53c6cba",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-00-overview.md": "94047e986bd687f2c7e5b3f5d508a647a7879f3ad31b9741b378c9320bfdaa44",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-10-packaging-docker.md": "3bb971d0db88f1575c362f970f37c80728ee064d58207e285c9d2726d32ba4f6",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md": "50d7afb72f7cbb5483879a8a94365968db818d163653d13e20fd0e56ba2f52e8"
-  },
-  "reviewer_verdicts": {
-    "reality": "APPROVED_AFTER_REPAIRS",
-    "architecture": "APPROVED_AFTER_REPAIRS",
-    "quality_security": "APPROVED_AFTER_REPAIRS",
-    "systems_dependencies": "APPROVED_AFTER_REPAIRS",
-    "final_rechecks": "APPROVED"
+    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-autonomous-codex-prompt.md": "1a9f1412ef4fb44972adf34073ff16b3345422c1bc3c7cdc2b49dab305a96c49",
+    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md": "29f927478abdbc7b5d37bb7f1e43754097928cbd0434887c97a3774cf0436974",
+    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-00-overview.md": "6cea4243755db7575dbb5ac992136248f67268fcf8bdc105ada91e51d655c7c9",
+    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-10-packaging-docker.md": "26db1f9b8476c37bde6d67d13fc20cf58d2eb70b712ea0e9a2122be2ddd93cb6",
+    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md": "c923a9070e7571dc08fe8b38b0b0211a4a24715f031e00492e24c9a5032dc3c8"
   },
   "blocking": [],
   "non_blocking_residuals": [
-    {
-      "id": "R1",
-      "title": "Runtime acceptance remains external",
-      "disposition": "Plans 10/12 own real Aurora/ECS/task-role/Guardrail/telemetry execution and zero-skip proof; planning approval is not runtime GO."
-    },
-    {
-      "id": "R2",
-      "title": "Epoch 23 needs operator-controlled recreation for populated old Landscape databases",
-      "disposition": "Archive/export, destructive reset, compatibility approval, and rollback decisions remain database/release-operator responsibilities."
-    },
-    {
-      "id": "R3",
-      "title": "AWS harmful-content coverage lacks Azure self_harm parity",
-      "disposition": "The residual is explicit; equivalent coverage requires another approved control or an operator decision."
-    },
-    {
-      "id": "R4",
-      "title": "Hosted CI does not build the lean INSTALL_EXTRAS image",
-      "disposition": "Plan 10 and Plan 12 perform the real lean build/run; retain the existing overview strengthening follow-up."
-    }
+    "Live AWS execution awaits the approved operator credentials and external Terraform inputs."
   ],
   "repairs_verified": [
-    "Plan 15 was split into 15A text sink, 15B universal policy, and 15C thin Bedrock Guardrail implementation with separate tracker ownership and review artifacts.",
-    "The approved required core is CSV/JSON/text source and sink plus field_mapper, web_scrape, and operator-profiled LLM for the canonical tutorial; XML remains parked.",
-    "Plan 15A is byte-oriented, race-safe, multi-batch preserving, rollback-aware, and source-hash/golden/discovery complete.",
-    "Plan 15B binds policy to exact plugin code identities, resolves per-principal usable aliases without credential-scope shadowing, and keeps private lowering memory-only.",
-    "Plan 15B enforces the same snapshot at catalog, freeform, guided, recipes, import, validation, execution, delayed export, frontend cache, readiness, and audit boundaries while leaving CLI unrestricted.",
-    "Required prompt/content controls use typed input/output roles, fail-safe trust classification, and graph dominance/post-dominance; recommendation never auto-inserts topology.",
-    "Landscape epoch 23 has explicit SQLite and PostgreSQL old-populated refusal/recreate behavior, atomic policy evidence, audit-before-telemetry ordering, and release compatibility ownership.",
-    "Plan 15C recursively pins the installed ApplyGuardrail model, validates complete usage, blocks detect-only positives, accepts bounded 1..N intervention outputs, and discards provider text.",
-    "Full CLI catalog schemas remain explicit while web policy-view schemas expose only usable opaque aliases and safe options.",
-    "Plan 12 mechanically checks all 19 pre-closeout tracker steps: 18 application slices plus the verification-baseline task; the live milestone has 20 steps including closeout."
+    "Seven ordered Plan 12 tasks with Task 7 as the endpoint.",
+    "Runnable ECR publication, A then B saved-plan apply, live acceptance, independent teardown, and exact-SHA release flow.",
+    "Coarse six-phase ledger and hosted-CI-free control manifest.",
+    "Retained telemetry completeness before the live phase.",
+    "No Wardline execution for this project.",
+    "No repository-wide CI-policy sweep or duplicate coverage lane in the AWS integration endpoint."
   ],
+  "reviewer_verdicts": {
+    "execution": "APPROVED",
+    "controller_and_cleanup": "APPROVED_AFTER_REPAIRS",
+    "coordinator": "APPROVED"
+  },
   "verification": [
-    "git diff --check passes for tracked changes and the untracked autonomous prompt",
-    "balanced Markdown fences across all five reviewed sources",
-    "all 56 Bash or shell fences pass bash -n",
-    "all current local links resolve, excluding three intentional Plan 10 forward-link examples created during implementation",
-    "all AWS ECS review artifacts parse as JSON",
-    "targeted stale orchestration-term searches found no executable per-slice worktree, branch, rebase, early release integration, or omitted-full-suite instruction in the five reviewed sources",
-    "live Filigree milestone has exactly 20 expected steps, exact direct dependencies, and the documented nine-node critical path",
-    "CI, CodeQL, and judge-gate workflows all accept Plan 12's immutable RC* exact-SHA push ref",
-    "every reviewed source SHA256 matches its refreshed sidecar or aggregate source_sha256 binding"
-  ],
-  "reviewed_files": [
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-00-overview.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-01-deployment-contract.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-02-postgres-schema-support.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-03-doctor-cli.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-04-validate-only-startup.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-05-readiness-endpoint.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-06-s3-source.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-07-s3-sink.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-08-s3-endpoint-gate.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-09-bedrock-provider.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-10-packaging-docker.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-11-landscape-write-gate.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-13-cognito-authorization-origin.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-14-cloudwatch-operator-telemetry.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-15a-text-sink.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-15b-universal-web-plugin-policy.md",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-15c-bedrock-guardrail-shields.md",
-    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md",
-    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-autonomous-codex-prompt.md",
-    "docs/superpowers/specs/2026-07-08-aws-ecs-runtime-readiness-design.md",
-    "docs/superpowers/specs/2026-07-12-universal-web-plugin-policy-design.md"
+    "250 focused tests pass.",
+    "Plan and runbook Bash fences pass bash -n.",
+    "Ruff, format check, strict mypy, JSON parsing, source hashes, and git diff --check pass."
   ],
   "review_history": [
     {
-      "round": 5,
-      "date": "2026-07-12",
-      "verdict": "APPROVED_WITH_WARNINGS",
-      "summary": "Telemetry and Guardrails expansion identified the need for AWS operational telemetry and explicit AWS-native prompt/content controls."
-    },
-    {
-      "round": "6-initial",
-      "date": "2026-07-12",
-      "verdict": "CHANGES_REQUESTED",
-      "summary": "The universal-policy pass found text-sink rollback/race defects, under-bound per-alias and private-config policy evidence, incomplete cache/trust/schema controls, response-model guesses, and stale dependency/closeout metadata."
-    },
-    {
-      "round": 6,
-      "date": "2026-07-12",
-      "verdict": "APPROVED_WITH_WARNINGS",
-      "summary": "All blockers were repaired; final independent re-reviews returned GO for Plans 15A, 15B, and 15C."
-    },
-    {
-      "round": 7,
-      "date": "2026-07-12",
-      "verdict": "APPROVED_WITH_WARNINGS",
-      "summary": "All AWS plan/review artifacts moved into the aws folder; path-bearing repository and tracker references were repaired; an orchestration run sheet now pins the live 20-step DAG, integration-before-close protocol, stage barriers, rollback baseline, and Plan 12 handoff."
-    },
-    {
-      "round": 8,
-      "date": "2026-07-12",
-      "verdict": "APPROVED_WITH_WARNINGS",
-      "summary": "The single-worktree autonomous model was independently re-reviewed after repair. The release-ancestry stop condition, stale start-next/merge/rebase wording, full-suite timing, exact-SHA CI path, and review hash bindings now agree across the prompt, run sheet, Plan 00, Plan 10, and Plan 12."
+      "round": 12,
+      "date": "2026-07-15",
+      "verdict": "APPROVED",
+      "summary": "Plan 12 was reduced to delivery-critical work and independently rechecked after the executable AWS lifecycle was restored to the canonical runbook."
     }
   ]
 }

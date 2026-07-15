@@ -341,6 +341,13 @@ def test_parse_rejects_tool_scaffolding_case_insensitively() -> None:
         _parse_step_1_source_tool_arguments(_source_tool_args(assistant_message="<TOOL_CALL>{}</TOOL_CALL>"), plugin_hint="json")
 
 
+def test_step_1_source_dynamic_block_guides_aws_s3_endpoint_url_policy() -> None:
+    prompt = _build_step_1_source_dynamic_block(plugin_hint="csv")
+
+    expected_guidance = ("`aws_s3`", "`endpoint_url`", "CLI/batch-only", "web authors must never set it")
+    assert [text for text in expected_guidance if text not in prompt] == []
+
+
 def test_step_1_revision_prompt_uses_llm_safe_source_context() -> None:
     current_source = SourceResolved(
         plugin="csv",

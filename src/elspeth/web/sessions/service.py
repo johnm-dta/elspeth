@@ -4873,6 +4873,75 @@ class SessionServiceImpl:
 
         return cast(list[RunRecord], await self._run_sync(_sync))
 
+    async def list_pending_landscape_reconciliations(self) -> list[RunRecord]:
+        """Return the durable, exact pending Landscape reconciliation set."""
+        from elspeth.web.sessions.protocol import LANDSCAPE_RECONCILIATION_PENDING_SUFFIX
+
+        def _sync() -> list[RunRecord]:
+            with self._engine.connect() as conn:
+                rows = conn.execute(
+                    select(runs_table)
+                    .where(
+                        runs_table.c.status == "cancelled",
+                        runs_table.c.error.is_not(None),
+                        runs_table.c.error.endswith(LANDSCAPE_RECONCILIATION_PENDING_SUFFIX, autoescape=True),
+                    )
+                    .order_by(runs_table.c.started_at, runs_table.c.id)
+                ).fetchall()
+            return [self._row_to_run_record(row) for row in rows]
+
+        return cast(list[RunRecord], await self._run_sync(_sync))
+
+    async def mark_landscape_reconciliation_outcomes(
+        self,
+        *,
+        complete_run_ids: frozenset[UUID],
+        absent_run_ids: frozenset[UUID],
+    ) -> None:
+        """Atomically close exact pending markers without rewriting reasons."""
+        from elspeth.web.sessions.protocol import (
+            LANDSCAPE_RECONCILIATION_ABSENT_SUFFIX,
+            LANDSCAPE_RECONCILIATION_COMPLETE_SUFFIX,
+            LANDSCAPE_RECONCILIATION_PENDING_SUFFIX,
+        )
+
+        overlap = complete_run_ids & absent_run_ids
+        if overlap:
+            raise ValueError("Landscape reconciliation outcome sets overlap")
+
+        def _sync() -> None:
+            with self._engine.begin() as conn:
+                outcomes = (
+                    (complete_run_ids, LANDSCAPE_RECONCILIATION_COMPLETE_SUFFIX),
+                    (absent_run_ids, LANDSCAPE_RECONCILIATION_ABSENT_SUFFIX),
+                )
+                for run_ids, closed_suffix in outcomes:
+                    for run_id in sorted(run_ids, key=str):
+                        row = conn.execute(
+                            select(runs_table.c.status, runs_table.c.error).where(runs_table.c.id == str(run_id))
+                        ).one_or_none()
+                        if (
+                            row is None
+                            or row.status != "cancelled"
+                            or not isinstance(row.error, str)
+                            or not row.error.endswith(LANDSCAPE_RECONCILIATION_PENDING_SUFFIX)
+                        ):
+                            raise ValueError("Run is not an exact pending Landscape reconciliation candidate")
+                        updated_error = row.error[: -len(LANDSCAPE_RECONCILIATION_PENDING_SUFFIX)] + closed_suffix
+                        result = conn.execute(
+                            update(runs_table)
+                            .where(
+                                runs_table.c.id == str(run_id),
+                                runs_table.c.status == "cancelled",
+                                runs_table.c.error == row.error,
+                            )
+                            .values(error=updated_error)
+                        )
+                        if result.rowcount != 1:
+                            raise RuntimeError("Landscape reconciliation marker update lost its compare-and-swap")
+
+        await self._run_sync(_sync)
+
     async def prune_state_versions(
         self,
         session_id: UUID,

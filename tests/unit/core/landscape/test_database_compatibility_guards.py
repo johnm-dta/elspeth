@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +14,7 @@ from sqlalchemy.schema import CreateIndex
 
 import elspeth.core.landscape.database as database_module
 from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
-from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata, token_work_items_table
+from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata, runs_table, token_work_items_table
 
 
 def _make_instance(url: str) -> LandscapeDB:
@@ -77,7 +78,7 @@ class _CreateEngineFake:
         assert self.calls == [(args, kwargs)]
 
 
-class TestSyncSchemaEpochDirectionalGuard:
+class TestSyncSchemaEpochFutureGuard:
     """Coverage for _sync_sqlite_schema_epoch directional guard."""
 
     def test_sync_rejects_future_epoch(self, tmp_path: Path) -> None:
@@ -104,6 +105,103 @@ class TestSyncSchemaEpochDirectionalGuard:
             epoch = conn.exec_driver_sql("PRAGMA user_version").scalar_one()
         assert epoch == SQLITE_SCHEMA_EPOCH + 1
         instance.close()
+
+
+class TestExplicitEngineKwargs:
+    """Both Landscape construction paths must preserve explicit pool sizing."""
+
+    def test_raw_constructor_forwards_engine_kwargs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _CreateEngineFake()
+        monkeypatch.setattr(database_module, "create_engine", fake)
+        monkeypatch.setattr(LandscapeDB, "_validate_schema", lambda self: None)
+        monkeypatch.setattr(LandscapeDB, "_create_tables", lambda self: None)
+        monkeypatch.setattr(LandscapeDB, "_create_additive_indexes", lambda self: None)
+        monkeypatch.setattr(LandscapeDB, "_sync_sqlite_schema_epoch", lambda self: None)
+
+        LandscapeDB(
+            "postgresql+psycopg://db.example/audit",
+            pool_size=3,
+            max_overflow=2,
+            pool_pre_ping=True,
+        )
+
+        fake.assert_called_once_with(
+            "postgresql+psycopg://db.example/audit",
+            echo=False,
+            pool_size=3,
+            max_overflow=2,
+            pool_pre_ping=True,
+        )
+
+    def test_from_url_forwards_engine_kwargs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _CreateEngineFake()
+        monkeypatch.setattr(database_module, "create_engine", fake)
+        monkeypatch.setattr(LandscapeDB, "_validate_schema", lambda self: None)
+
+        LandscapeDB.from_url(
+            "postgresql+psycopg://db.example/audit",
+            create_tables=False,
+            pool_size=3,
+            max_overflow=2,
+            pool_pre_ping=True,
+        )
+
+        fake.assert_called_once_with(
+            "postgresql+psycopg://db.example/audit",
+            echo=False,
+            pool_size=3,
+            max_overflow=2,
+            pool_pre_ping=True,
+        )
+
+    def test_sqlcipher_rejects_engine_kwargs(self) -> None:
+        with pytest.raises(ValueError, match="engine kwargs"):
+            LandscapeDB("sqlite:///audit.db", passphrase="fake", pool_size=3)
+
+
+class TestSyncSchemaEpochDirectionalGuard:
+    def test_populated_epoch_22_is_refused_before_create_all_and_left_unchanged(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db_path = tmp_path / "epoch_22_populated.db"
+        url = f"sqlite:///{db_path}"
+        engine = create_engine(url)
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DROP TABLE run_web_plugin_policy")
+            conn.execute(
+                runs_table.insert().values(
+                    run_id="legacy-run",
+                    started_at=datetime(2026, 7, 14, tzinfo=UTC),
+                    config_hash="a" * 64,
+                    settings_json="{}",
+                    canonical_version="v1",
+                    status="completed",
+                    seeded_from_cache=False,
+                    openrouter_catalog_sha256="b" * 64,
+                    openrouter_catalog_source="bundled",
+                )
+            )
+            conn.exec_driver_sql("PRAGMA user_version = 22")
+        engine.dispose()
+
+        def unexpected_create_all(*_args: object, **_kwargs: object) -> None:
+            pytest.fail("metadata.create_all must not mutate a populated epoch-22 database")
+
+        monkeypatch.setattr(metadata, "create_all", unexpected_create_all)
+        with pytest.raises(SchemaCompatibilityError, match=r"epoch|outdated"):
+            LandscapeDB(url)
+
+        check = create_engine(url)
+        try:
+            assert "run_web_plugin_policy" not in inspect(check).get_table_names()
+            with check.connect() as conn:
+                assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 22
+                assert conn.execute(text("SELECT count(*) FROM runs")).scalar_one() == 1
+        finally:
+            check.dispose()
 
     def test_sync_upgrades_epoch_zero(self, tmp_path: Path) -> None:
         """_sync_sqlite_schema_epoch upgrades unstamped databases (epoch 0)."""
@@ -866,7 +964,7 @@ class TestSchemaCompatibilityGuards:
         import sqlalchemy
 
         instance = _make_instance(f"sqlite:///{tmp_path / 'safe_descriptor_shape.db'}")
-        instance.connection_string = "postgresql://user:rawsecret@db.internal/audit?password=querysecret&sslmode=require"
+        instance.connection_string = "postgresql://user:rawsecret@db.internal/audit?password=querysecret&sslmode=require"  # secret-scan: allow-this-line -- fake redaction-test sentinels
 
         inspector = _InspectorFake(
             table_names=["runs"],
@@ -1394,7 +1492,7 @@ class TestJournalPathGuards:
         assert "auth_events" in tables
         assert epoch == SQLITE_SCHEMA_EPOCH
 
-    def test_from_url_create_tables_false_allows_missing_auth_events_without_mutation(self, tmp_path: Path) -> None:
+    def test_from_url_create_tables_false_rejects_missing_auth_events_without_mutation(self, tmp_path: Path) -> None:
         """Read-only opens tolerate the additive auth-events table absence."""
         db_path = tmp_path / "readonly_missing_auth_events_table.db"
         engine = create_engine(f"sqlite:///{db_path}")
@@ -1404,8 +1502,8 @@ class TestJournalPathGuards:
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
         engine.dispose()
 
-        db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
-        db.close()
+        with pytest.raises(SchemaCompatibilityError):
+            LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
 
         engine = create_engine(f"sqlite:///{db_path}")
         tables = set(inspect(engine).get_table_names())
@@ -1438,7 +1536,7 @@ class TestJournalPathGuards:
         assert "run_attributions" in tables
         assert epoch == SQLITE_SCHEMA_EPOCH
 
-    def test_from_url_create_tables_false_allows_missing_run_attributions_without_mutation(self, tmp_path: Path) -> None:
+    def test_from_url_create_tables_false_rejects_missing_run_attributions_without_mutation(self, tmp_path: Path) -> None:
         """Read-only opens tolerate the additive run-attributions table absence."""
         db_path = tmp_path / "readonly_missing_run_attributions_table.db"
         engine = create_engine(f"sqlite:///{db_path}")
@@ -1448,8 +1546,8 @@ class TestJournalPathGuards:
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
         engine.dispose()
 
-        db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
-        db.close()
+        with pytest.raises(SchemaCompatibilityError):
+            LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
 
         engine = create_engine(f"sqlite:///{db_path}")
         tables = set(inspect(engine).get_table_names())

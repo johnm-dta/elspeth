@@ -1431,7 +1431,7 @@ class TestValueErrorMappedTo400:
         assert resp.status_code == 400, resp.json()
         detail = resp.json()["detail"]
         assert "Guided-mode protocol error" in detail
-        assert "nonexistent_source_plugin_xyz" in detail
+        assert "plugin_not_enabled" in detail
 
     def test_site_c_unknown_sink_plugin_returns_400(
         self,
@@ -1467,7 +1467,7 @@ class TestValueErrorMappedTo400:
         assert resp.status_code == 400, resp.json()
         detail = resp.json()["detail"]
         assert "Guided-mode protocol error" in detail
-        assert "nonexistent_sink_plugin_xyz" in detail
+        assert "plugin_not_enabled" in detail
 
 
 # ---------------------------------------------------------------------------

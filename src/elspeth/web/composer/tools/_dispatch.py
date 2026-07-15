@@ -27,13 +27,12 @@ from sqlalchemy import Engine
 
 from elspeth.contracts.freeze import deep_freeze, deep_thaw
 from elspeth.contracts.secrets import WebSecretResolver
-from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.state import (
     CompositionState,
     ValidationSummary,
 )
-from elspeth.web.composer.tools._availability import schema_secret_unavailable_message
 from elspeth.web.composer.tools._common import (
     RuntimePreflight,
     ToolContext,
@@ -62,6 +61,7 @@ from elspeth.web.composer.tools.sessions import (
     _SESSION_AWARE_TOOL_HANDLERS,
     ADVISOR_TRIGGER_VALUES,
 )
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 __all__ = [
     "_inject_prior_validation",
@@ -465,7 +465,7 @@ def _requires_secret_context(tool_name: str) -> bool:
 def _augment_with_plugin_schemas(
     result: ToolResult,
     tool_name: str,
-    catalog: CatalogService,
+    catalog: PolicyCatalogView,
     context: ToolContext,
 ) -> ToolResult:
     """Attach inline ``plugin_schemas`` to a failed option-shape rejection.
@@ -493,7 +493,7 @@ def _augment_with_plugin_schemas(
     schemas = build_plugin_schemas_for_failure(
         result,
         catalog,
-        schema_unavailable_message=lambda schema: schema_secret_unavailable_message(schema, context),
+        schema_unavailable_message=lambda _schema: None,
     )
     if schemas is None:
         return result
@@ -504,7 +504,9 @@ def execute_tool(
     tool_name: str,
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
+    catalog: PolicyCatalogView,
+    *,
+    plugin_snapshot: PluginAvailabilitySnapshot,
     data_dir: str | None = None,
     session_engine: Engine | None = None,
     session_id: str | None = None,
@@ -585,6 +587,9 @@ def execute_tool(
             routing. Direct callers keep the historical failed-``ToolResult``
             contract by leaving this false.
     """
+    if catalog.snapshot is not plugin_snapshot:
+        raise ValueError("plugin_snapshot_catalog_mismatch")
+
     all_handlers: dict[str, ToolHandler] = {
         **_DISCOVERY_TOOLS,
         **_MUTATION_TOOLS,
@@ -617,6 +622,7 @@ def execute_tool(
     # the field is unused.
     context = ToolContext(
         catalog=catalog,
+        plugin_snapshot=plugin_snapshot,
         data_dir=data_dir,
         require_data_dir_for_paths=tool_arguments_hash is not None,
         session_engine=session_engine,

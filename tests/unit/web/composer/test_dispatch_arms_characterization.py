@@ -380,7 +380,7 @@ async def test_arm_advisor_budget_exhausted_records_success_with_budget_exhauste
     """
     settings = _make_settings(tmp_path, composer_advisor_max_calls_per_compose=0)
     sessions_svc = build_test_sessions_service(data_dir=tmp_path)
-    svc = ComposerServiceImpl(catalog=_mock_catalog(), settings=settings, sessions_service=sessions_svc)
+    svc = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=settings, sessions_service=sessions_svc)
 
     # Insert a session so _run_one_turn_for_test has a valid session_id to work
     # with (mirrors the result_session_id fixture body in conftest.py).
@@ -467,7 +467,7 @@ async def test_arm_advisor_arg_error_records_arg_error_with_type_error_class(
     """
     settings = _make_settings(tmp_path)
     sessions_svc = build_test_sessions_service(data_dir=tmp_path)
-    svc = ComposerServiceImpl(catalog=_mock_catalog(), settings=settings, sessions_service=sessions_svc)
+    svc = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=settings, sessions_service=sessions_svc)
 
     session_id = str(uuid4())
     now = datetime.now(UTC)

@@ -25,8 +25,11 @@ from elspeth.web.composer.service import AdvisorCheckpointVerdict
 from elspeth.web.sessions.routes._helpers import _dispatch_guided_respond
 from elspeth.web.sessions.routes.composer.guided import _turn_payload_response
 from tests.unit.web.sessions.routes._wire_fixtures import (
+    make_trained_plugin_policy_context,
     make_wire_ready_session_and_state,
 )
+
+_POLICY_CATALOG, _PLUGIN_SNAPSHOT = make_trained_plugin_policy_context()
 
 # TUTORIAL_PROFILE carries advisor_checkpoints=False (the explicit demo bypass);
 # clone it advisor-ON so the END sign-off runs and re-emits a budgeted REVISE.
@@ -68,7 +71,8 @@ async def _dispatch(session, state, svc, *, turn_response, max_passes=3):
         current_step=GuidedStep.STEP_4_WIRE,
         current_turn_type=TurnType.CONFIRM_WIRING,
         turn_response=turn_response,
-        catalog=MagicMock(spec_set=[]),
+        catalog=_POLICY_CATALOG,
+        plugin_snapshot=_PLUGIN_SNAPSHOT,
         recorder=BufferingRecorder(),
         user_id="u1",
         data_dir=None,

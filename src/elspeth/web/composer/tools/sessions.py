@@ -24,6 +24,8 @@ from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.recipes import (
     RecipeValidationError,
     apply_recipe,
+    get_recipe,
+    unavailable_recipe_plugin,
 )
 from elspeth.web.composer.redaction import (
     ApplyPipelineRecipeArgumentsModel,
@@ -59,9 +61,10 @@ from elspeth.web.composer.tools._common import (
     _missing_output_options_repair_error,
     _mutation_result,
     _options_with_default_llm_reviews,
+    _plugin_policy_failure,
     _prevalidate_sink,
     _prevalidate_source,
-    _prevalidate_transform,
+    _prevalidate_transform_for_context,
     _resolver_owned_interpretation_requirement_error,
     _runtime_owned_llm_option_error,
     _semantic_contracts_payload,
@@ -111,6 +114,7 @@ from elspeth.web.interpretation_state import (
     vague_term_wiring_count,
     validate_pipeline_decision_node_semantics,
 )
+from elspeth.web.provider_config_policy import web_aws_s3_endpoint_url_policy_error
 from elspeth.web.validation import (
     _reject_credential_shaped_content,
     _validate_accepted_value_content,
@@ -280,10 +284,13 @@ def _execute_set_pipeline(
                     "Bind blob-backed sources with set_source_from_blob, or use source for a single blob-backed pipeline.",
                 )
             src_plugin = source_model.plugin
-            plugin_error = _validate_plugin_name(catalog, "source", src_plugin)
-            if plugin_error is not None:
-                return _failure_result(state, f"Source '{source_name}': {plugin_error}")
             src_options = dict(source_model.options)
+            endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(src_plugin, src_options)
+            if endpoint_policy_error is not None:
+                return _failure_result(state, endpoint_policy_error)
+            plugin_error = _validate_plugin_name(context, "source", src_plugin)
+            if plugin_error is not None:
+                return _plugin_policy_failure(state, plugin_error, component=f"Source '{source_name}'")
             manual_blob_ref_error = _reject_manual_source_blob_ref(src_options, tool_name="set_pipeline")
             if manual_blob_ref_error is not None:
                 return _failure_result(state, f"Source '{source_name}': {manual_blob_ref_error}")
@@ -321,16 +328,19 @@ def _execute_set_pipeline(
         if legacy_source_model is None:
             raise AssertionError("validated.source unexpectedly None after source/sources gate")
         src_plugin = legacy_source_model.plugin
-        plugin_error = _validate_plugin_name(catalog, "source", src_plugin)
+        legacy_src_options: Mapping[str, Any] = dict(legacy_source_model.options)
+        endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(src_plugin, legacy_src_options)
+        if endpoint_policy_error is not None:
+            return _failure_result(state, endpoint_policy_error)
+        plugin_error = _validate_plugin_name(context, "source", src_plugin)
         if plugin_error is not None:
-            return _failure_result(state, plugin_error)
+            return _plugin_policy_failure(state, plugin_error)
 
         # Inline user-provided source data can be materialised as a blob inside
         # this same atomic pipeline mutation. The generated path/blob_ref are
         # authoritative exactly as if create_blob + set_source_from_blob had been
         # called, but the LLM gets one audited tool decision instead of a serial
         # blob-then-source-then-pipeline conversation.
-        legacy_src_options: Mapping[str, Any] = dict(legacy_source_model.options)
         manual_blob_ref_error = _reject_manual_source_blob_ref(
             legacy_src_options,
             tool_name="set_pipeline",
@@ -437,6 +447,10 @@ def _execute_set_pipeline(
             }
             legacy_src_options = _options_with_inline_blob_source_review(legacy_src_options, prepared_inline_blob)
 
+        endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(src_plugin, legacy_src_options)
+        if endpoint_policy_error is not None:
+            return _failure_result(state, endpoint_policy_error)
+
         path_error = _validate_source_path(legacy_src_options, data_dir)
         if path_error is not None:
             return _failure_result(state, path_error)
@@ -475,9 +489,9 @@ def _execute_set_pipeline(
         if credential_error is not None:
             return credential_error
         if node_type in ("transform", "aggregation") and node_plugin is not None:
-            plugin_error = _validate_plugin_name(catalog, "transform", node_plugin)
+            plugin_error = _validate_plugin_name(context, "transform", node_plugin)
             if plugin_error is not None:
-                return _failure_result(state, f"Node '{node_id}': {plugin_error}")
+                return _plugin_policy_failure(state, plugin_error, component=f"Node '{node_id}'")
             batch_placement_error = _batch_aware_placement_error(node_id, node_type, node_plugin, node.output_mode)
             if batch_placement_error is not None:
                 return _failure_result(state, f"Node '{node_id}': {batch_placement_error}")
@@ -490,7 +504,7 @@ def _execute_set_pipeline(
                 plugin=node_plugin,
                 options=node_options,
             )
-            node_prevalidation = _prevalidate_transform(node_plugin, review_options)
+            node_prevalidation = _prevalidate_transform_for_context(context, node_plugin, review_options)
             if node_prevalidation is not None:
                 return _failure_result(state, f"Node '{node_id}': {node_prevalidation}")
 
@@ -534,10 +548,13 @@ def _execute_set_pipeline(
     for index, output in enumerate(validated.outputs):
         out_name = output.sink_name
         out_plugin = output.plugin
-        plugin_error = _validate_plugin_name(catalog, "sink", out_plugin)
-        if plugin_error is not None:
-            return _failure_result(state, f"Output '{out_name}': {plugin_error}")
         out_options = output.options
+        endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(out_plugin, out_options)
+        if endpoint_policy_error is not None:
+            return _failure_result(state, endpoint_policy_error)
+        plugin_error = _validate_plugin_name(context, "sink", out_plugin)
+        if plugin_error is not None:
+            return _plugin_policy_failure(state, plugin_error, component=f"Output '{out_name}'")
         raw_out_args: Mapping[str, Any] = {}
         if isinstance(raw_outputs, list) and 0 <= index < len(raw_outputs):
             raw_entry = raw_outputs[index]
@@ -776,6 +793,21 @@ def _execute_apply_pipeline_recipe(
             state,
             "apply_pipeline_recipe requires a non-empty 'recipe_name' string. Call list_recipes to discover available recipes.",
         )
+
+    recipe = get_recipe(recipe_name)
+    if recipe is not None:
+        try:
+            unavailable = unavailable_recipe_plugin(recipe, context.plugin_snapshot, raw_slots=raw_slots)
+        except RecipeValidationError as exc:
+            return _failure_result(state, str(exc))
+        if unavailable is not None:
+            reason = context.catalog.unavailable_reason(unavailable)
+            error_code = "plugin_not_enabled" if reason is None else reason.value
+            return _failure_result(
+                state,
+                "This recipe is unavailable under the current plugin policy.",
+                error_code=error_code,
+            )
 
     try:
         pipeline_args = apply_recipe(recipe_name, dict(raw_slots))

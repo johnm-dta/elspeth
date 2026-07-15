@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable
 
 from elspeth.contracts.trust_boundary import trust_boundary
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.tools import is_approval_required_blob_store_only_mutation_tool
 
 from .._helpers import (
@@ -222,13 +223,20 @@ async def accept_composition_proposal(
             user_message_content=user_message_content,
         )
         cancellation_deferred = False
+        plugin_snapshot = request.app.state.plugin_snapshot_factory(user)
+        policy_catalog = PolicyCatalogView(
+            request.app.state.catalog_service,
+            plugin_snapshot,
+            request.app.state.operator_profile_registry,
+        )
         result, was_cancelled = await _await_with_deferred_cancellation(
             run_sync_in_worker(
                 execute_tool,
                 proposal.tool_name,
                 arguments,
                 current_state,
-                request.app.state.catalog_service,
+                policy_catalog,
+                plugin_snapshot=plugin_snapshot,
                 data_dir=str(request.app.state.settings.data_dir),
                 session_engine=request.app.state.session_engine,
                 session_id=str(session.id),
@@ -346,6 +354,8 @@ async def accept_composition_proposal(
                             secret_service=request.app.state.scoped_secret_resolver,
                             user_id=str(user.user_id),
                             session_id=session.id,
+                            plugin_snapshot=plugin_snapshot,
+                            profile_registry=request.app.state.operator_profile_registry,
                             runtime_preflight=result.runtime_preflight,
                             preflight_exception_policy="raise",
                             initial_version=current_state.version,
@@ -395,6 +405,8 @@ async def accept_composition_proposal(
                 secret_service=request.app.state.scoped_secret_resolver,
                 user_id=str(user.user_id),
                 session_id=session.id,
+                plugin_snapshot=plugin_snapshot,
+                profile_registry=request.app.state.operator_profile_registry,
                 runtime_preflight=result.runtime_preflight,
                 preflight_exception_policy="raise",
                 initial_version=current_state.version,

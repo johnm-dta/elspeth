@@ -10,31 +10,29 @@
 **Complete and integrate the 0.7.1 AWS ECS runtime-readiness programme, then
 run the owned release closeout against one unchanged candidate.**
 
-The release branch contains the post-0.7.0 Composer work described in the root
-changelog. The separate AWS programme branch carries additional PostgreSQL,
-S3, Bedrock, Cognito, telemetry, packaging, and deployment work. Those branches
-have diverged; the AWS programme is not part of the release branch until its
-coordinator completes the planned final fast-forward.
+The programme branch now contains the reviewed `release/0.7.1` tip plus the
+completed PostgreSQL, S3, Bedrock, Cognito, telemetry, packaging, and deployment
+slices. The release branch itself does not contain that programme until the
+coordinator completes Plan 12 and performs the planned final fast-forward.
 
 ## Current Release State
 
 - The root package metadata and lockfile identify 0.7.1.
 - Current release labels, container examples, website footers, and release
   documentation indexes identify the 0.7.1 line.
-- `CHANGELOG.md` records only changes present on `release/0.7.1`; it does not
-  claim the unmerged AWS programme as shipped.
-- `SESSION_SCHEMA_EPOCH` is 27. `SQLITE_SCHEMA_EPOCH` remains 22, so an upgrade
-  from 0.7.0 requires a session-database recreation but not another Landscape
-  reset.
+- `CHANGELOG.md` contains the release branch's Composer notes and the integrated
+  schema-cutover correction; Plan 12 still owns the final AWS programme entry.
+- `SESSION_SCHEMA_EPOCH` is 27 and `SQLITE_SCHEMA_EPOCH` is 23, so the integrated
+  candidate requires the documented two-database cutover from 0.7.0.
 - No 0.7.1 tag or final release candidate has been cut.
 
 ## In Flight
 
-- **Plan 15B — universal web plugin policy** (`elspeth-0674a06468`) is the
-  current P1 step on the programme critical path.
-- **Plan 15C — Bedrock prompt and content Guardrail shields** follows Plan 15B.
-- PostgreSQL doctor proof, packaging and deployment documentation, and final
-  integration closeout remain downstream work.
+- **Plan 12 — final integration closeout** (`elspeth-05396fed38`) is the sole
+  remaining milestone step.
+- All 19 prerequisite steps, including universal web plugin policy, Bedrock
+  Guardrail shields, PostgreSQL doctor proof, and packaging/deployment, are
+  closed with program-branch commit anchors.
 - `feat/aws-ecs-program` must remain the evidence-bound integration surface
   until its final gates complete; do not describe that work as released from
   the current `release/0.7.1` checkout.
@@ -53,8 +51,7 @@ coordinator completes the planned final fast-forward.
 
 ## Next Session, Start Here
 
-1. Read the live Filigree milestone and resume the current critical-path owner.
-2. Keep release-branch documentation claims separate from unmerged programme
-   claims.
-3. After programme integration, refresh the 0.7.1 changelog against the final
-   release SHA and rerun every release gate.
+1. Resume Plan 12 on the reconciled programme branch and freeze one candidate.
+2. Keep release-branch publication claims separate until final acceptance.
+3. Refresh the 0.7.1 changelog against the accepted candidate before the final
+   release fast-forward.

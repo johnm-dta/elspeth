@@ -28,11 +28,8 @@ def test_hidden_field_submission_returns_400(
             "edited_values": {
                 "plugin": "llm",
                 "options": {
-                    "provider": "azure",
-                    "schema_config": {"mode": "observed"},
-                    "deployment_name": "gpt-4",
-                    "endpoint": "https://example.openai.azure.com/",
-                    "api_key": "test-key",
+                    "profile": "task-role",
+                    "schema": {"mode": "observed"},
                     "prompt_template": "Summarize {{ row.text }}",
                     "base_url": "https://openrouter.ai/api/v1",
                 },

@@ -20,7 +20,9 @@ from elspeth.web.composer.service import (
     AdvisorCheckpointVerdict,
 )
 from elspeth.web.sessions.routes._helpers import _dispatch_guided_respond
-from tests.unit.web.sessions.routes._wire_fixtures import make_wire_ready_session_and_state
+from tests.unit.web.sessions.routes._wire_fixtures import make_trained_plugin_policy_context, make_wire_ready_session_and_state
+
+_POLICY_CATALOG, _PLUGIN_SNAPSHOT = make_trained_plugin_policy_context()
 
 
 @dataclass
@@ -121,7 +123,8 @@ async def test_request_advisor_at_wire_runs_whole_pipeline_signoff() -> None:
         current_step=GuidedStep.STEP_4_WIRE,
         current_turn_type=TurnType.CONFIRM_WIRING,
         turn_response=request_advisor_response(),
-        catalog=UnusedCatalogService(),
+        catalog=_POLICY_CATALOG,
+        plugin_snapshot=_PLUGIN_SNAPSHOT,
         recorder=recorder,
         user_id="u1",
         data_dir=None,
@@ -158,7 +161,8 @@ async def test_request_advisor_at_wire_clean_re_emits_never_completes() -> None:
         current_step=GuidedStep.STEP_4_WIRE,
         current_turn_type=TurnType.CONFIRM_WIRING,
         turn_response=request_advisor_response(),
-        catalog=UnusedCatalogService(),
+        catalog=_POLICY_CATALOG,
+        plugin_snapshot=_PLUGIN_SNAPSHOT,
         recorder=recorder,
         user_id="u1",
         data_dir=None,
@@ -192,7 +196,8 @@ async def test_request_advisor_at_wire_missing_service_or_budget_fails_closed() 
         current_step=GuidedStep.STEP_4_WIRE,
         current_turn_type=TurnType.CONFIRM_WIRING,
         turn_response=request_advisor_response(),
-        catalog=UnusedCatalogService(),
+        catalog=_POLICY_CATALOG,
+        plugin_snapshot=_PLUGIN_SNAPSHOT,
         recorder=recorder,
         user_id="u1",
         data_dir=None,
@@ -234,7 +239,8 @@ async def test_request_advisor_at_step3_still_resolves_chain(monkeypatch) -> Non
         current_step=GuidedStep.STEP_3_TRANSFORMS,
         current_turn_type=TurnType.PROPOSE_CHAIN,
         turn_response=request_advisor_response(),
-        catalog=UnusedCatalogService(),
+        catalog=_POLICY_CATALOG,
+        plugin_snapshot=_PLUGIN_SNAPSHOT,
         recorder=BufferingRecorder(),
         user_id="u1",
         data_dir=None,
@@ -270,7 +276,8 @@ async def test_request_advisor_at_wire_fences_free_text_revise_findings() -> Non
         current_step=GuidedStep.STEP_4_WIRE,
         current_turn_type=TurnType.CONFIRM_WIRING,
         turn_response=request_advisor_response(),
-        catalog=UnusedCatalogService(),
+        catalog=_POLICY_CATALOG,
+        plugin_snapshot=_PLUGIN_SNAPSHOT,
         recorder=BufferingRecorder(),
         user_id="u1",
         data_dir=None,
@@ -307,7 +314,8 @@ async def test_request_advisor_at_wire_caps_oversized_revise_findings() -> None:
         current_step=GuidedStep.STEP_4_WIRE,
         current_turn_type=TurnType.CONFIRM_WIRING,
         turn_response=request_advisor_response(),
-        catalog=UnusedCatalogService(),
+        catalog=_POLICY_CATALOG,
+        plugin_snapshot=_PLUGIN_SNAPSHOT,
         recorder=BufferingRecorder(),
         user_id="u1",
         data_dir=None,
@@ -350,7 +358,8 @@ async def test_request_advisor_at_wire_leaves_fixed_unavailable_text_literal() -
         current_step=GuidedStep.STEP_4_WIRE,
         current_turn_type=TurnType.CONFIRM_WIRING,
         turn_response=request_advisor_response(),
-        catalog=UnusedCatalogService(),
+        catalog=_POLICY_CATALOG,
+        plugin_snapshot=_PLUGIN_SNAPSHOT,
         recorder=BufferingRecorder(),
         user_id="u1",
         data_dir=None,

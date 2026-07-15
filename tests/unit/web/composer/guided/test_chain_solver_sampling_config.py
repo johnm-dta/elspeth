@@ -9,12 +9,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.guided import chain_solver
 from elspeth.web.composer.guided.prompts import build_step_3_context_block, load_guided_skill
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved, SourceResolved
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 
 def _source() -> SourceResolved:
@@ -224,6 +226,9 @@ async def test_solve_chain_marks_each_discovery_round(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(chain_solver, "_litellm_acompletion", fake_acompletion)
 
+    full_catalog = _mock_catalog_for_discovery()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(full_catalog)
+    catalog = PolicyCatalogView.for_trained_operator(full_catalog, snapshot)
     await chain_solver.solve_chain(
         model="openrouter/anthropic/claude-sonnet-4-6",
         source=_source(),
@@ -231,7 +236,8 @@ async def test_solve_chain_marks_each_discovery_round(monkeypatch: pytest.Monkey
         temperature=None,
         seed=None,
         state=_empty_state_for_discovery(),
-        catalog=_mock_catalog_for_discovery(),
+        catalog=catalog,
+        plugin_snapshot=snapshot,
         user_id="u1",
         max_discovery_iters=6,
     )

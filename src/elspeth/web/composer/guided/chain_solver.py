@@ -11,7 +11,7 @@ from typing import Any, Final
 
 from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
 from elspeth.contracts.secrets import WebSecretResolver
-from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided._discovery import _assistant_tool_calls_message, _execute_discovery_call
 
@@ -38,6 +38,7 @@ from elspeth.web.composer.llm_response_parsing import (
 from elspeth.web.composer.service import _litellm_acompletion
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.composer.tools._dispatch import get_discovery_tool_definitions
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 # ``ChainSolverResponseShapeError`` now lives in ``errors.py`` (the guided
 # exception taxonomy) so the discovery loop (``_discovery``, which this module
@@ -192,7 +193,8 @@ async def solve_chain(
     temperature: float | None,
     seed: int | None,
     state: CompositionState | None = None,
-    catalog: CatalogService | None = None,
+    catalog: PolicyCatalogView | None = None,
+    plugin_snapshot: PluginAvailabilitySnapshot | None = None,
     secret_service: WebSecretResolver | None = None,
     user_id: str | None = None,
     max_discovery_iters: int | None = None,
@@ -277,7 +279,7 @@ async def solve_chain(
     # solver's "act only via a tool" invariant while letting the model choose
     # discovery before it commits) and the solver threads results back until the
     # model emits ``propose_chain``.
-    discovery_enabled = state is not None and catalog is not None
+    discovery_enabled = state is not None and catalog is not None and plugin_snapshot is not None
     discovery_defs = get_discovery_tool_definitions(_STEP_3_TRANSFORM_DISCOVERY_TOOL_NAMES) if discovery_enabled else []
     allowed_discovery = _STEP_3_TRANSFORM_DISCOVERY_TOOL_NAMES if discovery_enabled else frozenset()
     tools = [*_GUIDED_LLM_TOOLS, *discovery_defs]
@@ -371,7 +373,7 @@ async def solve_chain(
 
             # Thread the assistant tool-call request once, then answer every call
             # id with its result, or the next round 400s.
-            assert state is not None and catalog is not None  # implied by discovery_enabled
+            assert state is not None and catalog is not None and plugin_snapshot is not None  # implied by discovery_enabled
             messages.append(_assistant_tool_calls_message(message, tool_calls))
             for tool_call in tool_calls:
                 messages.append(
@@ -379,6 +381,7 @@ async def solve_chain(
                         tool_call=tool_call,
                         state=state,
                         catalog=catalog,
+                        plugin_snapshot=plugin_snapshot,
                         secret_service=secret_service,
                         user_id=user_id,
                         actor=actor,

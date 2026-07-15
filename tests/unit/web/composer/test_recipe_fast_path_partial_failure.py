@@ -51,8 +51,13 @@ def _mock_catalog() -> MagicMock:
     catalog.list_sources.return_value = [
         PluginSummary(name="csv", description="CSV", plugin_type="source", config_fields=[]),
     ]
-    catalog.list_transforms.return_value = []
-    catalog.list_sinks.return_value = []
+    catalog.list_transforms.return_value = [
+        PluginSummary(name="passthrough", description="Passthrough", plugin_type="transform", config_fields=[]),
+        PluginSummary(name="truncate", description="Truncate", plugin_type="transform", config_fields=[]),
+    ]
+    catalog.list_sinks.return_value = [
+        PluginSummary(name="json", description="JSON", plugin_type="sink", config_fields=[]),
+    ]
     catalog.get_schema.return_value = PluginSchemaInfo(
         name="csv",
         plugin_type="source",
@@ -77,7 +82,7 @@ def _make_settings() -> WebSettings:
 
 
 def _make_service() -> ComposerServiceImpl:
-    return ComposerServiceImpl(
+    return ComposerServiceImpl.for_trained_operator(
         catalog=_mock_catalog(),
         settings=_make_settings(),
         session_engine=MagicMock(spec=Engine),
@@ -136,6 +141,7 @@ async def _run_fast_path(
         patch(f"{_SERVICE_MODULE}.match_freeform_recipe_intent", return_value=match),
         patch(f"{_SERVICE_MODULE}.execute_tool", execute_tool_mock),
     ):
+        plugin_snapshot, policy_catalog = service._plugin_policy_context("u1")
         result = await service._try_apply_freeform_recipe_intent(
             message="build the fork-coalesce pipeline",
             state=_empty_state(),
@@ -144,6 +150,8 @@ async def _run_fast_path(
             progress=None,
             user_message_id=None,
             recorder=recorder,
+            plugin_snapshot=plugin_snapshot,
+            policy_catalog=policy_catalog,
         )
     return result, recorder
 

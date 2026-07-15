@@ -44,6 +44,19 @@ class _NoopAuthAuditRecorder:
         return None
 
 
+class _AuditWriteFailure(OSError):
+    pass
+
+
+class _RaisingAuthAuditRecorder(_NoopAuthAuditRecorder):
+    def __init__(self) -> None:
+        self.failures: list[dict[str, object]] = []
+
+    def record_auth_failure(self, *args, **kwargs) -> None:
+        self.failures.append(kwargs)
+        raise _AuditWriteFailure("audit persistence unavailable")
+
+
 @dataclass
 class _FakeAuthProvider:
     authenticate_result: UserIdentity = field(default_factory=lambda: UserIdentity(user_id="alice", username="alice"))
@@ -94,6 +107,7 @@ def _create_test_app(provider, auth_provider_type: str = "local", **settings_ove
         **settings_overrides,
     )
     app.state.oidc_authorization_endpoint = None
+    app.state.oidc_token_endpoint = None
     app.state.auth_audit_recorder = _NoopAuthAuditRecorder()
     # Auth rate limiter — generous limit for tests that aren't testing rate limiting
     app.state.auth_rate_limiter = ComposerRateLimiter(limit=100)
@@ -931,6 +945,8 @@ class TestAuthConfigEndpoint:
             oidc_audience="test-audience",
             oidc_client_id="my-client-id",
         )
+        app.state.oidc_authorization_endpoint = "https://login.example.com/oauth2/authorize"
+        app.state.oidc_token_endpoint = "https://login.example.com/oauth2/token"
 
         async with _client_for(app) as client:
             response = await client.get("/api/auth/config")
@@ -939,6 +955,18 @@ class TestAuthConfigEndpoint:
         assert body["provider"] == "oidc"
         assert body["oidc_issuer"] == "https://login.example.com"
         assert body["oidc_client_id"] == "my-client-id"
+        assert body["authorization_endpoint"] == "https://login.example.com/oauth2/authorize"
+        assert body["token_endpoint"] == "https://login.example.com/oauth2/token"
+        assert set(body) == {
+            "provider",
+            "registration_mode",
+            "oidc_issuer",
+            "oidc_client_id",
+            "authorization_endpoint",
+            "token_endpoint",
+        }
+        assert "oidc_authorization_allowed_origins" not in body
+        assert "oidc_audience_claim" not in body
 
     async def test_config_endpoint_is_unauthenticated(self) -> None:
         """GET /api/auth/config must not require a Bearer token."""
@@ -949,6 +977,17 @@ class TestAuthConfigEndpoint:
         async with _client_for(app) as client:
             response = await client.get("/api/auth/config")
         assert response.status_code == 200
+
+    async def test_config_endpoint_is_not_cacheable(self) -> None:
+        provider = _FakeAuthProvider()
+        app = _create_test_app(provider, auth_provider_type="oidc", **_OIDC_FIELDS)
+
+        async with _client_for(app) as client:
+            response = await client.get("/api/auth/config")
+
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["Pragma"] == "no-cache"
 
 
 @pytest.mark.asyncio
@@ -1076,6 +1115,23 @@ class TestMeErrorPath:
             )
         assert response.status_code == 401
         assert response.json()["detail"] == "Profile lookup failed"
+
+    async def test_me_profile_failure_propagates_audit_write_failure(self) -> None:
+        provider = _FakeAuthProvider(profile_error=AuthenticationError("Profile lookup failed"))
+        app = _create_test_app(provider, auth_provider_type="oidc", **_OIDC_FIELDS)
+        recorder = _RaisingAuthAuditRecorder()
+        app.state.auth_audit_recorder = recorder
+
+        async with _client_for(app) as client:
+            with pytest.raises(_AuditWriteFailure):
+                await client.get(
+                    "/api/auth/me",
+                    headers={"Authorization": "Bearer valid-token"},
+                )
+
+        assert len(recorder.failures) == 1
+        assert recorder.failures[0]["provider"] == "oidc"
+        assert recorder.failures[0]["failure_stage"] == "profile_lookup"
 
     async def test_me_get_user_info_failure_records_profile_lookup_classification_without_detail(self, tmp_path) -> None:
         audit_url = f"sqlite:///{tmp_path / 'audit.db'}"

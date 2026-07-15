@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     MANIFEST,
@@ -45,6 +46,7 @@ from elspeth.web.composer.tools import (
 )
 from elspeth.web.composer.tools._common import ToolContext
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -63,7 +65,12 @@ def _ctx() -> ToolContext:
 
     from elspeth.web.catalog.protocol import CatalogService
 
-    return ToolContext(catalog=MagicMock(spec=CatalogService))
+    catalog = MagicMock(spec=CatalogService)
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return ToolContext(
+        catalog=PolicyCatalogView.for_trained_operator(catalog, snapshot),
+        plugin_snapshot=snapshot,
+    )
 
 
 def _empty_state() -> CompositionState:

@@ -13,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 from elspeth.web.config import WebSettings
+from elspeth.web.deployment_contract import validate_aws_ecs_settings
 
 
 def test_playwright_local_backend_secret_key_satisfies_non_pytest_guard() -> None:
@@ -37,6 +38,27 @@ class TestWebSettingsValidation:
                 shareable_link_signing_key=b"\x00" * 32,
                 composer_expose_provder_errors=True,  # type: ignore[call-arg]
             )
+
+    def test_bedrock_guardrail_settings_round_trip_without_repr_leak(self) -> None:
+        settings = WebSettings(
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+            bedrock_guardrail_profiles=(
+                {
+                    "alias": "prompt-default",
+                    "plugin": "aws_bedrock_prompt_shield",
+                    "guardrail_identifier": "privateguardrail",
+                    "guardrail_version": "7",
+                    "region": "us-east-1",
+                },
+            ),
+        )
+
+        assert settings.bedrock_guardrail_profiles[0].alias == "prompt-default"
+        assert "privateguardrail" not in repr(settings)
 
     def test_invalid_auth_provider_rejected(self) -> None:
         with pytest.raises(ValueError):
@@ -255,6 +277,260 @@ class TestWebSettingsValidation:
         with pytest.raises(ValidationError):
             WebSettings(
                 payload_store_retention_days=0,
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
+            )
+
+
+class TestDeploymentTarget:
+    def test_defaults_to_default(self) -> None:
+        settings = WebSettings(
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+        )
+
+        assert settings.deployment_target == "default"
+
+    def test_accepts_aws_ecs(self) -> None:
+        settings = WebSettings(
+            deployment_target="aws-ecs",
+            operator_telemetry="aws-otlp",
+            operator_telemetry_environment="production",
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+        )
+
+        assert settings.deployment_target == "aws-ecs"
+
+
+class TestOperatorTelemetrySettings:
+    def test_local_defaults_remain_prometheus_only(self) -> None:
+        settings = WebSettings(
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+        )
+
+        assert settings.operator_telemetry == "prometheus"
+        assert settings.operator_telemetry_service_name == "elspeth-web"
+        assert settings.operator_telemetry_environment is None
+        assert settings.operator_telemetry_release is None
+        assert settings.operator_telemetry_ecs_cluster is None
+        assert settings.operator_telemetry_ecs_service is None
+        assert settings.operator_telemetry_task_definition_family is None
+        assert settings.operator_telemetry_task_definition_revision is None
+        assert settings.operator_telemetry_export_interval_seconds == 60
+        assert settings.operator_pipeline_telemetry_granularity == "lifecycle"
+
+    @pytest.mark.parametrize(
+        ("field", "raw_value"),
+        [
+            ("operator_telemetry_service_name", "arn:aws:ecs:ap-southeast-2:123456789012:service/elspeth-web"),
+            ("operator_telemetry_service_name", "123456789012"),
+            ("operator_telemetry_service_name", "elspeth-123456789012-web"),
+            ("operator_telemetry_environment", "arn:aws:ecs:ap-southeast-2:123456789012:cluster/production"),
+            ("operator_telemetry_environment", "123456789012"),
+            ("operator_telemetry_environment", "prod-123456789012-blue"),
+        ],
+    )
+    def test_aws_mode_rejects_arn_and_account_resource_labels(self, field: str, raw_value: str) -> None:
+        overrides = {
+            "operator_telemetry": "aws-otlp",
+            "operator_telemetry_environment": "production",
+            field: raw_value,
+        }
+        with pytest.raises(ValidationError, match=field) as caught:
+            WebSettings(
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
+                **overrides,  # type: ignore[arg-type]
+            )
+
+        assert raw_value not in str(caught.value)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("operator_telemetry_service_name", "elspeth-web"),
+            ("operator_telemetry_service_name", "orders.api_v2"),
+            pytest.param("operator_telemetry_service_name", "s" * 128, id="service-128-char-boundary"),
+            ("operator_telemetry_environment", "production"),
+            ("operator_telemetry_environment", "prod-blue"),
+            pytest.param("operator_telemetry_environment", "e" * 128, id="environment-128-char-boundary"),
+        ],
+    )
+    def test_aws_mode_accepts_safe_resource_labels(self, field: str, value: str) -> None:
+        overrides = {
+            "operator_telemetry": "aws-otlp",
+            "operator_telemetry_environment": "production",
+            field: value,
+        }
+        settings = WebSettings(
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+            **overrides,  # type: ignore[arg-type]
+        )
+
+        assert getattr(settings, field) == value
+
+    def test_local_mode_preserves_generic_operator_resource_labels(self) -> None:
+        settings = WebSettings(
+            operator_telemetry_service_name="team/service:blue",
+            operator_telemetry_environment="staging/eu:1",
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+        )
+
+        assert settings.operator_telemetry_service_name == "team/service:blue"
+        assert settings.operator_telemetry_environment == "staging/eu:1"
+
+    @pytest.mark.parametrize(
+        ("overrides", "field"),
+        [
+            ({"operator_telemetry": "prometheus", "operator_telemetry_environment": "production"}, "operator_telemetry"),
+            ({"operator_telemetry": "aws-otlp"}, "operator_telemetry_environment"),
+            (
+                {
+                    "operator_telemetry": "aws-otlp",
+                    "operator_telemetry_environment": "production",
+                    "operator_telemetry_export_interval_seconds": 0,
+                },
+                "operator_telemetry_export_interval_seconds",
+            ),
+            (
+                {
+                    "operator_telemetry": "aws-otlp",
+                    "operator_telemetry_environment": "production",
+                    "operator_telemetry_export_interval_seconds": 3601,
+                },
+                "operator_telemetry_export_interval_seconds",
+            ),
+            (
+                {"operator_telemetry": "aws-otlp", "operator_telemetry_environment": "production", "operator_telemetry_service_name": " "},
+                "operator_telemetry_service_name",
+            ),
+            (
+                {"operator_telemetry": "aws-otlp", "operator_telemetry_environment": "production\nsecret"},
+                "operator_telemetry_environment",
+            ),
+            (
+                {"operator_telemetry": "aws-otlp", "operator_telemetry_environment": "p" * 129},
+                "operator_telemetry_environment",
+            ),
+        ],
+    )
+    def test_aws_ecs_rejects_invalid_operator_telemetry(self, overrides: dict[str, object], field: str) -> None:
+        contract_only = field == "operator_telemetry" or (field == "operator_telemetry_environment" and field not in overrides)
+        if contract_only:
+            settings = WebSettings(
+                deployment_target="aws-ecs",
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
+                **overrides,
+            )
+            checks = {check.name: check for check in validate_aws_ecs_settings(settings)}
+            assert checks[field].ok is False
+            return
+        with pytest.raises(ValidationError, match=field) as caught:
+            WebSettings(
+                deployment_target="aws-ecs",
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
+                **overrides,
+            )
+
+        assert "production\nsecret" not in str(caught.value)
+        assert "p" * 129 not in str(caught.value)
+
+    @pytest.mark.parametrize(
+        ("field", "raw_value"),
+        [
+            ("operator_telemetry_release", "arn:aws:ecr:ap-southeast-2:123456789012:repository/elspeth"),
+            ("operator_telemetry_ecs_cluster", "arn:aws:ecs:ap-southeast-2:123456789012:cluster/elspeth-production"),
+            ("operator_telemetry_ecs_service", "elspeth-123456789012-service"),
+            ("operator_telemetry_task_definition_family", "task-definition/elspeth-web"),
+            ("operator_telemetry_task_definition_revision", "123456789012"),
+        ],
+    )
+    def test_aws_deployment_identity_rejects_arns_accounts_and_non_names(self, field: str, raw_value: str) -> None:
+        with pytest.raises(ValidationError, match=field) as caught:
+            WebSettings(
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
+                **{field: raw_value},
+            )
+
+        assert raw_value not in str(caught.value)
+
+    def test_aws_release_accepts_valid_digest_with_numeric_run(self) -> None:
+        digest = "sha256:" + "a" + "123456789012" + ("b" * 51)
+
+        settings = WebSettings(
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+            operator_telemetry_release=digest,
+        )
+
+        assert settings.operator_telemetry_release == digest
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "operator_telemetry_endpoint",
+            "operator_telemetry_headers",
+            "operator_telemetry_credentials",
+            "operator_telemetry_aws_access_key_id",
+        ],
+    )
+    def test_operator_telemetry_has_no_egress_or_credential_settings(self, field: str) -> None:
+        with pytest.raises(ValidationError, match="extra") as caught:
+            WebSettings(
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
+                **{field: "secret-remote-value"},
+            )
+
+        assert "secret-remote-value" not in str(caught.value)
+
+    def test_rejects_unknown_value(self) -> None:
+        with pytest.raises(ValidationError, match="'default' or 'aws-ecs'"):
+            WebSettings(
+                deployment_target="azure-aca",
                 composer_max_composition_turns=15,
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
@@ -599,6 +875,24 @@ class TestPathFieldValidation:
         assert settings.get_payload_store_path() == Path("~/payloads").expanduser().resolve()
         assert settings.get_payload_store_path().is_absolute()
 
+    def test_preexisting_payload_symlink_preserves_configured_lexical_path(self, tmp_path: Path) -> None:
+        target = tmp_path / "payload-target"
+        target.mkdir()
+        configured_path = tmp_path / "payload-link"
+        configured_path.symlink_to(target, target_is_directory=True)
+
+        settings = WebSettings(
+            payload_store_path=configured_path,
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+        )
+
+        assert settings.payload_store_path == configured_path.absolute()
+        assert settings.payload_store_path != target.resolve()
+
     def test_relative_data_dir_resolved_at_validation_immune_to_chdir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """The download/preview path-allowlist check used to silently
         depend on the running process CWD: a relative data_dir was
@@ -757,11 +1051,13 @@ class TestOIDCIssuerValidation:
             oidc_audience="my-audience",
             oidc_client_id="my-client-id",
             oidc_authorization_endpoint="https://issuer.example.com/oauth2/authorize",
+            oidc_token_endpoint="https://issuer.example.com/oauth2/token",
             **self._COMPOSER_DEFAULTS,
         )
 
         assert settings.oidc_issuer == "https://issuer.example.com/tenant/v2.0"
         assert settings.oidc_authorization_endpoint == "https://issuer.example.com/oauth2/authorize"
+        assert settings.oidc_token_endpoint == "https://issuer.example.com/oauth2/token"
 
 
 class TestOIDCBlankStringRejection:
@@ -847,35 +1143,150 @@ class TestOIDCBlankStringRejection:
             )
 
     def test_oidc_http_authorization_endpoint_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="must be an HTTPS URL"):
+        with pytest.raises(ValidationError, match="HTTPS"):
             WebSettings(
                 auth_provider="oidc",
                 oidc_issuer="https://issuer.example.com",
                 oidc_audience="my-audience",
                 oidc_client_id="my-client-id",
                 oidc_authorization_endpoint="http://issuer.example.com/oauth2/authorize",
+                oidc_token_endpoint="https://issuer.example.com/oauth2/token",
                 **self._COMPOSER_DEFAULTS,
             )
 
     def test_oidc_cross_origin_authorization_endpoint_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="same origin as issuer"):
+        with pytest.raises(ValidationError, match="not allowed"):
             WebSettings(
                 auth_provider="oidc",
                 oidc_issuer="https://issuer.example.com",
                 oidc_audience="my-audience",
                 oidc_client_id="my-client-id",
                 oidc_authorization_endpoint="https://evil.example.com/oauth2/authorize",
+                oidc_token_endpoint="https://evil.example.com/oauth2/token",
                 **self._COMPOSER_DEFAULTS,
             )
 
     def test_entra_cross_origin_authorization_endpoint_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="same origin as issuer"):
+        with pytest.raises(ValidationError, match="not allowed"):
             WebSettings(
                 auth_provider="entra",
                 oidc_audience="my-audience",
                 oidc_client_id="my-client-id",
                 entra_tenant_id="test-tenant-id",
                 oidc_authorization_endpoint="https://evil.example.com/oauth2/authorize",
+                oidc_token_endpoint="https://evil.example.com/oauth2/token",
+                **self._COMPOSER_DEFAULTS,
+            )
+
+    def test_oidc_browser_fields_have_closed_defaults(self) -> None:
+        settings = WebSettings(**self._COMPOSER_DEFAULTS)
+        assert settings.oidc_authorization_allowed_origins == ()
+        assert settings.oidc_token_endpoint is None
+        assert settings.oidc_audience_claim == "aud"
+
+    def test_client_id_audience_claim_is_oidc_only(self) -> None:
+        settings = WebSettings(
+            auth_provider="oidc",
+            oidc_issuer="https://issuer.example.com",
+            oidc_audience="client",
+            oidc_client_id="client",
+            oidc_audience_claim="client_id",
+            **self._COMPOSER_DEFAULTS,
+        )
+        assert settings.oidc_audience_claim == "client_id"
+        for provider, fields in (
+            ("local", {}),
+            (
+                "entra",
+                {
+                    "oidc_audience": "client",
+                    "oidc_client_id": "client",
+                    "entra_tenant_id": "tenant",
+                },
+            ),
+        ):
+            with pytest.raises(ValidationError, match="audience claim"):
+                WebSettings(
+                    auth_provider=provider,  # type: ignore[arg-type]
+                    oidc_audience_claim="client_id",
+                    **fields,
+                    **self._COMPOSER_DEFAULTS,
+                )
+
+    def test_invalid_audience_claim_mode_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match=r"aud|client_id"):
+            WebSettings(
+                oidc_audience_claim="fallback",  # type: ignore[arg-type]
+                **self._COMPOSER_DEFAULTS,
+            )
+
+    @pytest.mark.parametrize(
+        ("authorization_endpoint", "token_endpoint"),
+        [
+            ("https://issuer.example.com/oauth2/authorize", None),
+            (None, "https://issuer.example.com/oauth2/token"),
+        ],
+    )
+    def test_oidc_explicit_browser_endpoints_are_both_or_neither(
+        self,
+        authorization_endpoint: str | None,
+        token_endpoint: str | None,
+    ) -> None:
+        with pytest.raises(ValidationError, match="both or neither"):
+            WebSettings(
+                auth_provider="oidc",
+                oidc_issuer="https://issuer.example.com/pool",
+                oidc_audience="my-audience",
+                oidc_client_id="my-client-id",
+                oidc_authorization_endpoint=authorization_endpoint,
+                oidc_token_endpoint=token_endpoint,
+                **self._COMPOSER_DEFAULTS,
+            )
+
+    def test_cognito_cross_origin_pair_requires_exact_allowlist(self) -> None:
+        values = {
+            "auth_provider": "oidc",
+            "oidc_issuer": "https://cognito-idp.ap-southeast-2.amazonaws.com/pool-id",
+            "oidc_audience": "client-id",
+            "oidc_client_id": "client-id",
+            "oidc_authorization_endpoint": "https://example.auth.ap-southeast-2.amazoncognito.com/oauth2/authorize",
+            "oidc_token_endpoint": "https://example.auth.ap-southeast-2.amazoncognito.com/oauth2/token",
+            **self._COMPOSER_DEFAULTS,
+        }
+        with pytest.raises(ValidationError, match="not allowed"):
+            WebSettings(**values)
+        settings = WebSettings(
+            **values,
+            oidc_authorization_allowed_origins=("https://example.auth.ap-southeast-2.amazoncognito.com",),
+        )
+        assert settings.oidc_authorization_endpoint is not None
+        assert settings.oidc_token_endpoint is not None
+
+    @pytest.mark.parametrize("provider", ["local", "entra"])
+    def test_allowlist_is_oidc_only(self, provider: str) -> None:
+        provider_fields: dict[str, object] = {}
+        if provider == "entra":
+            provider_fields = {
+                "oidc_audience": "audience",
+                "oidc_client_id": "client",
+                "entra_tenant_id": "tenant",
+            }
+        with pytest.raises(ValidationError, match="allowlist"):
+            WebSettings(
+                auth_provider=provider,  # type: ignore[arg-type]
+                oidc_authorization_allowed_origins=("https://login.example.com",),
+                **provider_fields,
+                **self._COMPOSER_DEFAULTS,
+            )
+
+    def test_allowlist_is_validated_without_explicit_endpoints(self) -> None:
+        with pytest.raises(ValidationError, match="bare-origin"):
+            WebSettings(
+                auth_provider="oidc",
+                oidc_issuer="https://issuer.example.com",
+                oidc_audience="audience",
+                oidc_client_id="client",
+                oidc_authorization_allowed_origins=("https://host.example.com/not-an-origin",),
                 **self._COMPOSER_DEFAULTS,
             )
 

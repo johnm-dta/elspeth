@@ -36,10 +36,12 @@ from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.web.catalog.schemas import PluginSchemaInfo
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import _prepare_blob_create, execute_tool
+from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     blobs_table,
@@ -66,22 +68,10 @@ def _empty_state() -> CompositionState:
     )
 
 
-class _CatalogFake:
-    def has_plugin(self, _plugin_type: str, _name: str) -> bool:
-        return True
-
-    def get_schema(self, _plugin_type: str, _name: str) -> PluginSchemaInfo:
-        return PluginSchemaInfo(
-            name="csv",
-            plugin_type="source",
-            description="CSV file source",
-            json_schema={"title": "CsvSourceConfig", "properties": {"path": {"type": "string"}}},
-            knob_schema={"fields": []},
-        )
-
-
-def _mock_catalog() -> _CatalogFake:
-    return _CatalogFake()
+def _trained_operator_catalog() -> PolicyCatalogView:
+    full_catalog = create_catalog_service()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(full_catalog)
+    return PolicyCatalogView.for_trained_operator(full_catalog, snapshot)
 
 
 def _session_with_user_message() -> tuple[Any, str, str]:
@@ -167,12 +157,14 @@ def test_verbatim_blob_records_creation_modality_and_message_id(tmp_path: Path) 
     """
     engine, session_id, user_message_id = _session_with_user_message()
     args = _minimal_inline_blob_args("name,score\nada,42\n")
+    catalog = _trained_operator_catalog()
 
     result = execute_tool(
         "set_pipeline",
         args,
         _empty_state(),
-        _mock_catalog(),
+        catalog,
+        plugin_snapshot=catalog.snapshot,
         data_dir=str(tmp_path),
         session_engine=engine,
         session_id=session_id,
@@ -357,13 +349,15 @@ def test_oversize_content_raises_tool_argument_error(tmp_path: Path) -> None:
     engine, session_id, user_message_id = _session_with_user_message()
     oversize_content = "x" * (300 * 1024)  # 300 KiB > 256 KiB cap
     args = _minimal_inline_blob_args(oversize_content)
+    catalog = _trained_operator_catalog()
 
     with pytest.raises(ToolArgumentError):
         execute_tool(
             "set_pipeline",
             args,
             _empty_state(),
-            _mock_catalog(),
+            catalog,
+            plugin_snapshot=catalog.snapshot,
             data_dir=str(tmp_path),
             session_engine=engine,
             session_id=session_id,

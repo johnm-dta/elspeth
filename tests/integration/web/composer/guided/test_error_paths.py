@@ -366,6 +366,8 @@ class TestExitFromCompletedTerminal:
         from uuid import UUID
 
         from elspeth.contracts.freeze import deep_thaw
+        from elspeth.web.auth.models import UserIdentity
+        from elspeth.web.catalog.policy_view import PolicyCatalogView
         from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
         from elspeth.web.composer.guided.state_machine import (
             ChainProposal,
@@ -404,10 +406,13 @@ class TestExitFromCompletedTerminal:
         # kind=COMPLETED); the test asserts that elision explicitly.
         guided = state.guided_session if state.guided_session is not None else GuidedSession.initial()
         catalog = client.app.state.catalog_service
+        plugin_snapshot = client.app.state.plugin_snapshot_factory(UserIdentity(user_id="alice", username="alice"))
+        catalog = PolicyCatalogView(catalog, plugin_snapshot, client.app.state.operator_profile_registry)
         step_1 = handle_step_1_source(
             state=state,
             session=guided,
             catalog=catalog,
+            plugin_snapshot=plugin_snapshot,
             resolved=SourceResolved(
                 plugin="csv",
                 options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
@@ -419,6 +424,7 @@ class TestExitFromCompletedTerminal:
             state=step_1.state,
             session=step_1.session,
             catalog=catalog,
+            plugin_snapshot=plugin_snapshot,
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
@@ -450,6 +456,7 @@ class TestExitFromCompletedTerminal:
             session=step_3_session,
             proposal=proposal,
             catalog=catalog,
+            plugin_snapshot=plugin_snapshot,
         )
         assert step_3.tool_result.success is True
         guided = step_3.session

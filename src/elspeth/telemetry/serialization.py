@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 from datetime import datetime
 from enum import Enum
@@ -95,6 +96,81 @@ def serialize_event_attributes(event: TelemetryEvent) -> dict[str, Any]:
     return result
 
 
+# OTLP is an operator-facing transport.  Keep this allowlist explicit so adding
+# a new audit field (especially a request/response body) cannot silently make it
+# an exported trace attribute.
+_OTLP_ATTRIBUTE_ALLOWLIST = frozenset(
+    {
+        "event_type",
+        "timestamp",
+        "run_id",
+        "row_id",
+        "token_id",
+        "node_id",
+        "state_id",
+        "operation_id",
+        "config_hash",
+        "source_plugin",
+        "plugin_name",
+        "status",
+        "duration_ms",
+        "row_count",
+        "phase",
+        "action",
+        "field_count",
+        "normalization_version",
+        "content_hash",
+        "input_hash",
+        "output_hash",
+        "routing_mode",
+        "destinations",
+        "outcome",
+        "path",
+        "sink_name",
+        "call_type",
+        "latency_ms",
+        "request_hash",
+        "response_hash",
+        "token_usage",
+    }
+)
+_MAX_OTLP_ATTRIBUTE_CHARS = 256
+_AWS_ACCOUNT_ID_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")
+
+
+def _safe_otlp_attribute_value(value: Any) -> bool:
+    """Return whether a serialized value is bounded and non-secret-shaped."""
+    if isinstance(value, str):
+        lowered = value.casefold()
+        return (
+            len(value) <= _MAX_OTLP_ATTRIBUTE_CHARS
+            and all(ch.isprintable() for ch in value)
+            and "://" not in value
+            and not value.startswith(("/", "\\"))
+            and "bearer " not in lowered
+            and "credential" not in lowered
+            and "password" not in lowered
+            and "secret" not in lowered
+            and "arn:aws:" not in lowered
+            and _AWS_ACCOUNT_ID_RE.search(value) is None
+        )
+    if isinstance(value, list):
+        return len(value) <= 32 and all(_safe_otlp_attribute_value(item) for item in value)
+    return isinstance(value, bool | int | float)
+
+
+def serialize_otlp_event_attributes(event: TelemetryEvent) -> dict[str, Any]:
+    """Serialize only bounded, non-content event fields for OTLP traces.
+
+    The generic audit DTO remains complete; this projection is deliberately
+    narrower.  Payloads, provider strings, field-resolution maps, URLs, local
+    paths, exception text, bearer material, and AWS identifiers never cross the
+    OTLP boundary.
+    """
+    serialized = serialize_event_attributes(event)
+    return {key: value for key, value in serialized.items() if key in _OTLP_ATTRIBUTE_ALLOWLIST and _safe_otlp_attribute_value(value)}
+
+
 # Conditional import for proper inheritance - opentelemetry is optional
 try:
     from opentelemetry.sdk.trace import ReadableSpan as _ReadableSpanBase
@@ -121,6 +197,7 @@ class SyntheticReadableSpan(_ReadableSpanBase):
         end_time: int,
         kind: Any,  # SpanKind
         resource: Any | None = None,  # Resource - optional, defaults to empty
+        status: Any | None = None,  # Status - optional, defaults to OK
     ) -> None:
         # Import SDK types for parent __init__
         from opentelemetry.sdk.resources import Resource
@@ -144,7 +221,7 @@ class SyntheticReadableSpan(_ReadableSpanBase):
                 name="elspeth.telemetry",
                 version=_elspeth_version,
             ),
-            status=Status(StatusCode.OK),
+            status=status if status is not None else Status(StatusCode.OK),
             start_time=start_time,
             end_time=end_time,
         )
@@ -155,4 +232,5 @@ __all__ = [
     "derive_trace_id",
     "generate_span_id",
     "serialize_event_attributes",
+    "serialize_otlp_event_attributes",
 ]

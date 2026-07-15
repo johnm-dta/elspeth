@@ -14,23 +14,37 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
 from elspeth.contracts.freeze import deep_freeze
-from elspeth.contracts.secrets import SecretInventoryItem
+from elspeth.contracts.plugin_capabilities import CapabilityDeclaration, ControlMode, PluginCapability
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSecretRequirement, PluginSummary
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.state_machine import TerminalKind, TerminalReason, TerminalState
 from elspeth.web.composer.prompts import (
     SYSTEM_PROMPT,
-    build_context_string,
-    build_messages,
     build_run_diagnostics_messages,
     build_system_prompt,
 )
+from elspeth.web.composer.prompts import (
+    build_context_string as _build_context_string,
+)
+from elspeth.web.composer.prompts import (
+    build_messages as _build_messages,
+)
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, SourceSpec
+from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.plugin_policy.models import (
+    PluginAvailability,
+    PluginAvailabilitySnapshot,
+    PluginId,
+    PluginUnavailableReason,
+)
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 
 EXPECTED_REDACTED_BLOB_SOURCE_PATH = "<redacted-blob-source-path>"
 
@@ -75,6 +89,40 @@ class StubCatalog:
         raise ValueError(f"Not implemented for stub: {plugin_type}/{name}")
 
 
+def _trained_policy_context(catalog: CatalogService) -> tuple[PolicyCatalogView, PluginAvailabilitySnapshot]:
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return PolicyCatalogView.for_trained_operator(catalog, snapshot), snapshot
+
+
+def build_context_string(state: CompositionState, catalog: CatalogService, **kwargs: Any) -> str:
+    kwargs.pop("secret_service", None)
+    kwargs.pop("user_id", None)
+    view, snapshot = _trained_policy_context(catalog)
+    return _build_context_string(state, view, plugin_snapshot=snapshot, **kwargs)
+
+
+def build_messages(
+    chat_history: list[dict[str, Any]],
+    state: CompositionState,
+    user_message: str,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    kwargs.pop("secret_service", None)
+    kwargs.pop("user_id", None)
+    view, snapshot = _trained_policy_context(catalog)
+    return _build_messages(
+        chat_history,
+        state,
+        user_message,
+        view,
+        data_dir,
+        plugin_snapshot=snapshot,
+        **kwargs,
+    )
+
+
 class PromptShieldCatalog(StubCatalog):
     def list_transforms(self) -> list[PluginSummary]:
         return [
@@ -95,18 +143,6 @@ class PromptShieldCatalog(StubCatalog):
                 secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
             ),
         ]
-
-
-class SecretResolverStub:
-    def __init__(self, inventory: list[SecretInventoryItem], available_names: set[str]) -> None:
-        self._inventory = inventory
-        self._available_names = available_names
-
-    def list_refs(self, _user_id: str) -> list[SecretInventoryItem]:
-        return self._inventory
-
-    def has_ref(self, _user_id: str, name: str) -> bool:
-        return name in self._available_names
 
 
 def _stub_catalog() -> CatalogService:
@@ -256,6 +292,81 @@ class TestBuildContextString:
         assert "passthrough" in plugins["transforms"]
         assert "csv" in plugins["sinks"]
 
+    def test_context_emits_only_safe_policy_inventory(self) -> None:
+        class _CapabilityCatalog(StubCatalog):
+            def list_transforms(self) -> list[PluginSummary]:
+                return [
+                    PluginSummary(
+                        name="llm",
+                        description="LLM transform",
+                        plugin_type="transform",
+                        config_fields=[],
+                        policy_capabilities=(CapabilityDeclaration(PluginCapability.LLM),),
+                    )
+                ]
+
+        catalog: CatalogService = _CapabilityCatalog()
+        base = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+        snapshot = PluginAvailabilitySnapshot.create(
+            policy_hash=base.policy_hash,
+            principal_scope=base.principal_scope,
+            available=base.available,
+            unavailable=base.unavailable,
+            selected=base.selected,
+            usable_profile_aliases=(),
+            selected_profile_aliases=(),
+            binding_generation_fingerprint=base.binding_generation_fingerprint,
+            control_modes=((PluginCapability.LLM, ControlMode.REQUIRED),),
+        )
+        view = PolicyCatalogView.for_trained_operator(catalog, snapshot)
+
+        context = _build_context_string(_empty_state(), view, plugin_snapshot=snapshot, schemas_loaded=frozenset())
+        policy = json.loads(context.split("\n", 1)[1])["plugin_policy"]
+
+        assert policy["capability_groups"] == {"llm": ["transform:llm"]}
+        assert policy["selected"]["llm"] == "transform:llm"
+        assert policy["control_modes"] == {"llm": "required"}
+        assert "OPENROUTER_API_KEY" not in context
+        assert "provider" not in json.dumps(policy)
+
+    def test_context_exposes_only_opaque_bedrock_profile_inventory(self) -> None:
+        prompt_id = PluginId("transform", "aws_bedrock_prompt_shield")
+        snapshot = PluginAvailabilitySnapshot.create(
+            policy_hash="bedrock-policy",
+            principal_scope="local:alice",
+            available=frozenset({prompt_id}),
+            unavailable=(),
+            selected=((PluginCapability.PROMPT_SHIELD, prompt_id),),
+            usable_profile_aliases=((prompt_id, ("prompt-default",)),),
+            selected_profile_aliases=((prompt_id, "prompt-default"),),
+            control_modes=((PluginCapability.PROMPT_SHIELD, ControlMode.REQUIRED),),
+            binding_generation_fingerprint="bedrock-binding",
+        )
+        catalog = create_catalog_service()
+        view = PolicyCatalogView(catalog, snapshot, MagicMock(spec=OperatorProfileRegistry))
+
+        context = _build_context_string(
+            _empty_state(),
+            view,
+            plugin_snapshot=snapshot,
+            schemas_loaded=frozenset(),
+        )
+        policy = json.loads(context.split("\n", 1)[1])["plugin_policy"]
+
+        assert policy["usable_profile_aliases"] == {"transform:aws_bedrock_prompt_shield": ["prompt-default"]}
+        assert policy["selected_profile_aliases"] == {"transform:aws_bedrock_prompt_shield": "prompt-default"}
+        rendered = json.dumps(policy, sort_keys=True)
+        for private in (
+            "private-guardrail-marker",
+            "private-version-marker",
+            "private-region-marker",
+            "AWS_SECRET_ACCESS_KEY",
+            "arn:aws:iam::123456789012:role/private-role",
+            "https://private-endpoint.invalid",
+            "local_requirement_unavailable",
+        ):
+            assert private not in rendered
+
     def test_context_includes_discovery_time_composer_hints(self) -> None:
         """The LLM sees JIT hints even when it does not call list_* first."""
         state = _empty_state()
@@ -274,17 +385,24 @@ class TestBuildContextString:
             },
         }
 
-    def test_secret_unavailable_prompt_shield_is_hidden_from_dynamic_context(self) -> None:
+    def test_snapshot_unavailable_prompt_shield_is_hidden_from_dynamic_context(self) -> None:
         state = _empty_state()
         catalog: CatalogService = PromptShieldCatalog()
-        secret_service = SecretResolverStub(
-            inventory=[
-                SecretInventoryItem(name="OPENROUTER_API_KEY", scope="user", available=True),
-            ],
-            available_names={"OPENROUTER_API_KEY"},
+        unrestricted = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+        shield_id = PluginId("transform", "azure_prompt_shield")
+        snapshot = PluginAvailabilitySnapshot.create(
+            policy_hash="restricted",
+            principal_scope="local:test-user",
+            available=unrestricted.available - {shield_id},
+            unavailable=(PluginAvailability(shield_id, PluginUnavailableReason.CREDENTIAL_MISSING),),
+            selected=unrestricted.selected,
+            usable_profile_aliases=(),
+            selected_profile_aliases=(),
+            binding_generation_fingerprint="restricted",
         )
+        view = PolicyCatalogView(catalog, snapshot, MagicMock(spec=OperatorProfileRegistry))
 
-        context = build_context_string(state, catalog, secret_service=secret_service, user_id="test-user")
+        context = _build_context_string(state, view, plugin_snapshot=snapshot)
         parsed = json.loads(context.split("\n", 1)[1])
 
         assert parsed["available_plugins"]["transforms"] == ["web_scrape"]

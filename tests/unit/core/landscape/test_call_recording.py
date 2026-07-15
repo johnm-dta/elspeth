@@ -1246,7 +1246,7 @@ class TestGetCallResponseData:
         import shutil
 
         shutil.rmtree(tmp_path / "payloads")
-        (tmp_path / "payloads").mkdir()
+        (tmp_path / "payloads").mkdir(mode=0o700)
 
         result = factory.execution.get_call_response_data(call.call_id)
         assert result.state == CallDataState.PURGED

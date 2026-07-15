@@ -77,6 +77,7 @@ from elspeth.web.composer.tools.declarations import (
     ToolKind,
 )
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
+from elspeth.web.provider_config_policy import web_aws_s3_endpoint_url_policy_error
 from elspeth.web.sessions.models import blob_run_links_table, blobs_table, composition_states_table, runs_table
 
 
@@ -482,6 +483,28 @@ def _affected_component_for_inline_field_path(field_path: str) -> tuple[str, ...
     return ()
 
 
+def _inline_blob_endpoint_policy_error(state: CompositionState, field_path: str) -> str | None:
+    """Return the endpoint policy result for the component changed by a blob marker."""
+    prefix, _, _rest = field_path.partition(".options.")
+    if prefix == "source":
+        source_name = "source"
+    elif prefix.startswith("source:"):
+        source_name = prefix.removeprefix("source:")
+    else:
+        source_name = None
+
+    if source_name is not None:
+        source = state.sources[source_name]
+        return web_aws_s3_endpoint_url_policy_error(source.plugin, source.options)
+
+    if prefix.startswith("output:"):
+        output_name = prefix.removeprefix("output:")
+        output = next(output for output in state.outputs if output.name == output_name)
+        return web_aws_s3_endpoint_url_policy_error(output.plugin, output.options)
+
+    return None
+
+
 def _execute_wire_blob_inline_ref(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -552,6 +575,9 @@ def _execute_wire_blob_inline_ref(
         new_state = _apply_inline_blob_marker(state, ref.field_path, marker)
     except ValueError as exc:
         return _failure_result(state, str(exc))
+    endpoint_policy_error = _inline_blob_endpoint_policy_error(new_state, ref.field_path)
+    if endpoint_policy_error is not None:
+        return _failure_result(state, endpoint_policy_error)
     return _mutation_result(new_state, _affected_component_for_inline_field_path(ref.field_path), data={"field_path": ref.field_path})
 
 

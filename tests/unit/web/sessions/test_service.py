@@ -27,6 +27,9 @@ from elspeth.web.sessions.models import (
     sessions_table,
 )
 from elspeth.web.sessions.protocol import (
+    LANDSCAPE_RECONCILIATION_ABSENT_SUFFIX,
+    LANDSCAPE_RECONCILIATION_COMPLETE_SUFFIX,
+    LANDSCAPE_RECONCILIATION_PENDING_SUFFIX,
     ChatMessageRecord,
     CompositionStateData,
     CompositionStateRecord,
@@ -1288,6 +1291,95 @@ class TestCancelAllOrphanedRuns:
         # Session should now be unblocked
         run2 = await service.create_run(session.id, state.id)
         assert run2.status == "pending"
+
+
+class TestLandscapeReconciliationMarkers:
+    @staticmethod
+    async def _cancelled_run(service, *, reason: str, landscape_run_id: str | None) -> RunRecord:
+        session = await service.create_session(str(uuid.uuid4()), "Pipeline", "local")
+        state = await service.save_composition_state(
+            session.id,
+            CompositionStateData(is_valid=True),
+            provenance="session_seed",
+        )
+        run = await service.create_run(session.id, state.id)
+        if landscape_run_id is not None:
+            await service.update_run_status(run.id, "running", landscape_run_id=landscape_run_id)
+        cancelled = await service.cancel_all_orphaned_run_records(reason=reason)
+        assert len(cancelled) == 1
+        return cancelled[0]
+
+    @pytest.mark.asyncio
+    async def test_exact_pending_suffix_selection_includes_null_anchor_and_excludes_other_errors(self, service) -> None:
+        pending_null = await self._cancelled_run(
+            service,
+            reason=f"startup reason {LANDSCAPE_RECONCILIATION_PENDING_SUFFIX}",
+            landscape_run_id=None,
+        )
+        pending_anchor = await self._cancelled_run(
+            service,
+            reason=f"periodic reason {LANDSCAPE_RECONCILIATION_PENDING_SUFFIX}",
+            landscape_run_id="landscape-1",
+        )
+        await self._cancelled_run(service, reason="ordinary user error", landscape_run_id="landscape-2")
+        await self._cancelled_run(
+            service,
+            reason=f"embedded {LANDSCAPE_RECONCILIATION_PENDING_SUFFIX} trailing text",
+            landscape_run_id="landscape-3",
+        )
+        await self._cancelled_run(
+            service,
+            reason=f"startup reason {LANDSCAPE_RECONCILIATION_COMPLETE_SUFFIX}",
+            landscape_run_id="landscape-4",
+        )
+        await self._cancelled_run(
+            service,
+            reason=f"startup reason {LANDSCAPE_RECONCILIATION_ABSENT_SUFFIX}",
+            landscape_run_id="landscape-5",
+        )
+
+        candidates = await service.list_pending_landscape_reconciliations()
+
+        assert {candidate.id for candidate in candidates} == {pending_null.id, pending_anchor.id}
+        assert {candidate.landscape_run_id for candidate in candidates} == {None, "landscape-1"}
+
+    @pytest.mark.asyncio
+    async def test_outcome_update_is_atomic_exact_and_preserves_reason(self, service) -> None:
+        complete = await self._cancelled_run(
+            service,
+            reason=f"human readable startup reason {LANDSCAPE_RECONCILIATION_PENDING_SUFFIX}",
+            landscape_run_id=None,
+        )
+        absent = await self._cancelled_run(
+            service,
+            reason=f"human readable periodic reason {LANDSCAPE_RECONCILIATION_PENDING_SUFFIX}",
+            landscape_run_id="missing-landscape",
+        )
+
+        await service.mark_landscape_reconciliation_outcomes(
+            complete_run_ids=frozenset({complete.id}),
+            absent_run_ids=frozenset({absent.id}),
+        )
+
+        complete_row = await service.get_run(complete.id)
+        absent_row = await service.get_run(absent.id)
+        assert complete_row.error == f"human readable startup reason {LANDSCAPE_RECONCILIATION_COMPLETE_SUFFIX}"
+        assert absent_row.error == f"human readable periodic reason {LANDSCAPE_RECONCILIATION_ABSENT_SUFFIX}"
+        assert await service.list_pending_landscape_reconciliations() == []
+
+    @pytest.mark.asyncio
+    async def test_outcome_update_rejects_overlap_without_mutation(self, service) -> None:
+        candidate = await self._cancelled_run(
+            service,
+            reason=f"startup reason {LANDSCAPE_RECONCILIATION_PENDING_SUFFIX}",
+            landscape_run_id="landscape-1",
+        )
+        with pytest.raises(ValueError, match="overlap"):
+            await service.mark_landscape_reconciliation_outcomes(
+                complete_run_ids=frozenset({candidate.id}),
+                absent_run_ids=frozenset({candidate.id}),
+            )
+        assert [row.id for row in await service.list_pending_landscape_reconciliations()] == [candidate.id]
 
 
 class TestCancelAllOrphanedRunsExcludeRunIds:

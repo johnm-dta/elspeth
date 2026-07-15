@@ -1,0 +1,955 @@
+"""Validated, bounded primitives for the optional AWS S3 sink plugin."""
+
+from __future__ import annotations
+
+import base64
+import codecs
+import csv
+import hashlib
+import json
+import math
+import re
+import tempfile
+import time
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from types import TracebackType
+from typing import Any, BinaryIO, ClassVar, Literal, Never, Self, cast
+from urllib.parse import urlsplit
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from elspeth.contracts import ArtifactDescriptor, CallStatus, CallType, Determinism, PluginSchema
+from elspeth.contracts import errors as contract_errors
+from elspeth.contracts.contexts import SinkContext
+from elspeth.contracts.diversion import SinkWriteResult
+from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.header_modes import HeaderMode, parse_header_mode
+from elspeth.contracts.plugin_assistance import PluginAssistance
+from elspeth.contracts.wire_visible_identity import reject_operator_required_placeholder_value
+from elspeth.plugins.aws_s3_common import build_s3_client
+from elspeth.plugins.infrastructure.base import BaseSink
+from elspeth.plugins.infrastructure.config_base import DataPluginConfig, validate_headers_value
+from elspeth.plugins.infrastructure.display_headers import (
+    apply_display_headers,
+    get_effective_display_headers,
+    init_display_headers,
+    resolve_contract_from_context_if_needed,
+    resolve_display_headers_if_needed,
+    set_resume_field_resolution,
+)
+from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+
+_SPOOL_MEMORY_BYTES = 8 * 1024 * 1024
+_WRITE_CHUNK_BYTES = 64 * 1024
+_MAX_BUCKET_CHARS = 2048
+_MAX_KEY_TEMPLATE_BYTES = 4096
+_MAX_RENDERED_KEY_BYTES = 1024
+_MAX_ENDPOINT_CHARS = 2048
+_MAX_REGION_CHARS = 64
+_MAX_ETAG_BYTES = 1024
+_SAFE_ERROR_TYPE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
+_CONDITIONAL_ERROR_CODES = frozenset({"PreconditionFailed", "ConditionalRequestConflict"})
+_DEFINITE_REJECTION_CODES = frozenset({"AccessDenied", "NoSuchBucket", "InvalidRequest"})
+
+
+class CSVWriteOptions(BaseModel):
+    """CSV output controls for the S3 sink."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    delimiter: str = Field(default=",", description="Single-character CSV field delimiter")
+    encoding: str = Field(default="utf-8", description="Character encoding for CSV output")
+    include_header: bool = Field(default=True, description="Write the CSV header record")
+
+    @field_validator("delimiter")
+    @classmethod
+    def _validate_delimiter(cls, value: str) -> str:
+        if len(value) != 1:
+            raise ValueError("delimiter must be a single character")
+        return value
+
+    @field_validator("encoding")
+    @classmethod
+    def _validate_encoding(cls, value: str) -> str:
+        try:
+            codecs.lookup(value)
+        except LookupError as exc:
+            raise ValueError("unknown CSV encoding") from exc
+        probe_failed = False
+        encoded: object = None
+        try:
+            encoder = codecs.getincrementalencoder(value)(errors="strict")
+            encoded = encoder.encode("", final=True)
+        except (LookupError, TypeError, UnicodeError, ValueError):
+            probe_failed = True
+        if probe_failed or not isinstance(encoded, bytes):
+            raise ValueError("CSV encoding must encode text to bytes") from None
+        return value
+
+
+class AWSS3SinkConfig(DataPluginConfig):
+    """Strict S3 sink configuration with no credential or raw client surface."""
+
+    _plugin_component_type: ClassVar[str | None] = "sink"
+
+    bucket: str = Field(..., description="S3 bucket name or access-point identifier")
+    key: str = Field(..., description="S3 object key template rendered once per run")
+    format: Literal["csv", "json", "jsonl"] = Field(default="csv", description="S3 object data format")
+    overwrite: bool = Field(default=True, description="Allow replacement of an existing S3 object")
+    csv_options: CSVWriteOptions = Field(default_factory=CSVWriteOptions, description="CSV writing options")
+    headers: str | dict[str, str] | None = Field(
+        default=None,
+        description="Normalized, original, or custom output headers",
+    )
+    region_name: str | None = Field(default=None, description="AWS signing region override")
+    endpoint_url: str | None = Field(default=None, description="CLI/batch-only S3-compatible HTTP endpoint")
+    max_object_bytes: int = Field(
+        default=256 * 1024 * 1024,
+        gt=0,
+        le=1024 * 1024 * 1024,
+        strict=True,
+        description="Maximum serialized S3 object bytes",
+    )
+    max_record_chars: int = Field(
+        default=1_000_000,
+        gt=0,
+        le=8_000_000,
+        strict=True,
+        description="Maximum characters in one serialized output record",
+    )
+
+    @field_validator("bucket")
+    @classmethod
+    def _validate_bucket(cls, value: str) -> str:
+        if not value.strip() or len(value) > _MAX_BUCKET_CHARS:
+            raise ValueError("bucket must be nonblank and at most 2048 characters")
+        return reject_operator_required_placeholder_value(value, field_name="bucket")
+
+    @field_validator("key")
+    @classmethod
+    def _validate_key_template(cls, value: str) -> str:
+        if not value.strip() or len(value.encode("utf-8")) > _MAX_KEY_TEMPLATE_BYTES:
+            raise ValueError("key template must be nonblank and at most 4096 UTF-8 bytes")
+        if _has_control_character(value):
+            raise ValueError("key template must not contain control characters")
+        reject_operator_required_placeholder_value(value, field_name="key")
+        _, template_syntax_error, environment_type = _load_jinja()
+        environment = environment_type(undefined=_load_jinja()[0])
+        try:
+            environment.from_string(value)
+        except template_syntax_error as exc:
+            raise ValueError("key template syntax is invalid") from exc
+        return value
+
+    @field_validator("headers")
+    @classmethod
+    def _validate_headers(cls, value: str | dict[str, str] | None) -> str | dict[str, str] | None:
+        return validate_headers_value(value)
+
+    @field_validator("region_name")
+    @classmethod
+    def _validate_region(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value or len(value) > _MAX_REGION_CHARS or re.fullmatch(r"[A-Za-z0-9-]+", value) is None:
+            raise ValueError("region_name must be a bounded AWS region identifier")
+        return value
+
+    @field_validator("endpoint_url")
+    @classmethod
+    def _validate_endpoint(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value or len(value) > _MAX_ENDPOINT_CHARS:
+            raise ValueError("endpoint_url must be a bounded HTTP(S) URL")
+        if any(character.isspace() or ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+            raise ValueError("endpoint_url must not contain whitespace or control characters")
+        try:
+            parsed = urlsplit(value)
+            _ = parsed.port
+        except ValueError as exc:
+            raise ValueError("endpoint_url must be a valid HTTP(S) URL") from exc
+        if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+            raise ValueError("endpoint_url must be an HTTP(S) URL with a hostname")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("endpoint_url must not contain userinfo")
+        if parsed.query or parsed.fragment:
+            raise ValueError("endpoint_url must not contain a query or fragment")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_csv_only_options(self) -> Self:
+        if self.format != "csv" and self.csv_options != CSVWriteOptions():
+            raise ValueError("csv_options is only supported for CSV format")
+        return self
+
+    @property
+    def headers_mode(self) -> HeaderMode:
+        return parse_header_mode(self.headers) if self.headers is not None else HeaderMode.NORMALIZED
+
+    @property
+    def headers_mapping(self) -> dict[str, str] | None:
+        return cast("dict[str, str]", self.headers) if self.headers_mode is HeaderMode.CUSTOM else None
+
+
+AWSS3SinkConfig.model_rebuild()
+
+
+def _load_jinja() -> tuple[type[Any], type[BaseException], type[Any]]:
+    """Load Jinja lazily so the base install can still discover other plugins."""
+    try:
+        from jinja2 import StrictUndefined, TemplateSyntaxError
+        from jinja2.sandbox import SandboxedEnvironment
+    except ImportError as exc:
+        raise ImportError('Jinja2 is required for aws_s3 sinks; install Elspeth with the "aws" extra') from exc
+    return StrictUndefined, TemplateSyntaxError, SandboxedEnvironment
+
+
+def _has_control_character(value: str) -> bool:
+    return any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+
+
+def _validate_rendered_key(value: str) -> str:
+    if not value.strip() or len(value.encode("utf-8")) > _MAX_RENDERED_KEY_BYTES:
+        raise ValueError("rendered key must be nonblank and at most 1024 UTF-8 bytes")
+    if _has_control_character(value):
+        raise ValueError("rendered key must not contain control characters")
+    return value
+
+
+def _render_key_template(template_source: str, *, run_id: str, timestamp: str) -> str:
+    strict_undefined, _, environment_type = _load_jinja()
+    environment = environment_type(undefined=strict_undefined)
+    try:
+        rendered = environment.from_string(template_source).render(run_id=run_id, timestamp=timestamp)
+    except BaseException as exc:
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise ValueError("S3 key template could not be rendered safely") from None
+    return _validate_rendered_key(rendered)
+
+
+class S3ObjectSizeLimitError(RuntimeError):
+    """The complete candidate object exceeded its configured byte cap."""
+
+    def __init__(self, observed_bytes: int, limit_bytes: int) -> None:
+        super().__init__(f"S3 object exceeds configured byte limit ({observed_bytes} > {limit_bytes}).")
+        self.observed_bytes = observed_bytes
+        self.limit_bytes = limit_bytes
+
+
+class S3RecordSerializationError(ValueError):
+    """A row cannot be represented without exposing its value in the error."""
+
+    def __init__(self) -> None:
+        super().__init__("S3 output record could not be serialized safely.")
+
+
+class S3RecordSizeLimitError(S3RecordSerializationError):
+    """A row exceeded the configured character budget."""
+
+    def __init__(self) -> None:
+        ValueError.__init__(self, "S3 output record exceeds configured character limit.")
+
+
+@dataclass(slots=True)
+class _SerializedObject:
+    """Own a rewound temporary object and its stable integrity metadata."""
+
+    body: BinaryIO
+    size_bytes: int
+    content_hash: str
+    checksum_sha256_b64: str
+    _closed: bool = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.body.close()
+
+    def __enter__(self) -> _SerializedObject:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+
+class _BoundedBinaryWriter:
+    def __init__(self, body: BinaryIO, max_object_bytes: int) -> None:
+        self._body = body
+        self._max_object_bytes = max_object_bytes
+        self.size_bytes = 0
+        self.digest = hashlib.sha256()
+
+    def write(self, data: bytes) -> None:
+        view = memoryview(data)
+        for offset in range(0, len(view), _WRITE_CHUNK_BYTES):
+            chunk = view[offset : offset + _WRITE_CHUNK_BYTES]
+            next_size = self.size_bytes + len(chunk)
+            if next_size > self._max_object_bytes:
+                raise S3ObjectSizeLimitError(next_size, self._max_object_bytes)
+            self.digest.update(chunk)
+            written = self._body.write(chunk)
+            if written != len(chunk):
+                raise OSError("temporary S3 object spool accepted a partial write")
+            self.size_bytes = next_size
+
+
+class _EncodedTextWriter:
+    def __init__(self, writer: _BoundedBinaryWriter, encoding: str) -> None:
+        self._writer = writer
+        encoder_failed = False
+        encoder: Any | None = None
+        try:
+            encoder = codecs.getincrementalencoder(encoding)(errors="strict")
+        except (LookupError, TypeError, UnicodeError, ValueError):
+            encoder_failed = True
+        if encoder_failed or encoder is None:
+            raise S3RecordSerializationError from None
+        self._encoder = encoder
+
+    def write(self, value: str) -> int:
+        encoding_failed = False
+        encoded: object = None
+        try:
+            encoded = self._encoder.encode(value, final=False)
+        except (LookupError, TypeError, UnicodeError, ValueError):
+            encoding_failed = True
+        if encoding_failed or not isinstance(encoded, bytes):
+            raise S3RecordSerializationError from None
+        self._writer.write(encoded)
+        return len(value)
+
+    def finalize(self) -> None:
+        encoding_failed = False
+        encoded: object = None
+        try:
+            encoded = self._encoder.encode("", final=True)
+        except (LookupError, TypeError, UnicodeError, ValueError):
+            encoding_failed = True
+        if encoding_failed or not isinstance(encoded, bytes):
+            raise S3RecordSerializationError from None
+        self._writer.write(encoded)
+
+
+def _json_string_chars(value: str) -> int:
+    total = 2
+    for character in value:
+        codepoint = ord(character)
+        if character in {'"', "\\"} or character in {"\b", "\f", "\n", "\r", "\t"}:
+            total += 2
+        elif codepoint < 0x20:
+            total += 6
+        else:
+            total += 1
+    return total
+
+
+def _json_value_chars(value: Any, *, seen: set[int]) -> int:
+    if value is None:
+        return 4
+    if value is True:
+        return 4
+    if value is False:
+        return 5
+    if isinstance(value, str):
+        return _json_string_chars(value)
+    if type(value) is int:
+        return len(str(value))
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise S3RecordSerializationError
+        return len(json.dumps(value, allow_nan=False))
+    if isinstance(value, Mapping):
+        identity = id(value)
+        if identity in seen:
+            raise S3RecordSerializationError
+        seen.add(identity)
+        try:
+            total = 2
+            for index, (key, child) in enumerate(value.items()):
+                if not isinstance(key, str):
+                    raise S3RecordSerializationError
+                if index:
+                    total += 1
+                total += _json_string_chars(key) + 1 + _json_value_chars(child, seen=seen)
+            return total
+        finally:
+            seen.remove(identity)
+    if isinstance(value, list | tuple):
+        identity = id(value)
+        if identity in seen:
+            raise S3RecordSerializationError
+        seen.add(identity)
+        try:
+            return 2 + max(0, len(value) - 1) + sum(_json_value_chars(child, seen=seen) for child in value)
+        finally:
+            seen.remove(identity)
+    raise S3RecordSerializationError
+
+
+def _check_json_record(row: Mapping[str, Any], max_record_chars: int) -> None:
+    traversal_failed = False
+    record_chars = 0
+    try:
+        record_chars = _json_value_chars(row, seen=set())
+    except S3RecordSerializationError:
+        raise
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        traversal_failed = True
+    if traversal_failed:
+        raise S3RecordSerializationError from None
+    if record_chars > max_record_chars:
+        raise S3RecordSizeLimitError
+
+
+def _csv_scalar_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if type(value) is bool:
+        return str(value)
+    if type(value) is int:
+        conversion_failed = False
+        rendered = ""
+        try:
+            rendered = str(value)
+        except (ValueError, TypeError, OverflowError):
+            conversion_failed = True
+        if conversion_failed:
+            raise S3RecordSerializationError from None
+        return rendered
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise S3RecordSerializationError
+        conversion_failed = False
+        rendered = ""
+        try:
+            rendered = str(value)
+        except (ValueError, TypeError, OverflowError):
+            conversion_failed = True
+        if conversion_failed:
+            raise S3RecordSerializationError from None
+        return rendered
+    raise S3RecordSerializationError
+
+
+def _csv_record_chars(values: Sequence[str], delimiter: str) -> int:
+    total = max(0, len(values) - 1) + 2
+    for value in values:
+        if delimiter in value or '"' in value or "\r" in value or "\n" in value:
+            total += len(value) + value.count('"') + 2
+        else:
+            total += len(value)
+    return total
+
+
+def _serialize_rows_to_spool(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    format: Literal["csv", "json", "jsonl"],
+    csv_options: CSVWriteOptions,
+    fieldnames: Sequence[str],
+    max_object_bytes: int,
+    max_record_chars: int,
+) -> _SerializedObject:
+    """Incrementally serialize rows into an owned, bounded 8 MiB spool."""
+    body = cast(
+        "BinaryIO",
+        tempfile.SpooledTemporaryFile(max_size=_SPOOL_MEMORY_BYTES, mode="w+b"),  # noqa: SIM115 - ownership is returned
+    )
+    writer = _BoundedBinaryWriter(body, max_object_bytes)
+    json_encoder = json.JSONEncoder(ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    try:
+        if format == "csv":
+            text_writer = _EncodedTextWriter(writer, csv_options.encoding)
+            csv_writer = csv.writer(text_writer, delimiter=csv_options.delimiter, lineterminator="\r\n")
+            if csv_options.include_header:
+                header_values = list(fieldnames)
+                if _csv_record_chars(header_values, csv_options.delimiter) > max_record_chars:
+                    raise S3RecordSizeLimitError
+                csv_writer.writerow(header_values)
+            for row in rows:
+                if set(row) - set(fieldnames):
+                    raise S3RecordSerializationError
+                values = [_csv_scalar_text(row.get(field)) for field in fieldnames]
+                if _csv_record_chars(values, csv_options.delimiter) > max_record_chars:
+                    raise S3RecordSizeLimitError
+                csv_writer.writerow(values)
+            text_writer.finalize()
+        elif format in {"json", "jsonl"}:
+            text_writer = _EncodedTextWriter(writer, "utf-8")
+            if format == "json":
+                writer.write(b"[")
+            for index, row in enumerate(rows):
+                _check_json_record(row, max_record_chars)
+                if format == "json" and index:
+                    writer.write(b",")
+                try:
+                    for fragment in json_encoder.iterencode(row):
+                        text_writer.write(fragment)
+                except S3ObjectSizeLimitError:
+                    raise
+                except (TypeError, ValueError, UnicodeError):
+                    serialization_failed = True
+                else:
+                    serialization_failed = False
+                if serialization_failed:
+                    raise S3RecordSerializationError from None
+                if format == "jsonl":
+                    writer.write(b"\n")
+            if format == "json":
+                writer.write(b"]")
+            text_writer.finalize()
+        else:
+            raise AssertionError(f"Unsupported S3 sink format: {format}")
+        body.seek(0)
+        digest = writer.digest.digest()
+        return _SerializedObject(
+            body=body,
+            size_bytes=writer.size_bytes,
+            content_hash=digest.hex(),
+            checksum_sha256_b64=base64.b64encode(digest).decode("ascii"),
+        )
+    except BaseException:
+        body.close()
+        raise
+
+
+def _normalize_error_type(error: BaseException) -> str:
+    name = type(error).__name__
+    return name if _SAFE_ERROR_TYPE.fullmatch(name) is not None else "ProviderError"
+
+
+class S3ConditionalWriteRejectedError(RuntimeError):
+    """A server-side S3 write condition rejected the request."""
+
+    def __init__(self) -> None:
+        super().__init__("S3 conditional write was rejected.")
+
+
+class S3SinkWriteError(RuntimeError):
+    """S3 definitely rejected the object write request."""
+
+    def __init__(self) -> None:
+        super().__init__("S3 object write was rejected.")
+
+
+class S3WriteOutcomeUnknownError(RuntimeError):
+    """A dispatched S3 request may or may not have reached durable storage."""
+
+    def __init__(self) -> None:
+        super().__init__("S3 object write outcome is unknown; sink is poisoned.")
+
+
+class S3SinkPoisonedError(RuntimeError):
+    """The sink cannot safely make another cumulative request."""
+
+
+class S3SinkClosedError(RuntimeError):
+    """The sink has already released its provider resources."""
+
+
+class S3ClientCloseError(RuntimeError):
+    """The detached S3 client failed during close."""
+
+
+def _raise_conditional_rejected() -> Never:
+    raise S3ConditionalWriteRejectedError from None
+
+
+def _raise_sink_write_rejected() -> Never:
+    raise S3SinkWriteError from None
+
+
+def _raise_outcome_unknown() -> Never:
+    raise S3WriteOutcomeUnknownError from None
+
+
+def _raise_audit_integrity(error_type: str) -> Never:
+    raise AuditIntegrityError(f"Failed to record S3 call in the audit trail ({error_type}).") from None
+
+
+def _provider_failure_kind(error: BaseException) -> Literal["conditional", "rejected", "unknown"]:
+    response = getattr(error, "response", None)
+    if not isinstance(response, Mapping):
+        return "unknown"
+    error_payload = response.get("Error")
+    code = error_payload.get("Code") if isinstance(error_payload, Mapping) else None
+    response_metadata = response.get("ResponseMetadata")
+    status = response_metadata.get("HTTPStatusCode") if isinstance(response_metadata, Mapping) else None
+    if code in _CONDITIONAL_ERROR_CODES or status in {409, 412}:
+        return "conditional"
+    if code in _DEFINITE_REJECTION_CODES:
+        return "rejected"
+    return "unknown"
+
+
+def _validated_etag(response: Mapping[str, Any]) -> str | None:
+    value = response.get("ETag")
+    if not isinstance(value, str):
+        return None
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    if not encoded or len(encoded) > _MAX_ETAG_BYTES:
+        return None
+    if any(byte < 0x20 or byte > 0x7E for byte in encoded):
+        return None
+    return value
+
+
+class AWSS3Sink(BaseSink):
+    """Write bounded cumulative CSV, JSON, or JSONL objects to AWS S3."""
+
+    name = "aws_s3"
+    determinism = Determinism.IO_WRITE
+    plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:f25920a72b942a5f"
+    config_model = AWSS3SinkConfig
+    supports_resume = False
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is not None:
+            return None
+        return PluginAssistance(
+            plugin_name=cls.name,
+            issue_code=None,
+            summary="Writes bounded pipeline output to an AWS S3 object as CSV, JSON, or JSONL.",
+            composer_hints=(
+                "Use the default AWS credential chain and provide a real bucket plus key template.",
+                "endpoint_url is CLI/batch-only; web-authored pipelines must omit it or set it to null.",
+                "Choose format and headers for the downstream consumer; CSV can omit its header record.",
+                "Set overwrite=false for conditional create and cumulative ETag-protected rewrites.",
+                "Keep max_object_bytes appropriate for one bounded PutObject request.",
+                "Route row serialization faults with the output on_write_failure setting.",
+            ),
+        )
+
+    def configure_for_resume(self) -> None:
+        raise NotImplementedError("AWSS3Sink does not support resume.") from None
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__(config)
+        cfg = AWSS3SinkConfig.from_dict(config, plugin_name=self.name)
+        self._bucket = cfg.bucket
+        self._key_template = cfg.key
+        self._format = cfg.format
+        self._overwrite = cfg.overwrite
+        self._csv_options = cfg.csv_options
+        self._region_name = cfg.region_name
+        self._endpoint_url = cfg.endpoint_url
+        self._max_object_bytes = cfg.max_object_bytes
+        self._max_record_chars = cfg.max_record_chars
+        self._schema_config = cfg.schema_config
+        init_display_headers(self, cfg.headers_mode, cfg.headers_mapping)
+        self._schema_class: type[PluginSchema] = create_schema_from_config(
+            self._schema_config,
+            "AWSS3SinkRowSchema",
+            allow_coercion=False,
+        )
+        self.input_schema = self._schema_class
+        self.declared_required_fields = self._schema_config.get_effective_required_fields()
+        self._s3_client: Any | None = None
+        self._buffered_rows: list[dict[str, Any]] = []
+        self._resolved_key: str | None = None
+        self._remote_etag: str | None = None
+        self._confirmed_artifact: ArtifactDescriptor | None = None
+        self._poisoned = False
+        self._closed = False
+
+    def set_resume_field_resolution(self, resolution_mapping: dict[str, str]) -> None:
+        set_resume_field_resolution(self, resolution_mapping)
+
+    def _get_s3_client(self) -> Any:
+        if self._s3_client is None:
+            self._s3_client = build_s3_client(self._region_name, self._endpoint_url)
+        return self._s3_client
+
+    def _get_or_init_key(self, ctx: SinkContext) -> str:
+        if self._resolved_key is None:
+            self._resolved_key = _render_key_template(
+                self._key_template,
+                run_id=ctx.run_id,
+                timestamp=datetime.now(tz=UTC).isoformat(),
+            )
+        return self._resolved_key
+
+    def _get_fieldnames_from_schema_or_rows(self, rows: Sequence[Mapping[str, Any]]) -> list[str]:
+        ordered_keys: list[str] = []
+        seen_keys: set[str] = set()
+        for row in rows:
+            for key in row:
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    ordered_keys.append(key)
+        if self._schema_config.is_observed:
+            return ordered_keys
+        if self._schema_config.fields:
+            declared = [field.name for field in self._schema_config.fields]
+            if self._schema_config.mode == "flexible":
+                declared_set = set(declared)
+                return [*declared, *(key for key in ordered_keys if key not in declared_set)]
+            return declared
+        return ordered_keys
+
+    def _display_fieldnames(self, data_fields: Sequence[str]) -> list[str]:
+        display_map = get_effective_display_headers(self)
+        if display_map is None:
+            return list(data_fields)
+        if self._headers_mode is HeaderMode.CUSTOM:
+            missing = [field for field in data_fields if field not in display_map]
+            if missing:
+                raise ValueError("CUSTOM header mode must map every S3 output field")
+        return [display_map.get(field, field) for field in data_fields]
+
+    def _preflight_rows(
+        self,
+        rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        accepted: list[dict[str, Any]] = []
+        for index, row in enumerate(rows):
+            probe_fields = self._get_fieldnames_from_schema_or_rows([row])
+            probe_rows = apply_display_headers(self, [row]) if self._format in {"json", "jsonl"} else [row]
+            try:
+                serialized = _serialize_rows_to_spool(
+                    probe_rows,
+                    format=self._format,
+                    csv_options=self._csv_options,
+                    fieldnames=probe_fields,
+                    max_object_bytes=1024 * 1024 * 1024,
+                    max_record_chars=self._max_record_chars,
+                )
+            except S3RecordSizeLimitError:
+                self._divert_row(row, row_index=index, reason="record exceeds configured character limit")
+                continue
+            except S3RecordSerializationError:
+                reason = "CSV record could not be encoded safely" if self._format == "csv" else "JSON record could not be serialized safely"
+                self._divert_row(row, row_index=index, reason=reason)
+                continue
+            else:
+                serialized.close()
+            accepted.append(row.copy())
+        return accepted
+
+    def _record_s3_call(
+        self,
+        ctx: SinkContext,
+        *,
+        status: CallStatus,
+        key: str,
+        condition: Literal["none", "if_none_match", "if_match"],
+        latency_ms: float,
+        response_data: dict[str, Any] | None = None,
+        error_type: str | None = None,
+    ) -> None:
+        recorder_error_type: str | None = None
+        try:
+            ctx.record_call(
+                call_type=CallType.HTTP,
+                status=status,
+                request_data={
+                    "operation": "put_object",
+                    "bucket": self._bucket,
+                    "key": key,
+                    "overwrite": self._overwrite,
+                    "condition": condition,
+                },
+                response_data=response_data,
+                error={"type": error_type} if error_type is not None else None,
+                latency_ms=latency_ms,
+                provider="aws_s3",
+            )
+        except contract_errors.TIER_1_ERRORS:
+            raise
+        except BaseException as error:
+            recorder_error_type = _normalize_error_type(error)
+        if recorder_error_type is not None:
+            self._poisoned = True
+            _raise_audit_integrity(recorder_error_type)
+
+    def _artifact(self, key: str, *, content_hash: str, size_bytes: int) -> SinkWriteResult:
+        return SinkWriteResult(
+            artifact=ArtifactDescriptor(
+                artifact_type="file",
+                path_or_uri=f"s3://{self._bucket}/{key}",
+                content_hash=content_hash,
+                size_bytes=size_bytes,
+            ),
+            diversions=self._get_diversions(),
+        )
+
+    def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
+        if self._closed:
+            raise S3SinkClosedError("S3 sink is closed and cannot be reused.") from None
+        if self._poisoned:
+            raise S3SinkPoisonedError("S3 sink is poisoned and cannot be reused.") from None
+
+        resolve_contract_from_context_if_needed(self, ctx)
+        resolve_display_headers_if_needed(self, ctx)
+        key = self._get_or_init_key(ctx)
+        accepted = self._preflight_rows(rows)
+
+        if not accepted:
+            if self._confirmed_artifact is not None:
+                return SinkWriteResult(artifact=self._confirmed_artifact, diversions=self._get_diversions())
+            return self._artifact(key, content_hash=hashlib.sha256(b"").hexdigest(), size_bytes=0)
+
+        candidate_rows = [*self._buffered_rows, *accepted]
+        data_fields = self._get_fieldnames_from_schema_or_rows(candidate_rows)
+        display_fields = self._display_fieldnames(data_fields)
+        displayed_candidate = apply_display_headers(self, candidate_rows)
+
+        serialized = _serialize_rows_to_spool(
+            displayed_candidate,
+            format=self._format,
+            csv_options=self._csv_options,
+            fieldnames=display_fields,
+            max_object_bytes=self._max_object_bytes,
+            max_record_chars=self._max_record_chars,
+        )
+        try:
+            request: dict[str, Any] = {
+                "Bucket": self._bucket,
+                "Key": key,
+                "Body": serialized.body,
+                "ContentLength": serialized.size_bytes,
+                "ChecksumSHA256": serialized.checksum_sha256_b64,
+            }
+            if self._overwrite:
+                condition: Literal["none", "if_none_match", "if_match"] = "none"
+            elif self._remote_etag is None:
+                request["IfNoneMatch"] = "*"
+                condition = "if_none_match"
+            else:
+                request["IfMatch"] = self._remote_etag
+                condition = "if_match"
+
+            started = time.perf_counter()
+            provider_error_type: str | None = None
+            failure_kind: Literal["conditional", "rejected", "unknown"] | None = None
+            response: Any = None
+            client: Any | None = self._s3_client
+            if client is None:
+                try:
+                    client = self._get_s3_client()
+                except ImportError:
+                    raise
+                except contract_errors.TIER_1_ERRORS:
+                    raise
+                except BaseException as error:
+                    provider_error_type = _normalize_error_type(error)
+                    failure_kind = "unknown"
+            if failure_kind is None and client is None:
+                provider_error_type = "InvalidS3Client"
+                failure_kind = "unknown"
+            if failure_kind is None:
+                assert client is not None
+                try:
+                    serialized.body.seek(0)
+                    response = client.put_object(**request)
+                except contract_errors.TIER_1_ERRORS:
+                    raise
+                except BaseException as error:
+                    provider_error_type = _normalize_error_type(error)
+                    failure_kind = _provider_failure_kind(error)
+            latency_ms = (time.perf_counter() - started) * 1000
+
+            if failure_kind is not None and provider_error_type is not None:
+                self._record_s3_call(
+                    ctx,
+                    status=CallStatus.ERROR,
+                    key=key,
+                    condition=condition,
+                    latency_ms=latency_ms,
+                    error_type=provider_error_type,
+                )
+                if failure_kind == "conditional":
+                    _raise_conditional_rejected()
+                if failure_kind == "rejected":
+                    _raise_sink_write_rejected()
+                self._poisoned = True
+                _raise_outcome_unknown()
+
+            if not isinstance(response, Mapping):
+                self._record_s3_call(
+                    ctx,
+                    status=CallStatus.ERROR,
+                    key=key,
+                    condition=condition,
+                    latency_ms=latency_ms,
+                    error_type="MalformedS3Response",
+                )
+                self._poisoned = True
+                _raise_outcome_unknown()
+
+            if not self._overwrite:
+                confirmed_etag = _validated_etag(response)
+                if confirmed_etag is None:
+                    self._record_s3_call(
+                        ctx,
+                        status=CallStatus.ERROR,
+                        key=key,
+                        condition=condition,
+                        latency_ms=latency_ms,
+                        error_type="MalformedS3Response",
+                    )
+                    self._poisoned = True
+                    _raise_outcome_unknown()
+                self._remote_etag = confirmed_etag
+
+            self._record_s3_call(
+                ctx,
+                status=CallStatus.SUCCESS,
+                key=key,
+                condition=condition,
+                latency_ms=latency_ms,
+                response_data={
+                    "size_bytes": serialized.size_bytes,
+                    "content_hash": serialized.content_hash,
+                },
+            )
+            self._buffered_rows = candidate_rows
+            result = self._artifact(key, content_hash=serialized.content_hash, size_bytes=serialized.size_bytes)
+            self._confirmed_artifact = result.artifact
+            return result
+        finally:
+            serialized.close()
+
+    def flush(self) -> None:
+        """PutObject is synchronous, so there is no deferred data to flush."""
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        client = self._s3_client
+        self._s3_client = None
+        self._buffered_rows = []
+        self._resolved_key = None
+        self._remote_etag = None
+        self._confirmed_artifact = None
+        self._poisoned = False
+        close_error_type: str | None = None
+        if client is not None:
+            close_method = getattr(client, "close", None)
+            if not callable(close_method):
+                close_error_type = "InvalidS3Client"
+            else:
+                try:
+                    close_method()
+                except BaseException as error:
+                    close_error_type = _normalize_error_type(error)
+        if close_error_type is not None:
+            raise S3ClientCloseError(f"Failed to close S3 client ({close_error_type}).") from None

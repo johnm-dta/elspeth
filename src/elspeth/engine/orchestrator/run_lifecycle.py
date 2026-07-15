@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from elspeth.contracts.payload_store import PayloadStore
+    from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
     from elspeth.contracts.preflight import PreflightResult
     from elspeth.core.config import ElspethSettings
     from elspeth.core.dag import ExecutionGraph
@@ -95,6 +96,7 @@ class InitializeDatabasePhase(Protocol):
         auth_provider_type: str | None = None,
         openrouter_catalog_sha256: str,
         openrouter_catalog_source: str,
+        web_plugin_policy_evidence: WebPluginPolicyEvidence | None = None,
     ) -> tuple[RecorderFactory, Any, CoordinationToken]: ...
 
 
@@ -147,6 +149,7 @@ class RunLifecycleCoordinator:
         auth_provider_type: str | None = None,
         openrouter_catalog_sha256: str,
         openrouter_catalog_source: str,
+        web_plugin_policy_evidence: WebPluginPolicyEvidence | None = None,
     ) -> tuple[RecorderFactory, Any, CoordinationToken]:
         """Execute the DATABASE phase: create factory, begin run, record secrets.
 
@@ -208,6 +211,7 @@ class RunLifecycleCoordinator:
                 openrouter_catalog_sha256=openrouter_catalog_sha256,
                 openrouter_catalog_source=openrouter_catalog_source,
                 leader_worker_id=worker_id,
+                web_plugin_policy_evidence=web_plugin_policy_evidence,
             )
             coordination_token = CoordinationToken(run_id=run.run_id, worker_id=worker_id, leader_epoch=1)
 
@@ -313,6 +317,7 @@ class RunLifecycleCoordinator:
         auth_provider_type: str | None = None,
         openrouter_catalog_sha256: str | None = None,
         openrouter_catalog_source: str | None = None,
+        web_plugin_policy_evidence: WebPluginPolicyEvidence | None = None,
         initialize_database_phase: InitializeDatabasePhase,
         execute_run: ExecuteRun,
     ) -> RunResult:
@@ -365,6 +370,7 @@ class RunLifecycleCoordinator:
             auth_provider_type=auth_provider_type,
             openrouter_catalog_sha256=openrouter_catalog_sha256,
             openrouter_catalog_source=openrouter_catalog_source,
+            web_plugin_policy_evidence=web_plugin_policy_evidence,
         )
 
         # Record pre-flight results (deferred from bootstrap_and_run)

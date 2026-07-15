@@ -195,7 +195,7 @@ def _make_harness(tmp_path: Path, *, session_state: SessionState = "empty") -> _
     with engine.begin() as conn:
         _make_session(conn, session_id=session_id, user_id=EVAL_USER_ID)
         conn.execute(text("UPDATE sessions SET trust_mode = 'auto_commit' WHERE id = :session_id"), {"session_id": session_id})
-    service = ComposerServiceImpl(
+    service = ComposerServiceImpl.for_trained_operator(
         catalog=_mock_catalog(),
         settings=_web_settings(data_dir),
         sessions_service=sessions_service,
@@ -403,9 +403,11 @@ async def _drive_trace_async(
             else:
                 pytest.fail("property trace did not reach COMMIT gate within 2s")
             task.cancel()
+            # Persistence is shielded from caller cancellation. Release the
+            # in-flight critical section before awaiting the deferred cancel.
+            release_commit.set()
             with pytest.raises(asyncio.CancelledError):
                 await task
-            release_commit.set()
             for _ in range(1000):
                 if commit_finished.is_set():
                     break
@@ -446,9 +448,11 @@ async def _drive_trace_async(
             else:
                 pytest.fail("property trace did not reach advisory-lock gate within 2s")
             task.cancel()
+            # The lock acquisition runs inside the shielded persistence task;
+            # let it finish before asserting that cancellation is re-raised.
+            release_lock.set()
             with pytest.raises(asyncio.CancelledError):
                 await task
-            release_lock.set()
             await asyncio.sleep(0)
         finally:
             harness.sessions_service._session_write_lock = real_session_write_lock  # type: ignore[method-assign]
@@ -470,9 +474,11 @@ async def _drive_trace_async(
             task = asyncio.create_task(_run_one_turn(harness, llm))
             await asyncio.wait_for(commit_returned.wait(), timeout=2.0)
             task.cancel()
+            # Model response publication after the durable write, then observe
+            # the cancellation deferred across that critical section.
+            release_response.set()
             with pytest.raises(asyncio.CancelledError):
                 await task
-            release_response.set()
         finally:
             harness.sessions_service.persist_compose_turn_async = real_persist_async  # type: ignore[method-assign]
         return True

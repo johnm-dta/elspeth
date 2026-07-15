@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.plugins.infrastructure.config_base import (
     DataPluginConfig,
+    LocalFileSinkConfig,
     PathConfig,
     PluginConfig,
     PluginConfigError,
@@ -224,6 +225,18 @@ class TestPathConfig:
 
         with pytest.raises(ValidationError):
             CSVConfig(path="data.csv", schema_config=DYNAMIC_SCHEMA, unknown="value")  # type: ignore[call-arg]
+
+
+class TestLocalFileSinkConfig:
+    def test_local_file_sink_config_has_collision_policy_without_headers(self) -> None:
+        schema = LocalFileSinkConfig.model_json_schema()["properties"]
+        assert "collision_policy" in schema
+        assert "headers" not in schema
+
+    def test_sink_path_config_retains_collision_policy_and_headers(self) -> None:
+        schema = SinkPathConfig.model_json_schema()["properties"]
+        assert "collision_policy" in schema
+        assert "headers" in schema
 
 
 class TestPluginConfigInheritance:

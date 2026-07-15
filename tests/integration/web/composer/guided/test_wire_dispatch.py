@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import HTTPException
 
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnResponse, TurnType
@@ -29,6 +30,7 @@ from elspeth.web.composer.guided.steps import (
 )
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions.routes._helpers import _dispatch_guided_respond, _summarize_guided_response
 from tests.fixtures.stores import MockPayloadStore
 
@@ -68,15 +70,22 @@ def _proposal() -> ChainProposal:
     )
 
 
+def _trained_catalog() -> PolicyCatalogView:
+    catalog = create_catalog_service()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return PolicyCatalogView.for_trained_operator(catalog, snapshot)
+
+
 def _step3_ready_session() -> tuple[CompositionState, GuidedSession, Any, MockPayloadStore]:
     state = _empty_state()
     session = GuidedSession.initial(profile=TUTORIAL_PROFILE)
-    catalog = create_catalog_service()
+    catalog = _trained_catalog()
 
     step_1 = handle_step_1_source(
         state=state,
         session=session,
         catalog=catalog,
+        plugin_snapshot=catalog.snapshot,
         resolved=SourceResolved(
             plugin="csv",
             options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
@@ -88,6 +97,7 @@ def _step3_ready_session() -> tuple[CompositionState, GuidedSession, Any, MockPa
         state=step_1.state,
         session=step_1.session,
         catalog=catalog,
+        plugin_snapshot=catalog.snapshot,
         resolved=SinkResolved(
             outputs=(
                 SinkOutputResolved(
@@ -112,7 +122,7 @@ def _wire_ready_session(*, valid: bool = True) -> tuple[CompositionState, Guided
         return (
             _empty_state(),
             replace(GuidedSession.initial(), step=GuidedStep.STEP_4_WIRE),
-            create_catalog_service(),
+            _trained_catalog(),
             MockPayloadStore(),
         )
 
@@ -122,6 +132,7 @@ def _wire_ready_session(*, valid: bool = True) -> tuple[CompositionState, Guided
         session=step3_session,
         proposal=step3_session.step_3_proposal,
         catalog=catalog,
+        plugin_snapshot=catalog.snapshot,
     )
     assert result.tool_result.success is True
     assert result.session.step is GuidedStep.STEP_4_WIRE
@@ -148,6 +159,7 @@ async def _dispatch(
         current_turn_type=current_turn_type,
         turn_response=turn_response,
         catalog=catalog,
+        plugin_snapshot=catalog.snapshot,
         recorder=recorder,
         user_id="test-user",
         data_dir=None,

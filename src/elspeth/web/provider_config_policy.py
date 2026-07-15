@@ -1,4 +1,4 @@
-"""Web-authored transform configuration policy helpers."""
+"""Web-authored provider configuration policy helpers."""
 
 from __future__ import annotations
 
@@ -35,10 +35,38 @@ LLM_RETRY_BUDGET_POLICY_ERROR: Final[str] = (
     "The LLM transform default is one hour, which can monopolize the web execution worker. "
     "Set max_capacity_retry_seconds to a small positive value or use pool_size > 1 for pooled retry handling."
 )
+AWS_S3_ENDPOINT_URL_POLICY_ERROR: Final[str] = (
+    "Web-authored aws_s3 source and sink options may not set endpoint_url. "
+    "Custom storage endpoints can redirect server-side requests to an author-chosen "
+    "destination; omit endpoint_url and use operator-controlled AWS configuration."
+)
 
 _FALSE_LITERALS: Final[frozenset[str]] = frozenset({"", "0", "false", "f", "no", "n", "off"})
 _TRUE_LITERALS: Final[frozenset[str]] = frozenset({"1", "true", "t", "yes", "y", "on"})
 _INT_ADAPTER: Final[TypeAdapter[int]] = TypeAdapter(int)
+
+
+@trust_boundary(
+    tier=3,
+    source="web-authored aws_s3 source/sink options (untrusted author-supplied mapping)",
+    source_param="options",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "non-aws_s3 plugins are ignored; omitted or explicit-null endpoint_url is allowed; "
+        "every non-null aws_s3 endpoint_url returns the static policy error; never raises"
+    ),
+    non_raising=True,
+)
+def web_aws_s3_endpoint_url_policy_error(
+    plugin: str | None,
+    options: Mapping[str, Any],
+) -> str | None:
+    """Reject non-null endpoint overrides in web-authored AWS S3 options."""
+    if plugin != "aws_s3":
+        return None
+    if options.get("endpoint_url") is None:
+        return None
+    return AWS_S3_ENDPOINT_URL_POLICY_ERROR
 
 
 @trust_boundary(

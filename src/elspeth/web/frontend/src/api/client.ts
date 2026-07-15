@@ -23,6 +23,9 @@ import type {
   CancelRunResponse,
   InlineSourceProvenance,
   PluginSchemaInfo,
+  PluginPolicyFinding,
+  PluginPolicyResponse,
+  PluginSnapshotResponse,
   PluginSummary,
   Run,
   RunDiagnostics,
@@ -102,6 +105,19 @@ function ownField(source: unknown, field: string): unknown {
 
 function firstDefined<T>(primary: T | undefined, secondary: T | undefined): T | undefined {
   return primary !== undefined ? primary : secondary;
+}
+
+function optionalResponseHeader(response: Response, name: string): string | undefined {
+  const headers = (response as unknown as { headers?: unknown }).headers;
+  if (typeof headers !== "object" || headers === null) {
+    return undefined;
+  }
+  const getHeader = (headers as { get?: unknown }).get;
+  if (typeof getHeader !== "function") {
+    return undefined;
+  }
+  const value = getHeader.call(headers, name) as unknown;
+  return typeof value === "string" ? value : undefined;
 }
 
 /**
@@ -251,6 +267,10 @@ export async function parseResponse<T>(
       provider_detail: providerDetail,
       provider_status_code: providerStatusCode,
       validation_errors: validationErrors,
+      snapshot_fingerprint: optionalResponseHeader(
+        response,
+        "X-ELSPETH-Plugin-Snapshot",
+      ),
     };
     throw error;
   }
@@ -265,7 +285,7 @@ export async function parseResponse<T>(
  * callable before login. Returns provider type and OIDC params.
  */
 export async function fetchAuthConfig(): Promise<AuthConfig> {
-  const response = await fetch("/api/auth/config");
+  const response = await fetch("/api/auth/config", { cache: "no-store" });
   return parseResponse<AuthConfig>(response);
 }
 
@@ -914,6 +934,7 @@ export interface ImportedCompositionState {
   version: number;
   is_valid: boolean;
   validation_errors: string[] | null;
+  plugin_policy_findings?: PluginPolicyFinding[];
 }
 
 /**
@@ -943,28 +964,50 @@ export async function importCompositionYaml(
 
 // ── Plugin Catalog ──────────────────────────────────────────────────────────
 
+async function parsePluginSnapshotResponse<T>(
+  response: Response,
+): Promise<PluginSnapshotResponse<T>> {
+  const data = await parseResponse<T>(response);
+  const snapshotFingerprint = response.headers.get(
+    "X-ELSPETH-Plugin-Snapshot",
+  );
+  if (snapshotFingerprint === null || snapshotFingerprint === "") {
+    throw new Error("Plugin catalog response omitted its snapshot fingerprint.");
+  }
+  return { data, snapshotFingerprint };
+}
+
+/** Fetch the current principal's immutable plugin-policy snapshot metadata. */
+export async function fetchPluginPolicy(): Promise<PluginSnapshotResponse<PluginPolicyResponse>> {
+  const response = await fetch("/api/catalog/policy", {
+    headers: authHeaders(),
+    cache: "no-store",
+  });
+  return parsePluginSnapshotResponse<PluginPolicyResponse>(response);
+}
+
 /** List available source plugins. */
-export async function listSources(): Promise<PluginSummary[]> {
+export async function listSources(): Promise<PluginSnapshotResponse<PluginSummary[]>> {
   const response = await fetch("/api/catalog/sources", {
     headers: authHeaders(),
   });
-  return parseResponse<PluginSummary[]>(response);
+  return parsePluginSnapshotResponse<PluginSummary[]>(response);
 }
 
 /** List available transform plugins. */
-export async function listTransforms(): Promise<PluginSummary[]> {
+export async function listTransforms(): Promise<PluginSnapshotResponse<PluginSummary[]>> {
   const response = await fetch("/api/catalog/transforms", {
     headers: authHeaders(),
   });
-  return parseResponse<PluginSummary[]>(response);
+  return parsePluginSnapshotResponse<PluginSummary[]>(response);
 }
 
 /** List available sink plugins. */
-export async function listSinks(): Promise<PluginSummary[]> {
+export async function listSinks(): Promise<PluginSnapshotResponse<PluginSummary[]>> {
   const response = await fetch("/api/catalog/sinks", {
     headers: authHeaders(),
   });
-  return parseResponse<PluginSummary[]>(response);
+  return parsePluginSnapshotResponse<PluginSummary[]>(response);
 }
 
 /**
@@ -975,7 +1018,7 @@ export async function listSinks(): Promise<PluginSummary[]> {
 export async function getPluginSchema(
   pluginType: "source" | "transform" | "sink",
   pluginName: string,
-): Promise<PluginSchemaInfo> {
+): Promise<PluginSnapshotResponse<PluginSchemaInfo>> {
   // REST URL uses plural path segments; the route handler translates
   // plural -> singular before calling CatalogService.
   const pluralType = `${pluginType}s`;
@@ -983,7 +1026,7 @@ export async function getPluginSchema(
     `/api/catalog/${pluralType}/${pluginName}/schema`,
     { headers: authHeaders() },
   );
-  return parseResponse<PluginSchemaInfo>(response);
+  return parsePluginSnapshotResponse<PluginSchemaInfo>(response);
 }
 
 // ── Validation & Execution ──────────────────────────────────────────────────
@@ -1328,6 +1371,13 @@ export async function deleteBlob(
 
 // ── Secrets ────────────────────────────────────────────────────────────────
 
+export const PLUGIN_CATALOG_INVALIDATED_EVENT =
+  "elspeth:plugin-catalog-invalidated";
+
+function emitPluginCatalogInvalidation(): void {
+  window.dispatchEvent(new Event(PLUGIN_CATALOG_INVALIDATED_EVENT));
+}
+
 /** List all available secret references (no values). */
 export async function listSecrets(): Promise<SecretInventoryItem[]> {
   const response = await fetch("/api/secrets", { headers: authHeaders() });
@@ -1344,7 +1394,9 @@ export async function createSecret(
     headers: authHeaders("application/json"),
     body: JSON.stringify({ name, value }),
   });
-  return parseResponse<{ name: string; scope: string; available: boolean }>(response);
+  const created = await parseResponse<{ name: string; scope: string; available: boolean }>(response);
+  emitPluginCatalogInvalidation();
+  return created;
 }
 
 /** Delete a user-scoped secret. */
@@ -1356,6 +1408,7 @@ export async function deleteSecret(name: string): Promise<void> {
   if (!response.ok) {
     await parseResponse<never>(response);
   }
+  emitPluginCatalogInvalidation();
 }
 
 // ── Interpretation events (Phase 5b) ───────────────────────────────────────

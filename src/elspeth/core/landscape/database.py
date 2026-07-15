@@ -9,12 +9,13 @@ import re
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from enum import Enum
 from pathlib import Path
 from typing import Any, NewType, Self, cast
 from urllib.parse import quote
 from weakref import WeakKeyDictionary
 
-from sqlalchemy import Connection, create_engine, event, text
+from sqlalchemy import Connection, Table, create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.engine.url import make_url
@@ -25,6 +26,7 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.url import SENSITIVE_PARAMS, _scrub_odbc_connect_value
 from elspeth.core.landscape.journal import LandscapeJournal
 from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata
+from elspeth.core.schema_shape import collect_metadata_shape_issues
 
 # Tier-1 branded Engine type.
 #
@@ -255,6 +257,19 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("run_attributions", "recorded_at"),
     ("run_attributions", "initiated_by_user_id"),
     ("run_attributions", "auth_provider_type"),
+    # Epoch 23: one optional, sanitized plugin-policy evidence row per web run.
+    ("run_web_plugin_policy", "run_id"),
+    ("run_web_plugin_policy", "schema_version"),
+    ("run_web_plugin_policy", "policy_hash"),
+    ("run_web_plugin_policy", "snapshot_hash"),
+    ("run_web_plugin_policy", "authorized_plugin_ids_json"),
+    ("run_web_plugin_policy", "available_plugin_ids_json"),
+    ("run_web_plugin_policy", "control_modes_json"),
+    ("run_web_plugin_policy", "selected_implementations_json"),
+    ("run_web_plugin_policy", "selected_profile_aliases_json"),
+    ("run_web_plugin_policy", "plugin_code_identities_json"),
+    ("run_web_plugin_policy", "binding_generation_fingerprint"),
+    ("run_web_plugin_policy", "decision_codes_json"),
     ("tokens", "expand_group_id"),
     # Added for run ownership — prevents cross-run contamination of token-linked records
     ("tokens", "run_id"),
@@ -424,6 +439,7 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
 # Use this only for exact single-column contracts. Run-scoped contracts belong in
 # _REQUIRED_COMPOSITE_FOREIGN_KEYS so stale single-column FKs cannot satisfy them.
 _REQUIRED_FOREIGN_KEYS: tuple[tuple[str, str, str], ...] = (
+    ("run_web_plugin_policy", "run_id", "runs"),
     ("validation_errors", "row_id", "rows"),
     ("preflight_results", "run_id", "runs"),
     ("scheduler_events", "run_id", "runs"),
@@ -481,6 +497,7 @@ _REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
     ("auth_events", "ck_auth_events_outcome"),
     ("auth_events", "ck_auth_events_provider"),
     ("run_attributions", "ck_run_attributions_auth_provider_type"),
+    ("run_web_plugin_policy", "ck_run_web_plugin_policy_schema_version"),
     ("run_sources", "ck_run_sources_lifecycle_state"),
     ("token_work_items", "ck_token_work_items_lease_owner_required_when_leased"),
     ("scheduler_events", "ck_scheduler_events_event_type"),
@@ -529,6 +546,81 @@ _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
 
 _ADDITIVE_INDEX_NAMES: frozenset[str] = frozenset({"ix_tokens_run_id"})
 _ADDITIVE_TABLE_NAMES: frozenset[str] = frozenset({"auth_events", "run_attributions"})
+
+
+class LandscapeSchemaShape(Enum):
+    """The non-mutating structural state of a Landscape target."""
+
+    EMPTY = "empty"
+    FOREIGN = "foreign"
+    INCOMPLETE = "incomplete"
+    DIVERGENT = "divergent"
+    MATCHES = "matches"
+
+
+def _sqlite_epoch_is_incompatible(bind: Engine | Connection) -> bool:
+    """Return whether a SQLite target carries a non-current, non-zero epoch."""
+    if bind.dialect.name != "sqlite":
+        return False
+    if isinstance(bind, Connection):
+        epoch = int(bind.exec_driver_sql("PRAGMA user_version").scalar_one())
+    else:
+        with bind.connect() as conn:
+            epoch = int(conn.exec_driver_sql("PRAGMA user_version").scalar_one())
+    return epoch not in (0, SQLITE_SCHEMA_EPOCH)
+
+
+def _missing_additive_indexes(inspector: Inspector, present_tables: set[str]) -> frozenset[str]:
+    found = {
+        str(index["name"]) for table_name in present_tables for index in inspector.get_indexes(table_name) if index.get("name") is not None
+    }
+    return _ADDITIVE_INDEX_NAMES - found
+
+
+def probe_schema_shape(bind: Engine | Connection) -> LandscapeSchemaShape:
+    """Classify a Landscape schema without creating or altering objects."""
+    from sqlalchemy import inspect
+
+    inspector = inspect(bind)
+    existing = set(inspector.get_table_names())
+    expected = set(metadata.tables)
+
+    if _sqlite_epoch_is_incompatible(bind):
+        return LandscapeSchemaShape.DIVERGENT
+    if not existing:
+        return LandscapeSchemaShape.EMPTY
+    if existing - expected:
+        return LandscapeSchemaShape.FOREIGN
+
+    present = existing & expected
+    if not present:
+        return LandscapeSchemaShape.FOREIGN
+
+    issues = collect_metadata_shape_issues(
+        inspector,
+        metadata,
+        dialect=bind.dialect,
+        present_tables=present,
+        allowed_missing_index_names=_ADDITIVE_INDEX_NAMES,
+    )
+    if issues:
+        return LandscapeSchemaShape.DIVERGENT
+
+    missing_tables = expected - existing
+    if missing_tables - _ADDITIVE_TABLE_NAMES:
+        return LandscapeSchemaShape.DIVERGENT
+
+    if missing_tables or _missing_additive_indexes(inspector, present):
+        return LandscapeSchemaShape.INCOMPLETE
+    return LandscapeSchemaShape.MATCHES
+
+
+def create_additive_indexes(bind: Engine | Connection) -> None:
+    """Create explicitly additive Landscape indexes on existing tables."""
+    for table in metadata.tables.values():
+        for index in table.indexes:
+            if index.name in _ADDITIVE_INDEX_NAMES:
+                index.create(bind, checkfirst=True)
 
 
 def _collect_missing_required_columns(inspector: Inspector) -> list[tuple[str, str]]:
@@ -587,6 +679,7 @@ class LandscapeDB:
         dump_to_jsonl_fail_on_error: bool = False,
         dump_to_jsonl_include_payloads: bool = False,
         dump_to_jsonl_payload_base_path: str | None = None,
+        **engine_kwargs: Any,
     ) -> None:
         """Initialize database connection.
 
@@ -620,21 +713,28 @@ class LandscapeDB:
                 include_payloads=dump_to_jsonl_include_payloads,
                 payload_base_path=dump_to_jsonl_payload_base_path,
             )
-        self._setup_engine()
+        self._setup_engine(**engine_kwargs)
         self._validate_schema()  # Check BEFORE create_tables
+        # Stamp only a structurally validated unstamped schema. A non-zero
+        # pre-23 Landscape is a deliberate drop/recreate boundary and is
+        # rejected here before create_all can add epoch-23 objects.
+        self._sync_sqlite_schema_epoch()
         self._create_tables()
         self._create_additive_indexes()
         self._sync_sqlite_schema_epoch()
 
-    def _setup_engine(self) -> None:
+    def _setup_engine(self, **engine_kwargs: Any) -> None:
         """Create and configure the database engine."""
         if self._passphrase is not None:
+            if engine_kwargs:
+                raise ValueError("SQLCipher construction does not accept SQLAlchemy engine kwargs")
             self._engine = self._create_sqlcipher_engine(self.connection_string, self._passphrase)
             LandscapeDB._configure_sqlite(self._engine)
         else:
             self._engine = create_engine(
                 self.connection_string,
                 echo=False,  # Set True for SQL debugging
+                **engine_kwargs,
             )
             # SQLite-specific configuration
             if self.connection_string.startswith("sqlite"):
@@ -908,10 +1008,7 @@ class LandscapeDB:
 
     def _create_additive_indexes(self) -> None:
         """Create non-gating performance indexes for existing schemas."""
-        for table in metadata.tables.values():
-            for index in table.indexes:
-                if index.name in _ADDITIVE_INDEX_NAMES:
-                    index.create(self.engine, checkfirst=True)
+        create_additive_indexes(self.engine)
 
     def _get_sqlite_schema_epoch(self) -> int:
         """Return SQLite schema epoch from PRAGMA user_version.
@@ -942,14 +1039,15 @@ class LandscapeDB:
         """Stamp compatible SQLite databases with the current schema epoch.
 
         New databases get the epoch immediately after create_all(). Existing
-        compatible databases without an epoch are upgraded in place to the
-        current stamp, which preserves a future migration path without requiring
-        a full migration framework today. Call this only from schema-managing
-        paths; read-only/inspection opens must not mutate the database.
+        compatible databases without an epoch are stamped in place. Populated
+        databases carrying an older non-zero epoch are rejected at this one-way
+        schema boundary rather than migrated implicitly. Call this only from
+        schema-managing paths; read-only/inspection opens must not mutate the
+        database.
 
         Raises:
-            SchemaCompatibilityError: If the database has a newer epoch than
-                this code version expects (prevents silent downgrades).
+            SchemaCompatibilityError: If the database has a non-zero epoch
+                different from this code version's epoch.
         """
         if not self.connection_string.startswith("sqlite"):
             return
@@ -965,6 +1063,31 @@ class LandscapeDB:
                 "Upgrade ELSPETH to open this database.\n\n"
                 f"Database: {_safe_database_descriptor(self.connection_string)}"
             )
+        if 0 < current_epoch < SQLITE_SCHEMA_EPOCH:
+            from sqlalchemy import inspect
+
+            present_landscape_tables = set(inspect(self.engine).get_table_names()) & set(metadata.tables)
+            if present_landscape_tables:
+                raise SchemaCompatibilityError(
+                    "Cannot sync schema epoch: this existing Landscape database predates "
+                    "the current one-way schema boundary. ELSPETH does not migrate it in place.\n\n"
+                    f"Database epoch: {current_epoch}\n"
+                    f"Current epoch: {SQLITE_SCHEMA_EPOCH}\n\n"
+                    "Obtain archive/export approval where retention applies, then have the "
+                    "database operator drop/recreate the Landscape database and initialize "
+                    "a fresh schema. Rolling code back over the recreated database is unsafe.\n\n"
+                    f"Database: {_safe_database_descriptor(self.connection_string)}"
+                )
+
+        if current_epoch == 0:
+            from sqlalchemy import inspect
+
+            # A genuinely fresh file is stamped only after create_all has
+            # installed the complete current shape. Existing unstamped schemas
+            # reach this point only after _validate_schema proved compatibility.
+            if not (set(inspect(self.engine).get_table_names()) & set(metadata.tables)):
+                return
+
         if current_epoch < SQLITE_SCHEMA_EPOCH:
             self._set_sqlite_schema_epoch(SQLITE_SCHEMA_EPOCH)
 
@@ -1003,6 +1126,22 @@ class LandscapeDB:
         present_landscape_tables = existing_tables & expected_tables
         schema_epoch = self._get_sqlite_schema_epoch() if self.connection_string.startswith("sqlite") else 0
 
+        epoch_incompatible = schema_epoch not in (0, SQLITE_SCHEMA_EPOCH)
+        if epoch_incompatible and not present_landscape_tables:
+            raise SchemaCompatibilityError(
+                "Landscape database schema is outdated.\n\n"
+                f"schema epoch is incompatible:\nDatabase epoch: {schema_epoch}\nCurrent epoch: {SQLITE_SCHEMA_EPOCH}\n\n"
+                f"Database: {_safe_database_descriptor(self.connection_string)}"
+            )
+
+        foreign_tables = sorted(existing_tables - expected_tables)
+        if foreign_tables:
+            raise SchemaCompatibilityError(
+                "Landscape database contains foreign tables and cannot be opened as an ELSPETH audit database.\n\n"
+                f"Unexpected tables: {', '.join(foreign_tables)}\n\n"
+                f"Database: {_safe_database_descriptor(self.connection_string)}"
+            )
+
         # If this looks like an existing Landscape database, all known tables must exist.
         # For brand-new DB files (no Landscape tables yet), creation happens in create_all().
         #
@@ -1016,7 +1155,23 @@ class LandscapeDB:
                 "Verify the database path is correct.\n\n"
                 f"Database: {_safe_database_descriptor(self.connection_string)}"
             )
-        missing_tables = sorted((expected_tables - existing_tables) - _ADDITIVE_TABLE_NAMES) if present_landscape_tables else []
+        allowed_missing_tables = frozenset() if self._require_existing_schema else _ADDITIVE_TABLE_NAMES
+        missing_tables = sorted((expected_tables - existing_tables) - allowed_missing_tables) if present_landscape_tables else []
+
+        # Some focused guard tests replace metadata with a name-only sentinel
+        # so they can isolate the legacy high-signal diagnostics. Real
+        # application metadata always contains SQLAlchemy Table objects.
+        shape_issues = (
+            collect_metadata_shape_issues(
+                inspector,
+                metadata,
+                dialect=self.engine.dialect,
+                present_tables=present_landscape_tables,
+                allowed_missing_index_names=_ADDITIVE_INDEX_NAMES,
+            )
+            if all(isinstance(table, Table) for table in metadata.tables.values())
+            else ()
+        )
 
         missing_columns = _collect_missing_required_columns(inspector)
         token_outcomes_shape_errors = _collect_token_outcomes_shape_errors(
@@ -1103,7 +1258,7 @@ class LandscapeDB:
             if not has_index:
                 missing_indexes.append((table_name, index_name))
 
-        epoch_incompatible = present_landscape_tables and schema_epoch not in (0, SQLITE_SCHEMA_EPOCH)
+        epoch_incompatible = bool(present_landscape_tables) and epoch_incompatible
 
         # Raise errors for missing columns, FKs, check constraints, indexes, or stale ADR-019 shapes.
         if (
@@ -1115,6 +1270,7 @@ class LandscapeDB:
             or forbidden_fks
             or missing_checks
             or missing_indexes
+            or shape_issues
             or epoch_incompatible
         ):
             error_parts = []
@@ -1158,6 +1314,10 @@ class LandscapeDB:
             if missing_indexes:
                 missing_indexes_str = ", ".join(f"{t}.{name}" for t, name in missing_indexes)
                 error_parts.append(f"Missing indexes: {missing_indexes_str}")
+
+            if shape_issues:
+                shape_str = "; ".join(f"{issue.subject}: expected {issue.expected!r}, observed {issue.actual!r}" for issue in shape_issues)
+                error_parts.append(f"Full metadata shape mismatches: {shape_str}")
 
             if (
                 ("token_outcomes", "completed") in missing_columns
@@ -1305,6 +1465,7 @@ class LandscapeDB:
         dump_to_jsonl_include_payloads: bool = False,
         dump_to_jsonl_payload_base_path: str | None = None,
         dump_to_jsonl_worker_suffix: str | None = None,
+        **engine_kwargs: Any,
     ) -> Self:
         """Create database from connection URL.
 
@@ -1342,6 +1503,8 @@ class LandscapeDB:
             raise ValueError("read_only=True cannot enable dump_to_jsonl")
 
         if passphrase is not None:
+            if engine_kwargs:
+                raise ValueError("SQLCipher construction does not accept SQLAlchemy engine kwargs")
             engine = cls._create_sqlcipher_engine(url, passphrase, read_only=read_only)
             cls._configure_sqlite(engine, read_only=read_only)
             if not read_only:
@@ -1349,7 +1512,7 @@ class LandscapeDB:
                 cls._verify_sqlite_pragmas(engine, url)
         else:
             engine_url = cls._sqlite_read_only_url(url) if read_only and url.startswith("sqlite") else url
-            engine = create_engine(engine_url, echo=False)
+            engine = create_engine(engine_url, echo=False, **engine_kwargs)
             # SQLite-specific configuration
             if url.startswith("sqlite"):
                 cls._configure_sqlite(engine, read_only=read_only)
@@ -1385,6 +1548,7 @@ class LandscapeDB:
         instance._validate_schema()
 
         if create_tables:
+            instance._sync_sqlite_schema_epoch()
             metadata.create_all(engine)
             instance._create_additive_indexes()
             instance._sync_sqlite_schema_epoch()

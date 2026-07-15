@@ -155,6 +155,9 @@ class _ProducerIndex:
     by_connection: Mapping[str, _Producer]
     queue_predecessors: Mapping[str, tuple[_Producer, ...]]
 
+    def __post_init__(self) -> None:
+        freeze_fields(self, "by_connection", "queue_predecessors")
+
 
 @dataclass(frozen=True, slots=True)
 class _FanoutTrace:

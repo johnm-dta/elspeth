@@ -19,13 +19,14 @@ from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import httpx
 import pytest
 
 from elspeth.contracts import Call, CallStatus, CallType
+from elspeth.contracts.audit_protocols import PluginAuditWriter
 from elspeth.contracts.events import ExternalCallCompleted
 from elspeth.core.rate_limit.registry import NoOpLimiter
 from elspeth.testing import make_pipeline_row
@@ -269,6 +270,51 @@ class TestLLMTransformTelemetryWiring:
         transform.close()
 
 
+class TestBedrockProviderTelemetryWiring:
+    """BedrockLLMProvider emits through its AuditedLLMClient."""
+
+    def test_telemetry_emitted_on_bedrock_llm_call(self) -> None:
+        from litellm.types.utils import ModelResponse, Usage
+
+        from elspeth.plugins.transforms.llm.providers.bedrock import BedrockLLMProvider
+
+        response = ModelResponse(
+            choices=[
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "classified"},
+                    "finish_reason": "stop",
+                }
+            ],
+            model="bedrock/anthropic.test-model-v1:0",
+            usage=Usage(prompt_tokens=3, completion_tokens=1, total_tokens=4),
+        )
+        events: list[Any] = []
+        provider = BedrockLLMProvider(
+            region_name=None,
+            recorder=cast(PluginAuditWriter, _ExecutionRepositoryDouble()),
+            run_id="test-run",
+            telemetry_emit=events.append,
+        )
+
+        try:
+            with patch("litellm.completion", return_value=response):
+                result = provider.execute_query(
+                    messages=[{"role": "user", "content": "classify"}],
+                    model="bedrock/anthropic.test-model-v1:0",
+                    temperature=0.0,
+                    max_tokens=16,
+                    state_id="state-001",
+                    token_id="token-001",
+                )
+        finally:
+            provider.close()
+
+        assert result.content == "classified"
+        llm_events = [event for event in events if isinstance(event, ExternalCallCompleted) and event.call_type == CallType.LLM]
+        assert len(llm_events) == 1
+
+
 class TestAzureSafetyTelemetryWiring:
     """Azure safety transforms wire telemetry_emit through to AuditedHTTPClient.
 
@@ -475,6 +521,7 @@ _KNOWN_AUDITED_CLIENT_USERS: set[str] = {
     # Wired — tested behaviorally above
     "src/elspeth/plugins/transforms/llm/transform.py",
     "src/elspeth/plugins/transforms/llm/providers/azure.py",
+    "src/elspeth/plugins/transforms/llm/providers/bedrock.py",
     "src/elspeth/plugins/transforms/llm/providers/openrouter.py",
     "src/elspeth/plugins/transforms/azure/base.py",
     "src/elspeth/plugins/transforms/azure/document_intelligence.py",

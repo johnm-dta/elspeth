@@ -386,6 +386,109 @@ def _row(snap, row_id):
     return matches[0]
 
 
+def _policy_readiness_snapshot(*, tutorial_profile: str | None, profile_usable: bool = True, required_prompt_shield: bool = False):
+    from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+    from elspeth.web.audit_readiness.service import build_plugin_policy_readiness
+    from elspeth.web.config import WebSettings
+    from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
+    from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
+    from elspeth.web.plugin_policy.profiles import RuntimeWebPluginConfig
+
+    settings = WebSettings.model_validate(
+        {
+            "composer_max_composition_turns": 4,
+            "composer_max_discovery_turns": 4,
+            "composer_timeout_seconds": 60,
+            "composer_rate_limit_per_minute": 20,
+            "shareable_link_signing_key": b"0123456789abcdef0123456789abcdef",
+        }
+    )
+    policy = compile_web_plugin_policy(
+        registry=get_shared_plugin_manager(),
+        settings=RuntimeWebPluginConfig.from_settings(settings),
+    )
+    llm_id = PluginId("transform", "llm")
+    shield_id = PluginId("transform", "azure_prompt_shield")
+    available = set(policy.authorized)
+    if required_prompt_shield:
+        available.add(shield_id)
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash=policy.policy_hash,
+        principal_scope="local:alice",
+        available=frozenset(available),
+        unavailable=(),
+        selected=(
+            (PluginCapability.LLM, llm_id),
+            (PluginCapability.PROMPT_SHIELD, shield_id if required_prompt_shield else None),
+            (PluginCapability.CONTENT_SAFETY, None),
+        ),
+        usable_profile_aliases=((llm_id, ("tutorial",) if profile_usable else ()),),
+        selected_profile_aliases=((llm_id, "tutorial" if profile_usable else None),),
+        binding_generation_fingerprint="a" * 64,
+        control_modes=(
+            (PluginCapability.PROMPT_SHIELD, ControlMode.REQUIRED if required_prompt_shield else ControlMode.RECOMMEND),
+            (PluginCapability.CONTENT_SAFETY, ControlMode.RECOMMEND),
+        ),
+    )
+    tutorial_state = _state(
+        source_plugin="json",
+        transforms=(("fetch", "web_scrape"), ("summarise", "llm"), ("minimise", "field_mapper")),
+        sinks=(("out", "json"),),
+    )
+    return build_plugin_policy_readiness(
+        policy=policy,
+        snapshot=snapshot,
+        tutorial_profile=tutorial_profile,
+        tutorial_state=tutorial_state,
+        profile_registry=None,
+    )
+
+
+def test_plugin_policy_readiness_has_separate_bounded_rows() -> None:
+    readiness = _policy_readiness_snapshot(tutorial_profile="tutorial")
+
+    assert tuple(row.id for row in readiness.rows) == (
+        "policy_compilation",
+        "required_core",
+        "local_capability_configuration",
+        "live_health",
+        "tutorial_profile",
+        "tutorial_required_control_coverage",
+    )
+    assert readiness.tutorial_ready is True
+
+
+def test_missing_tutorial_profile_is_unhealthy_without_invalidating_core() -> None:
+    readiness = _policy_readiness_snapshot(tutorial_profile=None)
+
+    rows = {row.id: row for row in readiness.rows}
+    assert rows["policy_compilation"].status == "ok"
+    assert rows["required_core"].status == "ok"
+    assert rows["tutorial_profile"].status == "error"
+    assert readiness.tutorial_ready is False
+
+
+def test_tutorial_profile_requires_principal_credential_readiness() -> None:
+    readiness = _policy_readiness_snapshot(tutorial_profile="tutorial", profile_usable=False)
+
+    rows = {row.id: row for row in readiness.rows}
+    assert rows["tutorial_profile"].status == "error"
+    assert readiness.tutorial_ready is False
+
+
+def test_tutorial_required_control_coverage_uses_policy_validator() -> None:
+    readiness = _policy_readiness_snapshot(
+        tutorial_profile="tutorial",
+        required_prompt_shield=True,
+    )
+
+    rows = {row.id: row for row in readiness.rows}
+    assert rows["tutorial_required_control_coverage"].status == "error"
+    assert "required" in rows["tutorial_required_control_coverage"].summary.lower()
+    assert readiness.tutorial_ready is False
+
+
 _OK = ValidationResult(is_valid=True, checks=[], errors=[], readiness=_ready_readiness(), semantic_contracts=[])
 
 

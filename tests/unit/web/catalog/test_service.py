@@ -4,6 +4,12 @@ from __future__ import annotations
 
 import pytest
 
+from elspeth.contracts.plugin_capabilities import (
+    CapabilityDeclaration,
+    ControlRole,
+    PluginCapability,
+    WebConfigAuthority,
+)
 from elspeth.plugins.infrastructure.manager import PluginManager
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSecretRequirement, PluginSummary
@@ -80,6 +86,26 @@ class TestListTransforms:
         transforms = catalog.list_transforms()
         assert len(transforms) > 0
 
+    def test_policy_metadata_is_closed_and_kind_qualified(self, catalog: CatalogServiceImpl) -> None:
+        transforms = {item.name: item for item in catalog.list_transforms()}
+
+        assert transforms["llm"].web_config_authority is WebConfigAuthority.OPERATOR_PROFILED
+        assert transforms["llm"].policy_capabilities == (CapabilityDeclaration(PluginCapability.LLM),)
+        assert transforms["azure_prompt_shield"].policy_capabilities == (
+            CapabilityDeclaration(
+                PluginCapability.PROMPT_SHIELD,
+                ControlRole.INPUT,
+                blocks_positive_detection=True,
+            ),
+        )
+        assert transforms["azure_content_safety"].policy_capabilities == (
+            CapabilityDeclaration(
+                PluginCapability.CONTENT_SAFETY,
+                ControlRole.OUTPUT,
+                blocks_positive_detection=True,
+            ),
+        )
+
     def test_passthrough_present(self, catalog: CatalogServiceImpl) -> None:
         transforms = catalog.list_transforms()
         names = [t.name for t in transforms]
@@ -134,6 +160,11 @@ class TestListSinks:
         sinks = catalog.list_sinks()
         names = [s.name for s in sinks]
         assert "csv" in names
+
+    def test_text_sink_present(self, catalog: CatalogServiceImpl) -> None:
+        sinks = catalog.list_sinks()
+        names = [s.name for s in sinks]
+        assert "text" in names
 
     def test_all_entries_have_sink_type(self, catalog: CatalogServiceImpl) -> None:
         sinks = catalog.list_sinks()
@@ -207,6 +238,22 @@ class TestGetSchema:
         assert info.plugin_type == "sink"
         assert isinstance(info.json_schema, dict)
 
+    def test_text_sink_schema_matches_model_json_schema(self, catalog: CatalogServiceImpl) -> None:
+        from elspeth.plugins.sinks.text_sink import TextSinkConfig
+
+        info = catalog.get_schema("sink", "text")
+        assert info.name == "text"
+        assert info.plugin_type == "sink"
+        assert info.json_schema == TextSinkConfig.model_json_schema()
+        assert {field["name"] for field in info.knob_schema["fields"]} >= {
+            "path",
+            "schema",
+            "field",
+            "encoding",
+            "mode",
+            "collision_policy",
+        }
+
     def test_null_source_returns_empty_schema(self, catalog: CatalogServiceImpl) -> None:
         info = catalog.get_schema("source", "null")
         assert info.name == "null"
@@ -218,8 +265,8 @@ class TestGetSchema:
         The LLM transform dispatches config on ``provider`` at runtime. The
         catalog must publish a Pydantic discriminated union with $defs per
         provider — not just the thin base LLMConfig whose required set is
-        missing the Azure (deployment_name/endpoint/api_key) and OpenRouter
-        (model/api_key) mandatory fields.
+        missing the Azure (deployment_name/endpoint/api_key), OpenRouter
+        (model/api_key), and keyless Bedrock (model/region_name) fields.
 
         Skipped when the ``[llm]`` extra is not installed: ``PluginManager``
         discovery silently omits plugins whose module-level imports fail
@@ -235,12 +282,13 @@ class TestGetSchema:
         info = catalog.get_schema("transform", "llm")
         schema = info.json_schema
         assert "oneOf" in schema
-        assert len(schema["oneOf"]) == 2
+        assert len(schema["oneOf"]) == 3
         assert schema["discriminator"]["propertyName"] == "provider"
-        assert set(schema["discriminator"]["mapping"].keys()) == {"azure", "openrouter"}
+        assert set(schema["discriminator"]["mapping"].keys()) == {"azure", "openrouter", "bedrock"}
         defs = schema["$defs"]
         assert "AzureOpenAIConfig" in defs
         assert "OpenRouterConfig" in defs
+        assert "BedrockConfig" in defs
         assert set(defs["AzureOpenAIConfig"]["required"]) >= {
             "deployment_name",
             "endpoint",
@@ -248,17 +296,21 @@ class TestGetSchema:
             "prompt_template",
         }
         assert set(defs["OpenRouterConfig"]["required"]) >= {"model", "api_key", "prompt_template"}
+        assert set(defs["BedrockConfig"]["required"]) >= {"model", "prompt_template", "provider"}
+        assert "region_name" in defs["BedrockConfig"]["properties"]
+        assert "api_key" not in defs["BedrockConfig"]["properties"]
 
     def test_llm_transform_summary_includes_provider_fields(self, catalog: CatalogServiceImpl) -> None:
         """Regression: bug elspeth-dcf12c061b.
 
         list_transforms()[llm].config_fields must surface provider-specific
         fields (deployment_name, endpoint, api_key, base_url, timeout_seconds,
-        model) — not just the base LLMConfig fields. Required-in-all-variants
-        is the honest summary rule: api_key and template appear in every
-        provider's required set; provider-specific required fields are marked
-        required=False because they are conditional on the discriminator
-        value, and the full schema encodes that conditionality.
+        model, region_name) — not just the base LLMConfig fields.
+        Required-in-all-variants is the honest summary rule: prompt_template
+        appears in every provider's required set, while api_key does not because
+        Bedrock uses the AWS default credential chain. Provider-specific required
+        fields are marked required=False because they are conditional on the
+        discriminator value, and the full schema encodes that conditionality.
 
         Gated on the ``[llm]`` extra for the same reason as the schema test
         above — without litellm installed, the LLM transform module fails
@@ -280,10 +332,11 @@ class TestGetSchema:
             "model",
             "base_url",
             "timeout_seconds",
+            "region_name",
         }
         required = {f.name for f in llm.config_fields if f.required}
         # Fields that are required in EVERY provider variant — honest intersection.
-        assert "api_key" in required
+        assert "api_key" not in required
         assert "prompt_template" in required
         # Fields required only for some providers must not claim universal requiredness.
         assert "deployment_name" not in required
@@ -517,7 +570,7 @@ class TestDiscriminatedFieldOrdering:
     lose ordering) fails loudly.
     """
 
-    def test_llm_fields_ordered_common_then_azure_then_openrouter(self, catalog: CatalogServiceImpl) -> None:
+    def test_llm_fields_ordered_common_then_azure_then_openrouter_then_bedrock(self, catalog: CatalogServiceImpl) -> None:
         pytest.importorskip(
             "litellm",
             reason="LLM transform requires the [llm] extra; catalog discovery skips it otherwise.",
@@ -525,15 +578,16 @@ class TestDiscriminatedFieldOrdering:
         transforms = catalog.list_transforms()
         llm = next(t for t in transforms if t.name == "llm")
         field_order = [f.name for f in llm.config_fields]
-        # ``provider`` + ``template`` are common to both variants (Azure first
-        # in _PROVIDERS) so they must precede the Azure-only and
-        # OpenRouter-only fields.
+        # Common fields precede provider-only fields; provider-only fields
+        # preserve the registry order Azure, OpenRouter, then Bedrock.
         assert field_order.index("provider") < field_order.index("deployment_name")
         assert field_order.index("provider") < field_order.index("base_url")
+        assert field_order.index("provider") < field_order.index("region_name")
         # Azure-specific fields must come before OpenRouter-only fields
         # because Azure is registered first in _PROVIDERS.
         assert field_order.index("deployment_name") < field_order.index("base_url")
         assert field_order.index("endpoint") < field_order.index("base_url")
+        assert field_order.index("base_url") < field_order.index("region_name")
 
 
 class TestOneOfRoutingPredicate:

@@ -26,6 +26,7 @@ from elspeth.web.composer.service import ComposerServiceImpl
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -75,7 +76,7 @@ def surfacer_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
         shareable_link_signing_key=b"\x00" * 32,
     )
     catalog = create_catalog_service()
-    composer_service = ComposerServiceImpl(
+    composer_service = ComposerServiceImpl.for_trained_operator(
         catalog=catalog,
         settings=settings,
         sessions_service=session_service,
@@ -99,6 +100,17 @@ def surfacer_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
     app.state.scoped_secret_resolver = None
     app.state.rate_limiter = ComposerRateLimiter(limit=100)
     app.state.catalog_service = catalog
+    # This dedicated fixture tests interpretation surfacing, not operator
+    # profiles.  Preserve its explicit trained-operator catalog while still
+    # providing the request-scoped snapshot now required by guided routes.
+    trained_snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+
+    class _FullSchemaProfiles:
+        def public_schema(self, _plugin_id, full_schema, *, available_aliases):
+            return full_schema
+
+    app.state.operator_profile_registry = _FullSchemaProfiles()
+    app.state.plugin_snapshot_factory = lambda _user: trained_snapshot
     app.state.composer_recorder = BufferingRecorder()
     app.state.composer_progress_registry = ComposerProgressRegistry()
 

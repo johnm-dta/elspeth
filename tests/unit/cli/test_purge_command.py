@@ -396,7 +396,7 @@ class TestPurgeErrorHandling:
         conn.close()
 
         assert result.exit_code == 1
-        assert "does not appear to be an ELSPETH audit database" in result.output
+        assert "contains foreign tables and cannot be opened as an ELSPETH audit database" in result.output
         assert after_tables == before_tables
         assert after_user_version == before_user_version == 0
 

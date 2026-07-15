@@ -50,6 +50,7 @@ from elspeth.plugins.infrastructure.validation import (
     get_source_config_model,
     get_transform_config_model,
 )
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.catalog.schemas import PluginSchemaInfo
 from elspeth.web.composer.protocol import ToolArgumentError
@@ -80,6 +81,7 @@ from elspeth.web.paths import (
     allowed_source_directories,
     resolve_data_path,
 )
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId, PluginUnavailableReason
 from elspeth.web.provider_config_policy import web_llm_retry_budget_policy_error, web_rag_provider_config_policy_error
 from elspeth.web.secrets.ref_policy import (
     allowed_secret_ref_fields,
@@ -868,6 +870,8 @@ def _discovery_result(state: CompositionState, data: Any) -> ToolResult:
 def _failure_result(
     state: CompositionState,
     error_msg: str,
+    *,
+    error_code: str | None = None,
 ) -> ToolResult:
     """Build a ToolResult for a failed mutation.
 
@@ -884,12 +888,15 @@ def _failure_result(
     error.
     """
     validation = _prepend_rejection_entry(state.validate(), error_msg)
+    data = {_DATA_ERROR_KEY: error_msg}
+    if error_code is not None:
+        data["error_code"] = error_code
     return ToolResult(
         success=False,
         updated_state=state,
         validation=validation,
         affected_nodes=(),
-        data={_DATA_ERROR_KEY: error_msg},
+        data=data,
     )
 
 
@@ -1235,17 +1242,49 @@ def _credential_wiring_contract_failure(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class PluginPolicyViolation:
+    error_code: PluginUnavailableReason
+    message: str
+
+
 def _validate_plugin_name(
-    catalog: CatalogService,
+    context: ToolContext,
     plugin_type: PluginKind,
     name: str,
-) -> str | None:
-    """Return an error message if the plugin name is not in the catalog, or None if valid."""
+) -> PluginPolicyViolation | None:
+    """Validate a new plugin selection against one request policy view."""
     try:
-        catalog.get_schema(plugin_type, name)
-    except (ValueError, KeyError) as exc:
-        return f"Unknown {plugin_type} plugin '{name}': {exc}"
+        plugin_id = PluginId(plugin_type, name)
+    except ValueError:
+        return PluginPolicyViolation(
+            error_code=PluginUnavailableReason.NOT_INSTALLED,
+            message=f"{plugin_type} plugin selection is unavailable ({PluginUnavailableReason.NOT_INSTALLED.value})",
+        )
+    reason = context.catalog.unavailable_reason(plugin_id)
+    if reason is not None:
+        return PluginPolicyViolation(
+            error_code=reason,
+            message=f"{plugin_type} plugin selection is unavailable ({reason.value})",
+        )
+    try:
+        context.catalog.get_schema(plugin_type, name)
+    except (ValueError, KeyError):
+        return PluginPolicyViolation(
+            error_code=PluginUnavailableReason.LOCAL_REQUIREMENT_MISSING,
+            message=f"{plugin_type} plugin selection is unavailable ({PluginUnavailableReason.LOCAL_REQUIREMENT_MISSING.value})",
+        )
     return None
+
+
+def _plugin_policy_failure(
+    state: CompositionState,
+    violation: PluginPolicyViolation,
+    *,
+    component: str | None = None,
+) -> ToolResult:
+    message = violation.message if component is None else f"{component}: {violation.message}"
+    return _failure_result(state, message, error_code=violation.error_code.value)
 
 
 def _validate_aggregation_trigger(trigger: Any) -> str | None:
@@ -1658,6 +1697,27 @@ def _missing_output_options_repair_error(
     validation_error: str | None,
 ) -> str:
     """Return an exact output-object repair hint for omitted sink options."""
+    if plugin_name == "text":
+        path_fragment = _repair_identifier_fragment(sink_name, fallback="output")
+        repair_output = {
+            "sink_name": sink_name,
+            "plugin": plugin_name,
+            "options": {
+                "path": f"outputs/{path_fragment}.txt",
+                "schema": {"mode": "observed"},
+                "field": "line_text",
+                "mode": "write",
+                "collision_policy": "auto_increment",
+            },
+            "on_write_failure": on_write_failure,
+        }
+        detail = f" Empty options were rejected: {validation_error}" if validation_error is not None else ""
+        return (
+            f"Output '{sink_name}' is missing options. For the text file sink, include path, schema, field, mode, "
+            f"and collision_policy. Use this runnable output object and replace line_text with the actual selected "
+            f"string field: {json.dumps(repair_output)}.{detail}"
+        )
+
     if plugin_name in FILE_SINK_REPAIR_EXTENSIONS:
         path_fragment = _repair_identifier_fragment(sink_name, fallback="output")
         extension = FILE_SINK_REPAIR_EXTENSIONS[plugin_name]
@@ -1762,6 +1822,32 @@ def _prevalidate_transform(plugin_name: str, options: Mapping[str, Any]) -> str 
     return _prevalidate_plugin_options("transform", plugin_name, strip_authoring_options(options))
 
 
+def _prevalidate_transform_for_context(
+    context: ToolContext,
+    plugin_name: str,
+    options: Mapping[str, Any],
+) -> str | None:
+    """Validate web-authored profile options through their ordinary resolver."""
+    authored = deep_thaw(strip_authoring_options(options))
+    plugin_id = PluginId("transform", plugin_name)
+    profiled_plugins = {candidate for candidate, _aliases in context.plugin_snapshot.usable_profile_aliases}
+    if "profile" not in authored or (plugin_name != "llm" and plugin_id not in profiled_plugins):
+        return _prevalidate_transform(plugin_name, options)
+
+    alias = authored.pop("profile")
+    if not isinstance(alias, str):
+        return f"Invalid options for transform '{plugin_name}': profile_unavailable"
+    try:
+        lowered = context.catalog.lower_operator_profile_options(
+            plugin_id,
+            alias=alias,
+            safe_options=authored,
+        )
+    except ValueError as exc:
+        return f"Invalid options for transform '{plugin_name}': {exc}"
+    return _prevalidate_transform(plugin_name, lowered.executable_options)
+
+
 def _prevalidate_sink(plugin_name: str, options: dict[str, Any]) -> str | None:
     """Pre-validate sink options."""
     return _prevalidate_plugin_options("sink", plugin_name, options)
@@ -1837,7 +1923,8 @@ class ToolContext:
             arguments that produced an LLM-authored blob.
     """
 
-    catalog: CatalogService
+    catalog: PolicyCatalogView
+    plugin_snapshot: PluginAvailabilitySnapshot
     data_dir: str | None = None
     require_data_dir_for_paths: bool = False
     session_engine: Engine | None = None

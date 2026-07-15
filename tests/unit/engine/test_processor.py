@@ -3667,7 +3667,7 @@ class TestDrainWorkQueueIterationGuard:
             return (None, [WorkItem(token=new_token, current_node_id=NodeID("source-0"))])
 
         with (
-            patch("elspeth.engine.processor.MAX_WORK_QUEUE_ITERATIONS", 3),
+            patch("elspeth.engine.scheduler_drain.MAX_WORK_QUEUE_ITERATIONS", 3),
             patch.object(processor, "_process_single_token", side_effect=infinite_loop_producer),
             pytest.raises(RuntimeError, match=r"exceeded.*iterations"),
         ):
@@ -3675,6 +3675,7 @@ class TestDrainWorkQueueIterationGuard:
                 WorkItem(token=token, current_node_id=NodeID("source-0")),
                 ctx=ctx,
             )
+        assert produced == 3
 
     def test_iteration_guard_allows_supported_batch_replicate_fanout(self) -> None:
         """The outer queue guard must not reject the largest supported legal fan-out."""
@@ -3699,7 +3700,7 @@ class TestDrainWorkQueueIterationGuard:
             return (None, [WorkItem(token=child, current_node_id=NodeID("source-0"))])
 
         with (
-            patch("elspeth.engine.processor.MAX_WORK_QUEUE_ITERATIONS", supported_copies + 2),
+            patch("elspeth.engine.scheduler_drain.MAX_WORK_QUEUE_ITERATIONS", supported_copies + 2),
             patch.object(processor, "_process_single_token", side_effect=supported_fanout_producer) as mock_process_single_token,
         ):
             results = processor._drain_work_queue(

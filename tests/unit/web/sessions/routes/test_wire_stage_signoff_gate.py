@@ -13,8 +13,11 @@ from elspeth.web.composer.guided.state_machine import GuidedSession, TerminalKin
 from elspeth.web.composer.service import AdvisorCheckpointVerdict
 from elspeth.web.sessions.routes._helpers import _dispatch_guided_respond
 from tests.unit.web.sessions.routes._wire_fixtures import (  # P3 helper; see note
+    make_trained_plugin_policy_context,
     make_wire_ready_session_and_state,
 )
+
+_POLICY_CATALOG, _PLUGIN_SNAPSHOT = make_trained_plugin_policy_context()
 
 # TUTORIAL_PROFILE carries advisor_checkpoints=False as the explicit demo
 # bypass. The gate-behavior cases below use a synthetic clone so they remain
@@ -86,7 +89,8 @@ async def _dispatch(
         current_step=GuidedStep.STEP_4_WIRE,
         current_turn_type=TurnType.CONFIRM_WIRING,
         turn_response=turn_response,
-        catalog=_CatalogPlaceholder(),
+        catalog=_POLICY_CATALOG,
+        plugin_snapshot=_PLUGIN_SNAPSHOT,
         recorder=BufferingRecorder(),
         user_id="u1",
         data_dir=None,

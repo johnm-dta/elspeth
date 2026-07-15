@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import create_mock_engine, insert, inspect, text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.pool import QueuePool
 
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, metadata, sessions_table
@@ -15,6 +16,7 @@ from elspeth.web.sessions.schema import (
     SessionSchemaError,
     _validate_current_schema,
     initialize_session_schema,
+    probe_current_schema,
 )
 
 
@@ -108,6 +110,103 @@ def test_initialize_session_schema_is_idempotent_for_current_schema() -> None:
 
     initialize_session_schema(eng)
     initialize_session_schema(eng)
+
+
+def test_probe_current_schema_accepts_engine_and_connection_for_current_schema() -> None:
+    eng = create_session_engine("sqlite:///:memory:")
+    initialize_session_schema(eng)
+
+    assert probe_current_schema(eng) is True
+    with eng.connect() as connection:
+        assert probe_current_schema(connection) is True
+
+
+def test_probe_current_schema_connection_does_not_checkout_a_second_connection() -> None:
+    eng = create_session_engine(
+        "sqlite:///:memory:",
+        poolclass=QueuePool,
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=0.01,
+    )
+    initialize_session_schema(eng)
+
+    with eng.connect() as connection:
+        assert probe_current_schema(connection) is True
+
+
+def test_probe_current_schema_true_preserves_transaction_free_connection() -> None:
+    eng = create_session_engine("sqlite:///:memory:")
+    initialize_session_schema(eng)
+
+    with eng.connect() as connection:
+        assert connection.in_transaction() is False
+        assert probe_current_schema(connection) is True
+        assert connection.in_transaction() is False
+
+
+def test_probe_current_schema_false_preserves_transaction_free_connection() -> None:
+    eng = create_session_engine("sqlite:///:memory:")
+
+    with eng.connect() as connection:
+        assert connection.in_transaction() is False
+        assert probe_current_schema(connection) is False
+        assert connection.in_transaction() is False
+
+
+def test_probe_current_schema_true_preserves_existing_transaction() -> None:
+    eng = create_session_engine("sqlite:///:memory:")
+    initialize_session_schema(eng)
+
+    with eng.connect() as connection, connection.begin() as transaction:
+        assert probe_current_schema(connection) is True
+        assert connection.in_transaction() is True
+        assert transaction.is_active is True
+
+
+def test_probe_current_schema_false_preserves_existing_transaction() -> None:
+    eng = create_session_engine("sqlite:///:memory:")
+    initialize_session_schema(eng)
+    with eng.begin() as connection:
+        connection.execute(text("DROP INDEX uq_chat_messages_tool_call_id"))
+
+    with eng.connect() as connection, connection.begin() as transaction:
+        assert probe_current_schema(connection) is False
+        assert connection.in_transaction() is True
+        assert transaction.is_active is True
+
+
+def test_probe_current_schema_returns_false_for_shape_drift() -> None:
+    eng = create_session_engine("sqlite:///:memory:")
+    initialize_session_schema(eng)
+    with eng.begin() as connection:
+        connection.execute(text("DROP INDEX uq_chat_messages_tool_call_id"))
+
+    assert probe_current_schema(eng) is False
+
+
+def test_probe_current_schema_never_creates_or_stamps_objects() -> None:
+    eng = create_session_engine("sqlite:///:memory:")
+
+    assert probe_current_schema(eng) is False
+    assert inspect(eng).get_table_names() == []
+    with eng.connect() as connection:
+        assert connection.execute(text("PRAGMA application_id")).scalar_one() == 0
+        assert connection.execute(text("PRAGMA user_version")).scalar_one() == 0
+
+
+def test_probe_current_schema_only_converts_session_schema_error(monkeypatch) -> None:
+    from elspeth.web.sessions import schema as schema_module
+
+    eng = create_session_engine("sqlite:///:memory:")
+
+    def _unexpected_failure(_bind) -> None:
+        raise RuntimeError("inspector unavailable")
+
+    monkeypatch.setattr(schema_module, "_assert_schema_sentinels", _unexpected_failure)
+
+    with pytest.raises(RuntimeError, match="inspector unavailable"):
+        probe_current_schema(eng)
 
 
 def test_initialize_session_schema_rejects_legacy_alembic_database() -> None:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import structlog
@@ -13,8 +13,11 @@ from elspeth.web.auth.models import UserIdentity
 from elspeth.web.composer.progress import ComposerProgressRegistry
 from elspeth.web.composer.state import CompositionState, OutputSpec, PipelineMetadata, SourceSpec
 from elspeth.web.config import WebSettings
+from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -65,6 +68,11 @@ def _make_app(
     app.state.execution_service = None
     app.state.composer_progress_registry = ComposerProgressRegistry()
     app.state.scoped_secret_resolver = None
+    catalog = create_catalog_service()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    app.state.catalog_service = catalog
+    app.state.operator_profile_registry = MagicMock(spec=OperatorProfileRegistry)
+    app.state.plugin_snapshot_factory = lambda _user: snapshot
     app.include_router(create_session_router())
     return app, service
 

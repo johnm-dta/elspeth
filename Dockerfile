@@ -1,7 +1,7 @@
 # Dockerfile for ELSPETH - Auditable Sense/Decide/Act Pipelines
 #
 # Multi-stage build for minimal runtime image.
-# All plugins (LLM, Azure) are bundled - activation is via configuration.
+# Default builds bundle all plugins; INSTALL_EXTRAS selects a lean plugin set.
 #
 # No default command - explicit command required (web, run, etc.).
 # Container orchestrators should configure appropriate health checks per deployment.
@@ -45,19 +45,38 @@ WORKDIR /build
 COPY pyproject.toml uv.lock ./
 COPY elspeth-lints/ ./elspeth-lints/
 
-# Create virtual environment and sync locked dependencies
-# We install the "all" extra to bundle all plugins (LLM, Azure)
+# Create virtual environment and sync the selected locked dependencies.
+# The default "all" preserves the shared GHCR/ACR image behavior.
+ARG INSTALL_EXTRAS="all"
 RUN uv venv /opt/venv && \
     . /opt/venv/bin/activate && \
-    uv sync --frozen --extra all --no-install-project --active
+    test -n "$INSTALL_EXTRAS" && \
+    set -f && \
+    set -- && \
+    for e in $INSTALL_EXTRAS; do \
+        case "$e" in [a-z0-9]*) ;; *) exit 2 ;; esac; \
+        case "$e" in *[!a-z0-9-]*) exit 2 ;; esac; \
+        set -- "$@" --extra "$e"; \
+    done && \
+    test "$#" -gt 0 && \
+    uv sync --frozen "$@" --no-install-project --active
 
 # Copy source code
 COPY src/ ./src/
 COPY README.md ./
 
-# Install project from lockfile (non-editable) with all optional dependencies
+# Install the project from the lockfile (non-editable) with the same selected extras.
 RUN . /opt/venv/bin/activate && \
-    uv sync --frozen --extra all --no-editable --active
+    test -n "$INSTALL_EXTRAS" && \
+    set -f && \
+    set -- && \
+    for e in $INSTALL_EXTRAS; do \
+        case "$e" in [a-z0-9]*) ;; *) exit 2 ;; esac; \
+        case "$e" in *[!a-z0-9-]*) exit 2 ;; esac; \
+        set -- "$@" --extra "$e"; \
+    done && \
+    test "$#" -gt 0 && \
+    uv sync --frozen "$@" --no-editable --active
 
 # Copy built SPA assets into the installed package, where app.py looks for
 # elspeth/web/frontend/dist at runtime.
@@ -107,11 +126,12 @@ EXPOSE 8451
 # No image-level HEALTHCHECK - container orchestrators should configure
 # appropriate health checks per deployment type:
 #
-#   Web containers:     elspeth health --port 8451
-#   Batch pipelines:    process exit code (no persistent health endpoint)
+#   Web task definitions: loopback GET /api/health
+#   ALB target groups:     GET /api/ready
+#   Batch tasks:           process exit code (no persistent health endpoint)
 #
-# Using `elspeth health` at image level would mark batch containers as
-# unhealthy (no web server) even when the pipeline is working correctly.
+# An image-level probe would mark batch containers unhealthy even when their
+# process-exit contract is working correctly.
 
 # Entry point is the elspeth CLI
 # Arguments after image name are passed directly to elspeth

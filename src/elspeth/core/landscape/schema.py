@@ -148,7 +148,9 @@ def _optional_enum_in_check(column_name: str, enum_type: type[StrEnum]) -> str:
 #        run_id) references rows(row_id, run_id). Populated epoch-23 SQLite
 #        databases receive a narrow, transactional tokens-table rebuild after
 #        a mismatch preflight; all older epochs retain the recreate boundary.
-SQLITE_SCHEMA_EPOCH = 24
+#   25 → Artifact logical-effect idempotency: non-null artifact keys are unique
+#        within a run, so retries converge on one immutable audit identity.
+SQLITE_SCHEMA_EPOCH = 25
 
 schema_identity_table = create_schema_identity_table(metadata)
 
@@ -1074,6 +1076,14 @@ artifacts_table = Table(
     ForeignKeyConstraint(["produced_by_state_id", "run_id"], ["node_states.state_id", "node_states.run_id"]),
     # Composite FK to nodes (node_id, run_id)
     ForeignKeyConstraint(["sink_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
+)
+Index(
+    "uq_artifacts_run_idempotency_key",
+    artifacts_table.c.run_id,
+    artifacts_table.c.idempotency_key,
+    unique=True,
+    sqlite_where=artifacts_table.c.idempotency_key.isnot(None),
+    postgresql_where=artifacts_table.c.idempotency_key.isnot(None),
 )
 
 # === Routing Events ===

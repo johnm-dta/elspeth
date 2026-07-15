@@ -3,8 +3,8 @@
 Consolidates read-only and write connection management for simple statements.
 """
 
-from collections.abc import Sequence
-from contextlib import AbstractContextManager
+from collections.abc import Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from typing import Any, Protocol
 
 from sqlalchemy import Executable
@@ -119,6 +119,18 @@ class DatabaseOps(ReadOnlyDatabaseOps):
             raise LandscapeRecordError(
                 f"execute_insert: zero rows affected{detail} — audit write failed (missing parent row or constraint violation)"
             )
+
+    @contextmanager
+    def write_connection(self) -> Iterator[Connection]:
+        """Expose one repository-owned write transaction.
+
+        Complex repository verbs use this when their correctness requires more
+        than one statement in the same write-intent transaction. Callers that
+        already own a transaction should continue passing its ``Connection``
+        through the repository API instead.
+        """
+        with self._db.write_connection() as conn:
+            yield conn
 
     def execute_update(self, stmt: Executable, *, context: str = "") -> None:
         """Execute update statement.

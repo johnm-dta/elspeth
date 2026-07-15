@@ -114,6 +114,29 @@ The current schema defines 30 tables:
 | Errors | `validation_errors`, `transform_errors` |
 | Recovery and outputs | `checkpoints`, `artifacts`, `coalesce_branch_losses` |
 
+### Artifact logical-effect identity
+
+`artifacts.idempotency_key` is an opaque logical-effect key scoped by
+`run_id`. The canonical sink contract uses
+`{run_id}:{row_id}:{sink_name}`; the repository stores and compares the key
+without parsing it. A partial unique index applies only when the key is
+non-null, so legacy callers that omit it continue to create independent
+artifact rows.
+
+Registration is one database-owned insert-or-fetch operation. A retry with
+the same `(run_id, idempotency_key)` must repeat all immutable effect fields:
+`produced_by_state_id`, `sink_node_id`, `artifact_type`, `path_or_uri`,
+`content_hash`, and `size_bytes`. An identical retry returns the first row's
+`artifact_id` and `created_at`; a divergent retry raises a Tier-1 audit
+integrity error without overwriting the durable evidence. `artifact_id` and
+`created_at` are result identity fields, not caller-controlled conflict fields.
+
+This repository contract deduplicates audit registration after an effect is
+described. Production sink execution currently omits the key, and artifact
+registration occurs after `sink.write`; preventing repeated external I/O at
+the crash seam therefore remains a caller/sink protocol concern rather than a
+claim made by this database constraint.
+
 ### Multi-source ingestion (ADR-025)
 
 `run_sources` records per-source lifecycle state, per-source schema

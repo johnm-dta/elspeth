@@ -1,15 +1,18 @@
-"""Schema epoch + required-columns + provenance-write guards (epoch 24)."""
+"""Schema epoch + required-shape + provenance-write guards (epoch 25)."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import inspect, select
+from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.schema import CreateIndex
 
 from elspeth.contracts.scheduler import SchedulerEventType
-from elspeth.core.landscape.database import _REQUIRED_COLUMNS
+from elspeth.core.landscape.database import _REQUIRED_COLUMNS, _REQUIRED_INDEXES, LandscapeDB
 from elspeth.core.landscape.schema import (
     SQLITE_SCHEMA_EPOCH,
+    artifacts_table,
     checkpoints_table,
     metadata,
     node_states_table,
@@ -21,8 +24,38 @@ from elspeth.core.landscape.schema import (
 from tests.fixtures.landscape import make_recorder_with_run
 
 
-def test_epoch_is_twenty_four() -> None:
-    assert SQLITE_SCHEMA_EPOCH == 24
+def test_epoch_is_twenty_five() -> None:
+    assert SQLITE_SCHEMA_EPOCH == 25
+
+
+def test_epoch_25_artifact_idempotency_index_is_partial_and_cross_dialect() -> None:
+    index = next(index for index in artifacts_table.indexes if index.name == "uq_artifacts_run_idempotency_key")
+
+    assert index.unique is True
+    assert [column.name for column in index.columns] == ["run_id", "idempotency_key"]
+    sqlite_ddl = str(CreateIndex(index).compile(dialect=sqlite.dialect()))
+    postgres_ddl = str(CreateIndex(index).compile(dialect=postgresql.dialect()))
+    assert "UNIQUE INDEX uq_artifacts_run_idempotency_key" in sqlite_ddl
+    assert "WHERE idempotency_key IS NOT NULL" in sqlite_ddl
+    assert "UNIQUE INDEX uq_artifacts_run_idempotency_key" in postgres_ddl
+    assert "WHERE idempotency_key IS NOT NULL" in postgres_ddl
+
+
+def test_epoch_25_artifact_idempotency_index_is_required_at_startup() -> None:
+    assert ("artifacts", "uq_artifacts_run_idempotency_key") in _REQUIRED_INDEXES
+
+
+def test_fresh_sqlite_schema_reflects_artifact_idempotency_index() -> None:
+    db = LandscapeDB.in_memory()
+    try:
+        indexes = {entry["name"]: entry for entry in inspect(db.engine).get_indexes("artifacts")}
+    finally:
+        db.close()
+
+    reflected = indexes["uq_artifacts_run_idempotency_key"]
+    assert reflected["unique"] == 1
+    assert reflected["column_names"] == ["run_id", "idempotency_key"]
+    assert "idempotency_key IS NOT NULL" in str(reflected["dialect_options"]["sqlite_where"])
 
 
 def test_epoch_23_web_plugin_policy_table_is_one_to_one_with_runs() -> None:

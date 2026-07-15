@@ -6,8 +6,13 @@ and deterministic artifact reads for export.
 
 from __future__ import annotations
 
-from sqlalchemy import select
-from sqlalchemy.engine import Connection
+from collections.abc import Mapping
+from typing import Any
+
+from sqlalchemy import Insert, select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts import Artifact
@@ -57,13 +62,16 @@ class ArtifactRepository:
             content_hash: Hash of artifact content
             size_bytes: Size of artifact in bytes
             artifact_id: Optional artifact ID
-            idempotency_key: Optional key for retry deduplication
+            idempotency_key: Optional opaque logical-effect key. Within one
+                run, an identical retry returns the original durable artifact;
+                reuse for divergent linkage or descriptor fields fails closed.
+                ``None`` preserves independent-insert behavior.
 
         Returns:
-            Artifact model
+            The durable Artifact model. On an idempotent retry this is the
+            original row, including its artifact ID and creation timestamp.
         """
         artifact_id = artifact_id or generate_id()
-        timestamp = now()
         require_no_artifact_uri_credentials(path)
 
         artifact = Artifact(
@@ -75,35 +83,123 @@ class ArtifactRepository:
             path_or_uri=path,
             content_hash=content_hash,
             size_bytes=size_bytes,
-            created_at=timestamp,
+            created_at=now(),
             idempotency_key=idempotency_key,
         )
 
-        stmt = artifacts_table.insert().values(
-            artifact_id=artifact.artifact_id,
-            run_id=artifact.run_id,
-            produced_by_state_id=artifact.produced_by_state_id,
-            sink_node_id=artifact.sink_node_id,
-            artifact_type=artifact.artifact_type,
-            path_or_uri=artifact.path_or_uri,
-            content_hash=artifact.content_hash,
-            size_bytes=artifact.size_bytes,
-            idempotency_key=artifact.idempotency_key,
-            created_at=artifact.created_at,
-        )
-        if conn is None:
-            self._ops.execute_insert(stmt)
-        else:
-            try:
-                result = conn.execute(stmt)
-            except SQLAlchemyError as exc:
-                raise LandscapeRecordError(
-                    f"register_artifact failed for state_id={state_id!r} — database rejected audit write: {type(exc).__name__}"
-                ) from exc
-            if result.rowcount == 0:
-                raise LandscapeRecordError(f"register_artifact: zero rows affected for state_id={state_id!r} — audit write failed")
+        values = {
+            "artifact_id": artifact.artifact_id,
+            "run_id": artifact.run_id,
+            "produced_by_state_id": artifact.produced_by_state_id,
+            "sink_node_id": artifact.sink_node_id,
+            "artifact_type": artifact.artifact_type,
+            "path_or_uri": artifact.path_or_uri,
+            "content_hash": artifact.content_hash,
+            "size_bytes": artifact.size_bytes,
+            "idempotency_key": artifact.idempotency_key,
+            "created_at": artifact.created_at,
+        }
+        if conn is not None:
+            return self._insert_or_fetch(conn, values)
 
-        return artifact
+        try:
+            with self._ops.write_connection() as owned_conn:
+                return self._insert_or_fetch(owned_conn, values)
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(
+                f"register_artifact failed for state_id={state_id!r} — database rejected audit write: {type(exc).__name__}"
+            ) from exc
+
+    def _insert_or_fetch(self, conn: Connection, values: Mapping[str, Any]) -> Artifact:
+        """Atomically insert a logical artifact effect or return its winner."""
+        idempotency_key = values["idempotency_key"]
+        inserted_artifact_id: str | None = None
+        try:
+            if idempotency_key is None:
+                conn.execute(artifacts_table.insert().values(**values))
+            else:
+                # RETURNING is the cross-driver authority for insert-vs-conflict:
+                # psycopg may report rowcount=-1 even when the insert succeeds.
+                inserted_artifact_id = conn.execute(
+                    self._idempotent_insert(conn, values).returning(artifacts_table.c.artifact_id)
+                ).scalar_one_or_none()
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(
+                f"register_artifact failed for state_id={values['produced_by_state_id']!r} "
+                f"— database rejected audit write: {type(exc).__name__}"
+            ) from exc
+
+        if inserted_artifact_id is not None and inserted_artifact_id != values["artifact_id"]:
+            raise LandscapeRecordError(
+                "register_artifact insert returned an artifact identity different from the proposed row; audit write is ambiguous"
+            )
+
+        if idempotency_key is None:
+            identity_query = select(artifacts_table).where(artifacts_table.c.artifact_id == values["artifact_id"])
+        else:
+            identity_query = (
+                select(artifacts_table)
+                .where(artifacts_table.c.run_id == values["run_id"])
+                .where(artifacts_table.c.idempotency_key == idempotency_key)
+            )
+        rows = conn.execute(identity_query).fetchmany(2)
+        if not rows:
+            raise LandscapeRecordError(
+                f"register_artifact could not read its durable row for state_id={values['produced_by_state_id']!r} after insert-or-fetch"
+            )
+        if len(rows) > 1:
+            raise LandscapeRecordError(
+                "register_artifact idempotency lookup matched multiple durable rows; artifact logical-effect identity is ambiguous"
+            )
+        row = rows[0]
+
+        if idempotency_key is not None:
+            self._validate_idempotent_effect(row._mapping, values)
+        return self._artifact_loader.load(row)
+
+    @staticmethod
+    def _idempotent_insert(conn: Connection, values: Mapping[str, Any]) -> Insert:
+        """Build the backend-native conflict-safe insert for the partial key."""
+        if conn.dialect.name == "sqlite":
+            return (
+                sqlite_insert(artifacts_table)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=[artifacts_table.c.run_id, artifacts_table.c.idempotency_key],
+                    index_where=artifacts_table.c.idempotency_key.is_not(None),
+                )
+            )
+        if conn.dialect.name == "postgresql":
+            return (
+                postgresql_insert(artifacts_table)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=[artifacts_table.c.run_id, artifacts_table.c.idempotency_key],
+                    index_where=artifacts_table.c.idempotency_key.is_not(None),
+                )
+            )
+        raise LandscapeRecordError(
+            f"register_artifact idempotency is unsupported for database dialect {conn.dialect.name!r}; refusing an unfenced insert"
+        )
+
+    @staticmethod
+    def _validate_idempotent_effect(existing: RowMapping, proposed: Mapping[str, Any]) -> None:
+        """Reject reuse of one logical-effect key for divergent evidence."""
+        effect_fields = (
+            "produced_by_state_id",
+            "sink_node_id",
+            "artifact_type",
+            "path_or_uri",
+            "content_hash",
+            "size_bytes",
+        )
+        mismatches = [field for field in effect_fields if existing[field] != proposed[field]]
+        if mismatches:
+            raise LandscapeRecordError(
+                "register_artifact idempotency conflict: the durable logical effect differs in "
+                + ", ".join(mismatches)
+                + "; existing artifact evidence was preserved unchanged"
+            )
 
     def get_artifacts(
         self,

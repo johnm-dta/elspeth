@@ -1228,6 +1228,211 @@ class TestRegisterArtifact:
 
         assert artifact.idempotency_key == "idem-key-1"
 
+    def test_identical_idempotent_retry_returns_original_artifact(self):
+        _db, factory = _setup_with_sink()
+        factory.execution.begin_node_state(
+            "tok-1",
+            "source-0",
+            "run-1",
+            0,
+            {"data": "test"},
+            state_id="state-1",
+        )
+        values = {
+            "run_id": "run-1",
+            "state_id": "state-1",
+            "sink_node_id": "sink-0",
+            "artifact_type": "csv",
+            "path": "/output/result.csv",
+            "content_hash": "sha256:abc",
+            "size_bytes": 512,
+            "idempotency_key": "run-1:row-1:csv_sink",
+        }
+
+        first = factory.execution.register_artifact(**values, artifact_id="artifact-first")
+        retried = factory.execution.register_artifact(**values, artifact_id="artifact-retry-proposal")
+
+        assert retried == first
+        assert retried.artifact_id == "artifact-first"
+        assert len(factory.execution.get_artifacts("run-1")) == 1
+
+    @pytest.mark.parametrize(
+        ("field", "divergent_value"),
+        [
+            ("state_id", "state-2"),
+            ("sink_node_id", "sink-1"),
+            ("artifact_type", "json"),
+            ("path", "/output/different.csv"),
+            ("content_hash", "sha256:different"),
+            ("size_bytes", 513),
+        ],
+    )
+    def test_idempotency_key_reuse_with_divergent_effect_fails_closed(self, field: str, divergent_value: str | int):
+        _db, factory = _setup_with_sink()
+        factory.data_flow.register_node(
+            run_id="run-1",
+            plugin_name="json_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0",
+            config={},
+            node_id="sink-1",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        factory.execution.begin_node_state(
+            "tok-1",
+            "source-0",
+            "run-1",
+            0,
+            {"data": "first"},
+            state_id="state-1",
+        )
+        factory.execution.begin_node_state(
+            "tok-2",
+            "source-0",
+            "run-1",
+            1,
+            {"data": "second"},
+            state_id="state-2",
+        )
+        values: dict[str, str | int] = {
+            "run_id": "run-1",
+            "state_id": "state-1",
+            "sink_node_id": "sink-0",
+            "artifact_type": "csv",
+            "path": "/output/result.csv",
+            "content_hash": "sha256:abc",
+            "size_bytes": 512,
+            "idempotency_key": "run-1:row-1:csv_sink",
+        }
+        original = factory.execution.register_artifact(
+            run_id=str(values["run_id"]),
+            state_id=str(values["state_id"]),
+            sink_node_id=str(values["sink_node_id"]),
+            artifact_type=str(values["artifact_type"]),
+            path=str(values["path"]),
+            content_hash=str(values["content_hash"]),
+            size_bytes=int(values["size_bytes"]),
+            idempotency_key=str(values["idempotency_key"]),
+        )
+        values[field] = divergent_value
+
+        with pytest.raises(AuditIntegrityError, match=field):
+            factory.execution.register_artifact(
+                run_id=str(values["run_id"]),
+                state_id=str(values["state_id"]),
+                sink_node_id=str(values["sink_node_id"]),
+                artifact_type=str(values["artifact_type"]),
+                path=str(values["path"]),
+                content_hash=str(values["content_hash"]),
+                size_bytes=int(values["size_bytes"]),
+                idempotency_key=str(values["idempotency_key"]),
+            )
+
+        assert factory.execution.get_artifacts("run-1") == [original]
+
+    def test_null_idempotency_keys_remain_independent(self):
+        _db, factory = _setup_with_sink()
+        factory.execution.begin_node_state(
+            "tok-1",
+            "source-0",
+            "run-1",
+            0,
+            {"data": "test"},
+            state_id="state-1",
+        )
+        values = {
+            "run_id": "run-1",
+            "state_id": "state-1",
+            "sink_node_id": "sink-0",
+            "artifact_type": "csv",
+            "path": "/output/result.csv",
+            "content_hash": "sha256:abc",
+            "size_bytes": 512,
+        }
+
+        first = factory.execution.register_artifact(**values)
+        second = factory.execution.register_artifact(**values)
+
+        assert first.artifact_id != second.artifact_id
+        assert len(factory.execution.get_artifacts("run-1")) == 2
+
+    def test_same_idempotency_key_is_independent_between_runs(self):
+        _db, factory = _setup_two_runs_with_batch_integrity_records()
+        values = {
+            "sink_node_id": "sink-0",
+            "artifact_type": "csv",
+            "path": "/output/result.csv",
+            "content_hash": "sha256:abc",
+            "size_bytes": 512,
+            "idempotency_key": "opaque-logical-effect",
+        }
+
+        run_a = factory.execution.register_artifact(run_id="run-A", state_id="state-A", **values)
+        run_b = factory.execution.register_artifact(run_id="run-B", state_id="state-B", **values)
+
+        assert run_a.artifact_id != run_b.artifact_id
+        assert factory.execution.get_artifacts("run-A") == [run_a]
+        assert factory.execution.get_artifacts("run-B") == [run_b]
+
+    def test_fault_before_outer_commit_rolls_back_idempotency_reservation(self):
+        db, factory = _setup_with_sink()
+        factory.execution.begin_node_state(
+            "tok-1",
+            "source-0",
+            "run-1",
+            0,
+            {"data": "test"},
+            state_id="state-1",
+        )
+        values = {
+            "run_id": "run-1",
+            "state_id": "state-1",
+            "sink_node_id": "sink-0",
+            "artifact_type": "csv",
+            "path": "/output/result.csv",
+            "content_hash": "sha256:abc",
+            "size_bytes": 512,
+            "idempotency_key": "run-1:row-1:csv_sink",
+        }
+
+        with pytest.raises(RuntimeError, match="fault before commit"), db.write_connection() as conn:
+            factory.execution.register_artifact(**values, conn=conn)
+            raise RuntimeError("fault before commit")
+
+        committed = factory.execution.register_artifact(**values)
+        assert factory.execution.get_artifacts("run-1") == [committed]
+
+    def test_retry_after_fault_after_commit_returns_committed_identity(self):
+        _db, factory = _setup_with_sink()
+        factory.execution.begin_node_state(
+            "tok-1",
+            "source-0",
+            "run-1",
+            0,
+            {"data": "test"},
+            state_id="state-1",
+        )
+        values = {
+            "run_id": "run-1",
+            "state_id": "state-1",
+            "sink_node_id": "sink-0",
+            "artifact_type": "csv",
+            "path": "/output/result.csv",
+            "content_hash": "sha256:abc",
+            "size_bytes": 512,
+            "idempotency_key": "run-1:row-1:csv_sink",
+        }
+        committed_artifact_id: str | None = None
+
+        with pytest.raises(RuntimeError, match="fault after commit"):
+            committed = factory.execution.register_artifact(**values)
+            committed_artifact_id = committed.artifact_id
+            raise RuntimeError("fault after commit before return to caller")
+
+        retried = factory.execution.register_artifact(**values)
+        assert retried.artifact_id == committed_artifact_id
+        assert factory.execution.get_artifacts("run-1") == [retried]
+
     def test_rejects_producer_state_from_different_run(self):
         """Artifacts must not be attributed to a node state from another run."""
         _db, factory = _setup_two_runs_with_batch_integrity_records()

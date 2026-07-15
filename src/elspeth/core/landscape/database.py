@@ -609,6 +609,7 @@ _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
     ("scheduler_events", "ix_scheduler_events_run_token_time"),
     ("scheduler_events", "ix_scheduler_events_work_item"),
     ("validation_errors", "ix_validation_errors_run_row"),
+    ("artifacts", "uq_artifacts_run_idempotency_key"),
     # Epoch 21: multi-worker coordination substrate (ADR-030).
     ("run_workers", "ix_run_workers_liveness"),
     ("run_coordination_events", "uq_run_coordination_events_event_id"),
@@ -818,9 +819,9 @@ class LandscapeDB:
         self._setup_engine(**engine_kwargs)
         self._migrate_sqlite_schema()
         self._validate_schema()  # Check BEFORE create_tables
-        # Stamp only a structurally validated unstamped schema. Epoch 23 has
-        # already taken the narrow epoch-24 migration above; all older non-zero
-        # epochs retain the deliberate drop/recreate boundary.
+        # Stamp only a structurally validated unstamped schema. Epochs 23 and
+        # 24 have already taken their ordered narrow migrations above; all
+        # older non-zero epochs retain the deliberate drop/recreate boundary.
         self._sync_sqlite_schema_epoch()
         self._create_tables()
         self._create_additive_indexes()

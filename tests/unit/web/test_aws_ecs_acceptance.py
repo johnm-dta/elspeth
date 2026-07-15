@@ -4627,6 +4627,23 @@ def test_orphan_sweep_counts_log_alarms_as_unapproved_survivors(tmp_path: Path) 
     assert all(client.closed for client in clients)
 
 
+def test_transaction_search_projection_accepts_aws_response_without_optional_actual_percentage() -> None:
+    assert acceptance._transaction_search_projection(
+        destination="CloudWatchLogs",
+        indexing_rules=[
+            {
+                "Name": "Default",
+                "Rule": {"Probabilistic": {"DesiredSamplingPercentage": 1.0}},
+            }
+        ],
+        spans_log_group_present=True,
+    ) == {
+        "destination": "CloudWatchLogs",
+        "indexing_rules": [{"name": "Default", "desired_sampling_percentage": 1.0}],
+        "spans_log_group_present": True,
+    }
+
+
 def test_orphan_sweep_queries_exact_retained_metric_trace_and_transaction_search_identities(tmp_path: Path) -> None:
     trace_id = f"1-12345678-{'a' * 24}"
 

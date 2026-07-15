@@ -6717,13 +6717,14 @@ def _transaction_search_projection(
         ):
             raise AcceptanceCheckError("orphan_sweep_api")
         probabilistic = rule["Probabilistic"]
-        if not isinstance(probabilistic, Mapping) or set(probabilistic) != {
-            "DesiredSamplingPercentage",
-            "ActualSamplingPercentage",
-        }:
+        if (
+            not isinstance(probabilistic, Mapping)
+            or "DesiredSamplingPercentage" not in probabilistic
+            or not set(probabilistic) <= {"DesiredSamplingPercentage", "ActualSamplingPercentage"}
+        ):
             raise AcceptanceCheckError("orphan_sweep_api")
         desired = probabilistic["DesiredSamplingPercentage"]
-        actual = probabilistic["ActualSamplingPercentage"]
+        actual = probabilistic.get("ActualSamplingPercentage")
         if type(desired) not in {int, float} or not math.isfinite(float(desired)) or not 0 <= float(desired) <= 100:
             raise AcceptanceCheckError("orphan_sweep_api")
         if actual is not None and (type(actual) not in {int, float} or not math.isfinite(float(actual)) or not 0 <= float(actual) <= 100):

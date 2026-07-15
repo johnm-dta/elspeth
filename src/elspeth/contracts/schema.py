@@ -455,7 +455,7 @@ class SchemaConfig:
     """
 
     mode: Literal["fixed", "flexible", "observed"]
-    fields: tuple[FieldDefinition, ...] | None
+    fields: tuple[FieldDefinition, ...] | None = None
     guaranteed_fields: tuple[str, ...] | None = None
     required_fields: tuple[str, ...] | None = None
     audit_fields: tuple[str, ...] | None = None

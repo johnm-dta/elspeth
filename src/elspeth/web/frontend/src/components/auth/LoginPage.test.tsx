@@ -137,55 +137,58 @@ describe("LoginPage", () => {
       });
     });
 
-    it("scrubs and exchanges a matching callback exactly once in StrictMode", async () => {
-      window.history.replaceState(null, "", "/?code=short-code&state=callback-state#old");
-      setOidcTransaction();
-      vi.mocked(api.fetchAuthConfig).mockResolvedValue(oidcConfig());
-      vi.mocked(api.fetchCurrentUser).mockResolvedValue({
-        user_id: "oidc-user",
-        username: "oidc-user",
-        display_name: null,
-        email: null,
-        groups: [],
-      });
-      vi.mocked(fetch).mockResolvedValue(
-        new Response(JSON.stringify({ token_type: "Bearer", access_token: "access-token" }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
+    it.each(["Bearer", "bearer", "BEARER", "BeArEr"])(
+      "scrubs and exchanges a matching callback exactly once in StrictMode for token type %s",
+      async (tokenType) => {
+        window.history.replaceState(null, "", "/?code=short-code&state=callback-state#old");
+        setOidcTransaction();
+        vi.mocked(api.fetchAuthConfig).mockResolvedValue(oidcConfig());
+        vi.mocked(api.fetchCurrentUser).mockResolvedValue({
+          user_id: "oidc-user",
+          username: "oidc-user",
+          display_name: null,
+          email: null,
+          groups: [],
+        });
+        vi.mocked(fetch).mockResolvedValue(
+          new Response(JSON.stringify({ token_type: tokenType, access_token: "access-token" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
 
-      render(
-        <StrictMode>
-          <LoginPage />
-        </StrictMode>,
-      );
+        render(
+          <StrictMode>
+            <LoginPage />
+          </StrictMode>,
+        );
 
-      expect(window.location.search).toBe("");
-      expect(window.location.hash).toBe("");
-      expect(sessionStorage.getItem("oidc_transaction")).toBeNull();
-      await waitFor(() => expect(useAuthStore.getState().token).toBe("access-token"));
-      expect(fetch).toHaveBeenCalledTimes(1);
-      const [endpoint, options] = vi.mocked(fetch).mock.calls[0];
-      expect(endpoint).toBe(oidcConfig().token_endpoint);
-      expect(options).toMatchObject({
-        method: "POST",
-        credentials: "omit",
-        redirect: "error",
-        cache: "no-store",
-        referrerPolicy: "no-referrer",
-      });
-      const form = new URLSearchParams(String(options?.body));
-      expect(Object.fromEntries(form)).toEqual({
-        grant_type: "authorization_code",
-        code: "short-code",
-        client_id: "public-client-id",
-        redirect_uri: window.location.origin + "/",
-        code_verifier: "v".repeat(64),
-      });
-      expect(localStorage.getItem("auth_token")).toBe("access-token");
-      expect(localStorage.getItem("refresh_token")).toBeNull();
-    });
+        expect(window.location.search).toBe("");
+        expect(window.location.hash).toBe("");
+        expect(sessionStorage.getItem("oidc_transaction")).toBeNull();
+        await waitFor(() => expect(useAuthStore.getState().token).toBe("access-token"));
+        expect(fetch).toHaveBeenCalledTimes(1);
+        const [endpoint, options] = vi.mocked(fetch).mock.calls[0];
+        expect(endpoint).toBe(oidcConfig().token_endpoint);
+        expect(options).toMatchObject({
+          method: "POST",
+          credentials: "omit",
+          redirect: "error",
+          cache: "no-store",
+          referrerPolicy: "no-referrer",
+        });
+        const form = new URLSearchParams(String(options?.body));
+        expect(Object.fromEntries(form)).toEqual({
+          grant_type: "authorization_code",
+          code: "short-code",
+          client_id: "public-client-id",
+          redirect_uri: window.location.origin + "/",
+          code_verifier: "v".repeat(64),
+        });
+        expect(localStorage.getItem("auth_token")).toBe("access-token");
+        expect(localStorage.getItem("refresh_token")).toBeNull();
+      },
+    );
 
     it.each([
       ["mismatched state", { state: "different" }, "/?code=code&state=callback-state"],

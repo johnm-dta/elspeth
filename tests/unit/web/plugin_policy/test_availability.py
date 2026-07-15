@@ -186,6 +186,62 @@ def test_in_place_profile_credential_rotation_changes_snapshot_identity(scope: s
     assert "generation-two" not in after.binding_generation_fingerprint
 
 
+@pytest.mark.parametrize(
+    ("before_profile", "after_profile", "inventory"),
+    [
+        (
+            {
+                "provider": "bedrock",
+                "model": "bedrock/apac.amazon.nova-micro-v1:0",
+                "region_name": "ap-southeast-1",
+            },
+            {
+                "provider": "bedrock",
+                "model": "bedrock/apac.amazon.nova-lite-v1:0",
+                "region_name": "ap-southeast-2",
+            },
+            _Inventory(),
+        ),
+        (
+            {
+                "provider": "azure",
+                "model": "private-model",
+                "credential_scope": "server",
+                "credential_ref": "AZURE_OPENAI_API_KEY",
+                "endpoint": "https://before.openai.azure.com",
+                "deployment_name": "before-deployment",
+            },
+            {
+                "provider": "azure",
+                "model": "private-model",
+                "credential_scope": "server",
+                "credential_ref": "AZURE_OPENAI_API_KEY",
+                "endpoint": "https://after.openai.azure.com",
+                "deployment_name": "after-deployment",
+            },
+            _Inventory(
+                server=frozenset({"AZURE_OPENAI_API_KEY"}),
+                server_generations={"AZURE_OPENAI_API_KEY": "same-credential-generation"},
+            ),
+        ),
+    ],
+)
+def test_llm_operator_binding_change_changes_snapshot_identity(
+    before_profile: dict[str, object],
+    after_profile: dict[str, object],
+    inventory: _Inventory,
+) -> None:
+    before = _build(_settings(llm_profiles={"stable": before_profile}), inventory=inventory)
+    repeated = _build(_settings(llm_profiles={"stable": before_profile}), inventory=inventory)
+    after = _build(_settings(llm_profiles={"stable": after_profile}), inventory=inventory)
+
+    assert before.available == after.available
+    assert before.binding_generation_fingerprint == repeated.binding_generation_fingerprint
+    assert before.snapshot_hash == repeated.snapshot_hash
+    assert before.binding_generation_fingerprint != after.binding_generation_fingerprint
+    assert before.snapshot_hash != after.snapshot_hash
+
+
 def test_bedrock_operator_binding_change_requires_rebuild_and_changes_snapshot_identity() -> None:
     def settings(version: str) -> WebSettings:
         return _settings(

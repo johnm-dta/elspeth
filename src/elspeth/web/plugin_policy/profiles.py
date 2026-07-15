@@ -59,6 +59,10 @@ class WebLLMProfileSettings(BaseModel):
         providers = LLMTransform.discriminated_variants()[1]
         if self.provider not in providers:
             raise ValueError("profile provider is not registered")
+        if self.provider != "openrouter" and "timeout_seconds" in self.model_fields_set:
+            raise ValueError(f"{self.provider} profile does not support timeout_seconds")
+        if self.provider == "azure" and self.region_name is not None:
+            raise ValueError("azure profile does not support region_name")
         if self.provider == "bedrock":
             if self.credential_scope is not None or self.credential_ref is not None:
                 raise ValueError("Bedrock profiles use the keyless AWS credential chain")
@@ -352,25 +356,51 @@ class _LLMProfileResolver:
         for alias in self._ordered_aliases:
             profile = self._profiles[alias]
             if profile.credential_scope is None:
-                result.append(ProfileAvailability(alias=alias, credential_scope=None, usable=True))
+                result.append(
+                    ProfileAvailability(
+                        alias=alias,
+                        credential_scope=None,
+                        usable=True,
+                        generation=self._binding_generation(profile, credential_generation=None),
+                    )
+                )
                 continue
             assert profile.credential_ref is not None
-            generation = (
+            credential_generation = (
                 inventory.server_generation(profile.credential_ref)
                 if profile.credential_scope == "server"
                 else inventory.user_generation(principal, profile.credential_ref)
             )
-            usable = generation is not None
+            usable = credential_generation is not None
             result.append(
                 ProfileAvailability(
                     alias=alias,
                     credential_scope=profile.credential_scope,
                     usable=usable,
                     reason=None if usable else ProfileUnavailableReason.CREDENTIAL_MISSING,
-                    generation=generation,
+                    generation=(
+                        self._binding_generation(profile, credential_generation=credential_generation) if usable else None
+                    ),
                 )
             )
         return tuple(result)
+
+    @staticmethod
+    def _binding_generation(profile: RuntimeWebLLMProfile, *, credential_generation: str | None) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                {
+                    "provider": profile.provider,
+                    "model": profile.model,
+                    "credential_scope": profile.credential_scope,
+                    "credential_ref": profile.credential_ref,
+                    "provider_options": dict(profile.provider_options),
+                    "credential_generation": credential_generation,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
 
     def check_local_requirements(self, alias: str) -> LocalRequirementResult:
         return LocalRequirementResult(available=alias in self._profiles)

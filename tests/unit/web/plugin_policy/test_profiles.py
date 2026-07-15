@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import FrozenInstanceError
 
 import pytest
+from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from elspeth.contracts.freeze import deep_thaw
@@ -33,6 +34,39 @@ def test_openrouter_profile_requires_explicit_scoped_credential() -> None:
         _settings(llm_profiles={"tutorial": {"provider": "openrouter", "model": "openai/gpt-5-mini"}})
 
 
+@pytest.mark.parametrize(
+    "profile",
+    [
+        {
+            "provider": "bedrock",
+            "model": "bedrock/apac.amazon.nova-micro-v1:0",
+            "timeout_seconds": 17.5,
+        },
+        {
+            "provider": "azure",
+            "model": "private-model",
+            "credential_scope": "server",
+            "credential_ref": "AZURE_OPENAI_API_KEY",
+            "endpoint": "https://example.openai.azure.com",
+            "deployment_name": "deployment",
+            "timeout_seconds": 60.0,
+        },
+        {
+            "provider": "azure",
+            "model": "private-model",
+            "credential_scope": "server",
+            "credential_ref": "AZURE_OPENAI_API_KEY",
+            "endpoint": "https://example.openai.azure.com",
+            "deployment_name": "deployment",
+            "region_name": "australiaeast",
+        },
+    ],
+)
+def test_llm_profiles_reject_provider_options_runtime_cannot_honor(profile: dict[str, object]) -> None:
+    with pytest.raises(ValidationError, match="does not support"):
+        _settings(llm_profiles={"invalid": profile})
+
+
 def test_bedrock_profile_is_keyless_and_uses_canonical_provider_registry() -> None:
     settings = _settings(
         llm_profiles={
@@ -51,6 +85,39 @@ def test_bedrock_profile_is_keyless_and_uses_canonical_provider_registry() -> No
     assert profile.credential_scope is None
     assert profile.credential_ref is None
     assert "credential" not in repr(profile)
+
+
+def test_llm_public_profile_schema_accepts_observed_schema_without_fields() -> None:
+    settings = _settings(
+        llm_profiles={
+            "tutorial": {
+                "provider": "bedrock",
+                "model": "bedrock/apac.amazon.nova-micro-v1:0",
+                "region_name": "ap-southeast-1",
+            }
+        },
+        tutorial_llm_profile="tutorial",
+    )
+    runtime = RuntimeWebPluginConfig.from_settings(settings)
+    policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+    profiles = OperatorProfileRegistry(policy=policy, settings=runtime)
+    public_schema = profiles.public_schema(
+        PluginId("transform", "llm"),
+        create_catalog_service().get_schema("transform", "llm"),
+        available_aliases=("tutorial",),
+    ).json_schema
+
+    options = {
+        "profile": "tutorial",
+        "prompt_template": "{{ row.text }}",
+        "schema": {
+            "mode": "observed",
+            "required_fields": ["text"],
+            "guaranteed_fields": ["text", "llm_response"],
+        },
+    }
+
+    assert list(Draft202012Validator(public_schema).iter_errors(options)) == []
 
 
 def test_runtime_conversion_is_frozen_and_canonical() -> None:
@@ -85,7 +152,6 @@ def test_profile_reprs_hide_provider_and_provider_specific_settings() -> None:
                 "endpoint": "https://private-endpoint-marker.example.com",
                 "deployment_name": "PRIVATE_DEPLOYMENT_MARKER",
                 "api_version": "PRIVATE_API_VERSION_MARKER",
-                "timeout_seconds": 47.25,
                 "max_tokens": 12345,
             }
         }
@@ -101,7 +167,6 @@ def test_profile_reprs_hide_provider_and_provider_specific_settings() -> None:
         "private-endpoint-marker",
         "PRIVATE_DEPLOYMENT_MARKER",
         "PRIVATE_API_VERSION_MARKER",
-        "47.25",
         "12345",
     ):
         assert marker not in settings_repr

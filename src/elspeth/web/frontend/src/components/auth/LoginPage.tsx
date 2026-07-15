@@ -193,7 +193,8 @@ async function readBoundedTokenResponse(response: Response): Promise<string> {
   }
   const token = decoded as Record<string, unknown>;
   if (
-    token.token_type !== "Bearer" ||
+    typeof token.token_type !== "string" ||
+    token.token_type.toLowerCase() !== "bearer" ||
     typeof token.access_token !== "string" ||
     token.access_token.trim().length === 0 ||
     new TextEncoder().encode(token.access_token).byteLength > ACCESS_TOKEN_MAX_BYTES

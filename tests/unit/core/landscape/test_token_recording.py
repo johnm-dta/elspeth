@@ -1173,6 +1173,66 @@ class TestRecordTokenOutcomeAtomicity:
             ).all()
         assert persisted_outcomes == []
 
+    def test_context_serialization_failure_opens_no_owned_write_transaction(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db, factory = _setup()
+        _row, token = _make_row(factory)
+        opened_transactions: list[bool] = []
+        original_write_connection = db.write_connection
+
+        def track_write_connection():
+            opened_transactions.append(True)
+            return original_write_connection()
+
+        monkeypatch.setattr(db, "write_connection", track_write_connection)
+
+        with pytest.raises(ValueError, match="Cannot canonicalize non-finite float"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="output",
+                context={"invalid": float("nan")},
+            )
+
+        assert opened_transactions == []
+        assert factory.data_flow.get_token_outcome(token.token_id) is None
+
+    def test_context_serialization_failure_precedes_caller_connection_validation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db, factory = _setup()
+        _row, token = _make_row(factory)
+        validation_calls: list[TokenRef] = []
+        outcomes = factory.data_flow.outcomes
+        original_ownership = outcomes._ownership.validate_token_run_ownership
+
+        def capture_ownership(ref: TokenRef, *, conn: Connection | None = None) -> None:
+            validation_calls.append(ref)
+            original_ownership(ref, conn=conn)
+
+        monkeypatch.setattr(outcomes._ownership, "validate_token_run_ownership", capture_ownership)
+
+        with db.write_connection() as caller_conn:
+            with pytest.raises(ValueError, match="Cannot canonicalize non-finite float"):
+                factory.data_flow.record_token_outcome(
+                    ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                    outcome=TerminalOutcome.SUCCESS,
+                    path=TerminalPath.DEFAULT_FLOW,
+                    sink_name="output",
+                    context={"invalid": float("nan")},
+                    conn=caller_conn,
+                )
+            persisted_outcomes = caller_conn.execute(
+                select(token_outcomes_table.c.outcome_id).where(token_outcomes_table.c.token_id == token.token_id)
+            ).all()
+
+        assert validation_calls == []
+        assert persisted_outcomes == []
+
 
 class TestGetTokenOutcome:
     """Tests for DataFlowRepository.get_token_outcome."""

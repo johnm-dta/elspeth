@@ -419,6 +419,11 @@ class TokenOutcomeRepository:
             expand_group_id=expand_group_id,
             error_hash=error_hash,
         )
+        # Canonicalization recursively normalizes caller-controlled data and
+        # can fail. Do it before taking SQLite's single writer slot (or before
+        # touching a caller-supplied transaction); only Tier-1 reads, witness
+        # locks, and the dependent INSERT belong inside the atomic boundary.
+        context_json = canonical_json(context) if context is not None else None
 
         def _record_on(active_conn: Connection) -> str:
             # Every Tier-1 read and the dependent insert use this exact
@@ -442,7 +447,6 @@ class TokenOutcomeRepository:
 
             outcome_id = f"out_{generate_id()[:12]}"
             completed = outcome is not None
-            context_json = canonical_json(context) if context is not None else None
             stmt = token_outcomes_table.insert().values(
                 outcome_id=outcome_id,
                 run_id=ref.run_id,

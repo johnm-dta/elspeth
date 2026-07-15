@@ -413,6 +413,7 @@ class NodeStateRepository:
         timestamp = now()
         terminal_values = [status.value for status in _TERMINAL_NODE_STATE_STATUSES]
         state_ids = [state_id for state_id, _output_data, _duration_ms in completions]
+        lock_state_ids = sorted(set(state_ids))
 
         params: list[dict[str, object]] = []
         for state_id, output_data, duration_ms in completions:
@@ -450,6 +451,13 @@ class NodeStateRepository:
         )
 
         def _complete_on(active_conn: Connection) -> list[Any]:
+            for state_id in lock_state_ids:
+                active_conn.execute(
+                    select(node_states_table.c.state_id)
+                    .where(node_states_table.c.state_id == state_id)
+                    .with_for_update(of=node_states_table)
+                ).fetchall()
+
             before_rows: list[Any] = []
             for i in range(0, len(state_ids), _STATE_ID_CHUNK_SIZE):
                 chunk = state_ids[i : i + _STATE_ID_CHUNK_SIZE]

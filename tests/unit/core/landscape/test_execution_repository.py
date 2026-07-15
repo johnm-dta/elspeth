@@ -348,6 +348,82 @@ class TestCompleteNodeStateCrashPaths:
 
         assert sorted(observed_select_sizes) == [1, 1, 500, 500]
 
+    @pytest.mark.parametrize("caller_owns_connection", [False, True], ids=["repository-owned", "caller-owned"])
+    def test_complete_node_states_completed_many_prelocks_unique_states_in_sorted_order(
+        self,
+        caller_owns_connection: bool,
+    ) -> None:
+        """Bulk completion locks the whole unique state set before reading or updating."""
+        db, repo, fac, tok = _make_repo_with_token()
+        fac.data_flow.create_row(
+            "run-1",
+            "source-0",
+            1,
+            {"name": "second"},
+            row_id="row-2",
+            source_row_index=1,
+            ingest_sequence=1,
+        )
+        fac.data_flow.create_token("row-2", token_id="tok-2")
+        state_b = repo.begin_node_state(tok, "sink-0", "run-1", 2, {"name": "test"}, state_id="state-b")
+        state_a = repo.begin_node_state("tok-2", "sink-0", "run-1", 2, {"name": "second"}, state_id="state-a")
+        completions = (
+            (state_b.state_id, {"completed": "b"}, 1.0),
+            (state_a.state_id, {"completed": "a"}, 1.0),
+            (state_b.state_id, {"completed": "b-duplicate"}, 2.0),
+        )
+        events: list[tuple[str, str | None]] = []
+
+        def observe_connection(conn: Any) -> None:
+            original_execute = conn.execute
+
+            def observed_execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+                if getattr(stmt, "is_select", False) and "FROM node_states" in str(stmt):
+                    if getattr(stmt, "_for_update_arg", None) is not None:
+                        compiled = stmt.compile(dialect=conn.dialect)
+                        locked_state_id = next(value for name, value in compiled.params.items() if name.startswith("state_id"))
+                        events.append(("lock", str(locked_state_id)))
+                    else:
+                        events.append(("read", None))
+                elif getattr(stmt, "is_update", False) and stmt.table is node_states_table:
+                    events.append(("update", None))
+                return original_execute(stmt, *args, **kwargs)
+
+            conn.execute = observed_execute
+
+        if caller_owns_connection:
+            with pytest.raises(LandscapeRecordError, match="affected 2 rows for 3 states"), db.write_connection() as conn:
+                observe_connection(conn)
+                repo.complete_node_states_completed_many(completions, conn=conn)
+        else:
+            original_connection = repo._db.write_connection
+
+            from contextlib import contextmanager
+
+            @contextmanager
+            def observed_write_connection():
+                with original_connection() as conn:
+                    observe_connection(conn)
+                    yield conn
+
+            repo._db.write_connection = observed_write_connection  # type: ignore[method-assign]
+            with pytest.raises(LandscapeRecordError, match="affected 2 rows for 3 states"):
+                repo.complete_node_states_completed_many(completions)
+
+        assert events[:3] == [("lock", "state-a"), ("lock", "state-b"), ("read", None)]
+        assert events.count(("lock", "state-a")) == 1
+        assert events.count(("lock", "state-b")) == 1
+        with db.read_only_connection() as conn:
+            statuses = conn.execute(
+                select(node_states_table.c.state_id, node_states_table.c.status)
+                .where(node_states_table.c.state_id.in_((state_a.state_id, state_b.state_id)))
+                .order_by(node_states_table.c.state_id)
+            ).all()
+        assert statuses == [
+            ("state-a", NodeStateStatus.OPEN.value),
+            ("state-b", NodeStateStatus.OPEN.value),
+        ]
+
     def test_batch_begin_rowcount_mismatch_rolls_back_inserted_open_states(self) -> None:
         """Rowcount mismatches must abort inside the write transaction."""
         db, repo, fac, tok = _make_repo_with_token()

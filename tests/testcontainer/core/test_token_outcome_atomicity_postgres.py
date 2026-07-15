@@ -6,10 +6,11 @@ import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Any
 
 import pytest
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import delete, event, insert, select, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.sql import Executable
@@ -23,7 +24,9 @@ from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.contracts.schema_contract import PipelineRow
+from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import artifacts_table, node_states_table, token_outcomes_table
 from elspeth.engine.executors.sink import SinkExecutor
@@ -385,3 +388,162 @@ def test_primary_sink_prelocks_tokens_before_states_so_concurrent_discard_cannot
         )
     assert outcomes == [(token_id, TerminalPath.DEFAULT_FLOW.value) for token_id in expected_lock_order]
     assert states == [NodeStateStatus.COMPLETED.value, NodeStateStatus.COMPLETED.value]
+
+
+def test_bulk_state_completion_lock_order_is_sorted_across_distinct_postgres_backends(
+    postgres_factory: tuple[LandscapeDB, RecorderFactory],
+    postgres_url: str,
+) -> None:
+    """Reversed bulk callers take state locks in one order and cannot deadlock."""
+    first_db, first_factory = postgres_factory
+    second_db = LandscapeDB(postgres_url)
+    second_factory = RecorderFactory(second_db)
+    run = first_factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+    source_id = register_test_node(first_factory.data_flow, run.run_id, "source-state-lock", node_type=NodeType.SOURCE)
+    sink_id = register_test_node(first_factory.data_flow, run.run_id, "sink-state-lock", node_type=NodeType.SINK)
+    states = []
+    for index, state_id in enumerate(("bulk-lock-state-a", "bulk-lock-state-b")):
+        data = {"value": index}
+        row = first_factory.data_flow.create_row(
+            run_id=run.run_id,
+            source_node_id=source_id,
+            row_index=index,
+            data=data,
+            source_row_index=index,
+            ingest_sequence=index,
+        )
+        token = first_factory.data_flow.create_token(row.row_id)
+        states.append(
+            first_factory.execution.begin_node_state(
+                token_id=token.token_id,
+                node_id=sink_id,
+                run_id=run.run_id,
+                step_index=0,
+                input_data=data,
+                state_id=state_id,
+            )
+        )
+
+    expected_order = tuple(sorted(state.state_id for state in states))
+    target_state_ids = set(expected_order)
+    lock_attempted = {name: threading.Event() for name in ("first", "second")}
+    first_lock_acquired = {name: threading.Event() for name in ("first", "second")}
+    release_first = threading.Event()
+    backend_pids: dict[str, int] = {}
+    lock_orders: dict[str, list[str]] = {"first": [], "second": []}
+
+    def locked_state_id(statement: str, parameters: Any) -> str | None:
+        if "FROM node_states" not in statement or "FOR UPDATE" not in statement.upper():
+            return None
+        if not isinstance(parameters, dict):
+            return None
+        matches = [value for value in parameters.values() if value in target_state_ids]
+        return str(matches[0]) if len(matches) == 1 else None
+
+    listeners: list[tuple[Any, str, Any]] = []
+
+    def install_lock_probe(name: str, db: LandscapeDB) -> None:
+        def before_cursor_execute(
+            conn: Any,
+            _cursor: Any,
+            statement: str,
+            parameters: Any,
+            _context: Any,
+            _executemany: bool,
+        ) -> None:
+            if locked_state_id(statement, parameters) is None:
+                return
+            driver_connection = conn.connection.driver_connection
+            backend_pids.setdefault(name, driver_connection.info.backend_pid)
+            lock_attempted[name].set()
+
+        def after_cursor_execute(
+            _conn: Any,
+            _cursor: Any,
+            statement: str,
+            parameters: Any,
+            _context: Any,
+            _executemany: bool,
+        ) -> None:
+            state_id = locked_state_id(statement, parameters)
+            if state_id is None:
+                return
+            lock_orders[name].append(state_id)
+            if len(lock_orders[name]) == 1:
+                first_lock_acquired[name].set()
+                if name == "first":
+                    assert release_first.wait(timeout=5), "first contender was not released after acquiring its first state lock"
+
+        event.listen(db.engine, "before_cursor_execute", before_cursor_execute)
+        event.listen(db.engine, "after_cursor_execute", after_cursor_execute)
+        listeners.extend(
+            (
+                (db.engine, "before_cursor_execute", before_cursor_execute),
+                (db.engine, "after_cursor_execute", after_cursor_execute),
+            )
+        )
+
+    install_lock_probe("first", first_db)
+    install_lock_probe("second", second_db)
+
+    first_completions = (
+        (states[1].state_id, {"winner": "first-b"}, 1.0),
+        (states[0].state_id, {"winner": "first-a"}, 1.0),
+    )
+    second_completions = tuple(reversed(first_completions))
+
+    def complete(
+        factory: RecorderFactory,
+        completions: tuple[tuple[str, dict[str, str], float], ...],
+    ) -> LandscapeRecordError | None:
+        try:
+            factory.execution.complete_node_states_completed_many(completions)
+        except LandscapeRecordError as exc:
+            return exc
+        return None
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first_future = pool.submit(complete, first_factory, first_completions)
+            assert first_lock_acquired["first"].wait(timeout=5), "first contender never acquired its first state lock"
+
+            second_future = pool.submit(complete, second_factory, second_completions)
+            assert lock_attempted["second"].wait(timeout=5), "second contender never attempted its first state lock"
+            assert backend_pids["first"] != backend_pids["second"]
+
+            deadline = monotonic() + 5
+            with first_db.engine.connect() as observer:
+                while monotonic() < deadline:
+                    wait_row = observer.exec_driver_sql(
+                        "SELECT wait_event_type, wait_event FROM pg_stat_activity WHERE pid = %s",
+                        (backend_pids["second"],),
+                    ).one()
+                    if wait_row.wait_event_type == "Lock":
+                        break
+                else:
+                    pytest.fail(f"second backend never entered a PostgreSQL lock wait; last activity={wait_row!r}")
+
+            release_first.set()
+            results = (first_future.result(timeout=10), second_future.result(timeout=10))
+    finally:
+        release_first.set()
+        for engine, identifier, listener in listeners:
+            event.remove(engine, identifier, listener)
+        second_db.engine.dispose()
+
+    assert results[0] is None
+    assert isinstance(results[1], LandscapeRecordError)
+    assert "already terminal" in str(results[1])
+    assert "40P01" not in str(results[1])
+    assert lock_orders == {"first": list(expected_order), "second": list(expected_order)}
+
+    with first_db.read_only_connection() as conn:
+        terminal_rows = conn.execute(
+            select(node_states_table.c.state_id, node_states_table.c.status, node_states_table.c.output_hash)
+            .where(node_states_table.c.state_id.in_(expected_order))
+            .order_by(node_states_table.c.state_id)
+        ).all()
+    assert terminal_rows == [
+        ("bulk-lock-state-a", NodeStateStatus.COMPLETED.value, stable_hash({"winner": "first-a"})),
+        ("bulk-lock-state-b", NodeStateStatus.COMPLETED.value, stable_hash({"winner": "first-b"})),
+    ]

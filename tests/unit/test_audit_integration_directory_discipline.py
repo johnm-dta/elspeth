@@ -45,6 +45,7 @@ REPOSITORY_AUDIT_TESTS = frozenset(
         "test_recorder_row_data.py",
         "test_recorder_runs.py",
         "test_recorder_tokens.py",
+        "test_routing_reason_atomicity.py",
         "test_schema_config_mode_serialization_roundtrip.py",
         "test_sink_required_fields_serialization_roundtrip.py",
         "test_source_guaranteed_fields_serialization_roundtrip.py",

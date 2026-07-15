@@ -155,6 +155,14 @@ class _TrackingPayloadStore(MockPayloadStore):
         return content_hash
 
 
+class _FailingPayloadStore(MockPayloadStore):
+    """Payload store whose durable write always fails."""
+
+    def store(self, content: bytes) -> str:
+        del content
+        raise OSError("injected reason-store failure")
+
+
 # ---------------------------------------------------------------------------
 # C1: begin_node_state quarantined=True repr_hash fallback
 # ---------------------------------------------------------------------------
@@ -1515,6 +1523,220 @@ class TestRecordRoutingEvent:
         payload_bytes = store.retrieve(event.reason_ref)
         assert b"row['x'] > 0" in payload_bytes
 
+    def test_supplied_reason_ref_must_resolve_to_exact_reason(self) -> None:
+        """A caller cannot attach a missing or mismatched blob to an event."""
+        store = _TrackingPayloadStore()
+        db, repo, fac, tok = _make_repo_with_token(payload_store=store)  # type: ignore[arg-type]
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        fac.data_flow.register_edge(
+            run_id="run-1",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="continue",
+            mode=RoutingMode.MOVE,
+            edge_id="edge-1",
+        )
+
+        with pytest.raises(AuditIntegrityError, match="does not match its canonical SHA-256 hash"):
+            repo.record_routing_event(
+                state.state_id,
+                "edge-1",
+                RoutingMode.MOVE,
+                reason={"condition": "x", "result": "true"},
+                reason_ref="0" * 64,
+            )
+
+        with db.connection() as conn:
+            assert conn.execute(select(routing_events_table.c.event_id)).all() == []
+
+        exact_ref = store.store(b'{"condition":"x","result":"true"}')
+        event = repo.record_routing_event(
+            state.state_id,
+            "edge-1",
+            RoutingMode.MOVE,
+            reason={"condition": "x", "result": "true"},
+            reason_ref=exact_ref,
+        )
+        assert event.reason_hash == exact_ref
+        assert event.reason_ref == exact_ref
+
+    def test_supplied_reason_ref_requires_verifying_payload_store(self) -> None:
+        """A ref cannot claim materialization when no backend can verify it."""
+        db, repo, fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        fac.data_flow.register_edge(
+            run_id="run-1",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="continue",
+            mode=RoutingMode.MOVE,
+            edge_id="edge-1",
+        )
+        reason: ConfigGateReason = {"condition": "x", "result": "true"}
+
+        with pytest.raises(AuditIntegrityError, match="requires a configured payload store"):
+            repo.record_routing_event(
+                state.state_id,
+                "edge-1",
+                RoutingMode.MOVE,
+                reason=reason,
+                reason_ref=stable_hash(reason),
+            )
+
+        with db.connection() as conn:
+            assert conn.execute(select(routing_events_table.c.event_id)).all() == []
+
+    def test_supplied_reason_ref_requires_reason_bytes(self) -> None:
+        """An unhashable opaque ref is not authoritative routing evidence."""
+        store = _TrackingPayloadStore()
+        db, repo, fac, tok = _make_repo_with_token(payload_store=store)  # type: ignore[arg-type]
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        fac.data_flow.register_edge(
+            run_id="run-1",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="continue",
+            mode=RoutingMode.MOVE,
+            edge_id="edge-1",
+        )
+
+        with pytest.raises(AuditIntegrityError, match="requires canonical reason bytes"):
+            repo.record_routing_event(
+                state.state_id,
+                "edge-1",
+                RoutingMode.MOVE,
+                reason_ref="0" * 64,
+            )
+
+        with db.connection() as conn:
+            assert conn.execute(select(routing_events_table.c.event_id)).all() == []
+
+    def test_reason_store_failure_creates_no_routing_event(self) -> None:
+        """A reason must be durable before its authoritative event can exist."""
+        store = _FailingPayloadStore()
+        db, repo, fac, tok = _make_repo_with_token(payload_store=store)  # type: ignore[arg-type]
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        fac.data_flow.register_edge(
+            run_id="run-1",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="continue",
+            mode=RoutingMode.MOVE,
+            edge_id="edge-1",
+        )
+
+        with pytest.raises(LandscapeRecordError, match="reason materialization failed"):
+            repo.record_routing_event(
+                state.state_id,
+                "edge-1",
+                RoutingMode.MOVE,
+                reason={"condition": "x", "result": "true"},
+            )
+
+        with db.connection() as conn:
+            assert conn.execute(select(routing_events_table.c.event_id)).all() == []
+
+    def test_event_insert_failure_leaves_reusable_deduplicated_reason(self) -> None:
+        """Store-first may orphan a blob, but retry must reuse its exact ref."""
+        store = _TrackingPayloadStore()
+        db, repo, fac, tok = _make_repo_with_token(payload_store=store)  # type: ignore[arg-type]
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        fac.data_flow.register_edge(
+            run_id="run-1",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="continue",
+            mode=RoutingMode.MOVE,
+            edge_id="edge-1",
+        )
+        repo.record_routing_event(
+            state.state_id,
+            "edge-1",
+            RoutingMode.MOVE,
+            event_id="occupied-event-id",
+            routing_group_id="occupied-group",
+        )
+        reason: ConfigGateReason = {"condition": "x", "result": "true"}
+        expected_ref = stable_hash(reason)
+
+        with pytest.raises(LandscapeRecordError, match="database rejected audit write"):
+            repo.record_routing_event(
+                state.state_id,
+                "edge-1",
+                RoutingMode.MOVE,
+                reason=reason,
+                event_id="occupied-event-id",
+                routing_group_id="retry-group",
+            )
+
+        assert store.exists(expected_ref)
+        with db.write_connection() as conn:
+            conn.execute(routing_events_table.delete().where(routing_events_table.c.event_id == "occupied-event-id"))
+
+        retried = repo.record_routing_event(
+            state.state_id,
+            "edge-1",
+            RoutingMode.MOVE,
+            reason=reason,
+            event_id="occupied-event-id",
+            routing_group_id="retry-group",
+        )
+
+        assert retried.reason_ref == expected_ref
+        assert store.store_calls == [expected_ref, expected_ref]
+
+    def test_response_loss_retry_returns_one_identical_routing_event(self) -> None:
+        """Repeating one decision must read back the durable event, not append."""
+        store = _TrackingPayloadStore()
+        db, repo, fac, tok = _make_repo_with_token(payload_store=store)  # type: ignore[arg-type]
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        fac.data_flow.register_edge(
+            run_id="run-1",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="continue",
+            mode=RoutingMode.MOVE,
+            edge_id="edge-1",
+        )
+        reason: ConfigGateReason = {"condition": "x", "result": "true"}
+
+        first = repo.record_routing_event(state.state_id, "edge-1", RoutingMode.MOVE, reason=reason)
+        retried = repo.record_routing_event(state.state_id, "edge-1", RoutingMode.MOVE, reason=reason)
+
+        assert retried == first
+        with db.connection() as conn:
+            rows = conn.execute(select(routing_events_table)).all()
+        assert len(rows) == 1
+        assert store.store_calls == [first.reason_ref, first.reason_ref]
+
+    def test_divergent_retry_fails_closed_and_preserves_first_decision(self) -> None:
+        """The stable retry identity must never alias two routing decisions."""
+        store = _TrackingPayloadStore()
+        db, repo, fac, tok = _make_repo_with_token(payload_store=store)  # type: ignore[arg-type]
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        for edge_id in ("edge-a", "edge-b"):
+            fac.data_flow.register_edge(
+                run_id="run-1",
+                from_node_id="transform-1",
+                to_node_id="sink-0",
+                label=edge_id,
+                mode=RoutingMode.MOVE,
+                edge_id=edge_id,
+            )
+        first_reason: ConfigGateReason = {"condition": "x", "result": "true"}
+        divergent_reason: ConfigGateReason = {"condition": "y", "result": "true"}
+        first = repo.record_routing_event(state.state_id, "edge-a", RoutingMode.MOVE, reason=first_reason)
+
+        with pytest.raises(AuditIntegrityError, match="durable event differs"):
+            repo.record_routing_event(state.state_id, "edge-b", RoutingMode.MOVE, reason=divergent_reason)
+
+        with db.connection() as conn:
+            rows = conn.execute(select(routing_events_table)).all()
+        assert len(rows) == 1
+        assert rows[0].event_id == first.event_id
+        assert rows[0].edge_id == "edge-a"
+        assert rows[0].reason_ref == stable_hash(first_reason)
+
     def test_record_routing_events_multiple(self) -> None:
         """record_routing_events records multiple routes with shared group ID."""
         _db, repo, fac, tok = _make_repo_with_token()
@@ -1546,6 +1768,35 @@ class TestRecordRoutingEvent:
         assert events[1].ordinal == 1
         # All events in a fork share the same routing_group_id
         assert events[0].routing_group_id == events[1].routing_group_id
+
+    def test_response_loss_retry_returns_one_identical_routing_group(self) -> None:
+        """A retried fork must converge on the original ordered event set."""
+        store = _TrackingPayloadStore()
+        db, repo, fac, tok = _make_repo_with_token(payload_store=store)  # type: ignore[arg-type]
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        for edge_id in ("edge-a", "edge-b"):
+            fac.data_flow.register_edge(
+                run_id="run-1",
+                from_node_id="transform-1",
+                to_node_id="sink-0",
+                label=edge_id,
+                mode=RoutingMode.COPY,
+                edge_id=edge_id,
+            )
+        routes = [
+            RoutingSpec(edge_id="edge-a", mode=RoutingMode.COPY),
+            RoutingSpec(edge_id="edge-b", mode=RoutingMode.COPY),
+        ]
+        reason: ConfigGateReason = {"condition": "fork", "result": "true"}
+
+        first = repo.record_routing_events(state.state_id, routes, reason=reason)
+        retried = repo.record_routing_events(state.state_id, routes, reason=reason)
+
+        assert retried == first
+        with db.connection() as conn:
+            rows = conn.execute(select(routing_events_table)).all()
+        assert len(rows) == 2
+        assert store.store_calls == [first[0].reason_ref, first[0].reason_ref]
 
     def test_record_routing_events_rejects_edge_from_different_run(self) -> None:
         """Batch routing writes must roll back when any route targets another run."""

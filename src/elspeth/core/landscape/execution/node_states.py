@@ -2,7 +2,7 @@
 
 Owns the ``node_states`` and ``routing_events`` audit aggregates: begin /
 complete lifecycle writes (single and batched), resume-derivation reads,
-and routing-event recording with post-insert reason materialization.
+and routing-event recording with store-first reason materialization.
 """
 
 from __future__ import annotations
@@ -10,13 +10,14 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import bindparam, func, select
+from sqlalchemy import Insert, bindparam, func, select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts import (
     CoalesceFailureReason,
-    FrameworkBugError,
     NodeState,
     NodeStateCompleted,
     NodeStateFailed,
@@ -713,13 +714,15 @@ class NodeStateRepository:
             edge_id=edge_id,
             owner="record_routing_event",
         )
-        event_id = event_id or generate_id()
-        routing_group_id = routing_group_id or generate_id()
-        reason_hash = stable_hash(reason) if reason else None
+        routing_group_id = routing_group_id or self._default_routing_group_id(state_id)
+        event_id = event_id or self._default_routing_event_id(routing_group_id, ordinal)
+        reason_hash = stable_hash(reason) if reason is not None else None
+        materialized_reason_ref = self._materialize_routing_reason_before_insert(
+            reason=reason,
+            reason_hash=reason_hash,
+            supplied_reason_ref=reason_ref,
+        )
         timestamp = now()
-        auto_reason_bytes = None
-        if reason is not None and reason_ref is None and self._payload_store is not None:
-            auto_reason_bytes = canonical_json(reason).encode("utf-8")
 
         event = RoutingEvent(
             event_id=event_id,
@@ -729,44 +732,15 @@ class NodeStateRepository:
             ordinal=ordinal,
             mode=mode,
             reason_hash=reason_hash,
-            reason_ref=reason_ref if auto_reason_bytes is None else None,
+            reason_ref=materialized_reason_ref,
             created_at=timestamp,
         )
 
-        self._ops.execute_insert(
-            routing_events_table.insert().values(
-                event_id=event.event_id,
-                state_id=event.state_id,
-                edge_id=event.edge_id,
-                run_id=run_id,
-                routing_group_id=event.routing_group_id,
-                ordinal=event.ordinal,
-                mode=event.mode,
-                reason_hash=event.reason_hash,
-                reason_ref=event.reason_ref,
-                created_at=event.created_at,
-            )
+        return self._insert_or_load_routing_event(
+            event,
+            run_id=run_id,
+            owner="record_routing_event",
         )
-
-        if auto_reason_bytes is not None:
-            materialized_reason_ref = self._materialize_routing_reason_ref_after_insert(
-                reason_bytes=auto_reason_bytes,
-                event_id=event.event_id,
-                expected_rows=1,
-            )
-            return RoutingEvent(
-                event_id=event.event_id,
-                state_id=event.state_id,
-                edge_id=event.edge_id,
-                routing_group_id=event.routing_group_id,
-                ordinal=event.ordinal,
-                mode=event.mode,
-                reason_hash=event.reason_hash,
-                reason_ref=materialized_reason_ref,
-                created_at=event.created_at,
-            )
-
-        return event
 
     def record_routing_events(
         self,
@@ -789,84 +763,37 @@ class NodeStateRepository:
         if not routes:
             return []
 
-        routing_group_id = generate_id()
-        reason_hash = stable_hash(reason) if reason else None
-        timestamp = now()
-        auto_reason_bytes = None
-        if reason is not None and self._payload_store is not None:
-            auto_reason_bytes = canonical_json(reason).encode("utf-8")
-
-        inserted_events: list[RoutingEvent] = []
-        try:
-            with self._db.write_connection() as conn:
-                route_run_ids = [
-                    self._routing_event_run_id(
-                        state_id=state_id,
-                        edge_id=route.edge_id,
-                        owner="record_routing_events",
-                        conn=conn,
-                    )
-                    for route in routes
-                ]
-                for ordinal, route in enumerate(routes):
-                    event_id = generate_id()
-                    event = RoutingEvent(
-                        event_id=event_id,
-                        state_id=state_id,
-                        edge_id=route.edge_id,
-                        routing_group_id=routing_group_id,
-                        ordinal=ordinal,
-                        mode=route.mode,  # Already RoutingMode enum from RoutingSpec
-                        reason_hash=reason_hash,
-                        reason_ref=None,
-                        created_at=timestamp,
-                    )
-
-                    result = conn.execute(
-                        routing_events_table.insert().values(
-                            event_id=event.event_id,
-                            state_id=event.state_id,
-                            edge_id=event.edge_id,
-                            run_id=route_run_ids[ordinal],
-                            routing_group_id=event.routing_group_id,
-                            ordinal=event.ordinal,
-                            mode=event.mode,
-                            reason_hash=event.reason_hash,
-                            reason_ref=event.reason_ref,
-                            created_at=event.created_at,
-                        )
-                    )
-                    if result.rowcount == 0:
-                        raise AuditIntegrityError(f"Failed to insert routing event {event_id} for state {state_id} - zero rows affected")
-
-                    inserted_events.append(event)
-        except SQLAlchemyError as exc:
-            raise LandscapeRecordError(
-                f"record_routing_events failed for state_id={state_id} — database rejected audit write: {type(exc).__name__}: {exc}"
-            ) from exc
-
-        reason_ref = None
-        if auto_reason_bytes is not None:
-            reason_ref = self._materialize_routing_reason_ref_after_insert(
-                reason_bytes=auto_reason_bytes,
-                routing_group_id=routing_group_id,
-                expected_rows=len(inserted_events),
+        route_run_ids = [
+            self._routing_event_run_id(
+                state_id=state_id,
+                edge_id=route.edge_id,
+                owner="record_routing_events",
             )
-
-        return [
-            RoutingEvent(
-                event_id=event.event_id,
-                state_id=event.state_id,
-                edge_id=event.edge_id,
-                routing_group_id=event.routing_group_id,
-                ordinal=event.ordinal,
-                mode=event.mode,
-                reason_hash=event.reason_hash,
-                reason_ref=reason_ref,
-                created_at=event.created_at,
-            )
-            for event in inserted_events
+            for route in routes
         ]
+        routing_group_id = self._default_routing_group_id(state_id)
+        reason_hash = stable_hash(reason) if reason is not None else None
+        reason_ref = self._materialize_routing_reason_before_insert(
+            reason=reason,
+            reason_hash=reason_hash,
+            supplied_reason_ref=None,
+        )
+        timestamp = now()
+        events = [
+            RoutingEvent(
+                event_id=self._default_routing_event_id(routing_group_id, ordinal),
+                state_id=state_id,
+                edge_id=route.edge_id,
+                routing_group_id=routing_group_id,
+                ordinal=ordinal,
+                mode=route.mode,
+                reason_hash=reason_hash,
+                reason_ref=reason_ref,
+                created_at=timestamp,
+            )
+            for ordinal, route in enumerate(routes)
+        ]
+        return self._insert_or_load_routing_group(events, run_ids=route_run_ids, state_id=state_id)
 
     def _routing_event_run_id(
         self,
@@ -892,37 +819,170 @@ class NodeStateRepository:
             raise LandscapeRecordError(f"{owner} requires state_id={state_id!r} and edge_id={edge_id!r} to belong to the same run")
         return str(row.state_run_id)
 
-    def _materialize_routing_reason_ref_after_insert(
+    @staticmethod
+    def _default_routing_group_id(state_id: str) -> str:
+        """Return the stable idempotency identity for one state's decision."""
+        return stable_hash({"kind": "routing_group", "state_id": state_id})
+
+    @staticmethod
+    def _default_routing_event_id(routing_group_id: str, ordinal: int) -> str:
+        """Return the stable identity for one ordinal within a decision."""
+        return stable_hash({"kind": "routing_event", "routing_group_id": routing_group_id, "ordinal": ordinal})
+
+    def _materialize_routing_reason_before_insert(
         self,
         *,
-        reason_bytes: bytes,
-        expected_rows: int,
-        event_id: str | None = None,
-        routing_group_id: str | None = None,
-    ) -> str:
-        """Store a routing reason after the event rows already exist."""
-        if self._payload_store is None:
-            raise FrameworkBugError("_materialize_routing_reason_ref_after_insert() requires a payload store")
-        if (event_id is None) == (routing_group_id is None):
-            raise FrameworkBugError("Routing reason materialization requires exactly one of event_id or routing_group_id")
-        target = event_id if event_id is not None else routing_group_id
-
+        reason: RoutingReason | None,
+        reason_hash: str | None,
+        supplied_reason_ref: str | None,
+    ) -> str | None:
+        """Durably store and verify reason bytes before an event can refer to them."""
+        if supplied_reason_ref is not None and reason is None:
+            raise AuditIntegrityError("A supplied routing reason_ref requires canonical reason bytes for verification")
+        if supplied_reason_ref is not None and self._payload_store is None:
+            raise AuditIntegrityError("A supplied routing reason_ref requires a configured payload store for verification")
+        if reason is None or self._payload_store is None:
+            return None
+        reason_bytes = canonical_json(reason).encode("utf-8")
         try:
-            reason_ref = self._payload_store.store(reason_bytes)
-            stmt = routing_events_table.update().values(reason_ref=reason_ref)
-            if event_id is not None:
-                stmt = stmt.where(routing_events_table.c.event_id == event_id)
-            else:
-                stmt = stmt.where(routing_events_table.c.routing_group_id == routing_group_id)
-
-            with self._db.write_connection() as conn:
-                result = conn.execute(stmt)
-                if result.rowcount != expected_rows:
-                    raise AuditIntegrityError(
-                        f"Routing reason ref update for {target} affected {result.rowcount} rows; expected {expected_rows}"
-                    )
+            reason_ref = supplied_reason_ref or self._payload_store.store(reason_bytes)
+            if reason_hash is None or reason_ref != reason_hash:
+                raise AuditIntegrityError("Payload store returned a routing reason ref that does not match its canonical SHA-256 hash")
+            if self._payload_store.retrieve(reason_ref) != reason_bytes:
+                raise AuditIntegrityError("Payload store readback did not match the canonical routing reason bytes")
+        except AuditIntegrityError:
+            raise
         except Exception as exc:
-            raise LandscapePostCommitError(
-                f"Routing event(s) {target} were recorded, but reason materialization failed: {type(exc).__name__}: {exc}"
-            ) from exc
+            raise LandscapeRecordError(f"Routing reason materialization failed before audit insert: {type(exc).__name__}") from exc
         return reason_ref
+
+    @staticmethod
+    def _routing_insert_statement(conn: Connection, values: dict[str, object]) -> Insert:
+        """Build a dialect-safe insert for the routing natural key."""
+        if conn.dialect.name == "postgresql":
+            # The deterministic retry row conflicts on both the primary key
+            # and (routing_group_id, ordinal). Suppress either uniqueness
+            # collision, then validate the natural-key row exactly below.
+            return postgresql_insert(routing_events_table).values(**values).on_conflict_do_nothing()
+        if conn.dialect.name == "sqlite":
+            # BEGIN IMMEDIATE serializes the pre-read and INSERT. A plain
+            # INSERT preserves the zero-row fail-closed invariant on SQLite.
+            return sqlite_insert(routing_events_table).values(**values)
+        raise LandscapeRecordError(
+            f"Routing event idempotency is unsupported for database dialect {conn.dialect.name!r}; refusing an ambiguous audit write"
+        )
+
+    @staticmethod
+    def _routing_event_values(event: RoutingEvent, *, run_id: str) -> dict[str, object]:
+        return {
+            "event_id": event.event_id,
+            "state_id": event.state_id,
+            "edge_id": event.edge_id,
+            "run_id": run_id,
+            "routing_group_id": event.routing_group_id,
+            "ordinal": event.ordinal,
+            "mode": event.mode,
+            "reason_hash": event.reason_hash,
+            "reason_ref": event.reason_ref,
+            "created_at": event.created_at,
+        }
+
+    def _load_matching_routing_event(self, row: Any, expected: RoutingEvent, *, run_id: str) -> RoutingEvent:
+        """Load an idempotent retry row or fail closed on divergent content."""
+        durable = self._routing_event_loader.load(row)
+        if (
+            durable.event_id != expected.event_id
+            or durable.state_id != expected.state_id
+            or durable.edge_id != expected.edge_id
+            or str(row.run_id) != run_id
+            or durable.routing_group_id != expected.routing_group_id
+            or durable.ordinal != expected.ordinal
+            or durable.mode != expected.mode
+            or durable.reason_hash != expected.reason_hash
+            or durable.reason_ref != expected.reason_ref
+        ):
+            raise AuditIntegrityError(
+                f"Routing decision conflict for group={expected.routing_group_id!r} ordinal={expected.ordinal}: "
+                "the durable event differs from the retried decision"
+            )
+        return durable
+
+    def _insert_or_load_routing_event(self, event: RoutingEvent, *, run_id: str, owner: str) -> RoutingEvent:
+        """Insert one event, or return the exact durable row on retry."""
+        key_query = select(routing_events_table).where(
+            routing_events_table.c.routing_group_id == event.routing_group_id,
+            routing_events_table.c.ordinal == event.ordinal,
+        )
+        try:
+            with self._db.write_connection() as conn:
+                existing = conn.execute(key_query).fetchone()
+                if existing is not None:
+                    return self._load_matching_routing_event(existing, event, run_id=run_id)
+
+                result = conn.execute(self._routing_insert_statement(conn, self._routing_event_values(event, run_id=run_id)))
+                if result.rowcount == 1:
+                    inserted = conn.execute(key_query).fetchone()
+                    if inserted is None:
+                        raise AuditIntegrityError(f"Routing event {event.event_id} became unreadable immediately after insert")
+                    return self._load_matching_routing_event(inserted, event, run_id=run_id)
+                if conn.dialect.name != "postgresql":
+                    raise AuditIntegrityError(
+                        f"Failed to insert routing event {event.event_id} for state {event.state_id} - zero rows affected"
+                    )
+                existing = conn.execute(key_query).fetchone()
+                if existing is None:
+                    raise AuditIntegrityError(
+                        f"Failed to insert routing event {event.event_id} for state {event.state_id} - zero rows affected"
+                    )
+                return self._load_matching_routing_event(existing, event, run_id=run_id)
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(
+                f"{owner} failed for state_id={event.state_id} — database rejected audit write: {type(exc).__name__}"
+            ) from exc
+
+    def _insert_or_load_routing_group(
+        self,
+        events: list[RoutingEvent],
+        *,
+        run_ids: list[str],
+        state_id: str,
+    ) -> list[RoutingEvent]:
+        """Atomically insert a fork, or return its exact durable event set."""
+        routing_group_id = events[0].routing_group_id
+        group_query = (
+            select(routing_events_table)
+            .where(routing_events_table.c.routing_group_id == routing_group_id)
+            .order_by(routing_events_table.c.ordinal)
+        )
+        try:
+            with self._db.write_connection() as conn:
+                existing = list(conn.execute(group_query).fetchall())
+                if existing:
+                    if len(existing) != len(events):
+                        raise AuditIntegrityError(
+                            f"Routing decision conflict for group={routing_group_id!r}: durable route count differs from retry"
+                        )
+                    return [
+                        self._load_matching_routing_event(row, event, run_id=run_ids[index])
+                        for index, (row, event) in enumerate(zip(existing, events, strict=True))
+                    ]
+
+                for event, run_id in zip(events, run_ids, strict=True):
+                    result = conn.execute(self._routing_insert_statement(conn, self._routing_event_values(event, run_id=run_id)))
+                    if result.rowcount == 0 and conn.dialect.name != "postgresql":
+                        raise AuditIntegrityError(
+                            f"Failed to insert routing event {event.event_id} for state {state_id} - zero rows affected"
+                        )
+                durable_rows = list(conn.execute(group_query).fetchall())
+                if len(durable_rows) != len(events):
+                    raise AuditIntegrityError(
+                        f"Routing decision conflict for group={routing_group_id!r}: durable route count differs from write"
+                    )
+                return [
+                    self._load_matching_routing_event(row, event, run_id=run_ids[index])
+                    for index, (row, event) in enumerate(zip(durable_rows, events, strict=True))
+                ]
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(
+                f"record_routing_events failed for state_id={state_id} — database rejected audit write: {type(exc).__name__}"
+            ) from exc

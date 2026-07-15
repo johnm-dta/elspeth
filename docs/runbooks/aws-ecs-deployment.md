@@ -460,7 +460,7 @@ verify_tf_binding() (
     printf '%s\n' 'terraform_binding_schema_invalid' >&2
     exit 1
   }
-  binding_hash=$(jq -cS . "$binding_file" 2>/dev/null | sha256sum | awk '{print $1}') || {
+  binding_hash=$(jq -cjS . "$binding_file" 2>/dev/null | sha256sum | awk '{print $1}') || {
     printf '%s\n' 'terraform_binding_hash_invalid' >&2
     exit 1
   }
@@ -1457,7 +1457,7 @@ countersigns it. Set `SCENARIO_A_COMPATIBILITY_RECORD_FILE` and
   "previous_image_digest": "sha256:64-lowercase-hex",
   "previous_task_definition": "exact-previous-task-definition-arn",
   "rollback_doctor_task_definition": "exact-rollback-doctor-task-definition-arn",
-  "previous_package_version": "0.7.1",
+  "previous_package_version": "0.7.0",
   "schema_facts": {
     "candidate": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": true},
     "previous": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": true},

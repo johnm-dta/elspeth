@@ -324,6 +324,8 @@ _GATE_LEDGER_GET_FIELDS = frozenset(
 )
 _TERMINAL_GATE_CHECK_ID = "cleanup"
 _APPLICATION_SCENARIO_IDS = frozenset({"A", "B"})
+_CANDIDATE_PACKAGE_VERSION = "0.7.1"
+_ROLLBACK_PACKAGE_VERSION = "0.7.0"
 _INFRASTRUCTURE_APPROVAL_SCOPES = frozenset({"A", "B", "bootstrap"})
 SCENARIO_ASSIGNMENT_NAMES = (
     "ACTIVE_SCENARIO_ID",
@@ -7609,12 +7611,12 @@ def validate_compatibility_record(
         or record["candidate_image_digest"] != ecr["candidate_digest"]
         or record["candidate_task_definition"] != values["CANDIDATE_TASK_DEFINITION"]
         or record["candidate_doctor_task_definition"] != values["DOCTOR_TASK_DEFINITION"]
-        or record["candidate_package_version"] != "0.7.1"
+        or record["candidate_package_version"] != _CANDIDATE_PACKAGE_VERSION
         or record["previous_source_sha"] != previous_source_sha
         or record["previous_image_digest"] != previous_digest
         or record["previous_task_definition"] != previous
         or record["rollback_doctor_task_definition"] != rollback_doctor
-        or record["previous_package_version"] != ("0.7.1" if scenario_id == "B" else "")
+        or record["previous_package_version"] != (_ROLLBACK_PACKAGE_VERSION if scenario_id == "B" else "")
         or record["schema_facts"] != expected_schema_facts
         or record["decision"] != "approved"
         or record["forward_compatible"] is not True
@@ -7646,12 +7648,12 @@ def validate_compatibility_record(
         "candidate_image_digest": ecr["candidate_digest"],
         "candidate_task_definition_sha256": _sha256(cast(str, values["CANDIDATE_TASK_DEFINITION"]).encode()),
         "candidate_doctor_task_definition_sha256": _sha256(cast(str, values["DOCTOR_TASK_DEFINITION"]).encode()),
-        "candidate_package_version": "0.7.1",
+        "candidate_package_version": _CANDIDATE_PACKAGE_VERSION,
         "previous_source_sha": previous_source_sha or None,
         "previous_image_digest": previous_digest or None,
         "previous_task_definition_sha256": _sha256(cast(str, previous).encode()) if previous else None,
         "rollback_doctor_task_definition_sha256": _sha256(cast(str, rollback_doctor).encode()) if rollback_doctor else None,
-        "previous_package_version": "0.7.1" if scenario_id == "B" else None,
+        "previous_package_version": _ROLLBACK_PACKAGE_VERSION if scenario_id == "B" else None,
         "schema_facts": expected_schema_facts,
         "forward_compatible": record["forward_compatible"],
         "backward_compatible": record["backward_compatible"],
@@ -7703,7 +7705,7 @@ def _validate_compatibility_receipt(
         or payload["candidate_sha"] != candidate_sha
         or type(payload["candidate_image_digest"]) is not str
         or re.fullmatch(r"sha256:[0-9a-f]{64}", payload["candidate_image_digest"]) is None
-        or payload["candidate_package_version"] != "0.7.1"
+        or payload["candidate_package_version"] != _CANDIDATE_PACKAGE_VERSION
         or payload["forward_compatible"] is not True
         or payload["decision"] != "approved"
         or payload["approvals_present"] is not True
@@ -7730,7 +7732,7 @@ def _validate_compatibility_receipt(
         and re.fullmatch(r"[0-9a-f]{40}", previous_source_sha) is not None
         and type(previous_image_digest) is str
         and re.fullmatch(r"sha256:[0-9a-f]{64}", previous_image_digest) is not None
-        and payload["previous_package_version"] == "0.7.1"
+        and payload["previous_package_version"] == _ROLLBACK_PACKAGE_VERSION
     ):
         raise AcceptanceCheckError("receipt_store_binding")
     if scenario_id == "A" and any(

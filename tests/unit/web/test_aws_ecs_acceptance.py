@@ -5100,7 +5100,7 @@ def test_compatibility_record_is_bound_to_resolved_scenario_and_stored_by_hash(t
         "previous_image_digest": "sha256:" + "b" * 64,
         "previous_task_definition": inventory["values"]["PREVIOUS_TASK_DEFINITION"],
         "rollback_doctor_task_definition": inventory["values"]["ROLLBACK_DOCTOR_TASK_DEFINITION"],
-        "previous_package_version": "0.7.1",
+        "previous_package_version": "0.7.0",
         "schema_facts": {
             "candidate": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": True},
             "previous": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": True},
@@ -5134,6 +5134,7 @@ def test_compatibility_record_is_bound_to_resolved_scenario_and_stored_by_hash(t
         (("rollback_doctor_task_definition",), inventory["values"]["PREVIOUS_TASK_DEFINITION"]),
         (("previous_source_sha",), "f" * 40),
         (("previous_image_digest",), "sha256:" + "f" * 64),
+        (("previous_package_version",), "0.7.1"),
         (("schema_facts", "candidate", "landscape_epoch"), 22),
         (("schema_facts", "previous", "session_epoch"), 26),
     ):
@@ -5162,6 +5163,7 @@ def test_compatibility_record_is_bound_to_resolved_scenario_and_stored_by_hash(t
 
     assert len(receipt_hash) == 64
     assert receipt["approvals_present"] is True
+    assert receipt["previous_package_version"] == "0.7.0"
     assert "database-operator" not in json.dumps(receipt)
 
 

@@ -642,16 +642,36 @@ def test_rollback_image_packages_baseline_source_with_candidate_docker_contract(
 
     ordered = (
         'ROLLBACK_CONTEXT="$(mktemp -d -p /tmp elspeth-rollback-context.XXXXXX)"',
+        'chmod 700 "$ROLLBACK_CONTEXT"',
+        "trap 'rm -rf -- \"$ROLLBACK_CONTEXT\"' EXIT HUP INT TERM",
         'git archive "$ROLLBACK_BASELINE_SHA" | tar -x -C "$ROLLBACK_CONTEXT"',
         'git show "$CANDIDATE_SHA:Dockerfile" >"$ROLLBACK_CONTEXT/Dockerfile"',
         'git show "$CANDIDATE_SHA:.dockerignore" >"$ROLLBACK_CONTEXT/.dockerignore"',
+        'chmod 600 "$ROLLBACK_CONTEXT/Dockerfile" "$ROLLBACK_CONTEXT/.dockerignore"',
         "docker buildx build",
         '--platform "$TARGET_PLATFORM" --load',
+        '--build-arg INSTALL_EXTRAS="webui llm aws postgres"',
+        '--label "org.opencontainers.image.revision=$ROLLBACK_BASELINE_SHA"',
+        '-t elspeth:ecs-rollback-baseline "$ROLLBACK_CONTEXT"',
+        "docker image inspect elspeth:ecs-rollback-baseline --format",
     )
     positions = [publication.index(marker) for marker in ordered]
     assert positions == sorted(positions)
+    assert re.findall(r'^\s*git show "\$CANDIDATE_SHA:[^\"]+"', publication, flags=re.MULTILINE) == [
+        '  git show "$CANDIDATE_SHA:Dockerfile"',
+        '  git show "$CANDIDATE_SHA:.dockerignore"',
+    ]
+    assert "'{{.Os}}/{{.Architecture}}'" in publication
     assert 'git archive "$ROLLBACK_BASELINE_SHA" | docker buildx build' not in publication
     assert "The image still contains the exact rollback source tree" in publication
+
+
+def test_terraform_binding_hash_matches_python_canonical_json_without_newline() -> None:
+    text = _text()
+    capture = text[text.index("verify_tf_binding()") : text.index("### Closed lifecycle helper wrappers")]
+
+    assert 'binding_hash=$(jq -cjS . "$binding_file"' in capture
+    assert 'binding_hash=$(jq -cS . "$binding_file"' not in capture
 
 
 def test_fresh_scenarios_bootstrap_schema_before_first_or_upgrade_candidate() -> None:

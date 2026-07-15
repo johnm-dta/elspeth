@@ -23,7 +23,7 @@ from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkItem, Token
 from elspeth.core.landscape.database import WRITE_INTENT_OPTION, Tier1Engine, begin_write
 from elspeth.core.landscape.run_coordination_repository import record_coordination_event
 from elspeth.core.landscape.scheduler.events import SchedulerEventStore
-from elspeth.core.landscape.scheduler.fencing import fenced_or_plain_write
+from elspeth.core.landscape.scheduler.fencing import fenced_write, legacy_unfenced_recover_expired_leases_write
 from elspeth.core.landscape.scheduler.work_items import item_from_mapping, work_item_id
 from elspeth.core.landscape.schema import (
     active_worker_fence_clause,
@@ -473,13 +473,13 @@ class SchedulerLeaseRepository:
         # ``coordination_token`` is not None (the fenced/leader path).
         #
         # UNFENCED/TEST ARM (coordination_token is None): the caller operates
-        # outside the coordination substrate.  This path is used by:
-        #   (a) resume sweeps (recover expired leases before acquiring
-        #       leadership — no token yet);
-        #   (b) integration tests that inject a MockClock with timestamps in a
+        # outside the coordination substrate.  Production resume drains now
+        # require a token before reaching lease recovery; this legacy arm
+        # remains load-bearing for direct harnesses, including:
+        #   (a) integration tests that inject a MockClock with timestamps in a
         #       different epoch than the real-clock ``heartbeat_expires_at`` rows
         #       written by ``begin_run``/``worker_heartbeat``.
-        #   (c) direct repository-level construction in tests with no
+        #   (b) direct repository-level construction in tests with no
         #       run_workers rows at all.
         # In all cases, the time-domain mismatch between the ``now`` argument
         # and the stored ``heartbeat_expires_at`` values would cause the liveness
@@ -517,7 +517,17 @@ class SchedulerLeaseRepository:
             lease_stalled = literal(False)
             reap_eligible = true()
 
-        with fenced_or_plain_write(self._engine, coordination_token=coordination_token, now=now, verb="recover_expired_leases") as conn:
+        write_transaction = (
+            legacy_unfenced_recover_expired_leases_write(self._engine)
+            if coordination_token is None
+            else fenced_write(
+                self._engine,
+                coordination_token=coordination_token,
+                now=now,
+                verb="recover_expired_leases",
+            )
+        )
+        with write_transaction as conn:
             expired_rows = conn.execute(
                 select(
                     token_work_items_table,

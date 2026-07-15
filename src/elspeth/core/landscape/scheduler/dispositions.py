@@ -21,7 +21,7 @@ from elspeth.core.landscape.database import Tier1Engine, begin_write
 from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
 from elspeth.core.landscape.scheduler.branch_losses import record_coalesce_branch_loss
 from elspeth.core.landscape.scheduler.events import SchedulerEventStore
-from elspeth.core.landscape.scheduler.fencing import fenced_or_plain_write
+from elspeth.core.landscape.scheduler.fencing import fenced_write
 from elspeth.core.landscape.scheduler.payload_codec import scrubbed_row_payload_json
 from elspeth.core.landscape.scheduler.work_items import item_from_mapping
 from elspeth.core.landscape.schema import (
@@ -448,7 +448,7 @@ class SchedulerDispositionRepository:
             .where(token_outcomes_table.c.completed == 1)
             .exists()
         )
-        with fenced_or_plain_write(
+        with fenced_write(
             self._engine, coordination_token=coordination_token, now=now, verb="terminalize_pending_sinks_with_terminal_outcomes"
         ) as conn:
             rows = (

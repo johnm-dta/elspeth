@@ -35,7 +35,7 @@ from elspeth.core.landscape.database import Tier1Engine, begin_write
 from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
 from elspeth.core.landscape.scheduler.branch_losses import record_coalesce_branch_loss
 from elspeth.core.landscape.scheduler.events import SchedulerEventStore
-from elspeth.core.landscape.scheduler.fencing import fenced_or_plain_write, require_coordination_token
+from elspeth.core.landscape.scheduler.fencing import fenced_write, require_coordination_token
 from elspeth.core.landscape.scheduler.payload_codec import scrubbed_row_payload_json
 from elspeth.core.landscape.scheduler.work_items import (
     insert_work_item,
@@ -266,7 +266,7 @@ class BarrierJournalRepository:
         if scope_row_id is not None:
             blocked_select = blocked_select.where(token_work_items_table.c.row_id == scope_row_id)
 
-        with fenced_or_plain_write(self._engine, coordination_token=coordination_token, now=now, verb="complete_barrier") as conn:
+        with fenced_write(self._engine, coordination_token=coordination_token, now=now, verb="complete_barrier") as conn:
             blocked_rows = (
                 conn.execute(
                     blocked_select.order_by(

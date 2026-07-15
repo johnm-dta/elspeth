@@ -301,7 +301,8 @@ and immediately before publication.
 Database checks mechanically enforce lifecycle completeness:
 
 - `RESERVED`: plan/prepared/finalized fields and active lease fields are null;
-- `PREPARED`: immutable plan hash/evidence, inspection reference, descriptor
+- `PREPARED`: immutable plan hash/evidence, typed inspection reference,
+  descriptor
   mode, prepared member dispositions, and prepared timestamp are non-null;
   active lease fields are null;
 - `IN_FLIGHT`: every prepared field plus lease owner, positive generation,
@@ -321,6 +322,12 @@ Generation is non-negative in reserved/prepared state and positive once
 in-flight. Lease expiry cannot precede heartbeat. Role, state, descriptor mode,
 attempt action, and reconcile result use database CHECK constraints over their
 closed vocabularies.
+
+Inspection mode is also closed: `INSPECTED` references a returned durable
+inspect attempt, while `NO_INSPECTION_REQUIRED` stores a typed sentinel plan
+reference and is valid only for adapter modes whose contract declares that no
+initial target facts are needed. Therefore every prepared row has a mechanical
+non-null inspection reference without fabricating a provider call.
 
 ### `sink_effect_members`
 
@@ -418,6 +425,85 @@ after full verification. Exact epoch-23 databases retain the ordered
 23-to-24-to-25-to-26 chain. PostgreSQL fresh schema and testcontainer probes
 must match metadata. Epoch 27 is untouched.
 
+## Global Transaction Lock Order
+
+Epoch 26 extends the existing outcome/artifact composition order; it does not
+create a parallel effect-specific order. Before implementation, every changed
+caller is enumerated against one global PostgreSQL acquisition order. The
+default order is:
+
+```text
+1. candidate IDs resolved by non-locking reads
+2. tokens, ascending token_id
+3. current node_states, ascending state_id
+4. sink_effect_streams, ascending stream_id
+5. sink_effects, ascending effect_id, then members by (effect_id, ordinal)
+6. artifacts, ascending artifact_id
+7. operations, ascending operation_id, then attempts/calls by reserved index
+8. terminal token outcomes, routing, scheduler-close, and related append rows
+```
+
+Step 8 is append/validated-CAS work after the complete mutable lock set; it
+does not introduce a new `FOR UPDATE` class after artifact/operation locks.
+
+The implementation may refine the relative order of steps 6 through 8 only
+after auditing all existing composition callers and updating this design's
+single order everywhere. It may not change token-first, state-second, or put a
+stream/effect lock ahead of a token/state lock. PostgreSQL FK key-share waits
+count as lock acquisition for this rule.
+
+Transactions resolve identifiers optimistically, begin the transaction, lock
+the complete token set in sorted order, re-read/validate membership, lock the
+complete current state-witness set in sorted order, and only then touch a
+stream or effect. State witnesses that changed between the optimistic read and
+the locked re-read cause a bounded restart from step 1, never an out-of-order
+additional lock.
+
+The concrete paths obey the order as follows:
+
+- **Reservation:** resolve membership and stream identity; lock all requested
+  tokens first and any required current states second; validate ownership,
+  payload hashes, and existing bindings; then insert/select-lock the stream,
+  allocate its tail, lock existing effects in sorted order, and finally insert
+  effect, members, and the effect-linked operation. Reservation never holds a
+  stream while waiting for a token or state.
+- **Plan completion and lease/takeover:** when membership/state validation is
+  required, lock tokens/states before stream/effect. A narrow takeover that
+  touches no token/state/stream begins at the effect step, then attempts and
+  operation/call rows; it cannot later reach backward for an earlier class.
+- **Attempt intent/result:** each short transaction locks the stream only when
+  it must validate the current predecessor/head, then effect/member, then
+  operation/attempt/call rows. No database transaction or row lock spans
+  inspect, commit, or reconcile network/filesystem I/O.
+- **Finalization/head CAS:** optimistically resolve all current witnesses;
+  lock sorted tokens, re-resolve and lock sorted current node states, then lock
+  stream and all linked primary/failsink effects in sorted order. Only then
+  advance the stream head and write artifact, operation/call, routing,
+  outcomes, and scheduler-close evidence in the audited terminal order.
+- **Artifact mutation/delete:** an effect-linked artifact locks its effect
+  before the artifact; a legacy state-linked artifact follows token, state,
+  artifact order. Ordinary snapshot reads take no `FOR UPDATE` locks and never
+  become a hidden reverse-order mutation.
+
+New-stream creation uses insert-on-conflict only after token/state locks, then
+locks the winning stream row. Overlapping reservations serialize at the sorted
+token set; disjoint reservations can wait on the one stream insert without a
+cycle because the winner never requests the loser's tokens afterward.
+
+Real PostgreSQL tests use separate engines/connections and assert distinct
+backend PIDs, bounded completion, exact winner state, and absence of deadlock
+for:
+
+- reservation versus discard/outcome composition;
+- finalization versus node-state/outcome mutation;
+- two overlapping and two disjoint stream reservations;
+- takeover versus finalization/head CAS; and
+- effect-linked and legacy artifact read/delete/mutation paths where the
+  repository permits mutation.
+
+The tests force each side to pause after its first lock so a green result
+proves composed acquisition order rather than merely low contention.
+
 ## Effect State Machine
 
 ```text
@@ -496,6 +582,9 @@ Inspection is the only initial remote-precondition capture. Reconciliation is
 reserved for an attempted/ambiguous publication and cannot stand in for it.
 Concurrent inspectors complete one plan by CAS; evidence that would yield a
 different plan fails closed instead of silently refreshing the precondition.
+An adapter that declares no initial target inspection persists the typed
+`NO_INSPECTION_REQUIRED` reference during plan CAS; null is never overloaded to
+mean both "not inspected yet" and "inspection is unnecessary."
 
 ### Prepare
 
@@ -695,6 +784,14 @@ stream with no physical target, the descriptor is a typed virtual-empty target
 with the canonical empty hash and size zero; it does not claim the file/object
 exists.
 
+Artifact metadata and every exporter/MCP/web representation surface
+`publication_performed=false` plus a closed `publication_evidence_kind` of
+`INHERITED` or `VIRTUAL_EMPTY`, with the predecessor effect/descriptor hash
+when inherited. Consumers therefore cannot mistake a deterministic artifact
+identity for proof that this effect performed a new external publication.
+Ordinary committed/reconciled effects surface `publication_performed=true`
+and their returned/reconciled evidence kind.
+
 For Database, constraint diversion is result-derived and the target-side
 effect marker is itself the external idempotency effect even when it records
 zero accepted rows. The derived artifact describes the canonical empty
@@ -799,6 +896,7 @@ exact bytes/metadata, exact audit attempt history, and convergent recovery.
 - exact pre-image, exact post-image, missing target, and divergent target;
 - remote inspect intent/result is durable before plan CAS, response-lost
   inspection is retried as inspection, and divergent concurrent plans fail;
+- no-inspect adapters persist the typed `NO_INSPECTION_REQUIRED` reference;
 - `RESERVED` cannot acquire a lease, incomplete plans cannot become prepared,
   and complete prepared evidence is immutable;
 - `UNKNOWN` never invokes commit;
@@ -811,7 +909,8 @@ exact bytes/metadata, exact audit attempt history, and convergent recovery.
   load, query, export/import, reproduce, serialize through MCP/web, and pass
   AWS acceptance fixtures without nullable-link assumptions; and
 - zero-accepted effects use exact no-publication/inherited/virtual semantics,
-  while Database records a zero-row target marker.
+  while Database records a zero-row target marker, and every consumer surfaces
+  publication-performed/evidence-kind metadata.
 
 ### Adapters
 
@@ -833,6 +932,9 @@ exact bytes/metadata, exact audit attempt history, and convergent recovery.
 ### Schema and regressions
 
 - fresh SQLite epoch 26 and PostgreSQL metadata parity;
+- real PostgreSQL distinct-backend composed lock races for reservation versus
+  outcome, finalization versus state/outcome, stream reservations, takeover
+  versus finalization, and artifact mutation/read paths;
 - exact 25-to-26 migration, 23-to-24-to-25-to-26 ordered migration, rollback,
   lock contention, duplicate/malformed predecessor refusal, and reopen;
 - full sink recovery, diversion, failsink, scheduler handoff, artifact export,
@@ -866,13 +968,16 @@ of production execution.
 3. Membership is complete, ordered by durable ingest/lineage authority, and
    independent of attempts and caller batch shape.
 4. Concurrent same-effect calls converge; generation fences Landscape
-   finalization; stale owners cannot mutate audit state.
+   finalization; stale owners cannot mutate audit state; all composed
+   PostgreSQL paths obey the one token/state/stream/effect/artifact-operation
+   lock order without deadlock.
 5. Concurrent disjoint replacing effects queue through one durable target
    predecessor chain and publish cumulative snapshots without lost rows.
 6. Every reconciler returns only the closed three-result vocabulary with
    exact bounded evidence. `UNKNOWN` fails closed.
 7. Initial remote reads occur only through durably intended read-only inspect;
-   reserved/incomplete plans cannot become in-flight.
+   no-inspect adapters persist a typed sentinel; reserved/incomplete plans
+   cannot become in-flight.
 8. Primary and failsink effects are separately recoverable and durably linked;
    diverted outcomes do not terminalize before failsink durability.
 9. All built-in supported modes pass adapter response-loss and exact-evidence
@@ -880,7 +985,8 @@ of production execution.
 10. New artifacts link to the complete sink effect, not the first row's state;
     old state-linked artifacts remain readable/exportable.
 11. Zero-accepted effects have explicit no-publication or result-derived marker
-    semantics and retain one deterministic artifact identity.
+    semantics, retain one deterministic artifact identity, and expose
+    inherited/virtual publication evidence to every consumer.
 12. Epoch 25 databases migrate transactionally to 26; PostgreSQL fresh schema
    is equivalent; epoch 27 remains unused.
 13. Focused and broad sink/recovery suites, real PostgreSQL probes, strict

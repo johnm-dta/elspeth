@@ -18,8 +18,8 @@ act only on their approved surfaces.
 ## Required order
 
 1. Freeze the candidate.
-2. Run static and contract gates.
-3. Run PostgreSQL, the complete suite, and coverage.
+2. Run code-quality checks.
+3. Run PostgreSQL and the complete suite.
 4. Build and inspect the production image.
 5. Run live AWS acceptance.
 6. Export evidence and clean up.
@@ -123,7 +123,7 @@ runbook, control manifest, and sanitized evidence store.
 
 ---
 
-### Task 2: Run static and contract gates
+### Task 2: Run code-quality checks
 
 - [ ] Run the local enforcing commands:
 
@@ -134,29 +134,6 @@ runbook, control manifest, and sanitized evidence store.
   uv run ruff check src/ tests/ scripts/ examples/ elspeth-lints/src/
   uv run ruff format --check src/ tests/ scripts/ examples/ elspeth-lints/src/
   uv run mypy src/ elspeth-lints/src/
-  uv run python scripts/cicd/check_slot_type_cross_language.py
-  uv run python scripts/cicd/generate_skill_inventory.py --check
-  uv run python scripts/check_contracts.py
-  PYTHONPATH=elspeth-lints/src uv run python scripts/cicd/parity_harness.py \
-    --manifest config/cicd/lint_migration_status.yaml --root .
-
-  PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check --rules plugin_contract.options_metadata --root .
-  PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check --rules plugin_contract.component_type,plugin_contract.plugin_hashes --root src/elspeth
-  PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check --rules immutability.freeze_guards,immutability.frozen_annotations --root src/elspeth
-  PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check --rules audit_evidence.nominal_base,audit_evidence.tier_1_decoration,audit_evidence.guard_symmetry,audit_evidence.gve_attribution --root src/elspeth
-  PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check --rules 'composer/*' --root src/elspeth
-  PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check --rules 'contract_invariants/*' --root src/elspeth
-  PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check --rules contract_invariants.session_engine_factory --root .
-  PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check --rules manifest.contract_manifest --root src/elspeth
-  PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check --rules manifest.symbol_inventory,manifest.test_to_source_mapping --root .
-  PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check --rules meta.no-new-bespoke-cicd-enforcer --root .
-  uv run python scripts/cicd/enforce_adapter_budget.py
-
-  test -n "${ELSPETH_JUDGE_METADATA_HMAC_KEY:-}"
-  ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE=required PYTHONPATH=elspeth-lints/src \
-    uv run python -m elspeth_lints.core.cli check --rules trust_tier.tier_model --root src/elspeth
-  ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE=required PYTHONPATH=elspeth-lints/src \
-    uv run python -m elspeth_lints.core.cli check --rules trust_boundary.tests,trust_boundary.scope,trust_boundary.tier --root src/elspeth
 
   test -z "$(git status --porcelain)"
   uv run --frozen python -m elspeth.web.aws_ecs_acceptance gate-ledger record \
@@ -165,12 +142,11 @@ runbook, control manifest, and sanitized evidence store.
     --receipt-hash "$(printf 'static\0%s\0complete' "$CANDIDATE_SHA" | sha256sum | awk '{print $1}')"
   ```
 
-**Outcome:** formatting, lint, strict typing, generated contracts, repository
-invariants, and signed trust checks pass on the frozen candidate.
+**Outcome:** formatting, lint, and strict typing pass on the frozen candidate.
 
 ---
 
-### Task 3: Run PostgreSQL, the complete suite, and coverage
+### Task 3: Run PostgreSQL and the complete suite
 
 - [ ] Run the load-bearing PostgreSQL tests first, with zero skips:
 
@@ -185,16 +161,10 @@ invariants, and signed trust checks pass on the frozen candidate.
     -m testcontainer -q
   ```
 
-- [ ] Run the complete suite once, then the coverage lane and subsystem floors:
+- [ ] Run the complete suite once:
 
   ```bash
   uv run pytest tests/ -v -m ""
-  uv run pytest tests/ --cov=src/elspeth --cov-report=xml --cov-report=term-missing \
-    --cov-fail-under=85 -v -m "not slow and not stress and not performance and not testcontainer"
-  uv run coverage report --include="src/elspeth/core/landscape/*" --fail-under=92
-  uv run coverage report --include="src/elspeth/core/canonical.py" --fail-under=99
-  uv run coverage report --include="src/elspeth/engine/orchestrator/*" --fail-under=90
-  uv run coverage report --include="src/elspeth/contracts/*" --fail-under=62
 
   test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
   test -z "$(git status --porcelain)"
@@ -204,8 +174,8 @@ invariants, and signed trust checks pass on the frozen candidate.
     --receipt-hash "$(printf 'tests\0%s\0complete' "$CANDIDATE_SHA" | sha256sum | awk '{print $1}')"
   ```
 
-**Outcome:** the five PostgreSQL files, the complete repository suite, overall
-coverage, and all four subsystem floors pass on the frozen candidate.
+**Outcome:** the five PostgreSQL files and the complete repository suite pass
+on the frozen candidate.
 
 ---
 

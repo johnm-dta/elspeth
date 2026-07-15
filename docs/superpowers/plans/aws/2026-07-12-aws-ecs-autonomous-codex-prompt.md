@@ -381,7 +381,7 @@ Before release reconciliation:
 - verify required AWS, Docker, Terraform, browser, and evidence
   facilities.
 
-Plan 12 owns exact-version local gates, platform-bound image proof,
+Plan 12 owns exact-version local checks, platform-bound image proof,
 live Aurora/EFS/ECS/ALB, task-role S3/Bedrock/Guardrails, Cognito/OIDC,
 Landscape-correlated CloudWatch/X-Ray, rollback, durable sanitized evidence,
 teardown, and final GO/NO-GO.

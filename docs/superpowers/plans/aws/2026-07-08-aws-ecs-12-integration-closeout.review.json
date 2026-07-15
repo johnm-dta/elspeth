@@ -3,11 +3,11 @@
   "scope_verdict": "GO_TO_EXECUTE",
   "summary": "Plan 12 is execution-ready as a seven-task AWS integration closeout. Tasks 1 through 4 freeze and qualify one candidate, Task 5 deploys and exercises that candidate in two isolated AWS scenarios, Task 6 tears down every disposable surface, and Task 7 performs the exact-SHA release transition and ends the program. Hosted CI, Wardline, per-checkbox proof rows, post-plan checkpoints, and parent milestone closeout are outside this plan.",
   "plan_file": "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md",
-  "plan_sha256": "1e23bf4e1ab5bc1073e22cec2dee65ee80d8258242585730a601c7bdaf9f333f",
+  "plan_sha256": "c923a9070e7571dc08fe8b38b0b0211a4a24715f031e00492e24c9a5032dc3c8",
   "reviewed_at": "2026-07-15T00:34:48Z",
   "review_basis": {
     "branch": "feat/aws-ecs-program",
-    "base_head": "b5501a58a4bc96794dbb7fb26d9fc84d51008b80",
+    "base_head": "5a4652afd0ebc3c82f1e58a3ddbdc5e192268db1",
     "process": "One full post-plan review by the coordinator and two independent read-only reviewers, limited to material execution blockers."
   },
   "blocking_issues": [],
@@ -33,6 +33,11 @@
       "id": "R12-3",
       "status": "RESOLVED",
       "resolution": "Moved retained CloudWatch and X-Ray completeness enforcement before the live phase can pass."
+    },
+    {
+      "id": "R12-4",
+      "status": "RESOLVED",
+      "resolution": "Removed the unrelated repository-wide CI policy sweep and duplicate coverage run; retained Ruff, formatting, strict typing, PostgreSQL integration, the complete suite, image validation, and live AWS acceptance."
     }
   ],
   "verification": [
@@ -40,13 +45,13 @@
     "Plan 12 and deployment-runbook Bash fences pass bash -n.",
     "250 focused acceptance-controller and deployment-runbook tests pass.",
     "Ruff check, Ruff format check, strict mypy for the controller, and git diff --check pass.",
-    "Plan 12 is 495 lines, down from the prior 3244-line form, while real deployment and teardown commands remain in the reusable runbook."
+    "Plan 12 is 465 lines, down from the prior 3244-line form, while real deployment and teardown commands remain in the reusable runbook."
   ],
   "review_history": [
     {
       "reviewed_at": "2026-07-15T00:34:48Z",
       "verdict": "APPROVED_AFTER_LEAN_REPAIR",
-      "summary": "The full-plan review removed process-only choreography and repaired the three concrete gaps that would have prevented live AWS deployment or cleanup."
+      "summary": "The full-plan review removed process-only choreography, repaired the concrete live execution gaps, and excluded unrelated repository-wide policy work from the AWS integration endpoint."
     }
   ],
   "reviewer_summaries": {

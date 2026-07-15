@@ -4,11 +4,11 @@
   "runtime_verdict": "PENDING_PLAN_12",
   "summary": "The autonomous prompt now hands one reconciled candidate to the seven-task Plan 12 and stops when Task 7 closes it. It requires one full review for the plan, excludes Wardline and hosted CI, and contains no post-Plan-12 checkpoint or parent milestone closeout.",
   "plan_file": "docs/superpowers/plans/aws/2026-07-12-aws-ecs-autonomous-codex-prompt.md",
-  "plan_sha256": "0d9b3a147bee5343968eb1fd335d95f9cb3a2429a00ee9b7c0e48e2d572e8a35",
+  "plan_sha256": "1a9f1412ef4fb44972adf34073ff16b3345422c1bc3c7cdc2b49dab305a96c49",
   "reviewed_at": "2026-07-15T00:34:48Z",
   "review_basis": {
     "branch": "feat/aws-ecs-program",
-    "base_head": "b5501a58a4bc96794dbb7fb26d9fc84d51008b80",
+    "base_head": "5a4652afd0ebc3c82f1e58a3ddbdc5e192268db1",
     "process": "Reviewed with the lean Plan 12 and active Stage 9 run sheet as one execution contract."
   },
   "blocking_issues": [],

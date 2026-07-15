@@ -4,11 +4,11 @@
   "runtime_verdict": "PENDING_PLAN_12",
   "summary": "Stage 9 now reconciles release/0.7.1, runs the seven-task Plan 12 on one immutable candidate, and ends when Task 7 fast-forwards and closes Plan 12. The run sheet performs no separate release mutation, checkpoint, Wave 4 closure, or milestone closure.",
   "plan_file": "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md",
-  "plan_sha256": "ffc5104ef96fbc3547aef4110d7e69d8b844fa8a7e60d9dfc4b8f7446b698fb0",
+  "plan_sha256": "29f927478abdbc7b5d37bb7f1e43754097928cbd0434887c97a3774cf0436974",
   "reviewed_at": "2026-07-15T00:34:48Z",
   "review_basis": {
     "branch": "feat/aws-ecs-program",
-    "base_head": "b5501a58a4bc96794dbb7fb26d9fc84d51008b80",
+    "base_head": "5a4652afd0ebc3c82f1e58a3ddbdc5e192268db1",
     "process": "Reviewed with the lean Plan 12, autonomous prompt, controller, and canonical AWS deployment runbook."
   },
   "blocking_issues": [],

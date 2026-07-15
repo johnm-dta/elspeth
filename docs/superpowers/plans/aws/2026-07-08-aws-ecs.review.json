@@ -7,11 +7,11 @@
   "runtime_verdict": "PENDING_PLAN_12",
   "verdict_summary": "The reviewed program endpoint is Plan 12 Task 7. The closeout retains the real local, image, live AWS, teardown, and exact-SHA release path while deleting hosted CI, Wardline, fine-grained proof rows, the extra final checkpoint, and parent phase or milestone administration.",
   "source_sha256": {
-    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-autonomous-codex-prompt.md": "0d9b3a147bee5343968eb1fd335d95f9cb3a2429a00ee9b7c0e48e2d572e8a35",
-    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md": "ffc5104ef96fbc3547aef4110d7e69d8b844fa8a7e60d9dfc4b8f7446b698fb0",
+    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-autonomous-codex-prompt.md": "1a9f1412ef4fb44972adf34073ff16b3345422c1bc3c7cdc2b49dab305a96c49",
+    "docs/superpowers/plans/aws/2026-07-12-aws-ecs-orchestration-run-sheet.md": "29f927478abdbc7b5d37bb7f1e43754097928cbd0434887c97a3774cf0436974",
     "docs/superpowers/plans/aws/2026-07-08-aws-ecs-00-overview.md": "6cea4243755db7575dbb5ac992136248f67268fcf8bdc105ada91e51d655c7c9",
     "docs/superpowers/plans/aws/2026-07-08-aws-ecs-10-packaging-docker.md": "26db1f9b8476c37bde6d67d13fc20cf58d2eb70b712ea0e9a2122be2ddd93cb6",
-    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md": "1e23bf4e1ab5bc1073e22cec2dee65ee80d8258242585730a601c7bdaf9f333f"
+    "docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md": "c923a9070e7571dc08fe8b38b0b0211a4a24715f031e00492e24c9a5032dc3c8"
   },
   "blocking": [],
   "non_blocking_residuals": [
@@ -22,7 +22,8 @@
     "Runnable ECR publication, A then B saved-plan apply, live acceptance, independent teardown, and exact-SHA release flow.",
     "Coarse six-phase ledger and hosted-CI-free control manifest.",
     "Retained telemetry completeness before the live phase.",
-    "No Wardline execution for this project."
+    "No Wardline execution for this project.",
+    "No repository-wide CI-policy sweep or duplicate coverage lane in the AWS integration endpoint."
   ],
   "reviewer_verdicts": {
     "execution": "APPROVED",

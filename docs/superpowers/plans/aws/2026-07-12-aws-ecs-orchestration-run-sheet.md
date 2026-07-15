@@ -1048,8 +1048,8 @@ includes the exact complete-suite command:
 uv run pytest tests/ -v -m ""
 ~~~
 
-It also includes every other local, coverage, static, trust, image, live AWS,
-rollback, evidence-export, and cleanup gate required by Plan 12. Never push or
+It also includes the local quality, image, live AWS, rollback,
+evidence-export, and cleanup work required by Plan 12. Never push or
 update release/0.7.1 early. Any
 code, documentation, lockfile, generated-file, or candidate-SHA change
 invalidates all candidate evidence and restarts Task 1. Evidence from

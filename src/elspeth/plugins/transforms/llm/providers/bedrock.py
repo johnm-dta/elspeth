@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from threading import Lock
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import Field, field_validator
 
 from elspeth.contracts.audit_protocols import PluginAuditWriter
+from elspeth.contracts.value_source import ValueSource
 from elspeth.plugins.infrastructure.clients.llm import (
     AuditedLLMClient,
     ContentPolicyError,
@@ -31,6 +32,12 @@ _STATIC_BEDROCK_ERROR = "Bedrock LLM request failed"
 
 class BedrockConfig(LLMConfig):
     """Keyless LiteLLM Bedrock configuration using the AWS default chain."""
+
+    # Bedrock model availability is account/region scoped and resolved by AWS;
+    # unlike OpenRouter there is no authoritative local catalog to validate.
+    # The LLM plugin is explicitly registered with the value-source walker, so
+    # every provider variant must still declare its participation contract.
+    VALUE_SOURCES: ClassVar[tuple[ValueSource, ...]] = ()
 
     provider: Literal["bedrock"] = Field(default="bedrock", description="LLM provider")
     model: str = Field(

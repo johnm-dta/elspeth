@@ -17,6 +17,7 @@ from elspeth.plugins.transforms.llm.model_catalog import (
     read_litellm_model_list,
 )
 from elspeth.plugins.transforms.llm.providers.azure import AzureOpenAIConfig
+from elspeth.plugins.transforms.llm.providers.bedrock import BedrockConfig
 from elspeth.plugins.transforms.llm.providers.openrouter import OpenRouterConfig
 
 
@@ -38,11 +39,15 @@ class TestProviderDeclarations:
         assert decl.sibling_field == "deployment_name"
         assert decl.allow_empty_default is True
 
+    def test_bedrock_declares_no_catalog_backed_values(self) -> None:
+        assert BedrockConfig.VALUE_SOURCES == ()
+
     def test_value_sources_not_in_pydantic_model_fields(self) -> None:
         """ClassVar must NOT appear as a Pydantic field — would expose
         VALUE_SOURCES in serialized config and break the contract."""
         assert "VALUE_SOURCES" not in OpenRouterConfig.model_fields
         assert "VALUE_SOURCES" not in AzureOpenAIConfig.model_fields
+        assert "VALUE_SOURCES" not in BedrockConfig.model_fields
 
 
 class TestModelCatalogReader:
@@ -153,3 +158,22 @@ class TestWalkerBehaviour:
         assert finding.component_id == "openrouter_node_1"
         assert finding.field_name == "model"
         assert "anthropic/claude-3.5-sonnet" in finding.reason
+
+    def test_bedrock_llm_without_catalog_passes_runtime_walker(self) -> None:
+        """Bedrock model access is resolved by AWS, not a local model catalog."""
+        from elspeth.engine.orchestrator.preflight import validate_value_source_compliance
+        from elspeth.plugins.transforms.llm.transform import LLMTransform
+
+        plugin = LLMTransform(
+            {
+                "provider": "bedrock",
+                "model": "bedrock/zai.glm-5",
+                "region_name": "ap-northeast-1",
+                "prompt_template": "Hello",
+                "schema": {"mode": "observed"},
+                "required_input_fields": [],
+            }
+        )
+        wired = SimpleNamespace(plugin=plugin, settings=SimpleNamespace(name="bedrock_node_1"))
+
+        validate_value_source_compliance([wired])

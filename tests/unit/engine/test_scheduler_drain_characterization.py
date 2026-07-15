@@ -16,9 +16,9 @@ unchanged against both the pre-move and post-move trees:
    threaded, returned result tagged); a claimed-token FAILURE marks FAILED;
    a non-sink terminal result marks TERMINAL; unregistered (legacy/N=0)
    builds thread ``worker_id=None`` (unfenced).
-3. SchedulerLeaseLostError abandonment: the in-flight result is dropped,
-   staged §E.5 branch losses are cleared, and NO disposition write follows —
-   the peer's rewrite owns the row now.
+3. Clean abandonment: SchedulerLeaseLostError drops the in-flight result, and
+   RunWorkerEvictedError propagates unchanged. Both clear staged §E.5 branch
+   losses and issue NO disposition write against the abandoned claim.
 4. Active-claim heartbeat: between claim and disposition,
    ``_heartbeat_active_claim`` refreshes the claimed lease at most once per
    heartbeat interval; outside an active claim it is a no-op.
@@ -48,17 +48,22 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import insert, select
+from sqlalchemy import delete, insert, select
 
 from elspeth.contracts import RowResult, TokenInfo
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
-from elspeth.contracts.errors import OrchestrationInvariantError, SchedulerLeaseLostError
+from elspeth.contracts.errors import OrchestrationInvariantError, RunWorkerEvictedError, SchedulerLeaseLostError
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.scheduler import BranchLossSpec, TokenWorkStatus
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
-from elspeth.core.landscape.schema import run_workers_table, token_work_items_table
+from elspeth.core.landscape.schema import (
+    run_coordination_events_table,
+    run_workers_table,
+    scheduler_events_table,
+    token_work_items_table,
+)
 from elspeth.engine.clock import MockClock
 from elspeth.engine.processor import SCHEDULER_MAINTENANCE_INTERVAL, DAGTraversalContext, RowProcessor
 from elspeth.engine.scheduler_drain import ProcessorMode
@@ -260,6 +265,34 @@ def _row_status(setup: RecorderSetup, work_item_id: str) -> tuple[str, str | Non
                 token_work_items_table.c.work_item_id == work_item_id
             )
         ).one()
+
+
+def _durable_claim_image(
+    setup: RecorderSetup,
+    work_item_id: str,
+) -> tuple[dict[str, Any], tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
+    """Item plus both event planes a clean-abandon path must not mutate."""
+    with setup.db.engine.connect() as conn:
+        item = dict(
+            conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id)).mappings().one()
+        )
+        scheduler_events = tuple(
+            dict(row)
+            for row in conn.execute(
+                select(scheduler_events_table)
+                .where(scheduler_events_table.c.run_id == setup.run_id)
+                .order_by(scheduler_events_table.c.event_id)
+            ).mappings()
+        )
+        coordination_events = tuple(
+            dict(row)
+            for row in conn.execute(
+                select(run_coordination_events_table)
+                .where(run_coordination_events_table.c.run_id == setup.run_id)
+                .order_by(run_coordination_events_table.c.event_id)
+            ).mappings()
+        )
+    return item, scheduler_events, coordination_events
 
 
 def _sink_bound_result(token: TokenInfo) -> RowResult:
@@ -469,6 +502,61 @@ def test_lease_lost_mid_processing_abandons_result_and_writes_no_disposition() -
     assert owner == LEADER_OWNER
 
 
+@pytest.mark.parametrize("surviving_peer", [False, True], ids=["sole-row-deletion", "n-greater-than-zero-absence"])
+def test_heartbeat_membership_loss_propagates_without_failure_disposition(surviving_peer: bool) -> None:
+    """A heartbeat membership refusal is not a plugin-processing failure.
+
+    Deleting the claimant's registry row must propagate RunWorkerEvictedError
+    directly whether the run registry becomes empty or another member remains.
+    The claimed item and both event planes stay byte-for-byte at the image
+    observed immediately after deletion; no mark_* disposition follows.
+    """
+    processor, spy, setup, clock = _build(lease_owner=LEADER_OWNER, heartbeat_seconds=60)
+    if surviving_peer:
+        _register_worker(setup, "worker-peer")
+    work_item_id, token = _enqueue_ready(setup, spy, clock, sequence=0)
+    processor._pending_branch_losses.append(
+        BranchLossSpec(
+            coalesce_name="merge",
+            row_id=token.row_id,
+            branch_name="left",
+            token_id=token.token_id,
+            reason="staged before membership loss",
+            recorded_by=LEADER_OWNER,
+        )
+    )
+    refused_image: list[tuple[dict[str, Any], tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]] = []
+
+    def fake_process(**kwargs: Any) -> tuple[RowResult, list[Any]]:
+        with setup.db.engine.begin() as conn:
+            deleted = conn.execute(delete(run_workers_table).where(run_workers_table.c.worker_id == LEADER_OWNER))
+        assert deleted.rowcount == 1
+        refused_image.append(_durable_claim_image(setup, work_item_id))
+        clock.advance(61.0)
+        processor._heartbeat_active_claim()
+        raise AssertionError("membership-refused heartbeat must not return")
+
+    spy.calls.clear()
+    with (
+        patch.object(processor, "_process_single_token", new=fake_process),
+        pytest.raises(RunWorkerEvictedError) as exc_info,
+    ):
+        processor._drain_scheduler_claims(ctx=_ctx(setup), pending_items={}, recover_pending_sinks=False)
+
+    assert exc_info.value.worker_id == LEADER_OWNER
+    assert exc_info.value.run_id == setup.run_id
+    assert processor._pending_branch_losses == []
+    assert len(refused_image) == 1
+    assert _durable_claim_image(setup, work_item_id) == refused_image[0]
+    assert len(spy.calls_for("heartbeat_lease")) == 1
+    assert spy.calls_for("mark_failed") == []
+    assert spy.calls_for("mark_terminal") == []
+    assert spy.calls_for("mark_pending_sink") == []
+    status, owner = _row_status(setup, work_item_id)
+    assert status == TokenWorkStatus.LEASED.value
+    assert owner == LEADER_OWNER
+
+
 def test_heartbeat_refreshes_active_claim_once_per_interval_and_is_noop_outside() -> None:
     """Between claim and disposition, _heartbeat_active_claim writes at most
     one lease refresh per heartbeat interval; outside an active claim it is
@@ -491,6 +579,7 @@ def test_heartbeat_refreshes_active_claim_once_per_interval_and_is_noop_outside(
     assert len(beats) == 1
     assert beats[0]["work_item_id"] == work_item_id
     assert beats[0]["lease_owner"] == LEADER_OWNER
+    assert beats[0]["membership_fenced"] is True
 
     # After the drain the claim is no longer active: even a long-overdue
     # heartbeat writes nothing.

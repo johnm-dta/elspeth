@@ -3402,7 +3402,8 @@ class RowProcessor:
         active-claim state and the at-most-once-per-interval write.
         ``_process_single_token`` calls this on every node-iteration boundary
         (ADR-026 RC6, filigree elspeth-ddde8144b6); it raises
-        ``SchedulerLeaseLostError`` when the lease was reaped by a peer.
+        ``SchedulerLeaseLostError`` when the lease was reaped by a peer and
+        ``RunWorkerEvictedError`` when the active-membership CAS refuses.
         """
         self._scheduler_drain.heartbeat_active_claim()
 

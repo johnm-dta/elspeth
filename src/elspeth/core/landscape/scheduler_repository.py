@@ -416,6 +416,7 @@ class TokenSchedulerRepository:
         lease_owner: str,
         lease_seconds: int,
         now: datetime,
+        membership_fenced: bool,
     ) -> datetime:
         """Extend a held lease (see :meth:`SchedulerLeaseRepository.heartbeat_lease`)."""
         return self.leases.heartbeat_lease(
@@ -424,6 +425,7 @@ class TokenSchedulerRepository:
             lease_owner=lease_owner,
             lease_seconds=lease_seconds,
             now=now,
+            membership_fenced=membership_fenced,
         )
 
     def peer_active_leases(

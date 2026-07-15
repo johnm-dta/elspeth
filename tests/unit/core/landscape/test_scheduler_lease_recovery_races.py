@@ -69,7 +69,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, event, insert, select
+from sqlalchemy import create_engine, event, insert, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 
@@ -82,7 +82,9 @@ from elspeth.core.landscape.schema import (
     metadata,
     nodes_table,
     rows_table,
+    run_coordination_events_table,
     run_coordination_table,
+    run_workers_table,
     runs_table,
     scheduler_events_table,
     token_work_items_table,
@@ -275,6 +277,85 @@ def test_explicit_none_preserves_pre_coordination_direct_harness_recovery(
     assert state["lease_owner"] is None
     assert state["work_item_id"] != original.work_item_id
     assert _event_counts(engine)[SchedulerEventType.RECOVER_EXPIRED_LEASE.value] == 1
+
+
+def test_heartbeat_membership_fence_observes_eviction_committed_immediately_before_begin(
+    engines: tuple[Tier1Engine, Tier1Engine],
+) -> None:
+    """A peer eviction committed at heartbeat entry is part of the item CAS.
+
+    The test hook runs before the heartbeat connection executes its
+    ``BEGIN IMMEDIATE``. The peer can therefore commit the active-to-evicted
+    transition first; the heartbeat then takes the writer lock and must refuse
+    without extending the lease or appending scheduler/coordination events.
+    """
+    from elspeth.contracts.errors import RunWorkerEvictedError
+
+    heartbeat_engine, eviction_engine = engines
+    repo = TokenSchedulerRepository(heartbeat_engine)
+    _seed_run_rows_tokens(heartbeat_engine, ("token-0",))
+    with heartbeat_engine.begin() as conn:
+        conn.execute(
+            insert(run_workers_table).values(
+                worker_id="worker-a",
+                run_id=RUN_ID,
+                role="follower",
+                status="active",
+                registered_at=BASE,
+                heartbeat_expires_at=BASE + timedelta(hours=1),
+            )
+        )
+    item = _enqueue_tokens(repo, ("token-0",))["token-0"]
+    claimed = repo.claim_ready(run_id=RUN_ID, lease_owner="worker-a", lease_seconds=300, now=BASE)
+    assert claimed is not None
+    before_item = _work_item_states(heartbeat_engine)["token-0"]
+    before_events = _event_counts(heartbeat_engine)
+    with heartbeat_engine.connect() as conn:
+        before_coordination_events = tuple(
+            conn.execute(select(run_coordination_events_table.c.event_id).where(run_coordination_events_table.c.run_id == RUN_ID)).scalars()
+        )
+
+    evicted: list[bool] = []
+
+    @event.listens_for(heartbeat_engine, "before_cursor_execute")
+    def evict_before_heartbeat_begin(conn, cursor, statement, parameters, context, executemany) -> None:  # type: ignore[no-untyped-def]
+        if evicted or statement.strip().upper() != "BEGIN IMMEDIATE":
+            return
+        with eviction_engine.begin() as peer_conn:
+            result = peer_conn.execute(
+                update(run_workers_table)
+                .where(run_workers_table.c.worker_id == "worker-a", run_workers_table.c.status == "active")
+                .values(status="evicted", evicted_at=BASE + timedelta(seconds=10), evicted_by_worker_id="worker-leader")
+            )
+        assert result.rowcount == 1
+        evicted.append(True)
+
+    try:
+        with pytest.raises(RunWorkerEvictedError):
+            repo.heartbeat_lease(
+                run_id=RUN_ID,
+                work_item_id=item.work_item_id,
+                lease_owner="worker-a",
+                lease_seconds=300,
+                now=BASE + timedelta(seconds=10),
+                membership_fenced=True,
+            )
+    finally:
+        event.remove(heartbeat_engine, "before_cursor_execute", evict_before_heartbeat_begin)
+
+    assert evicted == [True]
+    assert _work_item_states(heartbeat_engine)["token-0"] == before_item
+    assert _event_counts(heartbeat_engine) == before_events
+    with heartbeat_engine.connect() as conn:
+        assert conn.execute(select(run_workers_table.c.status).where(run_workers_table.c.worker_id == "worker-a")).scalar_one() == "evicted"
+        assert (
+            tuple(
+                conn.execute(
+                    select(run_coordination_events_table.c.event_id).where(run_coordination_events_table.c.run_id == RUN_ID)
+                ).scalars()
+            )
+            == before_coordination_events
+        )
 
 
 def test_claim_ready_probing_mid_sweep_is_lock_excluded_until_recovery_commits(

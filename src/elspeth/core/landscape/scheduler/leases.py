@@ -638,6 +638,7 @@ class SchedulerLeaseRepository:
         lease_owner: str,
         lease_seconds: int,
         now: datetime,
+        membership_fenced: bool,
     ) -> datetime:
         """Extend a held lease's ``lease_expires_at`` to ``now + lease_seconds``.
 
@@ -652,13 +653,22 @@ class SchedulerLeaseRepository:
         CAS contract (Tier-1 strictness on the write boundary):
 
         - The UPDATE matches on ``(work_item_id, run_id, status=LEASED,
-          lease_owner)``. If rowcount != 1, the lease has been reaped or
-          reassigned by a peer reaper (``recover_expired_leases`` rewrites the
-          ``work_item_id`` for bumped attempts), and this worker no longer owns
-          the row. Raise ``SchedulerLeaseLostError`` so the caller can abandon
-          its in-flight work cleanly — issuing a follow-up ``mark_*`` would
-          CAS-fail and cascade into a Tier-1 ``AuditIntegrityError``, which is
-          the exact failure mode this primitive exists to eliminate.
+          lease_owner)``. When ``membership_fenced`` is true, the same UPDATE
+          also requires an active ``run_workers`` row for ``lease_owner``.
+          An absent, departed, or evicted owner is refused with
+          ``RunWorkerEvictedError`` and zero durable mutation.
+        - ``membership_fenced`` has no default: production callers must choose
+          deliberately. Registered RowProcessors pass true. The explicit false
+          arm preserves pre-coordination/direct-repository N=0 harnesses; it is
+          never inferred from current registry emptiness, so deletion of the
+          sole membership row cannot silently downgrade a fenced heartbeat.
+        - A CAS miss while membership is still admitted means the lease was
+          reaped or reassigned by a peer reaper
+          (``recover_expired_leases`` rewrites the ``work_item_id`` for bumped
+          attempts). Raise ``SchedulerLeaseLostError`` so the caller can
+          abandon its in-flight work cleanly — issuing a follow-up ``mark_*``
+          would CAS-fail and cascade into a Tier-1 ``AuditIntegrityError``,
+          which is the exact failure mode this primitive exists to eliminate.
 
         Returns the new ``lease_expires_at`` so the caller can update its
         local last-heartbeat-attempt clock without re-reading the row.
@@ -671,22 +681,40 @@ class SchedulerLeaseRepository:
             conn.execution_options(**{WRITE_INTENT_OPTION: True})
             transaction = conn.begin()
             try:
+                where_clauses = and_(
+                    token_work_items_table.c.work_item_id == work_item_id,
+                    token_work_items_table.c.run_id == run_id,
+                    token_work_items_table.c.status == TokenWorkStatus.LEASED.value,
+                    token_work_items_table.c.lease_owner == lease_owner,
+                )
+                if membership_fenced:
+                    # The strict membership predicate rides the same UPDATE as
+                    # the lease predicates.  A separate pre-check would leave
+                    # an entry-to-CAS window for eviction or row deletion.
+                    where_clauses = and_(
+                        where_clauses,
+                        active_worker_fence_clause(worker_id=lease_owner, run_id=run_id),
+                    )
                 result = conn.execute(
                     update(token_work_items_table)
-                    .where(
-                        and_(
-                            token_work_items_table.c.work_item_id == work_item_id,
-                            token_work_items_table.c.run_id == run_id,
-                            token_work_items_table.c.status == TokenWorkStatus.LEASED.value,
-                            token_work_items_table.c.lease_owner == lease_owner,
-                        )
-                    )
+                    .where(where_clauses)
                     .values(
                         lease_expires_at=new_expires_at,
                         updated_at=now,
                     )
                 )
                 if result.rowcount != 1:
+                    if membership_fenced:
+                        # Re-probe only to classify the already-refused CAS.
+                        # False unambiguously means membership loss; unlike the
+                        # lenient claim fence, an empty registry does not pass.
+                        # Raising rolls the transaction back, including any
+                        # incidental audit write attempted by a future refactor.
+                        membership_active = conn.execute(
+                            select(active_worker_fence_clause(worker_id=lease_owner, run_id=run_id))
+                        ).scalar_one()
+                        if not membership_active:
+                            raise RunWorkerEvictedError(worker_id=lease_owner, run_id=run_id)
                     current = (
                         conn.execute(
                             select(token_work_items_table)

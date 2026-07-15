@@ -943,9 +943,9 @@ class RunWorkerEvictedError(Exception):
 
     Latched from the heartbeat CAS miss (slice-4 thread) or raised directly
     when a membership-fenced verb (``claim_ready`` / ``claim_pending_sink`` /
-    ``enqueue_ready``, slice 4) refuses with zero rows. The worker abandons
-    in-flight processing without emitting; a returning process mints a fresh
-    worker identity and re-admits.
+    ``enqueue_ready`` / ``heartbeat_lease``, slice 4) refuses with zero rows.
+    The worker abandons in-flight processing without emitting; a returning
+    process mints a fresh worker identity and re-admits.
 
     Attributes:
         worker_id: The evicted/departed worker identity.

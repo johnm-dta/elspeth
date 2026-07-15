@@ -610,6 +610,16 @@ class SchedulerDrainCoordinator:
                     self._pending_branch_losses.clear()
                     exc.add_note("scheduler lease lost during row processing; in-flight token result was abandoned")
                     return results
+                except RunWorkerEvictedError as exc:
+                    # Membership loss is a coordination signal, not a plugin
+                    # processing failure.  Propagate it directly: the generic
+                    # arm below performs mark_failed bookkeeping, which would
+                    # either mutate the abandoned lease through the lenient
+                    # N=0 disposition fence or mask this signal behind an
+                    # AuditIntegrityError when another member remains.
+                    self._pending_branch_losses.clear()
+                    exc.add_note("worker membership lost during row processing; in-flight token result was abandoned")
+                    raise
                 except Exception as processing_exc:
                     try:
                         self._scheduler.mark_failed(
@@ -928,6 +938,9 @@ class SchedulerDrainCoordinator:
                 issuing either would CAS-fail and cascade into a Tier-1
                 AuditIntegrityError, which is the exact failure mode this
                 primitive exists to eliminate.
+            RunWorkerEvictedError: the registered lease owner is no longer an
+                active run member. The existing eviction path propagates this
+                clean-abandon signal without a scheduler disposition mutation.
 
         **Single-plugin-call limitation.** This heartbeat fires *between*
         plugin calls, not *during* a single plugin call. If one plugin call
@@ -949,6 +962,11 @@ class SchedulerDrainCoordinator:
             lease_owner=self._scheduler_lease_owner,
             lease_seconds=self._scheduler_lease_seconds,
             now=now,
+            # Explicit boundary: registered production workers require the
+            # strict active-membership EXISTS predicate. Legacy/N=0 processors
+            # select the unfenced compatibility arm deliberately; registry
+            # emptiness inside the repository never chooses that arm.
+            membership_fenced=self._scheduler_lease_owner_registered,
         )
         self._last_heartbeat_at = now
 

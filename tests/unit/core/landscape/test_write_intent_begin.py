@@ -249,6 +249,7 @@ class TestBeginMode:
                 lease_owner="worker-1",
                 lease_seconds=30,
                 now=BASE,
+                membership_fenced=False,
             )
             assert "BEGIN IMMEDIATE" in _begin_statements(trace2)
         finally:

@@ -377,6 +377,7 @@ def test_heartbeat_lease_lost_records_event_when_current_row_is_peer_owned() -> 
             lease_owner="worker-a",
             lease_seconds=30,
             now=now + timedelta(seconds=2),
+            membership_fenced=False,
         )
 
     event = _scheduler_events(engine)[-1]
@@ -427,6 +428,7 @@ def test_heartbeat_lease_lost_records_event_when_expired_lease_was_recovered() -
             lease_owner="worker-a",
             lease_seconds=30,
             now=now + timedelta(seconds=32),
+            membership_fenced=False,
         )
 
     events = _scheduler_events(engine)

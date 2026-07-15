@@ -22,6 +22,7 @@ appear in many verbs and per-verb hand-rolled copies would drift.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from inspect import Parameter, signature
 
 import pytest
 from sqlalchemy import CheckConstraint, delete, insert, select, update
@@ -43,6 +44,7 @@ from elspeth.core.landscape.schema import (
     metadata,
     nodes_table,
     rows_table,
+    run_coordination_events_table,
     run_coordination_table,
     run_workers_table,
     runs_table,
@@ -538,6 +540,195 @@ class TestEnqueueReadyClaimedMembershipFence:
         assert exc_info.value.worker_id == "worker-active"
         assert exc_info.value.run_id == RUN_1
         assert _full_durable_snapshot(db) == before
+
+
+class TestHeartbeatLeaseMembershipFence:
+    """Heartbeat callers choose strict membership or explicit legacy N=0."""
+
+    def test_public_repository_layers_require_explicit_fence_intent(self) -> None:
+        from elspeth.core.landscape.scheduler.leases import SchedulerLeaseRepository
+
+        for heartbeat in (SchedulerLeaseRepository.heartbeat_lease, TokenSchedulerRepository.heartbeat_lease):
+            parameter = signature(heartbeat).parameters["membership_fenced"]
+            assert parameter.default is Parameter.empty
+
+    @staticmethod
+    def _leased_item(db: LandscapeDB, *, worker_id: str) -> tuple[TokenSchedulerRepository, str]:
+        work_item_id = _seed_ready_item(db, RUN_1)
+        repo = TokenSchedulerRepository(db.engine)
+        claimed = repo.claim_ready(run_id=RUN_1, lease_owner=worker_id, lease_seconds=60, now=NOW)
+        assert claimed is not None and claimed.work_item_id == work_item_id
+        return repo, work_item_id
+
+    @staticmethod
+    def _durable_state(db: LandscapeDB, *, work_item_id: str, worker_id: str) -> tuple[object, ...]:
+        """Snapshot every surface a refused heartbeat must leave unchanged."""
+        with db.engine.connect() as conn:
+            item = (
+                conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id)).mappings().one()
+            )
+            worker = conn.execute(select(run_workers_table).where(run_workers_table.c.worker_id == worker_id)).mappings().one_or_none()
+            scheduler_events = tuple(
+                conn.execute(
+                    select(scheduler_events_table.c.event_id)
+                    .where(scheduler_events_table.c.run_id == RUN_1)
+                    .order_by(scheduler_events_table.c.event_id)
+                ).scalars()
+            )
+            coordination_events = tuple(
+                conn.execute(
+                    select(run_coordination_events_table.c.event_id)
+                    .where(run_coordination_events_table.c.run_id == RUN_1)
+                    .order_by(run_coordination_events_table.c.event_id)
+                ).scalars()
+            )
+        return dict(item), None if worker is None else dict(worker), scheduler_events, coordination_events
+
+    @pytest.mark.parametrize("status", ["evicted", "departed"])
+    def test_non_active_owner_is_refused_with_zero_durable_mutation(self, db: LandscapeDB, status: str) -> None:
+        from elspeth.contracts.errors import RunWorkerEvictedError
+
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-a", run_id=RUN_1, status="active")
+        repo, work_item_id = self._leased_item(db, worker_id="worker-a")
+        with db.engine.begin() as conn:
+            conn.execute(
+                update(run_workers_table)
+                .where(run_workers_table.c.worker_id == "worker-a")
+                .values(
+                    status=status,
+                    departed_at=NOW + timedelta(seconds=1) if status == "departed" else None,
+                    evicted_at=NOW + timedelta(seconds=1) if status == "evicted" else None,
+                    evicted_by_worker_id="worker-leader" if status == "evicted" else None,
+                )
+            )
+        before = self._durable_state(db, work_item_id=work_item_id, worker_id="worker-a")
+
+        with pytest.raises(RunWorkerEvictedError) as exc_info:
+            repo.heartbeat_lease(
+                run_id=RUN_1,
+                work_item_id=work_item_id,
+                lease_owner="worker-a",
+                lease_seconds=60,
+                now=NOW + timedelta(seconds=30),
+                membership_fenced=True,
+            )
+
+        assert exc_info.value.worker_id == "worker-a"
+        assert exc_info.value.run_id == RUN_1
+        assert self._durable_state(db, work_item_id=work_item_id, worker_id="worker-a") == before
+
+    def test_deleted_sole_membership_row_is_refused_with_zero_durable_mutation(self, db: LandscapeDB) -> None:
+        from elspeth.contracts.errors import RunWorkerEvictedError
+
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-a", run_id=RUN_1, status="active")
+        repo, work_item_id = self._leased_item(db, worker_id="worker-a")
+        with db.engine.begin() as conn:
+            conn.execute(delete(run_workers_table).where(run_workers_table.c.worker_id == "worker-a"))
+        before = self._durable_state(db, work_item_id=work_item_id, worker_id="worker-a")
+
+        with pytest.raises(RunWorkerEvictedError):
+            repo.heartbeat_lease(
+                run_id=RUN_1,
+                work_item_id=work_item_id,
+                lease_owner="worker-a",
+                lease_seconds=60,
+                now=NOW + timedelta(seconds=30),
+                membership_fenced=True,
+            )
+
+        assert self._durable_state(db, work_item_id=work_item_id, worker_id="worker-a") == before
+
+    def test_active_current_owner_can_extend_lease(self, db: LandscapeDB) -> None:
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-a", run_id=RUN_1, status="active")
+        repo, work_item_id = self._leased_item(db, worker_id="worker-a")
+
+        expires_at = repo.heartbeat_lease(
+            run_id=RUN_1,
+            work_item_id=work_item_id,
+            lease_owner="worker-a",
+            lease_seconds=60,
+            now=NOW + timedelta(seconds=30),
+            membership_fenced=True,
+        )
+
+        assert expires_at == NOW + timedelta(seconds=90)
+
+    def test_active_owner_can_revive_expired_lease_before_recovery(self, db: LandscapeDB) -> None:
+        """Expiry alone is not ownership loss; recovery is the competing CAS."""
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-a", run_id=RUN_1, status="active")
+        repo, work_item_id = self._leased_item(db, worker_id="worker-a")
+
+        expires_at = repo.heartbeat_lease(
+            run_id=RUN_1,
+            work_item_id=work_item_id,
+            lease_owner="worker-a",
+            lease_seconds=60,
+            now=NOW + timedelta(seconds=61),
+            membership_fenced=True,
+        )
+
+        assert expires_at == NOW + timedelta(seconds=121)
+
+    def test_wrong_active_owner_uses_existing_lease_lost_path(self, db: LandscapeDB) -> None:
+        from elspeth.contracts.errors import SchedulerLeaseLostError
+
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-a", run_id=RUN_1, status="active")
+        _insert_worker(db, worker_id="worker-b", run_id=RUN_1, status="active")
+        repo, work_item_id = self._leased_item(db, worker_id="worker-a")
+
+        with pytest.raises(SchedulerLeaseLostError):
+            repo.heartbeat_lease(
+                run_id=RUN_1,
+                work_item_id=work_item_id,
+                lease_owner="worker-b",
+                lease_seconds=60,
+                now=NOW + timedelta(seconds=30),
+                membership_fenced=True,
+            )
+
+    def test_recovered_lease_uses_existing_lease_lost_path_when_membership_active(self, db: LandscapeDB) -> None:
+        from elspeth.contracts.errors import SchedulerLeaseLostError
+
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-a", run_id=RUN_1, status="active")
+        repo, work_item_id = self._leased_item(db, worker_id="worker-a")
+        recovered = repo.recover_expired_leases(
+            run_id=RUN_1,
+            now=NOW + timedelta(seconds=61),
+            caller_owner="worker-reaper",
+        )
+        assert recovered == 1
+
+        with pytest.raises(SchedulerLeaseLostError):
+            repo.heartbeat_lease(
+                run_id=RUN_1,
+                work_item_id=work_item_id,
+                lease_owner="worker-a",
+                lease_seconds=60,
+                now=NOW + timedelta(seconds=62),
+                membership_fenced=True,
+            )
+
+    def test_explicit_unfenced_intent_preserves_direct_harness_n0(self, db: LandscapeDB) -> None:
+        """The required False flag, not registry emptiness, selects legacy mode."""
+        _insert_run(db, RUN_1)
+        repo, work_item_id = self._leased_item(db, worker_id="direct-harness")
+
+        expires_at = repo.heartbeat_lease(
+            run_id=RUN_1,
+            work_item_id=work_item_id,
+            lease_owner="direct-harness",
+            lease_seconds=60,
+            now=NOW + timedelta(seconds=30),
+            membership_fenced=False,
+        )
+
+        assert expires_at == NOW + timedelta(seconds=90)
 
 
 class TestVerifyAndExtendLeaderFence:

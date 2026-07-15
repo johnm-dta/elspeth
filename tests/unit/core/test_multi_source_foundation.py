@@ -3142,6 +3142,7 @@ def test_scheduler_heartbeat_lease_extends_expires_at_for_held_lease() -> None:
         lease_owner="worker-a",
         lease_seconds=30,
         now=later,
+        membership_fenced=False,
     )
     assert new_expires_at == later + timedelta(seconds=30)
 
@@ -3192,6 +3193,7 @@ def test_scheduler_heartbeat_lease_prevents_peer_reaper_from_reaping_alive_slow_
         lease_owner=caller_owner,
         lease_seconds=30,
         now=now + timedelta(seconds=25),
+        membership_fenced=False,
     )
     recovered = repo.recover_expired_leases(
         run_id="run-1",
@@ -3298,6 +3300,7 @@ def test_scheduler_heartbeat_lease_raises_lease_lost_when_lease_was_reaped() -> 
             lease_owner=dead_owner,
             lease_seconds=30,
             now=now + timedelta(seconds=32),
+            membership_fenced=False,
         )
     assert exc_info.value.work_item_id == item.work_item_id
     assert exc_info.value.lease_owner == dead_owner
@@ -3329,6 +3332,7 @@ def test_scheduler_heartbeat_lease_raises_lease_lost_for_non_owner_caller() -> N
             lease_owner="worker-b",
             lease_seconds=30,
             now=now + timedelta(seconds=5),
+            membership_fenced=False,
         )
 
 
@@ -3371,6 +3375,7 @@ def test_scheduler_heartbeat_lease_composes_with_peer_active_leases() -> None:
         lease_owner=original_owner,
         lease_seconds=30,
         now=now + timedelta(seconds=28),
+        membership_fenced=False,
     )
 
     # At now+35s (after the original lease window would have expired),

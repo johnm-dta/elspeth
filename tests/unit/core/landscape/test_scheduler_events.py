@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from sqlalchemy import insert, select
@@ -20,6 +20,7 @@ from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.landscape.database import LandscapeDB, Tier1Engine
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.schema import (
+    coalesce_branch_losses_table,
     metadata,
     nodes_table,
     rows_table,
@@ -31,6 +32,10 @@ from elspeth.core.landscape.schema import (
     tokens_table,
 )
 from tests.fixtures.landscape import make_recorder_with_run, register_test_node
+
+if TYPE_CHECKING:
+    from elspeth.contracts.scheduler import BranchLossSpec, TokenWorkItem
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
 # Epoch-1 coordination seat token for the "run-1" test run.
 # The ratcheted verbs (mark_pending_sink_terminal*, terminalize_pending_sinks*)
@@ -564,6 +569,191 @@ def test_pending_sink_claim_and_terminalization_record_transition_events() -> No
     assert events[-1].caller_owner == "worker-b"
 
 
+@pytest.mark.parametrize("verb", ["mark_terminal", "mark_failed", "mark_blocked", "mark_pending_sink"])
+def test_normal_dispositions_refuse_reclaimed_sink_redrive_without_mutation(verb: str) -> None:
+    """TS-07 through TS-10 are transform-lease-only dispositions.
+
+    A reclaimed sink handoff is also LEASED, but ``pending_sink_name`` makes it
+    the sink-redrive subtype.  Refusal must occur before any part of the
+    transactional state/event/branch-loss image changes.
+    """
+    from elspeth.contracts.scheduler import BranchLossSpec, TokenWorkStatus
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+    engine = _make_scheduler_engine()
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    payload = _insert_scheduler_prerequisites(engine, now=now)
+    item = _make_pending_sink(repo, run_id="run-1", token_id="token-1", row_id="row-1", payload=payload, now=now)
+    reclaimed = repo.claim_pending_sink(
+        run_id="run-1",
+        lease_owner="worker-b",
+        lease_seconds=30,
+        now=now + timedelta(seconds=3),
+    )
+    assert reclaimed is not None
+    assert reclaimed.status is TokenWorkStatus.LEASED
+    assert reclaimed.pending_sink_name == "sink-a"
+
+    before = _disposition_state_snapshot(engine, work_item_id=item.work_item_id)
+    branch_loss = BranchLossSpec(
+        coalesce_name="merge",
+        row_id="row-1",
+        branch_name="left",
+        token_id="token-1",
+        reason="refused-normal-disposition",
+        recorded_by="worker-b",
+    )
+
+    with pytest.raises(AuditIntegrityError, match="transform-lease row"):
+        _invoke_normal_disposition(
+            repo,
+            verb=verb,
+            work_item_id=item.work_item_id,
+            payload=payload,
+            now=now + timedelta(seconds=4),
+            branch_loss=branch_loss,
+        )
+
+    assert _disposition_state_snapshot(engine, work_item_id=item.work_item_id) == before
+
+
+@pytest.mark.parametrize(
+    ("verb", "expected_status"),
+    [
+        ("mark_terminal", "terminal"),
+        ("mark_failed", "failed"),
+        ("mark_blocked", "blocked"),
+        ("mark_pending_sink", "pending_sink"),
+    ],
+)
+def test_normal_dispositions_still_accept_transform_leases(verb: str, expected_status: str) -> None:
+    """The subtype gate must preserve every legal transform-lease arm."""
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+    engine = _make_scheduler_engine()
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    payload = _insert_scheduler_prerequisites(engine, now=now)
+    item = repo.enqueue_ready(
+        run_id="run-1",
+        token_id="token-1",
+        row_id="row-1",
+        node_id="normalize",
+        step_index=1,
+        ingest_sequence=0,
+        available_at=now,
+        row_payload_json=payload,
+    )
+    claimed = repo.claim_ready(run_id="run-1", lease_owner="worker-b", lease_seconds=30, now=now + timedelta(seconds=1))
+    assert claimed is not None
+    assert claimed.pending_sink_name is None
+
+    transitioned = _invoke_normal_disposition(
+        repo,
+        verb=verb,
+        work_item_id=item.work_item_id,
+        payload=payload,
+        now=now + timedelta(seconds=2),
+    )
+
+    assert transitioned.status.value == expected_status
+
+
+@pytest.mark.parametrize("verb", ["mark_pending_sink_terminal", "mark_pending_sink_terminal_many"])
+def test_dedicated_sink_redrive_terminalizers_still_accept_reclaimed_sink_leases(verb: str) -> None:
+    """The normal-disposition gate must not block the dedicated redrive exit."""
+    from elspeth.contracts.scheduler import TokenWorkStatus
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+    engine = _make_scheduler_engine()
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    payload = _insert_scheduler_prerequisites(engine, now=now)
+    item = _make_pending_sink(repo, run_id="run-1", token_id="token-1", row_id="row-1", payload=payload, now=now)
+    reclaimed = repo.claim_pending_sink(
+        run_id="run-1",
+        lease_owner="worker-b",
+        lease_seconds=30,
+        now=now + timedelta(seconds=3),
+    )
+    assert reclaimed is not None
+    assert reclaimed.status is TokenWorkStatus.LEASED
+    assert reclaimed.pending_sink_name == "sink-a"
+
+    if verb == "mark_pending_sink_terminal":
+        terminalized = repo.mark_pending_sink_terminal(
+            run_id="run-1",
+            token_id="token-1",
+            now=now + timedelta(seconds=4),
+            expected_lease_owner="worker-b",
+            coordination_token=_COORD_TOKEN,
+        )
+    else:
+        terminalized = repo.mark_pending_sink_terminal_many(
+            run_id="run-1",
+            token_ids=("token-1",),
+            now=now + timedelta(seconds=4),
+            expected_lease_owner="worker-b",
+            coordination_token=_COORD_TOKEN,
+        )
+
+    assert terminalized == 1
+    with engine.connect() as conn:
+        status = conn.execute(
+            select(token_work_items_table.c.status).where(token_work_items_table.c.work_item_id == item.work_item_id)
+        ).scalar_one()
+    assert status == TokenWorkStatus.TERMINAL.value
+
+
+def test_normal_disposition_rolls_back_when_scheduler_event_insert_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shared disposition transaction is atomic with its event and loss."""
+    from elspeth.contracts.scheduler import BranchLossSpec, SchedulerEventType
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+    engine = _make_scheduler_engine()
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    payload = _insert_scheduler_prerequisites(engine, now=now)
+    item = repo.enqueue_ready(
+        run_id="run-1",
+        token_id="token-1",
+        row_id="row-1",
+        node_id="normalize",
+        step_index=1,
+        ingest_sequence=0,
+        available_at=now,
+        row_payload_json=payload,
+    )
+    assert repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now + timedelta(seconds=1)) is not None
+    before = _disposition_state_snapshot(engine, work_item_id=item.work_item_id)
+    original_record_scheduler_event = repo.events.record
+
+    def fail_failed_event(conn, *, event_type, **kwargs):
+        if event_type is SchedulerEventType.MARK_FAILED:
+            raise LandscapeRecordError("forced disposition event failure")
+        return original_record_scheduler_event(conn, event_type=event_type, **kwargs)
+
+    monkeypatch.setattr(repo.events, "record", fail_failed_event)
+
+    with pytest.raises(LandscapeRecordError, match="forced disposition event failure"):
+        repo.mark_failed(
+            work_item_id=item.work_item_id,
+            now=now + timedelta(seconds=2),
+            expected_lease_owner="worker-a",
+            branch_loss=BranchLossSpec(
+                coalesce_name="merge",
+                row_id="row-1",
+                branch_name="left",
+                token_id="token-1",
+                reason="failed",
+                recorded_by="worker-a",
+            ),
+        )
+
+    assert _disposition_state_snapshot(engine, work_item_id=item.work_item_id) == before
+
+
 def test_pending_sink_batch_terminalization_records_per_token_events() -> None:
     from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
@@ -991,6 +1181,80 @@ def test_query_repository_lists_scheduler_events_by_token_history() -> None:
     assert lineage is not None
     assert [event.event_type for event in lineage.scheduler_events] == [SchedulerEventType.ENQUEUE, SchedulerEventType.CLAIM_READY]
     db.close()
+
+
+def _invoke_normal_disposition(
+    repo: TokenSchedulerRepository,
+    *,
+    verb: str,
+    work_item_id: str,
+    payload: str,
+    now: datetime,
+    branch_loss: BranchLossSpec | None = None,
+) -> TokenWorkItem:
+    if verb == "mark_terminal":
+        return repo.mark_terminal(
+            work_item_id=work_item_id,
+            now=now,
+            expected_lease_owner="worker-b",
+            branch_loss=branch_loss,
+        )
+    if verb == "mark_failed":
+        return repo.mark_failed(
+            work_item_id=work_item_id,
+            now=now,
+            expected_lease_owner="worker-b",
+            branch_loss=branch_loss,
+        )
+    if verb == "mark_blocked":
+        return repo.mark_blocked(
+            work_item_id=work_item_id,
+            queue_key="queue-a",
+            barrier_key=None,
+            now=now,
+            expected_lease_owner="worker-b",
+        )
+    if verb == "mark_pending_sink":
+        return repo.mark_pending_sink(
+            work_item_id=work_item_id,
+            row_payload_json=payload,
+            sink_name="replacement-sink",
+            outcome="quarantined",
+            path="quarantined",
+            error_hash="replacement-error-hash",
+            error_message="replacement error",
+            now=now,
+            expected_lease_owner="worker-b",
+            branch_loss=branch_loss,
+        )
+    raise AssertionError(f"unknown normal disposition {verb!r}")
+
+
+def _disposition_state_snapshot(
+    engine: Tier1Engine, *, work_item_id: str
+) -> tuple[dict[str, object], dict[str, object], list[dict[str, object]], list[dict[str, object]]]:
+    from elspeth.core.landscape.schema import scheduler_events_table
+
+    with engine.connect() as conn:
+        work_item = dict(
+            conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id)).mappings().one()
+        )
+        coordination = dict(conn.execute(select(run_coordination_table).where(run_coordination_table.c.run_id == "run-1")).mappings().one())
+        events = [
+            dict(row)
+            for row in conn.execute(
+                select(scheduler_events_table)
+                .where(scheduler_events_table.c.run_id == "run-1")
+                .order_by(scheduler_events_table.c.recorded_at, scheduler_events_table.c.event_id)
+            )
+            .mappings()
+            .all()
+        ]
+        branch_losses = [
+            dict(row)
+            for row in conn.execute(select(coalesce_branch_losses_table).order_by(coalesce_branch_losses_table.c.loss_id)).mappings().all()
+        ]
+    return work_item, coordination, events, branch_losses
 
 
 def _make_scheduler_engine() -> Tier1Engine:

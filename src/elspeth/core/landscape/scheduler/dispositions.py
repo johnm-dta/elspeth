@@ -528,6 +528,11 @@ class SchedulerDispositionRepository:
         predicates = [
             token_work_items_table.c.work_item_id == work_item_id,
             token_work_items_table.c.status.in_(expected_status_values),
+            # TS-07 through TS-10 are transform-work dispositions.  A sink
+            # handoff reclaimed by claim_pending_sink is also LEASED, but its
+            # non-NULL pending_sink_name makes it the sink-redrive subtype;
+            # only the dedicated pending-sink terminalizers may consume it.
+            token_work_items_table.c.pending_sink_name.is_(None),
         ]
         if expected_lease_owner is not None:
             predicates.append(token_work_items_table.c.lease_owner == expected_lease_owner)
@@ -553,8 +558,10 @@ class SchedulerDispositionRepository:
                     # a registered-but-not-active worker raises the canonical
                     # eviction signal (zero mutation) instead of the generic
                     # audit-integrity crash.
-                    base_predicates_match = before["status"] in expected_status_values and (
-                        expected_lease_owner is None or before["lease_owner"] == expected_lease_owner
+                    base_predicates_match = (
+                        before["status"] in expected_status_values
+                        and before["pending_sink_name"] is None
+                        and (expected_lease_owner is None or before["lease_owner"] == expected_lease_owner)
                     )
                     if base_predicates_match:
                         worker_status = conn.execute(
@@ -566,9 +573,11 @@ class SchedulerDispositionRepository:
                             raise RunWorkerEvictedError(worker_id=fenced_worker_id, run_id=str(before["run_id"]))
                 actual = (
                     conn.execute(
-                        select(token_work_items_table.c.status, token_work_items_table.c.lease_owner).where(
-                            token_work_items_table.c.work_item_id == work_item_id
-                        )
+                        select(
+                            token_work_items_table.c.status,
+                            token_work_items_table.c.lease_owner,
+                            token_work_items_table.c.pending_sink_name,
+                        ).where(token_work_items_table.c.work_item_id == work_item_id)
                     )
                     .mappings()
                     .one_or_none()
@@ -576,12 +585,15 @@ class SchedulerDispositionRepository:
                 if actual is None:
                     actual_message = "missing"
                 else:
-                    actual_message = f"actual status {actual['status']}, actual lease_owner {actual['lease_owner']!r}"
+                    actual_subtype = "transform" if actual["pending_sink_name"] is None else "sink-redrive"
+                    actual_message = (
+                        f"actual status {actual['status']}, actual subtype {actual_subtype}, actual lease_owner {actual['lease_owner']!r}"
+                    )
                 expected_owner_message = "" if expected_lease_owner is None else f" and expected lease_owner {expected_lease_owner!r}"
                 fence_message = "" if fenced_worker_id is None else f" under membership fence for worker {fenced_worker_id!r}"
                 raise AuditIntegrityError(
                     f"Scheduler transition to {status.name!r} for work_item_id={work_item_id!r} "
-                    f"affected {result.rowcount} rows; expected exactly 1 row with expected status {expected_status_text}"
+                    f"affected {result.rowcount} rows; expected exactly 1 transform-lease row with expected status {expected_status_text}"
                     f"{expected_owner_message}{fence_message}. Caller assumed ownership but the row is missing or in an "
                     f"unexpected state ({actual_message})."
                 )

@@ -1463,9 +1463,9 @@ countersigns it. Set `SCENARIO_A_COMPATIBILITY_RECORD_FILE` and
   "rollback_doctor_task_definition": "exact-rollback-doctor-task-definition-arn",
   "previous_package_version": "0.7.0",
   "schema_facts": {
-    "candidate": {"session_epoch": 27, "landscape_epoch": 25, "run_web_plugin_policy_present": true},
+    "candidate": {"session_epoch": 28, "landscape_epoch": 27, "run_web_plugin_policy_present": true},
     "previous": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": true},
-    "structural_changes": "landscape_epoch_23_to_25_token_ownership_and_artifact_idempotency",
+    "structural_changes": "landscape_epoch_23_to_27_token_ownership_artifact_idempotency_sink_effect_ledger_and_coalesce_receipts",
     "semantics_only_changes": "none",
     "archive_export_decision": "required_before_forward_migration",
     "destructive_reset_required": false
@@ -2904,7 +2904,7 @@ Retain only allowlisted checks, classes, counts, and hashes.
 ### 7. Prove rollback refusal without crossing the schema stop
 
 The current upgrade record proves the opposite of rollback authorization. Once
-the candidate has migrated Landscape from epoch 23 through 24 to 25, the 0.7.0 image must
+the candidate has migrated Landscape from epoch 23 to 27, the 0.7.0 image must
 never be deployed against that database. Scenario B therefore exercises a
 fail-closed rollback refusal and forward recovery: revalidate and persist the
 sanitized compatibility receipt, prove the candidate task remains the active
@@ -2926,7 +2926,7 @@ if test "$DEPLOYMENT_MODE" = upgrade; then
     .backward_compatible == false
     and .rollback_permitted == false
     and .schema_facts.previous.landscape_epoch == 23
-    and .schema_facts.candidate.landscape_epoch == 25
+    and .schema_facts.candidate.landscape_epoch == 27
   ' "$ROLLBACK_REFUSAL_RECEIPT" >/dev/null
   persist_sanitized_receipt "$ACTIVE_SCENARIO_ID" compatibility-record \
     "$COMPATIBILITY_RECORD_SHA256" "$ROLLBACK_REFUSAL_RECEIPT" >/dev/null
@@ -2944,7 +2944,7 @@ fi
 
 The compatibility receipt plus `candidate-after-rollback-refusal` evidence is
 the refusal/forward-recovery record. If the candidate is unhealthy, keep traffic
-drained and repair forward with epoch-25-compatible code, or restore the matched
+drained and repair forward with epoch-27-compatible code, or restore the matched
 epoch-23 database archive before deploying the previous image. Never roll old
 code over the migrated schema.
 

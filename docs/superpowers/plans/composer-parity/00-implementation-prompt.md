@@ -18,23 +18,21 @@ the integrated feature to staging, execute the live three-surface colour proof,
 fix every in-scope defect you uncover, and close the controlling Filigree issue
 only when the full acceptance gate passes.
 
-## Authoritative package
+## Process documents
 
 Read these files before editing code:
 
 1. `docs/superpowers/plans/composer-parity/2026-07-13-composer-guided-freeform-capability-parity-design.md`
 2. `docs/superpowers/plans/composer-parity/2026-07-13-composer-capability-parity-implementation-plan.md`
-3. `docs/superpowers/plans/composer-parity/2026-07-13-composer-capability-parity-implementation-plan.review.json`
-4. Plans 01 through 07 in the same directory, in numeric order.
-5. `docs/superpowers/specs/2026-07-13-two-llm-colour-hybrid-pipeline-design.md`
-6. `docs/superpowers/plans/2026-07-13-two-llm-colour-hybrid-demo-run-sheet.md`
-7. The current repository `AGENTS.md` and every more-specific `AGENTS.md` that
+3. Plans 01 through 07 in the same directory, in numeric order.
+4. `docs/superpowers/specs/2026-07-13-two-llm-colour-hybrid-pipeline-design.md`
+5. `docs/superpowers/plans/2026-07-13-two-llm-colour-hybrid-demo-run-sheet.md`
+6. The current repository `AGENTS.md` and every more-specific `AGENTS.md` that
    governs a file you touch.
 
-The approved review report has zero blockers. If live code has changed since the
-review, treat the current code and repository instructions as factual authority,
-then update the affected plan precisely before implementing it. Do not silently
-invent a different architecture.
+Treat current code and repository instructions as factual authority. If a
+process document has drifted, update or retire it directly; do not create a
+signed plan package, review receipt, hash manifest, or sealing commit.
 
 ## Non-negotiable product result
 

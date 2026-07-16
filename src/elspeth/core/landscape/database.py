@@ -237,6 +237,59 @@ def _compile_sqlite_index_ddl(index: Index) -> str:
     return str(CreateIndex(index).compile(dialect=dialect()))
 
 
+def _normalize_sqlite_ddl(statement: str) -> str:
+    """Normalize SQLite's harmless quoting/whitespace rewrites for exact comparison."""
+    return " ".join(statement.replace('"', "").strip().rstrip(";").split())
+
+
+def _assert_sqlite_epoch_26_manifest(cursor: Any) -> None:
+    """Exact-check every epoch-26 table, index, and trigger before stamping."""
+    affected_tables = ("operations", "artifacts", *_EPOCH_26_NEW_TABLE_NAMES)
+    expected: dict[tuple[str, str], str] = {
+        ("table", table_name): _normalize_sqlite_ddl(_compile_sqlite_table_ddl(metadata.tables[table_name]))
+        for table_name in affected_tables
+    }
+    for table_name in affected_tables:
+        for index in metadata.tables[table_name].indexes:
+            if index.name is None:
+                raise AuditIntegrityError(f"Epoch-26 metadata contains an unnamed index on {table_name}")
+            expected[("index", index.name)] = _normalize_sqlite_ddl(_compile_sqlite_index_ddl(index))
+
+    witness_index = next(index for index in metadata.tables["runs"].indexes if index.name == "uq_runs_export_witness")
+    expected[("index", "uq_runs_export_witness")] = _normalize_sqlite_ddl(_compile_sqlite_index_ddl(witness_index))
+    for statement in _SQLITE_AUDIT_EXPORT_TRIGGERS:
+        match = re.search(r"\bCREATE\s+TRIGGER\s+([A-Za-z_][A-Za-z0-9_]*)", statement, flags=re.IGNORECASE)
+        if match is None:  # pragma: no cover - compile-time declaration guard
+            raise AuditIntegrityError("Epoch-26 metadata contains trigger DDL without a stable name")
+        expected[("trigger", match.group(1))] = _normalize_sqlite_ddl(statement)
+
+    table_placeholders = ",".join("?" for _ in affected_tables)
+    observed_rows = cursor.execute(
+        f"""
+        SELECT type, name, sql
+        FROM sqlite_schema
+        WHERE sql IS NOT NULL AND (
+          (type = 'table' AND name IN ({table_placeholders})) OR
+          (type = 'index' AND (tbl_name IN ({table_placeholders}) OR name = 'uq_runs_export_witness')) OR
+          (type = 'trigger' AND name LIKE 'trg_audit_export_%')
+        )
+        ORDER BY type, name
+        """,
+        (*affected_tables, *affected_tables),
+    ).fetchall()
+    observed = {(str(object_type), str(name)): _normalize_sqlite_ddl(str(sql)) for object_type, name, sql in observed_rows}
+    if observed.keys() != expected.keys():
+        raise AuditIntegrityError(
+            "Epoch-26 physical object manifest mismatch: "
+            f"missing={sorted(expected.keys() - observed.keys())!r}, extra={sorted(observed.keys() - expected.keys())!r}"
+        )
+    for key, expected_ddl in expected.items():
+        if observed[key] != expected_ddl:
+            raise AuditIntegrityError(
+                f"Epoch-26 physical DDL mismatch for {key[0]} {key[1]!r}: expected={expected_ddl!r}, observed={observed[key]!r}"
+            )
+
+
 def _remove_metadata_column(table: Table, column_name: str) -> None:
     """Remove a migration-successor column and every direct dependent object."""
     column = table.c[column_name]
@@ -802,7 +855,9 @@ _REQUIRED_TRIGGERS: tuple[str, ...] = (
     "trg_audit_export_chunk_insert_validate",
     "trg_audit_export_snapshot_insert_seal",
     "trg_audit_export_snapshot_immutable",
+    "trg_audit_export_snapshot_immutable_delete",
     "trg_audit_export_chunk_immutable",
+    "trg_audit_export_chunk_immutable_delete",
 )
 
 _ADDITIVE_INDEX_OWNERS: Mapping[str, str] = MappingProxyType({"ix_tokens_run_id": "tokens"})
@@ -1855,6 +1910,7 @@ class LandscapeDB:
                 if missing_triggers:
                     raise AuditIntegrityError(f"Epoch-26 migration physical trigger manifest is incomplete: {missing_triggers!r}")
 
+                _assert_sqlite_epoch_26_manifest(cursor)
                 cursor.execute("PRAGMA user_version = 26")
                 raw.commit()
         except Exception as exc:

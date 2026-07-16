@@ -8,6 +8,7 @@ from datetime import timedelta
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.sink_effects import (
@@ -18,6 +19,7 @@ from elspeth.contracts.sink_effects import (
     SinkEffectInputKind,
     SinkEffectInspectionMode,
     SinkEffectPlan,
+    SinkEffectReconcileKind,
     SinkEffectState,
 )
 from elspeth.core.landscape.database import LandscapeDB
@@ -27,7 +29,7 @@ from elspeth.core.landscape.execution.sink_effect_lifecycle import (
     SinkEffectAttemptResult,
 )
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.core.landscape.schema import calls_table, operations_table
+from elspeth.core.landscape.schema import calls_table, operations_table, sink_effects_table
 from tests.fixtures.landscape import make_factory, make_landscape_db
 from tests.unit.core.landscape.test_sink_effect_reservation import _pipeline_members, _pipeline_request
 
@@ -69,6 +71,64 @@ def test_reserved_effect_cannot_lease_before_complete_plan(db_factory: tuple[Lan
 
     with pytest.raises(LandscapeRecordError, match="prepared"):
         factory.execution.sink_effects.acquire_lease(effect.effect_id, owner="worker-a", ttl=timedelta(seconds=30))
+
+
+@pytest.mark.parametrize(
+    "forbidden_values",
+    (
+        {"reconcile_kind": SinkEffectReconcileKind.UNKNOWN},
+        {"result_descriptor_hash": "a" * 64},
+        {"publication_performed": False, "publication_evidence_kind": "virtual"},
+    ),
+)
+def test_reserved_effect_rejects_stale_result_fields(
+    db_factory: tuple[LandscapeDB, RecorderFactory],
+    forbidden_values: dict[str, object],
+) -> None:
+    db, factory = db_factory
+    effect = _reserved(factory)
+
+    with pytest.raises(IntegrityError), db.engine.begin() as conn:
+        conn.execute(sink_effects_table.update().where(sink_effects_table.c.effect_id == effect.effect_id).values(**forbidden_values))
+
+    with pytest.raises(ValueError, match="reserved effect"):
+        replace(effect, **forbidden_values)
+
+
+def test_prepared_effect_requires_inspection_and_precondition_witnesses(
+    db_factory: tuple[LandscapeDB, RecorderFactory],
+) -> None:
+    db, factory = db_factory
+    effect = _reserved(factory)
+
+    with pytest.raises(IntegrityError), db.engine.begin() as conn:
+        conn.execute(
+            sink_effects_table.update()
+            .where(sink_effects_table.c.effect_id == effect.effect_id)
+            .values(
+                state="prepared",
+                plan_json="{}",
+                plan_hash="a" * 64,
+                inspection_mode="no_inspection_required",
+                descriptor_mode="result_derived",
+                prepared_at=effect.created_at,
+            )
+        )
+
+
+def test_in_flight_effect_rejects_result_fields_before_finalization(
+    db_factory: tuple[LandscapeDB, RecorderFactory],
+) -> None:
+    db, factory = db_factory
+    effect = _reserved(factory)
+    repo = factory.execution.sink_effects
+    repo.complete_plan(effect.effect_id, _plan(effect.effect_id))
+    repo.acquire_lease(effect.effect_id, owner="worker-a", ttl=timedelta(seconds=30))
+
+    with pytest.raises(IntegrityError), db.engine.begin() as conn:
+        conn.execute(
+            sink_effects_table.update().where(sink_effects_table.c.effect_id == effect.effect_id).values(result_descriptor_hash="a" * 64)
+        )
 
 
 def test_concurrent_plan_cas_accepts_equal_and_rejects_divergent(db_factory: tuple[LandscapeDB, RecorderFactory]) -> None:

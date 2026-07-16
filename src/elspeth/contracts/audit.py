@@ -684,19 +684,44 @@ class SinkEffect:
         elif self.required_member_ordinal is not None or self.required_snapshot_slot != 0:
             raise ValueError("audit export effects require snapshot slot zero and no member ordinal")
 
-        prepared_fields = (self.plan_json, self.plan_hash, self.inspection_mode, self.descriptor_mode, self.prepared_at)
+        prepared_fields = (
+            self.plan_json,
+            self.plan_hash,
+            self.inspection_mode,
+            self.inspection_attempt_id,
+            self.descriptor_mode,
+            self.precondition_hash,
+            self.prepared_at,
+        )
         lease_fields = (self.lease_owner, self.lease_expires_at, self.lease_heartbeat_at)
+        result_fields = (
+            self.reconcile_kind,
+            self.reconcile_evidence_hash,
+            self.result_descriptor_hash,
+            self.publication_performed,
+            self.publication_evidence_kind,
+        )
         if self.state is SinkEffectState.RESERVED:
-            if any(value is not None for value in (*prepared_fields, *lease_fields, self.finalized_at)):
-                raise ValueError("reserved effect contains prepared, lease, or finalized fields")
+            if self.generation != 0 or any(
+                value is not None for value in (*prepared_fields, *lease_fields, *result_fields, self.finalized_at)
+            ):
+                raise ValueError("reserved effect contains prepared, lease, result, or finalized fields")
         elif self.state is SinkEffectState.PREPARED:
-            if any(value is None for value in prepared_fields) or any(value is not None for value in (*lease_fields, self.finalized_at)):
+            if (
+                self.generation != 0
+                or any(value is None for value in prepared_fields)
+                or any(value is not None for value in (*lease_fields, *result_fields, self.finalized_at))
+            ):
                 raise ValueError("prepared effect lifecycle fields are incomplete")
         elif self.state is SinkEffectState.IN_FLIGHT:
-            if any(value is None for value in (*prepared_fields, *lease_fields)) or self.generation < 1 or self.finalized_at is not None:
+            if (
+                any(value is None for value in (*prepared_fields, *lease_fields))
+                or self.generation < 1
+                or any(value is not None for value in (*result_fields, self.finalized_at))
+            ):
                 raise ValueError("in-flight effect lifecycle fields are incomplete")
         elif (
-            self.plan_hash is None
+            any(value is None for value in prepared_fields)
             or self.result_descriptor_hash is None
             or self.publication_performed is None
             or self.publication_evidence_kind is None
@@ -704,6 +729,21 @@ class SinkEffect:
             or any(value is not None for value in lease_fields)
         ):
             raise ValueError("finalized effect lifecycle fields are incomplete")
+        elif self.publication_performed:
+            if self.publication_evidence_kind == "returned":
+                if self.reconcile_kind is not None or self.reconcile_evidence_hash is not None:
+                    raise ValueError("returned effect cannot carry reconciliation evidence")
+            elif self.publication_evidence_kind == "reconciled":
+                if self.reconcile_kind is not SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR or self.reconcile_evidence_hash is None:
+                    raise ValueError("reconciled effect requires exact reconciliation evidence")
+            else:
+                raise ValueError("published effect requires returned or reconciled evidence")
+        elif (
+            self.publication_evidence_kind not in {"inherited", "virtual"}
+            or self.reconcile_kind is not None
+            or self.reconcile_evidence_hash is not None
+        ):
+            raise ValueError("no-publication effect requires inherited or virtual evidence")
 
         if self.lease_expires_at is not None and self.lease_heartbeat_at is not None and self.lease_expires_at < self.lease_heartbeat_at:
             raise ValueError("lease_expires_at cannot precede lease_heartbeat_at")

@@ -1251,17 +1251,35 @@ sink_effects_table = Table(
         name="ck_sink_effects_input_kind_xor",
     ),
     CheckConstraint(
-        "(state = 'reserved' AND plan_hash IS NULL AND prepared_at IS NULL AND lease_owner IS NULL "
-        "AND lease_expires_at IS NULL AND lease_heartbeat_at IS NULL AND finalized_at IS NULL) OR "
-        "(state = 'prepared' AND plan_hash IS NOT NULL AND plan_json IS NOT NULL AND inspection_mode IS NOT NULL "
-        "AND descriptor_mode IS NOT NULL AND prepared_at IS NOT NULL AND lease_owner IS NULL "
-        "AND lease_expires_at IS NULL AND lease_heartbeat_at IS NULL AND finalized_at IS NULL) OR "
-        "(state = 'in_flight' AND plan_hash IS NOT NULL AND plan_json IS NOT NULL AND prepared_at IS NOT NULL "
-        "AND lease_owner IS NOT NULL AND generation > 0 AND lease_expires_at IS NOT NULL "
-        "AND lease_heartbeat_at IS NOT NULL AND finalized_at IS NULL) OR "
-        "(state = 'finalized' AND plan_hash IS NOT NULL AND result_descriptor_hash IS NOT NULL "
-        "AND publication_performed IS NOT NULL AND publication_evidence_kind IS NOT NULL "
-        "AND lease_owner IS NULL AND lease_expires_at IS NULL AND lease_heartbeat_at IS NULL AND finalized_at IS NOT NULL)",
+        "(state = 'reserved' AND generation = 0 AND inspection_mode IS NULL AND inspection_attempt_id IS NULL "
+        "AND plan_json IS NULL AND plan_hash IS NULL AND descriptor_mode IS NULL AND expected_descriptor_hash IS NULL "
+        "AND precondition_hash IS NULL AND prepared_at IS NULL AND lease_owner IS NULL AND lease_expires_at IS NULL "
+        "AND lease_heartbeat_at IS NULL AND reconcile_kind IS NULL AND reconcile_evidence_hash IS NULL "
+        "AND result_descriptor_hash IS NULL AND publication_performed IS NULL AND publication_evidence_kind IS NULL "
+        "AND finalized_at IS NULL) OR "
+        "(state = 'prepared' AND generation = 0 AND plan_hash IS NOT NULL AND plan_json IS NOT NULL "
+        "AND inspection_mode IS NOT NULL AND inspection_attempt_id IS NOT NULL AND descriptor_mode IS NOT NULL "
+        "AND precondition_hash IS NOT NULL AND prepared_at IS NOT NULL AND lease_owner IS NULL "
+        "AND lease_expires_at IS NULL AND lease_heartbeat_at IS NULL AND reconcile_kind IS NULL "
+        "AND reconcile_evidence_hash IS NULL AND result_descriptor_hash IS NULL AND publication_performed IS NULL "
+        "AND publication_evidence_kind IS NULL AND finalized_at IS NULL) OR "
+        "(state = 'in_flight' AND plan_hash IS NOT NULL AND plan_json IS NOT NULL AND inspection_mode IS NOT NULL "
+        "AND inspection_attempt_id IS NOT NULL AND descriptor_mode IS NOT NULL AND precondition_hash IS NOT NULL "
+        "AND prepared_at IS NOT NULL AND lease_owner IS NOT NULL AND generation > 0 AND lease_expires_at IS NOT NULL "
+        "AND lease_heartbeat_at IS NOT NULL AND reconcile_kind IS NULL AND reconcile_evidence_hash IS NULL "
+        "AND result_descriptor_hash IS NULL AND publication_performed IS NULL AND publication_evidence_kind IS NULL "
+        "AND finalized_at IS NULL) OR "
+        "(state = 'finalized' AND plan_hash IS NOT NULL AND plan_json IS NOT NULL AND inspection_mode IS NOT NULL "
+        "AND inspection_attempt_id IS NOT NULL AND descriptor_mode IS NOT NULL AND precondition_hash IS NOT NULL "
+        "AND prepared_at IS NOT NULL AND result_descriptor_hash IS NOT NULL AND publication_performed IS NOT NULL "
+        "AND publication_evidence_kind IS NOT NULL AND lease_owner IS NULL AND lease_expires_at IS NULL "
+        "AND lease_heartbeat_at IS NULL AND finalized_at IS NOT NULL AND "
+        "((publication_performed IS TRUE AND publication_evidence_kind = 'returned' AND reconcile_kind IS NULL "
+        "AND reconcile_evidence_hash IS NULL) OR "
+        "(publication_performed IS TRUE AND publication_evidence_kind = 'reconciled' "
+        "AND reconcile_kind = 'applied_with_exact_descriptor' AND reconcile_evidence_hash IS NOT NULL) OR "
+        "(publication_performed IS FALSE AND publication_evidence_kind IN ('inherited','virtual') "
+        "AND reconcile_kind IS NULL AND reconcile_evidence_hash IS NULL)))",
         name="ck_sink_effects_lifecycle",
     ),
     CheckConstraint("generation >= 0", name="ck_sink_effects_generation"),

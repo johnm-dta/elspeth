@@ -124,6 +124,29 @@ def test_epoch_25_to_26_failure_rolls_back_every_object(tmp_path: Path, monkeypa
     assert before[0] == 25
 
 
+def test_epoch_26_refuses_divergent_new_table_before_stamping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db_path = tmp_path / "divergent-new-table.db"
+    url = _seed_current_database(db_path)
+    before = _schema_and_rows(db_path)
+    original = landscape_database._compile_sqlite_table_ddl
+    injected = False
+
+    def _inject_extra_column_once(table, *, replacement_name=None):  # type: ignore[no-untyped-def]
+        nonlocal injected
+        statement = original(table, replacement_name=replacement_name)
+        if table.name == "sink_effect_attempts" and replacement_name is None and not injected:
+            injected = True
+            return statement.replace("(\n", "(\n\tsurprise INTEGER, \n", 1)
+        return statement
+
+    monkeypatch.setattr(landscape_database, "_compile_sqlite_table_ddl", _inject_extra_column_once)
+    with pytest.raises(Exception, match=r"physical DDL mismatch.*sink_effect_attempts"):
+        LandscapeDB(url)
+
+    assert _schema_and_rows(db_path) == before
+    assert before[0] == 25
+
+
 def test_epoch_25_malformed_predecessor_is_refused_without_mutation(tmp_path: Path) -> None:
     db_path = tmp_path / "malformed.db"
     url = _seed_current_database(db_path)

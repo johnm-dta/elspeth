@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+_AUDIT_SAFE_PROVIDER_ERROR = "LLM provider request failed"
+
 
 @dataclass(frozen=True, slots=True)
 class LLMResponse:
@@ -434,7 +436,7 @@ class AuditedLLMClient(AuditedClientBase):
                 request_data=request_dto,
                 error=LLMCallError(
                     type=error_type,
-                    message=str(e),
+                    message=_AUDIT_SAFE_PROVIDER_ERROR,
                     retryable=is_retryable,
                 ),
                 latency_ms=latency_ms,

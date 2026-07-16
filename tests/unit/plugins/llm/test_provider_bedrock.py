@@ -330,7 +330,8 @@ class TestBedrockProvider:
         assert escaping.retryable is retryable
         assert escaping.__cause__ is None
         assert escaping.__context__ is None
-        assert recorder.calls[0]["error"].message == str(provider_error)
+        assert recorder.calls[0]["error"].message == "LLM provider request failed"
+        assert str(provider_error) not in recorder.calls[0]["error"].message
         assert str(provider_error) not in str(escaping)
 
     def test_runtime_preflight_redacts_raw_error_and_preserves_retryability(self) -> None:
@@ -353,7 +354,8 @@ class TestBedrockProvider:
         assert escaping.retryable is True
         assert escaping.__cause__ is None
         assert escaping.__context__ is None
-        assert sentinel in recorder.operation_calls[0]["error"].message
+        assert recorder.operation_calls[0]["error"].message == "LLM provider request failed"
+        assert sentinel not in recorder.operation_calls[0]["error"].message
 
     def test_close_closes_underlying_adapter_once(self) -> None:
         provider = _provider()

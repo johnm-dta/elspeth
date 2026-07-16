@@ -362,9 +362,13 @@ class TestAuditedLLMClient:
         assert calls[1]["call_index"] == 1
 
     def test_failed_call_records_error(self) -> None:
-        """Failed LLM call records error details."""
+        """Provider detail remains caller-visible but never enters the audit record."""
         execution = self._create_mock_execution()
-        openai_client = FakeOpenAIClient(exception=Exception("API connection failed"))
+        provider_detail = (
+            "API connection failed at https://provider.invalid/v1 "
+            "arn:aws:bedrock:ap-southeast-2:123456789012:model/private request-id=secret-request-marker"
+        )
+        openai_client = FakeOpenAIClient(exception=Exception(provider_detail))
 
         client = AuditedLLMClient(
             execution=execution,
@@ -374,18 +378,22 @@ class TestAuditedLLMClient:
             underlying_client=openai_client,
         )
 
-        with pytest.raises(LLMClientError, match="API connection failed"):
+        with pytest.raises(LLMClientError) as exc_info:
             client.chat_completion(
                 model="gpt-4",
                 messages=[{"role": "user", "content": "Hello"}],
             )
+
+        assert provider_detail in str(exc_info.value)
 
         # Verify error was recorded
         execution.assert_recorded_once()
         call_kwargs = execution.last_record_call_kwargs
         assert call_kwargs["status"] == CallStatus.ERROR
         assert call_kwargs["error"].type == "Exception"
-        assert "API connection failed" in call_kwargs["error"].message
+        assert call_kwargs["error"].message == "LLM provider request failed"
+        for marker in ("provider.invalid", "arn:aws:bedrock", "secret-request-marker"):
+            assert marker not in call_kwargs["error"].message
         assert call_kwargs["error"].retryable is False
 
     def test_missing_usage_attribute_still_records_call(self) -> None:

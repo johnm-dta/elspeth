@@ -637,6 +637,7 @@ def _make_exporter(
     return LandscapeExporter(
         _fake_landscape_db(),
         signing_key=signing_key,
+        signer_key_id="test-signer-v1" if signing_key is not None else None,
         include_raw_error_rows=include_raw_error_rows,
         row_batch_size=row_batch_size,
         read_model=_make_export_read_model(
@@ -764,7 +765,7 @@ class TestConstructor:
         assert not hasattr(read_model, "query")
         assert exporter._read_model is read_model
         records = list(exporter.export_run("run-1"))
-        assert records == [
+        assert records[:-1] == [
             {
                 "record_type": "run",
                 "run_id": "run-1",
@@ -837,7 +838,7 @@ class TestExportRunUnsigned:
     def test_empty_run_yields_run_record_only(self) -> None:
         exporter = _make_exporter()
         records = list(exporter.export_run("run-1"))
-        assert len(records) == 1
+        assert len(records) == 2
         assert records[0]["record_type"] == "run"
         assert records[0]["run_id"] == "run-1"
         assert records[0]["status"] == "completed"
@@ -909,8 +910,9 @@ class TestExportRunUnsigned:
     def test_no_signature_field_when_unsigned(self) -> None:
         exporter = _make_exporter()
         records = list(exporter.export_run("run-1"))
-        for record in records:
+        for record in records[:-1]:
             assert "signature" not in record
+        assert records[-1]["signature"] is None
 
     def test_reproducibility_grade_exported_as_string_not_enum(self) -> None:
         """Regression: elspeth-c74458d938 — StrEnum survives json.dumps but
@@ -968,7 +970,8 @@ class TestExportRunSigned:
         assert manifest["run_id"] == "run-1"
         assert manifest["record_count"] == 1  # Just the run record
         assert manifest["hash_algorithm"] == "sha256"
-        assert manifest["signature_algorithm"] == "hmac-sha256"
+        assert manifest["signature_algorithm"] == "hmac_sha256"
+        assert manifest["schema"] == "elspeth.audit-export-manifest.v2"
         assert "final_hash" in manifest
         assert "exported_at" in manifest
 
@@ -1451,6 +1454,7 @@ class TestSparseLookupMemory:
             "token",
             "node_state",
             "batch",
+            "manifest",
         ]
         empty_sparse_entries = [
             key
@@ -1921,6 +1925,7 @@ class TestFullPipelineExport:
             "batch": 1,
             "batch_member": 1,
             "artifact": 1,
+            "manifest": 1,
         }
 
     def test_export_stream_identical_across_row_batch_sizes(self) -> None:

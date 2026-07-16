@@ -9,12 +9,15 @@ content references on behalf of an adapter.
 from __future__ import annotations
 
 import hashlib
+import hmac
+import json
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Final, Literal, Protocol, runtime_checkable
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Final, Literal, Protocol, cast, runtime_checkable
 
 from elspeth.contracts.hashing import canonical_json
 
@@ -40,6 +43,35 @@ _LOWER_HEX_64 = re.compile(r"[0-9a-f]{64}\Z")
 _UTC_MICROSECOND_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z\Z")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _NAMESPACE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,255}\Z")
+_EXPORT_TERMINAL_STATUSES: Final = frozenset({"completed", "completed_with_failures", "empty"})
+_UNSIGNED_RECORD_CHAIN: Final = "sha256_concat_record_sha256_v1"
+_HMAC_RECORD_CHAIN: Final = "sha256_concat_hmac_sha256_signatures_v1"
+_FINAL_MANIFEST_CORE_FIELDS: Final = frozenset(
+    {
+        "chunk_count",
+        "derivation_version",
+        "export_format",
+        "exported_at",
+        "final_hash",
+        "hash_algorithm",
+        "last_chunk_seal_hash",
+        "manifest_hash",
+        "record_chain_algorithm",
+        "record_count",
+        "record_type",
+        "registry_key_hash",
+        "run_id",
+        "schema",
+        "signature_algorithm",
+        "signature_key_id",
+        "snapshot_hash",
+        "snapshot_id",
+        "snapshot_seal_hash",
+        "source_completed_at",
+        "source_status",
+        "total_bytes",
+    }
+)
 
 
 def _object(value: object, *, fields: frozenset[str], path: str) -> dict[str, object]:
@@ -412,6 +444,36 @@ def _validate_effect_identity(payload: object) -> None:
     _string(obj["source_run_id"], "source_run_id")
 
 
+def _validate_final_manifest_core(payload: object) -> None:
+    obj = _object(payload, fields=_FINAL_MANIFEST_CORE_FIELDS, path="final manifest signing body")
+    for field in ("chunk_count", "record_count", "total_bytes"):
+        _integer(obj[field], field, minimum=1)
+    _string(obj["derivation_version"], "derivation_version", allowed=frozenset({AUDIT_EXPORT_DERIVATION_VERSION}))
+    _string(obj["export_format"], "export_format", allowed=frozenset({"json", "csv"}))
+    _timestamp(obj["exported_at"], "exported_at")
+    for field in (
+        "final_hash",
+        "last_chunk_seal_hash",
+        "manifest_hash",
+        "registry_key_hash",
+        "snapshot_hash",
+        "snapshot_id",
+        "snapshot_seal_hash",
+    ):
+        _hash(obj[field], field)
+    _string(obj["hash_algorithm"], "hash_algorithm", allowed=frozenset({"sha256"}))
+    _string(obj["record_type"], "record_type", allowed=frozenset({"manifest"}))
+    _string(obj["run_id"], "run_id")
+    _string(obj["schema"], "schema", allowed=frozenset({AUDIT_EXPORT_MANIFEST_SCHEMA}))
+    mode = _string(obj["signature_algorithm"], "signature_algorithm", allowed=frozenset({"unsigned", "hmac_sha256"}))
+    signer = _string(obj["signature_key_id"], "signature_key_id")
+    _validate_signer(mode, signer, None, allow_signature_none=True)
+    expected_chain = _UNSIGNED_RECORD_CHAIN if mode == "unsigned" else _HMAC_RECORD_CHAIN
+    _string(obj["record_chain_algorithm"], "record_chain_algorithm", allowed=frozenset({expected_chain}))
+    _timestamp(obj["source_completed_at"], "source_completed_at")
+    _string(obj["source_status"], "source_status", allowed=_EXPORT_TERMINAL_STATUSES)
+
+
 _SCHEMA_VALIDATORS: Final[dict[str, Callable[[object], None]]] = {
     "audit-export-public-config-v1": _validate_public_config,
     "audit-export-registry-key-v1": _validate_registry_key,
@@ -420,6 +482,7 @@ _SCHEMA_VALIDATORS: Final[dict[str, Callable[[object], None]]] = {
     "audit-export-chunk-seal-v1": _validate_chunk_seal,
     "audit-export-manifest-v1": _validate_chunk_manifest,
     "audit-export-snapshot-seal-v1": _validate_snapshot_seal,
+    "audit-export-final-manifest-signing-body-v2": _validate_final_manifest_core,
     "sink-effect-audit-export-final-manifest-v1": _validate_final_manifest_identity,
     "sink-effect-audit-export-effect-v1": _validate_effect_identity,
 }
@@ -643,3 +706,405 @@ class IterableBoundAuditExportContentReader:
 
     def __iter__(self) -> Iterator[bytes]:
         yield self.read()
+
+
+@dataclass(frozen=True, slots=True)
+class AuditExportDerivationConfig:
+    """Complete immutable authority for one canonical export derivation."""
+
+    source_run_id: str
+    source_status: str
+    source_completed_at: str
+    export_format: Literal["json", "csv"]
+    exporter_version: str
+    serialization_version: str
+    chunking_algorithm_version: str
+    include_raw_error_rows: bool
+    per_chunk_byte_limit: int
+    per_chunk_record_limit: int
+    signing_mode: Literal["unsigned", "hmac_sha256"]
+    signer_key_id: str
+    signing_key: bytes | None
+
+    def __post_init__(self) -> None:
+        _string(self.source_run_id, "source_run_id")
+        _string(self.source_status, "source_status", allowed=_EXPORT_TERMINAL_STATUSES)
+        _timestamp(self.source_completed_at, "source_completed_at")
+        _string(self.export_format, "export_format", allowed=frozenset({"json", "csv"}))
+        _string(self.exporter_version, "exporter_version")
+        if self.serialization_version != AUDIT_EXPORT_SERIALIZATION_VERSION:
+            raise ValueError(f"serialization_version must equal {AUDIT_EXPORT_SERIALIZATION_VERSION!r}")
+        _string(self.chunking_algorithm_version, "chunking_algorithm_version")
+        _boolean(self.include_raw_error_rows, "include_raw_error_rows")
+        _integer(self.per_chunk_byte_limit, "per_chunk_byte_limit", minimum=1, maximum=AUDIT_EXPORT_MAX_CHUNK_BYTES)
+        _integer(
+            self.per_chunk_record_limit,
+            "per_chunk_record_limit",
+            minimum=1,
+            maximum=AUDIT_EXPORT_MAX_CHUNK_RECORDS,
+        )
+        _string(self.signing_mode, "signing_mode", allowed=frozenset({"unsigned", "hmac_sha256"}))
+        _validate_signer(self.signing_mode, self.signer_key_id, None, allow_signature_none=True)
+        if self.signing_mode == "unsigned":
+            if self.signing_key is not None:
+                raise ValueError("unsigned derivation forbids a signing key")
+        elif type(self.signing_key) is not bytes or not self.signing_key:
+            raise ValueError("hmac_sha256 derivation requires non-empty exact signing-key bytes")
+
+    @property
+    def exported_at(self) -> str:
+        return self.source_completed_at
+
+
+@dataclass(frozen=True, slots=True)
+class AuditExportDerivedChunk:
+    ordinal: int
+    content: bytes
+    descriptor: AuditExportContentDescriptor
+    record_count: int
+    cumulative_records: int
+    cumulative_bytes: int
+    predecessor_seal_hash: str | None
+    chunk_seal_bytes: bytes
+    chunk_seal_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class AuditExportDerivedBundle:
+    """Exact canonical records, chunks, seals, and detached final manifest."""
+
+    config: AuditExportDerivationConfig
+    public_export_config_bytes: bytes
+    public_export_config_hash: str
+    registry_key_bytes: bytes
+    registry_key_hash: str
+    unsigned_record_bytes: tuple[bytes, ...]
+    snapshot_content_bytes: bytes
+    snapshot_hash: str
+    snapshot_id_bytes: bytes
+    snapshot_id: str
+    chunk_manifest_bytes: bytes
+    manifest_hash: str
+    snapshot_seal_bytes: bytes
+    snapshot_seal_hash: str
+    last_chunk_seal_hash: str
+    record_chain_algorithm: str
+    final_hash: str
+    record_objects: tuple[Mapping[str, ClosedAuditExportJSON], ...]
+    record_frames: tuple[bytes, ...]
+    chunks: tuple[AuditExportDerivedChunk, ...]
+    signed_manifest: AuditExportSignedManifestInput
+    final_manifest: Mapping[str, ClosedAuditExportJSON]
+    signing_body: bytes
+    signed_manifest_bytes: bytes
+
+    @property
+    def source_completed_at(self) -> str:
+        return self.config.source_completed_at
+
+    @property
+    def exported_at(self) -> str:
+        return self.config.exported_at
+
+    @property
+    def chunk_bytes(self) -> tuple[bytes, ...]:
+        return tuple(chunk.content for chunk in self.chunks)
+
+    @property
+    def json_target_bytes(self) -> bytes:
+        return b"".join(self.chunk_bytes) + self.signed_manifest_bytes
+
+
+def _detached_record(record: Mapping[str, object]) -> dict[str, ClosedAuditExportJSON]:
+    if type(record) is not dict or any(type(key) is not str for key in record):
+        raise TypeError("audit export records must be exact string-keyed dictionaries")
+    if "signature" in record:
+        raise ValueError("audit export input records must not predeclare the reserved signature field")
+    if record.get("record_type") == "manifest":
+        raise ValueError("audit export input records must not contain a manifest")
+    # Round-tripping through the committed canonical encoder proves the value
+    # tree is detached JSON data and rejects datetimes/bytes/custom authority.
+    try:
+        encoded = canonical_json(record)
+        value = json.loads(encoded)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise TypeError("audit export record is not closed canonical JSON") from exc
+    if type(value) is not dict:
+        raise TypeError("audit export record must canonicalize to an object")
+    return value
+
+
+def derive_audit_export_bundle(
+    records: Iterable[Mapping[str, object]],
+    config: AuditExportDerivationConfig,
+) -> AuditExportDerivedBundle:
+    """Derive the exact v2 snapshot and final-manifest byte graph.
+
+    This pure boundary is intentionally target/store independent. Persistence
+    code may spool the returned complete-frame chunks before registering the
+    immutable winner; no formula here includes a target, effect, or store ID.
+    """
+    if type(config) is not AuditExportDerivationConfig:
+        raise TypeError("config must be exact AuditExportDerivationConfig")
+    from elspeth.contracts.sink_effects import AuditExportSignedManifestInput, AuditExportSigningMode
+
+    public_config: dict[str, ClosedAuditExportJSON] = {
+        "chunking_algorithm_version": config.chunking_algorithm_version,
+        "export_format": config.export_format,
+        "exporter_version": config.exporter_version,
+        "include_raw_error_rows": config.include_raw_error_rows,
+        "per_chunk_byte_limit": config.per_chunk_byte_limit,
+        "per_chunk_record_limit": config.per_chunk_record_limit,
+        "serialization_version": config.serialization_version,
+        "signer_key_id": config.signer_key_id,
+        "signing_mode": config.signing_mode,
+    }
+    public_export_config_bytes = C("audit-export-public-config-v1", public_config)
+    public_export_config_hash = H(public_export_config_bytes)
+    registry_key: dict[str, ClosedAuditExportJSON] = {
+        "export_format": config.export_format,
+        "exporter_version": config.exporter_version,
+        "public_export_config_hash": public_export_config_hash,
+        "serialization_version": config.serialization_version,
+        "signer_key_id": config.signer_key_id,
+        "signing_mode": config.signing_mode,
+        "source_run_id": config.source_run_id,
+    }
+    registry_key_bytes = C("audit-export-registry-key-v1", registry_key)
+    registry_key_hash = H(registry_key_bytes)
+
+    record_objects: list[Mapping[str, ClosedAuditExportJSON]] = []
+    unsigned_record_bytes: list[bytes] = []
+    record_frames: list[bytes] = []
+    chain = hashlib.sha256()
+    for raw in records:
+        unsigned = _detached_record(raw)
+        unsigned_bytes = canonical_json(unsigned).encode("utf-8")
+        emitted = dict(unsigned)
+        if config.signing_mode == "hmac_sha256":
+            assert config.signing_key is not None
+            record_signature = hmac.new(config.signing_key, unsigned_bytes, hashlib.sha256).hexdigest()
+            emitted["signature"] = record_signature
+            chain.update(record_signature.encode("ascii"))
+        else:
+            chain.update(hashlib.sha256(unsigned_bytes).hexdigest().encode("ascii"))
+        frame = canonical_json(emitted).encode("utf-8") + b"\n"
+        if len(frame) > config.per_chunk_byte_limit:
+            raise ValueError("one audit export record frame exceeds per_chunk_byte_limit")
+        record_objects.append(MappingProxyType(emitted))
+        unsigned_record_bytes.append(unsigned_bytes)
+        record_frames.append(frame)
+        if len(record_frames) > AUDIT_EXPORT_MAX_TOTAL_RECORDS:
+            raise ValueError("audit export record count exceeds the code-owned maximum")
+    if not record_frames:
+        raise ValueError("audit export requires at least the run record")
+
+    chunk_material: list[tuple[bytes, int]] = []
+    current: list[bytes] = []
+    current_bytes = 0
+    for frame in record_frames:
+        if current and (len(current) == config.per_chunk_record_limit or current_bytes + len(frame) > config.per_chunk_byte_limit):
+            chunk_material.append((b"".join(current), len(current)))
+            current = []
+            current_bytes = 0
+        current.append(frame)
+        current_bytes += len(frame)
+    if current:
+        chunk_material.append((b"".join(current), len(current)))
+    if len(chunk_material) > AUDIT_EXPORT_MAX_CHUNKS:
+        raise ValueError("audit export chunk count exceeds the code-owned maximum")
+
+    snapshot_chunks: list[dict[str, ClosedAuditExportJSON]] = []
+    cumulative_records = 0
+    cumulative_bytes = 0
+    for ordinal, (content, record_count) in enumerate(chunk_material):
+        cumulative_records += record_count
+        cumulative_bytes += len(content)
+        if cumulative_bytes > AUDIT_EXPORT_MAX_TOTAL_BYTES:
+            raise ValueError("audit export total bytes exceed the code-owned maximum")
+        snapshot_chunks.append(
+            {
+                "content_hash": H(content),
+                "cumulative_bytes": cumulative_bytes,
+                "cumulative_records": cumulative_records,
+                "ordinal": ordinal,
+                "record_count": record_count,
+                "size_bytes": len(content),
+            }
+        )
+    snapshot_content: dict[str, ClosedAuditExportJSON] = {
+        "chunking_algorithm_version": config.chunking_algorithm_version,
+        "chunks": cast(list[ClosedAuditExportJSON], snapshot_chunks),
+        "record_count": len(record_frames),
+        "serialization_version": config.serialization_version,
+        "total_bytes": cumulative_bytes,
+    }
+    snapshot_content_bytes = C("audit-export-snapshot-content-v1", snapshot_content)
+    snapshot_hash = H(snapshot_content_bytes)
+    snapshot_id_bytes = C(
+        "audit-export-snapshot-id-v1",
+        {"registry_key_hash": registry_key_hash, "snapshot_hash": snapshot_hash},
+    )
+    snapshot_id = H(snapshot_id_bytes)
+
+    derived_chunks: list[AuditExportDerivedChunk] = []
+    manifest_chunks: list[dict[str, ClosedAuditExportJSON]] = []
+    predecessor: str | None = None
+    for snapshot_chunk, (content, record_count) in zip(snapshot_chunks, chunk_material, strict=True):
+        content_hash = snapshot_chunk["content_hash"]
+        cumulative_bytes_value = snapshot_chunk["cumulative_bytes"]
+        cumulative_records_value = snapshot_chunk["cumulative_records"]
+        ordinal_value = snapshot_chunk["ordinal"]
+        assert type(content_hash) is str
+        assert type(cumulative_bytes_value) is int
+        assert type(cumulative_records_value) is int
+        assert type(ordinal_value) is int
+        content_ref = REF(content_hash)
+        predecessor_object: dict[str, ClosedAuditExportJSON] = (
+            {"kind": "genesis"} if predecessor is None else {"hash": predecessor, "kind": "chunk_seal"}
+        )
+        chunk_seal_payload: dict[str, ClosedAuditExportJSON] = {
+            "chunking_algorithm_version": config.chunking_algorithm_version,
+            "content_hash": content_hash,
+            "content_ref": content_ref,
+            "cumulative_bytes": cumulative_bytes_value,
+            "cumulative_records": cumulative_records_value,
+            "derivation_version": AUDIT_EXPORT_DERIVATION_VERSION,
+            "ordinal": ordinal_value,
+            "predecessor": predecessor_object,
+            "record_count": record_count,
+            "serialization_version": config.serialization_version,
+            "size_bytes": len(content),
+            "snapshot_id": snapshot_id,
+        }
+        chunk_seal_bytes = C("audit-export-chunk-seal-v1", chunk_seal_payload)
+        seal_hash = H(chunk_seal_bytes)
+        descriptor = AuditExportContentDescriptor(content_ref, content_hash, len(content), "data_chunk")
+        derived_chunks.append(
+            AuditExportDerivedChunk(
+                ordinal=ordinal_value,
+                content=content,
+                descriptor=descriptor,
+                record_count=record_count,
+                cumulative_records=cumulative_records_value,
+                cumulative_bytes=cumulative_bytes_value,
+                predecessor_seal_hash=predecessor,
+                chunk_seal_bytes=chunk_seal_bytes,
+                chunk_seal_hash=seal_hash,
+            )
+        )
+        manifest_chunks.append(
+            {
+                "chunk_seal_hash": seal_hash,
+                "content_hash": content_hash,
+                "content_ref": content_ref,
+                "cumulative_bytes": cumulative_bytes_value,
+                "cumulative_records": cumulative_records_value,
+                "ordinal": ordinal_value,
+                "predecessor_seal_hash": predecessor,
+                "record_count": record_count,
+                "size_bytes": len(content),
+            }
+        )
+        predecessor = seal_hash
+    assert predecessor is not None
+    manifest_payload: dict[str, ClosedAuditExportJSON] = {
+        "chunk_count": len(derived_chunks),
+        "chunks": cast(list[ClosedAuditExportJSON], manifest_chunks),
+        "record_count": len(record_frames),
+        "snapshot_id": snapshot_id,
+        "total_bytes": cumulative_bytes,
+    }
+    chunk_manifest_bytes = C("audit-export-manifest-v1", manifest_payload)
+    manifest_hash = H(chunk_manifest_bytes)
+    snapshot_seal_payload: dict[str, ClosedAuditExportJSON] = {
+        "chunk_count": len(derived_chunks),
+        "chunking_algorithm_version": config.chunking_algorithm_version,
+        "exported_at": config.exported_at,
+        "last_chunk_seal_hash": predecessor,
+        "manifest_hash": manifest_hash,
+        "per_chunk_byte_limit": config.per_chunk_byte_limit,
+        "per_chunk_record_limit": config.per_chunk_record_limit,
+        "record_count": len(record_frames),
+        "registry_key_hash": registry_key_hash,
+        "snapshot_hash": snapshot_hash,
+        "snapshot_id": snapshot_id,
+        "source_completed_at": config.source_completed_at,
+        "source_run_id": config.source_run_id,
+        "source_status": config.source_status,
+        "total_bytes": cumulative_bytes,
+    }
+    snapshot_seal_bytes = C("audit-export-snapshot-seal-v1", snapshot_seal_payload)
+    snapshot_seal_hash = H(snapshot_seal_bytes)
+    record_chain_algorithm = _UNSIGNED_RECORD_CHAIN if config.signing_mode == "unsigned" else _HMAC_RECORD_CHAIN
+    final_hash = chain.hexdigest()
+    final_core: dict[str, ClosedAuditExportJSON] = {
+        "chunk_count": len(derived_chunks),
+        "derivation_version": AUDIT_EXPORT_DERIVATION_VERSION,
+        "export_format": config.export_format,
+        "exported_at": config.exported_at,
+        "final_hash": final_hash,
+        "hash_algorithm": "sha256",
+        "last_chunk_seal_hash": predecessor,
+        "manifest_hash": manifest_hash,
+        "record_chain_algorithm": record_chain_algorithm,
+        "record_count": len(record_frames),
+        "record_type": "manifest",
+        "registry_key_hash": registry_key_hash,
+        "run_id": config.source_run_id,
+        "schema": AUDIT_EXPORT_MANIFEST_SCHEMA,
+        "signature_algorithm": config.signing_mode,
+        "signature_key_id": config.signer_key_id,
+        "snapshot_hash": snapshot_hash,
+        "snapshot_id": snapshot_id,
+        "snapshot_seal_hash": snapshot_seal_hash,
+        "source_completed_at": config.source_completed_at,
+        "source_status": config.source_status,
+        "total_bytes": cumulative_bytes,
+    }
+    signing_body = C("audit-export-final-manifest-signing-body-v2", final_core)
+    signature: str | None = None
+    if config.signing_mode == "hmac_sha256":
+        assert config.signing_key is not None
+        signature = hmac.new(config.signing_key, signing_body, hashlib.sha256).hexdigest()
+    final_manifest = {**final_core, "signature": signature}
+    signed_manifest_bytes = canonical_json(final_manifest).encode("utf-8")
+    signed_manifest_hash = H(signed_manifest_bytes)
+    signed_manifest = AuditExportSignedManifestInput(
+        content_ref=REF(signed_manifest_hash),
+        content_hash=signed_manifest_hash,
+        size_bytes=len(signed_manifest_bytes),
+        manifest_schema=AUDIT_EXPORT_MANIFEST_SCHEMA,
+        derivation_version=AUDIT_EXPORT_DERIVATION_VERSION,
+        signature_algorithm=AuditExportSigningMode(config.signing_mode),
+        signature_key_id=config.signer_key_id,
+        record_chain_algorithm=record_chain_algorithm,
+        final_hash=final_hash,
+        signature=signature,
+    )
+    return AuditExportDerivedBundle(
+        config=config,
+        public_export_config_bytes=public_export_config_bytes,
+        public_export_config_hash=public_export_config_hash,
+        registry_key_bytes=registry_key_bytes,
+        registry_key_hash=registry_key_hash,
+        unsigned_record_bytes=tuple(unsigned_record_bytes),
+        snapshot_content_bytes=snapshot_content_bytes,
+        snapshot_hash=snapshot_hash,
+        snapshot_id_bytes=snapshot_id_bytes,
+        snapshot_id=snapshot_id,
+        chunk_manifest_bytes=chunk_manifest_bytes,
+        manifest_hash=manifest_hash,
+        snapshot_seal_bytes=snapshot_seal_bytes,
+        snapshot_seal_hash=snapshot_seal_hash,
+        last_chunk_seal_hash=predecessor,
+        record_chain_algorithm=record_chain_algorithm,
+        final_hash=final_hash,
+        record_objects=tuple(record_objects),
+        record_frames=tuple(record_frames),
+        chunks=tuple(derived_chunks),
+        signed_manifest=signed_manifest,
+        final_manifest=MappingProxyType(final_manifest),
+        signing_body=signing_body,
+        signed_manifest_bytes=signed_manifest_bytes,
+    )

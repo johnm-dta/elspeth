@@ -14,7 +14,7 @@ import hmac
 import json
 from collections import defaultdict
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC
 from typing import Any, Protocol
 
 from elspeth.contracts import (
@@ -26,6 +26,12 @@ from elspeth.contracts import (
     Token,
     TokenOutcome,
     TokenParent,
+)
+from elspeth.contracts.audit_export import (
+    AUDIT_EXPORT_SERIALIZATION_VERSION,
+    AuditExportDerivationConfig,
+    AuditExportDerivedBundle,
+    derive_audit_export_bundle,
 )
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.export_records import (
@@ -228,6 +234,14 @@ class LandscapeExporter:
         include_raw_error_rows: bool = False,
         row_batch_size: int = 500,
         read_model: ExportReadModel | None = None,
+        signer_key_id: str | None = None,
+        export_format: str = "json",
+        exporter_version: str = "landscape-exporter-v1",
+        serialization_version: str = AUDIT_EXPORT_SERIALIZATION_VERSION,
+        chunking_algorithm_version: str = "record-framing-v1",
+        per_chunk_byte_limit: int = 64 * 1024 * 1024,
+        per_chunk_record_limit: int = 1_000_000,
+        derivation_config: AuditExportDerivationConfig | None = None,
     ) -> None:
         """Initialize exporter with database connection.
 
@@ -260,6 +274,14 @@ class LandscapeExporter:
         self._signing_key = signing_key
         self._include_raw_error_rows = include_raw_error_rows
         self._row_batch_size = row_batch_size
+        self._signer_key_id = signer_key_id
+        self._export_format = export_format
+        self._exporter_version = exporter_version
+        self._serialization_version = serialization_version
+        self._chunking_algorithm_version = chunking_algorithm_version
+        self._per_chunk_byte_limit = per_chunk_byte_limit
+        self._per_chunk_record_limit = per_chunk_record_limit
+        self._derivation_config = derivation_config
 
     @staticmethod
     def _parse_tier1_json(raw_json: str, field_name: str, context: str) -> Any:
@@ -316,36 +338,61 @@ class LandscapeExporter:
         Raises:
             ValueError: If run_id is not found, or sign=True without signing_key
         """
+        bundle = self.derive_run_bundle(run_id, sign=sign)
+        for record in bundle.record_objects:
+            yield dict(record)
+        yield dict(bundle.final_manifest)
+
+    def derive_run_bundle(
+        self,
+        run_id: str,
+        *,
+        sign: bool = False,
+        derivation_config: AuditExportDerivationConfig | None = None,
+    ) -> AuditExportDerivedBundle:
+        """Return the exact v2 byte graph for one immutable terminal run."""
         if sign and self._signing_key is None:
             raise ValueError("Signing requested but no signing_key provided")
-
-        running_hash = hashlib.sha256()
-        record_count = 0
-
-        for typed_record in self._iter_records(run_id):
-            # Widen to dict[str, Any] — export_run may add "signature" key
-            record: dict[str, Any] = typed_record  # type: ignore[assignment]
+        if derivation_config is None:
+            derivation_config = self._derivation_config
+        if derivation_config is None:
+            run = self._read_model.get_run(run_id)
+            if run is None:
+                raise ValueError(f"Run not found: {run_id}")
+            completed_at = run.completed_at
+            if completed_at is None or run.status.value not in {"completed", "completed_with_failures", "empty"}:
+                raise ValueError("Audit export requires an immutable export-terminal run")
+            if completed_at.tzinfo is None or completed_at.utcoffset() is None:
+                raise ValueError("Audit export terminal completed_at must be timezone-aware")
+            completed_text = completed_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             if sign:
-                record["signature"] = self._sign_record(record)
-                # Update running hash with signed record
-                running_hash.update(record["signature"].encode())
-
-            record_count += 1
-            yield record
-
-        # Emit manifest if signing
-        if sign:
-            manifest = {
-                "record_type": "manifest",
-                "run_id": run_id,
-                "record_count": record_count,
-                "final_hash": running_hash.hexdigest(),
-                "hash_algorithm": "sha256",
-                "signature_algorithm": "hmac-sha256",
-                "exported_at": datetime.now(UTC).isoformat(),
-            }
-            manifest["signature"] = self._sign_record(manifest)
-            yield manifest
+                if self._signer_key_id is None:
+                    raise ValueError("Signed export requires an explicit signer_key_id")
+                signing_mode = "hmac_sha256"
+                signer_key_id = self._signer_key_id
+                signing_key = self._signing_key
+            else:
+                signing_mode = "unsigned"
+                signer_key_id = "UNSIGNED"
+                signing_key = None
+            derivation_config = AuditExportDerivationConfig(
+                source_run_id=run_id,
+                source_status=run.status.value,
+                source_completed_at=completed_text,
+                export_format=self._export_format,  # type: ignore[arg-type]
+                exporter_version=self._exporter_version,
+                serialization_version=self._serialization_version,
+                chunking_algorithm_version=self._chunking_algorithm_version,
+                include_raw_error_rows=self._include_raw_error_rows,
+                per_chunk_byte_limit=self._per_chunk_byte_limit,
+                per_chunk_record_limit=self._per_chunk_record_limit,
+                signing_mode=signing_mode,  # type: ignore[arg-type]
+                signer_key_id=signer_key_id,
+                signing_key=signing_key,
+            )
+        elif derivation_config.source_run_id != run_id:
+            raise ValueError("derivation config source_run_id does not match requested run")
+        return derive_audit_export_bundle(self._iter_records(run_id), derivation_config)
 
     def iter_run_records_by_type(
         self,

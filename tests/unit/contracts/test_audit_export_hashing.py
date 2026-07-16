@@ -12,8 +12,10 @@ from elspeth.contracts.audit_export import (
     REF,
     AuditExportContentDescriptor,
     AuditExportContentStoreResolver,
+    AuditExportDerivationConfig,
     C,
     H,
+    derive_audit_export_bundle,
     derive_public_export_config_hash,
     derive_registry_key_hash,
     final_manifest_identity_payload,
@@ -297,3 +299,204 @@ def test_literal_final_manifest_and_export_effect_identity_vectors() -> None:
     )
     assert C("sink-effect-audit-export-effect-v1", effect_payload) == effect_bytes
     assert H(effect_bytes) == "d09466d2cbbb27205cf84de5a6bfddcda6c6c47f42428e1c0e3349dcf39b38bb"
+
+
+def _golden_config(
+    *,
+    signing_mode: str = "unsigned",
+    signer_key_id: str = "UNSIGNED",
+    signing_key: bytes | None = None,
+) -> AuditExportDerivationConfig:
+    return AuditExportDerivationConfig(
+        source_run_id="run-golden-001",
+        source_status="completed",
+        source_completed_at="2026-07-16T12:00:00.000001Z",
+        export_format="json",
+        exporter_version="landscape-exporter-v1",
+        serialization_version="audit-export-v2",
+        chunking_algorithm_version="record-framing-v1",
+        include_raw_error_rows=False,
+        per_chunk_byte_limit=1_048_576,
+        per_chunk_record_limit=1_000,
+        signing_mode=signing_mode,  # type: ignore[arg-type]
+        signer_key_id=signer_key_id,
+        signing_key=signing_key,
+    )
+
+
+def _golden_record() -> dict[str, object]:
+    return {
+        "completed_at": "2026-07-16T12:00:00.000001Z",
+        "record_type": "run",
+        "run_id": "run-golden-001",
+        "status": "completed",
+    }
+
+
+def test_unsigned_end_to_end_literal_derivation_vector() -> None:
+    completed_at = "2026-07-16T12:00:00.000001Z"
+    bundle = derive_audit_export_bundle((_golden_record(),), _golden_config())
+
+    assert bundle.exported_at == completed_at
+    assert bundle.source_completed_at == completed_at
+    assert bundle.public_export_config_bytes == PUBLIC_CONFIG_BYTES
+    assert bundle.public_export_config_hash == PUBLIC_CONFIG_HASH
+    assert bundle.registry_key_bytes == REGISTRY_KEY_BYTES
+    assert bundle.registry_key_hash == REGISTRY_KEY_HASH
+    assert bundle.unsigned_record_bytes == (
+        b'{"completed_at":"2026-07-16T12:00:00.000001Z","record_type":"run","run_id":"run-golden-001","status":"completed"}',
+    )
+    assert bundle.record_frames == (
+        b'{"completed_at":"2026-07-16T12:00:00.000001Z","record_type":"run","run_id":"run-golden-001","status":"completed"}\n',
+    )
+    assert bundle.chunks[0].descriptor == AuditExportContentDescriptor(
+        content_ref="sha256:85883c12e6e3754e1861b2fcdf93a2ee6ceb15945dbf584d71e795b07bdd8d1e",
+        content_hash="85883c12e6e3754e1861b2fcdf93a2ee6ceb15945dbf584d71e795b07bdd8d1e",
+        size_bytes=114,
+        object_kind="data_chunk",
+    )
+    assert bundle.snapshot_content_bytes == (
+        b'{"payload":{"chunking_algorithm_version":"record-framing-v1","chunks":['
+        b'{"content_hash":"85883c12e6e3754e1861b2fcdf93a2ee6ceb15945dbf584d71e795b07bdd8d1e",'
+        b'"cumulative_bytes":114,"cumulative_records":1,"ordinal":0,"record_count":1,"size_bytes":114}],'
+        b'"record_count":1,"serialization_version":"audit-export-v2","total_bytes":114},'
+        b'"schema":"audit-export-snapshot-content-v1"}'
+    )
+    assert bundle.snapshot_hash == "1b22e09b5a4ece941519c9c438181b395deeb94bdb7cbaa0fe851d75e788d5ff"
+    assert bundle.snapshot_id_bytes == (
+        b'{"payload":{"registry_key_hash":"5726ec70871545ac8f28360b2da7da568cbb45e68a7c3ac6d41873a6bdfda06d",'
+        b'"snapshot_hash":"1b22e09b5a4ece941519c9c438181b395deeb94bdb7cbaa0fe851d75e788d5ff"},'
+        b'"schema":"audit-export-snapshot-id-v1"}'
+    )
+    assert bundle.snapshot_id == "f6c08911e8469ea5408deae72b61454a891eb1b7271d3bbb1404baf57f03e605"
+    assert bundle.chunks[0].chunk_seal_bytes == (
+        b'{"payload":{"chunking_algorithm_version":"record-framing-v1",'
+        b'"content_hash":"85883c12e6e3754e1861b2fcdf93a2ee6ceb15945dbf584d71e795b07bdd8d1e",'
+        b'"content_ref":"sha256:85883c12e6e3754e1861b2fcdf93a2ee6ceb15945dbf584d71e795b07bdd8d1e",'
+        b'"cumulative_bytes":114,"cumulative_records":1,"derivation_version":"audit-export-derivation-v1",'
+        b'"ordinal":0,"predecessor":{"kind":"genesis"},"record_count":1,'
+        b'"serialization_version":"audit-export-v2","size_bytes":114,'
+        b'"snapshot_id":"f6c08911e8469ea5408deae72b61454a891eb1b7271d3bbb1404baf57f03e605"},'
+        b'"schema":"audit-export-chunk-seal-v1"}'
+    )
+    assert bundle.chunks[0].chunk_seal_hash == "25d81e6f65274cd41c9b7ec7c6dedfff650696d8cde9902e012f1b1d3c8fb1c4"
+    assert bundle.chunk_manifest_bytes == (
+        b'{"payload":{"chunk_count":1,"chunks":['
+        b'{"chunk_seal_hash":"25d81e6f65274cd41c9b7ec7c6dedfff650696d8cde9902e012f1b1d3c8fb1c4",'
+        b'"content_hash":"85883c12e6e3754e1861b2fcdf93a2ee6ceb15945dbf584d71e795b07bdd8d1e",'
+        b'"content_ref":"sha256:85883c12e6e3754e1861b2fcdf93a2ee6ceb15945dbf584d71e795b07bdd8d1e",'
+        b'"cumulative_bytes":114,"cumulative_records":1,"ordinal":0,"predecessor_seal_hash":null,'
+        b'"record_count":1,"size_bytes":114}],"record_count":1,'
+        b'"snapshot_id":"f6c08911e8469ea5408deae72b61454a891eb1b7271d3bbb1404baf57f03e605",'
+        b'"total_bytes":114},"schema":"audit-export-manifest-v1"}'
+    )
+    assert bundle.manifest_hash == "ae602e41dad5d16af48df9b918346602cb16d52fcdb8f1a704332ce317435ed6"
+    assert bundle.snapshot_seal_bytes == (
+        b'{"payload":{"chunk_count":1,"chunking_algorithm_version":"record-framing-v1",'
+        b'"exported_at":"2026-07-16T12:00:00.000001Z",'
+        b'"last_chunk_seal_hash":"25d81e6f65274cd41c9b7ec7c6dedfff650696d8cde9902e012f1b1d3c8fb1c4",'
+        b'"manifest_hash":"ae602e41dad5d16af48df9b918346602cb16d52fcdb8f1a704332ce317435ed6",'
+        b'"per_chunk_byte_limit":1048576,"per_chunk_record_limit":1000,"record_count":1,'
+        b'"registry_key_hash":"5726ec70871545ac8f28360b2da7da568cbb45e68a7c3ac6d41873a6bdfda06d",'
+        b'"snapshot_hash":"1b22e09b5a4ece941519c9c438181b395deeb94bdb7cbaa0fe851d75e788d5ff",'
+        b'"snapshot_id":"f6c08911e8469ea5408deae72b61454a891eb1b7271d3bbb1404baf57f03e605",'
+        b'"source_completed_at":"2026-07-16T12:00:00.000001Z","source_run_id":"run-golden-001",'
+        b'"source_status":"completed","total_bytes":114},"schema":"audit-export-snapshot-seal-v1"}'
+    )
+    assert bundle.snapshot_seal_hash == "2c1fac75acf1a2a74e8c90f7f9eaad6bb68e2cb02ff391237b4c356d53776040"
+    assert bundle.final_hash == "23ad15b5ddb5391a65605774122036f6dd889e9230d0e167ce1d527902a54589"
+    assert bundle.signing_body == (
+        b'{"payload":{"chunk_count":1,"derivation_version":"audit-export-derivation-v1",'
+        b'"export_format":"json","exported_at":"2026-07-16T12:00:00.000001Z",'
+        b'"final_hash":"23ad15b5ddb5391a65605774122036f6dd889e9230d0e167ce1d527902a54589",'
+        b'"hash_algorithm":"sha256",'
+        b'"last_chunk_seal_hash":"25d81e6f65274cd41c9b7ec7c6dedfff650696d8cde9902e012f1b1d3c8fb1c4",'
+        b'"manifest_hash":"ae602e41dad5d16af48df9b918346602cb16d52fcdb8f1a704332ce317435ed6",'
+        b'"record_chain_algorithm":"sha256_concat_record_sha256_v1","record_count":1,'
+        b'"record_type":"manifest",'
+        b'"registry_key_hash":"5726ec70871545ac8f28360b2da7da568cbb45e68a7c3ac6d41873a6bdfda06d",'
+        b'"run_id":"run-golden-001","schema":"elspeth.audit-export-manifest.v2",'
+        b'"signature_algorithm":"unsigned","signature_key_id":"UNSIGNED",'
+        b'"snapshot_hash":"1b22e09b5a4ece941519c9c438181b395deeb94bdb7cbaa0fe851d75e788d5ff",'
+        b'"snapshot_id":"f6c08911e8469ea5408deae72b61454a891eb1b7271d3bbb1404baf57f03e605",'
+        b'"snapshot_seal_hash":"2c1fac75acf1a2a74e8c90f7f9eaad6bb68e2cb02ff391237b4c356d53776040",'
+        b'"source_completed_at":"2026-07-16T12:00:00.000001Z","source_status":"completed",'
+        b'"total_bytes":114},"schema":"audit-export-final-manifest-signing-body-v2"}'
+    )
+    assert bundle.signed_manifest_bytes == (
+        b'{"chunk_count":1,"derivation_version":"audit-export-derivation-v1","export_format":"json",'
+        b'"exported_at":"2026-07-16T12:00:00.000001Z",'
+        b'"final_hash":"23ad15b5ddb5391a65605774122036f6dd889e9230d0e167ce1d527902a54589",'
+        b'"hash_algorithm":"sha256",'
+        b'"last_chunk_seal_hash":"25d81e6f65274cd41c9b7ec7c6dedfff650696d8cde9902e012f1b1d3c8fb1c4",'
+        b'"manifest_hash":"ae602e41dad5d16af48df9b918346602cb16d52fcdb8f1a704332ce317435ed6",'
+        b'"record_chain_algorithm":"sha256_concat_record_sha256_v1","record_count":1,'
+        b'"record_type":"manifest",'
+        b'"registry_key_hash":"5726ec70871545ac8f28360b2da7da568cbb45e68a7c3ac6d41873a6bdfda06d",'
+        b'"run_id":"run-golden-001","schema":"elspeth.audit-export-manifest.v2","signature":null,'
+        b'"signature_algorithm":"unsigned","signature_key_id":"UNSIGNED",'
+        b'"snapshot_hash":"1b22e09b5a4ece941519c9c438181b395deeb94bdb7cbaa0fe851d75e788d5ff",'
+        b'"snapshot_id":"f6c08911e8469ea5408deae72b61454a891eb1b7271d3bbb1404baf57f03e605",'
+        b'"snapshot_seal_hash":"2c1fac75acf1a2a74e8c90f7f9eaad6bb68e2cb02ff391237b4c356d53776040",'
+        b'"source_completed_at":"2026-07-16T12:00:00.000001Z","source_status":"completed",'
+        b'"total_bytes":114}'
+    )
+    assert bundle.signed_manifest.content_hash == "6ece028d51231229a870823bd4c775b5e8086d12e7f6d72462088ea88f19273d"
+    assert bundle.signed_manifest.content_ref == ("sha256:6ece028d51231229a870823bd4c775b5e8086d12e7f6d72462088ea88f19273d")
+    assert bundle.signed_manifest.size_bytes == 1100
+    assert bundle.json_target_bytes == b"".join(bundle.chunk_bytes) + bundle.signed_manifest_bytes
+    assert bundle.final_manifest["signature"] is None
+
+
+def test_hmac_end_to_end_literal_derivation_vector() -> None:
+    bundle = derive_audit_export_bundle(
+        (_golden_record(),),
+        _golden_config(
+            signing_mode="hmac_sha256",
+            signer_key_id="operator-key-v1",
+            signing_key=b"golden-key",
+        ),
+    )
+
+    assert bundle.public_export_config_hash == "da0ad18d78cea923e62f5e4db2681f9f329839e5e104ed569087f2d51b5f5144"
+    assert bundle.registry_key_hash == "97e57909a1f03821db3d98ad0abf88e281f3f9b21a8678f04860d1bbdd61b835"
+    assert bundle.unsigned_record_bytes == (
+        b'{"completed_at":"2026-07-16T12:00:00.000001Z","record_type":"run","run_id":"run-golden-001","status":"completed"}',
+    )
+    assert bundle.record_objects[0]["signature"] == "103133ca66b940d225b799e5311d253a822c5a1469a0931cca2a114e07a2543b"
+    assert bundle.record_frames == (
+        b'{"completed_at":"2026-07-16T12:00:00.000001Z","record_type":"run",'
+        b'"run_id":"run-golden-001",'
+        b'"signature":"103133ca66b940d225b799e5311d253a822c5a1469a0931cca2a114e07a2543b",'
+        b'"status":"completed"}\n',
+    )
+    assert bundle.chunks[0].descriptor.content_hash == "df943880fa1bdfa03b300a13dcd67fd59cc6921e28756025dd97520e837fa70a"
+    assert bundle.snapshot_hash == "7e2769b75d78420c87ad3c941517d19f23a710f1a793e6652612b3fb0592bd8e"
+    assert bundle.snapshot_id == "9b7d0994fdeccf13283750dc2281943128bd7136c3b90aec54e1b194cd4c52cb"
+    assert bundle.chunks[0].chunk_seal_hash == "6e5b1c39c90af166ac272f388a2bcf9dc8863aa80df98432d18d72c3e3003fd4"
+    assert bundle.manifest_hash == "0dea48a8a0077a7c8218e0a6e8970ac8a54c38640b748c788d0170bd12d65e83"
+    assert bundle.snapshot_seal_hash == "069c42e3d02b558a323e57a960177e8f1d760c151e61e09aff2e70006d2330fa"
+    assert bundle.final_hash == "061084b57b7b3d40295e5699a22e685d86ef95c2f492c34aad2fdb62564c426e"
+    assert bundle.final_manifest["signature"] == "4db2df3c8d6aed706956d9a5bd471054025bd44483b388d632105bb8f2f45d83"
+    assert bundle.signed_manifest_bytes == (
+        b'{"chunk_count":1,"derivation_version":"audit-export-derivation-v1","export_format":"json",'
+        b'"exported_at":"2026-07-16T12:00:00.000001Z",'
+        b'"final_hash":"061084b57b7b3d40295e5699a22e685d86ef95c2f492c34aad2fdb62564c426e",'
+        b'"hash_algorithm":"sha256",'
+        b'"last_chunk_seal_hash":"6e5b1c39c90af166ac272f388a2bcf9dc8863aa80df98432d18d72c3e3003fd4",'
+        b'"manifest_hash":"0dea48a8a0077a7c8218e0a6e8970ac8a54c38640b748c788d0170bd12d65e83",'
+        b'"record_chain_algorithm":"sha256_concat_hmac_sha256_signatures_v1","record_count":1,'
+        b'"record_type":"manifest",'
+        b'"registry_key_hash":"97e57909a1f03821db3d98ad0abf88e281f3f9b21a8678f04860d1bbdd61b835",'
+        b'"run_id":"run-golden-001","schema":"elspeth.audit-export-manifest.v2",'
+        b'"signature":"4db2df3c8d6aed706956d9a5bd471054025bd44483b388d632105bb8f2f45d83",'
+        b'"signature_algorithm":"hmac_sha256","signature_key_id":"operator-key-v1",'
+        b'"snapshot_hash":"7e2769b75d78420c87ad3c941517d19f23a710f1a793e6652612b3fb0592bd8e",'
+        b'"snapshot_id":"9b7d0994fdeccf13283750dc2281943128bd7136c3b90aec54e1b194cd4c52cb",'
+        b'"snapshot_seal_hash":"069c42e3d02b558a323e57a960177e8f1d760c151e61e09aff2e70006d2330fa",'
+        b'"source_completed_at":"2026-07-16T12:00:00.000001Z","source_status":"completed",'
+        b'"total_bytes":193}'
+    )
+    assert bundle.signed_manifest.content_hash == "cd9ed845731e32330b38b45ccd387d85aed5fcddf0ca9b800c32253ebb8eaa89"
+    assert bundle.signed_manifest.content_ref == ("sha256:cd9ed845731e32330b38b45ccd387d85aed5fcddf0ca9b800c32253ebb8eaa89")
+    assert bundle.signed_manifest.size_bytes == 1181

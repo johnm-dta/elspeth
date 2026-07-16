@@ -34,8 +34,10 @@ from elspeth.contracts.sink_effects import SINK_EFFECT_PROTOCOL_VERSION, SinkEff
 from elspeth.engine.orchestrator.export import (
     _export_csv_multifile,
     _write_json_export_batches,
-    export_landscape,
     prepare_audit_export_binding,
+)
+from elspeth.engine.orchestrator.export import (
+    export_landscape as _production_export_landscape,
 )
 from elspeth.engine.orchestrator.preflight import (
     ResolvedSinkEffectMode,
@@ -124,6 +126,39 @@ class _SinkDouble:
         return None
 
 
+class _AuditContentStoreDouble:
+    content_store_id = "archive-primary-v1"
+    namespace = "audit-export"
+
+    def is_durable(self) -> bool:
+        return True
+
+    def put_immutable(self, content: bytes, *, candidate_id: str, object_kind: str) -> str:
+        del content, candidate_id, object_kind
+        return f"sha256:{'a' * 64}"
+
+    def open_registered(self, registration: object) -> object:
+        return registration
+
+    def mark_candidate_orphans(self, candidate_id: str, descriptors: tuple[object, ...]) -> None:
+        del candidate_id, descriptors
+
+    def garbage_collect_candidate(self, request: object) -> bool:
+        del request
+        return False
+
+
+_TEST_PAYLOAD_STORE = object()
+_TEST_AUDIT_CONTENT_STORE = _AuditContentStoreDouble()
+
+
+def export_landscape(*args: Any, **kwargs: Any) -> None:
+    """Keep existing unit scenarios explicit without repeating resource doubles."""
+    kwargs.setdefault("payload_store", _TEST_PAYLOAD_STORE)
+    kwargs.setdefault("audit_export_content_store", _TEST_AUDIT_CONTENT_STORE)
+    _production_export_landscape(*args, **kwargs)
+
+
 class _ExporterDouble:
     def __init__(self, grouped: dict[str, list[dict[str, Any]]]) -> None:
         self.export_run_grouped = _CallRecorder(return_value=grouped)
@@ -143,8 +178,10 @@ def _make_settings(*, fmt: str = "json", sign: bool = False, sink: str = "output
             export=SimpleNamespace(
                 format=fmt,
                 sign=sign,
+                signing_secret_ref="ELSPETH_SIGNING_KEY" if sign else None,
                 sink=sink,
                 include_raw_error_rows=include_raw_error_rows,
+                content_store=SimpleNamespace(content_store_id="archive-primary-v1", namespace="audit-export"),
             )
         ),
     )
@@ -183,6 +220,35 @@ class TestExportLandscapeJSON:
 
     def _make_settings(self, *, fmt: str = "json", sign: bool = False, sink: str = "output", include_raw_error_rows: bool = False) -> Any:
         return _make_settings(fmt=fmt, sign=sign, sink=sink, include_raw_error_rows=include_raw_error_rows)
+
+    def test_export_requires_explicit_payload_and_audit_content_stores(self) -> None:
+        sink, factory = _make_sink_and_factory()
+        payload_store = object()
+        audit_content_store = _AuditContentStoreDouble()
+
+        class StopAfterExporterConstruction(Exception):
+            pass
+
+        with (
+            patch("elspeth.core.landscape.factory.RecorderFactory") as recorder_factory,
+            patch(
+                "elspeth.core.landscape.exporter.LandscapeExporter",
+                side_effect=StopAfterExporterConstruction,
+            ) as exporter,
+            pytest.raises(StopAfterExporterConstruction),
+        ):
+            _production_export_landscape(
+                object(),
+                "run-1",
+                self._make_settings(),
+                factory,
+                payload_store=payload_store,
+                audit_export_content_store=audit_content_store,
+            )
+
+        recorder_factory.assert_called_once_with(exporter.call_args.args[0], payload_store=payload_store)
+        assert exporter.call_args.kwargs["read_model"] is not None
+        assert sink.node_id is None
 
     def test_export_preflight_passes_explicit_audit_snapshot_kind(self) -> None:
         sink, factory = _make_sink_and_factory()
@@ -493,7 +559,11 @@ class TestExportLandscapeJSON:
 
             export_landscape(db, "run-1", settings, factory)
 
-        MockExporter.assert_called_once_with(db, signing_key=b"test-key-123", include_raw_error_rows=False)
+        MockExporter.assert_called_once()
+        assert MockExporter.call_args.args == (db,)
+        assert MockExporter.call_args.kwargs["signing_key"] == b"test-key-123"
+        assert MockExporter.call_args.kwargs["include_raw_error_rows"] is False
+        assert MockExporter.call_args.kwargs["read_model"] is not None
 
     def test_raw_error_rows_opt_in_threads_to_exporter(self) -> None:
         """The export-config classification flag reaches the exporter
@@ -512,7 +582,11 @@ class TestExportLandscapeJSON:
 
             export_landscape(db, "run-1", settings, factory)
 
-        MockExporter.assert_called_once_with(db, signing_key=None, include_raw_error_rows=True)
+        MockExporter.assert_called_once()
+        assert MockExporter.call_args.args == (db,)
+        assert MockExporter.call_args.kwargs["signing_key"] is None
+        assert MockExporter.call_args.kwargs["include_raw_error_rows"] is True
+        assert MockExporter.call_args.kwargs["read_model"] is not None
 
     def test_signing_without_env_key_raises(self) -> None:
         """Signing enabled without ELSPETH_SIGNING_KEY raises ValueError."""

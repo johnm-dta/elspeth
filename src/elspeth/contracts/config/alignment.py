@@ -96,6 +96,7 @@ EXEMPT_SETTINGS: Final[frozenset[str]] = frozenset(
         "DatabaseSettings",
         "LandscapeSettings",
         "LandscapeExportSettings",
+        "AuditExportContentStoreSettings",
         "PayloadStoreSettings",
         # Nested in RateLimitSettings - handled by parent
         "ServiceRateLimit",

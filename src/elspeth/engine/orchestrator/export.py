@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol
+    from elspeth.contracts.audit_export import AuditExportContentStore
+    from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.sink_effects import SinkEffectRuntimeBinding
     from elspeth.core.config import ElspethSettings
     from elspeth.core.landscape import LandscapeDB
@@ -333,6 +335,8 @@ def export_landscape(
     settings: ElspethSettings,
     sink_factory: Callable[[str], SinkEffectRuntimeBinding],
     *,
+    payload_store: PayloadStore,
+    audit_export_content_store: AuditExportContentStore,
     prepared_binding: SinkEffectRuntimeBinding | None = None,
     sink_effect_admission: object | None = None,
 ) -> None:
@@ -356,9 +360,23 @@ def export_landscape(
         ValueError: If signing requested but ELSPETH_SIGNING_KEY not set,
                    or if sink_factory raises for the configured sink name
     """
-    from elspeth.core.landscape.exporter import LandscapeExporter
+    from elspeth.contracts.audit_export import AuditExportContentStore
+    from elspeth.core.landscape.exporter import LandscapeExporter, RecorderFactoryExportReadModel
+    from elspeth.core.landscape.factory import RecorderFactory
 
     export_config = settings.landscape.export
+
+    if not isinstance(audit_export_content_store, AuditExportContentStore):
+        raise TypeError("audit_export_content_store must implement AuditExportContentStore")
+    if not audit_export_content_store.is_durable():
+        raise ValueError("audit_export_content_store must prove durability")
+    configured_store = export_config.content_store
+    if configured_store is None:
+        raise ValueError("audit export requires an explicit durable content_store policy")
+    if audit_export_content_store.content_store_id != configured_store.content_store_id:
+        raise ValueError("resolved audit_export_content_store ID does not match configured content_store_id")
+    if audit_export_content_store.namespace != configured_store.namespace:
+        raise ValueError("resolved audit_export_content_store namespace does not match configured namespace")
 
     from elspeth.contracts.sink_effects import SinkEffectInputKind
     from elspeth.engine.orchestrator.preflight import require_sink_effect_admission
@@ -376,30 +394,35 @@ def export_landscape(
     # Get signing key from environment if signing enabled
     signing_key: bytes | None = None
     if export_config.sign:
+        signing_secret_ref = export_config.signing_secret_ref
+        if signing_secret_ref is None:
+            raise ValueError("hmac_sha256 export requires an explicit signing_secret_ref")
         try:
-            key_str = os.environ["ELSPETH_SIGNING_KEY"]
+            key_str = os.environ[signing_secret_ref]
         except KeyError as exc:
-            raise ValueError("ELSPETH_SIGNING_KEY environment variable required for signed export") from exc
+            raise ValueError(f"{signing_secret_ref} environment variable required for signed export") from exc
         if not key_str.strip():
-            raise ValueError("ELSPETH_SIGNING_KEY environment variable required for signed export")
+            raise ValueError(f"{signing_secret_ref} environment variable required for signed export")
         signing_key = key_str.encode("utf-8")
 
-    # Create exporter
+    # Construct the one explicit repository graph with the run's exact
+    # PayloadStore.  Passing its read adapter prevents LandscapeExporter from
+    # constructing a hidden RecorderFactory(db) without payload authority.
+    factory = RecorderFactory(db, payload_store=payload_store)
     exporter = LandscapeExporter(
         db,
         signing_key=signing_key,
         include_raw_error_rows=export_config.include_raw_error_rows,
+        read_model=RecorderFactoryExportReadModel(factory),
     )
 
     sink.node_id = f"export:{sink_name}"
 
     from elspeth.contracts import NodeType
     from elspeth.contracts.schema import SchemaConfig
-    from elspeth.core.landscape.factory import RecorderFactory
 
-    factory = RecorderFactory(db)
     ctx = PluginContext(
-        run_id=run_id, config={}, landscape=factory.plugin_audit_writer(), payload_store=factory.payload_store, node_id=sink.node_id
+        run_id=run_id, config={}, landscape=factory.plugin_audit_writer(), payload_store=payload_store, node_id=sink.node_id
     )
 
     # Register the export sink as a node so the FK constraint in `operations` is satisfied.

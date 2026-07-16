@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     import threading
     from collections.abc import Callable
 
+    from elspeth.contracts.audit_export import AuditExportContentStore
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
     from elspeth.contracts.preflight import PreflightResult
@@ -248,6 +249,9 @@ class RunLifecycleCoordinator:
         run_id: str,
         settings: ElspethSettings,
         sink_factory: Callable[[str], SinkEffectRuntimeBinding],
+        *,
+        payload_store: PayloadStore,
+        audit_export_content_store: AuditExportContentStore,
     ) -> None:
         """Execute the EXPORT phase: export Landscape data to configured sink.
 
@@ -292,6 +296,8 @@ class RunLifecycleCoordinator:
                 sink_factory,
                 prepared_binding=binding,
                 sink_effect_admission=sink_effect_admission,
+                payload_store=payload_store,
+                audit_export_content_store=audit_export_content_store,
             )
 
             factory.run_lifecycle.set_export_status(run_id, status=ExportStatus.COMPLETED)
@@ -319,6 +325,7 @@ class RunLifecycleCoordinator:
         settings: ElspethSettings | None = None,
         *,
         payload_store: PayloadStore,
+        audit_export_content_store: AuditExportContentStore | None = None,
         secret_resolutions: list[SecretResolutionInput] | None = None,
         preflight_results: PreflightResult | None = None,
         shutdown_event: threading.Event | None = None,
@@ -493,7 +500,19 @@ class RunLifecycleCoordinator:
                         "The caller must supply a sink_factory so the export phase can create "
                         "a fresh sink instance (the pipeline's sinks are already closed)."
                     )
-                self.execute_export_phase(factory, run.run_id, settings, sink_factory)
+                if audit_export_content_store is None:
+                    raise ValueError(
+                        "Export is enabled but no audit_export_content_store was provided; "
+                        "the durable winning store must be resolved explicitly."
+                    )
+                self.execute_export_phase(
+                    factory,
+                    run.run_id,
+                    settings,
+                    sink_factory,
+                    payload_store=payload_store,
+                    audit_export_content_store=audit_export_content_store,
+                )
 
             # Emit RunSummary event with final metrics.  Map the new
             # terminal status onto the CLI exit-code taxonomy via

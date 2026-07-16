@@ -26,6 +26,15 @@ from urllib.parse import urlparse
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from elspeth.contracts.audit_export import (
+    AUDIT_EXPORT_MAX_CHUNK_BYTES,
+    AUDIT_EXPORT_MAX_CHUNK_RECORDS,
+    AUDIT_EXPORT_MAX_CHUNKS,
+    AUDIT_EXPORT_MAX_TOTAL_BYTES,
+    AUDIT_EXPORT_MAX_TOTAL_RECORDS,
+    validate_content_namespace,
+    validate_credential_free_identifier,
+)
 from elspeth.contracts.enums import OutputMode, RunMode
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.security import SecretFingerprintError as SecretFingerprintError
@@ -1198,38 +1207,167 @@ class SinkSettings(BaseModel):
         return _validate_connection_or_sink_name(value, field_label="Sink on_write_failure sink name")
 
 
-class LandscapeExportSettings(BaseModel):
-    """Landscape export configuration for audit compliance.
-
-    Exports audit trail to a configured sink after run completes.
-    Optional cryptographic signing for legal-grade integrity.
-    """
+class AuditExportContentStoreSettings(BaseModel):
+    """Credential-free durable-store policy for immutable export snapshots."""
 
     model_config = {"frozen": True, "extra": "forbid"}
 
-    enabled: bool = Field(
-        default=False,
-        description="Enable audit trail export after run completes",
-    )
-    sink: str | None = Field(
-        default=None,
-        description="Sink name to export to (must be defined in sinks)",
-    )
-    format: Literal["csv", "json"] = Field(
-        default="csv",
-        description="Export format: csv (human-readable) or json (machine)",
-    )
-    sign: bool = Field(
-        default=False,
-        description="HMAC sign each record for integrity verification",
-    )
-    include_raw_error_rows: bool = Field(
-        default=False,
-        description="Include raw failing-row payloads (row_data_json) in exported "
-        "validation_error/transform_error records. Default False: error records "
-        "export row_hash only and the raw row stays in the audit database "
-        "(raw-payload minimization for the external export artifact).",
-    )
+    content_store_id: str
+    namespace: str
+    policy_version: str = Field(min_length=1, max_length=64)
+    retention_days: int = Field(gt=0, le=36_500)
+    durability: Literal["fsync", "replicated"]
+    orphan_grace_period_seconds: int = Field(gt=0, le=31 * 24 * 60 * 60)
+    reference_safe_gc: bool = Field(default=True, strict=True)
+    cleanup_scope: Literal["candidate_unreferenced"] = "candidate_unreferenced"
+
+    @field_validator("content_store_id")
+    @classmethod
+    def validate_content_store_id(cls, value: str) -> str:
+        return validate_credential_free_identifier(value, "content_store_id")
+
+    @field_validator("namespace")
+    @classmethod
+    def validate_namespace(cls, value: str) -> str:
+        return validate_content_namespace(value)
+
+    @field_validator("reference_safe_gc")
+    @classmethod
+    def validate_reference_safe_gc(cls, value: bool) -> bool:
+        if value is not True:
+            raise ValueError("reference_safe_gc must be true")
+        return value
+
+
+class LandscapeExportSettings(BaseModel):
+    """Target-independent audit snapshot identity and bounded resources."""
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    enabled: bool = False
+    sink: str | None = None
+    format: Literal["csv", "json"] = "csv"
+    signing_mode: Literal["unsigned", "hmac_sha256"] = "unsigned"
+    signer_key_id: str = "UNSIGNED"
+    signing_secret_ref: str | None = None
+    signer_rotation_policy: Literal["multi_version", "single_export"] = "multi_version"
+    exporter_version: str = Field(default="landscape-exporter-v1", min_length=1, max_length=64)
+    serialization_version: str = Field(default="audit-export-v2", min_length=1, max_length=64)
+    chunking_algorithm_version: str = Field(default="record-framing-v1", min_length=1, max_length=64)
+    include_raw_error_rows: bool = False
+    total_record_limit: int | None = Field(default=None, gt=0, le=AUDIT_EXPORT_MAX_TOTAL_RECORDS)
+    total_byte_limit: int | None = Field(default=None, gt=0, le=AUDIT_EXPORT_MAX_TOTAL_BYTES)
+    chunk_limit: int | None = Field(default=None, gt=0, le=AUDIT_EXPORT_MAX_CHUNKS)
+    per_chunk_record_limit: int | None = Field(default=None, gt=0, le=AUDIT_EXPORT_MAX_CHUNK_RECORDS)
+    per_chunk_byte_limit: int | None = Field(default=None, gt=0, le=AUDIT_EXPORT_MAX_CHUNK_BYTES)
+    spool_root: Path | None = None
+    spool_cleanup_age_seconds: int | None = Field(default=None, gt=0, le=365 * 24 * 60 * 60)
+    spool_cleanup_byte_budget: int | None = Field(default=None, gt=0, le=AUDIT_EXPORT_MAX_TOTAL_BYTES)
+    spool_cleanup_count_budget: int | None = Field(default=None, gt=0, le=AUDIT_EXPORT_MAX_CHUNKS)
+    content_store: AuditExportContentStoreSettings | None = None
+
+    @field_validator("signer_key_id")
+    @classmethod
+    def validate_signer_key_id(cls, value: str) -> str:
+        if value == "UNSIGNED":
+            return value
+        return validate_credential_free_identifier(value, "signer_key_id")
+
+    @field_validator("signing_secret_ref")
+    @classmethod
+    def validate_signing_secret_ref(cls, value: str | None) -> str | None:
+        if value is not None and _ENV_VAR_NAME_RE.fullmatch(value) is None:
+            raise ValueError("signing_secret_ref must be an exact environment secret reference name")
+        return value
+
+    @field_validator("spool_root", mode="before")
+    @classmethod
+    def validate_spool_root(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, (str, Path)):
+            raise TypeError("spool_root must be a filesystem path")
+        path = Path(value)
+        if path.is_absolute() or ".." in path.parts or path.parts[:2] != (".elspeth", "audit-export-spool"):
+            raise ValueError("spool_root must be inside the code-owned private .elspeth/audit-export-spool root")
+        if path.exists():
+            if not path.is_dir():
+                raise ValueError("spool_root must be a directory")
+            if path.stat().st_mode & 0o077:
+                raise ValueError("spool_root must be private (no group/world permissions)")
+        return path
+
+    @model_validator(mode="after")
+    def validate_snapshot_policy(self) -> "LandscapeExportSettings":
+        if self.signing_mode == "unsigned":
+            if self.signer_key_id != "UNSIGNED":
+                raise ValueError("unsigned signing requires the typed UNSIGNED signer identity")
+            if self.signing_secret_ref is not None:
+                raise ValueError("unsigned signing forbids signing secret resolution")
+        else:
+            if self.signer_key_id == "UNSIGNED":
+                raise ValueError("hmac_sha256 signer_key_id cannot use the reserved UNSIGNED identity")
+            if self.signing_secret_ref is None:
+                raise ValueError("hmac_sha256 signing requires a signing secret reference")
+
+        required = (
+            "total_record_limit",
+            "total_byte_limit",
+            "chunk_limit",
+            "per_chunk_record_limit",
+            "per_chunk_byte_limit",
+            "spool_root",
+            "spool_cleanup_age_seconds",
+            "spool_cleanup_byte_budget",
+            "spool_cleanup_count_budget",
+            "content_store",
+        )
+        if self.enabled:
+            missing = [name for name in required if getattr(self, name) is None]
+            if missing:
+                raise ValueError(f"enabled audit export requires explicit fields: {', '.join(missing)}")
+        if all(getattr(self, name) is not None for name in required):
+            assert self.total_record_limit is not None
+            assert self.total_byte_limit is not None
+            assert self.chunk_limit is not None
+            assert self.per_chunk_record_limit is not None
+            assert self.per_chunk_byte_limit is not None
+            if self.per_chunk_record_limit > self.total_record_limit:
+                raise ValueError("per_chunk_record_limit cannot exceed total_record_limit")
+            if self.per_chunk_byte_limit > self.total_byte_limit:
+                raise ValueError("per_chunk_byte_limit cannot exceed total_byte_limit")
+            if self.total_record_limit > self.chunk_limit * self.per_chunk_record_limit:
+                raise ValueError("total_record_limit exceeds configured chunk record capacity")
+            if self.total_byte_limit > self.chunk_limit * self.per_chunk_byte_limit:
+                raise ValueError("total_byte_limit exceeds configured chunk byte capacity")
+            if self.total_byte_limit < self.total_record_limit:
+                raise ValueError("total_byte_limit must allow at least one byte per accepted record")
+        return self
+
+    @property
+    def sign(self) -> bool:
+        return self.signing_mode == "hmac_sha256"
+
+    def public_snapshot_config(self) -> dict[str, object]:
+        """Return exactly the target-independent snapshot-shaping fields."""
+        if self.per_chunk_byte_limit is None or self.per_chunk_record_limit is None:
+            raise ValueError("audit export chunk limits are not configured")
+        return {
+            "chunking_algorithm_version": self.chunking_algorithm_version,
+            "export_format": self.format,
+            "exporter_version": self.exporter_version,
+            "include_raw_error_rows": self.include_raw_error_rows,
+            "per_chunk_byte_limit": self.per_chunk_byte_limit,
+            "per_chunk_record_limit": self.per_chunk_record_limit,
+            "serialization_version": self.serialization_version,
+            "signer_key_id": self.signer_key_id,
+            "signing_mode": self.signing_mode,
+        }
+
+    def assert_signer_rotation_allowed(self, *, existing_signer_key_id: str) -> None:
+        validate_credential_free_identifier(existing_signer_key_id, "existing_signer_key_id")
+        if existing_signer_key_id != self.signer_key_id and self.signer_rotation_policy == "single_export":
+            raise ValueError("single_export rotation policy refuses a different signer_key_id")
 
 
 class LandscapeSettings(BaseModel):

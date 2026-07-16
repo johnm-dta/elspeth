@@ -7,6 +7,35 @@ import pytest
 from pydantic import ValidationError
 
 
+def _complete_audit_export_config(**overrides: object) -> dict[str, object]:
+    config: dict[str, object] = {
+        "enabled": True,
+        "sink": "audit_archive",
+        "format": "csv",
+        "signing_mode": "unsigned",
+        "signer_key_id": "UNSIGNED",
+        "total_record_limit": 10_000,
+        "total_byte_limit": 10_000_000,
+        "chunk_limit": 100,
+        "per_chunk_record_limit": 1_000,
+        "per_chunk_byte_limit": 1_000_000,
+        "spool_root": ".elspeth/audit-export-spool",
+        "spool_cleanup_age_seconds": 3600,
+        "spool_cleanup_byte_budget": 10_000_000,
+        "spool_cleanup_count_budget": 100,
+        "content_store": {
+            "content_store_id": "archive-primary-v1",
+            "namespace": "audit-export",
+            "policy_version": "audit-store-policy-v1",
+            "retention_days": 365,
+            "durability": "fsync",
+            "orphan_grace_period_seconds": 7200,
+        },
+    }
+    config.update(overrides)
+    return config
+
+
 class TestDatabaseSettings:
     """Database configuration validation."""
 
@@ -507,12 +536,11 @@ class TestLandscapeExportSettings:
         from elspeth.core.config import LandscapeSettings
 
         settings = LandscapeSettings(
-            export={
-                "enabled": True,
-                "sink": "audit_archive",
-                "format": "csv",
-                "sign": True,
-            }
+            export=_complete_audit_export_config(
+                signing_mode="hmac_sha256",
+                signer_key_id="audit-key-v1",
+                signing_secret_ref="ELSPETH_SIGNING_KEY",
+            )
         )
         assert settings.export.enabled is True
         assert settings.export.sink == "audit_archive"
@@ -790,8 +818,7 @@ class TestExportSinkValidation:
                 sinks={"output": {"plugin": "csv", "on_write_failure": "discard", "options": {"path": "out.csv"}}},
                 landscape={
                     "export": {
-                        "enabled": True,
-                        "sink": "nonexistent_sink",  # Not in sinks
+                        **_complete_audit_export_config(sink="nonexistent_sink"),
                     }
                 },
             )
@@ -822,8 +849,7 @@ class TestExportSinkValidation:
                 sinks={"output": {"plugin": "csv", "on_write_failure": "discard", "options": {"path": "out.csv"}}},
                 landscape={
                     "export": {
-                        "enabled": True,
-                        # sink is None (not provided)
+                        **_complete_audit_export_config(sink=None),
                     }
                 },
             )
@@ -843,8 +869,7 @@ class TestExportSinkValidation:
             },
             landscape={
                 "export": {
-                    "enabled": True,
-                    "sink": "audit_archive",  # Valid sink
+                    **_complete_audit_export_config(sink="audit_archive"),
                 }
             },
         )

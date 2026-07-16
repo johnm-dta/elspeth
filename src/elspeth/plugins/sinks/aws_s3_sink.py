@@ -10,23 +10,35 @@ import json
 import math
 import re
 import tempfile
-import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any, BinaryIO, ClassVar, Literal, Never, Self, cast
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from elspeth.contracts import ArtifactDescriptor, CallStatus, CallType, Determinism, PluginSchema
+from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
 from elspeth.contracts import errors as contract_errors
 from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.header_modes import HeaderMode, parse_header_mode
 from elspeth.contracts.plugin_assistance import PluginAssistance
+from elspeth.contracts.sink_effects import (
+    SINK_EFFECT_PROTOCOL_VERSION,
+    ResolvedSinkEffectMode,
+    RestrictedSinkEffectContext,
+    SinkEffectCommitResult,
+    SinkEffectExecutionPurpose,
+    SinkEffectInputKind,
+    SinkEffectInspection,
+    SinkEffectInspectionRequest,
+    SinkEffectPipelineMembersInput,
+    SinkEffectPlan,
+    SinkEffectPrepareRequest,
+    SinkEffectReconcileResult,
+)
 from elspeth.contracts.wire_visible_identity import reject_operator_required_placeholder_value
 from elspeth.plugins.aws_s3_common import build_s3_client
 from elspeth.plugins.infrastructure.base import BaseSink
@@ -35,11 +47,18 @@ from elspeth.plugins.infrastructure.display_headers import (
     apply_display_headers,
     get_effective_display_headers,
     init_display_headers,
-    resolve_contract_from_context_if_needed,
-    resolve_display_headers_if_needed,
     set_resume_field_resolution,
 )
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sinks._remote_object_effects import (
+    RemoteObjectObservation,
+    RemoteObjectPreconditionError,
+    inspect_remote_object,
+    prepare_remote_object,
+    reconcile_remote_observation,
+    remote_commit_result,
+    validate_remote_plan,
+)
 
 _SPOOL_MEMORY_BYTES = 8 * 1024 * 1024
 _WRITE_CHUNK_BYTES = 64 * 1024
@@ -571,7 +590,7 @@ class S3WriteOutcomeUnknownError(RuntimeError):
     """A dispatched S3 request may or may not have reached durable storage."""
 
     def __init__(self) -> None:
-        super().__init__("S3 object write outcome is unknown; sink is poisoned.")
+        super().__init__("S3 object write outcome is unknown; reconciliation is required.")
 
 
 class S3SinkPoisonedError(RuntimeError):
@@ -640,7 +659,20 @@ class AWSS3Sink(BaseSink):
     plugin_version = "1.0.0"
     source_file_hash: str | None = "sha256:c8a09119b4079bb2"
     config_model = AWSS3SinkConfig
+    effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    supported_effect_modes = frozenset({"write"})
+    supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
     supports_resume = False
+
+    @classmethod
+    def _resolve_sink_effect_mode(
+        cls,
+        config: Mapping[str, object],
+        *,
+        purpose: SinkEffectExecutionPurpose,
+    ) -> ResolvedSinkEffectMode | None:
+        del cls, config, purpose
+        return ResolvedSinkEffectMode("write")
 
     @classmethod
     def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
@@ -685,11 +717,6 @@ class AWSS3Sink(BaseSink):
         self.input_schema = self._schema_class
         self.declared_required_fields = self._schema_config.get_effective_required_fields()
         self._s3_client: Any | None = None
-        self._buffered_rows: list[dict[str, Any]] = []
-        self._resolved_key: str | None = None
-        self._remote_etag: str | None = None
-        self._confirmed_artifact: ArtifactDescriptor | None = None
-        self._poisoned = False
         self._closed = False
 
     def set_resume_field_resolution(self, resolution_mapping: dict[str, str]) -> None:
@@ -700,14 +727,241 @@ class AWSS3Sink(BaseSink):
             self._s3_client = build_s3_client(self._region_name, self._endpoint_url)
         return self._s3_client
 
-    def _get_or_init_key(self, ctx: SinkContext) -> str:
-        if self._resolved_key is None:
-            self._resolved_key = _render_key_template(
-                self._key_template,
-                run_id=ctx.run_id,
-                timestamp=datetime.now(tz=UTC).isoformat(),
+    def _effect_key(self, ctx: RestrictedSinkEffectContext) -> str:
+        return _render_key_template(
+            self._key_template,
+            run_id=ctx.run_id,
+            timestamp=ctx.run_started_at.isoformat(),
+        )
+
+    @staticmethod
+    def _is_missing(error: BaseException) -> bool:
+        response = getattr(error, "response", None)
+        if not isinstance(response, Mapping):
+            return False
+        error_payload = response.get("Error")
+        code = error_payload.get("Code") if isinstance(error_payload, Mapping) else None
+        response_metadata = response.get("ResponseMetadata")
+        status = response_metadata.get("HTTPStatusCode") if isinstance(response_metadata, Mapping) else None
+        return code in {"404", "NoSuchKey", "NotFound"} or status == 404
+
+    @staticmethod
+    def _observation_from_head(response: Mapping[str, object]) -> RemoteObjectObservation:
+        size = response.get("ContentLength")
+        etag = _validated_etag(cast("Mapping[str, Any]", response))
+        metadata_value = response.get("Metadata")
+        metadata = metadata_value if isinstance(metadata_value, Mapping) else {}
+        content_hash = metadata.get("elspeth-content-sha256")
+        effect_id = metadata.get("elspeth-effect-id")
+        plan_hash = metadata.get("elspeth-plan-hash")
+        protocol_version = metadata.get("elspeth-protocol-version")
+        checksum = response.get("ChecksumSHA256")
+        checksum_b64 = checksum if isinstance(checksum, str) else None
+        if isinstance(content_hash, str) and checksum_b64 is not None:
+            try:
+                checksum_hash = base64.b64decode(checksum_b64, validate=True).hex()
+            except ValueError:
+                content_hash = None
+                checksum_b64 = None
+            else:
+                if checksum_hash != content_hash:
+                    content_hash = None
+                    checksum_b64 = None
+        return RemoteObjectObservation(
+            exists=True,
+            etag=etag,
+            content_hash=content_hash if isinstance(content_hash, str) else None,
+            size_bytes=size if type(size) is int and size >= 0 else None,
+            effect_id=effect_id if isinstance(effect_id, str) else None,
+            plan_hash=plan_hash if isinstance(plan_hash, str) else None,
+            protocol_version=protocol_version if isinstance(protocol_version, str) else None,
+            checksum_algorithm="sha256" if checksum_b64 is not None else None,
+            checksum_b64=checksum_b64,
+        )
+
+    def _observe_effect_target(self, key: str) -> RemoteObjectObservation:
+        try:
+            response = self._get_s3_client().head_object(Bucket=self._bucket, Key=key, ChecksumMode="ENABLED")
+        except contract_errors.TIER_1_ERRORS:
+            raise
+        except BaseException as error:
+            if self._is_missing(error):
+                return RemoteObjectObservation(False, None, None, None)
+            raise RemoteObjectPreconditionError("S3 object inspection failed before effect dispatch") from None
+        if not isinstance(response, Mapping):
+            raise RemoteObjectPreconditionError("S3 object inspection returned malformed evidence")
+        return self._observation_from_head(response)
+
+    def inspect_effect(
+        self,
+        request: SinkEffectInspectionRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectInspection:
+        key = self._effect_key(ctx)
+        target = f"s3://{self._bucket}/{key}"
+        observation = self._observe_effect_target(key)
+        if observation.exists and not self._overwrite and request.predecessor_descriptor is None:
+            raise S3ConditionalWriteRejectedError from None
+        return inspect_remote_object(
+            provider="aws_s3",
+            target=target,
+            request=request,
+            observation=observation,
+        )
+
+    def _preflight_effect_members(
+        self,
+        effect_input: SinkEffectPipelineMembersInput,
+    ) -> tuple[list[dict[str, Any]], tuple[int, ...], tuple[int, ...]]:
+        accepted: list[int] = []
+        diverted: list[int] = []
+        diverted_keys: set[tuple[str, str]] = set()
+        for member in effect_input.members:
+            row = dict(member.row)
+            probe_fields = self._get_fieldnames_from_schema_or_rows([row])
+            probe_rows = apply_display_headers(self, [row]) if self._format in {"json", "jsonl"} else [row]
+            try:
+                serialized = _serialize_rows_to_spool(
+                    probe_rows,
+                    format=self._format,
+                    csv_options=self._csv_options,
+                    fieldnames=probe_fields,
+                    max_object_bytes=1024 * 1024 * 1024,
+                    max_record_chars=self._max_record_chars,
+                )
+            except S3RecordSizeLimitError:
+                self._divert_row(row, row_index=member.ordinal, reason="record exceeds configured character limit")
+                diverted.append(member.ordinal)
+                diverted_keys.add((member.token_id, member.row_id))
+            except S3RecordSerializationError:
+                reason = "CSV record could not be encoded safely" if self._format == "csv" else "JSON record could not be serialized safely"
+                self._divert_row(row, row_index=member.ordinal, reason=reason)
+                diverted.append(member.ordinal)
+                diverted_keys.add((member.token_id, member.row_id))
+            else:
+                serialized.close()
+                accepted.append(member.ordinal)
+        rows = [
+            dict(member.row) for member in effect_input.target_snapshot_members if (member.token_id, member.row_id) not in diverted_keys
+        ]
+        return rows, tuple(accepted), tuple(diverted)
+
+    def prepare_effect(
+        self,
+        request: SinkEffectPrepareRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectPlan:
+        del ctx
+        if type(request.effect_input) is not SinkEffectPipelineMembersInput:
+            raise TypeError("AWSS3Sink effects require pipeline member input")
+        rows, accepted, diverted = self._preflight_effect_members(request.effect_input)
+        data_fields = self._get_fieldnames_from_schema_or_rows(rows)
+        display_fields = self._display_fieldnames(data_fields)
+        displayed_rows = apply_display_headers(self, rows) if self._format in {"json", "jsonl"} else rows
+        serialized = _serialize_rows_to_spool(
+            displayed_rows,
+            format=self._format,
+            csv_options=self._csv_options,
+            fieldnames=display_fields,
+            max_object_bytes=self._max_object_bytes,
+            max_record_chars=self._max_record_chars,
+        )
+
+        def chunks() -> Iterator[bytes]:
+            serialized.body.seek(0)
+            while chunk := serialized.body.read(_WRITE_CHUNK_BYTES):
+                yield chunk
+
+        evidence = request.inspection.evidence
+        predecessor: ArtifactDescriptor | None = None
+        if evidence.get("predecessor_declared") is True:
+            observed_hash = evidence.get("observed_content_hash")
+            observed_size = evidence.get("observed_size")
+            if not isinstance(observed_hash, str) or type(observed_size) is not int:
+                serialized.close()
+                raise RemoteObjectPreconditionError("S3 predecessor inspection lacks exact content identity")
+            predecessor = ArtifactDescriptor(
+                artifact_type="file",
+                path_or_uri=request.inspection.reference,
+                content_hash=observed_hash,
+                size_bytes=observed_size,
             )
-        return self._resolved_key
+        try:
+            return prepare_remote_object(
+                effect_id=request.effect_id,
+                provider="aws_s3",
+                inspection=request.inspection,
+                body_chunks=chunks(),
+                format_name=self._format,
+                max_bytes=self._max_object_bytes,
+                accepted_ordinals=accepted,
+                diverted_ordinals=diverted,
+                predecessor_descriptor=predecessor,
+                checksum_algorithm="sha256",
+            )
+        finally:
+            serialized.close()
+
+    def commit_effect(
+        self,
+        plan: SinkEffectPlan,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectCommitResult:
+        evidence, stage = validate_remote_plan(plan, provider="aws_s3", require_stage=True)
+        expected_target = f"s3://{self._bucket}/{self._effect_key(ctx)}"
+        if evidence.target != expected_target:
+            raise RemoteObjectPreconditionError("S3 effect target diverges from the configured run target")
+        key = evidence.target.removeprefix(f"s3://{self._bucket}/")
+        if not key or f"s3://{self._bucket}/{key}" != evidence.target:
+            raise RemoteObjectPreconditionError("S3 effect target does not match configured bucket")
+        with stage.open("rb") as body:
+            put_request: dict[str, object] = {
+                "Bucket": self._bucket,
+                "Key": key,
+                "Body": body,
+                "ContentLength": evidence.staged_size,
+                "ChecksumSHA256": base64.b64encode(bytes.fromhex(evidence.staged_hash)).decode("ascii"),
+                "Metadata": {
+                    "elspeth-content-sha256": evidence.staged_hash,
+                    "elspeth-effect-id": plan.effect_id,
+                    "elspeth-plan-hash": plan.plan_hash,
+                    "elspeth-protocol-version": SINK_EFFECT_PROTOCOL_VERSION,
+                },
+            }
+            if evidence.precondition == "if_none_match":
+                put_request["IfNoneMatch"] = "*"
+            else:
+                put_request["IfMatch"] = evidence.predecessor_etag
+            try:
+                response = self._get_s3_client().put_object(**put_request)
+            except contract_errors.TIER_1_ERRORS:
+                raise
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as error:
+                failure_kind = _provider_failure_kind(error)
+                if failure_kind == "conditional":
+                    _raise_conditional_rejected()
+                if failure_kind == "rejected":
+                    _raise_sink_write_rejected()
+                _raise_outcome_unknown()
+            if not isinstance(response, Mapping) or _validated_etag(response) is None:
+                _raise_outcome_unknown()
+        return remote_commit_result(plan, evidence)
+
+    def reconcile_effect(
+        self,
+        plan: SinkEffectPlan,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectReconcileResult:
+        evidence, _stage = validate_remote_plan(plan, provider="aws_s3", require_stage=False)
+        expected_target = f"s3://{self._bucket}/{self._effect_key(ctx)}"
+        if evidence.target != expected_target:
+            raise RemoteObjectPreconditionError("S3 effect target diverges from the configured run target")
+        key = evidence.target.removeprefix(f"s3://{self._bucket}/")
+        if not key or f"s3://{self._bucket}/{key}" != evidence.target:
+            raise RemoteObjectPreconditionError("S3 effect target does not match configured bucket")
+        return reconcile_remote_observation(plan, evidence, self._observe_effect_target(key))
 
     def _get_fieldnames_from_schema_or_rows(self, rows: Sequence[Mapping[str, Any]]) -> list[str]:
         ordered_keys: list[str] = []
@@ -737,218 +991,9 @@ class AWSS3Sink(BaseSink):
                 raise ValueError("CUSTOM header mode must map every S3 output field")
         return [display_map.get(field, field) for field in data_fields]
 
-    def _preflight_rows(
-        self,
-        rows: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        accepted: list[dict[str, Any]] = []
-        for index, row in enumerate(rows):
-            probe_fields = self._get_fieldnames_from_schema_or_rows([row])
-            probe_rows = apply_display_headers(self, [row]) if self._format in {"json", "jsonl"} else [row]
-            try:
-                serialized = _serialize_rows_to_spool(
-                    probe_rows,
-                    format=self._format,
-                    csv_options=self._csv_options,
-                    fieldnames=probe_fields,
-                    max_object_bytes=1024 * 1024 * 1024,
-                    max_record_chars=self._max_record_chars,
-                )
-            except S3RecordSizeLimitError:
-                self._divert_row(row, row_index=index, reason="record exceeds configured character limit")
-                continue
-            except S3RecordSerializationError:
-                reason = "CSV record could not be encoded safely" if self._format == "csv" else "JSON record could not be serialized safely"
-                self._divert_row(row, row_index=index, reason=reason)
-                continue
-            else:
-                serialized.close()
-            accepted.append(row.copy())
-        return accepted
-
-    def _record_s3_call(
-        self,
-        ctx: SinkContext,
-        *,
-        status: CallStatus,
-        key: str,
-        condition: Literal["none", "if_none_match", "if_match"],
-        latency_ms: float,
-        response_data: dict[str, Any] | None = None,
-        error_type: str | None = None,
-    ) -> None:
-        recorder_error_type: str | None = None
-        try:
-            ctx.record_call(
-                call_type=CallType.HTTP,
-                status=status,
-                request_data={
-                    "operation": "put_object",
-                    "bucket": self._bucket,
-                    "key": key,
-                    "overwrite": self._overwrite,
-                    "condition": condition,
-                },
-                response_data=response_data,
-                error={"type": error_type} if error_type is not None else None,
-                latency_ms=latency_ms,
-                provider="aws_s3",
-            )
-        except contract_errors.TIER_1_ERRORS:
-            raise
-        except BaseException as error:
-            recorder_error_type = _normalize_error_type(error)
-        if recorder_error_type is not None:
-            self._poisoned = True
-            _raise_audit_integrity(recorder_error_type)
-
-    def _artifact(self, key: str, *, content_hash: str, size_bytes: int) -> SinkWriteResult:
-        return SinkWriteResult(
-            artifact=ArtifactDescriptor(
-                artifact_type="file",
-                path_or_uri=f"s3://{self._bucket}/{key}",
-                content_hash=content_hash,
-                size_bytes=size_bytes,
-            ),
-            diversions=self._get_diversions(),
-        )
-
     def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
-        if self._closed:
-            raise S3SinkClosedError("S3 sink is closed and cannot be reused.") from None
-        if self._poisoned:
-            raise S3SinkPoisonedError("S3 sink is poisoned and cannot be reused.") from None
-
-        resolve_contract_from_context_if_needed(self, ctx)
-        resolve_display_headers_if_needed(self, ctx)
-        key = self._get_or_init_key(ctx)
-        accepted = self._preflight_rows(rows)
-
-        if not accepted:
-            if self._confirmed_artifact is not None:
-                return SinkWriteResult(artifact=self._confirmed_artifact, diversions=self._get_diversions())
-            return self._artifact(key, content_hash=hashlib.sha256(b"").hexdigest(), size_bytes=0)
-
-        candidate_rows = [*self._buffered_rows, *accepted]
-        data_fields = self._get_fieldnames_from_schema_or_rows(candidate_rows)
-        display_fields = self._display_fieldnames(data_fields)
-        displayed_candidate = apply_display_headers(self, candidate_rows)
-
-        serialized = _serialize_rows_to_spool(
-            displayed_candidate,
-            format=self._format,
-            csv_options=self._csv_options,
-            fieldnames=display_fields,
-            max_object_bytes=self._max_object_bytes,
-            max_record_chars=self._max_record_chars,
-        )
-        try:
-            request: dict[str, Any] = {
-                "Bucket": self._bucket,
-                "Key": key,
-                "Body": serialized.body,
-                "ContentLength": serialized.size_bytes,
-                "ChecksumSHA256": serialized.checksum_sha256_b64,
-            }
-            if self._overwrite:
-                condition: Literal["none", "if_none_match", "if_match"] = "none"
-            elif self._remote_etag is None:
-                request["IfNoneMatch"] = "*"
-                condition = "if_none_match"
-            else:
-                request["IfMatch"] = self._remote_etag
-                condition = "if_match"
-
-            started = time.perf_counter()
-            provider_error_type: str | None = None
-            failure_kind: Literal["conditional", "rejected", "unknown"] | None = None
-            response: Any = None
-            client: Any | None = self._s3_client
-            if client is None:
-                try:
-                    client = self._get_s3_client()
-                except ImportError:
-                    raise
-                except contract_errors.TIER_1_ERRORS:
-                    raise
-                except BaseException as error:
-                    provider_error_type = _normalize_error_type(error)
-                    failure_kind = "unknown"
-            if failure_kind is None and client is None:
-                provider_error_type = "InvalidS3Client"
-                failure_kind = "unknown"
-            if failure_kind is None:
-                assert client is not None
-                try:
-                    serialized.body.seek(0)
-                    response = client.put_object(**request)
-                except contract_errors.TIER_1_ERRORS:
-                    raise
-                except BaseException as error:
-                    provider_error_type = _normalize_error_type(error)
-                    failure_kind = _provider_failure_kind(error)
-            latency_ms = (time.perf_counter() - started) * 1000
-
-            if failure_kind is not None and provider_error_type is not None:
-                self._record_s3_call(
-                    ctx,
-                    status=CallStatus.ERROR,
-                    key=key,
-                    condition=condition,
-                    latency_ms=latency_ms,
-                    error_type=provider_error_type,
-                )
-                if failure_kind == "conditional":
-                    _raise_conditional_rejected()
-                if failure_kind == "rejected":
-                    _raise_sink_write_rejected()
-                self._poisoned = True
-                _raise_outcome_unknown()
-
-            if not isinstance(response, Mapping):
-                self._record_s3_call(
-                    ctx,
-                    status=CallStatus.ERROR,
-                    key=key,
-                    condition=condition,
-                    latency_ms=latency_ms,
-                    error_type="MalformedS3Response",
-                )
-                self._poisoned = True
-                _raise_outcome_unknown()
-
-            if not self._overwrite:
-                confirmed_etag = _validated_etag(response)
-                if confirmed_etag is None:
-                    self._record_s3_call(
-                        ctx,
-                        status=CallStatus.ERROR,
-                        key=key,
-                        condition=condition,
-                        latency_ms=latency_ms,
-                        error_type="MalformedS3Response",
-                    )
-                    self._poisoned = True
-                    _raise_outcome_unknown()
-                self._remote_etag = confirmed_etag
-
-            self._record_s3_call(
-                ctx,
-                status=CallStatus.SUCCESS,
-                key=key,
-                condition=condition,
-                latency_ms=latency_ms,
-                response_data={
-                    "size_bytes": serialized.size_bytes,
-                    "content_hash": serialized.content_hash,
-                },
-            )
-            self._buffered_rows = candidate_rows
-            result = self._artifact(key, content_hash=serialized.content_hash, size_bytes=serialized.size_bytes)
-            self._confirmed_artifact = result.artifact
-            return result
-        finally:
-            serialized.close()
+        del rows, ctx
+        raise RuntimeError("AWSS3Sink publication requires the recoverable sink effect coordinator") from None
 
     def flush(self) -> None:
         """PutObject is synchronous, so there is no deferred data to flush."""
@@ -959,11 +1004,6 @@ class AWSS3Sink(BaseSink):
         self._closed = True
         client = self._s3_client
         self._s3_client = None
-        self._buffered_rows = []
-        self._resolved_key = None
-        self._remote_etag = None
-        self._confirmed_artifact = None
-        self._poisoned = False
         close_error_type: str | None = None
         if client is not None:
             close_method = getattr(client, "close", None)

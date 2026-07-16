@@ -1,57 +1,108 @@
-"""Property-based tests for Azure Blob Storage sink plugin.
-
-Verifies hash determinism, JSONL round-trip integrity, and buffering
-equivalence using Hypothesis-generated data.
-"""
+"""Property-based checks for deterministic Azure Blob effect plans."""
 
 from __future__ import annotations
 
-import hashlib
 import json
-from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from hashlib import sha256
+from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 from hypothesis import given
 from hypothesis import strategies as st
 
-from elspeth.contracts.plugin_context import PluginContext
+from elspeth.contracts.hashing import canonical_json
+from elspeth.contracts.sink_effects import (
+    RestrictedSinkEffectContext,
+    SinkEffectInspectionRequest,
+    SinkEffectMember,
+    SinkEffectPipelineMembersInput,
+    SinkEffectPrepareRequest,
+)
 from elspeth.plugins.sinks.azure_blob_sink import AzureBlobSink
 from tests.fixtures.base_classes import inject_write_failure
-from tests.fixtures.factories import make_operation_context
 from tests.strategies.settings import SLOW_SETTINGS
 
-# ---------------------------------------------------------------------------
-# Shared constants
-# ---------------------------------------------------------------------------
-
-FAKE_CONN_STRING = "DefaultEndpointsProtocol=https;AccountName=fake;AccountKey=ZmFrZQ==;EndpointSuffix=core.windows.net"
-PATCH_AUTH = "elspeth.plugins.infrastructure.azure_auth.AzureAuthConfig.create_blob_service_client"
-FIXED_SCHEMA: dict[str, Any] = {
+_CONNECTION = "DefaultEndpointsProtocol=https;AccountName=fake;AccountKey=ZmFrZQ==;EndpointSuffix=core.windows.net"
+_SCHEMA: dict[str, Any] = {
     "mode": "fixed",
     "fields": ["id: int", "name: str", "score: float?"],
 }
+_CTX = RestrictedSinkEffectContext(
+    run_id="property-run",
+    run_started_at=datetime(2026, 7, 16, tzinfo=UTC),
+    operation_id="property-operation",
+    sink_node_id="property-sink",
+)
 
 
-# ---------------------------------------------------------------------------
-# Strategies
-# ---------------------------------------------------------------------------
+class ResourceNotFoundError(Exception):
+    pass
+
+
+class _Blob:
+    def get_blob_properties(self) -> None:
+        raise ResourceNotFoundError
+
+
+class _Container:
+    def get_blob_client(self, *_args: object, **_kwargs: object) -> _Blob:
+        return _Blob()
+
+    def close(self) -> None:
+        return None
+
+
+def _member(ordinal: int, row: dict[str, Any]) -> SinkEffectMember:
+    encoded = canonical_json(row).encode()
+    return SinkEffectMember(
+        ordinal=ordinal,
+        token_id=f"token-{ordinal}",
+        row_id=f"row-{ordinal}",
+        ingest_sequence=ordinal,
+        lineage_json="[]",
+        lineage_hash=sha256(b"[]").hexdigest(),
+        payload_hash=sha256(encoded).hexdigest(),
+        row=row,
+        member_effect_id=sha256(f"member-{ordinal}-{encoded!r}".encode()).hexdigest(),
+    )
+
+
+def _effect_plan(rows: list[dict[str, Any]]):
+    sink = inject_write_failure(
+        AzureBlobSink(
+            {
+                "connection_string": _CONNECTION,
+                "container": "property-container",
+                "blob_path": "output.jsonl",
+                "schema": _SCHEMA,
+                "format": "jsonl",
+            }
+        )
+    )
+    sink._container_client = _Container()  # type: ignore[assignment]
+    members = tuple(_member(index, row) for index, row in enumerate(rows))
+    effect_id = sha256(canonical_json(rows).encode()).hexdigest()
+    inspection = sink.inspect_effect(
+        SinkEffectInspectionRequest(effect_id=effect_id, target="{}", predecessor_descriptor=None),
+        _CTX,
+    )
+    return sink.prepare_effect(
+        SinkEffectPrepareRequest(
+            effect_id=effect_id,
+            effect_input=SinkEffectPipelineMembersInput(members=members, target_snapshot_members=members),
+            inspection=inspection,
+        ),
+        _CTX,
+    )
+
 
 row_strategy = st.fixed_dictionaries(
     {
         "id": st.integers(min_value=0, max_value=1000),
-        "name": st.text(
-            min_size=1,
-            max_size=20,
-            alphabet=st.characters(whitelist_categories=("L", "N")),
-        ),
+        "name": st.text(min_size=1, max_size=20, alphabet=st.characters(whitelist_categories=("L", "N"))),
         "score": st.one_of(
-            st.floats(
-                allow_nan=False,
-                allow_infinity=False,
-                min_value=-1e6,
-                max_value=1e6,
-            ),
+            st.floats(allow_nan=False, allow_infinity=False, min_value=-1e6, max_value=1e6),
             st.none(),
         ),
     }
@@ -59,214 +110,37 @@ row_strategy = st.fixed_dictionaries(
 rows_strategy = st.lists(row_strategy, min_size=1, max_size=5)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+@given(rows=rows_strategy)
+@SLOW_SETTINGS
+def test_effect_descriptor_hash_matches_staged_content(rows: list[dict[str, Any]]) -> None:
+    plan = _effect_plan(rows)
+    body = Path(str(plan.safe_evidence["staging_path"])).read_bytes()
+    assert plan.expected_descriptor is not None
+    assert plan.expected_descriptor.content_hash == sha256(body).hexdigest()
+    assert plan.expected_descriptor.size_bytes == len(body)
 
 
-@dataclass
-class FakeBlobClient:
-    """Blob client fake that records uploaded payloads."""
-
-    uploaded_payloads: list[bytes] = field(default_factory=list)
-
-    def upload_blob(self, data: bytes, *, overwrite: bool) -> None:
-        self.uploaded_payloads.append(data)
+@given(rows=rows_strategy)
+@SLOW_SETTINGS
+def test_same_rows_produce_same_effect_payload_hash(rows: list[dict[str, Any]]) -> None:
+    assert _effect_plan(rows).payload_hash == _effect_plan(rows).payload_hash
 
 
-@dataclass
-class FakeContainerClient:
-    """Container fake that returns the same blob client for each requested path."""
-
-    blob_client: FakeBlobClient = field(default_factory=FakeBlobClient)
-    blob_paths: list[str] = field(default_factory=list)
-    closed: bool = False
-
-    def get_blob_client(self, blob_path: str) -> FakeBlobClient:
-        self.blob_paths.append(blob_path)
-        return self.blob_client
-
-    def close(self) -> None:
-        self.closed = True
+@given(rows=rows_strategy)
+@SLOW_SETTINGS
+def test_jsonl_effect_round_trip(rows: list[dict[str, Any]]) -> None:
+    plan = _effect_plan(rows)
+    body = Path(str(plan.safe_evidence["staging_path"])).read_text()
+    assert [json.loads(line) for line in body.splitlines()] == rows
 
 
-@dataclass
-class FakeBlobServiceClient:
-    """Service fake that records requested containers."""
-
-    container_client: FakeContainerClient = field(default_factory=FakeContainerClient)
-    containers: list[str] = field(default_factory=list)
-
-    def get_container_client(self, container: str) -> FakeContainerClient:
-        self.containers.append(container)
-        return self.container_client
-
-
-def _base_config(**overrides: Any) -> dict[str, Any]:
-    """Minimal valid config dict."""
-    cfg: dict[str, Any] = {
-        "connection_string": FAKE_CONN_STRING,
-        "container": "test-container",
-        "blob_path": "output.jsonl",
-        "schema": FIXED_SCHEMA,
-        "format": "jsonl",
-    }
-    cfg.update(overrides)
-    return cfg
-
-
-def _fake_blob_upload() -> tuple[FakeBlobServiceClient, FakeBlobClient]:
-    """Create fake service client returning (service, blob_client) for upload assertions."""
-    fake_service = FakeBlobServiceClient()
-    return fake_service, fake_service.container_client.blob_client
-
-
-def _make_sink_ctx() -> PluginContext:
-    """Build a PluginContext suitable for sink.write() calls."""
-    return make_operation_context(
-        operation_type="sink_write",
-        node_id="sink",
-        node_type="SINK",
-        plugin_name="azure_blob",
-    )
-
-
-def _get_uploaded_bytes(fake_blob: FakeBlobClient) -> bytes:
-    """Extract the bytes passed to upload_blob."""
-    return fake_blob.uploaded_payloads[-1]
-
-
-# ---------------------------------------------------------------------------
-# Hash properties
-# ---------------------------------------------------------------------------
-
-
-class TestAzureBlobSinkHashProperties:
-    """Artifact hash must match SHA-256 of uploaded content."""
-
-    @given(rows=rows_strategy)
-    @SLOW_SETTINGS
-    @patch(PATCH_AUTH)
-    def test_hash_matches_uploaded_content(
-        self,
-        mock_create: Any,
-        rows: list[dict[str, object]],
-    ) -> None:
-        """Artifact hash == SHA-256 of captured upload bytes, size matches."""
-        sink = inject_write_failure(AzureBlobSink(_base_config()))
-        ctx = _make_sink_ctx()
-        fake_service, fake_blob = _fake_blob_upload()
-        mock_create.return_value = fake_service
-
-        result = sink.write(rows, ctx)
-
-        uploaded = _get_uploaded_bytes(fake_blob)
-        expected_hash = hashlib.sha256(uploaded).hexdigest()
-        assert result.artifact.content_hash == expected_hash
-        assert result.artifact.size_bytes == len(uploaded)
-
-    @given(rows=rows_strategy)
-    @SLOW_SETTINGS
-    @patch(PATCH_AUTH)
-    def test_same_rows_produce_same_hash(
-        self,
-        mock_create: Any,
-        rows: list[dict[str, object]],
-    ) -> None:
-        """Same rows written to two separate sink instances produce same hash."""
-        hashes = []
-        for _ in range(2):
-            sink = inject_write_failure(AzureBlobSink(_base_config()))
-            ctx = _make_sink_ctx()
-            fake_service, _fake_blob = _fake_blob_upload()
-            mock_create.return_value = fake_service
-
-            result = sink.write(rows, ctx)
-            hashes.append(result.artifact.content_hash)
-
-        assert hashes[0] == hashes[1]
-
-
-# ---------------------------------------------------------------------------
-# JSONL round-trip properties
-# ---------------------------------------------------------------------------
-
-
-class TestAzureBlobSinkJSONLRoundTrip:
-    """JSONL output can be parsed back and values match."""
-
-    @given(rows=rows_strategy)
-    @SLOW_SETTINGS
-    @patch(PATCH_AUTH)
-    def test_jsonl_round_trip(
-        self,
-        mock_create: Any,
-        rows: list[dict[str, object]],
-    ) -> None:
-        """Write rows as JSONL, parse uploaded bytes back, verify values match."""
-        sink = inject_write_failure(AzureBlobSink(_base_config(format="jsonl")))
-        ctx = _make_sink_ctx()
-        fake_service, fake_blob = _fake_blob_upload()
-        mock_create.return_value = fake_service
-
-        sink.write(rows, ctx)
-
-        uploaded = _get_uploaded_bytes(fake_blob)
-        lines = uploaded.decode("utf-8").strip().split("\n")
-        assert len(lines) == len(rows)
-
-        for parsed_line, original in zip(lines, rows, strict=True):
-            parsed = json.loads(parsed_line)
-            for key, expected_value in original.items():
-                actual_value = parsed[key]
-                if expected_value is None:
-                    assert actual_value is None
-                elif isinstance(expected_value, float):
-                    assert abs(actual_value - expected_value) < 1e-9
-                else:
-                    assert actual_value == expected_value
-
-
-# ---------------------------------------------------------------------------
-# Buffering properties
-# ---------------------------------------------------------------------------
-
-
-class TestAzureBlobSinkBufferingProperties:
-    """Cumulative buffering: write(A) + write(B) == write(A+B)."""
-
-    @given(
-        rows_a=rows_strategy,
-        rows_b=rows_strategy,
-    )
-    @SLOW_SETTINGS
-    @patch(PATCH_AUTH)
-    def test_two_writes_equals_one_combined_write(
-        self,
-        mock_create: Any,
-        rows_a: list[dict[str, object]],
-        rows_b: list[dict[str, object]],
-    ) -> None:
-        """write(A) then write(B) produces same blob as write(A+B)."""
-        # Two-write path
-        sink_split = inject_write_failure(AzureBlobSink(_base_config()))
-        ctx_split = _make_sink_ctx()
-        fake_service_split, fake_blob_split = _fake_blob_upload()
-        mock_create.return_value = fake_service_split
-
-        sink_split.write(rows_a, ctx_split)
-        sink_split.write(rows_b, ctx_split)
-
-        uploaded_split = _get_uploaded_bytes(fake_blob_split)
-
-        # One-write path
-        sink_combined = inject_write_failure(AzureBlobSink(_base_config()))
-        ctx_combined = _make_sink_ctx()
-        fake_service_combined, fake_blob_combined = _fake_blob_upload()
-        mock_create.return_value = fake_service_combined
-
-        sink_combined.write(rows_a + rows_b, ctx_combined)
-
-        uploaded_combined = _get_uploaded_bytes(fake_blob_combined)
-
-        assert uploaded_split == uploaded_combined
+@given(rows_a=rows_strategy, rows_b=rows_strategy)
+@SLOW_SETTINGS
+def test_cumulative_target_snapshot_equals_combined_serialization(
+    rows_a: list[dict[str, Any]],
+    rows_b: list[dict[str, Any]],
+) -> None:
+    combined = [*rows_a, *rows_b]
+    plan = _effect_plan(combined)
+    body = Path(str(plan.safe_evidence["staging_path"])).read_text()
+    assert [json.loads(line) for line in body.splitlines()] == combined

@@ -1159,9 +1159,7 @@ async def test_resolve_profiled_llm_review_revalidates_lowered_contract(engine) 
             _insert_session(conn, str(session_id))
             if review_disabled:
                 conn.execute(
-                    update(sessions_table)
-                    .where(sessions_table.c.id == str(session_id))
-                    .values(interpretation_review_disabled=True)
+                    update(sessions_table).where(sessions_table.c.id == str(session_id)).values(interpretation_review_disabled=True)
                 )
         saved_state = await policy_service.save_composition_state(
             session_id,

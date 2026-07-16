@@ -600,6 +600,41 @@ describe("WireStageTurn — outcome → affordance", () => {
     ).toBeNull();
   });
 
+  it("revise: formats fenced multiline advisor findings without exposing the fence", () => {
+    render(
+      <WireStageTurn
+        {...ALL_HANDLERS}
+        data={outcomeData({
+          signoff_outcome: "revise",
+          advisor_findings: [
+            "BEGIN_UNTRUSTED_ADVISOR_FINDINGS",
+            "FLAGGED: check the field contract.",
+            "",
+            "- Read `page_content`.",
+            "- Preserve `summary`.",
+            "END_UNTRUSTED_ADVISOR_FINDINGS",
+          ].join("\n"),
+          passes_remaining: 1,
+        })}
+      />,
+    );
+
+    const review = screen.getByRole("heading", { name: "Advisor review" })
+      .parentElement;
+    expect(review).not.toBeNull();
+    expect(review!.textContent).not.toContain(
+      "BEGIN_UNTRUSTED_ADVISOR_FINDINGS",
+    );
+    expect(review!.textContent).not.toContain("END_UNTRUSTED_ADVISOR_FINDINGS");
+    expect(within(review!).getByRole("list")).toBeTruthy();
+    expect(
+      within(review!).getByText("page_content", { selector: "code" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Ask advisor (spends 1 of 1)" }),
+    ).toBeTruthy();
+  });
+
   it("blocked_flagged: findings + Exit, no budget-burning or bypass button", () => {
     render(
       <WireStageTurn
@@ -618,6 +653,42 @@ describe("WireStageTurn — outcome → affordance", () => {
     ).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Ask advisor/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "Confirm wiring" })).toBeNull();
+  });
+
+  it("blocked_flagged: formats embedded fenced findings and preserves the failure prefix", () => {
+    render(
+      <WireStageTurn
+        {...ALL_HANDLERS}
+        data={outcomeData({
+          signoff_outcome: "blocked_flagged",
+          advisor_findings: [
+            "The advisor sign-off did not pass (exhausted); the pipeline cannot complete.",
+            "",
+            "BEGIN_UNTRUSTED_ADVISOR_FINDINGS",
+            "FLAGGED: repair the field contract.",
+            "",
+            "1. Set `content_field` to `page_content`.",
+            "2. Keep the final mapper selective.",
+            "END_UNTRUSTED_ADVISOR_FINDINGS",
+          ].join("\n"),
+          passes_remaining: 0,
+        })}
+      />,
+    );
+
+    const review = screen.getByRole("heading", { name: "Advisor review" })
+      .parentElement;
+    expect(review).not.toBeNull();
+    expect(review!.textContent).toContain("pipeline cannot complete");
+    expect(review!.textContent).not.toContain(
+      "BEGIN_UNTRUSTED_ADVISOR_FINDINGS",
+    );
+    expect(review!.textContent).not.toContain("END_UNTRUSTED_ADVISOR_FINDINGS");
+    expect(within(review!).getByRole("list")).toBeTruthy();
+    expect(
+      within(review!).getByText("content_field", { selector: "code" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Ask advisor/ })).toBeNull();
   });
 
   it("blocked_unavailable: explanation + Exit", () => {

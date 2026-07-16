@@ -364,12 +364,18 @@ def test_postgres_scheduler_enqueue_and_accounting_projection_are_dialect_safe(
         assert accounting.sources["source"].rows_processed == 1
 
         with landscape.engine.connect() as conn:
-            assert conn.execute(
-                select(token_work_items_table.c.work_item_id).where(token_work_items_table.c.run_id == "scheduler-postgres-run")
-            ).scalar_one() == item.work_item_id
-            assert conn.execute(
-                select(scheduler_events_table.c.work_item_id).where(scheduler_events_table.c.run_id == "scheduler-postgres-run")
-            ).scalar_one() == item.work_item_id
+            assert (
+                conn.execute(
+                    select(token_work_items_table.c.work_item_id).where(token_work_items_table.c.run_id == "scheduler-postgres-run")
+                ).scalar_one()
+                == item.work_item_id
+            )
+            assert (
+                conn.execute(
+                    select(scheduler_events_table.c.work_item_id).where(scheduler_events_table.c.run_id == "scheduler-postgres-run")
+                ).scalar_one()
+                == item.work_item_id
+            )
 
 
 def test_request_open_does_not_repair_missing_additive_index(

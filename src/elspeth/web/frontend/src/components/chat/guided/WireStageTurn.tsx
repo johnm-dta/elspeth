@@ -2,6 +2,22 @@ import { useId } from "react";
 import type { WireStageData } from "@/types/guided";
 import { focusAcknowledgementCard } from "../AcknowledgementCard";
 import { stepLabelForPlugin } from "../interpretationStepLabel";
+import { MarkdownRenderer } from "../MarkdownRenderer";
+
+const ADVISOR_FINDINGS_FENCE_LINES = new Set([
+  "BEGIN_UNTRUSTED_ADVISOR_FINDINGS",
+  "END_UNTRUSTED_ADVISOR_FINDINGS",
+]);
+
+function advisorFindingsForDisplay(findings: string): string {
+  // The backend fences model-authored findings because they can be replayed to
+  // another model as untrusted data.  Keep that wire/audit safety boundary,
+  // but do not expose its internal markers in the operator-facing view.
+  return findings
+    .split(/\r?\n/)
+    .filter((line) => !ADVISOR_FINDINGS_FENCE_LINES.has(line.trim()))
+    .join("\n");
+}
 
 /**
  * One named blocker behind a disabled "Confirm wiring" — a pending
@@ -448,7 +464,9 @@ export function WireStageTurn({
       {data.advisor_findings !== undefined ? (
         <div className="wire-stage__findings">
           <h4>Advisor review</h4>
-          <p>{data.advisor_findings}</p>
+          <MarkdownRenderer
+            content={advisorFindingsForDisplay(data.advisor_findings)}
+          />
         </div>
       ) : null}
 

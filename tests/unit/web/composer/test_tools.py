@@ -394,6 +394,40 @@ def test_apply_pipeline_recipe_reports_unavailable_profile_alias() -> None:
     assert result.updated_state.version == 1
 
 
+def test_apply_pipeline_recipe_reports_profile_unavailable_when_required_profile_is_omitted() -> None:
+    catalog = _mock_catalog()
+    unrestricted = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash="recipe-no-profile-policy",
+        principal_scope="local:test-user",
+        available=unrestricted.available,
+        unavailable=(),
+        selected=unrestricted.selected,
+        usable_profile_aliases=(),
+        selected_profile_aliases=(),
+        binding_generation_fingerprint="recipe-no-profile-generation",
+    )
+    policy_catalog = PolicyCatalogView(catalog, snapshot, MagicMock(spec=OperatorProfileRegistry))
+
+    result = execute_tool(
+        "apply_pipeline_recipe",
+        {
+            "recipe_name": "classify-rows-llm-jsonl",
+            "slots": {
+                "source_blob_id": str(uuid4()),
+                "classifier_template": "Classify this row",
+            },
+        },
+        _empty_state(),
+        policy_catalog,
+        plugin_snapshot=snapshot,
+    )
+
+    assert result.success is False
+    assert result.data["error_code"] == "profile_unavailable"
+    assert result.updated_state.version == 1
+
+
 def test_apply_pipeline_recipe_preserves_disabled_llm_plugin_reason() -> None:
     catalog = _mock_catalog()
     llm_id = PluginId("transform", "llm")

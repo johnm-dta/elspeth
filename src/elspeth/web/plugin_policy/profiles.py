@@ -381,9 +381,7 @@ class _LLMProfileResolver:
                     credential_scope=profile.credential_scope,
                     usable=usable,
                     reason=None if usable else ProfileUnavailableReason.CREDENTIAL_MISSING,
-                    generation=(
-                        self._binding_generation(profile, credential_generation=credential_generation) if usable else None
-                    ),
+                    generation=(self._binding_generation(profile, credential_generation=credential_generation) if usable else None),
                 )
             )
         return tuple(result)

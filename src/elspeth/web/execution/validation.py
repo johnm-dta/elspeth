@@ -872,9 +872,7 @@ def validate_pipeline(
     # options.  A concrete model selected by the operator is not a model choice
     # authored by the composer and therefore has no user review card to resolve.
     operator_resolved_model_node_ids = frozenset(
-        node.id
-        for node in state.nodes
-        if node.plugin == "llm" and isinstance(node.options.get("profile"), str)
+        node.id for node in state.nodes if node.plugin == "llm" and isinstance(node.options.get("profile"), str)
     )
 
     # Step 0: Empty-composition short-circuit.

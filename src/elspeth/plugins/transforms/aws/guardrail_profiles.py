@@ -21,9 +21,7 @@ BEDROCK_GUARDRAIL_PLUGIN_IDS: tuple[BedrockGuardrailPlugin, ...] = (
 
 _ALIAS = re.compile(r"[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*\Z")
 _GUARDRAIL_ID = re.compile(r"(?:[a-z0-9]+|arn:aws(?:-[^:]+)?:bedrock:[a-z0-9-]{1,20}:[0-9]{12}:guardrail/[a-z0-9]+)\Z")
-_GUARDRAIL_ARN = re.compile(
-    r"arn:(?P<partition>aws(?:-[^:]+)?):bedrock:(?P<region>[a-z0-9-]{1,20}):[0-9]{12}:guardrail/[a-z0-9]+\Z"
-)
+_GUARDRAIL_ARN = re.compile(r"arn:(?P<partition>aws(?:-[^:]+)?):bedrock:(?P<region>[a-z0-9-]{1,20}):[0-9]{12}:guardrail/[a-z0-9]+\Z")
 _NUMERIC_VERSION = re.compile(r"[1-9][0-9]{0,7}\Z")
 
 # Pinned from boto3/botocore 1.43.46's offline ``endpoints.json`` for the

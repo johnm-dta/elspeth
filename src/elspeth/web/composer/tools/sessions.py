@@ -802,14 +802,7 @@ def _execute_apply_pipeline_recipe(
         except RecipeValidationError as exc:
             return _failure_result(state, str(exc))
         if unavailable is not None:
-            requested_profile = raw_slots.get("profile")
-            usable_profiles = dict(context.plugin_snapshot.usable_profile_aliases).get(unavailable, ())
-            if (
-                unavailable == PluginId("transform", "llm")
-                and unavailable in context.plugin_snapshot.available
-                and isinstance(requested_profile, str)
-                and requested_profile not in usable_profiles
-            ):
+            if unavailable == PluginId("transform", "llm") and unavailable in context.plugin_snapshot.available:
                 error_code = PluginUnavailableReason.PROFILE_UNAVAILABLE.value
             else:
                 reason = context.catalog.unavailable_reason(unavailable)

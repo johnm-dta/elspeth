@@ -5174,6 +5174,15 @@ _ADVISOR_SUMMARY_VALUE_KEYS: Final[frozenset[str]] = frozenset(
         "expression",
         "operation",
         "aggregation",
+        # Dynamic field contracts.  These values are non-secret and determine
+        # which fields a plugin produces or consumes; hiding them forces the
+        # advisor to guess plugin defaults and can create false mismatches.
+        "url_field",
+        "content_field",
+        "fingerprint_field",
+        "response_field",
+        "mapping",
+        "select_only",
     }
 )
 _ADVISOR_SUMMARY_VALUE_MAX_CHARS: Final[int] = 120

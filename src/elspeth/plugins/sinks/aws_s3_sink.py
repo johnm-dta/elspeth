@@ -638,7 +638,7 @@ class AWSS3Sink(BaseSink):
     name = "aws_s3"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:f25920a72b942a5f"
+    source_file_hash: str | None = "sha256:c8a09119b4079bb2"
     config_model = AWSS3SinkConfig
     supports_resume = False
 

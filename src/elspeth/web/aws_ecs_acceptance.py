@@ -6363,10 +6363,7 @@ def validate_task_definition_policy_binding(
         if type(task_definition_arn) is str
         else None
     )
-    if (
-        type(task_definition_arn) is not str
-        or task_definition_match is None
-    ):
+    if type(task_definition_arn) is not str or task_definition_match is None:
         raise AcceptanceCheckError("task_definition_policy_binding")
     containers = task.get("containerDefinitions")
     if not isinstance(containers, list) or len(containers) > 100:

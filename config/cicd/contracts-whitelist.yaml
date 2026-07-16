@@ -709,6 +709,10 @@ allowed_dict_patterns:
   # Sink options are open-ended plugin configuration; this helper only overlays
   # the Step-2 schema contract before passing the dict back to composer state.
   - "src/elspeth/web/composer/guided/steps.py:_sink_options_with_step_2_schema_contract:return"
+  # Profiled options are likewise open-ended across plugin JSON schemas. This
+  # helper removes private binding fields and overlays the opaque profile alias
+  # while preserving the selected plugin's public option keys in flat form.
+  - "src/elspeth/web/composer/guided/steps.py:_normalize_profiled_options:return"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # WEB COMPOSER — Compose-loop helpers (Tier 3 LiteLLM API shapes)

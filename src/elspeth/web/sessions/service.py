@@ -1553,9 +1553,7 @@ class SessionServiceImpl:
 
         def _sync() -> PluginAvailabilitySnapshot | None:
             with self._engine.connect() as conn:
-                user_id = conn.execute(
-                    select(sessions_table.c.user_id).where(sessions_table.c.id == session_id)
-                ).scalar_one_or_none()
+                user_id = conn.execute(select(sessions_table.c.user_id).where(sessions_table.c.id == session_id)).scalar_one_or_none()
             if user_id is None:
                 return None
             assert self._plugin_snapshot_factory is not None

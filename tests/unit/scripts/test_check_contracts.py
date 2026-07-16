@@ -368,6 +368,20 @@ def build(payload: dict[str, typing.Any]) -> dict[str, typing.Any]:
     ]
 
 
+def test_profiled_options_dynamic_return_is_allowlisted() -> None:
+    """The profile normalizer preserves each plugin's open-ended option schema."""
+    source_file = Path("src/elspeth/web/composer/guided/steps.py")
+    pattern = f"{source_file}:_normalize_profiled_options:return"
+    whitelist, _entries = load_whitelist(Path("config/cicd/contracts-whitelist.yaml"))
+    matched: dict[str, bool] = {}
+
+    violations = find_dict_violations(source_file, whitelist=whitelist["dicts"], matched_entries=matched)
+
+    assert pattern in whitelist["dicts"]
+    assert matched.get(pattern) is True
+    assert not any(violation.context == "_normalize_profiled_options" and violation.param_name == "return" for violation in violations)
+
+
 # =============================================================================
 # Settings Alignment Tests
 # =============================================================================

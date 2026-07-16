@@ -3726,10 +3726,7 @@ def _task_definition_policy_payload(tmp_path: Path) -> tuple[Path, str, dict[str
     secrets = [
         {
             "name": name,
-            "valueFrom": (
-                "arn:aws:secretsmanager:ap-southeast-2:123456789012:"
-                f"secret:{secret_id}-AbCd12:{json_key}::"
-            ),
+            "valueFrom": (f"arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:{secret_id}-AbCd12:{json_key}::"),
         }
         for name, secret_id, json_key in required_secret_bindings
     ]
@@ -3791,10 +3788,7 @@ def test_task_definition_policy_binding_rejects_missing_or_unapproved_secret_ref
     if reference_kind == "missing":
         del entry["valueFrom"]
     else:
-        entry["valueFrom"] = (
-            "arn:aws:secretsmanager:ap-southeast-2:123456789012:"
-            "secret:unapproved-database-secret-AbCd12:SESSION_DB_URL::"
-        )
+        entry["valueFrom"] = "arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:unapproved-database-secret-AbCd12:SESSION_DB_URL::"
     with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
         acceptance.validate_task_definition_policy_binding(
             payload,
@@ -3807,9 +3801,7 @@ def test_task_definition_policy_binding_rejects_missing_or_unapproved_secret_ref
 def test_task_definition_policy_binding_requires_complete_runtime_secret_set(tmp_path: Path) -> None:
     manifest_path, container_name, _inventory, payload = _task_definition_policy_payload(tmp_path)
     container = payload["taskDefinition"]["containerDefinitions"][0]
-    container["secrets"] = [
-        entry for entry in container["secrets"] if entry["name"] != "ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY"
-    ]
+    container["secrets"] = [entry for entry in container["secrets"] if entry["name"] != "ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY"]
 
     with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
         acceptance.validate_task_definition_policy_binding(
@@ -3868,10 +3860,7 @@ def test_task_definition_policy_binding_rejects_plaintext_secrets_and_aws_overri
         container["secrets"].append(
             {
                 "name": name,
-                "valueFrom": (
-                    "arn:aws:secretsmanager:ap-southeast-2:123456789012:"
-                    f"secret:{secret_id}-AbCd12:AWS_ACCESS_KEY_ID::"
-                ),
+                "valueFrom": (f"arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:{secret_id}-AbCd12:AWS_ACCESS_KEY_ID::"),
             }
         )
 

@@ -71,9 +71,7 @@ def test_additive_index_name_on_wrong_table_does_not_satisfy_tokens(engine: Engi
 def test_bare_run_coordination_event_primary_key_is_divergent(engine: Engine) -> None:
     _create_full(engine)
     with engine.connect() as conn:
-        ddl = conn.exec_driver_sql(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='run_coordination_events'"
-        ).scalar_one()
+        ddl = conn.exec_driver_sql("SELECT sql FROM sqlite_master WHERE type='table' AND name='run_coordination_events'").scalar_one()
         assert "AUTOINCREMENT" in ddl
         conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
         conn.exec_driver_sql("DROP TABLE run_coordination_events")
@@ -88,9 +86,7 @@ def test_bare_run_coordination_event_primary_key_is_divergent(engine: Engine) ->
 def test_autoincrement_word_in_sql_comment_does_not_prove_table_shape(engine: Engine) -> None:
     _create_full(engine)
     with engine.connect() as conn:
-        ddl = conn.exec_driver_sql(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='run_coordination_events'"
-        ).scalar_one()
+        ddl = conn.exec_driver_sql("SELECT sql FROM sqlite_master WHERE type='table' AND name='run_coordination_events'").scalar_one()
         conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
         conn.exec_driver_sql("DROP TABLE run_coordination_events")
         conn.exec_driver_sql(ddl.replace(" PRIMARY KEY AUTOINCREMENT", " PRIMARY KEY /* AUTOINCREMENT */"))

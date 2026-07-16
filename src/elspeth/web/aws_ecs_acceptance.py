@@ -51,6 +51,7 @@ from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
 from elspeth.contracts.config.runtime import RuntimeTelemetryConfig
 from elspeth.contracts.errors import ExecutionError
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
+from elspeth.contracts.hashing import canonical_json
 from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
 from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.schema import SchemaConfig
@@ -2149,14 +2150,17 @@ def _drive_s3_acceptance_effect(
 ) -> tuple[ArtifactDescriptor, bool]:
     """Exercise only the effect protocol; never call legacy write/flush."""
     effect_id = _s3_acceptance_effect_id(bucket=bucket, key=key, region=region, content_hash=expected_hash)
+    row = dict(_S3_ACCEPTANCE_ROW)
+    lineage_json = canonical_json([{"row_id": "verify-s3-row", "token_id": "verify-s3-token"}])
     member = SinkEffectMember(
         ordinal=0,
         token_id="verify-s3-token",
         row_id="verify-s3-row",
         ingest_sequence=0,
-        lineage_key="verify-s3-lineage",
-        payload_hash=expected_hash,
-        row=dict(_S3_ACCEPTANCE_ROW),
+        lineage_json=lineage_json,
+        lineage_hash=_sha256(lineage_json.encode("utf-8")),
+        payload_hash=_sha256(canonical_json(row).encode("utf-8")),
+        row=row,
     )
     effect_input = SinkEffectPipelineMembersInput(members=(member,), target_snapshot_members=(member,))
     context = RestrictedSinkEffectContext(

@@ -34,6 +34,18 @@ from elspeth.contracts.enums import (
     TerminalPath,
     TriggerType,
 )
+from elspeth.contracts.sink_effects import (
+    AuditExportFormat,
+    AuditExportSigningMode,
+    SinkEffectAttemptAction,
+    SinkEffectAttemptState,
+    SinkEffectDescriptorMode,
+    SinkEffectInputKind,
+    SinkEffectInspectionMode,
+    SinkEffectReconcileKind,
+    SinkEffectRole,
+    SinkEffectState,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +105,22 @@ def _validate_enum(value: object, enum_type: type, field_name: str, *, optional:
         return
     if not isinstance(value, enum_type):
         raise TypeError(f"{field_name} must be {enum_type.__name__}, got {type(value).__name__}: {value!r}")
+
+
+def _validate_hash(value: object, field_name: str, *, optional: bool = False) -> None:
+    """Validate a lowercase SHA-256 digest without coercion."""
+    if value is None and optional:
+        return
+    if not isinstance(value, str) or _SHA256_HEX_PATTERN.fullmatch(value) is None:
+        raise ValueError(f"{field_name} must be a 64-character lowercase hexadecimal digest")
+
+
+def _validate_nonempty_string(value: object, field_name: str, *, optional: bool = False) -> None:
+    """Validate required audit identifiers without silently trimming them."""
+    if value is None and optional:
+        return
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty string")
 
 
 @dataclass(frozen=True, slots=True)
@@ -539,6 +567,399 @@ class Call:
             raise ValueError(
                 f"Call requires exactly one of state_id or operation_id. Got state_id={self.state_id!r}, operation_id={self.operation_id!r}"
             )
+
+
+@dataclass(frozen=True, slots=True)
+class SinkEffectStream:
+    """Durable total-order authority for one replacing sink target."""
+
+    stream_id: str
+    run_id: str
+    sink_node_id: str
+    role: SinkEffectRole
+    requested_target_hash: str
+    resolved_target: str | None
+    next_sequence: int
+    tail_effect_id: str | None
+    head_effect_id: str | None
+    head_descriptor_hash: str | None
+
+    def __post_init__(self) -> None:
+        _validate_hash(self.stream_id, "stream_id")
+        _validate_enum(self.role, SinkEffectRole, "role")
+        _validate_hash(self.requested_target_hash, "requested_target_hash")
+        require_int(self.next_sequence, "next_sequence", min_value=0)
+        _validate_hash(self.tail_effect_id, "tail_effect_id", optional=True)
+        _validate_hash(self.head_effect_id, "head_effect_id", optional=True)
+        _validate_hash(self.head_descriptor_hash, "head_descriptor_hash", optional=True)
+        if self.head_effect_id is None and self.head_descriptor_hash is not None:
+            raise ValueError("head_descriptor_hash requires head_effect_id")
+
+
+@dataclass(frozen=True, slots=True)
+class SinkEffect:
+    """Immutable view of one recoverable external publication effect."""
+
+    effect_id: str
+    run_id: str
+    sink_node_id: str
+    role: SinkEffectRole
+    state: SinkEffectState
+    protocol_version: str
+    input_kind: SinkEffectInputKind
+    required_member_ordinal: int | None
+    required_snapshot_slot: int | None
+    config_hash: str
+    membership_or_manifest_hash: str
+    group_payload_hash: str
+    artifact_id: str
+    artifact_idempotency_key: str
+    target_json: str
+    inspection_mode: SinkEffectInspectionMode | None
+    inspection_attempt_id: str | None
+    plan_json: str | None
+    plan_hash: str | None
+    descriptor_mode: SinkEffectDescriptorMode | None
+    expected_descriptor_hash: str | None
+    precondition_hash: str | None
+    prepared_at: datetime | None
+    lease_owner: str | None
+    generation: int
+    lease_expires_at: datetime | None
+    lease_heartbeat_at: datetime | None
+    reconcile_kind: SinkEffectReconcileKind | None
+    reconcile_evidence_hash: str | None
+    result_descriptor_hash: str | None
+    publication_performed: bool | None
+    publication_evidence_kind: str | None
+    primary_effect_id: str | None
+    stream_id: str | None
+    stream_sequence: int | None
+    predecessor_effect_id: str | None
+    created_at: datetime
+    updated_at: datetime
+    finalized_at: datetime | None
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "effect_id",
+            "config_hash",
+            "membership_or_manifest_hash",
+            "group_payload_hash",
+            "artifact_id",
+        ):
+            _validate_hash(getattr(self, field_name), field_name)
+        for field_name in (
+            "plan_hash",
+            "expected_descriptor_hash",
+            "precondition_hash",
+            "reconcile_evidence_hash",
+            "result_descriptor_hash",
+            "primary_effect_id",
+            "stream_id",
+            "predecessor_effect_id",
+        ):
+            _validate_hash(getattr(self, field_name), field_name, optional=True)
+        _validate_nonempty_string(self.protocol_version, "protocol_version")
+        _validate_nonempty_string(self.artifact_idempotency_key, "artifact_idempotency_key")
+        _validate_nonempty_string(self.target_json, "target_json")
+        _validate_enum(self.role, SinkEffectRole, "role")
+        _validate_enum(self.state, SinkEffectState, "state")
+        _validate_enum(self.input_kind, SinkEffectInputKind, "input_kind")
+        _validate_enum(self.inspection_mode, SinkEffectInspectionMode, "inspection_mode", optional=True)
+        _validate_enum(self.descriptor_mode, SinkEffectDescriptorMode, "descriptor_mode", optional=True)
+        _validate_enum(self.reconcile_kind, SinkEffectReconcileKind, "reconcile_kind", optional=True)
+        require_int(self.required_member_ordinal, "required_member_ordinal", optional=True, min_value=0)
+        require_int(self.required_snapshot_slot, "required_snapshot_slot", optional=True, min_value=0)
+        require_int(self.generation, "generation", min_value=0)
+        require_int(self.stream_sequence, "stream_sequence", optional=True, min_value=0)
+        if self.publication_performed is not None and type(self.publication_performed) is not bool:
+            raise TypeError("publication_performed must be bool or None")
+
+        if self.input_kind is SinkEffectInputKind.PIPELINE_MEMBERS:
+            if self.required_member_ordinal != 0 or self.required_snapshot_slot is not None:
+                raise ValueError("pipeline member effects require member ordinal zero and no snapshot slot")
+        elif self.required_member_ordinal is not None or self.required_snapshot_slot != 0:
+            raise ValueError("audit export effects require snapshot slot zero and no member ordinal")
+
+        prepared_fields = (self.plan_json, self.plan_hash, self.inspection_mode, self.descriptor_mode, self.prepared_at)
+        lease_fields = (self.lease_owner, self.lease_expires_at, self.lease_heartbeat_at)
+        if self.state is SinkEffectState.RESERVED:
+            if any(value is not None for value in (*prepared_fields, *lease_fields, self.finalized_at)):
+                raise ValueError("reserved effect contains prepared, lease, or finalized fields")
+        elif self.state is SinkEffectState.PREPARED:
+            if any(value is None for value in prepared_fields) or any(value is not None for value in (*lease_fields, self.finalized_at)):
+                raise ValueError("prepared effect lifecycle fields are incomplete")
+        elif self.state is SinkEffectState.IN_FLIGHT:
+            if any(value is None for value in (*prepared_fields, *lease_fields)) or self.generation < 1 or self.finalized_at is not None:
+                raise ValueError("in-flight effect lifecycle fields are incomplete")
+        elif (
+            self.plan_hash is None
+            or self.result_descriptor_hash is None
+            or self.publication_performed is None
+            or self.publication_evidence_kind is None
+            or self.finalized_at is None
+            or any(value is not None for value in lease_fields)
+        ):
+            raise ValueError("finalized effect lifecycle fields are incomplete")
+
+        if self.lease_expires_at is not None and self.lease_heartbeat_at is not None and self.lease_expires_at < self.lease_heartbeat_at:
+            raise ValueError("lease_expires_at cannot precede lease_heartbeat_at")
+        if self.descriptor_mode is SinkEffectDescriptorMode.PRECOMPUTED and self.expected_descriptor_hash is None:
+            raise ValueError("precomputed descriptor mode requires expected_descriptor_hash")
+        if self.descriptor_mode is SinkEffectDescriptorMode.RESULT_DERIVED and self.expected_descriptor_hash is not None:
+            raise ValueError("result-derived descriptor mode forbids expected_descriptor_hash")
+        if self.descriptor_mode is SinkEffectDescriptorMode.NO_PUBLICATION and self.expected_descriptor_hash is None:
+            raise ValueError("no-publication descriptor mode requires expected_descriptor_hash")
+        if self.stream_id is None:
+            if self.stream_sequence is not None or self.predecessor_effect_id is not None:
+                raise ValueError("unbound effects cannot carry stream ordering fields")
+        elif self.stream_sequence == 0:
+            if self.predecessor_effect_id is not None:
+                raise ValueError("stream sequence zero cannot have a predecessor")
+        elif self.stream_sequence is None or self.stream_sequence < 1 or self.predecessor_effect_id is None:
+            raise ValueError("later stream effects require a sequence and predecessor")
+
+
+@dataclass(frozen=True, slots=True)
+class SinkEffectMemberRecord:
+    """Canonical member identity and durable per-member publication state."""
+
+    effect_id: str
+    input_kind: SinkEffectInputKind
+    ordinal: int
+    run_id: str
+    sink_node_id: str
+    role: SinkEffectRole
+    token_id: str
+    row_id: str
+    ingest_sequence: int
+    lineage_json: str
+    lineage_hash: str
+    payload_hash: str
+    prepared_disposition: Literal["accepted", "diverted"] | None
+    reason_hash: str | None
+    member_effect_id: str | None
+    member_state: SinkEffectState | None
+    descriptor_hash: str | None
+    evidence_hash: str | None
+
+    def __post_init__(self) -> None:
+        _validate_hash(self.effect_id, "effect_id")
+        _validate_enum(self.input_kind, SinkEffectInputKind, "input_kind")
+        if self.input_kind is not SinkEffectInputKind.PIPELINE_MEMBERS:
+            raise ValueError("sink effect members require pipeline_members input kind")
+        _validate_enum(self.role, SinkEffectRole, "role")
+        _validate_enum(self.member_state, SinkEffectState, "member_state", optional=True)
+        require_int(self.ordinal, "ordinal", min_value=0)
+        require_int(self.ingest_sequence, "ingest_sequence", min_value=0)
+        _validate_nonempty_string(self.lineage_json, "lineage_json")
+        for field_name in ("lineage_hash", "payload_hash"):
+            _validate_hash(getattr(self, field_name), field_name)
+        for field_name in ("reason_hash", "member_effect_id", "descriptor_hash", "evidence_hash"):
+            _validate_hash(getattr(self, field_name), field_name, optional=True)
+        if self.prepared_disposition not in (None, "accepted", "diverted"):
+            raise ValueError("prepared_disposition must be accepted, diverted, or None")
+
+
+@dataclass(frozen=True, slots=True)
+class AuditExportSnapshotChunk:
+    """One immutable, cumulatively sealed audit-export data chunk."""
+
+    snapshot_id: str
+    ordinal: int
+    content_ref: str
+    content_hash: str
+    size_bytes: int
+    record_count: int
+    predecessor_seal_hash: str | None
+    cumulative_records: int
+    cumulative_bytes: int
+    chunk_seal_hash: str
+
+    def __post_init__(self) -> None:
+        _validate_hash(self.snapshot_id, "snapshot_id")
+        _validate_hash(self.content_hash, "content_hash")
+        _validate_hash(self.predecessor_seal_hash, "predecessor_seal_hash", optional=True)
+        _validate_hash(self.chunk_seal_hash, "chunk_seal_hash")
+        if self.content_ref != f"sha256:{self.content_hash}":
+            raise ValueError("content_ref must exactly match content_hash")
+        require_int(self.ordinal, "ordinal", min_value=0)
+        require_int(self.size_bytes, "size_bytes", min_value=1)
+        require_int(self.record_count, "record_count", min_value=1)
+        require_int(self.cumulative_records, "cumulative_records", min_value=1)
+        require_int(self.cumulative_bytes, "cumulative_bytes", min_value=1)
+        if self.ordinal == 0:
+            if self.predecessor_seal_hash is not None:
+                raise ValueError("chunk zero must not have a predecessor seal")
+            if self.cumulative_records != self.record_count or self.cumulative_bytes != self.size_bytes:
+                raise ValueError("chunk zero cumulative totals must equal its own totals")
+        elif self.predecessor_seal_hash is None:
+            raise ValueError("nonzero chunks require a predecessor seal")
+
+
+@dataclass(frozen=True, slots=True)
+class AuditExportSnapshot:
+    """Strict immutable registry record for a durable audit-export winner.
+
+    This record is not a content capability. Public loading must bind and
+    verify it with its stored content resolver before exposing chunk bytes.
+    """
+
+    snapshot_id: str
+    source_run_id: str
+    source_status: RunStatus
+    source_completed_at: datetime
+    exported_at: datetime
+    registry_key_hash: str
+    exporter_version: str
+    serialization_version: str
+    export_format: AuditExportFormat
+    signing_mode: AuditExportSigningMode
+    signer_key_id: str
+    derivation_version: str
+    public_export_config_hash: str
+    chunking_algorithm_version: str
+    per_chunk_record_limit: int
+    per_chunk_byte_limit: int
+    record_count: int
+    total_bytes: int
+    chunk_count: int
+    terminal_chunk_ordinal: int
+    content_store_id: str
+    manifest_hash: str
+    last_chunk_seal_hash: str
+    snapshot_hash: str
+    snapshot_seal_hash: str
+    signature_hex: str | None
+    record_chain_algorithm: str
+    final_hash: str
+    signed_manifest_schema: str
+    signed_manifest_hash: str
+    signed_manifest_ref: str
+    signed_manifest_size_bytes: int
+
+    def __post_init__(self) -> None:
+        _validate_enum(self.source_status, RunStatus, "source_status")
+        if self.source_status not in {RunStatus.COMPLETED, RunStatus.COMPLETED_WITH_FAILURES, RunStatus.EMPTY}:
+            raise ValueError("audit export snapshot requires an immutable export-terminal run")
+        _validate_enum(self.export_format, AuditExportFormat, "export_format")
+        _validate_enum(self.signing_mode, AuditExportSigningMode, "signing_mode")
+        for field_name in (
+            "snapshot_id",
+            "registry_key_hash",
+            "public_export_config_hash",
+            "manifest_hash",
+            "last_chunk_seal_hash",
+            "snapshot_hash",
+            "snapshot_seal_hash",
+            "final_hash",
+            "signed_manifest_hash",
+        ):
+            _validate_hash(getattr(self, field_name), field_name)
+        _validate_hash(self.signature_hex, "signature_hex", optional=True)
+        for field_name in (
+            "exporter_version",
+            "serialization_version",
+            "signer_key_id",
+            "derivation_version",
+            "chunking_algorithm_version",
+            "content_store_id",
+            "record_chain_algorithm",
+        ):
+            _validate_nonempty_string(getattr(self, field_name), field_name)
+        for field_name in (
+            "per_chunk_record_limit",
+            "per_chunk_byte_limit",
+            "record_count",
+            "total_bytes",
+            "chunk_count",
+            "signed_manifest_size_bytes",
+        ):
+            require_int(getattr(self, field_name), field_name, min_value=1)
+        require_int(self.terminal_chunk_ordinal, "terminal_chunk_ordinal", min_value=0)
+        if self.terminal_chunk_ordinal != self.chunk_count - 1:
+            raise ValueError("terminal_chunk_ordinal must equal chunk_count - 1")
+        if self.signed_manifest_schema != "elspeth.audit-export-manifest.v2":
+            raise ValueError("signed_manifest_schema is not the supported v2 schema")
+        if self.derivation_version != "audit-export-derivation-v1":
+            raise ValueError("derivation_version is not supported")
+        if self.signed_manifest_ref != f"sha256:{self.signed_manifest_hash}":
+            raise ValueError("signed_manifest_ref must exactly match signed_manifest_hash")
+        if self.signed_manifest_size_bytes > 64 * 1024:
+            raise ValueError("signed manifest exceeds the code-owned size limit")
+        if self.signing_mode is AuditExportSigningMode.UNSIGNED:
+            if self.signer_key_id != "UNSIGNED" or self.signature_hex is not None:
+                raise ValueError("unsigned snapshots require UNSIGNED signer and no signature")
+            if self.record_chain_algorithm != "sha256_concat_record_sha256_v1":
+                raise ValueError("unsigned snapshot has the wrong record-chain algorithm")
+        else:
+            if self.signer_key_id == "UNSIGNED" or not self.signer_key_id.strip() or self.signature_hex is None:
+                raise ValueError("HMAC snapshots require an identified signer and signature")
+            if self.record_chain_algorithm != "sha256_concat_hmac_sha256_signatures_v1":
+                raise ValueError("HMAC snapshot has the wrong record-chain algorithm")
+
+
+@dataclass(frozen=True, slots=True)
+class SinkEffectExportSnapshotAssociation:
+    """The single immutable snapshot input selected by an export effect."""
+
+    effect_id: str
+    input_kind: SinkEffectInputKind
+    slot: int
+    snapshot_id: str
+
+    def __post_init__(self) -> None:
+        _validate_hash(self.effect_id, "effect_id")
+        _validate_hash(self.snapshot_id, "snapshot_id")
+        _validate_enum(self.input_kind, SinkEffectInputKind, "input_kind")
+        require_int(self.slot, "slot", min_value=0)
+        if self.input_kind is not SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT or self.slot != 0:
+            raise ValueError("export snapshot associations require audit_export_snapshot input kind and slot zero")
+
+
+@dataclass(frozen=True, slots=True)
+class SinkEffectAttempt:
+    """Durable intent/result row for one effect-side external call."""
+
+    attempt_id: str
+    effect_id: str
+    member_ordinal: int | None
+    generation: int
+    action: SinkEffectAttemptAction
+    call_kind: str
+    request_hash: str
+    state: SinkEffectAttemptState
+    evidence_json: str | None
+    evidence_hash: str | None
+    started_at: datetime
+    completed_at: datetime | None
+    latency_ms: float | None
+
+    def __post_init__(self) -> None:
+        _validate_hash(self.attempt_id, "attempt_id")
+        _validate_hash(self.effect_id, "effect_id")
+        _validate_hash(self.request_hash, "request_hash")
+        _validate_hash(self.evidence_hash, "evidence_hash", optional=True)
+        _validate_enum(self.action, SinkEffectAttemptAction, "action")
+        _validate_enum(self.state, SinkEffectAttemptState, "state")
+        _validate_nonempty_string(self.call_kind, "call_kind")
+        require_int(self.member_ordinal, "member_ordinal", optional=True, min_value=0)
+        require_int(self.generation, "generation", min_value=0)
+        if self.latency_ms is not None and self.latency_ms < 0:
+            raise ValueError("latency_ms must be non-negative")
+        if self.state is SinkEffectAttemptState.INTENT:
+            if (
+                self.completed_at is not None
+                or self.latency_ms is not None
+                or self.evidence_json is not None
+                or self.evidence_hash is not None
+            ):
+                raise ValueError("intent attempts cannot contain completion evidence")
+        elif self.completed_at is None or self.latency_ms is None:
+            raise ValueError("closed attempts require completed_at and latency_ms")
+        if (self.evidence_json is None) != (self.evidence_hash is None):
+            raise ValueError("attempt evidence JSON and hash must be both present or both absent")
 
 
 @dataclass(frozen=True, slots=True)

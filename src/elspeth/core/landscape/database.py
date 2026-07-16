@@ -521,6 +521,23 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("coalesce_branch_losses", "adopted_epoch"),
 )
 
+_EPOCH_26_REQUIRED_TABLES = (
+    "sink_effect_streams",
+    "sink_effects",
+    "sink_effect_members",
+    "sink_effect_attempts",
+    "audit_export_snapshots",
+    "audit_export_snapshot_chunks",
+    "sink_effect_export_snapshots",
+)
+_REQUIRED_COLUMNS += (
+    *((table_name, column.name) for table_name in _EPOCH_26_REQUIRED_TABLES for column in metadata.tables[table_name].columns),
+    ("operations", "sink_effect_id"),
+    ("artifacts", "sink_effect_id"),
+    ("artifacts", "publication_performed"),
+    ("artifacts", "publication_evidence_kind"),
+)
+
 # Required foreign keys for audit integrity (Tier 1 trust).
 # Format: (table_name, column_name, referenced_table)
 # Use this only for exact single-column contracts. Run-scoped contracts belong in
@@ -535,6 +552,10 @@ _REQUIRED_FOREIGN_KEYS: tuple[tuple[str, str, str], ...] = (
     ("run_workers", "run_id", "runs"),
     ("run_coordination_events", "run_id", "runs"),
     ("coalesce_branch_losses", "run_id", "runs"),
+    ("operations", "sink_effect_id", "sink_effects"),
+    ("audit_export_snapshot_chunks", "snapshot_id", "audit_export_snapshots"),
+    ("sink_effect_export_snapshots", "snapshot_id", "audit_export_snapshots"),
+    ("sink_effect_attempts", "effect_id", "sink_effects"),
 )
 
 # Required composite foreign keys for run-scoped audit integrity.
@@ -565,6 +586,17 @@ _REQUIRED_COMPOSITE_FOREIGN_KEYS: tuple[tuple[str, tuple[str, ...], str, tuple[s
     ("token_work_items", ("coalesce_node_id", "run_id"), "nodes", ("node_id", "run_id")),
     ("scheduler_events", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
     ("scheduler_events", ("node_id", "run_id"), "nodes", ("node_id", "run_id")),
+    ("artifacts", ("sink_effect_id", "run_id", "sink_node_id"), "sink_effects", ("effect_id", "run_id", "sink_node_id")),
+    ("sink_effects", ("sink_node_id", "run_id"), "nodes", ("node_id", "run_id")),
+    ("sink_effect_members", ("token_id", "row_id", "run_id"), "tokens", ("token_id", "row_id", "run_id")),
+    ("sink_effect_members", ("effect_id", "input_kind"), "sink_effects", ("effect_id", "input_kind")),
+    (
+        "audit_export_snapshots",
+        ("source_run_id", "source_status", "source_completed_at"),
+        "runs",
+        ("run_id", "status", "completed_at"),
+    ),
+    ("sink_effect_export_snapshots", ("effect_id", "input_kind"), "sink_effects", ("effect_id", "input_kind")),
 )
 
 # Foreign keys that belonged to older schema shapes but are incompatible with
@@ -603,6 +635,45 @@ _REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
     ("run_workers", "ck_run_workers_status"),
     ("run_workers", "ck_run_workers_evicted_at_paired"),
     ("run_coordination_events", "ck_run_coordination_events_event_type"),
+    ("sink_effect_streams", "ck_sink_effect_streams_role"),
+    ("sink_effect_streams", "ck_sink_effect_streams_next_sequence"),
+    ("sink_effects", "ck_sink_effects_role"),
+    ("sink_effects", "ck_sink_effects_state"),
+    ("sink_effects", "ck_sink_effects_input_kind_xor"),
+    ("sink_effects", "ck_sink_effects_lifecycle"),
+    ("sink_effects", "ck_sink_effects_generation"),
+    ("sink_effects", "ck_sink_effects_lease_window"),
+    ("sink_effects", "ck_sink_effects_stream_shape"),
+    ("sink_effects", "ck_sink_effects_descriptor_mode"),
+    ("sink_effects", "ck_sink_effects_inspection_mode"),
+    ("sink_effects", "ck_sink_effects_reconcile_kind"),
+    ("sink_effect_members", "ck_sink_effect_members_input_kind"),
+    ("sink_effect_members", "ck_sink_effect_members_order"),
+    ("sink_effect_members", "ck_sink_effect_members_disposition"),
+    ("sink_effect_members", "ck_sink_effect_members_state"),
+    ("sink_effect_export_snapshots", "ck_sink_effect_export_snapshots_input_kind"),
+    ("sink_effect_export_snapshots", "ck_sink_effect_export_snapshots_slot"),
+    ("sink_effect_attempts", "ck_sink_effect_attempts_generation"),
+    ("sink_effect_attempts", "ck_sink_effect_attempts_action"),
+    ("sink_effect_attempts", "ck_sink_effect_attempts_state"),
+    ("operations", "ck_operations_sink_effect_type"),
+    ("artifacts", "ck_artifacts_producer_xor"),
+    ("artifacts", "ck_artifacts_publication_evidence_kind"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_terminal_witness"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_positive_totals"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_terminal_ordinal"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_manifest_hash_hex"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_snapshot_hash_hex"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_snapshot_seal_hash_hex"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_last_chunk_seal_hash_hex"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_final_hash_hex"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_signed_manifest_hash_hex"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_signed_manifest_ref"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_signed_manifest_size"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_manifest_schema"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_derivation_version"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_signing_tuple"),
+    ("audit_export_snapshot_chunks", "ck_audit_export_snapshot_chunks_content_ref"),
 )
 
 # Required indexes (including partial unique indexes) for audit integrity.
@@ -632,6 +703,20 @@ _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
     ("run_coordination_events", "uq_run_coordination_events_event_id"),
     ("run_coordination_events", "ix_run_coordination_events_run"),
     ("coalesce_branch_losses", "uq_coalesce_branch_losses_natural"),
+    ("runs", "uq_runs_export_witness"),
+    ("operations", "uq_operations_sink_effect_id"),
+    ("sink_effect_streams", "uq_sink_effect_stream_identity"),
+    ("sink_effect_members", "uq_sink_effect_member_binding"),
+    ("audit_export_snapshots", "uq_audit_export_snapshots_registry_key"),
+    ("audit_export_snapshots", "ix_audit_export_snapshots_registry_key_hash"),
+    ("audit_export_snapshot_chunks", "uq_audit_export_snapshot_chunks_terminal"),
+)
+
+_REQUIRED_TRIGGERS: tuple[str, ...] = (
+    "trg_audit_export_chunk_insert_validate",
+    "trg_audit_export_snapshot_insert_seal",
+    "trg_audit_export_snapshot_immutable",
+    "trg_audit_export_chunk_immutable",
 )
 
 _ADDITIVE_INDEX_OWNERS: Mapping[str, str] = MappingProxyType({"ix_tokens_run_id": "tokens"})
@@ -1753,6 +1838,26 @@ class LandscapeDB:
             if not has_index:
                 missing_indexes.append((table_name, index_name))
 
+        # Triggers are physical integrity objects, not reflected as table
+        # indexes/checks by SQLAlchemy. Require their exact stable names on a
+        # current physical schema so an equivalent-looking table definition
+        # cannot silently omit the seal/immutability enforcement.
+        missing_triggers: list[str] = []
+        should_validate_triggers = bool(present_landscape_tables) and (
+            not self.connection_string.startswith("sqlite") or schema_epoch == SQLITE_SCHEMA_EPOCH
+        )
+        if should_validate_triggers:
+            with self.engine.connect() as connection:
+                if self.connection_string.startswith("sqlite"):
+                    trigger_names = set(connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type = 'trigger'").scalars())
+                else:
+                    trigger_names = set(
+                        connection.exec_driver_sql(
+                            "SELECT trigger_name FROM information_schema.triggers WHERE trigger_schema = current_schema()"
+                        ).scalars()
+                    )
+            missing_triggers = sorted(set(_REQUIRED_TRIGGERS) - trigger_names)
+
         epoch_incompatible = bool(present_landscape_tables) and epoch_incompatible
 
         # Raise errors for missing columns, FKs, check constraints, indexes, or stale ADR-019 shapes.
@@ -1765,6 +1870,7 @@ class LandscapeDB:
             or forbidden_fks
             or missing_checks
             or missing_indexes
+            or missing_triggers
             or shape_issues
             or epoch_incompatible
             or identity_issue
@@ -1816,6 +1922,9 @@ class LandscapeDB:
             if missing_indexes:
                 missing_indexes_str = ", ".join(f"{t}.{name}" for t, name in missing_indexes)
                 error_parts.append(f"Missing indexes: {missing_indexes_str}")
+
+            if missing_triggers:
+                error_parts.append(f"Missing triggers: {', '.join(missing_triggers)}")
 
             if shape_issues:
                 shape_str = "; ".join(f"{issue.subject}: expected {issue.expected!r}, observed {issue.actual!r}" for issue in shape_issues)

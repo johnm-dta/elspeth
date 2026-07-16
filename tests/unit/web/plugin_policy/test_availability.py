@@ -205,7 +205,7 @@ def test_in_place_profile_credential_rotation_changes_snapshot_identity(scope: s
         (
             {
                 "provider": "azure",
-                "model": "private-model",
+                "model": "before-deployment",
                 "credential_scope": "server",
                 "credential_ref": "AZURE_OPENAI_API_KEY",
                 "endpoint": "https://before.openai.azure.com",
@@ -213,7 +213,7 @@ def test_in_place_profile_credential_rotation_changes_snapshot_identity(scope: s
             },
             {
                 "provider": "azure",
-                "model": "private-model",
+                "model": "after-deployment",
                 "credential_scope": "server",
                 "credential_ref": "AZURE_OPENAI_API_KEY",
                 "endpoint": "https://after.openai.azure.com",

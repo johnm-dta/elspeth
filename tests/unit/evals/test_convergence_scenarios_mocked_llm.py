@@ -57,6 +57,7 @@ from elspeth.web.composer.service import ComposerServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.schemas import ValidationError, ValidationReadiness, ValidationResult
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -1117,8 +1118,9 @@ class TestPreflightRepairContinue:
             state: CompositionState,
             user_id: str | None = None,
             session_id: str | None = None,
+            plugin_snapshot: PluginAvailabilitySnapshot | None = None,
         ) -> ValidationResult:
-            del user_id, session_id
+            del user_id, session_id, plugin_snapshot
             sink_path = state.outputs[0].options.get("path") if state.outputs else None
             if sink_path == _BROKEN_SINK_PATH:
                 return _preflight_invalid_for_placeholder_sink()

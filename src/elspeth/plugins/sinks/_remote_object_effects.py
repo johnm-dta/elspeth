@@ -493,7 +493,14 @@ def validate_remote_plan(plan: SinkEffectPlan, *, provider: str, require_stage: 
 
 
 def remote_commit_result(plan: SinkEffectPlan, evidence: RemoteObjectPlanEvidence) -> SinkEffectCommitResult:
+    """Build the commit result and release the now-durable effect body spool.
+
+    Callers invoke this only after the provider has durably confirmed the
+    conditional write, so the effect-addressed stage has served its purpose
+    and is removed to keep ordinary batches from accumulating spool files.
+    """
     assert plan.expected_descriptor is not None
+    Path(evidence.staging_path).unlink(missing_ok=True)
     return SinkEffectCommitResult(
         descriptor=plan.expected_descriptor,
         evidence={
@@ -524,6 +531,11 @@ def reconcile_remote_observation(
     )
     if exact:
         assert plan.expected_descriptor is not None
+        # The remote object carries this exact effect's identity, so the
+        # durable body has been applied and its spool can be released. All
+        # other outcomes keep the stage: NOT_APPLIED may still commit, and
+        # UNKNOWN must preserve evidence for investigation.
+        Path(evidence.staging_path).unlink(missing_ok=True)
         return SinkEffectReconcileResult.applied(
             plan.expected_descriptor,
             evidence={"effect_id": plan.effect_id, "provider": evidence.provider, "reconciled": "exact_metadata"},

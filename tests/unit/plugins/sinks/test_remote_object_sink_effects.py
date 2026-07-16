@@ -612,6 +612,56 @@ def test_effect_plan_body_is_durable_and_not_process_local(tmp_path: Any, monkey
 
 
 @pytest.mark.parametrize("factory", [_s3, _azure])
+def test_remote_commit_removes_effect_body_spool(factory: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Successful finalization must not leave body spools on disk (elspeth-6543d78f06)."""
+    monkeypatch.setenv("ELSPETH_EFFECT_SPOOL_DIR", str(tmp_path))
+    store = _S3Store() if factory is _s3 else _AzureStore()
+    member = _member(0, {"id": 1})
+    sink = factory(store)
+    plan = _prepare(sink, effect_id="a1" * 32, current=(member,), target_snapshot=(member,))
+    stage = Path(str(plan.safe_evidence["staging_path"]))
+    assert stage.exists()
+
+    sink.commit_effect(plan, _CTX)
+
+    assert store.value is not None
+    assert not stage.exists()
+
+
+def test_reconcile_applied_exact_removes_effect_body_spool(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reconciling an applied effect must clean its body spool (elspeth-6543d78f06)."""
+    monkeypatch.setenv("ELSPETH_EFFECT_SPOOL_DIR", str(tmp_path))
+    store = _S3Store()
+    member = _member(0, {"id": 1})
+    sink = _s3(store)
+    plan = _prepare(sink, effect_id="b2" * 32, current=(member,), target_snapshot=(member,))
+    stage = Path(str(plan.safe_evidence["staging_path"]))
+    store.response_loss = True
+    with pytest.raises(RuntimeError, match="outcome is unknown"):
+        sink.commit_effect(plan, _CTX)
+    assert stage.exists()
+
+    result = _s3(store).reconcile_effect(plan, _CTX)
+
+    assert result.kind is SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR
+    assert not stage.exists()
+
+
+def test_reconcile_not_applied_keeps_effect_body_spool_for_retry(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unapplied effect keeps its durable body so commit can still run (elspeth-6543d78f06)."""
+    monkeypatch.setenv("ELSPETH_EFFECT_SPOOL_DIR", str(tmp_path))
+    store = _S3Store()
+    member = _member(0, {"id": 1})
+    plan = _prepare(_s3(store), effect_id="c3" * 32, current=(member,), target_snapshot=(member,))
+    stage = Path(str(plan.safe_evidence["staging_path"]))
+
+    result = _s3(store).reconcile_effect(plan, _CTX)
+
+    assert result.kind is SinkEffectReconcileKind.NOT_APPLIED
+    assert stage.exists()
+
+
+@pytest.mark.parametrize("factory", [_s3, _azure])
 def test_remote_sinks_have_no_process_local_publication_authority(factory: Any) -> None:
     store = _S3Store() if factory is _s3 else _AzureStore()
     sink = factory(store)

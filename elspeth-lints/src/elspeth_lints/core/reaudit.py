@@ -600,6 +600,10 @@ _RULE_VOCABULARY_REGISTRY: dict[str, _VocabularySpec] = {
         "elspeth_lints.rules.contract_invariants.session_engine_factory.rule",
         ("RULE_ID",),
     ),
+    "contract_invariants.portable_sqlite_insert": _VocabularySpec(
+        "elspeth_lints.rules.contract_invariants.portable_sqlite_insert.rule",
+        ("RULE_ID",),
+    ),
     "contract_invariants.validation_theatre": _VocabularySpec(
         "elspeth_lints.rules.contract_invariants.validation_theatre.rule",
         ("RULE_ID",),

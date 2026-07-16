@@ -219,21 +219,37 @@ def export_landscape(
     sink.node_id = f"export:{sink_name}"
 
     from elspeth.contracts import NodeType
+    from elspeth.contracts.errors import AuditIntegrityError
     from elspeth.contracts.schema import SchemaConfig
 
     # Snapshot first: export audit rows can never recurse into their own bytes.
     factory = RecorderFactory(db, payload_store=payload_store)
-    factory.data_flow.register_node(
-        run_id=run_id,
-        node_id=sink.node_id,
-        plugin_name=sink.name,
-        node_type=NodeType.SINK,
-        plugin_version=sink.plugin_version,
-        config=dict(sink.config),
-        schema_config=SchemaConfig.from_dict({"mode": "observed"}),
-        determinism=Determinism.IO_WRITE,
-        source_file_hash=sink.source_file_hash,
-    )
+    # Export-node registration is idempotent (elspeth-08350558e6): the node id
+    # is deterministic (``export:<sink>``), so a retry after a failed or lost
+    # publication response finds the row a prior attempt registered. Reuse it
+    # so the retry reaches SinkEffectCoordinator reconciliation of the durable
+    # effect instead of crashing on the nodes composite primary key. Fail
+    # closed if the registered identity is not the audit-export sink node this
+    # attempt would register.
+    existing_node = factory.data_flow.get_node(sink.node_id, run_id)
+    if existing_node is None:
+        factory.data_flow.register_node(
+            run_id=run_id,
+            node_id=sink.node_id,
+            plugin_name=sink.name,
+            node_type=NodeType.SINK,
+            plugin_version=sink.plugin_version,
+            config=dict(sink.config),
+            schema_config=SchemaConfig.from_dict({"mode": "observed"}),
+            determinism=Determinism.IO_WRITE,
+            source_file_hash=sink.source_file_hash,
+        )
+    elif existing_node.node_type is not NodeType.SINK or existing_node.plugin_name != sink.name:
+        raise AuditIntegrityError(
+            f"audit export node {sink.node_id!r} for run {run_id!r} is already registered "
+            f"with divergent identity ({existing_node.node_type.value!r}/{existing_node.plugin_name!r}); "
+            f"refusing to reuse it for export sink {sink.name!r}"
+        )
     try:
         execute_audit_export_effect(
             factory=factory,

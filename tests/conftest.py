@@ -194,13 +194,56 @@ def _freeze_runtime_val_registries_before_begin_run(monkeypatch: pytest.MonkeyPa
 
     original_orch_run = Orchestrator.run
 
+    def with_test_sink_effect_modes(config):  # type: ignore[no-untyped-def]
+        """Mirror RuntimePluginFactory mode resolution for test-only sinks."""
+        from dataclasses import replace
+
+        from elspeth.contracts import ResolvedSinkEffectMode, SinkEffectExecutionPurpose
+        from elspeth.engine.orchestrator import PipelineConfig
+
+        if (
+            not isinstance(config, PipelineConfig)
+            or config.sink_effect_modes
+            or not all(type(sink).__module__.startswith("tests.") for sink in config.sinks.values())
+        ):
+            return config
+        modes: dict[str, str] = {}
+        for sink_name, sink in config.sinks.items():
+            resolver = getattr(type(sink), "_resolve_sink_effect_mode", None)
+            if resolver is None:
+                continue
+            resolved = resolver(dict(sink.config), purpose=SinkEffectExecutionPurpose.FRESH)
+            if not isinstance(resolved, ResolvedSinkEffectMode):
+                raise TypeError("test sink effect resolver must return ResolvedSinkEffectMode")
+            modes[sink_name] = resolved.value
+        return replace(config, sink_effect_modes=modes) if modes else config
+
     @functools.wraps(original_orch_run)
     def wrapped_orch_run(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        # Direct orchestrator tests bypass RuntimePluginFactory, which is the
+        # production authority that resolves and binds sink-effect modes. Keep
+        # test-only sink fixtures honest under the same effect-only runtime by
+        # resolving their declared mode before the call. Production sink types
+        # and tests that provide an explicit mode map are left untouched.
+        if args:
+            args = (with_test_sink_effect_modes(args[0]), *args[1:])
         kwargs.setdefault("openrouter_catalog_sha256", "0" * 64)
         kwargs.setdefault("openrouter_catalog_source", "bundled")
         return original_orch_run(self, *args, **kwargs)
 
     monkeypatch.setattr(Orchestrator, "run", wrapped_orch_run)
+
+    original_orch_resume = Orchestrator.resume
+
+    @functools.wraps(original_orch_resume)
+    def wrapped_orch_resume(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if "config" in kwargs:
+            kwargs["config"] = with_test_sink_effect_modes(kwargs["config"])
+        elif len(args) >= 2:
+            args = (args[0], with_test_sink_effect_modes(args[1]), *args[2:])
+        return original_orch_resume(self, *args, **kwargs)
+
+    monkeypatch.setattr(Orchestrator, "resume", wrapped_orch_resume)
 
     # ExecutionServiceImpl: in production the lifespan calls
     # ``set_openrouter_catalog_snapshot()`` after construction. Tests

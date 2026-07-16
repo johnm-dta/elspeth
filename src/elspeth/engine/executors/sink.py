@@ -1,4 +1,4 @@
-"""SinkExecutor - wraps sink.write() with artifact recording."""
+"""Effect-only sink execution with durable artifact and diversion recording."""
 
 from __future__ import annotations
 
@@ -101,11 +101,11 @@ class _EffectPrimaryWrite:
 class SinkExecutor:
     """Executes sinks with artifact recording.
 
-    Wraps sink.write() with a three-phase flow:
-    1. Call sink.write() inside track_operation (discover diversions)
-    2. Open/complete node_states and record outcomes for primary tokens
-    3. Route diverted tokens to failsink or discard with audit trail
-    4. Register artifacts and emit OpenTelemetry span
+    Every non-empty batch executes through the sink-effect protocol:
+    1. Open or recover the batch's node states.
+    2. Reconcile or publish the primary effect and finalize accepted members.
+    3. Route diverted members through a linked failsink effect or durable discard.
+    4. Checkpoint only after the selected terminal path is exact.
 
     CRITICAL: Every token reaching a sink gets a node_state at the primary
     sink. Accepted rows get COMPLETED; diverted rows get FAILED (the row
@@ -128,6 +128,7 @@ class SinkExecutor:
             step_in_pipeline=5,
             sink_name="output",
             pending_outcome=pending,
+            effect_mode="write",
         )
         print(diversion_counts.total)
     """
@@ -927,10 +928,9 @@ class SinkExecutor:
     ) -> tuple[Artifact | None, DiversionCounts]:
         """Write tokens to sink with artifact recording and failsink routing.
 
-        CRITICAL: Creates a node_state for EACH token written AND records
-        token outcomes. Node_states are opened BEFORE I/O so that Phase 1
-        failures result in FAILED states (not silent drops). States are
-        completed as COMPLETED only after sink.flush() confirms durability.
+        CRITICAL: creates or reuses one node_state per token before effect
+        publication, then finalizes states and outcomes from durable effect
+        evidence. Direct ``sink.write``/``sink.flush`` publication is forbidden.
 
         This is the ONLY place terminal outcomes should be recorded for sink-bound
         tokens. Recording here (not in the orchestrator processing loop) ensures the
@@ -938,11 +938,11 @@ class SinkExecutor:
         - Invariant 3: "COMPLETED/ROUTED implies the token has a completed sink node_state"
         - Invariant 4: "Completed sink node_state implies a terminal token_outcome"
 
-        Four-phase flow:
-        - Pre-phase: Open node_states for ALL tokens at primary sink
-        - Phase 1: Call sink.write() → discover diversions (FAILED on error)
-        - Phase 2: Complete states for primary (non-diverted) tokens
-        - Phase 3: Handle diversions (failsink write or discard)
+        Flow:
+        - Open or recover node states for all primary members.
+        - Execute/reconcile the primary effect and persist its partition.
+        - Finalize accepted members; route diverted members to a linked effect
+          or record discard evidence.
 
         Args:
             sink: Sink plugin to write to
@@ -952,6 +952,7 @@ class SinkExecutor:
             sink_name: Name of the sink (for token_outcome recording)
             pending_outcome: PendingOutcome containing outcome and optional error_hash.
                     Required - all sink-bound tokens must have their outcome recorded.
+            effect_mode: Validated sink-effect mode. Required for non-empty batches.
             failsink: Resolved failsink instance (or None for discard mode)
             failsink_name: Config-level name of the failsink (for outcome recording)
             failsink_edge_id: Edge ID of the __failsink__ DIVERT edge in the DAG
@@ -963,7 +964,8 @@ class SinkExecutor:
             Tuple of (Artifact if tokens were written else None, diversion counts)
 
         Raises:
-            Exception: Propagated from sink.write(), sink.flush(), or failsink.write()
+            OrchestrationInvariantError: If a non-empty batch has no validated effect mode.
+            Exception: Propagated from effect inspection, preparation, commit, reconciliation, or audit recording.
         """
         if not tokens:
             return None, DiversionCounts()
@@ -980,7 +982,7 @@ class SinkExecutor:
                 f"Sink '{sink_name}' received pending_outcome=None — all sink-bound tokens must have a PendingOutcome."
             )
 
-        # Extract dicts from PipelineRow for sink write
+        # Extract exact member payloads for effect identity and preparation.
         rows = [t.row_data.to_dict() for t in tokens]
 
         # Sink must have node_id assigned by orchestrator before execution

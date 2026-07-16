@@ -22,7 +22,7 @@ from elspeth.contracts.sink_effects import (
     AuditExportSigningMode,
     SinkEffectInputKind,
     SinkEffectMember,
-    SinkEffectRole,
+    SinkEffectReservationRequest,
     SinkEffectState,
 )
 from elspeth.core.landscape._helpers import now
@@ -42,78 +42,6 @@ from elspeth.core.landscape.schema import (
 
 _LOWER_HEX_64: Final = re.compile(r"[0-9a-f]{64}\Z")
 _EMPTY_TARGET_JSON: Final = "{}"
-
-
-def _require_nonempty(value: object, field_name: str) -> None:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field_name} must be a non-empty string")
-
-
-def _require_hash(value: object, field_name: str, *, optional: bool = False) -> None:
-    if optional and value is None:
-        return
-    if not isinstance(value, str) or _LOWER_HEX_64.fullmatch(value) is None:
-        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
-
-
-@dataclass(frozen=True, slots=True)
-class SinkEffectReservationRequest:
-    """Complete, credential-free authority required to reserve one effect."""
-
-    run_id: str
-    sink_node_id: str
-    role: SinkEffectRole
-    input_kind: SinkEffectInputKind
-    requested_target_hash: str
-    members: Sequence[SinkEffectMember]
-    audit_export_snapshot_id: str | None
-    config_hash: str
-    replacing_target: bool
-    primary_effect_id: str | None
-
-    def __post_init__(self) -> None:
-        _require_nonempty(self.run_id, "run_id")
-        _require_nonempty(self.sink_node_id, "sink_node_id")
-        if type(self.role) is not SinkEffectRole:
-            raise TypeError("role must be exact SinkEffectRole")
-        if type(self.input_kind) is not SinkEffectInputKind:
-            raise TypeError("input_kind must be exact SinkEffectInputKind")
-        _require_hash(self.requested_target_hash, "requested_target_hash")
-        _require_hash(self.config_hash, "config_hash")
-        _require_hash(self.primary_effect_id, "primary_effect_id", optional=True)
-        if type(self.replacing_target) is not bool:
-            raise TypeError("replacing_target must be exact bool")
-
-        members = tuple(self.members)
-        if any(type(member) is not SinkEffectMember for member in members):
-            raise TypeError("members must contain exact SinkEffectMember values")
-        if len({member.token_id for member in members}) != len(members):
-            raise ValueError("members must contain unique token IDs")
-        ordinals = [member.ordinal for member in members]
-        if len(set(ordinals)) != len(ordinals):
-            raise ValueError("members must carry unique source ordinals")
-        members = tuple(
-            replace(member, ordinal=ordinal, member_effect_id=None)
-            for ordinal, member in enumerate(sorted(members, key=lambda member: member.ordinal))
-        )
-        object.__setattr__(self, "members", members)
-
-        if self.role is SinkEffectRole.PRIMARY and self.primary_effect_id is not None:
-            raise ValueError("primary effects cannot refer to another primary effect")
-        if self.role is SinkEffectRole.FAILSINK and self.primary_effect_id is None:
-            raise ValueError("failsink effects require primary_effect_id")
-
-        if self.input_kind is SinkEffectInputKind.PIPELINE_MEMBERS:
-            if not members:
-                raise ValueError("pipeline reservation requires at least one member")
-            if self.audit_export_snapshot_id is not None:
-                raise ValueError("pipeline reservation cannot carry an audit export snapshot")
-        else:
-            if members:
-                raise ValueError("audit export reservation cannot carry pipeline members")
-            _require_hash(self.audit_export_snapshot_id, "audit_export_snapshot_id")
-            if self.config_hash != self.requested_target_hash:
-                raise ValueError("audit export config_hash must equal requested_target_hash")
 
 
 @dataclass(frozen=True, slots=True)

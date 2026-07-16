@@ -19,7 +19,11 @@ from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Literal, Protocol, cast, runtime_checkable
 
+from elspeth.contracts.audit import AuditExportSnapshot, AuditExportSnapshotChunk
+from elspeth.contracts.enums import RunStatus
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import canonical_json
+from elspeth.contracts.sink_effects import AuditExportFormat, AuditExportSigningMode
 
 if TYPE_CHECKING:
     from elspeth.contracts.sink_effects import AuditExportSignedManifestInput
@@ -44,6 +48,7 @@ _UTC_MICROSECOND_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _NAMESPACE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,255}\Z")
 _EXPORT_TERMINAL_STATUSES: Final = frozenset({"completed", "completed_with_failures", "empty"})
+_EXPORT_TERMINAL: Final = frozenset({RunStatus.COMPLETED, RunStatus.COMPLETED_WITH_FAILURES, RunStatus.EMPTY})
 _UNSIGNED_RECORD_CHAIN: Final = "sha256_concat_record_sha256_v1"
 _HMAC_RECORD_CHAIN: Final = "sha256_concat_hmac_sha256_signatures_v1"
 _FINAL_MANIFEST_CORE_FIELDS: Final = frozenset(
@@ -72,6 +77,160 @@ _FINAL_MANIFEST_CORE_FIELDS: Final = frozenset(
         "total_bytes",
     }
 )
+
+
+def _require_positive_bounded(value: int, field_name: str, maximum: int) -> None:
+    if type(value) is not int or value < 1 or value > maximum:
+        raise ValueError(f"{field_name} must be an exact integer within [1, {maximum}]")
+
+
+@dataclass(frozen=True, slots=True)
+class AuditExportTerminalWitness:
+    """Immutable run tuple that pins every snapshot timestamp and status."""
+
+    source_run_id: str
+    source_status: RunStatus
+    source_completed_at: datetime
+
+    def __post_init__(self) -> None:
+        if type(self.source_run_id) is not str or not self.source_run_id:
+            raise ValueError("source_run_id must be a non-empty exact string")
+        if type(self.source_status) is not RunStatus or self.source_status not in _EXPORT_TERMINAL:
+            raise AuditIntegrityError("audit export requires an immutable export-terminal run status")
+        if self.source_completed_at.tzinfo is None or self.source_completed_at.utcoffset() is None:
+            raise AuditIntegrityError("audit export terminal completed_at must be timezone-aware")
+
+
+@dataclass(frozen=True, slots=True)
+class AuditExportSnapshotRegistryKey:
+    """Exact persisted lookup key plus every separately stored shaping field."""
+
+    source_run_id: str
+    exporter_version: str
+    serialization_version: str
+    export_format: AuditExportFormat
+    signing_mode: AuditExportSigningMode
+    signer_key_id: str
+    public_export_config_hash: str
+    registry_key_hash: str
+    chunking_algorithm_version: str
+    per_chunk_record_limit: int
+    per_chunk_byte_limit: int
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "source_run_id",
+            "exporter_version",
+            "serialization_version",
+            "signer_key_id",
+            "chunking_algorithm_version",
+        ):
+            value = getattr(self, field_name)
+            if type(value) is not str or not value:
+                raise ValueError(f"{field_name} must be a non-empty exact string")
+        if type(self.export_format) is not AuditExportFormat:
+            raise TypeError("export_format must be exact AuditExportFormat")
+        if type(self.signing_mode) is not AuditExportSigningMode:
+            raise TypeError("signing_mode must be exact AuditExportSigningMode")
+        for field_name in ("public_export_config_hash", "registry_key_hash"):
+            value = getattr(self, field_name)
+            if type(value) is not str or _LOWER_HEX_64.fullmatch(value) is None:
+                raise ValueError(f"{field_name} must be lowercase SHA-256 hex")
+        _require_positive_bounded(self.per_chunk_record_limit, "per_chunk_record_limit", AUDIT_EXPORT_MAX_CHUNK_RECORDS)
+        _require_positive_bounded(self.per_chunk_byte_limit, "per_chunk_byte_limit", AUDIT_EXPORT_MAX_CHUNK_BYTES)
+
+    @classmethod
+    def from_snapshot(cls, snapshot: AuditExportSnapshot) -> AuditExportSnapshotRegistryKey:
+        if type(snapshot) is not AuditExportSnapshot:
+            raise TypeError("snapshot must be exact AuditExportSnapshot")
+        return cls(
+            source_run_id=snapshot.source_run_id,
+            exporter_version=snapshot.exporter_version,
+            serialization_version=snapshot.serialization_version,
+            export_format=snapshot.export_format,
+            signing_mode=snapshot.signing_mode,
+            signer_key_id=snapshot.signer_key_id,
+            public_export_config_hash=snapshot.public_export_config_hash,
+            registry_key_hash=snapshot.registry_key_hash,
+            chunking_algorithm_version=snapshot.chunking_algorithm_version,
+            per_chunk_record_limit=snapshot.per_chunk_record_limit,
+            per_chunk_byte_limit=snapshot.per_chunk_byte_limit,
+        )
+
+
+def _validate_snapshot_bundle(snapshot: AuditExportSnapshot, chunks: tuple[AuditExportSnapshotChunk, ...]) -> None:
+    if type(snapshot) is not AuditExportSnapshot:
+        raise TypeError("snapshot must be exact AuditExportSnapshot")
+    if not chunks or any(type(chunk) is not AuditExportSnapshotChunk for chunk in chunks):
+        raise ValueError("chunks must be a non-empty exact AuditExportSnapshotChunk tuple")
+    if len(chunks) != snapshot.chunk_count:
+        raise AuditIntegrityError("snapshot chunk_count does not match its exact chunk tuple")
+    cumulative_records = 0
+    cumulative_bytes = 0
+    predecessor: str | None = None
+    for ordinal, chunk in enumerate(chunks):
+        if chunk.snapshot_id != snapshot.snapshot_id or chunk.ordinal != ordinal:
+            raise AuditIntegrityError("snapshot chunks must bind one snapshot with dense ordered ordinals")
+        if chunk.predecessor_seal_hash != predecessor:
+            raise AuditIntegrityError("snapshot chunk predecessor seal chain is not exact")
+        cumulative_records += chunk.record_count
+        cumulative_bytes += chunk.size_bytes
+        if chunk.cumulative_records != cumulative_records or chunk.cumulative_bytes != cumulative_bytes:
+            raise AuditIntegrityError("snapshot chunk cumulative totals are not exact")
+        predecessor = chunk.chunk_seal_hash
+    terminal = chunks[-1]
+    if (
+        terminal.ordinal != snapshot.terminal_chunk_ordinal
+        or terminal.chunk_seal_hash != snapshot.last_chunk_seal_hash
+        or cumulative_records != snapshot.record_count
+        or cumulative_bytes != snapshot.total_bytes
+    ):
+        raise AuditIntegrityError("snapshot terminal chunk descriptor does not seal its registry totals")
+
+
+@dataclass(frozen=True, slots=True)
+class AuditExportSnapshotCandidate:
+    """Fully materialized and durably stored candidate ready for registry CAS."""
+
+    snapshot: AuditExportSnapshot
+    chunks: tuple[AuditExportSnapshotChunk, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "chunks", tuple(self.chunks))
+        _validate_snapshot_bundle(self.snapshot, self.chunks)
+
+
+@dataclass(frozen=True, slots=True)
+class AuditExportSnapshotWinner:
+    """Immutable registry winner and its exact sealed data descriptors."""
+
+    snapshot: AuditExportSnapshot
+    chunks: tuple[AuditExportSnapshotChunk, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "chunks", tuple(self.chunks))
+        _validate_snapshot_bundle(self.snapshot, self.chunks)
+
+
+@dataclass(frozen=True, slots=True)
+class AuditExportSnapshotReadLimits:
+    """Current acceptance limits, deliberately absent from snapshot identity."""
+
+    max_total_bytes: int = AUDIT_EXPORT_MAX_TOTAL_BYTES
+    max_total_records: int = AUDIT_EXPORT_MAX_TOTAL_RECORDS
+    max_chunks: int = AUDIT_EXPORT_MAX_CHUNKS
+    max_chunk_bytes: int = AUDIT_EXPORT_MAX_CHUNK_BYTES
+    max_chunk_records: int = AUDIT_EXPORT_MAX_CHUNK_RECORDS
+
+    def __post_init__(self) -> None:
+        for field_name, maximum in (
+            ("max_total_bytes", AUDIT_EXPORT_MAX_TOTAL_BYTES),
+            ("max_total_records", AUDIT_EXPORT_MAX_TOTAL_RECORDS),
+            ("max_chunks", AUDIT_EXPORT_MAX_CHUNKS),
+            ("max_chunk_bytes", AUDIT_EXPORT_MAX_CHUNK_BYTES),
+            ("max_chunk_records", AUDIT_EXPORT_MAX_CHUNK_RECORDS),
+        ):
+            _require_positive_bounded(getattr(self, field_name), field_name, maximum)
 
 
 def _object(value: object, *, fields: frozenset[str], path: str) -> dict[str, object]:
@@ -846,7 +1005,7 @@ def derive_audit_export_bundle(
     """
     if type(config) is not AuditExportDerivationConfig:
         raise TypeError("config must be exact AuditExportDerivationConfig")
-    from elspeth.contracts.sink_effects import AuditExportSignedManifestInput, AuditExportSigningMode
+    from elspeth.contracts.sink_effects import AuditExportSignedManifestInput
 
     public_config: dict[str, ClosedAuditExportJSON] = {
         "chunking_algorithm_version": config.chunking_algorithm_version,

@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC
 from typing import Any
 
 from sqlalchemy import and_, select
 from sqlalchemy.engine import Connection, Engine
 
 from elspeth.contracts import RunStatus, SecretResolution
+from elspeth.contracts.audit_export import AuditExportTerminalWitness
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.core.landscape.model_loaders import (
@@ -59,23 +59,6 @@ from elspeth.core.landscape.schema import (
 
 _QUERY_CHUNK_SIZE = 500
 _EXPORT_TERMINAL = frozenset({RunStatus.COMPLETED, RunStatus.COMPLETED_WITH_FAILURES, RunStatus.EMPTY})
-
-
-@dataclass(frozen=True, slots=True)
-class AuditExportTerminalWitness:
-    """Immutable run tuple that pins every snapshot timestamp and status."""
-
-    source_run_id: str
-    source_status: RunStatus
-    source_completed_at: datetime
-
-    def __post_init__(self) -> None:
-        if type(self.source_run_id) is not str or not self.source_run_id:
-            raise ValueError("source_run_id must be a non-empty exact string")
-        if type(self.source_status) is not RunStatus or self.source_status not in _EXPORT_TERMINAL:
-            raise AuditIntegrityError("audit export requires an immutable export-terminal run status")
-        if self.source_completed_at.tzinfo is None or self.source_completed_at.utcoffset() is None:
-            raise AuditIntegrityError("audit export terminal completed_at must be timezone-aware")
 
 
 def _chunks(values: Sequence[str]) -> Iterator[Sequence[str]]:

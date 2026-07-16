@@ -6,19 +6,23 @@ import json
 import math
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from hashlib import sha256
 from types import MappingProxyType
-from typing import Final, NoReturn, final
+from typing import TYPE_CHECKING, Final, NoReturn, final
 from urllib.parse import parse_qsl, urlsplit
 
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.freeze import deep_freeze, deep_thaw, require_int
 from elspeth.contracts.hashing import canonical_json
-from elspeth.contracts.results import ArtifactDescriptor
+from elspeth.contracts.results import ArtifactDescriptor, require_no_artifact_uri_credentials
 from elspeth.contracts.secret_scrub import scrub_payload_for_audit, scrub_text_for_audit
 from elspeth.contracts.url import SENSITIVE_PARAMS
+
+if TYPE_CHECKING:
+    from elspeth.contracts.audit import Artifact, ArtifactPublicationEvidenceKind, SinkEffect
 
 SINK_EFFECT_PROTOCOL_VERSION: Final = "sink-effect-v1"
 _SINK_EFFECT_EVIDENCE_MAX_BYTES: Final = 64 * 1024
@@ -63,6 +67,12 @@ _V2_MANIFEST_FIELDS: Final = frozenset(
         "total_bytes",
     }
 )
+_EVIDENCE_PERFORMED: Final[dict[str, bool]] = {
+    "returned": True,
+    "reconciled": True,
+    "inherited": False,
+    "virtual": False,
+}
 
 
 class SinkEffectRole(StrEnum):
@@ -369,6 +379,225 @@ class SinkEffectMember:
         if sha256(canonical_json(deep_thaw(frozen_row)).encode("utf-8")).hexdigest() != self.payload_hash:
             raise ValueError("payload_hash must bind the exact canonical row")
         object.__setattr__(self, "row", deep_freeze(frozen_row))
+
+
+@dataclass(frozen=True, slots=True)
+class SinkEffectReservationRequest:
+    """Complete, credential-free authority required to reserve one effect."""
+
+    run_id: str
+    sink_node_id: str
+    role: SinkEffectRole
+    input_kind: SinkEffectInputKind
+    requested_target_hash: str
+    members: Sequence[SinkEffectMember]
+    audit_export_snapshot_id: str | None
+    config_hash: str
+    replacing_target: bool
+    primary_effect_id: str | None
+
+    def __post_init__(self) -> None:
+        _require_nonempty_string(self.run_id, "run_id")
+        _require_nonempty_string(self.sink_node_id, "sink_node_id")
+        if type(self.role) is not SinkEffectRole:
+            raise TypeError("role must be exact SinkEffectRole")
+        if type(self.input_kind) is not SinkEffectInputKind:
+            raise TypeError("input_kind must be exact SinkEffectInputKind")
+        _require_lower_hex_64(self.requested_target_hash, "requested_target_hash")
+        _require_lower_hex_64(self.config_hash, "config_hash")
+        if self.primary_effect_id is not None:
+            _require_lower_hex_64(self.primary_effect_id, "primary_effect_id")
+        if type(self.replacing_target) is not bool:
+            raise TypeError("replacing_target must be exact bool")
+
+        members = tuple(self.members)
+        if any(type(member) is not SinkEffectMember for member in members):
+            raise TypeError("members must contain exact SinkEffectMember values")
+        if len({member.token_id for member in members}) != len(members):
+            raise ValueError("members must contain unique token IDs")
+        ordinals = [member.ordinal for member in members]
+        if len(set(ordinals)) != len(ordinals):
+            raise ValueError("members must carry unique source ordinals")
+        members = tuple(
+            replace(member, ordinal=ordinal, member_effect_id=None)
+            for ordinal, member in enumerate(sorted(members, key=lambda member: member.ordinal))
+        )
+        object.__setattr__(self, "members", members)
+
+        if self.role is SinkEffectRole.PRIMARY and self.primary_effect_id is not None:
+            raise ValueError("primary effects cannot refer to another primary effect")
+        if self.role is SinkEffectRole.FAILSINK and self.primary_effect_id is None:
+            raise ValueError("failsink effects require primary_effect_id")
+
+        if self.input_kind is SinkEffectInputKind.PIPELINE_MEMBERS:
+            if not members:
+                raise ValueError("pipeline reservation requires at least one member")
+            if self.audit_export_snapshot_id is not None:
+                raise ValueError("pipeline reservation cannot carry an audit export snapshot")
+        else:
+            if members:
+                raise ValueError("audit export reservation cannot carry pipeline members")
+            _require_lower_hex_64(self.audit_export_snapshot_id, "audit_export_snapshot_id")
+            if self.config_hash != self.requested_target_hash:
+                raise ValueError("audit export config_hash must equal requested_target_hash")
+
+
+@dataclass(frozen=True, slots=True)
+class SinkEffectAttemptRequest:
+    effect_id: str
+    member_ordinal: int | None
+    generation: int
+    action: SinkEffectAttemptAction
+    request_hash: str
+
+    def __post_init__(self) -> None:
+        _require_lower_hex_64(self.effect_id, "effect_id")
+        _require_lower_hex_64(self.request_hash, "request_hash")
+        if self.member_ordinal is not None and (type(self.member_ordinal) is not int or self.member_ordinal < 0):
+            raise ValueError("member_ordinal must be a non-negative exact int or None")
+        if type(self.generation) is not int or self.generation < 0:
+            raise ValueError("generation must be a non-negative exact int")
+        if type(self.action) is not SinkEffectAttemptAction:
+            raise TypeError("action must be exact SinkEffectAttemptAction")
+
+
+@dataclass(frozen=True, slots=True)
+class SinkEffectAttemptResult:
+    attempt_id: str
+    evidence: Mapping[str, object]
+    latency_ms: float
+
+    def __post_init__(self) -> None:
+        _require_lower_hex_64(self.attempt_id, "attempt_id")
+        if isinstance(self.latency_ms, bool) or not isinstance(self.latency_ms, int | float):
+            raise TypeError("latency_ms must be a finite number")
+        if not math.isfinite(self.latency_ms) or self.latency_ms < 0:
+            raise ValueError("latency_ms must be finite and non-negative")
+        object.__setattr__(self, "latency_ms", float(self.latency_ms))
+        object.__setattr__(self, "evidence", _freeze_bounded_evidence(self.evidence, "evidence"))
+
+
+@dataclass(frozen=True, slots=True)
+class SinkEffectLease:
+    effect_id: str
+    owner: str
+    generation: int
+    expires_at: datetime
+
+    def __post_init__(self) -> None:
+        _require_lower_hex_64(self.effect_id, "effect_id")
+        if not isinstance(self.owner, str) or not self.owner.strip():
+            raise ValueError("lease owner must be non-empty")
+        if len(self.owner) > 128:
+            raise ValueError("lease owner exceeds 128 characters")
+        if type(self.generation) is not int or self.generation < 1:
+            raise ValueError("lease generation must be a positive exact int")
+        if not isinstance(self.expires_at, datetime) or self.expires_at.tzinfo is None:
+            raise ValueError("lease expires_at must be timezone-aware")
+
+
+@dataclass(frozen=True, slots=True)
+class SinkEffectFinalizationMember:
+    """One member's state and terminal-outcome writes."""
+
+    ordinal: int
+    output_data: Mapping[str, object]
+    duration_ms: float
+    outcome: TerminalOutcome
+    path: TerminalPath
+    sink_name: str | None = None
+    batch_id: str | None = None
+    fork_group_id: str | None = None
+    join_group_id: str | None = None
+    expand_group_id: str | None = None
+    error_hash: str | None = None
+    context: Mapping[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.ordinal) is not int or self.ordinal < 0:
+            raise ValueError("ordinal must be a non-negative exact int")
+        if not isinstance(self.output_data, Mapping):
+            raise TypeError("output_data must be a mapping")
+        if isinstance(self.duration_ms, bool) or not isinstance(self.duration_ms, int | float):
+            raise TypeError("duration_ms must be a finite non-negative number")
+        if not math.isfinite(self.duration_ms) or self.duration_ms < 0:
+            raise ValueError("duration_ms must be finite and non-negative")
+        if type(self.outcome) is not TerminalOutcome or type(self.path) is not TerminalPath:
+            raise TypeError("outcome and path must be exact terminal enums")
+        object.__setattr__(self, "duration_ms", float(self.duration_ms))
+        object.__setattr__(self, "output_data", deep_freeze(self.output_data))
+        if self.context is not None:
+            object.__setattr__(self, "context", _freeze_bounded_evidence(self.context, "evidence"))
+
+
+@dataclass(frozen=True, slots=True)
+class SinkEffectFinalizeRequest:
+    """Complete one exact, generation-fenced effect winner."""
+
+    effect_id: str
+    lease_owner: str | None
+    generation: int
+    descriptor: ArtifactDescriptor
+    publication_performed: bool
+    publication_evidence_kind: ArtifactPublicationEvidenceKind
+    accepted_ordinals: Sequence[int]
+    diverted_ordinals: Sequence[int]
+    evidence: Mapping[str, object]
+    members: Sequence[SinkEffectFinalizationMember]
+    attempt_id: str | None = None
+    reconcile_kind: SinkEffectReconcileKind | None = None
+    operation_duration_ms: float = 0.0
+
+    def __post_init__(self) -> None:
+        _require_lower_hex_64(self.effect_id, "effect_id")
+        if self.lease_owner is not None and (not isinstance(self.lease_owner, str) or not self.lease_owner.strip()):
+            raise ValueError("lease_owner must be non-empty or None")
+        if type(self.generation) is not int or self.generation < 0:
+            raise ValueError("generation must be a non-negative exact int")
+        if type(self.descriptor) is not ArtifactDescriptor:
+            raise TypeError("descriptor must be exact ArtifactDescriptor")
+        require_no_artifact_uri_credentials(self.descriptor.path_or_uri)
+        if type(self.publication_performed) is not bool:
+            raise TypeError("publication_performed must be exact bool")
+        expected_performed = _EVIDENCE_PERFORMED.get(self.publication_evidence_kind)
+        if expected_performed is None or expected_performed is not self.publication_performed:
+            raise ValueError("publication evidence kind contradicts publication_performed")
+        accepted = tuple(self.accepted_ordinals)
+        diverted = tuple(self.diverted_ordinals)
+        for field_name, values in (("accepted_ordinals", accepted), ("diverted_ordinals", diverted)):
+            if any(type(value) is not int or value < 0 for value in values):
+                raise ValueError(f"{field_name} must contain non-negative exact ints")
+            if values != tuple(sorted(set(values))):
+                raise ValueError(f"{field_name} must be unique and ascending")
+        if set(accepted) & set(diverted):
+            raise ValueError("accepted and diverted ordinals must be disjoint")
+        finalization_members = tuple(self.members)
+        if any(type(member) is not SinkEffectFinalizationMember for member in finalization_members):
+            raise TypeError("members must contain exact SinkEffectFinalizationMember values")
+        member_ordinals = tuple(member.ordinal for member in finalization_members)
+        if member_ordinals != accepted:
+            raise ValueError("finalization member ordinals must exactly equal accepted_ordinals")
+        if self.attempt_id is not None:
+            _require_lower_hex_64(self.attempt_id, "attempt_id")
+        if self.reconcile_kind is not None and type(self.reconcile_kind) is not SinkEffectReconcileKind:
+            raise TypeError("reconcile_kind must be exact SinkEffectReconcileKind or None")
+        if isinstance(self.operation_duration_ms, bool) or not isinstance(self.operation_duration_ms, int | float):
+            raise TypeError("operation_duration_ms must be a finite non-negative number")
+        if not math.isfinite(self.operation_duration_ms) or self.operation_duration_ms < 0:
+            raise ValueError("operation_duration_ms must be finite and non-negative")
+        object.__setattr__(self, "accepted_ordinals", accepted)
+        object.__setattr__(self, "diverted_ordinals", diverted)
+        object.__setattr__(self, "members", finalization_members)
+        object.__setattr__(self, "evidence", _freeze_bounded_evidence(self.evidence, "evidence"))
+        object.__setattr__(self, "operation_duration_ms", float(self.operation_duration_ms))
+
+
+@dataclass(frozen=True, slots=True)
+class SinkEffectFinalizationResult:
+    effect: SinkEffect
+    artifact: Artifact
+    state_ids: tuple[str, ...]
+    outcome_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1074,16 +1303,22 @@ __all__ = [
     "RestrictedAuditExportSnapshotReader",
     "RestrictedSinkEffectContext",
     "SinkEffectAttemptAction",
+    "SinkEffectAttemptRequest",
+    "SinkEffectAttemptResult",
     "SinkEffectAttemptState",
     "SinkEffectAuditExportSnapshotInput",
     "SinkEffectCommitResult",
     "SinkEffectDescriptorMode",
     "SinkEffectExecutionPurpose",
+    "SinkEffectFinalizationMember",
+    "SinkEffectFinalizationResult",
+    "SinkEffectFinalizeRequest",
     "SinkEffectIdentity",
     "SinkEffectInputKind",
     "SinkEffectInspection",
     "SinkEffectInspectionMode",
     "SinkEffectInspectionRequest",
+    "SinkEffectLease",
     "SinkEffectMember",
     "SinkEffectMemberCandidate",
     "SinkEffectPipelineMembersInput",
@@ -1091,6 +1326,7 @@ __all__ = [
     "SinkEffectPrepareRequest",
     "SinkEffectReconcileKind",
     "SinkEffectReconcileResult",
+    "SinkEffectReservationRequest",
     "SinkEffectRole",
     "SinkEffectRuntimeBinding",
     "SinkEffectState",

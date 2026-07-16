@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import math
 import re
-from collections.abc import Mapping
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any, Final
@@ -15,15 +12,17 @@ from sqlalchemy.engine import Connection
 
 from elspeth.contracts import CallStatus, CallType
 from elspeth.contracts.audit import SinkEffect, SinkEffectAttempt
-from elspeth.contracts.freeze import deep_freeze, deep_thaw
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import canonical_json, stable_hash
-from elspeth.contracts.secret_scrub import scrub_payload_for_audit
 from elspeth.contracts.sink_effects import (
     SinkEffectAttemptAction,
+    SinkEffectAttemptRequest,
+    SinkEffectAttemptResult,
     SinkEffectAttemptState,
     SinkEffectDescriptorMode,
     SinkEffectInputKind,
     SinkEffectInspectionMode,
+    SinkEffectLease,
     SinkEffectPlan,
     SinkEffectState,
 )
@@ -41,7 +40,6 @@ from elspeth.core.landscape.schema import (
 )
 
 _LOWER_HEX_64: Final = re.compile(r"[0-9a-f]{64}\Z")
-_MAX_EVIDENCE_BYTES: Final = 64 * 1024
 
 
 def _require_hash(value: object, field_name: str) -> None:
@@ -56,74 +54,6 @@ def _require_positive_ttl(ttl: timedelta) -> None:
 
 def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-
-
-def _bounded_evidence(value: Mapping[str, object], field_name: str) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise TypeError(f"{field_name} must be a mapping")
-    frozen = deep_freeze(value)
-    detached = deep_thaw(frozen)
-    encoded = canonical_json(detached).encode("utf-8")
-    if len(encoded) > _MAX_EVIDENCE_BYTES:
-        raise ValueError(f"{field_name} exceeds the 64 KiB evidence limit")
-    if scrub_payload_for_audit(detached) != detached:
-        raise ValueError(f"{field_name} must be credential-free")
-    assert isinstance(frozen, Mapping)
-    return frozen
-
-
-@dataclass(frozen=True, slots=True)
-class SinkEffectAttemptRequest:
-    effect_id: str
-    member_ordinal: int | None
-    generation: int
-    action: SinkEffectAttemptAction
-    request_hash: str
-
-    def __post_init__(self) -> None:
-        _require_hash(self.effect_id, "effect_id")
-        _require_hash(self.request_hash, "request_hash")
-        if self.member_ordinal is not None and (type(self.member_ordinal) is not int or self.member_ordinal < 0):
-            raise ValueError("member_ordinal must be a non-negative exact int or None")
-        if type(self.generation) is not int or self.generation < 0:
-            raise ValueError("generation must be a non-negative exact int")
-        if type(self.action) is not SinkEffectAttemptAction:
-            raise TypeError("action must be exact SinkEffectAttemptAction")
-
-
-@dataclass(frozen=True, slots=True)
-class SinkEffectAttemptResult:
-    attempt_id: str
-    evidence: Mapping[str, object]
-    latency_ms: float
-
-    def __post_init__(self) -> None:
-        _require_hash(self.attempt_id, "attempt_id")
-        if isinstance(self.latency_ms, bool) or not isinstance(self.latency_ms, int | float):
-            raise TypeError("latency_ms must be a finite number")
-        if not math.isfinite(self.latency_ms) or self.latency_ms < 0:
-            raise ValueError("latency_ms must be finite and non-negative")
-        object.__setattr__(self, "latency_ms", float(self.latency_ms))
-        object.__setattr__(self, "evidence", _bounded_evidence(self.evidence, "evidence"))
-
-
-@dataclass(frozen=True, slots=True)
-class SinkEffectLease:
-    effect_id: str
-    owner: str
-    generation: int
-    expires_at: datetime
-
-    def __post_init__(self) -> None:
-        _require_hash(self.effect_id, "effect_id")
-        if not isinstance(self.owner, str) or not self.owner.strip():
-            raise ValueError("lease owner must be non-empty")
-        if len(self.owner) > 128:
-            raise ValueError("lease owner exceeds 128 characters")
-        if type(self.generation) is not int or self.generation < 1:
-            raise ValueError("lease generation must be a positive exact int")
-        if not isinstance(self.expires_at, datetime) or self.expires_at.tzinfo is None:
-            raise ValueError("lease expires_at must be timezone-aware")
 
 
 def _descriptor_payload(plan: SinkEffectPlan) -> object:

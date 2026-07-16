@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -15,15 +13,17 @@ from sqlalchemy import Row, func, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
 
-from elspeth.contracts import Artifact, NodeStateStatus, TerminalOutcome, TerminalPath
-from elspeth.contracts.audit import ArtifactPublicationEvidenceKind, SinkEffect, TokenRef
-from elspeth.contracts.freeze import deep_freeze, deep_thaw
-from elspeth.contracts.results import ArtifactDescriptor, require_no_artifact_uri_credentials
-from elspeth.contracts.secret_scrub import scrub_payload_for_audit
+from elspeth.contracts import NodeStateStatus
+from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.contracts.sink_effects import (
     SinkEffectAttemptAction,
     SinkEffectAttemptState,
     SinkEffectDescriptorMode,
+    SinkEffectFinalizationMember,
+    SinkEffectFinalizationResult,
+    SinkEffectFinalizeRequest,
     SinkEffectReconcileKind,
     SinkEffectState,
 )
@@ -54,20 +54,7 @@ from elspeth.core.landscape.schema import (
     token_outcomes_table,
 )
 
-_LOWER_HEX_64: Final = re.compile(r"[0-9a-f]{64}\Z")
-_MAX_EVIDENCE_BYTES: Final = 64 * 1024
 _MAX_WITNESS_RESTARTS: Final = 3
-_EVIDENCE_PERFORMED: Final[dict[str, bool]] = {
-    "returned": True,
-    "reconciled": True,
-    "inherited": False,
-    "virtual": False,
-}
-
-
-def _require_hash(value: object, field_name: str) -> None:
-    if not isinstance(value, str) or _LOWER_HEX_64.fullmatch(value) is None:
-        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
 
 
 def _descriptor_payload(descriptor: ArtifactDescriptor) -> dict[str, object]:
@@ -82,124 +69,6 @@ def _descriptor_payload(descriptor: ArtifactDescriptor) -> dict[str, object]:
 
 def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-
-
-def _bounded_evidence(value: Mapping[str, object]) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise TypeError("evidence must be a mapping")
-    frozen = deep_freeze(value)
-    detached = deep_thaw(frozen)
-    encoded = canonical_json(detached).encode("utf-8")
-    if len(encoded) > _MAX_EVIDENCE_BYTES:
-        raise ValueError("evidence exceeds the 64 KiB limit")
-    if scrub_payload_for_audit(detached) != detached:
-        raise ValueError("evidence must be credential-free")
-    assert isinstance(frozen, Mapping)
-    return frozen
-
-
-@dataclass(frozen=True, slots=True)
-class SinkEffectFinalizationMember:
-    """One member's state and terminal-outcome writes."""
-
-    ordinal: int
-    output_data: Mapping[str, object]
-    duration_ms: float
-    outcome: TerminalOutcome
-    path: TerminalPath
-    sink_name: str | None = None
-    batch_id: str | None = None
-    fork_group_id: str | None = None
-    join_group_id: str | None = None
-    expand_group_id: str | None = None
-    error_hash: str | None = None
-    context: Mapping[str, object] | None = None
-
-    def __post_init__(self) -> None:
-        if type(self.ordinal) is not int or self.ordinal < 0:
-            raise ValueError("ordinal must be a non-negative exact int")
-        if not isinstance(self.output_data, Mapping):
-            raise TypeError("output_data must be a mapping")
-        if isinstance(self.duration_ms, bool) or not isinstance(self.duration_ms, int | float):
-            raise TypeError("duration_ms must be a finite non-negative number")
-        if not math.isfinite(self.duration_ms) or self.duration_ms < 0:
-            raise ValueError("duration_ms must be finite and non-negative")
-        if type(self.outcome) is not TerminalOutcome or type(self.path) is not TerminalPath:
-            raise TypeError("outcome and path must be exact terminal enums")
-        object.__setattr__(self, "duration_ms", float(self.duration_ms))
-        object.__setattr__(self, "output_data", deep_freeze(self.output_data))
-        if self.context is not None:
-            object.__setattr__(self, "context", _bounded_evidence(self.context))
-
-
-@dataclass(frozen=True, slots=True)
-class SinkEffectFinalizeRequest:
-    """Complete one exact, generation-fenced effect winner."""
-
-    effect_id: str
-    lease_owner: str | None
-    generation: int
-    descriptor: ArtifactDescriptor
-    publication_performed: bool
-    publication_evidence_kind: ArtifactPublicationEvidenceKind
-    accepted_ordinals: Sequence[int]
-    diverted_ordinals: Sequence[int]
-    evidence: Mapping[str, object]
-    members: Sequence[SinkEffectFinalizationMember]
-    attempt_id: str | None = None
-    reconcile_kind: SinkEffectReconcileKind | None = None
-    operation_duration_ms: float = 0.0
-
-    def __post_init__(self) -> None:
-        _require_hash(self.effect_id, "effect_id")
-        if self.lease_owner is not None and (not isinstance(self.lease_owner, str) or not self.lease_owner.strip()):
-            raise ValueError("lease_owner must be non-empty or None")
-        if type(self.generation) is not int or self.generation < 0:
-            raise ValueError("generation must be a non-negative exact int")
-        if type(self.descriptor) is not ArtifactDescriptor:
-            raise TypeError("descriptor must be exact ArtifactDescriptor")
-        require_no_artifact_uri_credentials(self.descriptor.path_or_uri)
-        if type(self.publication_performed) is not bool:
-            raise TypeError("publication_performed must be exact bool")
-        expected_performed = _EVIDENCE_PERFORMED.get(self.publication_evidence_kind)
-        if expected_performed is None or expected_performed is not self.publication_performed:
-            raise ValueError("publication evidence kind contradicts publication_performed")
-        accepted = tuple(self.accepted_ordinals)
-        diverted = tuple(self.diverted_ordinals)
-        for field_name, values in (("accepted_ordinals", accepted), ("diverted_ordinals", diverted)):
-            if any(type(value) is not int or value < 0 for value in values):
-                raise ValueError(f"{field_name} must contain non-negative exact ints")
-            if values != tuple(sorted(set(values))):
-                raise ValueError(f"{field_name} must be unique and ascending")
-        if set(accepted) & set(diverted):
-            raise ValueError("accepted and diverted ordinals must be disjoint")
-        finalization_members = tuple(self.members)
-        if any(type(member) is not SinkEffectFinalizationMember for member in finalization_members):
-            raise TypeError("members must contain exact SinkEffectFinalizationMember values")
-        member_ordinals = tuple(member.ordinal for member in finalization_members)
-        if member_ordinals != accepted:
-            raise ValueError("finalization member ordinals must exactly equal accepted_ordinals")
-        if self.attempt_id is not None:
-            _require_hash(self.attempt_id, "attempt_id")
-        if self.reconcile_kind is not None and type(self.reconcile_kind) is not SinkEffectReconcileKind:
-            raise TypeError("reconcile_kind must be exact SinkEffectReconcileKind or None")
-        if isinstance(self.operation_duration_ms, bool) or not isinstance(self.operation_duration_ms, int | float):
-            raise TypeError("operation_duration_ms must be a finite non-negative number")
-        if not math.isfinite(self.operation_duration_ms) or self.operation_duration_ms < 0:
-            raise ValueError("operation_duration_ms must be finite and non-negative")
-        object.__setattr__(self, "accepted_ordinals", accepted)
-        object.__setattr__(self, "diverted_ordinals", diverted)
-        object.__setattr__(self, "members", finalization_members)
-        object.__setattr__(self, "evidence", _bounded_evidence(self.evidence))
-        object.__setattr__(self, "operation_duration_ms", float(self.operation_duration_ms))
-
-
-@dataclass(frozen=True, slots=True)
-class SinkEffectFinalizationResult:
-    effect: SinkEffect
-    artifact: Artifact
-    state_ids: tuple[str, ...]
-    outcome_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)

@@ -1210,14 +1210,18 @@ class ExecutionServiceImpl:
                 raw_eligibility_config = (
                     cast(dict[str, Any], loaded_eligibility_config) if type(loaded_eligibility_config) is dict else None
                 )
-            raw_eligibility_sinks = None if raw_eligibility_config is None else raw_eligibility_config.get("sinks")
-            if isinstance(raw_eligibility_sinks, Mapping) and all(
-                isinstance(component, Mapping) and "on_write_failure" in component for component in raw_eligibility_sinks.values()
-            ):
-                assert raw_eligibility_config is not None
+            if raw_eligibility_config is None:
+                raise TypeError("Pipeline YAML must produce a mapping before sink effect eligibility")
+            validate_sink_effect_eligibility_from_raw_config(
+                raw_eligibility_config,
+                purpose=SinkEffectExecutionPurpose.FRESH,
+            )
+            raw_landscape = raw_eligibility_config.get("landscape")
+            raw_export = raw_landscape.get("export") if isinstance(raw_landscape, Mapping) else None
+            if isinstance(raw_export, Mapping) and raw_export.get("enabled") is True:
                 validate_sink_effect_eligibility_from_raw_config(
                     raw_eligibility_config,
-                    purpose=SinkEffectExecutionPurpose.FRESH,
+                    purpose=SinkEffectExecutionPurpose.AUDIT_EXPORT,
                 )
 
             # B8/C1: SessionService is async — bridge from background thread.

@@ -215,7 +215,7 @@ def validate_sink_effect_eligibility_from_raw_config(
         selected_names = tuple(name for name in raw_sinks if name != delayed_export_name)
         required_input_kind = SinkEffectInputKind.PIPELINE_MEMBERS
 
-    manager = get_shared_plugin_manager()
+    manager = None
     modes: dict[str, ResolvedSinkEffectMode] = {}
     for sink_name in selected_names:
         if not isinstance(sink_name, str) or not sink_name:
@@ -226,10 +226,14 @@ def validate_sink_effect_eligibility_from_raw_config(
         plugin_name = component.get("plugin")
         if not isinstance(plugin_name, str) or not plugin_name:
             raise ValueError(f"Sink {sink_name!r} plugin must be a non-empty string")
-        raw_options = component.get("options", {})
+        if "options" not in component:
+            raise ValueError(f"Sink {sink_name!r} options must be present for sink effect eligibility")
+        raw_options = component["options"]
         if not isinstance(raw_options, Mapping):
             raise ValueError(f"Sink {sink_name!r} options must be a mapping/object")
         options = dict(raw_options)
+        if manager is None:
+            manager = get_shared_plugin_manager()
         sink_type = manager.get_sink_by_name(plugin_name)
         mode: ResolvedSinkEffectMode | None = None
         if issubclass(sink_type, BaseSink):

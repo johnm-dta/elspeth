@@ -40,6 +40,7 @@ from elspeth.engine.orchestrator.preflight import SinkEffectCapabilityError
 if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol, SourceProtocol
     from elspeth.contracts.payload_store import PayloadStore
+    from elspeth.contracts.plugin_context import PluginContext
     from elspeth.contracts.run_result import RunResult
     from elspeth.core.landscape import LandscapeDB
     from elspeth.engine import Orchestrator, PipelineConfig
@@ -77,6 +78,30 @@ def _preflight_follower_sink_effects(
         configured_modes=configured_modes,
         required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
     )
+
+
+def _start_follower_plugin_lifecycle(
+    *,
+    transforms: Collection[RowPlugin],
+    sinks: Mapping[str, SinkProtocol],
+    configured_modes: Mapping[str, str],
+    admission: object,
+    ctx: PluginContext,
+) -> None:
+    """Consume exact follower admission immediately before plugin startup."""
+    from elspeth.contracts.sink_effects import SinkEffectInputKind
+    from elspeth.engine.orchestrator.preflight import require_sink_effect_admission
+
+    require_sink_effect_admission(
+        sinks,
+        configured_modes=configured_modes,
+        required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+        admission=admission,
+    )
+    for transform in transforms:
+        transform.on_start(ctx)
+    for sink in sinks.values():
+        sink.on_start(ctx)
 
 
 def _instantiate_plugins_for_runtime_preflight(
@@ -536,7 +561,16 @@ def _preflight_raw_settings_sink_effects(settings_path: Path, *, purpose: object
 
     if not isinstance(purpose, SinkEffectExecutionPurpose):
         raise TypeError("Raw sink effect preflight purpose must be exact SinkEffectExecutionPurpose")
-    validate_sink_effect_eligibility_from_raw_config(_load_raw_yaml(settings_path), purpose=purpose)
+    raw_config = _load_raw_yaml(settings_path)
+    validate_sink_effect_eligibility_from_raw_config(raw_config, purpose=purpose)
+    if purpose is SinkEffectExecutionPurpose.FRESH:
+        raw_landscape = raw_config.get("landscape")
+        raw_export = raw_landscape.get("export") if isinstance(raw_landscape, Mapping) else None
+        if isinstance(raw_export, Mapping) and raw_export.get("enabled") is True:
+            validate_sink_effect_eligibility_from_raw_config(
+                raw_config,
+                purpose=SinkEffectExecutionPurpose.AUDIT_EXPORT,
+            )
 
 
 @app.command()
@@ -2996,10 +3030,13 @@ def join(
         # on the first process() call.
         follower_run_entered = False
         try:
-            for _follower_transform in follower_transforms:
-                _follower_transform.on_start(ctx)
-            for _follower_sink in execution_sinks.values():
-                _follower_sink.on_start(ctx)
+            _start_follower_plugin_lifecycle(
+                transforms=follower_transforms,
+                sinks=execution_sinks,
+                configured_modes=execution_sink_modes,
+                admission=sink_effect_admission,
+                ctx=ctx,
+            )
 
             follower_run_entered = True
             follower_proc.run(ctx)

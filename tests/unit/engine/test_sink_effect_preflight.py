@@ -14,7 +14,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from elspeth.cli import _join_after_follower_sink_preflight, _preflight_execution_sinks, _preflight_follower_sink_effects
+from elspeth.cli import (
+    _join_after_follower_sink_preflight,
+    _preflight_execution_sinks,
+    _preflight_follower_sink_effects,
+    _start_follower_plugin_lifecycle,
+)
 from elspeth.contracts.sink_effects import SINK_EFFECT_PROTOCOL_VERSION, SinkEffectInputKind
 from elspeth.engine.orchestrator.core import Orchestrator
 from elspeth.engine.orchestrator.export import export_landscape
@@ -357,6 +362,51 @@ def test_admission_receipt_is_private_and_forged_lookalike_is_rejected() -> None
         )
 
 
+def test_module_private_receipt_parts_cannot_forge_or_replace_authority() -> None:
+    from elspeth.engine.orchestrator import preflight
+
+    sink = EffectCapableSink()
+    sinks = {"output": sink}
+    modes = {"output": "write"}
+    admission = validate_pipeline_sink_effect_capabilities(
+        sinks,  # type: ignore[arg-type]
+        configured_modes=modes,
+        required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+    )
+
+    assert inspect.getattr_static(preflight, "_ADMISSION_ISSUER", None) is None
+    assert inspect.getattr_static(preflight, "_AdmittedSinkBinding", None) is None
+    issue = inspect.getattr_static(preflight, "_issue_sink_effect_admission", None)
+    assert callable(issue)
+    with pytest.raises(SinkEffectCapabilityError, match="effect protocol"):
+        issue(
+            {"legacy": LegacyObservableSink()},
+            configured_modes={"legacy": "write"},
+            required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+        )
+
+    forged = object.__new__(type(admission))
+    with pytest.raises(SinkEffectCapabilityError, match="not validator-issued"):
+        require_sink_effect_admission(
+            sinks,  # type: ignore[arg-type]
+            configured_modes=modes,
+            required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            admission=forged,
+        )
+
+    with pytest.raises((AttributeError, TypeError)):
+        object.__setattr__(admission, "_SinkEffectCapabilityAdmission__bindings", ())
+    assert (
+        require_sink_effect_admission(
+            sinks,  # type: ignore[arg-type]
+            configured_modes=modes,
+            required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            admission=admission,
+        )
+        is admission
+    )
+
+
 def test_admission_receipt_keeps_exact_sink_alive_only_for_its_own_lifetime() -> None:
     sink = EffectCapableSink()
     sink_ref = weakref.ref(sink)
@@ -397,6 +447,61 @@ def test_admission_receipt_is_safe_for_concurrent_exact_checks() -> None:
         accepted = tuple(executor.map(lambda _index: check(), range(64)))
 
     assert all(item is admission for item in accepted)
+
+
+@pytest.mark.parametrize("mutation", ["instance", "mode", "capability"])
+def test_follower_consumes_exact_receipt_before_any_plugin_lifecycle(mutation: str) -> None:
+    sink = EffectCapableSink()
+    sinks: dict[str, EffectCapableSink] = {"output": sink}
+    modes = {"output": "write"}
+    admission = validate_pipeline_sink_effect_capabilities(
+        sinks,  # type: ignore[arg-type]
+        configured_modes=modes,
+        required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+    )
+    if mutation == "instance":
+        sinks = {"output": EffectCapableSink()}
+    elif mutation == "mode":
+        modes = {"output": "append"}
+    else:
+        sink.commit_effect = None  # type: ignore[assignment]
+
+    with pytest.raises(SinkEffectCapabilityError, match="does not bind"):
+        _start_follower_plugin_lifecycle(
+            transforms=(),
+            sinks=sinks,  # type: ignore[arg-type]
+            configured_modes=modes,
+            admission=admission,
+            ctx=object(),  # type: ignore[arg-type]
+        )
+
+    assert sink.on_start_calls == 0
+    assert all(candidate.on_start_calls == 0 for candidate in sinks.values())
+
+
+def test_follower_consumes_unchanged_receipt_without_duplicate_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    sink = EffectCapableSink()
+    sinks = {"output": sink}
+    modes = {"output": "write"}
+    admission = validate_pipeline_sink_effect_capabilities(
+        sinks,  # type: ignore[arg-type]
+        configured_modes=modes,
+        required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+    )
+    monkeypatch.setattr(
+        "elspeth.engine.orchestrator.preflight.validate_sink_effect_capability",
+        lambda *_args, **_kwargs: pytest.fail("follower receipt consumption must be match-only"),
+    )
+
+    _start_follower_plugin_lifecycle(
+        transforms=(),
+        sinks=sinks,  # type: ignore[arg-type]
+        configured_modes=modes,
+        admission=admission,
+        ctx=object(),  # type: ignore[arg-type]
+    )
+
+    assert sink.on_start_calls == 1
 
 
 @pytest.mark.parametrize("mutation", ["instance", "mode", "name", "kind", "capability"])
@@ -802,6 +907,33 @@ def test_raw_sink_eligibility_rejects_legacy_adapter_without_constructing_it(
         )
 
     assert constructor_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("component", "message"),
+    [
+        ({"options": {}}, "plugin"),
+        ({"plugin": "capable"}, "options"),
+    ],
+)
+def test_raw_sink_eligibility_rejects_missing_plugin_or_options_before_manager_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    component: dict[str, object],
+    message: str,
+) -> None:
+    from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
+    from elspeth.plugins.infrastructure.runtime_factory import validate_sink_effect_eligibility_from_raw_config
+
+    monkeypatch.setattr(
+        "elspeth.plugins.infrastructure.manager.get_shared_plugin_manager",
+        lambda: pytest.fail("malformed raw sink must fail before plugin-manager lookup"),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        validate_sink_effect_eligibility_from_raw_config(
+            {"sinks": {"output": component}},
+            purpose=SinkEffectExecutionPurpose.FRESH,
+        )
 
 
 @pytest.mark.parametrize("tamper", ["name", "sink", "config", "purpose"])

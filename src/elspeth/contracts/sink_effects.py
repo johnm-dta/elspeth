@@ -173,6 +173,15 @@ def _require_lower_hex_64(value: object, field_name: str) -> None:
         raise ValueError(f"{field_name} must be lowercase 64-character hexadecimal")
 
 
+def _require_utc_microsecond_timestamp(value: object, field_name: str) -> None:
+    if not isinstance(value, str) or _UTC_MICROSECOND_TIMESTAMP.fullmatch(value) is None:
+        raise ValueError(f"{field_name} must be an exact UTC microsecond timestamp")
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be a valid UTC timestamp") from exc
+
+
 def _require_bounded_positive_int(value: object, field_name: str, maximum: int) -> None:
     require_int(value, field_name)
     assert isinstance(value, int)
@@ -418,6 +427,11 @@ class _AuditExportReaderBinding:
     signer_key_id: str
     record_count: int
     total_bytes: int
+    exported_at: str
+    source_completed_at: str
+    source_status: str
+    last_chunk_seal_hash: str
+    snapshot_seal_hash: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,7 +448,7 @@ class RestrictedAuditExportSnapshotReader:
     __binding: _AuditExportReaderBinding
     __chunks: tuple[AuditExportSnapshotChunkInput, ...]
     __signed_manifest: AuditExportSignedManifestInput
-    __limits: tuple[int, int, int]
+    __limits: tuple[int, int, int, int, int]
     __store_resolver: _AuditExportReaderStoreAccess
 
     def __init__(self) -> None:
@@ -461,16 +475,24 @@ class RestrictedAuditExportSnapshotReader:
     def iter_verified_chunks(self) -> Iterator[bytes]:
         cumulative_bytes = 0
         cumulative_records = 0
-        max_total_bytes, max_total_records, max_chunks = self.__limits
+        max_total_bytes, max_total_records, max_chunks, max_chunk_bytes, max_chunk_records = self.__limits
         if len(self.__chunks) > max_chunks:
             raise ValueError("reader chunk_count exceeds its configured bound")
         for expected_ordinal, descriptor in enumerate(self.__chunks):
             if descriptor.ordinal != expected_ordinal:
                 raise ValueError("reader chunk ordinals are not dense and ordered")
+            if descriptor.size_bytes > max_chunk_bytes:
+                raise ValueError("reader chunk size_bytes exceeds max_chunk_bytes")
+            if descriptor.record_count > max_chunk_records:
+                raise ValueError("reader chunk record_count exceeds max_chunk_records")
             content = self.__store_resolver.resolve(descriptor.content_ref)
+            if len(content) > max_chunk_bytes:
+                raise ValueError("reader observed chunk bytes exceed max_chunk_bytes")
             _verify_content_bytes(content, descriptor.content_hash, descriptor.size_bytes, "chunk")
             observed_records = self.__store_resolver.count_records(content)
             require_int(observed_records, "observed chunk record_count", min_value=0)
+            if observed_records > max_chunk_records:
+                raise ValueError("reader observed chunk records exceed max_chunk_records")
             if observed_records != descriptor.record_count:
                 raise ValueError("reader chunk record_count does not match its bound descriptor")
             cumulative_bytes += len(content)
@@ -510,20 +532,18 @@ class RestrictedAuditExportSnapshotReader:
         chunks: tuple[AuditExportSnapshotChunkInput, ...],
         signed_manifest: AuditExportSignedManifestInput,
     ) -> bool:
+        binding = self.__binding
         return (
-            self.__binding
-            == _AuditExportReaderBinding(
-                snapshot_id=snapshot_id,
-                source_run_id=source_run_id,
-                registry_key_hash=registry_key_hash,
-                manifest_hash=manifest_hash,
-                snapshot_hash=snapshot_hash,
-                export_format=export_format,
-                signing_mode=signing_mode,
-                signer_key_id=signer_key_id,
-                record_count=record_count,
-                total_bytes=total_bytes,
-            )
+            binding.snapshot_id == snapshot_id
+            and binding.source_run_id == source_run_id
+            and binding.registry_key_hash == registry_key_hash
+            and binding.manifest_hash == manifest_hash
+            and binding.snapshot_hash == snapshot_hash
+            and binding.export_format is export_format
+            and binding.signing_mode is signing_mode
+            and binding.signer_key_id == signer_key_id
+            and binding.record_count == record_count
+            and binding.total_bytes == total_bytes
             and self.__chunks == chunks
             and self.__signed_manifest == signed_manifest
         )
@@ -580,14 +600,7 @@ def _verify_signed_manifest_bytes(
     ):
         _require_lower_hex_64(manifest[field_name], f"signed manifest {field_name}")
     for field_name in ("exported_at", "source_completed_at"):
-        timestamp = manifest[field_name]
-        assert isinstance(timestamp, str)
-        if _UTC_MICROSECOND_TIMESTAMP.fullmatch(timestamp) is None:
-            raise ValueError(f"signed manifest {field_name} must be an exact UTC microsecond timestamp")
-        try:
-            datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
-        except ValueError as exc:
-            raise ValueError(f"signed manifest {field_name} must be a valid UTC timestamp") from exc
+        _require_utc_microsecond_timestamp(manifest[field_name], f"signed manifest {field_name}")
     if manifest["hash_algorithm"] != "sha256":
         raise ValueError("signed manifest hash_algorithm must equal 'sha256'")
     if manifest["record_type"] != "manifest":
@@ -611,6 +624,11 @@ def _verify_signed_manifest_bytes(
         "record_count": binding.record_count,
         "total_bytes": binding.total_bytes,
         "chunk_count": chunk_count,
+        "exported_at": binding.exported_at,
+        "source_completed_at": binding.source_completed_at,
+        "source_status": binding.source_status,
+        "last_chunk_seal_hash": binding.last_chunk_seal_hash,
+        "snapshot_seal_hash": binding.snapshot_seal_hash,
     }
     for field_name, expected in expected_fields.items():
         if manifest[field_name] != expected:
@@ -629,6 +647,11 @@ def _create_restricted_audit_export_snapshot_reader(
     signer_key_id: str,
     record_count: int,
     total_bytes: int,
+    exported_at: str,
+    source_completed_at: str,
+    source_status: str,
+    last_chunk_seal_hash: str,
+    snapshot_seal_hash: str,
     chunks: Sequence[AuditExportSnapshotChunkInput],
     signed_manifest: AuditExportSignedManifestInput,
     store_resolver: Callable[[str], bytes],
@@ -637,14 +660,29 @@ def _create_restricted_audit_export_snapshot_reader(
     max_total_bytes: int = _AUDIT_EXPORT_MAX_TOTAL_BYTES,
     max_total_records: int = _AUDIT_EXPORT_MAX_TOTAL_RECORDS,
     max_chunks: int = _AUDIT_EXPORT_MAX_CHUNKS,
+    max_chunk_bytes: int = _AUDIT_EXPORT_MAX_CHUNK_BYTES,
+    max_chunk_records: int = _AUDIT_EXPORT_MAX_CHUNK_RECORDS,
 ) -> RestrictedAuditExportSnapshotReader:
     """Internal trusted factory used after registry/store verification."""
     chunk_tuple = tuple(chunks)
     _require_bounded_positive_int(max_total_bytes, "max_total_bytes", _AUDIT_EXPORT_MAX_TOTAL_BYTES)
     _require_bounded_positive_int(max_total_records, "max_total_records", _AUDIT_EXPORT_MAX_TOTAL_RECORDS)
     _require_bounded_positive_int(max_chunks, "max_chunks", _AUDIT_EXPORT_MAX_CHUNKS)
+    _require_bounded_positive_int(max_chunk_bytes, "max_chunk_bytes", _AUDIT_EXPORT_MAX_CHUNK_BYTES)
+    _require_bounded_positive_int(max_chunk_records, "max_chunk_records", _AUDIT_EXPORT_MAX_CHUNK_RECORDS)
+    _require_utc_microsecond_timestamp(exported_at, "exported_at")
+    _require_utc_microsecond_timestamp(source_completed_at, "source_completed_at")
+    if not isinstance(source_status, str) or source_status not in {"completed", "completed_with_failures", "empty"}:
+        raise ValueError("source_status is not export-terminal")
+    _require_lower_hex_64(last_chunk_seal_hash, "last_chunk_seal_hash")
+    _require_lower_hex_64(snapshot_seal_hash, "snapshot_seal_hash")
     if total_bytes > max_total_bytes or record_count > max_total_records or len(chunk_tuple) > max_chunks:
         raise ValueError("snapshot exceeds configured reader limits")
+    for chunk in chunk_tuple:
+        if chunk.size_bytes > max_chunk_bytes:
+            raise ValueError("snapshot chunk size_bytes exceeds max_chunk_bytes")
+        if chunk.record_count > max_chunk_records:
+            raise ValueError("snapshot chunk record_count exceeds max_chunk_records")
     binding = _AuditExportReaderBinding(
         snapshot_id=snapshot_id,
         source_run_id=source_run_id,
@@ -656,6 +694,11 @@ def _create_restricted_audit_export_snapshot_reader(
         signer_key_id=signer_key_id,
         record_count=record_count,
         total_bytes=total_bytes,
+        exported_at=exported_at,
+        source_completed_at=source_completed_at,
+        source_status=source_status,
+        last_chunk_seal_hash=last_chunk_seal_hash,
+        snapshot_seal_hash=snapshot_seal_hash,
     )
     manifest_bytes = store_resolver(signed_manifest.content_ref)
     _verify_content_bytes(manifest_bytes, signed_manifest.content_hash, signed_manifest.size_bytes, "signed manifest")
@@ -666,7 +709,11 @@ def _create_restricted_audit_export_snapshot_reader(
     object.__setattr__(reader, "_RestrictedAuditExportSnapshotReader__binding", binding)
     object.__setattr__(reader, "_RestrictedAuditExportSnapshotReader__chunks", chunk_tuple)
     object.__setattr__(reader, "_RestrictedAuditExportSnapshotReader__signed_manifest", signed_manifest)
-    object.__setattr__(reader, "_RestrictedAuditExportSnapshotReader__limits", (max_total_bytes, max_total_records, max_chunks))
+    object.__setattr__(
+        reader,
+        "_RestrictedAuditExportSnapshotReader__limits",
+        (max_total_bytes, max_total_records, max_chunks, max_chunk_bytes, max_chunk_records),
+    )
     object.__setattr__(
         reader,
         "_RestrictedAuditExportSnapshotReader__store_resolver",

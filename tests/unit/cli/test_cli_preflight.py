@@ -102,6 +102,46 @@ def test_cli_run_rejects_raw_legacy_sink_before_key_vault_resolution(tmp_path: P
     load_secrets.assert_not_called()
 
 
+def test_cli_fresh_run_screens_pipeline_and_export_lanes_before_secret_loading(tmp_path: Path) -> None:
+    import yaml
+
+    from elspeth.engine.orchestrator.preflight import SinkEffectCapabilityError, SinkEffectExecutionPurpose
+
+    settings_path = tmp_path / "dual-lane.yaml"
+    settings_path.write_text(
+        yaml.dump(
+            {
+                "sources": {"primary": {"plugin": "csv", "options": {"path": "input.csv"}}},
+                "sinks": {
+                    "pipeline": {"plugin": "csv", "options": {"path": "output.csv"}},
+                    "audit": {"plugin": "json", "options": {"path": "audit.jsonl"}},
+                },
+                "landscape": {"export": {"enabled": True, "sink": "audit"}},
+            }
+        )
+    )
+    purposes: list[SinkEffectExecutionPurpose] = []
+
+    def validate(_raw: object, *, purpose: SinkEffectExecutionPurpose) -> dict[str, object]:
+        purposes.append(purpose)
+        if purpose is SinkEffectExecutionPurpose.AUDIT_EXPORT:
+            raise SinkEffectCapabilityError("export lane rejected")
+        return {}
+
+    with (
+        patch(
+            "elspeth.plugins.infrastructure.runtime_factory.validate_sink_effect_eligibility_from_raw_config",
+            side_effect=validate,
+        ),
+        patch("elspeth.cli._load_settings_with_secrets") as load_settings_with_secrets,
+    ):
+        result = runner.invoke(app, ["run", "-s", str(settings_path), "--execute"])
+
+    assert result.exit_code == 1
+    assert purposes == [SinkEffectExecutionPurpose.FRESH, SinkEffectExecutionPurpose.AUDIT_EXPORT]
+    load_settings_with_secrets.assert_not_called()
+
+
 def _make_resume_config_and_database(tmp_path: Path) -> tuple[Path, Path]:
     import yaml
 

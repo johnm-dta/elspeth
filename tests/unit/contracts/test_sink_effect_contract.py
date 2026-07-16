@@ -82,8 +82,13 @@ def _export_input(
     *,
     signing_mode: AuditExportSigningMode = AuditExportSigningMode.UNSIGNED,
     chunk_bytes: bytes = b'{"record":1}\n',
+    chunk_record_count: int = 1,
     objects_out: dict[str, bytes] | None = None,
     manifest_mutator: Callable[[dict[str, object]], object] | None = None,
+    reader_binding_overrides: dict[str, object] | None = None,
+    max_chunk_bytes: int | None = None,
+    max_chunk_records: int | None = None,
+    record_counter: Callable[[bytes], int] | None = None,
 ) -> SinkEffectAuditExportSnapshotInput:
     snapshot_id = "1" * 64
     registry_key_hash = "2" * 64
@@ -100,7 +105,7 @@ def _export_input(
         content_ref=f"sha256:{chunk_hash}",
         content_hash=chunk_hash,
         size_bytes=len(chunk_bytes),
-        record_count=1,
+        record_count=chunk_record_count,
     )
     manifest_object = {
         "chunk_count": 1,
@@ -112,7 +117,7 @@ def _export_input(
         "last_chunk_seal_hash": "7" * 64,
         "manifest_hash": manifest_hash,
         "record_chain_algorithm": record_chain_algorithm,
-        "record_count": 1,
+        "record_count": chunk_record_count,
         "record_type": "manifest",
         "registry_key_hash": registry_key_hash,
         "run_id": "source-run-1",
@@ -145,22 +150,36 @@ def _export_input(
     )
     objects = objects_out if objects_out is not None else {}
     objects.update({chunk.content_ref: chunk_bytes, signed_manifest.content_ref: manifest_bytes})
-    reader = _create_restricted_audit_export_snapshot_reader(
-        snapshot_id=snapshot_id,
-        source_run_id="source-run-1",
-        registry_key_hash=registry_key_hash,
-        manifest_hash=manifest_hash,
-        snapshot_hash=snapshot_hash,
-        export_format=AuditExportFormat.JSON,
-        signing_mode=signing_mode,
-        signer_key_id=signer_key_id,
-        record_count=1,
-        total_bytes=len(chunk_bytes),
-        chunks=(chunk,),
-        signed_manifest=signed_manifest,
-        store_resolver=objects.__getitem__,
-        record_counter=lambda content: content.count(b"\n"),
-        signed_manifest_verifier=lambda _content, _descriptor: None,
+    reader_kwargs: dict[str, object] = {
+        "snapshot_id": snapshot_id,
+        "source_run_id": "source-run-1",
+        "registry_key_hash": registry_key_hash,
+        "manifest_hash": manifest_hash,
+        "snapshot_hash": snapshot_hash,
+        "export_format": AuditExportFormat.JSON,
+        "signing_mode": signing_mode,
+        "signer_key_id": signer_key_id,
+        "record_count": chunk_record_count,
+        "total_bytes": len(chunk_bytes),
+        "exported_at": "2026-07-16T01:02:03.456789Z",
+        "source_completed_at": "2026-07-16T01:02:03.456789Z",
+        "source_status": "completed",
+        "last_chunk_seal_hash": "7" * 64,
+        "snapshot_seal_hash": "8" * 64,
+        "chunks": (chunk,),
+        "signed_manifest": signed_manifest,
+        "store_resolver": objects.__getitem__,
+        "record_counter": record_counter or (lambda content: content.count(b"\n")),
+        "signed_manifest_verifier": lambda _content, _descriptor: None,
+    }
+    if reader_binding_overrides is not None:
+        reader_kwargs.update(reader_binding_overrides)
+    if max_chunk_bytes is not None:
+        reader_kwargs["max_chunk_bytes"] = max_chunk_bytes
+    if max_chunk_records is not None:
+        reader_kwargs["max_chunk_records"] = max_chunk_records
+    reader = _create_restricted_audit_export_snapshot_reader(  # type: ignore[arg-type]
+        **reader_kwargs,
     )
     return SinkEffectAuditExportSnapshotInput(
         snapshot_id=snapshot_id,
@@ -172,7 +191,7 @@ def _export_input(
         export_format=AuditExportFormat.JSON,
         signing_mode=signing_mode,
         signer_key_id=signer_key_id,
-        record_count=1,
+        record_count=chunk_record_count,
         total_bytes=len(chunk_bytes),
         chunk_count=1,
         chunks=(chunk,),
@@ -894,6 +913,101 @@ def test_reader_rejects_non_string_v2_manifest_field(field_name: str) -> None:
 def test_reader_rejects_non_string_non_null_v2_signature() -> None:
     with pytest.raises(TypeError, match="signature"):
         _export_input(manifest_mutator=lambda manifest: manifest.__setitem__("signature", 1))
+
+
+@pytest.mark.parametrize(
+    ("field_name", "different_valid_value"),
+    [
+        ("exported_at", "2026-07-16T01:02:04.456789Z"),
+        ("source_completed_at", "2026-07-16T01:02:02.456789Z"),
+        ("source_status", "empty"),
+        ("last_chunk_seal_hash", "9" * 64),
+        ("snapshot_seal_hash", "a" * 64),
+    ],
+)
+def test_reader_rejects_valid_but_unregistered_final_manifest_fact(
+    field_name: str,
+    different_valid_value: str,
+) -> None:
+    with pytest.raises(ValueError, match=field_name):
+        _export_input(manifest_mutator=lambda manifest: manifest.__setitem__(field_name, different_valid_value))
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("exported_at", "2026-07-16T01:02:03Z"),
+        ("source_completed_at", "not-a-timestamp"),
+        ("source_status", "running"),
+        ("last_chunk_seal_hash", "A" * 64),
+        ("snapshot_seal_hash", "short"),
+    ],
+)
+def test_reader_factory_rejects_invalid_registered_final_manifest_fact(field_name: str, invalid_value: str) -> None:
+    with pytest.raises(ValueError, match=field_name):
+        _export_input(reader_binding_overrides={field_name: invalid_value})
+
+
+@pytest.mark.parametrize(
+    ("chunk_bytes", "chunk_records", "max_chunk_bytes", "max_chunk_records", "message"),
+    [
+        (b"0123456789", 1, 9, 1, "max_chunk_bytes"),
+        (b"one\ntwo\n", 2, 8, 1, "max_chunk_records"),
+    ],
+)
+def test_reader_factory_enforces_configured_per_chunk_limits_below_hard_maxima(
+    chunk_bytes: bytes,
+    chunk_records: int,
+    max_chunk_bytes: int,
+    max_chunk_records: int,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _export_input(
+            chunk_bytes=chunk_bytes,
+            chunk_record_count=chunk_records,
+            max_chunk_bytes=max_chunk_bytes,
+            max_chunk_records=max_chunk_records,
+        )
+
+
+def test_reader_rechecks_configured_chunk_byte_limit_against_store_observation() -> None:
+    objects: dict[str, bytes] = {}
+    export_input = _export_input(objects_out=objects, max_chunk_bytes=13, max_chunk_records=1)
+    chunk = export_input.chunks[0]
+    objects[chunk.content_ref] = b'{"record":10}\n'
+
+    with pytest.raises(ValueError, match="max_chunk_bytes"):
+        list(export_input.reader.iter_verified_chunks())
+
+
+def test_reader_rechecks_configured_chunk_record_limit_against_store_observation() -> None:
+    observed_records = [1]
+    export_input = _export_input(
+        max_chunk_bytes=64,
+        max_chunk_records=1,
+        record_counter=lambda _content: observed_records[0],
+    )
+    observed_records[0] = 2
+
+    with pytest.raises(ValueError, match="max_chunk_records"):
+        list(export_input.reader.iter_verified_chunks())
+
+
+def test_reader_rechecks_configured_chunk_limit_after_descriptor_tamper() -> None:
+    objects: dict[str, bytes] = {}
+    export_input = _export_input(objects_out=objects, max_chunk_bytes=13, max_chunk_records=1)
+    chunk = export_input.chunks[0]
+    replacement = b"x" * 14
+    replacement_hash = _sha256(replacement)
+    replacement_ref = f"sha256:{replacement_hash}"
+    objects[replacement_ref] = replacement
+    object.__setattr__(chunk, "content_ref", replacement_ref)
+    object.__setattr__(chunk, "content_hash", replacement_hash)
+    object.__setattr__(chunk, "size_bytes", len(replacement))
+
+    with pytest.raises(ValueError, match="max_chunk_bytes"):
+        list(export_input.reader.iter_verified_chunks())
 
 
 def test_restricted_context_is_frozen() -> None:

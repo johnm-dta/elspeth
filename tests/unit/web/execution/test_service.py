@@ -489,6 +489,24 @@ def mock_session_service() -> MagicMock:
     return svc
 
 
+@pytest.fixture(autouse=True)
+def isolate_raw_sink_effect_eligibility_gate(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Keep unrelated service mechanics tests behind an admitted raw gate.
+
+    The two raw-gate regressions install their own validator behavior.  The
+    rejection-ordering test intentionally exercises the real legacy adapter
+    rejection and therefore opts out of this isolation fixture.
+    """
+    if request.node.name == "test_sink_effect_rejection_precedes_status_landscape_and_payload_resources":
+        yield
+        return
+    with patch(
+        "elspeth.web.execution.service.validate_sink_effect_eligibility_from_raw_config",
+        return_value={},
+    ):
+        yield
+
+
 @pytest.fixture
 def service(
     mock_loop: MagicMock,
@@ -1477,6 +1495,50 @@ class TestExecutionFanoutGuard:
 class TestWebRuntimeInfrastructure:
     """Regression coverage for web execution's orchestrator runtime wiring."""
 
+    def test_raw_pipeline_and_export_eligibility_precede_secret_resolution_without_shape_skip(
+        self,
+        service: ExecutionServiceImpl,
+    ) -> None:
+        from elspeth.engine.orchestrator.preflight import SinkEffectCapabilityError, SinkEffectExecutionPurpose
+
+        pipeline_yaml = """
+sinks:
+  pipeline:
+    plugin: json
+    options: {}
+  audit:
+    plugin: json
+    options: {}
+landscape:
+  export:
+    enabled: true
+    sink: audit
+"""
+        secret_service = MagicMock(spec=["list_refs"])
+        secret_service.list_refs.return_value = []
+        service._secret_service = secret_service
+        purposes: list[SinkEffectExecutionPurpose] = []
+
+        def validate(_raw: object, *, purpose: SinkEffectExecutionPurpose) -> dict[str, object]:
+            purposes.append(purpose)
+            if purpose is SinkEffectExecutionPurpose.AUDIT_EXPORT:
+                raise SinkEffectCapabilityError("export lane rejected")
+            return {}
+
+        with (
+            patch(
+                "elspeth.web.execution.service.validate_sink_effect_eligibility_from_raw_config",
+                side_effect=validate,
+            ),
+            patch("elspeth.core.secrets.resolve_secret_refs") as resolve_secret_refs,
+            pytest.raises(SinkEffectCapabilityError, match="export lane"),
+        ):
+            service._run_pipeline(str(uuid4()), pipeline_yaml, threading.Event(), user_id="alice")
+
+        assert purposes == [SinkEffectExecutionPurpose.FRESH, SinkEffectExecutionPurpose.AUDIT_EXPORT]
+        secret_service.list_refs.assert_not_called()
+        resolve_secret_refs.assert_not_called()
+
     def test_sink_effect_rejection_precedes_status_landscape_and_payload_resources(
         self,
         service: ExecutionServiceImpl,
@@ -1909,7 +1971,7 @@ class TestB3Construction:
             "elspeth.web.execution.service.load_run_accounting_from_db",
             return_value=_run_accounting_for_status(RunStatus.COMPLETED),
         ):
-            service._run_pipeline(str(uuid4()), "yaml", threading.Event())
+            service._run_pipeline(str(uuid4()), _TEST_PIPELINE_YAML, threading.Event())
 
         # B3: LandscapeDB opened through the deployment-gated factory.
         mock_open_landscape.assert_called_once_with(service._settings)
@@ -1952,7 +2014,7 @@ class TestB3Construction:
                 return_value=_run_accounting_for_status(RunStatus.COMPLETED),
             ),
         ):
-            service._run_pipeline(str(uuid4()), "yaml", threading.Event())
+            service._run_pipeline(str(uuid4()), _TEST_PIPELINE_YAML, threading.Event())
 
         mock_from_settings.assert_called_once_with(mock_load.return_value.rate_limit, state_dir=Path("/tmp/custom-web-state"))
 
@@ -2544,7 +2606,7 @@ class TestB7ExceptionHandling:
         mock_landscape.side_effect = KeyboardInterrupt("ctrl-c")
 
         with _admitted_runtime_setup(), pytest.raises(KeyboardInterrupt):
-            service._run_pipeline(str(uuid4()), "yaml", threading.Event())
+            service._run_pipeline(str(uuid4()), _TEST_PIPELINE_YAML, threading.Event())
 
         # R6: The 'running' update went through, but the 'failed' update was skipped
         calls = mock_session_service.update_run_status.call_args_list
@@ -2564,7 +2626,7 @@ class TestB7ExceptionHandling:
         mock_landscape.side_effect = SystemExit(1)
 
         with _admitted_runtime_setup(), pytest.raises(SystemExit):
-            service._run_pipeline(str(uuid4()), "yaml", threading.Event())
+            service._run_pipeline(str(uuid4()), _TEST_PIPELINE_YAML, threading.Event())
 
         # R6: The 'running' update went through, but the 'failed' update was skipped
         calls = mock_session_service.update_run_status.call_args_list
@@ -2583,7 +2645,7 @@ class TestB7ExceptionHandling:
         with _admitted_runtime_setup(), patch("elspeth.web.execution.service.open_landscape_db") as mock_db:
             mock_db.side_effect = RuntimeError("boom")
             with pytest.raises(RuntimeError):
-                service._run_pipeline(run_id, "yaml", event)
+                service._run_pipeline(run_id, _TEST_PIPELINE_YAML, event)
 
         # finally must have removed the event
         assert run_id not in service._shutdown_events
@@ -2978,7 +3040,7 @@ class TestCancelMechanism:
 
         # Should NOT raise — graceful exit
         with _admitted_runtime_setup():
-            service._run_pipeline(run_id, "yaml", threading.Event())
+            service._run_pipeline(run_id, _TEST_PIPELINE_YAML, threading.Event())
 
         # No Orchestrator or LandscapeDB instantiated (early return)
         mock_landscape.assert_not_called()
@@ -3031,7 +3093,7 @@ class TestCancelMechanism:
         mock_session_service.get_run.return_value = _run_record_stub(status="completed")
 
         with _admitted_runtime_setup(), pytest.raises(ValueError, match="completed"):
-            service._run_pipeline(run_id, "yaml", threading.Event())
+            service._run_pipeline(run_id, _TEST_PIPELINE_YAML, threading.Event())
 
     @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
@@ -3080,7 +3142,7 @@ class TestCancelMechanism:
         service._broadcaster.broadcast = spy_broadcast  # type: ignore[assignment]
 
         with _admitted_runtime_setup(), pytest.raises(ValueError, match="sentinel-existing-id") as exc_info:
-            service._run_pipeline(run_id, "yaml", threading.Event())
+            service._run_pipeline(run_id, _TEST_PIPELINE_YAML, threading.Event())
 
         # Discriminator #1: the propagating exception is bare ValueError, not the
         # narrow subclass — proves the catch did not match.
@@ -5030,7 +5092,7 @@ class TestRunningStatusFailure:
         cast(Any, service)._call_async = failing_call_async
 
         with _admitted_runtime_setup(), pytest.raises(ConnectionError):
-            service._run_pipeline(str(uuid4()), "yaml", threading.Event())
+            service._run_pipeline(str(uuid4()), _TEST_PIPELINE_YAML, threading.Event())
 
         # The except block tried to set "failed" via the second _call_async call
         assert call_count >= 2
@@ -6450,7 +6512,7 @@ class TestEdgeCompatibility:
         )
 
         with pytest.raises(GraphValidationError, match="Schema mismatch"):
-            service._run_pipeline(str(uuid4()), "yaml", threading.Event())
+            service._run_pipeline(str(uuid4()), _TEST_PIPELINE_YAML, threading.Event())
 
 
 # ── Blob Finalization Catch Widening ──────────────────────────────────
@@ -6629,7 +6691,7 @@ class TestTerminalOrderingInvariant:
             cast(Any, svc)._call_async = lambda coro: _real_loop.run_until_complete(coro)
 
             with contextlib.suppress(Exception):
-                svc._run_pipeline(str(uuid4()), "yaml", threading.Event())
+                svc._run_pipeline(str(uuid4()), _TEST_PIPELINE_YAML, threading.Event())
 
             terminals = _collect_terminal_types(mock_broadcaster)
             assert len(terminals) == 1, (
@@ -6695,7 +6757,7 @@ class TestTerminalOrderingInvariant:
         try:
             cast(Any, svc)._call_async = lambda coro: _real_loop.run_until_complete(coro)
 
-            svc._run_pipeline(str(uuid4()), "yaml", threading.Event())
+            svc._run_pipeline(str(uuid4()), _TEST_PIPELINE_YAML, threading.Event())
 
             terminals = _collect_terminal_types(mock_broadcaster)
             assert len(terminals) == 1, (

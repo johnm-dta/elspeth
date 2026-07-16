@@ -999,7 +999,28 @@ landscape:
     enabled: true
     sink: audit_archive
     format: json
-    sign: true
+    signing_mode: hmac_sha256
+    signer_key_id: audit-export-2026-q3-v1
+    signing_secret_ref: ELSPETH_AUDIT_EXPORT_SIGNING_KEY
+    signer_rotation_policy: multi_version
+    total_record_limit: 1000000
+    total_byte_limit: 1073741824
+    chunk_limit: 100
+    per_chunk_record_limit: 10000
+    per_chunk_byte_limit: 16777216
+    spool_root: .elspeth/audit-export-spool/primary
+    spool_cleanup_age_seconds: 86400
+    spool_cleanup_byte_budget: 1073741824
+    spool_cleanup_count_budget: 100
+    content_store:
+      content_store_id: audit-archive-v1
+      namespace: audit-exports
+      policy_version: retention-v1
+      retention_days: 2555
+      durability: replicated
+      orphan_grace_period_seconds: 86400
+      reference_safe_gc: true
+      cleanup_scope: candidate_unreferenced
   # Optional: JSONL change journal for emergency backup
   dump_to_jsonl: false
   dump_to_jsonl_path: ./runs/audit.journal.jsonl
@@ -1019,7 +1040,19 @@ landscape:
 | `dump_to_jsonl_include_payloads` | bool | `false` | Include request/response bodies in journal |
 | `dump_to_jsonl_payload_base_path` | string | (from payload_store) | Payload store path for inlining |
 
-### Landscape schema epoch 25
+### Landscape schema epoch 26
+
+Landscape epoch 26 adds durable sink-effect streams, effects, ordered members,
+attempts, and sealed audit-export snapshots. Exact epoch-25 SQLite databases
+migrate atomically during writable schema-managing initialization. PostgreSQL
+requires the approved schema-owner DDL; runtime roles remain DML-only. See the
+[epoch-26 migration guide](../operator/migrations/epoch-26-sink-effects.md) and
+[sink-effect recovery runbook](../runbooks/sink-effect-recovery.md).
+
+Code that understands only epoch 25 must not be rolled back over an epoch-26
+database.
+
+#### Historical epoch-25 artifact identity
 
 Landscape epoch 25 makes artifact logical-effect identity structural. Fresh
 SQLite and PostgreSQL schemas carry a partial unique index on
@@ -1088,9 +1121,66 @@ compatibility record rather than relying on a structural probe alone.
 | `enabled` | bool | `false` | Enable audit trail export after run |
 | `sink` | string | - | Sink name to export to (required when enabled) |
 | `format` | string | `csv` | Export format: `csv`, `json` |
-| `sign` | bool | `false` | HMAC sign each record for integrity |
+| `signing_mode` | string | `unsigned` | `unsigned` or `hmac_sha256` |
+| `signer_key_id` | string | `UNSIGNED` | Credential-free public signer key ID/version recorded in snapshot identity |
+| `signing_secret_ref` | string | - | Exact environment-variable name containing the HMAC key; required for `hmac_sha256` |
+| `signer_rotation_policy` | string | `multi_version` | `multi_version` allows a new signer identity for a new snapshot; `single_export` refuses a different signer identity for the same export lineage |
+| `exporter_version` | string | `landscape-exporter-v1` | Export implementation identity |
+| `serialization_version` | string | `audit-export-v2` | Canonical record serialization identity |
+| `chunking_algorithm_version` | string | `record-framing-v1` | Chunk-boundary algorithm identity |
+| `include_raw_error_rows` | bool | `false` | Include bounded raw error rows when policy permits |
+| `total_record_limit` | int | required when enabled | Maximum records derived for one snapshot |
+| `total_byte_limit` | int | required when enabled | Maximum serialized bytes derived for one snapshot |
+| `chunk_limit` | int | required when enabled | Maximum immutable chunks in one snapshot |
+| `per_chunk_record_limit` | int | required when enabled | Maximum records in one chunk |
+| `per_chunk_byte_limit` | int | required when enabled | Maximum serialized bytes in one chunk |
+| `spool_root` | path | required when enabled | Private path below `.elspeth/audit-export-spool`; absolute and parent-traversal paths are refused |
+| `spool_cleanup_age_seconds` | int | required when enabled | Minimum age used by bounded spool cleanup |
+| `spool_cleanup_byte_budget` | int | required when enabled | Maximum bytes considered by one cleanup pass |
+| `spool_cleanup_count_budget` | int | required when enabled | Maximum candidates considered by one cleanup pass |
+| `content_store` | object | required when enabled | Explicit durable immutable-content policy |
+| `content_store.content_store_id` | string | required | Credential-free store identity persisted with snapshots |
+| `content_store.namespace` | string | required | Credential-free content namespace |
+| `content_store.policy_version` | string | required | Retention/durability policy version |
+| `content_store.retention_days` | int | required | Retention period |
+| `content_store.durability` | string | required | `fsync` or `replicated` |
+| `content_store.orphan_grace_period_seconds` | int | required | Minimum age before an unreferenced candidate can be collected |
+| `content_store.reference_safe_gc` | bool | `true` | Must remain true |
+| `content_store.cleanup_scope` | string | `candidate_unreferenced` | Cleanup is limited to unreferenced candidates |
 
-**Audit export signing:** For legal-grade audit trail integrity, enable export signing by setting `landscape.export.sign = true` in your pipeline settings. This produces cryptographically signed exports (HMAC) that can be independently verified. Requires `ELSPETH_SIGNING_KEY` to be set (see [Environment Variables](environment-variables.md)).
+Enabled export is deliberately all-explicit: total capacity must fit within
+`chunk_limit × per_chunk_*_limit`, the spool must already be a private
+directory, and cleanup is age-, byte-, and count-bounded. Content-store
+retention never authorizes deletion of referenced snapshot objects.
+
+**Signing and rotation:** `signer_key_id` is a public, credential-free identity
+that includes the operator's key version. It participates in snapshot identity,
+so rotating a key means selecting a new key ID and secret reference together.
+`multi_version` preserves verification of old snapshots under their recorded
+IDs; `single_export` refuses an identity change within that export lineage.
+The value of `signing_secret_ref` is only the environment variable name. Key
+bytes, secret values, hashes of weak key material, and low-entropy key-derived identifiers
+are never persisted. See [Environment
+Variables](environment-variables.md) for secret provisioning.
+
+### Sink-effect resource and transport bounds
+
+Effect adapters apply bounds before external publication. The relevant
+settings and code-owned defaults are:
+
+| Scope | Limit or setting | Current contract |
+|---|---|---|
+| Local file staging | bytes / rows | Code-owned maximum: 1 GiB and 10,000,000 rows per prepared effect |
+| Local file target lock | lock wait | Code-owned bounded wait: 5 seconds; timeout aborts without publication |
+| S3 object | `max_object_bytes`, `max_record_chars` | Defaults: 256 MiB and 1,000,000 characters; hard maxima: 1 GiB and 8,000,000 characters |
+| Azure Blob object | `max_blob_bytes` | Default: 256 MiB; hard maximum: 1 GiB |
+| Effect ownership | lease TTL | Coordinator default: 5 minutes; takeover is allowed only after expiry and increments the generation |
+| Provider network | connect/read/request timeout | Must be bounded in the deployed provider client/SDK policy. These are not universal pipeline YAML fields; a transport failure becomes response-lost evidence and requires reconciliation, never assumed absence. |
+
+Do not extend a network timeout beyond the operational lease window without a
+coordinated lease/heartbeat policy. Do not raise staging or object limits by
+bypassing validation: split the workload or change the reviewed adapter
+contract.
 
 ### JSONL Change Journal
 

@@ -174,13 +174,20 @@ flowchart LR
     BLOCK --> INTAKE[Leader barrier intake AUX-03]
     INTAKE --> BATCH[Batch TransformProtocol.process or in-engine coalesce]
     BATCH --> COMPLETE[TS-15/16/17/18 complete_barrier]
-    PS --> SINK[SinkProtocol.write + flush]
-    COMPLETE -->|TS-16 or TS-17 sink emission| SINK
+    PS --> EFFECT[Reserve sink effect]
+    COMPLETE -->|TS-16 or TS-17 sink emission| EFFECT
     COMPLETE -->|TS-18 READY continuation| DRAIN
     COMPLETE -->|aggregation child TS-00, later transaction| READY
     COMPLETE -->|TS-15 consume only| RELEASED[No emitted scheduler work]
-    SINK -->|durable node state, artifact, token outcome| CLOSE[TS-11/12/13]
-    SINK -->|crash after outcome, before close| REPAIR[TS-14 resume repair]
+    EFFECT --> PREPARE[Inspect target and persist exact plan]
+    PREPARE --> LEASE[Acquire effect lease]
+    LEASE --> RECONCILE{Reconcile exact plan}
+    RECONCILE -->|NOT_APPLIED| COMMIT[Commit once]
+    RECONCILE -->|APPLIED_WITH_EXACT_DESCRIPTOR| FINALIZE[Finalize exact evidence]
+    RECONCILE -->|UNKNOWN| HALT[Keep effect and successors blocked]
+    COMMIT --> FINALIZE
+    FINALIZE -->|artifact and token outcomes durable| CLOSE[TS-11/12/13]
+    FINALIZE -->|crash after outcome, before close| REPAIR[TS-14 resume repair]
 ```
 
 Plugin ordering depends on the boundary: source loading precedes scheduling;
@@ -196,7 +203,7 @@ sink plugin I/O.
 | PB-03 | Declarative gate | `TokenTraversalEngine.handle_gate_node` reaches `GateExecutor.execute_config_gate`. This evaluates configuration; it is not an arbitrary plugin call. | Continue/fork children use TS-00. Discard, routed sink, and failure dispositions become TS-08/10/09; coalesce branch loss rides the same disposition. | gate routing, discard, fork, and branch-loss processor tests |
 | PB-04 | Aggregation barrier | A claimed token reaches a batch-aware transform. Leader and follower paths deposit TS-07 before leader journal intake. `BarrierIntakeCoordinator` opens batch membership, performs AUX-03, feeds adopted rows to `AggregationExecutor`, and triggers the batch plugin. | Successful sink-bound output uses atomic TS-15+TS-16/17. Non-sink continuation children are enqueued later as TS-00, not TS-18. A returned plugin error writes terminal failure outcomes then performs separate TS-15-only release; a raised plugin exception leaves rows BLOCKED for restore/retry. | scheduler intake slice tests; aggregation buffering/flush tests; `test_aggregation_recovery.py::test_failed_flush_crash_between_terminal_write_and_release_resumes` |
 | PB-05 | Coalesce barrier | Fork siblings deposit TS-07 under the coalesce key. Leader intake adopts the rows and replays durable branch losses; `CoalesceExecutor` resolves merge/failure/timeouts in engine code. | A successful terminal merge uses TS-15+TS-17; a successful nonterminal merge uses TS-15+TS-18. Group failures and late-arrival release are TS-15-only. Rows outside the firing snapshot remain BLOCKED for later intake/release. | coalesce processor tests; barrier-intake dispositions; complete-barrier scoped/snapshot tests |
-| PB-06 | Sink plugin | `SinkFlushCoordinator` groups pending tokens and calls `SinkExecutor.write`. The executor opens states, validates the boundary, invokes `SinkProtocol.write`, and flushes. For the primary non-diverted path, node states, artifact, and outcomes then commit in one audit transaction. Failsink diversion performs secondary I/O and persists per-token state/routing, artifact, and outcomes across separate commits; discard has its own per-token durability path. | Only tokens marked `scheduler_pending_sink` invoke TS-13 after the selected primary/diversion/discard evidence is durable. Failure before that evidence leaves sink debt open; failure after external I/O but before evidence can repeat I/O. | mocked-`SinkExecutor` callback-selection tests; real sink durability tests without scheduler close; sink diversion unit tests |
+| PB-06 | Sink plugin | `SinkFlushCoordinator` groups pending tokens and `SinkExecutor` submits a deterministic reservation to `SinkEffectCoordinator`. The coordinator reserves ordered members, inspects the target, persists the exact plan, acquires a generation-fenced lease, reconciles the plan, commits only after `NOT_APPLIED`, and atomically finalizes the exact artifact/member evidence. `APPLIED_WITH_EXACT_DESCRIPTOR` finalizes without another commit; `UNKNOWN` stops with sink debt open. Primary, failsink, discard/no-publication, and audit-export publication use this effect boundary. Production callers do not invoke legacy `write`/`flush`. | Only tokens with durable finalized member outcomes invoke TS-13. Returned or reconciled finalization is reused after restart; TS-14 closes scheduler debt from the existing outcome witness without re-publication. A predecessor stream blocks successors until the predecessor finalizes. | sink-effect coordinator seam tests; sink-specific reconcile tests; response-lost recovery integrations; scheduler close/repair tests |
 | PB-07 | Post-sink crash repair | Sink durability and token outcome can commit before the scheduler callback. Resume drains run the outcome-witness repair before reclaiming pending sinks. | TS-14 closes the handoff without repeating external I/O. | scheduler event repair test; processor `test_pending_sink_resume_repairs_already_outcomed_row_without_reemitting_sink` |
 | PB-08 | Follower worker | A follower claims READY work and executes row-level transforms/gates, but does not evaluate aggregation triggers or write sinks. It deposits barrier holds or owner-attributed sink handoffs for the leader. | TS-03 followed by TS-07, TS-08, TS-09, or TS-10. The leader later owns intake, sink write, and finalization. | follower processor tests with mocked traversal boundaries; `test_follower_join_and_drain.py` direct-repository disposition cases, not full plugin traversal |
 | PB-09 | Plugin lifecycle | Fresh leaders call `on_start` for sources, transforms, then sinks before source iteration. Resume starts transforms and sinks but deliberately skips the source. The CLI follower likewise starts and tears down transforms/sinks only. Cleanup calls `on_complete` then `close` for every successfully started plugin, including error paths. | Lifecycle hooks do not themselves move scheduler state; startup must precede any PB-01/02/06 call, and teardown follows the run/follower drain ceremony. | orchestrator lifecycle/cleanup tests, resume characterization, CLI follower startup failure, and follower teardown tests |
@@ -247,7 +254,7 @@ after a process death between the two commits.
 | Aggregation TS-15 completion | Non-sink child TS-00 enqueue(s) | Barrier inputs are already TERMINAL before continuations are scheduled; recovery of a crash in this interval requires positive confirmation. |
 | Coalesce decision/audit records | TS-15/17/18 `complete_barrier` | Barrier rows remain BLOCKED until exhaustive completion commits. |
 | In-memory branch-loss notification | Branch-loss row riding a later disposition/completion | Durable scheduler state and the branch-loss ledger, not memory, govern replay after restart. |
-| External `sink.write` and `flush` | Durable sink node states, artifact, and terminal outcomes | Before the audit transaction commits there is no internal witness; process death or deposition can repeat external I/O. Sink idempotency or an external transaction protocol must carry this seam. |
+| External sink publication | Durable sink-effect attempts, finalized artifact, member outcomes, and terminal token outcomes | Intent is durable before each external call. A lost response is reconciled against the exact persisted plan: exact absence permits one commit, exact application finalizes without another commit, and `UNKNOWN` blocks. Target adapters must supply conditional mutation, immutable evidence, or a target-side ledger; the engine never guesses. |
 | Sink node state, artifact, and terminal outcome | TS-11/12/13 scheduler terminalization | The terminal outcome is the witness for TS-14; external sink I/O must not repeat. |
 
 ## Orchestration ordering and quiescence
@@ -351,7 +358,7 @@ update this document only after reviewing the executed evidence:
 | Intake and identity | TS-00–TS-03, PB-01 | Idempotency, composed rollback, source-boundary exclusion, deterministic claim, real contention. |
 | Sink leasing and recovery | TS-04–TS-06, AUX-01/02 | Sink-bundle preservation, attempt/identity split, liveness and self-reap refusals, heartbeat-loss abandonment, real contention where claimed. |
 | Claimed dispositions | TS-07–TS-10, PB-02/03/08 | Real drain methods, state plus event plus payload/branch-loss effects, owner and membership refusals. |
-| Sink durability | TS-11–TS-14, PB-06/07 | External write ordering, primary/diversion/discard durability, strict owner and batch rollback, no duplicate re-emission after the terminal-outcome witness, and explicit characterization of the pre-witness duplication window. |
+| Sink durability | TS-11–TS-14, PB-06/07 | Reservation and predecessor ordering; inspect/plan/lease/reconcile/commit/finalize ordering; primary/diversion/discard durability; response-lost recovery; strict owner and batch rollback; and no duplicate re-emission after finalized effect or terminal-outcome evidence. |
 | Barrier completion | TS-15–TS-18, AUX-03–05, PB-04/05 | Token-carrying fenced consume/emit, compatibility-arm behavior, adoption and reset crash windows, branch-loss replay, late-arrival isolation, aggregation and coalesce plugin paths. |
 | Run/worker fencing and reads | AUX-06/07, RM-01–RM-06, F-06/07/10 | Membership and epoch refusals with zero payload mutation, eviction-before-reap ordering, leader/follower role separation, and positive/negative truth-table cases for every orchestration read. |
 | Plugin lifecycle | PB-09 | Fresh, resume, follower, partial-start failure, normal teardown, and exceptional teardown ordering for sources, transforms, and sinks. |
@@ -587,3 +594,4 @@ High-value candidate test suites:
 - [ADR-029: Journal Is Barrier Buffer Truth](adr/029-journal-is-barrier-buffer-truth.md)
 - [ADR-030: Multi-Worker Deployment Shape](adr/030-multi-worker-deployment-shape.md)
 - [Scheduler Lease Recovery](../runbooks/scheduler-lease-recovery.md)
+- [Sink Effect Recovery](../runbooks/sink-effect-recovery.md)

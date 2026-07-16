@@ -13,7 +13,7 @@ from elspeth.web.plugin_policy.profiles import LoweredPluginConfig, OperatorProf
 
 if TYPE_CHECKING:
     from elspeth.web.composer.state import CompositionState
-    from elspeth.web.plugin_policy.validation import PluginPolicyValidationResult
+    from elspeth.web.plugin_policy.validation import PluginPolicyValidationResult, ProfileAwareValidationResult
 
 
 class PolicyCatalogView:
@@ -108,8 +108,8 @@ class PolicyCatalogView:
     ) -> LoweredPluginConfig:
         """Lower authored profile options without exposing the binding.
 
-        This is used only for in-memory authoring validation. Persisted state
-        continues to retain the opaque alias and safe options.
+        Persisted state retains the opaque alias and safe options; this
+        compatibility boundary only returns an in-memory executable view.
         """
         if self._profiles is None:
             raise ValueError("plugin_has_no_operator_profile")
@@ -126,6 +126,18 @@ class PolicyCatalogView:
             state,
             snapshot=self.snapshot,
             profile_registry=self._profiles,
+            catalog=self._full,
+        )
+
+    def validate_composition_state(self, state: CompositionState) -> ProfileAwareValidationResult:
+        """Return the shared authored/executable validation projection."""
+        from elspeth.web.plugin_policy.validation import validate_authored_composition_state
+
+        return validate_authored_composition_state(
+            state,
+            snapshot=self.snapshot,
+            profile_registry=self._profiles,
+            catalog=self._full,
         )
 
     def post_call_hints(

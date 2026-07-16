@@ -16,6 +16,8 @@ from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.prompts import build_context_string
 from elspeth.web.composer.state import CompositionState, NodeSpec, OutputSpec, PipelineMetadata, SourceSpec
+from elspeth.web.composer.tools import ToolResult
+from elspeth.web.composer.yaml_generator import generate_public_yaml
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.service import _build_web_plugin_policy_evidence
@@ -310,7 +312,12 @@ def test_web_runtime_lowering_and_control_modes_use_generic_policy(mode: Control
     _policy, profiles, snapshot = _policy_context(settings)
     state = _guarded_state()
 
-    result = validate_plugin_policy(state, snapshot=snapshot, profile_registry=profiles)
+    result = validate_plugin_policy(
+        state,
+        snapshot=snapshot,
+        profile_registry=profiles,
+        catalog=create_catalog_service(),
+    )
 
     assert result.findings == ()
     assert dict(snapshot.control_modes)[PluginCapability.PROMPT_SHIELD] is mode
@@ -321,6 +328,117 @@ def test_web_runtime_lowering_and_control_modes_use_generic_policy(mode: Control
     assert result.executable_state.nodes[2].options["guardrail_identifier"] == "privatecontentmarker"
     for node in (result.executable_state.nodes[0], result.executable_state.nodes[2]):
         assert not {"access_key", "secret_key", "session_token", "endpoint_url"} & set(node.options)
+
+
+def test_profiled_prompt_shield_contract_uses_executable_binding_without_mutating_authored_state() -> None:
+    _policy, profiles, snapshot = _policy_context(_guardrail_settings())
+    catalog = create_catalog_service()
+    view = PolicyCatalogView(catalog, snapshot, profiles)
+    state = CompositionState(
+        source=SourceSpec(
+            plugin="csv",
+            on_success="scrape_in",
+            options={
+                "path": "rows.csv",
+                "schema": {"mode": "fixed", "fields": ["url: str"]},
+            },
+            on_validation_failure="discard",
+        ),
+        nodes=(
+            NodeSpec(
+                id="scrape",
+                node_type="transform",
+                plugin="web_scrape",
+                input="scrape_in",
+                on_success="shield_in",
+                on_error="discard",
+                options={
+                    "url_field": "url",
+                    "content_field": "page_text",
+                    "fingerprint_field": "page_fingerprint",
+                    "format": "text",
+                    "http": {
+                        "abuse_contact": "policy-test@foundryside.dev",
+                        "scraping_reason": "profile-aware contract integration test",
+                    },
+                    "schema": {"mode": "observed"},
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+            NodeSpec(
+                id="shield",
+                node_type="transform",
+                plugin=_AWS_PROMPT.name,
+                input="shield_in",
+                on_success="llm_in",
+                on_error="discard",
+                options={
+                    "profile": "prompt-default",
+                    "fields": ["page_text"],
+                    "schema": {"mode": "observed", "fields": None},
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+            NodeSpec(
+                id="llm",
+                node_type="transform",
+                plugin="llm",
+                input="llm_in",
+                on_success="output",
+                on_error="discard",
+                options={
+                    "profile": "llm-default",
+                    "prompt_template": "{{ row['page_text'] }}",
+                    "required_input_fields": ["page_text"],
+                    "schema": {"mode": "observed", "fields": None},
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(
+            OutputSpec(
+                name="output",
+                plugin="json",
+                options={"path": "out.jsonl", "schema": {"mode": "observed"}},
+                on_write_failure="discard",
+            ),
+        ),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+    result = view.validate_composition_state(state)
+
+    assert result.authored_state is state
+    assert result.authored_state.nodes[1].options["profile"] == "prompt-default"
+    assert "guardrail_identifier" not in result.authored_state.nodes[1].options
+    assert result.executable_state.nodes[1].options["guardrail_identifier"] == "privateguardrailmarker"
+    assert result.validation.is_valid, result.validation.errors
+    shield_contract = next(contract for contract in result.validation.edge_contracts if contract.from_id == "shield")
+    assert shield_contract.to_id == "llm"
+    assert "page_text" in shield_contract.producer_guarantees
+    assert shield_contract.consumer_requires == ("page_text",)
+    assert shield_contract.satisfied
+    assert not any(
+        warning.component == "node:shield" and "computed contract probe" in warning.message.lower()
+        for warning in result.validation.warnings
+    )
 
 
 def test_private_bindings_never_enter_authored_prompt_snapshot_or_policy_evidence() -> None:
@@ -340,6 +458,40 @@ def test_private_bindings_never_enter_authored_prompt_snapshot_or_policy_evidenc
 
     assert dict(evidence.selected_profile_aliases)[str(_AWS_PROMPT)] == "prompt-default"
     assert dict(evidence.selected_profile_aliases)[str(_AWS_CONTENT)] == "content-default"
+    for surface, rendered in surfaces.items():
+        for marker in _PRIVATE_MARKERS:
+            assert marker not in rendered, surface
+
+
+def test_private_profile_binding_never_reaches_tool_message_audit_yaml_or_logs(caplog: pytest.LogCaptureFixture) -> None:
+    _policy, profiles, snapshot = _policy_context(_guardrail_settings())
+    state = _guarded_state()
+    validation = PolicyCatalogView(create_catalog_service(), snapshot, profiles).validate_composition_state(state)
+    tool_result = ToolResult(
+        success=True,
+        updated_state=state,
+        validation=validation.validation,
+        affected_nodes=("prompt_shield", "content_safety"),
+    )
+    authored_payload = state.to_dict()
+    surfaces = {
+        "adapter_repr": repr(validation),
+        "tool_message": json.dumps(tool_result.to_dict(), sort_keys=True),
+        "proposal_arguments": json.dumps(authored_payload, sort_keys=True),
+        "proposal_arguments_redacted": json.dumps(authored_payload, sort_keys=True),
+        "persisted_state": json.dumps(authored_payload, sort_keys=True),
+        "public_yaml": generate_public_yaml(state),
+        "guided_audit_evidence": json.dumps(
+            {
+                "errors": [entry.to_dict() for entry in validation.validation.errors],
+                "warnings": [entry.to_dict() for entry in validation.validation.warnings],
+            },
+            sort_keys=True,
+        ),
+        "logs": caplog.text,
+    }
+
+    assert validation.executable_state.nodes[0].options["guardrail_identifier"] == "privateguardrailmarker"
     for surface, rendered in surfaces.items():
         for marker in _PRIVATE_MARKERS:
             assert marker not in rendered, surface

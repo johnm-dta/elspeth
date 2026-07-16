@@ -371,10 +371,14 @@ class ValidationEntry:
     component: str
     message: str
     severity: Severity
+    error_code: str | None = None
 
     def to_dict(self) -> dict[str, str]:
         """Serialize to a plain dict for JSON responses."""
-        return {"component": self.component, "message": self.message, "severity": self.severity}
+        result = {"component": self.component, "message": self.message, "severity": self.severity}
+        if self.error_code is not None:
+            result["error_code"] = self.error_code
+        return result
 
 
 EdgeContractDict = TypedDict(

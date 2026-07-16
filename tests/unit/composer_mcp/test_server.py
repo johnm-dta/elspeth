@@ -465,6 +465,61 @@ class TestDispatchTool:
         assert result["success"] is True
         assert isinstance(result["data"], str)
 
+    def test_local_trained_operator_generate_yaml_keeps_raw_profile_behavior_without_registry(
+        self,
+        scratch_dir: Path,
+    ) -> None:
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="llm_in",
+                options={"path": "/data/in.csv", "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+            nodes=(
+                NodeSpec(
+                    id="summarize",
+                    node_type="transform",
+                    plugin="llm",
+                    input="llm_in",
+                    on_success="main",
+                    on_error="discard",
+                    options={
+                        "profile": "operator-owned-alias",
+                        "prompt_template": "Summarise {{ row }}",
+                        "schema": {"mode": "observed"},
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            edges=(),
+            outputs=(
+                OutputSpec(
+                    name="main",
+                    plugin="json",
+                    options={
+                        "path": "outputs/out.jsonl",
+                        "schema": {"mode": "observed"},
+                        "mode": "write",
+                        "collision_policy": "auto_increment",
+                    },
+                    on_write_failure="discard",
+                ),
+            ),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        result = _dispatch_tool("generate_yaml", {}, state, _mock_catalog(), scratch_dir)
+
+        assert result["success"] is True
+        assert yaml.safe_load(result["data"])["transforms"][0]["options"]["profile"] == "operator-owned-alias"
+
     def test_generate_yaml_strips_blob_bound_source_storage_path(self, scratch_dir: Path) -> None:
         storage_path = "/data/blobs/session/98b1357d_input.csv"
         state = CompositionState(

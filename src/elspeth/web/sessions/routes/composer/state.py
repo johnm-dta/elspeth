@@ -558,6 +558,7 @@ async def import_state_yaml(
             session_id=session.id,
             plugin_snapshot=plugin_snapshot,
             profile_registry=request.app.state.operator_profile_registry,
+            catalog=request.app.state.catalog_service,
             runtime_preflight=None,
             preflight_exception_policy="persist_invalid",
             initial_version=imported_state.version,
@@ -734,6 +735,7 @@ async def seed_state_for_e2e(
             session_id=session.id,
             plugin_snapshot=plugin_snapshot,
             profile_registry=request.app.state.operator_profile_registry,
+            catalog=request.app.state.catalog_service,
             runtime_preflight=None,
             preflight_exception_policy="persist_invalid",
             initial_version=seeded_state.version,
@@ -789,6 +791,7 @@ async def _require_yaml_export_preflight(
             session_id=session_id,
             plugin_snapshot=plugin_snapshot,
             profile_registry=request.app.state.operator_profile_registry,
+            catalog=request.app.state.catalog_service,
         )
     except (
         TimeoutError,

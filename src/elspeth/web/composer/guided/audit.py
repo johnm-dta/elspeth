@@ -44,7 +44,7 @@ _VALID_ADVANCE_REASONS: frozenset[str] = frozenset({"recipe_applied", "user_adva
 # deliberately EXCLUDED: it is free-form validator text that echoes filesystem
 # paths and raw plugin / pydantic exception strings (see ``tools/_common.py``
 # path / ``{exc}`` messages).
-_SAFE_VALIDATION_ERROR_KEYS: frozenset[str] = frozenset({"component", "severity", "error_class"})
+_SAFE_VALIDATION_ERROR_KEYS: frozenset[str] = frozenset({"component", "severity", "error_code", "error_class"})
 
 
 def _redacted_validation_result(validation_result: Mapping[str, Any]) -> dict[str, Any]:

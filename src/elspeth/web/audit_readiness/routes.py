@@ -133,6 +133,7 @@ def create_audit_readiness_router() -> APIRouter:
                     plugin_policy_readiness=build_boot_plugin_policy_readiness(
                         policy=request.app.state.web_plugin_policy,
                         settings=request.app.state.runtime_web_plugin_config,
+                        catalog=request.app.state.catalog_service,
                     ),
                 ),
             )

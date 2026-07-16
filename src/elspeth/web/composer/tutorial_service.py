@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException, Request
 from sqlalchemy import func, select, update
@@ -107,6 +107,7 @@ def _tutorial_launch_blocker(
     snapshot: PluginAvailabilitySnapshot,
     tutorial_profile: str | None,
     profile_registry: OperatorProfileRegistry,
+    catalog: CatalogService,
 ) -> tuple[str, str] | None:
     """Return one sanitized launch blocker, or ``None`` when runnable."""
     try:
@@ -140,6 +141,7 @@ def _tutorial_launch_blocker(
         state,
         snapshot=snapshot,
         profile_registry=profile_registry,
+        catalog=catalog,
     )
     stage_codes: tuple[tuple[PolicyValidationStage, str], ...] = (
         ("plugin_enablement", "tutorial_plugin_unavailable"),
@@ -158,6 +160,7 @@ def _tutorial_launch_blocker(
         tutorial_profile=tutorial_profile,
         tutorial_state=state,
         profile_registry=profile_registry,
+        catalog=catalog,
     )
     if not readiness.tutorial_ready:
         failing = next(row for row in readiness.rows if row.status == "error")
@@ -188,6 +191,7 @@ async def _require_tutorial_launch_readiness(
         snapshot=snapshot,
         tutorial_profile=settings.tutorial_llm_profile,
         profile_registry=request.app.state.operator_profile_registry,
+        catalog=request.app.state.catalog_service,
     )
     if blocker is not None:
         code, detail = blocker
@@ -645,3 +649,7 @@ async def cleanup_tutorial_orphans(
             break
         offset += limit
     return TutorialOrphanCleanupResponse(deleted_count=deleted_count)
+
+
+if TYPE_CHECKING:
+    from elspeth.web.catalog.protocol import CatalogService

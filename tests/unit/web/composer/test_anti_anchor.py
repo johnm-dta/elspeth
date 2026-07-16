@@ -18,6 +18,7 @@ import pytest
 from elspeth.web.composer.anti_anchor import (
     AntiAnchorTracker,
     build_anti_anchor_hint,
+    build_drift_hint,
     should_inject_hint,
 )
 
@@ -49,6 +50,23 @@ def test_tracker_fires_on_three_same_tool_drift_failures() -> None:
     assert "set_pipeline" in hint
     assert "drift" in hint.lower()
     assert "different arguments" in hint
+
+
+def test_drift_hint_names_splice_for_one_node_linear_insertions() -> None:
+    failures = deque(
+        [
+            ("set_pipeline", "hash-a"),
+            ("set_pipeline", "hash-b"),
+            ("set_pipeline", "hash-c"),
+        ],
+        maxlen=5,
+    )
+
+    hint = build_drift_hint(failures)
+
+    assert "one-node linear insertion" in hint
+    assert "splice_transform" in hint
+    assert "full-replacement payloads" in hint
 
 
 def test_tracker_does_not_fire_on_mixed_tool_failures() -> None:

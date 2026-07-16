@@ -2572,9 +2572,10 @@ def build_plugin_policy_acceptance(
         secret_key = settings.secret_key
         if type(secret_key) is not str or len(secret_key.encode("utf-8")) < 32:
             raise ValueError("invalid generation key")
+        catalog = create_catalog_service()
         snapshot = build_plugin_snapshot(
             policy=policy,
-            catalog=create_catalog_service(),
+            catalog=catalog,
             profiles=profiles,
             principal_scope="system:aws-ecs-acceptance",
             secret_inventory=_AcceptanceSecretInventory(),
@@ -2586,6 +2587,7 @@ def build_plugin_policy_acceptance(
             tutorial_profile=runtime.tutorial_llm_profile,
             tutorial_state=_canonical_tutorial_policy_state(profile_alias=runtime.tutorial_llm_profile or ""),
             profile_registry=profiles,
+            catalog=catalog,
         )
     except Exception:
         raise AcceptanceCheckError("plugin_policy_settings") from None

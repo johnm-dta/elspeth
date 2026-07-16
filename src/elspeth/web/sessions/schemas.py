@@ -181,6 +181,7 @@ class ValidationEntryResponse(_StrictResponse):
     component: str
     message: str
     severity: str
+    error_code: str | None = None
 
 
 type CompositionObject = dict[str, JsonValue]

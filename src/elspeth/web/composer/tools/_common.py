@@ -59,6 +59,7 @@ from elspeth.web.composer.state import (
     EdgeSpec,
     NodeSpec,
     OutputSpec,
+    PipelineMetadata,
     SourceSpec,
     ValidationEntry,
     ValidationSummary,
@@ -71,6 +72,7 @@ from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
     SOURCE_AUTHORING_KEY,
     InterpretationRequirement,
+    serialize_authoring_review_options,
     strip_authoring_options,
 )
 from elspeth.web.paths import (
@@ -887,7 +889,7 @@ def _failure_result(
     with "No source configured." instead of the real option-shape
     error.
     """
-    validation = _prepend_rejection_entry(state.validate(), error_msg)
+    validation = _prepend_rejection_entry(state.validate(), error_msg, error_code=error_code)
     data = {_DATA_ERROR_KEY: error_msg}
     if error_code is not None:
         data["error_code"] = error_code
@@ -965,6 +967,8 @@ def build_plugin_schemas_for_failure(
 def _prepend_rejection_entry(
     base: ValidationSummary,
     error_msg: str,
+    *,
+    error_code: str | None = None,
 ) -> ValidationSummary:
     """Return a ValidationSummary with a leading rejected_mutation entry.
 
@@ -977,6 +981,7 @@ def _prepend_rejection_entry(
         component="rejected_mutation",
         message=error_msg,
         severity="high",
+        error_code=error_code,
     )
     return ValidationSummary(
         is_valid=False,
@@ -1827,25 +1832,53 @@ def _prevalidate_transform_for_context(
     plugin_name: str,
     options: Mapping[str, Any],
 ) -> str | None:
-    """Validate web-authored profile options through their ordinary resolver."""
-    authored = deep_thaw(strip_authoring_options(options))
-    plugin_id = PluginId("transform", plugin_name)
-    profiled_plugins = {candidate for candidate, _aliases in context.plugin_snapshot.usable_profile_aliases}
-    if "profile" not in authored or (plugin_name != "llm" and plugin_id not in profiled_plugins):
-        return _prevalidate_transform(plugin_name, options)
-
-    alias = authored.pop("profile")
+    """Validate one candidate transform through the shared profile adapter."""
+    candidate = CompositionState(
+        source=SourceSpec(
+            plugin="csv",
+            on_success="profile_prevalidation_in",
+            options={"schema": {"mode": "observed"}},
+            on_validation_failure="discard",
+        ),
+        nodes=(
+            NodeSpec(
+                id="profile_prevalidation",
+                node_type="transform",
+                plugin=plugin_name,
+                input="profile_prevalidation_in",
+                on_success="profile_prevalidation_out",
+                on_error="discard",
+                options=options,
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(
+            OutputSpec(
+                name="profile_prevalidation_out",
+                plugin="json",
+                options={"schema": {"mode": "observed"}},
+                on_write_failure="discard",
+            ),
+        ),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+    profile_validation = context.catalog.validate_composition_state(candidate)
+    blocking = tuple(
+        finding for finding in profile_validation.policy_findings if finding.stage in {"plugin_enablement", "operator_profile_options"}
+    )
+    if blocking:
+        return f"Invalid options for transform '{plugin_name}': {blocking[0].error_code}"
+    alias = options["profile"] if "profile" in options else plugin_name
     if not isinstance(alias, str):
         return f"Invalid options for transform '{plugin_name}': profile_unavailable"
-    try:
-        lowered = context.catalog.lower_operator_profile_options(
-            plugin_id,
-            alias=alias,
-            safe_options=authored,
-        )
-    except ValueError as exc:
-        return f"Invalid options for transform '{plugin_name}': {exc}"
-    return _prevalidate_transform(plugin_name, lowered.executable_options)
+    return _prevalidate_transform(plugin_name, profile_validation.executable_state.nodes[0].options)
 
 
 def _prevalidate_sink(plugin_name: str, options: dict[str, Any]) -> str | None:
@@ -1948,3 +1981,130 @@ ToolHandler = Callable[
     [dict[str, Any], CompositionState, ToolContext],
     ToolResult,
 ]
+
+
+def normalize_tool_result_validation(
+    result: ToolResult,
+    catalog: PolicyCatalogView,
+) -> ToolResult:
+    """Replace a tool's raw validation with the shared profile-aware result.
+
+    Handlers remain small state-transition functions and may construct their
+    provisional envelope with ``CompositionState.validate()``. This final
+    dispatch-boundary normalization is the sole outward authority.
+    """
+    shared = catalog.validate_composition_state(result.updated_state).validation
+    rejections = tuple(entry for entry in result.validation.errors if entry.component == "rejected_mutation")
+    if rejections:
+        shared = replace(
+            shared,
+            is_valid=False,
+            errors=(*rejections, *shared.errors),
+        )
+    return replace(result, validation=shared)
+
+
+def _serialize_authoring_options(options: Mapping[str, Any]) -> dict[str, Any]:
+    """Strip resolver-owned review evidence while retaining pending shells."""
+    return cast(dict[str, Any], deep_thaw(serialize_authoring_review_options(options)))
+
+
+def _serialize_set_pipeline_node(node: NodeSpec) -> dict[str, Any]:
+    payload = _serialize_node(node)
+    payload["options"] = _serialize_authoring_options(node.options)
+    return payload
+
+
+def _serialize_set_pipeline_source(
+    source: SourceSpec,
+    *,
+    allow_blob_binding: bool,
+) -> tuple[dict[str, Any] | None, str | None]:
+    options = _serialize_authoring_options(source.options)
+    blob_ref = source.options["blob_ref"] if "blob_ref" in source.options else None
+    if blob_ref is not None:
+        if not allow_blob_binding:
+            return None, "named or multiple blob-backed sources cannot round-trip through set_pipeline v1"
+        if type(blob_ref) is not str or not blob_ref.strip() or is_widened_blob_ref(blob_ref):
+            return None, "the default source has a non-scalar blob identity that set_pipeline v1 cannot bind safely"
+        for key in ("path", "blob_ref", "mode", SOURCE_AUTHORING_KEY):
+            if key in options:
+                del options[key]
+        return (
+            {
+                "plugin": source.plugin,
+                "on_success": source.on_success,
+                "blob_id": blob_ref,
+                "options": options,
+                "on_validation_failure": source.on_validation_failure,
+            },
+            None,
+        )
+    path_value = source.options["path"] if "path" in source.options else None
+    if (
+        "blob_ref" in source.options
+        or SOURCE_AUTHORING_KEY in source.options
+        or ("mode" in source.options and source.options["mode"] == "bind_source")
+        or (type(path_value) is str and "/blobs/" in path_value)
+    ):
+        return None, "the blob-backed source is missing a scalar blob identity that set_pipeline v1 can bind safely"
+    return (
+        {
+            "plugin": source.plugin,
+            "on_success": source.on_success,
+            "options": options,
+            "on_validation_failure": source.on_validation_failure,
+        },
+        None,
+    )
+
+
+def _serialize_set_pipeline_arguments(state: CompositionState) -> tuple[dict[str, Any] | None, str | None]:
+    """Build the exact public authoring payload accepted by set_pipeline."""
+    try:
+        payload: dict[str, Any] = {
+            "nodes": [_serialize_set_pipeline_node(node) for node in state.nodes],
+            "edges": [_serialize_edge(edge) for edge in state.edges],
+            "outputs": [
+                {
+                    **_serialize_output(output),
+                    "options": _serialize_authoring_options(output.options),
+                }
+                for output in state.outputs
+            ],
+            "metadata": {
+                "name": state.metadata.name,
+                "description": state.metadata.description,
+            },
+        }
+    except (KeyError, TypeError, ValueError):
+        return None, "resolved authoring review state is not safely reconstructible"
+    if set(state.sources) == {"source"}:
+        try:
+            source_payload, error = _serialize_set_pipeline_source(
+                state.sources["source"],
+                allow_blob_binding=True,
+            )
+        except (KeyError, TypeError, ValueError):
+            return None, "resolved authoring review state is not safely reconstructible"
+        if error is not None:
+            return None, error
+        assert source_payload is not None
+        payload["source"] = source_payload
+        return payload, None
+
+    serialized_sources: dict[str, dict[str, Any]] = {}
+    for source_name, source in state.sources.items():
+        try:
+            source_payload, error = _serialize_set_pipeline_source(
+                source,
+                allow_blob_binding=False,
+            )
+        except (KeyError, TypeError, ValueError):
+            return None, "resolved authoring review state is not safely reconstructible"
+        if error is not None:
+            return None, error
+        assert source_payload is not None
+        serialized_sources[source_name] = source_payload
+    payload["sources"] = serialized_sources
+    return payload, None

@@ -56,6 +56,7 @@ from elspeth.web.composer.tools._common import (
     _options_with_default_llm_reviews,
     _prevalidate_plugin_options,
     diff_states,
+    normalize_tool_result_validation,
     validate_composer_file_sink_collision_policy,
 )
 from elspeth.web.composer.tools._dispatch import (
@@ -192,5 +193,6 @@ __all__ = [
     "is_discovery_tool",
     "is_mutation_tool",
     "is_session_aware_tool",
+    "normalize_tool_result_validation",
     "validate_composer_file_sink_collision_policy",
 ]

@@ -444,14 +444,14 @@ def _execute_explain_validation_error(
     context: ToolContext,
 ) -> ToolResult:
     """Explain a validation error with human-readable diagnosis and fix."""
-    del context  # unused; signature uniformity with the other handlers.
+    validation = context.catalog.validate_composition_state(state).validation
     error_text = args["error_text"]
     for pattern, explanation, fix in _VALIDATION_ERROR_PATTERNS:
         if re.search(pattern, error_text):
             return ToolResult(
                 success=True,
                 updated_state=state,
-                validation=state.validate(),
+                validation=validation,
                 affected_nodes=(),
                 data={
                     "error_text": error_text,
@@ -463,7 +463,7 @@ def _execute_explain_validation_error(
     return ToolResult(
         success=True,
         updated_state=state,
-        validation=state.validate(),
+        validation=validation,
         affected_nodes=(),
         data={
             "error_text": error_text,
@@ -1698,7 +1698,7 @@ def _execute_preview_pipeline(
     blob). The presence of any blocking ``proof_diagnostics`` entry means
     ``is_valid=False`` even when authoring + runtime checks pass.
     """
-    validation = state.validate()
+    validation = context.catalog.validate_composition_state(state).validation
     _AUTHORING_VALIDATION_COUNTER.add(
         1,
         {"outcome": "valid" if validation.is_valid else "invalid"},
@@ -1794,7 +1794,13 @@ def _execute_diff_pipeline(
             },
         )
 
-    changes = diff_states(baseline, state, current_validation=current_validation)
+    baseline_validation = context.catalog.validate_composition_state(baseline).validation
+    changes = diff_states(
+        baseline,
+        state,
+        baseline_validation=baseline_validation,
+        current_validation=current_validation,
+    )
     return _discovery_result(state, changes)
 
 

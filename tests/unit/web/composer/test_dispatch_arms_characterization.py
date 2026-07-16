@@ -89,12 +89,14 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
 
 from elspeth.contracts.composer_audit import ComposerToolStatus
 from elspeth.web.composer.service import ComposerServiceImpl
+from elspeth.web.composer.tools._common import normalize_tool_result_validation
 from elspeth.web.sessions.models import sessions_table
 
 from .conftest import (
@@ -331,6 +333,24 @@ async def test_arm_discovery_cache_hit_records_success_with_cache_hit_flag(
         "(e.g. both calls hit the execute path) — inspect the cache-populate / cache-check ordering in "
         "tool_batch.py."
     )
+
+
+@pytest.mark.asyncio
+async def test_arm_discovery_cache_hit_uses_profile_aware_validation(
+    fake_composer_service: ComposerServiceImpl,
+    result_session_id: str,
+) -> None:
+    """A cache reconstruction crosses the shared adapter before it is returned."""
+    with patch(
+        "elspeth.web.composer.tool_batch.normalize_tool_result_validation",
+        wraps=normalize_tool_result_validation,
+    ) as normalize:
+        await test_arm_discovery_cache_hit_records_success_with_cache_hit_flag(
+            fake_composer_service,
+            result_session_id,
+        )
+
+    assert normalize.call_count == 1
 
 
 # ---------------------------------------------------------------------------

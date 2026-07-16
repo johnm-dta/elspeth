@@ -964,6 +964,29 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
             "focused on trigger/cascade semantics."
         ),
     ),
+    # ------ tests/testcontainer/web/test_release_0_7_1_schema_migration.py ------
+    ReviewedWriter(
+        path="tests/testcontainer/web/test_release_0_7_1_schema_migration.py",
+        enclosing_symbol="_seed_representative_rows",
+        table="composition_states",
+        operation="raw_string_in_text",
+        purpose=(
+            "release-0.7.1 migration proof seeds the exact pre-migration SQL shape "
+            "before fingerprinting every row; bypassing current service writers is "
+            "intentional because the test must prove legacy rows survive unchanged."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/testcontainer/web/test_release_0_7_1_schema_migration.py",
+        enclosing_symbol="_seed_representative_rows",
+        table="chat_messages",
+        operation="raw_string_in_text",
+        purpose=(
+            "release-0.7.1 migration proof seeds an attributed legacy transcript row "
+            "and verifies its digest is unchanged after DDL; the raw writer is test-only "
+            "and keeps the migration pre-state independent of current service code."
+        ),
+    ),
     # ------ tests/unit/web/sessions/test_fork.py — corruption fixture ------
     ReviewedWriter(
         path="tests/unit/web/sessions/test_fork.py",

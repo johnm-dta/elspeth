@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from functools import lru_cache
-from typing import Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import UUID
 
 from elspeth.contracts.composer_interpretation import (
@@ -134,6 +134,7 @@ def build_plugin_policy_readiness(
     tutorial_profile: str | None,
     tutorial_state: CompositionState | None,
     profile_registry: OperatorProfileRegistry | None,
+    catalog: CatalogService,
     live_probe_health: Mapping[str, bool] | None = None,
     profile_credentials_checked: bool = True,
 ) -> PluginPolicyReadinessSnapshot:
@@ -268,6 +269,7 @@ def build_plugin_policy_readiness(
             tutorial_state,
             snapshot=snapshot,
             profile_registry=profile_registry,
+            catalog=catalog,
         )
         coverage_findings = validation.findings_for("required_control_coverage")
         coverage_row = PluginPolicyReadinessRow(
@@ -289,6 +291,7 @@ def build_boot_plugin_policy_readiness(
     *,
     policy: WebPluginPolicy,
     settings: RuntimeWebPluginConfig,
+    catalog: CatalogService,
 ) -> PluginPolicyReadinessSnapshot:
     """Build the public boot-time view without claiming remote/user health.
 
@@ -301,9 +304,9 @@ def build_boot_plugin_policy_readiness(
     tutorial_profile = settings.tutorial_llm_profile
     selected_by_capability = dict(policy.preferences)
     implementations: dict[PluginCapability, list[PluginId]] = {capability: [] for capability in PluginCapability}
-    catalog = _plugin_catalog_snapshot()
+    plugin_classes = _plugin_catalog_snapshot()
     for plugin_id in sorted(policy.authorized):
-        plugin_cls = catalog[plugin_id.kind][plugin_id.name]
+        plugin_cls = plugin_classes[plugin_id.kind][plugin_id.name]
         for declaration in plugin_cls.policy_capabilities:
             implementations[declaration.capability].append(plugin_id)
     selected = tuple(
@@ -336,6 +339,7 @@ def build_boot_plugin_policy_readiness(
         tutorial_profile=tutorial_profile,
         tutorial_state=None,
         profile_registry=None,
+        catalog=catalog,
         profile_credentials_checked=False,
     )
 
@@ -491,6 +495,7 @@ class ReadinessService:
         web_plugin_policy: WebPluginPolicy | None = None,
         plugin_snapshot_factory: Callable[[str], PluginAvailabilitySnapshot] | None = None,
         operator_profile_registry: OperatorProfileRegistry | None = None,
+        catalog: CatalogService | None = None,
         tutorial_profile: str | None = None,
     ) -> None:
         self._execution_service = execution_service
@@ -500,6 +505,7 @@ class ReadinessService:
         self._web_plugin_policy = web_plugin_policy
         self._plugin_snapshot_factory = plugin_snapshot_factory
         self._operator_profile_registry = operator_profile_registry
+        self._catalog = catalog
         self._tutorial_profile = tutorial_profile
         self._state_from_record: Callable[..., CompositionState] = (
             state_from_record if state_from_record is not None else _default_state_from_record
@@ -574,12 +580,15 @@ class ReadinessService:
         )
         policy_readiness = None
         if self._web_plugin_policy is not None and self._plugin_snapshot_factory is not None:
+            if self._catalog is None:
+                raise RuntimeError("Plugin-policy readiness has no authoritative catalog")
             policy_readiness = build_plugin_policy_readiness(
                 policy=self._web_plugin_policy,
                 snapshot=self._plugin_snapshot_factory(user_id),
                 tutorial_profile=self._tutorial_profile,
                 tutorial_state=_tutorial_candidate(state),
                 profile_registry=self._operator_profile_registry,
+                catalog=self._catalog,
             )
         # ``session_id`` is rendered as ``str`` in the JSON envelope; the
         # model's pydantic ``Field(min_length=1)`` accepts the canonical
@@ -1059,3 +1068,7 @@ def _build_secrets_row(validation: ValidationResult, inventory: list[SecretInven
         detail=(f"{len(inventory)} secret(s) in your inventory" if inventory else "Composition references no secrets"),
         component_ids=(),
     )
+
+
+if TYPE_CHECKING:
+    from elspeth.web.catalog.protocol import CatalogService

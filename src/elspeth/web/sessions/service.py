@@ -55,6 +55,7 @@ from elspeth.web.interpretation_state import (
     PROMPT_TEMPLATE_PARTS_KEY,
     SOURCE_AUTHORING_KEY,
     SOURCE_COMPONENT_ID,
+    model_choice_artifact_hash,
     pipeline_decision_artifact_hash,
     prompt_structure_hash_from_options,
     validate_pipeline_decision_node_semantics,
@@ -111,6 +112,7 @@ from elspeth.web.sessions.telemetry import _SessionsTelemetry
 from elspeth.web.validation import INTERPRETATION_PLACEHOLDER_RE, _validate_accepted_value_content
 
 if TYPE_CHECKING:
+    from elspeth.web.catalog.protocol import CatalogService
     from elspeth.web.composer.state import CompositionState, ValidationSummary
     from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
     from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
@@ -1469,7 +1471,7 @@ def _resolve_model_choice_review(
     # resolved requirement must carry the hash of the accepted model. The
     # field is named for the prompt-template case but is reused here as the
     # model-choice review's anchor hash (mirroring _resolve_prompt_template_review).
-    requirement["resolved_prompt_template_hash"] = stable_hash(accepted_value)
+    requirement["resolved_prompt_template_hash"] = model_choice_artifact_hash(accepted_value)
     requirements[matching_index] = requirement
 
     final_nodes: list[Mapping[str, Any]] = []
@@ -1504,15 +1506,19 @@ class SessionServiceImpl:
         log: structlog.stdlib.BoundLogger,
         plugin_snapshot_factory: Callable[[str], PluginAvailabilitySnapshot] | None = None,
         operator_profile_registry: OperatorProfileRegistry | None = None,
+        catalog: CatalogService | None = None,
     ) -> None:
         if (plugin_snapshot_factory is None) != (operator_profile_registry is None):
             raise ValueError("plugin_snapshot_factory and operator_profile_registry must be configured together")
+        if plugin_snapshot_factory is not None and catalog is None:
+            raise ValueError("profile-aware session validation requires the authoritative catalog")
         self._engine = engine
         self._data_dir = data_dir
         self._telemetry = telemetry
         self._log = log
         self._plugin_snapshot_factory = plugin_snapshot_factory
         self._operator_profile_registry = operator_profile_registry
+        self._catalog = catalog
 
     def _validate_patched_composition_state(
         self,
@@ -1526,26 +1532,17 @@ class SessionServiceImpl:
         if plugin_snapshot is None:
             raise AuditIntegrityError("Profile-aware composition validation has no principal snapshot")
 
-        from elspeth.web.composer.state import ValidationEntry, ValidationSummary
-        from elspeth.web.plugin_policy.validation import validate_plugin_policy
+        from elspeth.web.plugin_policy.validation import validate_authored_composition_state
 
         assert self._operator_profile_registry is not None
-        policy_validation = validate_plugin_policy(
+        assert self._catalog is not None
+        result = validate_authored_composition_state(
             state,
             snapshot=plugin_snapshot,
             profile_registry=self._operator_profile_registry,
+            catalog=self._catalog,
         )
-        if policy_validation.findings:
-            errors = tuple(
-                ValidationEntry(
-                    component=finding.component_id or "pipeline",
-                    message=finding.message,
-                    severity="high",
-                )
-                for finding in policy_validation.findings
-            )
-            return ValidationSummary(is_valid=False, errors=errors)
-        return policy_validation.executable_state.validate()
+        return result.validation
 
     async def _plugin_snapshot_for_session(self, session_id: str) -> PluginAvailabilitySnapshot | None:
         """Build a principal snapshot before a session write transaction starts."""

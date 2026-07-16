@@ -207,6 +207,7 @@ def _llm_call(**overrides: Any) -> ComposerLLMCall:
         "provider_request_id": "chatcmpl-route",
         "messages_hash": "m" * 64,
         "tools_spec_hash": "t" * 64,
+        "declared_tool_names": ("set_pipeline",),
         "started_at": datetime.now(UTC),
         "finished_at": datetime.now(UTC),
         "error_class": None,
@@ -8126,8 +8127,8 @@ def test_state_data_carries_structured_errors_before_save_for_atomicity() -> Non
     # structured-errors path under test is never exercised.
     state = _make_authoring_valid_partial("atomicity-test")
 
-    async def boom(state, *, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry):
-        del plugin_snapshot, profile_registry
+    async def boom(state, *, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry, catalog):
+        del plugin_snapshot, profile_registry, catalog
         raise AttributeError("'NoneType' has no attribute 'something_that_failed'")
 
     with patch("elspeth.web.sessions.routes._helpers._runtime_preflight_for_state", side_effect=boom):
@@ -8138,8 +8139,9 @@ def test_state_data_carries_structured_errors_before_save_for_atomicity() -> Non
                 secret_service=None,
                 user_id="alice",
                 session_id="session-123",
-                plugin_snapshot=MagicMock(spec=PluginAvailabilitySnapshot),
+                plugin_snapshot=PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service()),
                 profile_registry=MagicMock(spec=OperatorProfileRegistry),
+                catalog=create_catalog_service(),
                 runtime_preflight=None,
                 preflight_exception_policy="persist_invalid",
                 initial_version=None,
@@ -8168,6 +8170,7 @@ async def test_runtime_preflight_for_state_threads_session_id_to_validate_pipeli
     settings = SimpleNamespace(composer_runtime_preflight_timeout_seconds=1)
     plugin_snapshot = MagicMock(spec=PluginAvailabilitySnapshot)
     profile_registry = MagicMock(spec=OperatorProfileRegistry)
+    catalog = create_catalog_service()
     seen_kwargs: list[dict[str, object]] = []
 
     async def fake_run_sync_in_worker(func, *args, **kwargs):
@@ -8186,6 +8189,7 @@ async def test_runtime_preflight_for_state_threads_session_id_to_validate_pipeli
         session_id="session-123",
         plugin_snapshot=plugin_snapshot,
         profile_registry=profile_registry,
+        catalog=catalog,
     )
 
     assert seen_kwargs == [
@@ -8195,6 +8199,7 @@ async def test_runtime_preflight_for_state_threads_session_id_to_validate_pipeli
             "session_id": "session-123",
             "plugin_snapshot": plugin_snapshot,
             "profile_registry": profile_registry,
+            "catalog": catalog,
         }
     ]
 
@@ -8207,8 +8212,8 @@ async def test_state_data_threads_session_id_to_runtime_preflight() -> None:
     state = _make_authoring_valid_partial("session-scoped-preflight")
     seen_session_ids: list[str] = []
 
-    async def capture_session_id(state, *, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry):
-        del state, settings, secret_service, user_id, plugin_snapshot, profile_registry
+    async def capture_session_id(state, *, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry, catalog):
+        del state, settings, secret_service, user_id, plugin_snapshot, profile_registry, catalog
         seen_session_ids.append(session_id)
         return ValidationResult(is_valid=True, checks=[], errors=[])
 
@@ -8219,8 +8224,9 @@ async def test_state_data_threads_session_id_to_runtime_preflight() -> None:
             secret_service=None,
             user_id="alice",
             session_id="session-123",
-            plugin_snapshot=MagicMock(spec=PluginAvailabilitySnapshot),
+            plugin_snapshot=PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service()),
             profile_registry=MagicMock(spec=OperatorProfileRegistry),
+            catalog=create_catalog_service(),
             runtime_preflight=None,
             preflight_exception_policy="persist_invalid",
             initial_version=None,
@@ -8228,6 +8234,38 @@ async def test_state_data_threads_session_id_to_runtime_preflight() -> None:
         )
 
     assert seen_session_ids == ["session-123"]
+
+
+@pytest.mark.asyncio
+async def test_state_data_from_composer_state_uses_profile_aware_authoring_validation() -> None:
+    from elspeth.web.sessions.routes import _helpers as routes
+
+    catalog = create_catalog_service()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    state = _make_authoring_valid_partial("profile-aware-state-data")
+    runtime = ValidationResult(is_valid=True, checks=[], errors=[])
+
+    with patch(
+        "elspeth.web.sessions.routes._helpers.validate_authored_composition_state",
+        wraps=routes.validate_authored_composition_state,
+    ) as validate:
+        _state_data, summary = await routes._state_data_from_composer_state(
+            state,
+            settings=object(),
+            secret_service=None,
+            user_id="alice",
+            session_id="session-123",
+            plugin_snapshot=snapshot,
+            profile_registry=MagicMock(spec=OperatorProfileRegistry),
+            catalog=catalog,
+            runtime_preflight=runtime,
+            preflight_exception_policy="persist_invalid",
+            initial_version=None,
+            telemetry_source="compose",
+        )
+
+    validate.assert_called_once()
+    assert summary == state.validate()
 
 
 @pytest.mark.asyncio
@@ -8333,8 +8371,9 @@ async def test_state_data_persists_structured_implicit_decisions_report() -> Non
         secret_service=None,
         user_id="alice",
         session_id="session-123",
-        plugin_snapshot=MagicMock(spec=PluginAvailabilitySnapshot),
+        plugin_snapshot=PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service()),
         profile_registry=MagicMock(spec=OperatorProfileRegistry),
+        catalog=create_catalog_service(),
         runtime_preflight=ValidationResult(is_valid=True, checks=[], errors=[]),
         preflight_exception_policy="raise",
         initial_version=1,
@@ -8389,8 +8428,9 @@ def test_runtime_preflight_failure_500_detail_does_not_promise_journal_traceback
             None,
             settings=object(),
             secret_service=None,
-            plugin_snapshot=MagicMock(spec=PluginAvailabilitySnapshot),
+            plugin_snapshot=PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service()),
             profile_registry=MagicMock(spec=OperatorProfileRegistry),
+            catalog=create_catalog_service(),
         ),
     )
 
@@ -8446,8 +8486,9 @@ async def test_state_data_from_composer_state_propagates_to_dict_errors() -> Non
             secret_service=None,
             user_id="user-1",
             session_id="session-123",
-            plugin_snapshot=MagicMock(spec=PluginAvailabilitySnapshot),
+            plugin_snapshot=PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service()),
             profile_registry=MagicMock(spec=OperatorProfileRegistry),
+            catalog=create_catalog_service(),
             runtime_preflight=None,
             preflight_exception_policy="persist_invalid",
             initial_version=None,
@@ -8606,7 +8647,7 @@ def test_recompose_convergence_persists_runtime_invalid_partial_state(tmp_path) 
         ),
         nodes=(),
         edges=(EdgeSpec(id="e1", from_node="source", to_node="out", edge_type="on_success", label=None),),
-        outputs=(OutputSpec(name="out", plugin="discard", options=deep_freeze({}), on_write_failure="discard"),),
+        outputs=(OutputSpec(name="out", plugin="json", options=deep_freeze({}), on_write_failure="discard"),),
         metadata=PipelineMetadata(name="partial-after-convergence"),
         version=2,
     )
@@ -8669,7 +8710,7 @@ def test_compose_plugin_crash_persists_runtime_invalid_partial_state(tmp_path) -
         ),
         nodes=(),
         edges=(EdgeSpec(id="e1", from_node="source", to_node="out", edge_type="on_success", label=None),),
-        outputs=(OutputSpec(name="out", plugin="discard", options=deep_freeze({}), on_write_failure="discard"),),
+        outputs=(OutputSpec(name="out", plugin="json", options=deep_freeze({}), on_write_failure="discard"),),
         metadata=PipelineMetadata(name="partial-after-plugin-crash"),
         version=5,
     )
@@ -8747,7 +8788,7 @@ def _make_authoring_valid_partial(name: str, version: int = 5) -> CompositionSta
         ),
         nodes=(),
         edges=(EdgeSpec(id="e1", from_node="source", to_node="out", edge_type="on_success", label=None),),
-        outputs=(OutputSpec(name="out", plugin="discard", options=deep_freeze({}), on_write_failure="discard"),),
+        outputs=(OutputSpec(name="out", plugin="json", options=deep_freeze({}), on_write_failure="discard"),),
         metadata=PipelineMetadata(name=name),
         version=version,
     )
@@ -9209,8 +9250,8 @@ async def test_state_data_raise_arm_emits_telemetry_before_propagating() -> None
 
     state = _make_authoring_valid_partial("raise-arm-telemetry")
 
-    async def boom(state, *, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry):
-        del plugin_snapshot, profile_registry
+    async def boom(state, *, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry, catalog):
+        del plugin_snapshot, profile_registry, catalog
         raise RuntimeError("preflight raised at primary site")
 
     with (
@@ -9224,8 +9265,9 @@ async def test_state_data_raise_arm_emits_telemetry_before_propagating() -> None
             secret_service=None,
             user_id="user-1",
             session_id="session-123",
-            plugin_snapshot=MagicMock(spec=PluginAvailabilitySnapshot),
+            plugin_snapshot=PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service()),
             profile_registry=MagicMock(spec=OperatorProfileRegistry),
+            catalog=create_catalog_service(),
             runtime_preflight=None,
             preflight_exception_policy="raise",
             initial_version=1,

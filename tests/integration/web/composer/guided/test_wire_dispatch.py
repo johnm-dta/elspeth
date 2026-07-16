@@ -12,6 +12,7 @@ from fastapi import HTTPException
 
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder
+from elspeth.web.composer.guided.errors import WireConfirmRejectedError
 from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.state_machine import (
@@ -26,7 +27,6 @@ from elspeth.web.composer.guided.steps import (
     handle_step_1_source,
     handle_step_2_sink,
     handle_step_3_chain_accept,
-    handle_step_4_wire_confirm,
 )
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.dependencies import create_catalog_service
@@ -424,14 +424,25 @@ async def test_confirm_wiring_lowers_operator_profile_only_for_validation() -> N
     assert "zai.glm-5" not in guided2.terminal.pipeline_yaml
 
 
-def test_confirm_wiring_invalid_pipeline_returns_failed_tool_result_without_terminal() -> None:
-    state, wire_session, _catalog, _payload_store = _wire_ready_session(valid=False)
+@pytest.mark.asyncio
+async def test_wire_profile_failure_carries_profile_unavailable_without_raw_fallback() -> None:
+    state, wire_session, catalog, _profiles, payload_store = _profiled_wire_ready_session()
+    broken_catalog = PolicyCatalogView(catalog._full, catalog.snapshot, None)  # type: ignore[arg-type]
 
-    result = handle_step_4_wire_confirm(state=state, session=wire_session)
+    with pytest.raises(WireConfirmRejectedError) as caught:
+        await _dispatch(
+            state,
+            wire_session,
+            broken_catalog,
+            payload_store=payload_store,
+            current_step=GuidedStep.STEP_4_WIRE,
+            current_turn_type=TurnType.CONFIRM_WIRING,
+            turn_response=_valid_confirm_body(),
+        )
 
-    assert result.tool_result.success is False
-    assert result.session.terminal is None
-    assert result.session.step is GuidedStep.STEP_4_WIRE
+    assert caught.value.issues
+    assert caught.value.issues[0]["error_code"] == "profile_unavailable"
+    assert not any("Missing fields: [summary]" in issue["message"] for issue in caught.value.issues)
 
 
 @pytest.mark.asyncio

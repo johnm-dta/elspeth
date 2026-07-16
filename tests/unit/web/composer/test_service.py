@@ -652,6 +652,38 @@ class TestComposerSingleToolCall:
         assert result.tool_outcomes[0].post_version == state.version
 
     @pytest.mark.asyncio
+    async def test_explicit_approve_proposal_uses_profile_aware_validation(
+        self,
+        composer_service_with_real_sessions: ComposerServiceImpl,
+        result_session_id: str,
+        fake_llm_one_set_pipeline_tool_call: Any,
+    ) -> None:
+        sessions_service = composer_service_with_real_sessions._sessions_service
+        assert sessions_service is not None
+        await sessions_service.update_composer_preferences(
+            UUID(result_session_id),
+            trust_mode="explicit_approve",
+            density_default="high",
+            actor="user:alice",
+        )
+        state = _empty_state()
+
+        result = await composer_service_with_real_sessions._run_one_turn_for_test(
+            llm=fake_llm_one_set_pipeline_tool_call,
+            session_id=result_session_id,
+            initial_state=state,
+        )
+
+        proposal_result = result.tool_outcomes[0].response
+        assert isinstance(proposal_result, ToolResult)
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(composer_service_with_real_sessions._catalog)
+        expected = PolicyCatalogView.for_trained_operator(
+            composer_service_with_real_sessions._catalog,
+            snapshot,
+        ).validate_composition_state(state)
+        assert proposal_result.validation == expected.validation
+
+    @pytest.mark.asyncio
     async def test_create_composition_proposal_normalizes_composer_provenance(
         self,
         composer_service_with_real_sessions: ComposerServiceImpl,

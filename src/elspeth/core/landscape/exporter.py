@@ -367,8 +367,8 @@ class LandscapeExporter:
         """
         bundle = self.derive_run_bundle(run_id, sign=sign)
         for record in bundle.record_objects:
-            yield dict(record)
-        yield dict(bundle.final_manifest)
+            yield deep_thaw(record)
+        yield deep_thaw(bundle.final_manifest)
 
     def derive_run_bundle(
         self,

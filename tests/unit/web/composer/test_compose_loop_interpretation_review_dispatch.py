@@ -69,7 +69,9 @@ from elspeth.web.composer.tools import (
     RATE_CAP_CODE_TO_TELEMETRY_CAP_TYPE,
     RATE_CAP_PER_SESSION_DAY_CODE,
     RATE_CAP_PER_TERM_CODE,
+    ToolResult,
 )
+from elspeth.web.composer.tools._common import normalize_tool_result_validation
 from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, SOURCE_AUTHORING_KEY
 from elspeth.web.sessions.engine import create_session_engine
@@ -748,6 +750,47 @@ async def test_compose_loop_dispatches_request_interpretation_review(
     from elspeth.web.composer.prompts import PIPELINE_COMPOSER_SKILL_HASH
 
     assert event.composer_skill_hash == PIPELINE_COMPOSER_SKILL_HASH
+
+
+@pytest.mark.asyncio
+async def test_request_interpretation_review_result_uses_profile_aware_validation(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    composer = _build_composer(tmp_path, sessions_service)
+    state = _state_with_llm_node()
+    session_id, state_id = await _seed_session_and_state(sessions_service)
+    llm = _ScriptedLLM(
+        [
+            _fake_response_with_tool_call(
+                tool_call_id="call_profile_validation",
+                tool_name="request_interpretation_review",
+                arguments={
+                    "affected_node_id": "rate_node",
+                    "kind": "vague_term",
+                    "user_term": "cool",
+                    "llm_draft": "Visually appealing and well-organized.",
+                },
+            ),
+            _fake_text_response("Done."),
+        ]
+    )
+
+    with patch(
+        "elspeth.web.composer.service.normalize_tool_result_validation",
+        wraps=normalize_tool_result_validation,
+    ) as normalize:
+        result = await composer._run_one_turn_for_test(
+            llm=llm,
+            session_id=str(session_id),
+            current_state_id=str(state_id),
+            initial_state=state,
+        )
+
+    tool_result = result.tool_outcomes[0].response
+    assert isinstance(tool_result, ToolResult)
+    normalize.assert_called_once()
+    assert tool_result.validation == state.validate()
 
 
 @pytest.mark.asyncio

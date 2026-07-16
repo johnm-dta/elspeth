@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 import yaml
@@ -818,6 +818,7 @@ def validate_pipeline(
     *,
     plugin_snapshot: PluginAvailabilitySnapshot,
     profile_registry: OperatorProfileRegistry | None,
+    catalog: CatalogService,
     secret_service: WebSecretResolver | None = None,
     user_id: str | None = None,
     blob_get_metadata: Callable[[UUID], BlobRecord | None] | None = None,
@@ -927,6 +928,7 @@ def validate_pipeline(
         state,
         snapshot=plugin_snapshot,
         profile_registry=profile_registry,
+        catalog=catalog,
     )
     for stage, check_name in _PLUGIN_POLICY_CHECKS:
         stage_findings = policy_result.findings_for(stage)
@@ -2380,8 +2382,7 @@ def validate_pipeline_for_trained_operator(
     from elspeth.web.dependencies import create_catalog_service
 
     plugin_snapshot = kwargs.pop("plugin_snapshot", None)
-    if plugin_snapshot is None:
-        plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+    catalog, plugin_snapshot = _trained_operator_validation_context(kwargs, plugin_snapshot, create_catalog_service)
     profile_registry = kwargs.pop("profile_registry", None)
     return validate_pipeline(
         state,
@@ -2389,5 +2390,34 @@ def validate_pipeline_for_trained_operator(
         yaml_generator,
         plugin_snapshot=plugin_snapshot,
         profile_registry=profile_registry,
+        catalog=catalog,
         **kwargs,
+    )
+
+
+if TYPE_CHECKING:
+    from elspeth.web.catalog.protocol import CatalogService
+
+
+def _trained_operator_validation_context(
+    kwargs: dict[str, Any],
+    plugin_snapshot: PluginAvailabilitySnapshot | None,
+    catalog_factory: Callable[[], CatalogService],
+) -> tuple[CatalogService, PluginAvailabilitySnapshot]:
+    """Consume the local catalog and normalize a caller-supplied snapshot."""
+    catalog = kwargs.pop("catalog") if "catalog" in kwargs else catalog_factory()
+    if plugin_snapshot is None:
+        return catalog, PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    if plugin_snapshot.principal_scope == "local:trained-operator":
+        return catalog, plugin_snapshot
+    return catalog, PluginAvailabilitySnapshot.create(
+        policy_hash=plugin_snapshot.policy_hash,
+        principal_scope="local:trained-operator",
+        available=plugin_snapshot.available,
+        unavailable=plugin_snapshot.unavailable,
+        selected=plugin_snapshot.selected,
+        usable_profile_aliases=plugin_snapshot.usable_profile_aliases,
+        selected_profile_aliases=plugin_snapshot.selected_profile_aliases,
+        control_modes=plugin_snapshot.control_modes,
+        binding_generation_fingerprint=plugin_snapshot.binding_generation_fingerprint,
     )

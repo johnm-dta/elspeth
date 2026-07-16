@@ -93,6 +93,7 @@ from elspeth.web.composer.tools import (
     is_discovery_tool,
     is_mutation_tool,
     is_session_aware_tool,
+    normalize_tool_result_validation,
 )
 from elspeth.web.execution.schemas import ValidationResult
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
@@ -461,6 +462,7 @@ async def run_tool_batch(
                     state,
                     discovery_cache[cache_key],
                 )
+                cached_result = normalize_tool_result_validation(cached_result, ctx.policy_catalog)
                 cached_payload = {
                     "success": cached_result.success,
                     "data": cached_result.data,
@@ -627,7 +629,9 @@ async def run_tool_batch(
                 proposal_result = ToolResult(
                     success=True,
                     updated_state=state,
-                    validation=last_validation if last_validation is not None else state.validate(),
+                    validation=(
+                        last_validation if last_validation is not None else ctx.policy_catalog.validate_composition_state(state).validation
+                    ),
                     affected_nodes=(),
                     data=proposal_payload,
                 )
@@ -757,7 +761,7 @@ async def run_tool_batch(
                 turn_has_discovery = True
                 continue
 
-            remaining = deadline - asyncio.get_event_loop().time()
+            remaining = _remaining_compose_seconds(deadline)
             if remaining <= 0:
                 timeout_payload: dict[str, Any] = {
                     "status": "COMPOSE_TIMEOUT",
@@ -787,6 +791,36 @@ async def run_tool_batch(
                     tool_invocations=recorder.invocations,
                     llm_calls=recorder.llm_calls,
                 )
+
+            elif remaining < _MIN_USEFUL_ADVISOR_SECONDS:
+                deadline_payload = {
+                    "status": "DEADLINE_TOO_CLOSE",
+                    "outbound_call_made": False,
+                    "budget_used": advisor_calls_used,
+                    "budget_remaining": budget - advisor_calls_used,
+                }
+                recorder.record(
+                    finish_success(
+                        audit,
+                        result_payload=deadline_payload,
+                        version_after=state.version,
+                    )
+                )
+                _append_tool_outcome(
+                    response=deadline_payload,
+                    error_class=None,
+                    error_message=None,
+                    post_version=state.version,
+                )
+                llm_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(deadline_payload),
+                    }
+                )
+                turn_has_discovery = True
+                continue
 
             advisor_timeout = ctx.service._settings.composer_advisor_timeout_seconds
             effective_advisor_timeout = min(advisor_timeout, remaining)
@@ -995,6 +1029,7 @@ async def run_tool_batch(
                 response=response,
                 llm_messages=llm_messages,
                 anti_anchor=anti_anchor,
+                policy_catalog=ctx.policy_catalog,
             )
             all_cache_hits = False
             _append_tool_outcome(
@@ -1421,3 +1456,12 @@ async def run_tool_batch(
         pre_state_id=pre_state_id,
     )
     return dispatch, advisor_calls_used
+
+
+_MIN_USEFUL_ADVISOR_SECONDS: Final[float] = 5.0
+
+
+def _remaining_compose_seconds(deadline: float) -> float:
+    """Return the compose budget available at the advisor boundary."""
+
+    return deadline - asyncio.get_event_loop().time()

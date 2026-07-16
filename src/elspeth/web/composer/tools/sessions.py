@@ -71,6 +71,7 @@ from elspeth.web.composer.tools._common import (
     _serialize_full_pipeline_state,
     _serialize_node,
     _serialize_output,
+    _serialize_set_pipeline_arguments,
     _serialize_source,
     _validate_mutation_arguments,
     _validate_plugin_name,
@@ -110,6 +111,7 @@ from elspeth.web.interpretation_state import (
     SOURCE_COMPONENT_ID,
     composition_review_contract_error,
     interpretation_sites,
+    reconcile_authoritative_reviews,
     transform_vague_term_site_tuples,
     vague_term_wiring_count,
     validate_pipeline_decision_node_semantics,
@@ -704,6 +706,22 @@ def _execute_set_pipeline(
         metadata=metadata_spec,
         version=state.version + 1,
     )
+    try:
+        new_state = reconcile_authoritative_reviews(state, new_state)
+    except TypeError as exc:
+        if str(exc) == "interpretation_requirements must be a list":
+            return _failure_result(state, "interpretation_requirements must be a list.")
+        return _failure_result(
+            state,
+            "Authoritative interpretation-review reconciliation failed. Re-inspect the exact set_pipeline_arguments payload and retry.",
+            error_code="review_reconciliation_failed",
+        )
+    except (KeyError, ValueError):
+        return _failure_result(
+            state,
+            "Authoritative interpretation-review reconciliation failed. Re-inspect the exact set_pipeline_arguments payload and retry.",
+            error_code="review_reconciliation_failed",
+        )
     review_contract_error = composition_review_contract_error(new_state)
     if review_contract_error is not None:
         return _failure_result(state, review_contract_error)
@@ -912,10 +930,10 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
     name="set_pipeline",
     handler=_handle_set_pipeline,
     kind=ToolKind.MUTATION,
-    description="Atomically replace the entire pipeline. Provide the "
-    "complete source, nodes, edges, outputs, and metadata in one call. "
-    "This is more efficient than calling set_source + upsert_node + "
-    "upsert_edge + set_output sequentially.",
+    description=(
+        "Atomically create or fully rebuild a pipeline. For a narrow edit to an existing pipeline, "
+        "use the dedicated patch tool; use `splice_transform` to insert one transform on a direct linear path."
+    ),
     json_schema={
         "type": "object",
         "properties": {
@@ -1173,9 +1191,20 @@ def _execute_get_pipeline_state(
     """
     del context  # unused; signature uniformity with the other handlers.
     component = args.get("component")
+    data: Any
 
-    if component == "source":
-        data: Any = {"sources": {name: _serialize_source(source) for name, source in state.sources.items()}}
+    if component == "set_pipeline_arguments":
+        exact_arguments, round_trip_error = _serialize_set_pipeline_arguments(state)
+        if round_trip_error is not None:
+            return _failure_result(
+                state,
+                f"Pipeline cannot be represented as exact set_pipeline arguments: {round_trip_error}.",
+                error_code="round_trip_unavailable",
+            )
+        assert exact_arguments is not None
+        data = exact_arguments
+    elif component == "source":
+        data = {"sources": {name: _serialize_source(source) for name, source in state.sources.items()}}
     elif component is not None:
         # Try node, then output
         node = next((n for n in state.nodes if n.id == component), None)
@@ -1215,7 +1244,8 @@ _GET_PIPELINE_STATE_DECLARATION = ToolDeclaration(
                 "description": (
                     "Optional: return only one component — 'source', a node ID, or an output name. "
                     "Accepted full-state aliases: omit component, pass 'full', 'all', 'pipeline', "
-                    "or pass the empty string."
+                    "or pass the empty string. Use 'set_pipeline_arguments' for the exact public "
+                    "payload accepted by set_pipeline; ordinary inspection output is diagnostic only."
                 ),
             },
         },

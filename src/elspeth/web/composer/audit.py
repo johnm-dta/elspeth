@@ -289,6 +289,7 @@ _LLM_CALL_PUBLIC_AUDIT_FIELDS: Final[tuple[str, ...]] = (
     "provider_request_id",
     "messages_hash",
     "tools_spec_hash",
+    "declared_tool_names",
     "started_at",
     "finished_at",
     "error_class",

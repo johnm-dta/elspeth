@@ -100,6 +100,7 @@ from elspeth.web.composer.redaction import (
     _PipelineOutputModel,
     _RepairToolCallShadowModel,
     _SetPipelineSourceModel,
+    _SpliceTransformNodeModel,
 )
 from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
@@ -235,6 +236,16 @@ def _pipeline_output_strategy() -> st.SearchStrategy[_PipelineOutputModel]:
     )
 
 
+def _splice_transform_node_strategy() -> st.SearchStrategy[_SpliceTransformNodeModel]:
+    return st.builds(
+        _SpliceTransformNodeModel,
+        id=st.text(),
+        plugin=st.text(),
+        options=_OPTIONS_STRATEGY,
+        on_error=st.one_of(st.none(), st.text()),
+    )
+
+
 def _repair_tool_call_strategy() -> st.SearchStrategy[_RepairToolCallShadowModel]:
     """Resolve ``_RepairToolCallShadowModel`` for the property test.
 
@@ -267,6 +278,7 @@ st.register_type_strategy(SetSourceFromBlobArgumentsModel, _set_source_from_blob
 st.register_type_strategy(_SetPipelineSourceModel, _set_pipeline_source_strategy())
 st.register_type_strategy(_PipelineNodeModel, _pipeline_node_strategy())
 st.register_type_strategy(_PipelineOutputModel, _pipeline_output_strategy())
+st.register_type_strategy(_SpliceTransformNodeModel, _splice_transform_node_strategy())
 st.register_type_strategy(_RepairToolCallShadowModel, _repair_tool_call_strategy())
 
 
@@ -282,6 +294,7 @@ _OVERRIDE_REGISTERED_MODELS: tuple[type[BaseModel], ...] = (
     _SetPipelineSourceModel,
     _PipelineNodeModel,
     _PipelineOutputModel,
+    _SpliceTransformNodeModel,
 )
 
 

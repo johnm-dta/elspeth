@@ -165,7 +165,7 @@
     "shape": "declarative"
   },
   "set_pipeline": {
-    "hash": "69320669036f5eabb7466a04b63eb940a6f99c61fb3943e1b4793c94b6aae380",
+    "hash": "855973f53321c1193df6bdc54e947777c555419e745f1c3d62f7c058b7d2cdf0",
     "sensitive_path_count": 6,
     "shape": "type_driven"
   },
@@ -176,6 +176,11 @@
   },
   "set_source_from_blob": {
     "hash": "bd2df326445b3bf70ef6a68fcc53fe822c98023b1836beb43d21f72e9b5aa064",
+    "sensitive_path_count": 1,
+    "shape": "type_driven"
+  },
+  "splice_transform": {
+    "hash": "53fd55f4123139ba3240c6589f0b460aa995af720f4fa2cf1138099d48c4b4e5",
     "sensitive_path_count": 1,
     "shape": "type_driven"
   },

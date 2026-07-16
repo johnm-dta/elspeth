@@ -1365,12 +1365,12 @@ class _PipelineNodeModel(BaseModel):
     """
 
     id: str
+    options: _LlmJsonObject = Field(default_factory=dict)
+    on_error: str | None = None
     node_type: str
     input: str
     plugin: str | None = None
     on_success: str | None = None
-    on_error: str | None = None
-    options: _LlmJsonObject = Field(default_factory=dict)
     condition: str | None = None
     routes: dict[str, str] | None = None
     fork_to: list[str] | None = None
@@ -3521,3 +3521,40 @@ def redact_guided_snapshot_storage_paths(
         sources_out = rebuilt
 
     return sources_out, meta_out
+
+
+class _AuthoringNodeOptionsModel(BaseModel):
+    """Shared redaction-bearing surface for authored transform options."""
+
+    id: str
+    options: _LlmJsonObject = Field(default_factory=dict)
+    on_error: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _SpliceTransformNodeModel(_AuthoringNodeOptionsModel):
+    """Caller-authored portion of a transform whose routing is server-derived."""
+
+    plugin: str
+    options: _LlmJsonObject
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class SpliceTransformArgumentsModel(BaseModel):
+    """Redaction-bearing arguments for one direct-path transform insertion."""
+
+    predecessor_id: str
+    successor_id: str
+    node: _SpliceTransformNodeModel
+
+    model_config = ConfigDict(extra="forbid")
+
+
+MANIFEST = MappingProxyType(
+    {
+        **MANIFEST,
+        "splice_transform": ToolRedaction(argument_model=SpliceTransformArgumentsModel),
+    }
+)

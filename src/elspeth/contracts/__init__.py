@@ -237,6 +237,7 @@ from elspeth.contracts.plugin_context import (
 )
 from elspeth.contracts.plugin_protocols import (
     BatchTransformProtocol,
+    SinkEffectProtocol,
     SinkProtocol,
     SourceProtocol,
     TransformProtocol,
@@ -272,6 +273,32 @@ from elspeth.contracts.schema_contract_factory import (
     map_schema_mode,
 )
 from elspeth.contracts.sink import OutputValidationResult
+from elspeth.contracts.sink_effects import (
+    SINK_EFFECT_PROTOCOL_VERSION,
+    AuditExportFormat,
+    AuditExportSignedManifestInput,
+    AuditExportSigningMode,
+    AuditExportSnapshotChunkInput,
+    RestrictedAuditExportSnapshotReader,
+    RestrictedSinkEffectContext,
+    SinkEffectAttemptAction,
+    SinkEffectAttemptState,
+    SinkEffectAuditExportSnapshotInput,
+    SinkEffectCommitResult,
+    SinkEffectDescriptorMode,
+    SinkEffectInputKind,
+    SinkEffectInspection,
+    SinkEffectInspectionMode,
+    SinkEffectInspectionRequest,
+    SinkEffectMember,
+    SinkEffectPipelineMembersInput,
+    SinkEffectPlan,
+    SinkEffectPrepareRequest,
+    SinkEffectReconcileKind,
+    SinkEffectReconcileResult,
+    SinkEffectRole,
+    SinkEffectState,
+)
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.contracts.transform_contract import (
     create_output_contract_from_schema,
@@ -502,6 +529,7 @@ __all__ = [  # Grouped by category for readability
     # plugin protocols
     "BatchTransformRuntimeProtocol",
     "BatchTransformProtocol",
+    "SinkEffectProtocol",
     "SinkProtocol",
     "SourceProtocol",
     "TransformProtocol",
@@ -532,6 +560,31 @@ __all__ = [  # Grouped by category for readability
     "SanitizedWebhookUrl",
     # sink
     "OutputValidationResult",
+    # sink effects
+    "SINK_EFFECT_PROTOCOL_VERSION",
+    "AuditExportFormat",
+    "AuditExportSignedManifestInput",
+    "AuditExportSigningMode",
+    "AuditExportSnapshotChunkInput",
+    "RestrictedAuditExportSnapshotReader",
+    "RestrictedSinkEffectContext",
+    "SinkEffectAttemptAction",
+    "SinkEffectAttemptState",
+    "SinkEffectAuditExportSnapshotInput",
+    "SinkEffectCommitResult",
+    "SinkEffectDescriptorMode",
+    "SinkEffectInputKind",
+    "SinkEffectInspection",
+    "SinkEffectInspectionMode",
+    "SinkEffectInspectionRequest",
+    "SinkEffectMember",
+    "SinkEffectPipelineMembersInput",
+    "SinkEffectPlan",
+    "SinkEffectPrepareRequest",
+    "SinkEffectReconcileKind",
+    "SinkEffectReconcileResult",
+    "SinkEffectRole",
+    "SinkEffectState",
     # token usage
     "TokenUsage",
     # call data (LLM + HTTP audit records)

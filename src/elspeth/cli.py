@@ -63,6 +63,24 @@ composer_app.add_typer(composer_users_app, name="users")
 app.add_typer(doctor_app, name="doctor")
 
 
+def _preflight_follower_sink_effects(sinks: Mapping[str, SinkProtocol]) -> None:
+    """Fail closed over resolved follower sinks before any startup work."""
+    from elspeth.contracts.sink_effects import SinkEffectInputKind
+    from elspeth.engine.orchestrator.preflight import validate_pipeline_sink_effect_capabilities
+
+    validate_pipeline_sink_effect_capabilities(
+        sinks,
+        required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+    )
+
+
+def _instantiate_plugins_for_runtime_preflight(settings: ElspethSettings) -> PluginBundle:
+    """Construct runtime plugins under the constructor-safe preflight posture."""
+    from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
+
+    return instantiate_plugins_from_config(settings, preflight_mode=True)
+
+
 @doctor_app.command("aws-ecs")
 def doctor_aws_ecs(
     init_schema: bool = typer.Option(
@@ -473,8 +491,6 @@ def run(
     Requires --execute flag to actually run (safety feature).
     Use --dry-run to validate configuration without executing.
     """
-    from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
-
     settings_path = Path(settings).expanduser()
 
     # Load and validate config with Key Vault secrets (same flow as other commands)
@@ -504,7 +520,7 @@ def run(
 
     # Instantiate plugins before graph construction
     try:
-        plugins = instantiate_plugins_from_config(config)
+        plugins = _instantiate_plugins_for_runtime_preflight(config)
     except contract_errors.TIER_1_ERRORS:
         raise  # Tier 1 errors must crash with full traceback, not Exit(1)
     except Exception as e:
@@ -1253,11 +1269,11 @@ def bootstrap_and_run(settings_path: Path) -> RunResult:
     from elspeth.core.payload_store import FilesystemPayloadStore
     from elspeth.engine.bootstrap import resolve_preflight
     from elspeth.plugins.infrastructure.probe_factory import build_collection_probes
-    from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config, make_sink_factory
+    from elspeth.plugins.infrastructure.runtime_factory import make_sink_factory
 
     config, secret_resolutions = _load_settings_with_secrets(settings_path)
 
-    plugins = instantiate_plugins_from_config(config)
+    plugins = _instantiate_plugins_for_runtime_preflight(config)
     execution_sinks = _execution_sinks_for_graph(config, plugins.sinks)
 
     graph = ExecutionGraph.from_plugin_instances(
@@ -2185,10 +2201,8 @@ def resume(
         recovery_manager = RecoveryManager(db, checkpoint_manager)
 
         # Instantiate plugins once — reused for validation graph, execution graph, and sink checks
-        from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
-
         try:
-            plugins = instantiate_plugins_from_config(settings_config)
+            plugins = _instantiate_plugins_for_runtime_preflight(settings_config)
         except contract_errors.TIER_1_ERRORS:
             raise  # Tier 1 errors must crash with full traceback, not Exit(1)
         except Exception as e:
@@ -2706,9 +2720,11 @@ def join(
         # Build the execution graph for the follower (needed to recognise
         # barrier / sink nodes for hand-off routing).
         try:
-            from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
-
-            plugins = instantiate_plugins_from_config(settings_config)
+            plugins = _instantiate_plugins_for_runtime_preflight(settings_config)
+            # Resolved follower sink instances/modes are now available. Gate
+            # them before graph/processor/context construction or any plugin
+            # lifecycle, reservation, sink client initialization, or sink I/O.
+            _preflight_follower_sink_effects(plugins.sinks)
         except contract_errors.TIER_1_ERRORS:
             raise
         except Exception as e:

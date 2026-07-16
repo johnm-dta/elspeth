@@ -28,6 +28,7 @@ from pydantic import ValidationError
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_context import PluginContext
+from elspeth.contracts.sink_effects import SINK_EFFECT_PROTOCOL_VERSION, SinkEffectInputKind
 from elspeth.engine.orchestrator.export import (
     _export_csv_multifile,
     _write_json_export_batches,
@@ -74,9 +75,13 @@ class _SinkDouble:
     name = "export_sink"
     plugin_version = "test"
     source_file_hash = "0" * 64
+    effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    supported_effect_modes = frozenset({"write"})
+    supported_effect_input_kinds = frozenset({SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT})
 
     def __init__(self, *, config: dict[str, Any] | None = None, **overrides: Any) -> None:
         self.config = config or {}
+        self.effect_mode = "write"
         self.node_id = None
         self.on_start = _CallRecorder()
         self.write = _CallRecorder()
@@ -85,6 +90,18 @@ class _SinkDouble:
         self.close = _CallRecorder()
         for k, v in overrides.items():
             setattr(self, k, v)
+
+    def inspect_effect(self, _request: object, _ctx: object) -> None:
+        return None
+
+    def prepare_effect(self, _request: object, _ctx: object) -> None:
+        return None
+
+    def commit_effect(self, _plan: object, _ctx: object) -> None:
+        return None
+
+    def reconcile_effect(self, _plan: object, _ctx: object) -> None:
+        return None
 
 
 class _ExporterDouble:
@@ -137,6 +154,25 @@ class TestExportLandscapeJSON:
 
     def _make_settings(self, *, fmt: str = "json", sign: bool = False, sink: str = "output", include_raw_error_rows: bool = False) -> Any:
         return _make_settings(fmt=fmt, sign=sign, sink=sink, include_raw_error_rows=include_raw_error_rows)
+
+    def test_export_preflight_passes_explicit_audit_snapshot_kind(self) -> None:
+        sink, factory = _make_sink_and_factory()
+
+        class StopAfterPreflight(Exception):
+            pass
+
+        with (
+            patch(
+                "elspeth.engine.orchestrator.preflight.validate_pipeline_sink_effect_capabilities",
+                side_effect=StopAfterPreflight,
+            ) as validate,
+            pytest.raises(StopAfterPreflight),
+        ):
+            export_landscape(object(), "run-1", self._make_settings(), factory)
+        validate.assert_called_once_with(
+            {"output": sink},
+            required_input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
+        )
 
     def test_jsonl_export_helpers_do_not_probe_sink_shape_with_getattr(self) -> None:
         import inspect

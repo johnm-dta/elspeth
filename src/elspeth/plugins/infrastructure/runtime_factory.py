@@ -146,9 +146,12 @@ def make_sink_factory(config: ElspethSettings) -> Callable[[str], SinkProtocol]:
 
     Used by the export phase, which runs after the pipeline's sinks have
     already been closed. The factory creates a new, unstarted instance each time
-    it is called.
+    it is called. Delayed export sinks are constructed in preflight mode so
+    compliant constructors defer credential and client initialization until
+    after the export lifecycle capability gate.
     """
     from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+    from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode
 
     def factory(sink_name: str) -> SinkProtocol:
         if sink_name not in config.sinks:
@@ -156,7 +159,8 @@ def make_sink_factory(config: ElspethSettings) -> Callable[[str], SinkProtocol]:
         sink_config = config.sinks[sink_name]
         manager = get_shared_plugin_manager()
         sink_cls = manager.get_sink_by_name(sink_config.plugin)
-        sink = sink_cls(dict(sink_config.options))
+        with plugin_preflight_mode(True):
+            sink = sink_cls(dict(sink_config.options))
         sink._on_write_failure = sink_config.on_write_failure
         return sink
 

@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.schema import SchemaConfig
     from elspeth.contracts.schema_contract import SchemaContract
     from elspeth.contracts.sink import OutputValidationResult
+    from elspeth.contracts.sink_effects import SinkEffectInputKind
     from elspeth.plugins.infrastructure.config_base import PluginConfig, TransformDataConfig
 from elspeth.plugins.infrastructure.results import (
     TransformResult,
@@ -950,6 +951,13 @@ class BaseSink(ABC):
     plugin_version: str = "0.0.0"
     source_file_hash: str | None = None
 
+    # Recoverable publication is an explicit per-adapter opt-in. Legacy sinks
+    # remain visibly unsupported until they implement the full effect protocol.
+    effect_protocol_version: ClassVar[str | None] = None
+    supported_effect_modes: ClassVar[frozenset[str]] = frozenset()
+    supported_effect_input_kinds: ClassVar[frozenset[SinkEffectInputKind]] = frozenset()
+    effect_mode: str | None = None
+
     # ── Reference content (Phase 7A) ────────────────────────────────────
     # These fields populate the catalog's reference cards. They are
     # documentation, not configuration — authors fill them in to explain
@@ -1149,6 +1157,7 @@ class BaseSink(ABC):
             config: Plugin configuration
         """
         self.config = config
+        self.effect_mode = None
         # Per-instance lifecycle guards — see BaseTransform.__init__ for
         # the full rationale (lifecycle-guard contract, missing-super()
         # detection, why class-level state would mask bugs).

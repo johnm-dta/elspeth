@@ -25,9 +25,11 @@ error.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, cast
 
+from elspeth.contracts.sink_effects import SINK_EFFECT_PROTOCOL_VERSION, SinkEffectInputKind
 from elspeth.contracts.types import AggregationName
 from elspeth.contracts.value_source import (
     CatalogValueSource,
@@ -52,6 +54,96 @@ if TYPE_CHECKING:
     from elspeth.core.config import AggregationSettings, ElspethSettings
     from elspeth.core.dag.graph import ExecutionGraph
     from elspeth.core.dag.wiring import WiredTransform
+
+
+class SinkEffectCapabilityError(ValueError):
+    """A sink cannot safely participate in recoverable effect publication."""
+
+
+_SINK_EFFECT_METHODS = ("inspect_effect", "prepare_effect", "commit_effect", "reconcile_effect")
+
+
+def validate_sink_effect_capability(
+    sink: object,
+    mode: str,
+    required_input_kind: SinkEffectInputKind,
+) -> None:
+    """Validate only the sink's local, declarative effect capability surface.
+
+    This check deliberately performs no plugin lifecycle call, credential
+    resolution, target inspection, audit write, or external I/O.
+    """
+    sink_type = type(sink)
+    sink_name = inspect.getattr_static(sink_type, "name", sink_type.__name__)
+    if not isinstance(required_input_kind, SinkEffectInputKind):
+        raise SinkEffectCapabilityError("Sink effect required input kind must be an exact SinkEffectInputKind")
+    protocol_version = inspect.getattr_static(sink_type, "effect_protocol_version", None)
+    if protocol_version != SINK_EFFECT_PROTOCOL_VERSION:
+        raise SinkEffectCapabilityError(
+            f"Sink {sink_name!r} does not declare the required effect protocol "
+            f"{SINK_EFFECT_PROTOCOL_VERSION!r}; legacy sink execution is unsafe"
+        )
+
+    supported_modes = inspect.getattr_static(sink_type, "supported_effect_modes", None)
+    if not isinstance(supported_modes, frozenset):
+        raise SinkEffectCapabilityError(f"Sink {sink_name!r} supported_effect_modes must be an exact frozenset declaration")
+    if not supported_modes or any(not isinstance(declared, str) or not declared.strip() for declared in supported_modes):
+        raise SinkEffectCapabilityError(f"Sink {sink_name!r} must declare at least one non-empty supported effect mode")
+    resolved_mode = _resolved_sink_effect_mode(sink, str(sink_name))
+    if not isinstance(mode, str) or not mode.strip():
+        raise SinkEffectCapabilityError(f"Sink {sink_name!r} requires a non-empty configured effect mode")
+    if mode != resolved_mode:
+        raise SinkEffectCapabilityError(
+            f"Sink {sink_name!r} configured effect mode {mode!r} does not match resolved effect_mode {resolved_mode!r}"
+        )
+    if mode not in supported_modes:
+        raise SinkEffectCapabilityError(
+            f"Sink {sink_name!r} does not support configured effect mode {mode!r}; declared modes: {sorted(supported_modes)!r}"
+        )
+
+    supported_input_kinds = inspect.getattr_static(sink_type, "supported_effect_input_kinds", None)
+    if not isinstance(supported_input_kinds, frozenset):
+        raise SinkEffectCapabilityError(f"Sink {sink_name!r} supported_effect_input_kinds must be an exact frozenset declaration")
+    if not supported_input_kinds:
+        raise SinkEffectCapabilityError(f"Sink {sink_name!r} must declare at least one supported effect input kind")
+    if any(not isinstance(declared, SinkEffectInputKind) for declared in supported_input_kinds):
+        raise SinkEffectCapabilityError(f"Sink {sink_name!r} supported_effect_input_kinds entries must be exact SinkEffectInputKind values")
+    if required_input_kind not in supported_input_kinds:
+        raise SinkEffectCapabilityError(
+            f"Sink {sink_name!r} does not support required effect input kind {required_input_kind.value!r}; "
+            f"declared input kinds: {sorted(kind.value for kind in supported_input_kinds)!r}"
+        )
+
+    for method_name in _SINK_EFFECT_METHODS:
+        method = inspect.getattr_static(sink_type, method_name, None)
+        if not callable(method):
+            raise SinkEffectCapabilityError(
+                f"Sink {sink_name!r} declares effect protocol {SINK_EFFECT_PROTOCOL_VERSION!r} but {method_name} is not callable"
+            )
+
+
+def _resolved_sink_effect_mode(sink: object, sink_name: str) -> str:
+    """Read the adapter-resolved effect mode without inspecting raw config."""
+    resolved = inspect.getattr_static(sink, "effect_mode", None)
+    if not isinstance(resolved, str) or not resolved.strip():
+        raise SinkEffectCapabilityError(
+            f"Sink {sink_name!r} effect protocol requires one explicit resolved effect_mode string; raw adapter config is never inferred"
+        )
+    return resolved
+
+
+def validate_pipeline_sink_effect_capabilities(
+    sinks: Mapping[str, SinkProtocol],
+    *,
+    required_input_kind: SinkEffectInputKind,
+) -> None:
+    """Validate every resolved sink before per-run context/lifecycle setup."""
+    for sink_name, sink in sinks.items():
+        validate_sink_effect_capability(
+            sink,
+            mode=_resolved_sink_effect_mode(sink, sink_name),
+            required_input_kind=required_input_kind,
+        )
 
 
 def assemble_and_validate_pipeline_config(
@@ -344,7 +436,10 @@ def _read_field(config: object, field_name: str) -> object:
 # intentionally NOT caught by the walker — it surfaces unconfigured catalogs
 # as 500-class programmer bugs, not per-pipeline validation failures.
 __all__ = [
+    "SinkEffectCapabilityError",
     "UnknownCatalogIdError",
     "assemble_and_validate_pipeline_config",
+    "validate_pipeline_sink_effect_capabilities",
+    "validate_sink_effect_capability",
     "validate_value_source_compliance",
 ]

@@ -15,10 +15,21 @@ from unittest.mock import patch
 
 from typer.testing import CliRunner
 
-from elspeth.cli import app
+from elspeth.cli import _preflight_follower_sink_effects, app
 from elspeth.contracts.preflight import DependencyRunResult, PreflightResult
+from elspeth.contracts.sink_effects import SinkEffectInputKind
 
 runner = CliRunner()
+
+
+def test_follower_preflight_passes_explicit_pipeline_members_kind() -> None:
+    sinks = {"output": object()}
+    with patch("elspeth.engine.orchestrator.preflight.validate_pipeline_sink_effect_capabilities") as validate:
+        _preflight_follower_sink_effects(sinks)  # type: ignore[arg-type]
+    validate.assert_called_once_with(
+        sinks,
+        required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+    )
 
 
 @dataclass(slots=True)

@@ -24,9 +24,11 @@ from elspeth.contracts import (
     TransformProtocol,
 )
 from elspeth.contracts.plugin_context import PluginContext
+from elspeth.contracts.sink_effects import SinkEffectInputKind
 from elspeth.contracts.types import NodeID
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins, plugin_node_scope
 from elspeth.engine.orchestrator.graph_wiring import assign_plugin_node_ids
+from elspeth.engine.orchestrator.preflight import validate_pipeline_sink_effect_capabilities
 from elspeth.engine.orchestrator.run_state import (
     AggNodeEntry,
     RunContext,
@@ -106,6 +108,16 @@ class RunContextFactory:
             RunContext with ctx, processor, coalesce_executor, coalesce_node_map,
             and agg_transform_lookup.
         """
+        # Effect capability is a local/declarative gate over already-resolved
+        # sink instances. It must precede node assignment, restricted-context
+        # construction, every plugin on_start(), reservation, inspection,
+        # sink client initialization, and target I/O on both fresh and resume
+        # paths.
+        validate_pipeline_sink_effect_capabilities(
+            config.sinks,
+            required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+        )
+
         source_id = artifacts.source_id
         sink_id_map = dict(artifacts.sink_id_map)
         transform_id_map = dict(artifacts.transform_id_map)

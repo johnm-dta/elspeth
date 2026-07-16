@@ -309,6 +309,22 @@ def export_landscape(
 
     export_config = settings.landscape.export
 
+    sink_name = export_config.sink
+    if sink_name is None:
+        raise ValueError("Export sink name is None")
+    sink = sink_factory(sink_name)
+
+    # The export sink is a fresh lifecycle boundary, separate from the main
+    # pipeline. Validate its resolved mode before signing-key resolution,
+    # exporter/context/node construction, on_start(), reservation, or I/O.
+    from elspeth.contracts.sink_effects import SinkEffectInputKind
+    from elspeth.engine.orchestrator.preflight import validate_pipeline_sink_effect_capabilities
+
+    validate_pipeline_sink_effect_capabilities(
+        {sink_name: sink},
+        required_input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
+    )
+
     # Get signing key from environment if signing enabled
     signing_key: bytes | None = None
     if export_config.sign:
@@ -327,10 +343,6 @@ def export_landscape(
         include_raw_error_rows=export_config.include_raw_error_rows,
     )
 
-    sink_name = export_config.sink
-    if sink_name is None:
-        raise ValueError("Export sink name is None")
-    sink = sink_factory(sink_name)
     sink.node_id = f"export:{sink_name}"
 
     from elspeth.contracts import NodeType

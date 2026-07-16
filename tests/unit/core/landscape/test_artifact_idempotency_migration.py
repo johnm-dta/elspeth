@@ -22,6 +22,92 @@ from tests.unit.core.landscape.test_token_ownership_run_scope import _rewrite_to
 _ARTIFACT_INDEX = "uq_artifacts_run_idempotency_key"
 _SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
+_LEGACY_OPERATIONS_DDL = """
+CREATE TABLE operations_epoch_25 (
+    operation_id VARCHAR(64) NOT NULL PRIMARY KEY,
+    run_id VARCHAR(64) NOT NULL REFERENCES runs(run_id),
+    node_id VARCHAR(64) NOT NULL,
+    operation_type VARCHAR(32) NOT NULL,
+    started_at DATETIME NOT NULL,
+    completed_at DATETIME,
+    status VARCHAR(16) NOT NULL,
+    input_data_ref VARCHAR(256), input_data_hash VARCHAR(64),
+    output_data_ref VARCHAR(256), output_data_hash VARCHAR(64),
+    error_message TEXT, duration_ms FLOAT,
+    FOREIGN KEY(node_id, run_id) REFERENCES nodes(node_id, run_id)
+)
+"""
+_LEGACY_ARTIFACTS_DDL = """
+CREATE TABLE artifacts_epoch_25 (
+    artifact_id VARCHAR(64) NOT NULL PRIMARY KEY,
+    run_id VARCHAR(64) NOT NULL REFERENCES runs(run_id),
+    produced_by_state_id VARCHAR(64) NOT NULL,
+    sink_node_id VARCHAR(64) NOT NULL,
+    artifact_type VARCHAR(64) NOT NULL,
+    path_or_uri VARCHAR(512) NOT NULL,
+    content_hash VARCHAR(64) NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    idempotency_key VARCHAR(256),
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY(produced_by_state_id, run_id) REFERENCES node_states(state_id, run_id),
+    FOREIGN KEY(sink_node_id, run_id) REFERENCES nodes(node_id, run_id)
+)
+"""
+
+
+def _rewrite_current_as_epoch_25(db_path: Path) -> None:
+    """Create the genuine physical predecessor used by migration tests."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(_LEGACY_OPERATIONS_DDL)
+        conn.execute(
+            """
+            INSERT INTO operations_epoch_25
+            SELECT operation_id, run_id, node_id, operation_type, started_at,
+                   completed_at, status, input_data_ref, input_data_hash,
+                   output_data_ref, output_data_hash, error_message, duration_ms
+            FROM operations
+            """
+        )
+        conn.execute("DROP TABLE operations")
+        conn.execute("ALTER TABLE operations_epoch_25 RENAME TO operations")
+        conn.execute("CREATE INDEX ix_operations_node_run ON operations(node_id, run_id)")
+        conn.execute("CREATE INDEX ix_operations_run_id ON operations(run_id)")
+
+        conn.execute(_LEGACY_ARTIFACTS_DDL)
+        conn.execute(
+            """
+            INSERT INTO artifacts_epoch_25
+            SELECT artifact_id, run_id, produced_by_state_id, sink_node_id,
+                   artifact_type, path_or_uri, content_hash, size_bytes,
+                   idempotency_key, created_at
+            FROM artifacts
+            """
+        )
+        conn.execute("DROP TABLE artifacts")
+        conn.execute("ALTER TABLE artifacts_epoch_25 RENAME TO artifacts")
+        conn.execute("CREATE INDEX ix_artifacts_run ON artifacts(run_id)")
+        conn.execute(
+            "CREATE UNIQUE INDEX uq_artifacts_run_idempotency_key ON artifacts(run_id, idempotency_key) WHERE idempotency_key IS NOT NULL"
+        )
+
+        conn.execute("DROP INDEX uq_runs_export_witness")
+        conn.execute("DROP INDEX uq_tokens_identity_row_run")
+        for table_name in (
+            "sink_effect_attempts",
+            "sink_effect_export_snapshots",
+            "sink_effect_members",
+            "sink_effects",
+            "sink_effect_streams",
+            "audit_export_snapshot_chunks",
+            "audit_export_snapshots",
+        ):
+            conn.execute(f"DROP TABLE {table_name}")
+        conn.execute("PRAGMA user_version = 25")
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys = ON")
+
 
 def _seed_current_database(db_path: Path) -> str:
     url = f"sqlite:///{db_path}"
@@ -71,19 +157,28 @@ def _seed_current_database(db_path: Path) -> str:
             input_data={"value": 1},
             state_id="state-artifact-migration",
         )
-        factory.execution.register_artifact(
-            run_id=run.run_id,
-            state_id=state.state_id,
-            sink_node_id="sink-artifact-migration",
-            artifact_type="csv",
-            path="/output/migration.csv",
-            content_hash="sha256:migration",
-            size_bytes=128,
-            artifact_id="artifact-migration-original",
-            idempotency_key="run-artifact-migration:row-artifact-migration:csv_sink",
-        )
+        with db.engine.begin() as connection:
+            connection.exec_driver_sql(
+                """
+                INSERT INTO artifacts (
+                    artifact_id, run_id, produced_by_state_id, sink_effect_id,
+                    sink_node_id, artifact_type, path_or_uri, content_hash,
+                    size_bytes, idempotency_key, publication_performed,
+                    publication_evidence_kind, created_at
+                ) VALUES (?, ?, ?, NULL, ?, 'csv', '/output/migration.csv',
+                          'sha256:migration', 128, ?, 1, 'returned', CURRENT_TIMESTAMP)
+                """,
+                (
+                    "artifact-migration-original",
+                    run.run_id,
+                    state.state_id,
+                    "sink-artifact-migration",
+                    "run-artifact-migration:row-artifact-migration:csv_sink",
+                ),
+            )
     finally:
         db.close()
+    _rewrite_current_as_epoch_25(db_path)
     return url
 
 
@@ -180,7 +275,7 @@ def test_epoch_24_migrates_to_25_and_preserves_artifact(tmp_path: Path) -> None:
     migrated = LandscapeDB(url)
     try:
         with migrated.engine.connect() as conn:
-            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 25
+            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 26
             artifact = conn.exec_driver_sql("SELECT artifact_id, content_hash FROM artifacts WHERE idempotency_key IS NOT NULL").one()
         assert tuple(artifact) == ("artifact-migration-original", "sha256:migration")
         assert _ARTIFACT_INDEX in _artifact_indexes(migrated.engine)
@@ -200,7 +295,7 @@ def test_epoch_23_migrates_sequentially_through_24_to_25(tmp_path: Path) -> None
     migrated = LandscapeDB(url)
     try:
         with migrated.engine.connect() as conn:
-            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 25
+            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 26
             token_fks = conn.exec_driver_sql("PRAGMA foreign_key_list(tokens)").fetchall()
         assert any(str(row[2]) == "rows" and str(row[3]) == "run_id" and str(row[4]) == "run_id" for row in token_fks)
         assert _ARTIFACT_INDEX in _artifact_indexes(migrated.engine)

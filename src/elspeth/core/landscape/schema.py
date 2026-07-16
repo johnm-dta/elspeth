@@ -507,11 +507,11 @@ tokens_table = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     # Composite unique target for downstream composite FKs (token_id, run_id)
     UniqueConstraint("token_id", "run_id"),
-    UniqueConstraint("token_id", "row_id", "run_id"),
     # Epoch 24: row ownership is authoritative. The independent run FK proves
     # the run exists; this composite FK proves it is the row's run.
     ForeignKeyConstraint(["row_id", "run_id"], ["rows.row_id", "rows.run_id"]),
 )
+Index("uq_tokens_identity_row_run", tokens_table.c.token_id, tokens_table.c.row_id, tokens_table.c.run_id, unique=True)
 
 # === Token Outcomes (AUD-001: Explicit terminal state recording) ===
 

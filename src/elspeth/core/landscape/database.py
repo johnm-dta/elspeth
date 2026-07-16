@@ -16,17 +16,25 @@ from typing import Any, Literal, NewType, Self, cast
 from urllib.parse import quote
 from weakref import WeakKeyDictionary
 
-from sqlalchemy import Connection, MetaData, Table, create_engine, event, text
+from sqlalchemy import Connection, Index, MetaData, Table, create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.pool import StaticPool
+from sqlalchemy.schema import CreateIndex, CreateTable
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.url import SENSITIVE_PARAMS, _scrub_odbc_connect_value
 from elspeth.core.landscape.journal import LandscapeJournal
-from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata, schema_identity_table
+from elspeth.core.landscape.schema import (
+    _SQLITE_AUDIT_EXPORT_TRIGGERS,
+    SQLITE_SCHEMA_EPOCH,
+    artifacts_table,
+    metadata,
+    operations_table,
+    schema_identity_table,
+)
 from elspeth.core.schema_identity import (
     SCHEMA_IDENTITY_TABLE_NAME,
     SchemaIdentityMismatch,
@@ -193,13 +201,90 @@ _SQLITE_EPOCH_25_ARTIFACT_INDEX_DDL = (
 )
 _EPOCH_25_ARTIFACT_INDEX = ("artifacts", _SQLITE_EPOCH_25_ARTIFACT_INDEX_NAME)
 
+_EPOCH_26_NEW_TABLE_NAMES: tuple[str, ...] = (
+    "sink_effect_streams",
+    "audit_export_snapshots",
+    "audit_export_snapshot_chunks",
+    "sink_effects",
+    "sink_effect_members",
+    "sink_effect_export_snapshots",
+    "sink_effect_attempts",
+)
+_SQLITE_EPOCH_26_OPERATION_LEGACY_COLUMNS = (
+    "operation_id, run_id, node_id, operation_type, started_at, completed_at, status, "
+    "input_data_ref, input_data_hash, output_data_ref, output_data_hash, error_message, duration_ms"
+)
+_SQLITE_EPOCH_26_ARTIFACT_LEGACY_COLUMNS = (
+    "artifact_id, run_id, produced_by_state_id, sink_node_id, artifact_type, path_or_uri, "
+    "content_hash, size_bytes, idempotency_key, created_at"
+)
 
-def _sqlite_epoch_24_shape_metadata() -> MetaData:
-    """Return current metadata with only the epoch-25 artifact index removed."""
+
+def _compile_sqlite_table_ddl(table: Table, *, replacement_name: str | None = None) -> str:
+    """Compile one current metadata table for the raw epoch-26 transaction."""
+    from sqlalchemy.dialects.sqlite import dialect
+
+    statement = str(CreateTable(table).compile(dialect=dialect()))
+    if replacement_name is not None:
+        statement = statement.replace(f"CREATE TABLE {table.name}", f"CREATE TABLE {replacement_name}", 1)
+    return statement
+
+
+def _compile_sqlite_index_ddl(index: Index) -> str:
+    """Compile one current metadata index for the raw epoch-26 transaction."""
+    from sqlalchemy.dialects.sqlite import dialect
+
+    return str(CreateIndex(index).compile(dialect=dialect()))
+
+
+def _remove_metadata_column(table: Table, column_name: str) -> None:
+    """Remove a migration-successor column and every direct dependent object."""
+    column = table.c[column_name]
+    for constraint in list(table.constraints):
+        elements = getattr(constraint, "elements", ())
+        if any(getattr(element, "parent", None) is column for element in elements):
+            table.constraints.discard(constraint)
+            for element in elements:
+                element.parent.foreign_keys.discard(element)
+                table.foreign_keys.discard(element)
+    for index in list(table.indexes):
+        if any(index_column is column for index_column in index.columns):
+            table.indexes.discard(index)
+    table._columns.remove(column)  # SQLAlchemy has no public predecessor-shape removal API.
+
+
+def _sqlite_epoch_25_shape_metadata() -> MetaData:
+    """Return the exact metadata predecessor of the epoch-26 ledger."""
     predecessor = MetaData()
     for table in metadata.tables.values():
         table.to_metadata(predecessor)
 
+    operations = predecessor.tables["operations"]
+    operations.constraints.discard(next(item for item in operations.constraints if item.name == "ck_operations_sink_effect_type"))
+    _remove_metadata_column(operations, "sink_effect_id")
+
+    artifacts = predecessor.tables["artifacts"]
+    for name in ("ck_artifacts_producer_xor", "ck_artifacts_publication_evidence_kind"):
+        artifacts.constraints.discard(next(item for item in artifacts.constraints if item.name == name))
+    _remove_metadata_column(artifacts, "sink_effect_id")
+    _remove_metadata_column(artifacts, "publication_performed")
+    _remove_metadata_column(artifacts, "publication_evidence_kind")
+    artifacts.c.produced_by_state_id.nullable = False
+
+    tokens = predecessor.tables["tokens"]
+    tokens.indexes.discard(next(index for index in tokens.indexes if index.name == "uq_tokens_identity_row_run"))
+
+    runs = predecessor.tables["runs"]
+    runs.indexes.discard(next(index for index in runs.indexes if index.name == "uq_runs_export_witness"))
+
+    for table_name in reversed(_EPOCH_26_NEW_TABLE_NAMES):
+        predecessor.remove(predecessor.tables[table_name])
+    return predecessor
+
+
+def _sqlite_epoch_24_shape_metadata() -> MetaData:
+    """Return epoch-25 predecessor metadata with its artifact index removed."""
+    predecessor = _sqlite_epoch_25_shape_metadata()
     artifacts = predecessor.tables["artifacts"]
     artifact_index = next(index for index in artifacts.indexes if index.name == _SQLITE_EPOCH_25_ARTIFACT_INDEX_NAME)
     artifacts.indexes.discard(artifact_index)
@@ -704,6 +789,7 @@ _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
     ("run_coordination_events", "ix_run_coordination_events_run"),
     ("coalesce_branch_losses", "uq_coalesce_branch_losses_natural"),
     ("runs", "uq_runs_export_witness"),
+    ("tokens", "uq_tokens_identity_row_run"),
     ("operations", "uq_operations_sink_effect_id"),
     ("sink_effect_streams", "uq_sink_effect_stream_identity"),
     ("sink_effect_members", "uq_sink_effect_member_binding"),
@@ -921,8 +1007,8 @@ class LandscapeDB:
         self._setup_engine(**engine_kwargs)
         self._migrate_sqlite_schema()
         self._validate_schema()  # Check BEFORE create_tables
-        # Stamp only a structurally validated unstamped schema. Epochs 23 and
-        # 24 have already taken their ordered narrow migrations above; all
+        # Stamp only a structurally validated unstamped schema. Epochs 23,
+        # 24, and 25 have already taken their ordered narrow migrations above; all
         # older non-zero epochs retain the deliberate drop/recreate boundary.
         self._sync_sqlite_schema_epoch()
         self._create_tables()
@@ -1253,8 +1339,9 @@ class LandscapeDB:
         """Apply explicitly supported forward-only SQLite migrations.
 
         Supported migrations are an ordered chain with fixed target epochs:
-        epoch 23 rebuilds ``tokens`` and commits epoch 24, then epoch 24 adds
-        the artifact idempotency index and commits epoch 25. Each step performs
+        epoch 23 rebuilds ``tokens`` and commits epoch 24, epoch 24 adds
+        the artifact idempotency index and commits epoch 25, then epoch 25
+        installs the sink-effect ledger and commits epoch 26. Each step performs
         its own exact-shape preflight and write-lock epoch recheck. Older
         epochs, partial/foreign schemas, read-only opens, and inspection-only
         opens are left untouched for the compatibility validator to reject.
@@ -1262,13 +1349,16 @@ class LandscapeDB:
         if not self.connection_string.startswith("sqlite") or self._read_only:
             return
 
-        for _step in range(2):
+        for _step in range(3):
             epoch = self._get_sqlite_schema_epoch()
             if epoch == 23:
                 self._migrate_sqlite_epoch_23_to_24()
                 continue
             if epoch == 24:
                 self._migrate_sqlite_epoch_24_to_25()
+                continue
+            if epoch == 25:
+                self._migrate_sqlite_epoch_25_to_26()
                 continue
             return
 
@@ -1304,7 +1394,7 @@ class LandscapeDB:
                     f"{type(epoch_error).__name__}: {epoch_error}"
                 )
                 raise validation_error.with_traceback(validation_error.__traceback__) from None
-            if current_epoch in (24, 25):
+            if current_epoch in (24, 25, 26):
                 return
             raise
 
@@ -1322,7 +1412,7 @@ class LandscapeDB:
 
             cursor.execute("BEGIN IMMEDIATE")
             locked_epoch = int(cursor.execute("PRAGMA user_version").fetchone()[0])
-            if locked_epoch in (24, 25):
+            if locked_epoch in (24, 25, 26):
                 # Another process completed the same migration while this
                 # opener waited for SQLite's single-writer lock.
                 raw.rollback()
@@ -1476,7 +1566,7 @@ class LandscapeDB:
                     f"{type(epoch_error).__name__}: {epoch_error}"
                 )
                 raise validation_error.with_traceback(validation_error.__traceback__) from None
-            if current_epoch == 25:
+            if current_epoch in (25, 26):
                 return
             raise
 
@@ -1489,7 +1579,7 @@ class LandscapeDB:
         try:
             cursor.execute("BEGIN IMMEDIATE")
             locked_epoch = int(cursor.execute("PRAGMA user_version").fetchone()[0])
-            if locked_epoch == 25:
+            if locked_epoch in (25, 26):
                 # Another process completed the migration while this opener
                 # waited for SQLite's single-writer lock.
                 raw.rollback()
@@ -1569,12 +1659,275 @@ class LandscapeDB:
         if close_error is not None:
             raise AuditIntegrityError("Epoch-25 migration failed to close its SQLite connection cleanly") from close_error
 
+    def _migrate_sqlite_epoch_25_to_26(self) -> None:
+        """Install the recoverable sink-effect ledger and rebuild linked rows."""
+        from sqlalchemy import inspect
+
+        if not set(inspect(self.engine).get_table_names()):
+            return
+
+        # Perform the complete predecessor probe before checking out the raw
+        # connection. This preserves the single-connection pool contract and
+        # prevents an inspector from interfering with BEGIN IMMEDIATE.
+        try:
+            self._validate_schema(
+                allowed_sqlite_epochs=frozenset({25}),
+                shape_metadata=_sqlite_epoch_25_shape_metadata(),
+            )
+            with self.engine.connect() as connection:
+                duplicate = connection.exec_driver_sql(
+                    """
+                    SELECT run_id, idempotency_key, COUNT(*)
+                    FROM artifacts
+                    WHERE idempotency_key IS NOT NULL
+                    GROUP BY run_id, idempotency_key
+                    HAVING COUNT(*) > 1
+                    ORDER BY run_id, idempotency_key
+                    LIMIT 1
+                    """
+                ).first()
+            if duplicate is not None:
+                run_id, idempotency_key, count = duplicate
+                raise AuditIntegrityError(
+                    "Epoch-26 migration found duplicate artifact idempotency records "
+                    f"for run_id={run_id!r}, idempotency_key={idempotency_key!r} ({count} rows). "
+                    "Refusing to choose or delete Tier-1 audit data."
+                )
+        except (SchemaCompatibilityError, AuditIntegrityError) as validation_error:
+            try:
+                current_epoch = self._get_sqlite_schema_epoch()
+            except Exception as epoch_error:
+                validation_error.add_note(
+                    "Epoch-26 migration could not re-read the epoch after predecessor validation failed: "
+                    f"{type(epoch_error).__name__}: {epoch_error}"
+                )
+                raise validation_error.with_traceback(validation_error.__traceback__) from None
+            if current_epoch == 26:
+                return
+            raise
+
+        raw = self.engine.raw_connection()
+        cursor = raw.cursor()
+        primary_error: Exception | None = None
+        primary_traceback: TracebackType | None = None
+        restore_error: Exception | None = None
+        close_error: Exception | None = None
+        invalidate_connection = False
+        try:
+            cursor.execute("PRAGMA foreign_keys = OFF")
+            if cursor.execute("PRAGMA foreign_keys").fetchone() != (0,):
+                raise AuditIntegrityError("Epoch-26 migration could not disable SQLite foreign-key enforcement before BEGIN")
+
+            cursor.execute("BEGIN IMMEDIATE")
+            locked_epoch = int(cursor.execute("PRAGMA user_version").fetchone()[0])
+            if locked_epoch == 26:
+                raw.rollback()
+            elif locked_epoch != 25:
+                raise SchemaCompatibilityError(
+                    "Epoch-26 migration lost its predecessor precondition after acquiring the write lock: "
+                    f"expected epoch 25, observed {locked_epoch}."
+                )
+            else:
+                dependent_schema = cursor.execute(
+                    """
+                    SELECT tbl_name, type, name, sql
+                    FROM sqlite_schema
+                    WHERE tbl_name IN ('operations', 'artifacts')
+                      AND type IN ('index', 'trigger')
+                      AND sql IS NOT NULL
+                    ORDER BY tbl_name, type, name
+                    """
+                ).fetchall()
+
+                operation_count = int(cursor.execute("SELECT COUNT(*) FROM operations").fetchone()[0])
+                artifact_count = int(cursor.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0])
+
+                cursor.execute(_compile_sqlite_table_ddl(operations_table, replacement_name="operations_epoch_26"))
+                cursor.execute(
+                    "INSERT INTO operations_epoch_26 "
+                    f"({_SQLITE_EPOCH_26_OPERATION_LEGACY_COLUMNS}, sink_effect_id) "
+                    f"SELECT {_SQLITE_EPOCH_26_OPERATION_LEGACY_COLUMNS}, NULL FROM operations"
+                )
+                if int(cursor.execute("SELECT COUNT(*) FROM operations_epoch_26").fetchone()[0]) != operation_count:
+                    raise AuditIntegrityError("Epoch-26 migration did not preserve every legacy operation row")
+                if (
+                    cursor.execute(
+                        f"SELECT {_SQLITE_EPOCH_26_OPERATION_LEGACY_COLUMNS} FROM operations "
+                        f"EXCEPT SELECT {_SQLITE_EPOCH_26_OPERATION_LEGACY_COLUMNS} FROM operations_epoch_26"
+                    ).fetchone()
+                    is not None
+                ):
+                    raise AuditIntegrityError("Epoch-26 migration changed legacy operation data during copy")
+
+                cursor.execute(_compile_sqlite_table_ddl(artifacts_table, replacement_name="artifacts_epoch_26"))
+                cursor.execute(
+                    """
+                    INSERT INTO artifacts_epoch_26 (
+                        artifact_id, run_id, produced_by_state_id, sink_effect_id,
+                        sink_node_id, artifact_type, path_or_uri, content_hash,
+                        size_bytes, idempotency_key, publication_performed,
+                        publication_evidence_kind, created_at
+                    )
+                    SELECT artifact_id, run_id, produced_by_state_id, NULL,
+                           sink_node_id, artifact_type, path_or_uri, content_hash,
+                           size_bytes, idempotency_key, 1, 'legacy_returned', created_at
+                    FROM artifacts
+                    """
+                )
+                if int(cursor.execute("SELECT COUNT(*) FROM artifacts_epoch_26").fetchone()[0]) != artifact_count:
+                    raise AuditIntegrityError("Epoch-26 migration did not preserve every legacy artifact row")
+                if (
+                    cursor.execute(
+                        f"SELECT {_SQLITE_EPOCH_26_ARTIFACT_LEGACY_COLUMNS} FROM artifacts "
+                        f"EXCEPT SELECT {_SQLITE_EPOCH_26_ARTIFACT_LEGACY_COLUMNS} FROM artifacts_epoch_26"
+                    ).fetchone()
+                    is not None
+                ):
+                    raise AuditIntegrityError("Epoch-26 migration changed legacy artifact data during copy")
+
+                cursor.execute("DROP TABLE operations")
+                cursor.execute("ALTER TABLE operations_epoch_26 RENAME TO operations")
+                cursor.execute("DROP TABLE artifacts")
+                cursor.execute("ALTER TABLE artifacts_epoch_26 RENAME TO artifacts")
+
+                # Parent uniqueness must exist before child FK tables are
+                # created. Both indexes are exact, named, and non-partial.
+                witness_index = next(index for index in metadata.tables["runs"].indexes if index.name == "uq_runs_export_witness")
+                token_identity_index = next(
+                    index for index in metadata.tables["tokens"].indexes if index.name == "uq_tokens_identity_row_run"
+                )
+                cursor.execute(_compile_sqlite_index_ddl(witness_index))
+                cursor.execute(_compile_sqlite_index_ddl(token_identity_index))
+
+                for table_name in _EPOCH_26_NEW_TABLE_NAMES:
+                    cursor.execute(_compile_sqlite_table_ddl(metadata.tables[table_name]))
+
+                recreated_names: set[str] = set()
+                for table_name in ("operations", "artifacts", *_EPOCH_26_NEW_TABLE_NAMES):
+                    for index in sorted(metadata.tables[table_name].indexes, key=lambda candidate: candidate.name or ""):
+                        if index.name is None:
+                            raise AuditIntegrityError(f"Epoch-26 migration found an unnamed index on {table_name}")
+                        cursor.execute(_compile_sqlite_index_ddl(index))
+                        recreated_names.add(index.name)
+
+                for table_name, object_type, object_name, statement in dependent_schema:
+                    if object_name in recreated_names:
+                        continue
+                    if not isinstance(statement, str):
+                        raise AuditIntegrityError(f"Epoch-26 migration found non-text DDL for {table_name} {object_type} {object_name!r}")
+                    cursor.execute(statement)
+
+                for trigger_ddl in _SQLITE_AUDIT_EXPORT_TRIGGERS:
+                    cursor.execute(trigger_ddl)
+
+                foreign_key_violations = cursor.execute("PRAGMA foreign_key_check").fetchall()
+                if foreign_key_violations:
+                    raise AuditIntegrityError(
+                        f"Epoch-26 migration produced foreign-key violations; refusing to commit: {foreign_key_violations[:10]!r}"
+                    )
+
+                table_names = {
+                    str(row[0])
+                    for row in cursor.execute("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").fetchall()
+                }
+                if table_names != set(metadata.tables):
+                    raise AuditIntegrityError(
+                        "Epoch-26 migration physical table manifest mismatch: "
+                        f"missing={sorted(set(metadata.tables) - table_names)!r}, extra={sorted(table_names - set(metadata.tables))!r}"
+                    )
+                for table in (operations_table, artifacts_table):
+                    observed_columns = [str(row[1]) for row in cursor.execute(f"PRAGMA table_info('{table.name}')").fetchall()]
+                    if observed_columns != [column.name for column in table.columns]:
+                        raise AuditIntegrityError(f"Epoch-26 migration physical column manifest mismatch for {table.name}")
+
+                witness_rows = cursor.execute("PRAGMA index_list('runs')").fetchall()
+                witness = next((row for row in witness_rows if row[1] == "uq_runs_export_witness"), None)
+                if witness is None or int(witness[2]) != 1 or int(witness[4]) != 0:
+                    raise AuditIntegrityError("Epoch-26 migration did not install the exact non-partial unique export witness index")
+                witness_columns = [
+                    str(row[2]) for row in cursor.execute("PRAGMA index_xinfo('uq_runs_export_witness')").fetchall() if int(row[5]) == 1
+                ]
+                if witness_columns != ["run_id", "status", "completed_at"]:
+                    raise AuditIntegrityError("Epoch-26 migration export witness index has the wrong ordered columns")
+
+                trigger_names = {str(row[0]) for row in cursor.execute("SELECT name FROM sqlite_schema WHERE type = 'trigger'").fetchall()}
+                missing_triggers = sorted(set(_REQUIRED_TRIGGERS) - trigger_names)
+                if missing_triggers:
+                    raise AuditIntegrityError(f"Epoch-26 migration physical trigger manifest is incomplete: {missing_triggers!r}")
+
+                cursor.execute("PRAGMA user_version = 26")
+                raw.commit()
+        except Exception as exc:
+            primary_error = exc
+            primary_traceback = exc.__traceback__
+            try:
+                raw.rollback()
+            except Exception as rollback_error:
+                invalidate_connection = True
+                exc.add_note(
+                    "Epoch-26 migration rollback also failed; the physical connection was invalidated: "
+                    f"{type(rollback_error).__name__}: {rollback_error}"
+                )
+        finally:
+            try:
+                cursor.execute("PRAGMA foreign_keys = ON")
+                if cursor.execute("PRAGMA foreign_keys").fetchone() != (1,):
+                    raise AuditIntegrityError("Epoch-26 migration failed to restore SQLite foreign-key enforcement")
+            except Exception as exc:
+                invalidate_connection = True
+                restore_error = exc
+                if primary_error is not None:
+                    primary_error.add_note(
+                        "Epoch-26 migration foreign-key restoration also failed; the physical connection was "
+                        f"invalidated: {type(exc).__name__}: {exc}"
+                    )
+            if invalidate_connection:
+                try:
+                    raw.invalidate()
+                except Exception as invalidate_error:
+                    target_error = primary_error or restore_error
+                    if target_error is not None:
+                        target_error.add_note(
+                            "Epoch-26 migration could not invalidate an uncertain physical connection: "
+                            f"{type(invalidate_error).__name__}: {invalidate_error}"
+                        )
+            try:
+                raw.close()
+            except Exception as exc:
+                close_error = exc
+                try:
+                    raw.invalidate()
+                except Exception as invalidate_error:
+                    cleanup_note = (
+                        "Epoch-26 migration connection close failed and the uncertain physical connection could not be "
+                        f"invalidated: close={type(exc).__name__}: {exc}; "
+                        f"invalidate={type(invalidate_error).__name__}: {invalidate_error}"
+                    )
+                    exc.add_note(cleanup_note)
+                else:
+                    cleanup_note = (
+                        "Epoch-26 migration connection close failed; the uncertain physical connection was invalidated: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                target_error = primary_error or restore_error
+                if target_error is not None:
+                    target_error.add_note(cleanup_note)
+
+        if primary_error is not None:
+            raise primary_error.with_traceback(primary_traceback)
+        if restore_error is not None:
+            if isinstance(restore_error, AuditIntegrityError):
+                raise restore_error
+            raise AuditIntegrityError("Epoch-26 migration failed to restore SQLite foreign-key enforcement") from restore_error
+        if close_error is not None:
+            raise AuditIntegrityError("Epoch-26 migration failed to close its SQLite connection cleanly") from close_error
+
     def _get_sqlite_schema_epoch(self) -> int:
         """Return SQLite schema epoch from PRAGMA user_version.
 
         Uses SQLite's built-in schema version slot as a lightweight marker for
-        intentional pre-1.0 schema breaks and the ordered epoch-23-to-24 and
-        epoch-24-to-25 migrations implemented by
+        intentional pre-1.0 schema breaks and the ordered epoch-23-to-24,
+        epoch-24-to-25, and epoch-25-to-26 migrations implemented by
         :meth:`_migrate_sqlite_schema`.
         """
         if not self.connection_string.startswith("sqlite"):
@@ -1696,7 +2049,8 @@ class LandscapeDB:
                     f"Database: {_safe_database_descriptor(self.connection_string)}"
                 ) from e
             raise
-        expected_tables = set(metadata.tables.keys())
+        validation_metadata = shape_metadata or metadata
+        expected_tables = set(validation_metadata.tables.keys())
         present_landscape_tables = existing_tables & expected_tables
         schema_epoch = self._get_sqlite_schema_epoch() if self.connection_string.startswith("sqlite") else 0
         identity_issue = _landscape_identity_issue(self.engine, inspector, existing_tables) if existing_tables else None
@@ -1739,16 +2093,19 @@ class LandscapeDB:
         shape_issues = (
             collect_metadata_shape_issues(
                 inspector,
-                shape_metadata or metadata,
+                validation_metadata,
                 dialect=self.engine.dialect,
                 present_tables=present_landscape_tables,
                 allowed_missing_index_names=_ADDITIVE_INDEX_NAMES,
             )
-            if all(isinstance(table, Table) for table in metadata.tables.values())
+            if all(isinstance(table, Table) for table in validation_metadata.tables.values())
             else ()
         )
 
-        missing_columns = _collect_missing_required_columns(inspector)
+        # Full shape validation already covers every predecessor column. The
+        # named current-column guard is retained for ordinary current-schema
+        # validation, where it provides higher-signal diagnostics.
+        missing_columns = [] if shape_metadata is not None else _collect_missing_required_columns(inspector)
         token_outcomes_shape_errors = _collect_token_outcomes_shape_errors(
             inspector,
             engine=self.engine,
@@ -1759,6 +2116,12 @@ class LandscapeDB:
         missing_fks: list[tuple[str, str, str]] = []
 
         for table_name, column_name, referenced_table in _REQUIRED_FOREIGN_KEYS:
+            if shape_metadata is not None and (
+                table_name not in expected_tables
+                or column_name not in validation_metadata.tables[table_name].c
+                or referenced_table not in expected_tables
+            ):
+                continue
             # Check if table exists
             if table_name not in existing_tables:
                 # Table will be created by create_all, skip
@@ -1778,6 +2141,12 @@ class LandscapeDB:
         for table_name, constrained_columns, referenced_table, referenced_columns in _REQUIRED_COMPOSITE_FOREIGN_KEYS:
             contract = (table_name, constrained_columns, referenced_table, referenced_columns)
             if contract in ignored_missing_composite_foreign_keys:
+                continue
+            if shape_metadata is not None and (
+                table_name not in expected_tables
+                or referenced_table not in expected_tables
+                or any(column not in validation_metadata.tables[table_name].c for column in constrained_columns)
+            ):
                 continue
             if table_name not in existing_tables:
                 continue
@@ -1814,6 +2183,11 @@ class LandscapeDB:
         missing_checks: list[tuple[str, str]] = []
 
         for table_name, constraint_name in _REQUIRED_CHECK_CONSTRAINTS:
+            if shape_metadata is not None and (
+                table_name not in expected_tables
+                or not any(constraint.name == constraint_name for constraint in validation_metadata.tables[table_name].constraints)
+            ):
+                continue
             if table_name not in existing_tables:
                 continue
 
@@ -1829,6 +2203,11 @@ class LandscapeDB:
         for table_name, index_name in _REQUIRED_INDEXES:
             if (table_name, index_name) in ignored_missing_indexes:
                 continue
+            if shape_metadata is not None and (
+                table_name not in expected_tables
+                or not any(index.name == index_name for index in validation_metadata.tables[table_name].indexes)
+            ):
+                continue
             if table_name not in existing_tables:
                 continue
 
@@ -1843,12 +2222,14 @@ class LandscapeDB:
         # current physical schema so an equivalent-looking table definition
         # cannot silently omit the seal/immutability enforcement.
         missing_triggers: list[str] = []
-        should_validate_triggers = bool(present_landscape_tables) and (
-            not self.connection_string.startswith("sqlite") or schema_epoch == SQLITE_SCHEMA_EPOCH
+        should_validate_triggers = (
+            bool(present_landscape_tables)
+            and "audit_export_snapshot_chunks" in expected_tables
+            and (self.engine.dialect.name != "sqlite" or schema_epoch == SQLITE_SCHEMA_EPOCH)
         )
         if should_validate_triggers:
             with self.engine.connect() as connection:
-                if self.connection_string.startswith("sqlite"):
+                if self.engine.dialect.name == "sqlite":
                     trigger_names = set(connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type = 'trigger'").scalars())
                 else:
                     trigger_names = set(

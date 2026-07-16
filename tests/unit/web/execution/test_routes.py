@@ -1048,6 +1048,7 @@ class TestRunDiagnosticsEndpoint:
                 RunDiagnosticOperation(
                     operation_id="op-1",
                     node_id="llm",
+                    sink_effect_id=None,
                     operation_type="runtime_preflight",
                     status="failed",
                     duration_ms=1.0,

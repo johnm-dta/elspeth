@@ -135,6 +135,7 @@ class SinkFlushCoordinator:
         *,
         on_token_written_factory: _CheckpointFactory | None = None,
         scheduler_terminalizer: SchedulerTerminalizer | None = None,
+        worker_id: str | None = None,
     ) -> DiversionCounts:
         """Write pending tokens to sinks using SinkExecutor.
 
@@ -168,6 +169,7 @@ class SinkFlushCoordinator:
             self._span_factory,
             run_id,
             factory=factory,
+            worker_id=worker_id,
         )
         step = sink_step
         total_diversions = DiversionCounts()
@@ -320,6 +322,7 @@ class SinkFlushCoordinator:
             sink_step=loop_ctx.processor.resolve_sink_step(),
             on_token_written_factory=on_token_written_factory,
             scheduler_terminalizer=scheduler_terminalizer,
+            worker_id=(loop_ctx.processor.coordination_token.worker_id if loop_ctx.processor.coordination_token is not None else None),
         )
         # ADR-019: failsink-mode diversions are TRANSIENT structural evidence;
         # discard-mode diversions are FAILURE predicate inputs as well.

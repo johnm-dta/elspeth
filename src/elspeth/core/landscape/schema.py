@@ -85,13 +85,50 @@ def _compile_sqlite_signing_tuple(_element: _SigningTupleCheck, _compiler: SQLCo
 @compiles(_SigningTupleCheck, "postgresql")
 def _compile_postgres_signing_tuple(_element: _SigningTupleCheck, _compiler: SQLCompiler, **_kw: object) -> str:
     return (
-        "(signing_mode = 'hmac_sha256' AND signer_key_id <> 'UNSIGNED' "
-        "AND length(trim(signer_key_id)) > 0 AND signature_hex IS NOT NULL "
-        "AND signature_hex ~ '^[0-9a-f]{64}$' "
-        "AND record_chain_algorithm = 'sha256_concat_hmac_sha256_signatures_v1') OR "
-        "(signing_mode = 'unsigned' AND signer_key_id = 'UNSIGNED' AND signature_hex IS NULL "
-        "AND record_chain_algorithm = 'sha256_concat_record_sha256_v1')"
+        "signing_mode::text = 'hmac_sha256'::text AND signer_key_id::text <> 'UNSIGNED'::text "
+        "AND length(TRIM(BOTH FROM signer_key_id)) > 0 AND signature_hex IS NOT NULL "
+        "AND signature_hex::text ~ '^[0-9a-f]{64}$'::text "
+        "AND record_chain_algorithm::text = 'sha256_concat_hmac_sha256_signatures_v1'::text OR "
+        "signing_mode::text = 'unsigned'::text AND signer_key_id::text = 'UNSIGNED'::text AND signature_hex IS NULL "
+        "AND record_chain_algorithm::text = 'sha256_concat_record_sha256_v1'::text"
     )
+
+
+class _Sha256ContentRefCheck(ColumnElement[bool]):
+    """Dialect-exact ``sha256:<hash>`` reference binding."""
+
+    inherit_cache = True
+
+    def __init__(self, reference_column: str, hash_column: str) -> None:
+        super().__init__()
+        self.reference_column = reference_column
+        self.hash_column = hash_column
+
+
+@compiles(_Sha256ContentRefCheck, "sqlite")
+def _compile_sqlite_sha256_content_ref(element: _Sha256ContentRefCheck, _compiler: SQLCompiler, **_kw: object) -> str:
+    return f"{element.reference_column} = 'sha256:' || {element.hash_column}"
+
+
+@compiles(_Sha256ContentRefCheck, "postgresql")
+def _compile_postgres_sha256_content_ref(element: _Sha256ContentRefCheck, _compiler: SQLCompiler, **_kw: object) -> str:
+    return f"{element.reference_column}::text = ('sha256:'::text || {element.hash_column}::text)"
+
+
+class _SignedManifestSizeCheck(ColumnElement[bool]):
+    """Dialect-exact signed-manifest byte bounds."""
+
+    inherit_cache = True
+
+
+@compiles(_SignedManifestSizeCheck, "sqlite")
+def _compile_sqlite_signed_manifest_size(_element: _SignedManifestSizeCheck, _compiler: SQLCompiler, **_kw: object) -> str:
+    return "signed_manifest_size_bytes BETWEEN 1 AND 65536"
+
+
+@compiles(_SignedManifestSizeCheck, "postgresql")
+def _compile_postgres_signed_manifest_size(_element: _SignedManifestSizeCheck, _compiler: SQLCompiler, **_kw: object) -> str:
+    return "signed_manifest_size_bytes >= 1 AND signed_manifest_size_bytes <= 65536"
 
 
 class _OptionalLowerHex64Check(ColumnElement[bool]):
@@ -1118,11 +1155,11 @@ audit_export_snapshots_table = Table(
     CheckConstraint(_LowerHex64Check("final_hash"), name="ck_audit_export_snapshots_final_hash_hex"),
     CheckConstraint(_LowerHex64Check("signed_manifest_hash"), name="ck_audit_export_snapshots_signed_manifest_hash_hex"),
     CheckConstraint(
-        "signed_manifest_ref = 'sha256:' || signed_manifest_hash",
+        _Sha256ContentRefCheck("signed_manifest_ref", "signed_manifest_hash"),
         name="ck_audit_export_snapshots_signed_manifest_ref",
     ),
     CheckConstraint(
-        "signed_manifest_size_bytes BETWEEN 1 AND 65536",
+        _SignedManifestSizeCheck(),
         name="ck_audit_export_snapshots_signed_manifest_size",
     ),
     CheckConstraint(
@@ -1185,7 +1222,10 @@ audit_export_snapshot_chunks_table = Table(
     CheckConstraint(_LowerHex64Check("content_hash"), name="ck_audit_export_snapshot_chunks_content_hash_hex"),
     CheckConstraint(_LowerHex64Check("chunk_seal_hash"), name="ck_audit_export_snapshot_chunks_seal_hash_hex"),
     CheckConstraint(_OptionalLowerHex64Check("predecessor_seal_hash"), name="ck_audit_export_snapshot_chunks_predecessor_hash"),
-    CheckConstraint("content_ref = 'sha256:' || content_hash", name="ck_audit_export_snapshot_chunks_content_ref"),
+    CheckConstraint(
+        _Sha256ContentRefCheck("content_ref", "content_hash"),
+        name="ck_audit_export_snapshot_chunks_content_ref",
+    ),
     ForeignKeyConstraint(["snapshot_id"], ["audit_export_snapshots.snapshot_id"], deferrable=True, initially="DEFERRED"),
 )
 Index(
@@ -1565,7 +1605,12 @@ _POSTGRES_AUDIT_EXPORT_TRIGGER_DDL: tuple[str, ...] = (
     """,
     """
     CREATE TRIGGER trg_audit_export_snapshot_immutable
-    BEFORE UPDATE OR DELETE ON audit_export_snapshots
+    BEFORE UPDATE ON audit_export_snapshots
+    FOR EACH ROW EXECUTE FUNCTION fn_audit_export_snapshot_immutable()
+    """,
+    """
+    CREATE TRIGGER trg_audit_export_snapshot_immutable_delete
+    BEFORE DELETE ON audit_export_snapshots
     FOR EACH ROW EXECUTE FUNCTION fn_audit_export_snapshot_immutable()
     """,
     """
@@ -1574,12 +1619,20 @@ _POSTGRES_AUDIT_EXPORT_TRIGGER_DDL: tuple[str, ...] = (
       IF EXISTS (SELECT 1 FROM audit_export_snapshots WHERE snapshot_id=OLD.snapshot_id) THEN
         RAISE EXCEPTION 'sealed audit export chunk is immutable';
       END IF;
+      IF TG_OP = 'UPDATE' THEN
+        RETURN NEW;
+      END IF;
       RETURN OLD;
     END; $$ LANGUAGE plpgsql
     """,
     """
     CREATE TRIGGER trg_audit_export_chunk_immutable
-    BEFORE UPDATE OR DELETE ON audit_export_snapshot_chunks
+    BEFORE UPDATE ON audit_export_snapshot_chunks
+    FOR EACH ROW EXECUTE FUNCTION fn_audit_export_chunk_immutable()
+    """,
+    """
+    CREATE TRIGGER trg_audit_export_chunk_immutable_delete
+    BEFORE DELETE ON audit_export_snapshot_chunks
     FOR EACH ROW EXECUTE FUNCTION fn_audit_export_chunk_immutable()
     """,
 )

@@ -16,6 +16,7 @@ from sqlalchemy.engine import Connection
 from elspeth.contracts.audit import SinkEffect
 from elspeth.contracts.audit_export import C, H, final_manifest_identity_payload, hash_final_manifest_identity_payload
 from elspeth.contracts.enums import NodeStateStatus
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.hashing import canonical_json
 from elspeth.contracts.sink_effects import (
     SINK_EFFECT_PROTOCOL_VERSION,
@@ -62,6 +63,7 @@ class SinkEffectReservationResult:
             raise ValueError("reservation result cannot classify one effect as both finalized and open")
         object.__setattr__(self, "finalized_effect_ids", finalized)
         object.__setattr__(self, "open_effect_ids", opened)
+        freeze_fields(self, "finalized_effect_ids", "open_effect_ids")
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +80,9 @@ class _EffectIdentity:
 @dataclass(frozen=True, slots=True)
 class _PipelineWitness:
     state_ids_by_token: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "state_ids_by_token")
 
 
 def _labeled_hash(tag: str, payload: object) -> str:

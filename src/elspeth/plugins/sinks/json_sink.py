@@ -152,7 +152,7 @@ class JSONSink(BaseSink):
     name = "json"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c9a247c5b371eab3"
+    source_file_hash: str | None = "sha256:085aa589992e378e"
     config_model = JSONSinkConfig
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"append", "write"})
@@ -420,29 +420,38 @@ class JSONSink(BaseSink):
         if type(effect_input) is not SinkEffectPipelineMembersInput:
             raise TypeError("JSONSink effects require a closed supported effect input")
 
-        members = effect_input.target_snapshot_members
+        members = effect_input.members
+        target_snapshot_members = effect_input.target_snapshot_members
+        current_by_effect_id = {member.member_effect_id: member for member in members}
         target = Path(str(request.inspection.evidence["target_path"]))
         predecessor_declared = bool(request.inspection.evidence["predecessor_declared"])
-        include_baseline = predecessor_declared or self._mode == "append"
+        has_predecessor_snapshot_members = any(member.member_effect_id not in current_by_effect_id for member in target_snapshot_members)
+        include_baseline = (predecessor_declared and not has_predecessor_snapshot_members) or (
+            self._mode == "append" and not predecessor_declared
+        )
         accepted: list[int] = []
         diverted: list[int] = []
         diversion_attribution: list[DiversionAttribution] = []
 
         def serialized_rows() -> Iterator[tuple[int, str]]:
-            source_rows = [deep_thaw(member.row) for member in members]
+            source_rows = [deep_thaw(member.row) for member in target_snapshot_members]
             output_rows = apply_display_headers(self, source_rows)
-            for member, original, output in zip(members, source_rows, output_rows, strict=True):
+            for snapshot_member, original, output in zip(target_snapshot_members, source_rows, output_rows, strict=True):
+                current_member = current_by_effect_id.get(snapshot_member.member_effect_id)
                 try:
                     serialized = json.dumps(output, indent=self._indent if self._format == "json" else None, allow_nan=False)
                 except (ValueError, TypeError) as exc:
                     reason = f"JSON serialization failed: {exc}"
-                    self._divert_row(original, row_index=member.ordinal, reason=reason)
-                    diverted.append(member.ordinal)
-                    diversion_attribution.append(build_diversion_attribution(ordinal=member.ordinal, reason=reason))
+                    if current_member is None:
+                        raise ValueError(f"Predecessor JSON snapshot is incompatible: {reason}") from exc
+                    self._divert_row(original, row_index=current_member.ordinal, reason=reason)
+                    diverted.append(current_member.ordinal)
+                    diversion_attribution.append(build_diversion_attribution(ordinal=current_member.ordinal, reason=reason))
                     continue
-                accepted.append(member.ordinal)
+                if current_member is not None:
+                    accepted.append(current_member.ordinal)
                 serialized.encode(self._encoding)
-                yield member.ordinal, serialized
+                yield snapshot_member.ordinal, serialized
 
         def jsonl_chunks() -> Iterator[bytes]:
             encoder = codecs.getincrementalencoder(self._encoding)()

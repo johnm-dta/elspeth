@@ -211,9 +211,9 @@ class TestAzureBlobSinkLifecycle:
 
         mock_client.close.assert_called_once()
         assert sink._container_client is None
-        assert not hasattr(sink, "_buffered_rows")
-        assert not hasattr(sink, "_resolved_blob_path")
-        assert not hasattr(sink, "_has_uploaded")
+        for obsolete in ("_buffered_rows", "_resolved_blob_path", "_has_uploaded"):
+            with pytest.raises(AttributeError):
+                object.__getattribute__(sink, obsolete)
 
     def test_close_without_client_is_safe(self) -> None:
         sink = inject_write_failure(AzureBlobSink(_base_config()))

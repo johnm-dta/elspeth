@@ -685,12 +685,22 @@ class TestJoinCommand:
         finally:
             db.close()
 
-        failing_sink = SimpleNamespace(
-            name="failing_sink",
-            node_id="sink-failing",
-            on_start=_CallRecorder(side_effect=RuntimeError("sink startup failed")),
-            on_complete=_CallRecorder(),
-            close=_CallRecorder(),
+        from elspeth.contracts.hashing import stable_hash as effect_stable_hash
+        from elspeth.engine.orchestrator.preflight import (
+            SinkEffectExecutionPurpose,
+            SinkEffectRuntimeBinding,
+        )
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        failing_sink = JSONSink(dict(settings_config.sinks["default"].options))
+        failing_sink.node_id = "sink-failing"
+        failing_sink._on_write_failure = settings_config.sinks["default"].on_write_failure
+        failing_sink.on_start = _CallRecorder(side_effect=RuntimeError("sink startup failed"))  # type: ignore[method-assign]
+        failing_sink.on_complete = _CallRecorder()  # type: ignore[method-assign]
+        failing_sink.close = _CallRecorder()  # type: ignore[method-assign]
+        effect_mode = type(failing_sink)._resolve_sink_effect_mode(
+            dict(settings_config.sinks["default"].options),
+            purpose=SinkEffectExecutionPurpose.FOLLOWER,
         )
         plugins = SimpleNamespace(
             sources={"primary": object()},
@@ -698,6 +708,16 @@ class TestJoinCommand:
             transforms=[],
             aggregations={},
             sinks={"default": failing_sink},
+            sink_effect_bindings={
+                "default": SinkEffectRuntimeBinding(
+                    sink_name="default",
+                    sink=failing_sink,
+                    sink_type=type(failing_sink),
+                    config_fingerprint=effect_stable_hash(dict(settings_config.sinks["default"].options)),
+                    purpose=SinkEffectExecutionPurpose.FOLLOWER,
+                    effect_mode=effect_mode,
+                )
+            },
         )
         execution_graph = SimpleNamespace(get_aggregation_id_map=_CallRecorder({}))
 
@@ -711,7 +731,7 @@ class TestJoinCommand:
                 ["join", run_id, "--settings", str(settings_path)],
             )
 
-        assert result.exit_code == 4
+        assert result.exit_code == 4, (result.output, result.exception)
         mock_build_follower.assert_called_once()
         failing_sink.on_start.assert_called_once()
         failing_sink.on_complete.assert_called_once()

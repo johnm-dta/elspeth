@@ -224,6 +224,12 @@ class _EffectCapableSinkStub:
     def reconcile_effect(self, _plan: object, _ctx: object) -> None: ...
 
 
+class _LegacySinkStub:
+    """Deliberately lacks the sink-effect protocol for raw-gate refusal tests."""
+
+    name = "legacy"
+
+
 def _plugin_bundle_stub() -> SimpleNamespace:
     from elspeth.engine.orchestrator.preflight import (
         ResolvedSinkEffectMode,
@@ -1528,6 +1534,23 @@ landscape:
   export:
     enabled: true
     sink: audit
+    total_record_limit: 10
+    total_byte_limit: 1000
+    chunk_limit: 2
+    per_chunk_record_limit: 5
+    per_chunk_byte_limit: 500
+    spool_root: .elspeth/audit-export-spool/web-test
+    spool_cleanup_age_seconds: 3600
+    spool_cleanup_byte_budget: 1000
+    spool_cleanup_count_budget: 2
+    content_store:
+      content_store_id: web-test
+      namespace: web-test
+      root: .elspeth/audit-export-content-store/web-test
+      policy_version: v1
+      retention_days: 30
+      durability: fsync
+      orphan_grace_period_seconds: 3600
 """
         secret_service = MagicMock(spec=["list_refs"])
         secret_service.list_refs.return_value = []
@@ -1564,13 +1587,15 @@ landscape:
         pipeline_yaml = """
 sinks:
   output:
-    plugin: json
+    plugin: legacy
     on_write_failure: discard
-    options:
-      path: output.jsonl
+    options: {}
 """
         mock_session_service.update_run_status.reset_mock()
+        manager = MagicMock(spec=["get_sink_by_name"])
+        manager.get_sink_by_name.return_value = _LegacySinkStub
         with (
+            patch("elspeth.plugins.infrastructure.manager.get_shared_plugin_manager", return_value=manager),
             patch("elspeth.web.execution.service.open_landscape_db") as open_database,
             patch("elspeth.web.execution.service.FilesystemPayloadStore") as make_payload_store,
             pytest.raises(SinkEffectCapabilityError, match="effect protocol"),
@@ -1941,10 +1966,57 @@ class TestB2ShutdownEvent:
         assert isinstance(evidence, WebPluginPolicyEvidence)
         assert evidence.snapshot_hash
         assert evidence.decision_codes == ("policy_allowed",)
+        assert "audit_export_content_store" in orch_run_call.kwargs
+        assert "audit_export_content_store_resolver" in orch_run_call.kwargs
 
         running_calls = [call for call in mock_session_service.update_run_status.await_args_list if call.kwargs.get("status") == "running"]
         assert running_calls
         assert running_calls[0].kwargs.get("landscape_run_id") == str(run_id)
+
+    @patch("elspeth.web.execution.service.Orchestrator")
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
+    @patch("elspeth.web.execution.preflight.ExecutionGraph")
+    @patch("elspeth.web.execution.service.open_landscape_db")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_enabled_web_export_constructs_and_threads_production_store(
+        self,
+        mock_payload: MagicMock,
+        mock_landscape: MagicMock,
+        mock_graph_cls: MagicMock,
+        mock_instantiate: MagicMock,
+        mock_load: MagicMock,
+        mock_orch_cls: MagicMock,
+        service: ExecutionServiceImpl,
+    ) -> None:
+        del mock_payload, mock_landscape
+        settings = _mock_pipeline_settings()
+        export_settings = SimpleNamespace(enabled=True, sink="primary")
+        settings.landscape.export = export_settings
+        mock_load.return_value = settings
+        mock_instantiate.return_value = _plugin_bundle_stub()
+        mock_graph_cls.from_plugin_instances.return_value = _execution_graph_stub()
+        run_id = str(uuid4())
+        mock_orch = _orchestrator_stub(_orchestrator_result_stub(run_id=run_id))
+        mock_orch_cls.return_value = mock_orch
+        store = object()
+        resolver = object()
+
+        with (
+            patch(
+                "elspeth.core.audit_export_content_store.create_audit_export_content_store",
+                return_value=(store, resolver),
+            ) as create_store,
+            patch(
+                "elspeth.web.execution.service.load_run_accounting_from_db",
+                return_value=_run_accounting_for_status(RunStatus.COMPLETED),
+            ),
+        ):
+            service._run_pipeline(run_id, "source:\n  plugin: csv", threading.Event())
+
+        create_store.assert_called_once_with(export_settings)
+        assert mock_orch.run.call_args.kwargs["audit_export_content_store"] is store
+        assert mock_orch.run.call_args.kwargs["audit_export_content_store_resolver"] is resolver
 
 
 # ── B3: LandscapeDB and PayloadStore Construction ─────────────────────

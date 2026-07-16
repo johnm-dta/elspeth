@@ -8,9 +8,31 @@ and transforms. Migrated from tests/conftest.py with no behavioral changes.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
+from hashlib import sha256
 from typing import TYPE_CHECKING, Any, cast
 
-from elspeth.contracts import Determinism, PluginSchema, SourceRow
+from elspeth.contracts import (
+    SINK_EFFECT_PROTOCOL_VERSION,
+    Determinism,
+    PluginSchema,
+    ResolvedSinkEffectMode,
+    RestrictedSinkEffectContext,
+    SinkEffectCommitResult,
+    SinkEffectDescriptorMode,
+    SinkEffectExecutionPurpose,
+    SinkEffectInputKind,
+    SinkEffectInspection,
+    SinkEffectInspectionMode,
+    SinkEffectInspectionRequest,
+    SinkEffectPipelineMembersInput,
+    SinkEffectPlan,
+    SinkEffectPrepareRequest,
+    SinkEffectReconcileResult,
+    SourceRow,
+)
+from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
+from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.hashing import canonical_json, stable_hash
 from elspeth.plugins.infrastructure.base import BaseTransform
 
 if TYPE_CHECKING:
@@ -145,13 +167,152 @@ class _TestSinkBase:
     declared_required_fields: frozenset[str] = frozenset()
     _on_write_failure: str | None = "discard"
     supports_resume: bool = False
+    effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    supported_effect_modes = frozenset({"write"})
+    supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
 
     def __init__(self) -> None:
         self.config: dict[str, Any] = {"schema": {"mode": "observed"}}
         self._diversion_log: list[Any] = []
+        self._test_effect_plans: dict[str, SinkEffectPlan] = {}
+        self._test_effect_rows: dict[str, tuple[dict[str, Any], ...]] = {}
+        self._test_effect_ordinals: dict[str, tuple[int, ...]] = {}
+        self._test_effect_commits: dict[str, SinkEffectCommitResult] = {}
+
+    @classmethod
+    def _resolve_sink_effect_mode(
+        cls,
+        config: Mapping[str, object],
+        *,
+        purpose: SinkEffectExecutionPurpose,
+    ) -> ResolvedSinkEffectMode:
+        del cls, config, purpose
+        return ResolvedSinkEffectMode("write")
 
     def _reset_diversion_log(self) -> None:
         self._diversion_log = []
+
+    def _get_diversions(self) -> tuple[RowDiversion, ...]:
+        return tuple(self._diversion_log)
+
+    def inspect_effect(
+        self,
+        request: SinkEffectInspectionRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectInspection:
+        del ctx
+        committed = self._test_effect_commits.get(request.effect_id)
+        return SinkEffectInspection(
+            mode=SinkEffectInspectionMode.NO_INSPECTION_REQUIRED,
+            reference=request.target,
+            evidence={"state": "committed" if committed is not None else "not_applied"},
+        )
+
+    def prepare_effect(
+        self,
+        request: SinkEffectPrepareRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectPlan:
+        del ctx
+        if not isinstance(request.effect_input, SinkEffectPipelineMembersInput):
+            raise TypeError("test sinks only support pipeline member effects")
+        rows = tuple(deep_thaw(member.row) for member in request.effect_input.members)
+        if any(type(row) is not dict for row in rows):
+            raise TypeError("test sink effect rows must thaw to exact dictionaries")
+        ordinals = tuple(member.ordinal for member in request.effect_input.members)
+        payload_hash = sha256(canonical_json(rows).encode("utf-8")).hexdigest()
+        plan = SinkEffectPlan(
+            effect_id=request.effect_id,
+            protocol_version=SINK_EFFECT_PROTOCOL_VERSION,
+            input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            descriptor_mode=SinkEffectDescriptorMode.RESULT_DERIVED,
+            inspection_mode=request.inspection.mode,
+            target=request.inspection.reference,
+            plan_hash=stable_hash(
+                {
+                    "effect_id": request.effect_id,
+                    "input_kind": SinkEffectInputKind.PIPELINE_MEMBERS.value,
+                    "payload_hash": payload_hash,
+                    "target": request.inspection.reference,
+                    "test_adapter": type(self).__qualname__,
+                }
+            ),
+            payload_hash=payload_hash,
+            expected_descriptor=None,
+            safe_evidence={"sink_kind": "test_result_adapter"},
+        )
+        request.validate_plan(plan)
+        existing = self._test_effect_plans.get(request.effect_id)
+        if existing is not None and existing != plan:
+            raise ValueError("test sink effect id was prepared with a different plan")
+        self._test_effect_plans[request.effect_id] = plan
+        self._test_effect_rows[request.effect_id] = rows
+        self._test_effect_ordinals[request.effect_id] = ordinals
+        return plan
+
+    def commit_effect(
+        self,
+        plan: SinkEffectPlan,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectCommitResult:
+        prepared = self._test_effect_plans.get(plan.effect_id)
+        if prepared is None or prepared != plan:
+            raise ValueError("test sink can only commit the exact prepared plan")
+        committed = self._test_effect_commits.get(plan.effect_id)
+        if committed is not None:
+            return committed
+        result = self.write(list(self._test_effect_rows[plan.effect_id]), ctx)
+        if not isinstance(result, SinkWriteResult):
+            raise TypeError("test sink write must return SinkWriteResult")
+        ordinals = self._test_effect_ordinals[plan.effect_id]
+        diverted_indexes = {item.row_index for item in result.diversions}
+        if any(index >= len(ordinals) for index in diverted_indexes):
+            raise ValueError("test sink diversion index is outside the effect batch")
+        diverted_ordinals = tuple(ordinals[index] for index in sorted(diverted_indexes))
+        diverted_set = set(diverted_ordinals)
+        accepted_ordinals = tuple(ordinal for ordinal in ordinals if ordinal not in diverted_set)
+        self._diversion_log = [
+            RowDiversion(
+                row_index=ordinals[item.row_index],
+                reason=item.reason,
+                row_data=dict(item.row_data),
+            )
+            for item in result.diversions
+        ]
+        committed = SinkEffectCommitResult(
+            descriptor=result.artifact,
+            evidence={
+                "accepted_ordinals": list(accepted_ordinals),
+                "descriptor": {
+                    "artifact_type": result.artifact.artifact_type,
+                    "content_hash": result.artifact.content_hash,
+                    "metadata": None if result.artifact.metadata is None else deep_thaw(result.artifact.metadata),
+                    "path_or_uri": result.artifact.path_or_uri,
+                    "size_bytes": result.artifact.size_bytes,
+                },
+                "diverted_ordinals": list(diverted_ordinals),
+            },
+            accepted_ordinals=accepted_ordinals,
+            diverted_ordinals=diverted_ordinals,
+        )
+        self._test_effect_commits[plan.effect_id] = committed
+        return committed
+
+    def reconcile_effect(
+        self,
+        plan: SinkEffectPlan,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectReconcileResult:
+        del ctx
+        committed = self._test_effect_commits.get(plan.effect_id)
+        if committed is None:
+            return SinkEffectReconcileResult.not_applied(evidence={"state": "not_applied"})
+        return SinkEffectReconcileResult.applied(
+            committed.descriptor,
+            evidence=committed.evidence,
+            accepted_ordinals=committed.accepted_ordinals,
+            diverted_ordinals=committed.diverted_ordinals,
+        )
 
     def on_start(self, ctx: Any) -> None:
         pass

@@ -384,7 +384,7 @@ def test_sink_effect_protocol_has_independent_kind_capability_and_exact_methods(
             ),
         ),
         (SinkEffectCommitResult, ("descriptor", "evidence", "accepted_ordinals", "diverted_ordinals")),
-        (SinkEffectReconcileResult, ("kind", "descriptor", "evidence")),
+        (SinkEffectReconcileResult, ("kind", "descriptor", "evidence", "accepted_ordinals", "diverted_ordinals")),
         (RestrictedSinkEffectContext, ("run_id", "run_started_at", "operation_id", "sink_node_id")),
     ],
 )

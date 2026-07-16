@@ -109,6 +109,7 @@ def test_sqlite_process_cannot_mutate_node_state_between_validation_and_insert(
         sink_node_id: str | None,
         artifact_id: str | None,
         conn: Connection | None = None,
+        lock_witnesses: bool = True,
     ) -> None:
         original_invariants(
             ref,
@@ -118,6 +119,7 @@ def test_sqlite_process_cannot_mutate_node_state_between_validation_and_insert(
             sink_node_id=sink_node_id,
             artifact_id=artifact_id,
             conn=conn,
+            lock_witnesses=lock_witnesses,
         )
         start.set()
         try:

@@ -134,7 +134,7 @@ class _S3Store:
         if "IfMatch" in request and (self.value is None or request["IfMatch"] != self.value.etag):
             raise _S3PreconditionFailed()
         body = request["Body"]
-        assert hasattr(body, "read")
+        assert isinstance(body, io.BufferedIOBase)
         payload = body.read()
         assert type(payload) is bytes
         etag = f'"etag-{len(self.requests)}"'
@@ -177,10 +177,11 @@ class _AzureBlob:
             raise _AzurePreconditionFailed()
         if "etag" in request and (self._store.value is None or request["etag"] != self._store.value.etag):
             raise _AzurePreconditionFailed()
-        if hasattr(data, "read"):
-            payload = data.read()
-        else:
+        if isinstance(data, bytes):
             payload = data
+        else:
+            assert isinstance(data, io.BufferedIOBase)
+            payload = data.read()
         assert type(payload) is bytes
         metadata = request["metadata"]
         assert isinstance(metadata, dict)
@@ -361,6 +362,57 @@ def test_diverted_successor_preserves_prior_snapshot_without_publication() -> No
     assert plan.safe_evidence["diversion_attribution"] == _expected_diversion_attribution(successor)
 
 
+def test_initial_all_diverted_s3_effect_is_virtual_without_upload() -> None:
+    store = _S3Store()
+    member = _member(0, {"id": "x" * 100})
+    sink = _s3(store, max_record_chars=10)
+
+    plan = _prepare(
+        sink,
+        effect_id="31" * 32,
+        current=(member,),
+        target_snapshot=(member,),
+    )
+
+    assert plan.descriptor_mode is SinkEffectDescriptorMode.NO_PUBLICATION
+    assert plan.expected_descriptor is not None
+    assert plan.expected_descriptor.content_hash == sha256(b"").hexdigest()
+    assert plan.expected_descriptor.size_bytes == 0
+    assert plan.safe_evidence["publication_kind"] == "virtual"
+    assert plan.safe_evidence["accepted_ordinals"] == ()
+    assert plan.safe_evidence["diverted_ordinals"] == (0,)
+    assert not Path(str(plan.safe_evidence["staging_path"])).exists()
+    assert [request["operation"] for request in store.requests] == ["head"]
+
+
+def test_initial_all_diverted_azure_effect_is_virtual_without_upload() -> None:
+    store = _AzureStore()
+    member = _member(0, {"id": 1, "name": "Ada", "extra": "divert"})
+    sink = _azure(
+        store,
+        format="csv",
+        blob_path="out.csv",
+        schema={"mode": "fixed", "fields": ["id: int", "name: str"]},
+    )
+
+    plan = _prepare(
+        sink,
+        effect_id="32" * 32,
+        current=(member,),
+        target_snapshot=(member,),
+    )
+
+    assert plan.descriptor_mode is SinkEffectDescriptorMode.NO_PUBLICATION
+    assert plan.expected_descriptor is not None
+    assert plan.expected_descriptor.content_hash == sha256(b"").hexdigest()
+    assert plan.expected_descriptor.size_bytes == 0
+    assert plan.safe_evidence["publication_kind"] == "virtual"
+    assert plan.safe_evidence["accepted_ordinals"] == ()
+    assert plan.safe_evidence["diverted_ordinals"] == (0,)
+    assert not Path(str(plan.safe_evidence["staging_path"])).exists()
+    assert [request["operation"] for request in store.requests] == ["properties"]
+
+
 def test_azure_fresh_process_successor_and_response_loss_reconcile() -> None:
     store = _AzureStore()
     first_member = _member(0, {"id": 1})
@@ -394,7 +446,6 @@ def test_azure_fresh_process_successor_and_response_loss_reconcile() -> None:
     assert upload_requests[1]["etag"] == '"etag-2"'
     assert upload_requests[1]["metadata"]["elspeth_protocol_version"] == "sink-effect-v1"  # type: ignore[index]
     content_settings = upload_requests[1]["content_settings"]
-    assert hasattr(content_settings, "content_md5")
     assert content_settings.content_md5 == md5(store.value.body, usedforsecurity=False).digest()
     reconciled = _azure(store).reconcile_effect(second_plan, _CTX)
     assert reconciled.kind is SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR
@@ -505,6 +556,7 @@ def test_remote_sinks_have_no_process_local_publication_authority(factory: Any) 
         "_resolved_blob_path",
         "_has_uploaded",
     ):
-        assert not hasattr(sink, obsolete)
+        with pytest.raises(AttributeError):
+            object.__getattribute__(sink, obsolete)
     with pytest.raises(RuntimeError, match="effect coordinator"):
         sink.write([{"id": 1}], SimpleNamespace(run_id="run", contract=None, landscape=None, operation_id="op"))

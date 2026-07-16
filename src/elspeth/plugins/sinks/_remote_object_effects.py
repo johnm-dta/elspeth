@@ -114,7 +114,7 @@ class RemoteObjectPlanEvidence:
         if (precondition == "if_match") != (predecessor_etag is not None):
             raise RemoteObjectPreconditionError("remote object precondition and predecessor ETag diverge")
         publication_kind = _string(value.get("publication_kind"), "publication_kind")
-        if publication_kind not in {"conditional_create", "conditional_replace", "inherited"}:
+        if publication_kind not in {"conditional_create", "conditional_replace", "inherited", "virtual"}:
             raise RemoteObjectPreconditionError("remote object publication kind is not closed")
         checksum_algorithm = _checksum_algorithm(value.get("checksum_algorithm"))
         return cls(
@@ -367,12 +367,22 @@ def prepare_remote_object(
         raise RemoteObjectPreconditionError("prepare predecessor diverges from inspection")
     path = _stage_path(effect_id, provider)
     algorithm = _checksum_algorithm(checksum_algorithm)
-    staged_hash, staged_size, checksum_b64 = _write_stage(
-        path=path,
-        chunks=body_chunks,
-        max_bytes=max_bytes,
-        checksum_algorithm=algorithm,
-    )
+    accepted = tuple(accepted_ordinals)
+    diverted = tuple(diverted_ordinals)
+    initial_no_publication = not accepted and not exists and predecessor_descriptor is None
+    if initial_no_publication:
+        path.unlink(missing_ok=True)
+        staged_hash = hashlib.sha256(b"").hexdigest()
+        staged_size = 0
+        checksum = hashlib.sha256(b"") if algorithm == "sha256" else hashlib.md5(b"", usedforsecurity=False)
+        checksum_b64 = base64.b64encode(checksum.digest()).decode("ascii")
+    else:
+        staged_hash, staged_size, checksum_b64 = _write_stage(
+            path=path,
+            chunks=body_chunks,
+            max_bytes=max_bytes,
+            checksum_algorithm=algorithm,
+        )
     descriptor = ArtifactDescriptor(
         artifact_type="file",
         path_or_uri=target,
@@ -380,7 +390,10 @@ def prepare_remote_object(
         size_bytes=staged_size,
     )
     inherited = predecessor_descriptor == descriptor
-    if inherited:
+    if initial_no_publication:
+        publication_kind = "virtual"
+        descriptor_mode = SinkEffectDescriptorMode.NO_PUBLICATION
+    elif inherited:
         publication_kind = "inherited"
         descriptor_mode = SinkEffectDescriptorMode.NO_PUBLICATION
         path.unlink(missing_ok=True)
@@ -390,7 +403,7 @@ def prepare_remote_object(
     try:
         attribution = parse_diversion_attribution(
             diversion_attribution,
-            diverted_ordinals=diverted_ordinals,
+            diverted_ordinals=diverted,
         )
     except ValueError as exc:
         path.unlink(missing_ok=True)
@@ -406,8 +419,8 @@ def prepare_remote_object(
         checksum_algorithm=algorithm,
         checksum_b64=checksum_b64,
         format_name=format_name,
-        accepted_ordinals=tuple(accepted_ordinals),
-        diverted_ordinals=tuple(diverted_ordinals),
+        accepted_ordinals=accepted,
+        diverted_ordinals=diverted,
         diversion_attribution=attribution,
         publication_kind=publication_kind,
     )

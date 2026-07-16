@@ -110,6 +110,7 @@ sources:
     options:
       path: input.csv
       on_validation_failure: discard
+      schema: {{mode: observed}}
       on_success: default
 sinks:
   default:
@@ -117,6 +118,7 @@ sinks:
     on_write_failure: discard
     options:
       path: output.json
+      schema: {{mode: observed}}
 """
         settings_file = tmp_path / "settings.yaml"
         settings_file.write_text(settings_content)
@@ -146,6 +148,7 @@ sources:
     options:
       path: input.csv
       on_validation_failure: discard
+      schema: {{mode: observed}}
       on_success: default
 sinks:
   default:
@@ -153,6 +156,7 @@ sinks:
     on_write_failure: discard
     options:
       path: output.json
+      schema: {{mode: observed}}
 """
         settings_file = tmp_path / "settings.yaml"
         settings_file.write_text(settings_content)
@@ -192,12 +196,14 @@ sources:
     options:
       path: input.csv
       on_validation_failure: discard
+      schema: {{mode: observed}}
 sinks:
   default:
     plugin: json
     on_write_failure: discard
     options:
       path: output.json
+      schema: {{mode: observed}}
 landscape:
   url: "sqlite:///{nonexistent_db}"
 """
@@ -236,12 +242,14 @@ sources:
     options:
       path: input.csv
       on_validation_failure: discard
+      schema: {{mode: observed}}
 sinks:
   default:
     plugin: json
     on_write_failure: discard
     options:
       path: output.json
+      schema: {{mode: observed}}
 landscape:
   url: "sqlite:///{empty_db}"
 """

@@ -127,6 +127,15 @@
         "name": "headers",
         "nullable": false,
         "required": false
+      },
+      {
+        "default": 268435456,
+        "description": "Maximum serialized Azure blob bytes",
+        "kind": "number-int",
+        "label": "Max Blob Bytes",
+        "name": "max_blob_bytes",
+        "nullable": false,
+        "required": false
       }
     ]
   },

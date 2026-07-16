@@ -96,7 +96,7 @@ class TextSink(BaseSink):
     name = "text"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:8d595e1faa8de040"
+    source_file_hash: str | None = "sha256:14909a7e18eaa4e1"
     config_model = TextSinkConfig
     supports_resume = True
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
@@ -184,10 +184,15 @@ class TextSink(BaseSink):
         del ctx
         if type(request.effect_input) is not SinkEffectPipelineMembersInput:
             raise TypeError("TextSink effects require pipeline member input")
-        members = request.effect_input.target_snapshot_members
+        members = request.effect_input.members
+        target_snapshot_members = request.effect_input.target_snapshot_members
+        current_by_effect_id = {member.member_effect_id: member for member in members}
         target = Path(str(request.inspection.evidence["target_path"]))
         predecessor_declared = bool(request.inspection.evidence["predecessor_declared"])
-        include_baseline = predecessor_declared or self._mode == "append"
+        has_predecessor_snapshot_members = any(member.member_effect_id not in current_by_effect_id for member in target_snapshot_members)
+        include_baseline = (predecessor_declared and not has_predecessor_snapshot_members) or (
+            self._mode == "append" and not predecessor_declared
+        )
         accepted: list[int] = []
         diverted: list[int] = []
         diversion_attribution: list[DiversionAttribution] = []
@@ -199,8 +204,9 @@ class TextSink(BaseSink):
                     raise ValueError(f"Existing text output is incompatible: {validation.error_message}")
                 yield from iter_path_chunks(target)
             missing = object()
-            for member in members:
-                row = deep_thaw(member.row)
+            for snapshot_member in target_snapshot_members:
+                current_member = current_by_effect_id.get(snapshot_member.member_effect_id)
+                row = deep_thaw(snapshot_member.row)
                 value = row.get(self._field, missing)
                 reason: str | None = None
                 encoded: bytes | None = None
@@ -214,12 +220,15 @@ class TextSink(BaseSink):
                     except UnicodeEncodeError:
                         reason = f"Text value is not representable in configured codec {self._encoding}"
                 if reason is not None:
-                    self._divert_row(row, row_index=member.ordinal, reason=reason)
-                    diverted.append(member.ordinal)
-                    diversion_attribution.append(build_diversion_attribution(ordinal=member.ordinal, reason=reason))
+                    if current_member is None:
+                        raise ValueError(f"Predecessor text snapshot is incompatible: {reason}")
+                    self._divert_row(row, row_index=current_member.ordinal, reason=reason)
+                    diverted.append(current_member.ordinal)
+                    diversion_attribution.append(build_diversion_attribution(ordinal=current_member.ordinal, reason=reason))
                     continue
                 assert encoded is not None
-                accepted.append(member.ordinal)
+                if current_member is not None:
+                    accepted.append(current_member.ordinal)
                 yield encoded
 
         return prepare_local_effect(

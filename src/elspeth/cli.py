@@ -1363,6 +1363,14 @@ def _execute_pipeline_with_instances(
         raise typer.Exit(1)
     payload_store = FilesystemPayloadStore(config.payload_store.base_path)
 
+    audit_export_content_store = None
+    audit_export_content_store_resolver = None
+    export_settings = getattr(config.landscape, "export", None)
+    if export_settings is not None and export_settings.enabled:
+        from elspeth.core.audit_export_content_store import create_audit_export_content_store
+
+        audit_export_content_store, audit_export_content_store_resolver = create_audit_export_content_store(export_settings)
+
     try:
         if verbose:
             typer.echo("Starting pipeline execution...")
@@ -1391,6 +1399,8 @@ def _execute_pipeline_with_instances(
                 graph=graph,
                 settings=config,
                 payload_store=payload_store,
+                audit_export_content_store=audit_export_content_store,
+                audit_export_content_store_resolver=audit_export_content_store_resolver,
                 secret_resolutions=secret_resolutions,
                 preflight_results=preflight_results,
                 sink_factory=make_sink_factory(config),
@@ -1476,6 +1486,13 @@ def bootstrap_and_run(settings_path: Path) -> RunResult:
         raise ValueError(f"Unsupported payload store backend '{config.payload_store.backend}'. Only 'filesystem' is currently supported.")
     payload_store = FilesystemPayloadStore(config.payload_store.base_path)
 
+    audit_export_content_store = None
+    audit_export_content_store_resolver = None
+    if config.landscape.export.enabled:
+        from elspeth.core.audit_export_content_store import create_audit_export_content_store
+
+        audit_export_content_store, audit_export_content_store_resolver = create_audit_export_content_store(config.landscape.export)
+
     try:
         with _orchestrator_context(
             config,
@@ -1494,6 +1511,8 @@ def bootstrap_and_run(settings_path: Path) -> RunResult:
                 graph=graph,
                 settings=config,
                 payload_store=payload_store,
+                audit_export_content_store=audit_export_content_store,
+                audit_export_content_store_resolver=audit_export_content_store_resolver,
                 preflight_results=preflight,
                 secret_resolutions=secret_resolutions,
                 sink_factory=make_sink_factory(config),

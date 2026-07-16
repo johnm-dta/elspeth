@@ -320,8 +320,6 @@ allowed_dict_patterns:
 
   # Audit CSV export records are heterogeneous formatter output; individual
   # record-type contracts live in formatter/export-record types.
-  - "src/elspeth/engine/orchestrator/export.py:_neutralize_csv_formula_record:return"
-  - "src/elspeth/engine/orchestrator/export.py:_CsvRecordTypeSpool.append:record"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # PLUGIN CONTEXT - Recording and routing

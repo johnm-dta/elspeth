@@ -37,7 +37,7 @@ COMPLETED_AT = datetime(2026, 7, 16, 3, 4, 5, 678901, tzinfo=UTC)
 COMPLETED_AT_TEXT = "2026-07-16T03:04:05.678901Z"
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def postgres_url() -> Iterator[str]:
     with PostgresContainer("postgres:16-alpine", driver="psycopg") as postgres:
         yield postgres.get_connection_url()

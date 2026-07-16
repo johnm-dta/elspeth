@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
@@ -62,10 +63,13 @@ class _FakePayloadStore:
 
 
 class _FakeOrchestrator:
+    last_run_kwargs: ClassVar[dict[str, object]] = {}
+
     def __init__(self, run_result: object | BaseException) -> None:
         self._run_result = run_result
 
     def run(self, *_args: object, **_kwargs: object) -> object:
+        type(self).last_run_kwargs = dict(_kwargs)
         if isinstance(self._run_result, BaseException):
             raise self._run_result
         return self._run_result
@@ -190,6 +194,32 @@ def test_interactive_success_propagates_db_close_failure():
             graph=object(),
             plugins=object(),
         )
+
+
+def test_cli_runtime_threads_audit_export_store_resources_to_orchestrator() -> None:
+    from elspeth.cli import _execute_pipeline_with_instances
+
+    db = _CloseOk()
+    run_result = SimpleNamespace(run_id="run-1", status="completed", rows_processed=1)
+    config = _interactive_config()
+    config.landscape.export = SimpleNamespace(enabled=True)
+    content_store = object()
+    resolver = object()
+    with (
+        _patched_interactive_execution(db, run_result),
+        patch(
+            "elspeth.core.audit_export_content_store.create_audit_export_content_store",
+            return_value=(content_store, resolver),
+        ),
+    ):
+        _execute_pipeline_with_instances(
+            config,
+            graph=object(),
+            plugins=object(),
+        )
+
+    assert _FakeOrchestrator.last_run_kwargs["audit_export_content_store"] is content_store
+    assert _FakeOrchestrator.last_run_kwargs["audit_export_content_store_resolver"] is resolver
 
 
 def test_explain_exit_not_masked_by_db_close_failure():

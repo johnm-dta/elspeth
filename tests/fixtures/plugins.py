@@ -317,7 +317,7 @@ class FailingSink(CollectSink):
         pass
 
 
-class DivertingSink(_TestSinkBase):
+class DivertingSink(CollectSink):
     """Sink that diverts the first configured rows and writes the rest.
 
     This exercises the production ``SinkExecutor`` discard branch: when no
@@ -334,17 +334,26 @@ class DivertingSink(_TestSinkBase):
         name: str | None = None,
         divert_count: int | None = None,
     ) -> None:
-        super().__init__()
         options = dict(config or {})
         configured_name = name if name is not None else options.get("name", self.name)
-        self.name = str(configured_name)
+        super().__init__(str(configured_name))
         configured_divert_count = divert_count if divert_count is not None else options.get("divert_count")
         if configured_divert_count is None:
             self._divert_count: int | None = None
         else:
             self._divert_count = int(configured_divert_count)
-        self.results: list[dict[str, Any]] = []
-        self._artifact_counter = 0
+
+    def prepare_effect(
+        self,
+        request: SinkEffectPrepareRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectPlan:
+        if not isinstance(request.effect_input, SinkEffectPipelineMembersInput):
+            raise TypeError("DivertingSink only supports pipeline member effects")
+        ordinals = tuple(member.ordinal for member in request.effect_input.members)
+        limit = self._divert_count if self._divert_count is not None else len(ordinals)
+        self._configured_divert_ordinals = frozenset(ordinals[:limit])
+        return super().prepare_effect(request, ctx)
 
     def on_start(self, ctx: Any) -> None:
         pass

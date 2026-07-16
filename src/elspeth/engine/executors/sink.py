@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC
@@ -38,6 +39,7 @@ from elspeth.contracts.errors import (
     SinkDiversionReason,
     SinkTransactionalInvariantError,
 )
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema_contract import SchemaContract
@@ -99,6 +101,9 @@ class _EffectPrimaryWrite:
     diversion_reason_hashes: Mapping[int, str]
     accepted_token_ids: frozenset[str]
 
+    def __post_init__(self) -> None:
+        freeze_fields(self, "diversion_error_hashes", "diversion_reason_hashes")
+
 
 class SinkExecutor:
     """Executes sinks with artifact recording.
@@ -159,7 +164,11 @@ class SinkExecutor:
         self._spans = span_factory
         self._run_id = run_id
         self._factory = factory
-        self._worker_id = worker_id or f"sink-effects:{run_id}"
+        # A deterministic per-run owner lets separate processes look like the
+        # same live lease holder and dispatch the same external effect. Normal
+        # orchestration threads its registered coordination worker id; direct
+        # executor callers still receive a process-unique owner.
+        self._worker_id = worker_id or f"sink-effects:{run_id}:{uuid.uuid4().hex}"
         self._sink_effect_fault_hook = sink_effect_fault_hook
 
     def _complete_states_failed(

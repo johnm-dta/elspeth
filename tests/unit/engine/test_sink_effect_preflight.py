@@ -1212,6 +1212,7 @@ def test_audit_export_preflights_fresh_sink_before_node_or_lifecycle_or_io() -> 
             payload_store=object(),  # type: ignore[arg-type]
             audit_export_content_store=_AUDIT_CONTENT_STORE,  # type: ignore[arg-type]
             audit_export_content_store_resolver=_AUDIT_CONTENT_STORE_RESOLVER,
+            worker_id="worker:run-1:test",
         )
 
     assert "node_id" not in vars(sink)
@@ -1258,6 +1259,7 @@ def test_export_admission_precedes_pending_events_telemetry_and_signing_key_read
             payload_store=object(),  # type: ignore[arg-type]
             audit_export_content_store=_AUDIT_CONTENT_STORE,  # type: ignore[arg-type]
             audit_export_content_store_resolver=_AUDIT_CONTENT_STORE_RESOLVER,
+            worker_id="worker:run-1:test",
         )
 
     factory.run_lifecycle.set_export_status.assert_not_called()
@@ -1307,6 +1309,7 @@ def test_prepared_export_binding_provenance_precedes_pending_status(monkeypatch:
             payload_store=object(),  # type: ignore[arg-type]
             audit_export_content_store=_AUDIT_CONTENT_STORE,  # type: ignore[arg-type]
             audit_export_content_store_resolver=_AUDIT_CONTENT_STORE_RESOLVER,
+            worker_id="worker:run-1:test",
         )
 
     factory.run_lifecycle.set_export_status.assert_not_called()
@@ -1382,6 +1385,7 @@ def test_prepared_export_binding_rejects_claimed_mode_before_pending_or_receipt(
             payload_store=object(),  # type: ignore[arg-type]
             audit_export_content_store=_AUDIT_CONTENT_STORE,  # type: ignore[arg-type]
             audit_export_content_store_resolver=_AUDIT_CONTENT_STORE_RESOLVER,
+            worker_id="worker:run-1:test",
         )
 
     factory.run_lifecycle.set_export_status.assert_not_called()
@@ -1418,6 +1422,7 @@ def test_audit_export_requires_export_input_kind_and_rejects_pipeline_only_sink(
             payload_store=object(),  # type: ignore[arg-type]
             audit_export_content_store=_AUDIT_CONTENT_STORE,  # type: ignore[arg-type]
             audit_export_content_store_resolver=_AUDIT_CONTENT_STORE_RESOLVER,
+            worker_id="worker:run-1:test",
         )
     assert "node_id" not in vars(sink)
     assert sink.on_start_calls == 0

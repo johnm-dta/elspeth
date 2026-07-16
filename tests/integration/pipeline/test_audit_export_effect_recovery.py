@@ -37,6 +37,7 @@ from elspeth.contracts.sink_effects import (
     SinkEffectPrepareRequest,
     SinkEffectReconcileResult,
 )
+from elspeth.core.audit_export_content_store import FilesystemAuditExportContentStore
 from elspeth.core.config import AuditExportContentStoreSettings, LandscapeExportSettings
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
@@ -201,6 +202,7 @@ def _config(**overrides: object) -> LandscapeExportSettings:
         content_store=AuditExportContentStoreSettings(
             content_store_id="audit-store-v1",
             namespace="audit/export",
+            root=Path(".elspeth/audit-export-content-store/recovery"),
             policy_version="v1",
             retention_days=30,
             durability="fsync",
@@ -281,6 +283,43 @@ def test_registry_hit_reuses_verified_winner_without_rewriting_content(tmp_path:
         db.close()
 
 
+def test_production_filesystem_store_materializes_and_reopens_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'filesystem-store.db'}")
+    config = _config()
+    assert config.content_store is not None
+    store = FilesystemAuditExportContentStore(config.content_store)
+    resolver = AuditExportContentStoreResolver()
+    resolver.register(store)
+    try:
+        _insert_terminal_run(db)
+        first = prepare_audit_export_snapshot(
+            db,
+            run_id="run-export",
+            config=config,
+            signing_key=None,
+            content_store=store,
+            content_store_resolver=resolver,
+        )
+        second = prepare_audit_export_snapshot(
+            db,
+            run_id="run-export",
+            config=config,
+            signing_key=None,
+            content_store=store,
+            content_store_resolver=resolver,
+        )
+
+        assert second.snapshot_id == first.snapshot_id
+        assert b"".join(second.reader.iter_verified_chunks()).endswith(b"\n")
+        assert second.reader.read_verified_signed_manifest().endswith(b"}")
+    finally:
+        db.close()
+
+
 def test_hmac_snapshot_streaming_derivation_and_production_verification(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -306,6 +345,48 @@ def test_hmac_snapshot_streaming_derivation_and_production_verification(
         manifest = json.loads(snapshot.reader.read_verified_signed_manifest())
         assert isinstance(record["signature"], str) and len(record["signature"]) == 64
         assert isinstance(manifest["signature"], str) and len(manifest["signature"]) == 64
+    finally:
+        db.close()
+
+
+def test_single_export_rotation_policy_refuses_a_different_signer_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'single-export.db'}")
+    store = _MemoryContentStore()
+    try:
+        _insert_terminal_run(db)
+        prepare_audit_export_snapshot(
+            db,
+            run_id="run-export",
+            config=_config(
+                signing_mode="hmac_sha256",
+                signer_key_id="audit-key-v1",
+                signing_secret_ref="AUDIT_EXPORT_TEST_KEY_V1",
+                signer_rotation_policy="single_export",
+            ),
+            signing_key=b"first-signing-key",
+            content_store=store,
+        )
+
+        with pytest.raises(ValueError, match="single_export"):
+            prepare_audit_export_snapshot(
+                db,
+                run_id="run-export",
+                config=_config(
+                    signing_mode="hmac_sha256",
+                    signer_key_id="audit-key-v2",
+                    signing_secret_ref="AUDIT_EXPORT_TEST_KEY_V2",
+                    signer_rotation_policy="single_export",
+                ),
+                signing_key=b"second-signing-key",
+                content_store=store,
+            )
+
+        with db.engine.connect() as connection:
+            assert connection.scalar(select(func.count()).select_from(audit_export_snapshots_table)) == 1
     finally:
         db.close()
 

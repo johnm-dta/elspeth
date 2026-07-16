@@ -156,6 +156,7 @@ def export_landscape(*args: Any, **kwargs: Any) -> None:
     kwargs.setdefault("payload_store", _TEST_PAYLOAD_STORE)
     kwargs.setdefault("audit_export_content_store", _TEST_AUDIT_CONTENT_STORE)
     kwargs.setdefault("audit_export_content_store_resolver", _TEST_AUDIT_CONTENT_STORE_RESOLVER)
+    kwargs.setdefault("worker_id", "runtime-worker")
     _production_export_landscape(*args, **kwargs)
 
 
@@ -221,6 +222,7 @@ def test_export_landscape_materializes_snapshot_before_audit_rows_and_executes_e
         assert kwargs["factory"] is factory
         assert kwargs["snapshot"] is snapshot
         assert kwargs["sink"] is sink
+        assert kwargs["worker_id"] != "audit-export:run-1"
 
     with (
         patch("elspeth.core.landscape.factory.RecorderFactory", return_value=factory),
@@ -325,6 +327,7 @@ class _LegacyExportLandscapeJSON:
                 payload_store=payload_store,
                 audit_export_content_store=audit_content_store,
                 audit_export_content_store_resolver=audit_content_store_resolver,
+                worker_id="runtime-worker",
             )
 
         recorder_factory.assert_called_once_with(exporter.call_args.args[0], payload_store=payload_store)

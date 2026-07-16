@@ -26,6 +26,7 @@ def _complete_audit_export_config(**overrides: object) -> dict[str, object]:
         "content_store": {
             "content_store_id": "archive-primary-v1",
             "namespace": "audit-export",
+            "root": ".elspeth/audit-export-content-store/primary",
             "policy_version": "audit-store-policy-v1",
             "retention_days": 365,
             "durability": "fsync",

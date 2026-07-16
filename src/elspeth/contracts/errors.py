@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.coordination import RegisteredWorker
 
 
+# TIER-2: Configuration/preflight refusal for sinks that cannot satisfy the recoverable-effect contract; no audit mutation has begun.
 class SinkEffectCapabilityError(ValueError):
     """A sink cannot safely participate in recoverable effect publication."""
 

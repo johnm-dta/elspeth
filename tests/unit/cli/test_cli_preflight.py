@@ -49,6 +49,12 @@ class _EffectCapableSink:
     supported_effect_modes = frozenset({"write"})
     supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
 
+    @classmethod
+    def _resolve_sink_effect_mode(cls, _options: object, *, purpose: object) -> object:
+        from elspeth.contracts.sink_effects import ResolvedSinkEffectMode
+
+        return ResolvedSinkEffectMode("write")
+
     def inspect_effect(self, _request: object, _ctx: object) -> None: ...
 
     def prepare_effect(self, _request: object, _ctx: object) -> None: ...
@@ -74,15 +80,57 @@ class _FakePluginBundle:
     aggregations: dict[str, object] = field(default_factory=dict)
     sink_effect_modes: dict[str, str] = field(default_factory=lambda: {"output": "write"})
 
+    @property
+    def sink_effect_bindings(self) -> dict[str, object]:
+        from elspeth.contracts.hashing import stable_hash
+        from elspeth.contracts.sink_effects import (
+            ResolvedSinkEffectMode,
+            SinkEffectExecutionPurpose,
+            SinkEffectRuntimeBinding,
+        )
 
-def _make_minimal_config_yaml(tmp_path: Path, *, with_depends_on: bool = False) -> Path:
+        return {
+            sink_name: SinkEffectRuntimeBinding(
+                sink_name=sink_name,
+                sink=sink,
+                sink_type=type(sink),
+                config_fingerprint=stable_hash({}),
+                purpose=SinkEffectExecutionPurpose.FRESH,
+                effect_mode=ResolvedSinkEffectMode(mode) if (mode := self.sink_effect_modes.get(sink_name)) is not None else None,
+            )
+            for sink_name, sink in self.sinks.items()
+        }
+
+
+def _make_minimal_config_yaml(
+    tmp_path: Path,
+    *,
+    with_depends_on: bool = False,
+    sink_plugin: str = "csv",
+) -> Path:
     """Write a minimal valid pipeline YAML and return its path."""
     import yaml
 
     config: dict[str, object] = {
-        "sources": {"primary": {"plugin": "csv", "options": {"path": str(tmp_path / "input.csv")}}},
+        "sources": {
+            "primary": {
+                "plugin": "csv",
+                "on_success": "output",
+                "options": {
+                    "path": str(tmp_path / "input.csv"),
+                    "on_validation_failure": "discard",
+                    "schema": {"mode": "observed"},
+                },
+            }
+        },
         "transforms": [],
-        "sinks": {"output": {"plugin": "csv", "on_write_failure": "discard", "options": {"path": str(tmp_path / "output.csv")}}},
+        "sinks": {
+            "output": {
+                "plugin": sink_plugin,
+                "on_write_failure": "discard",
+                "options": {"path": str(tmp_path / "output.csv"), "schema": {"mode": "observed"}},
+            }
+        },
     }
     if with_depends_on:
         config["depends_on"] = [{"name": "indexer", "settings": "./index.yaml"}]
@@ -92,10 +140,40 @@ def _make_minimal_config_yaml(tmp_path: Path, *, with_depends_on: bool = False) 
     return settings_path
 
 
-def test_cli_run_rejects_raw_legacy_sink_before_key_vault_resolution(tmp_path: Path) -> None:
-    settings_path = _make_minimal_config_yaml(tmp_path)
+def _explicit_audit_export_settings(*, enabled: bool | str | int, sink: str = "audit") -> dict[str, object]:
+    """Return a fully bounded raw export policy for CLI preflight tests."""
+    return {
+        "enabled": enabled,
+        "sink": sink,
+        "total_record_limit": 1_000,
+        "total_byte_limit": 1_000_000,
+        "chunk_limit": 10,
+        "per_chunk_record_limit": 100,
+        "per_chunk_byte_limit": 100_000,
+        "spool_root": ".elspeth/audit-export-spool/cli-preflight",
+        "spool_cleanup_age_seconds": 3_600,
+        "spool_cleanup_byte_budget": 1_000_000,
+        "spool_cleanup_count_budget": 10,
+        "content_store": {
+            "content_store_id": "cli-preflight-store-v1",
+            "namespace": "audit/export",
+            "root": ".elspeth/audit-export-content-store/cli-preflight",
+            "policy_version": "v1",
+            "retention_days": 30,
+            "durability": "fsync",
+            "orphan_grace_period_seconds": 3_600,
+        },
+    }
 
-    with patch("elspeth.cli.load_secrets_from_config") as load_secrets:
+
+def test_cli_run_rejects_raw_legacy_sink_before_key_vault_resolution(tmp_path: Path) -> None:
+    settings_path = _make_minimal_config_yaml(tmp_path, sink_plugin="legacy")
+    manager = SimpleNamespace(get_sink_by_name=lambda _name: _LegacyResumeSink)
+
+    with (
+        patch("elspeth.plugins.infrastructure.manager.get_shared_plugin_manager", return_value=manager),
+        patch("elspeth.cli.load_secrets_from_config") as load_secrets,
+    ):
         result = runner.invoke(app, ["run", "-s", str(settings_path), "--execute"])
 
     assert result.exit_code == 1
@@ -117,7 +195,7 @@ def test_cli_fresh_run_screens_pipeline_and_export_lanes_before_secret_loading(t
                     "pipeline": {"plugin": "csv", "options": {"path": "output.csv"}},
                     "audit": {"plugin": "json", "options": {"path": "audit.jsonl"}},
                 },
-                "landscape": {"export": {"enabled": True, "sink": "audit"}},
+                "landscape": {"export": _explicit_audit_export_settings(enabled=True)},
             }
         )
     )
@@ -175,7 +253,7 @@ def test_raw_export_lane_classification_matches_pydantic_bool_coercion(
                     "pipeline": {"plugin": "csv", "options": {}},
                     "audit": {"plugin": "json", "options": {}},
                 },
-                "landscape": {"export": {"enabled": raw_enabled, "sink": "audit"}},
+                "landscape": {"export": _explicit_audit_export_settings(enabled=raw_enabled)},
             }
         )
     )
@@ -262,6 +340,7 @@ def _fake_config(*, with_depends_on: bool) -> SimpleNamespace:
         gates=[],
         coalesce=[],
         queues={},
+        sinks={"output": SimpleNamespace(options={})},
         landscape=SimpleNamespace(export=SimpleNamespace(enabled=False, sink=None)),
     )
 

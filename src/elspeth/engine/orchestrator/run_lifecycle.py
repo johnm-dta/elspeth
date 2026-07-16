@@ -253,6 +253,7 @@ class RunLifecycleCoordinator:
         payload_store: PayloadStore,
         audit_export_content_store: AuditExportContentStore,
         audit_export_content_store_resolver: AuditExportContentStoreResolver,
+        worker_id: str,
     ) -> None:
         """Execute the EXPORT phase: export Landscape data to configured sink.
 
@@ -300,6 +301,7 @@ class RunLifecycleCoordinator:
                 payload_store=payload_store,
                 audit_export_content_store=audit_export_content_store,
                 audit_export_content_store_resolver=audit_export_content_store_resolver,
+                worker_id=worker_id,
             )
 
             factory.run_lifecycle.set_export_status(run_id, status=ExportStatus.COMPLETED)
@@ -521,6 +523,7 @@ class RunLifecycleCoordinator:
                     payload_store=payload_store,
                     audit_export_content_store=audit_export_content_store,
                     audit_export_content_store_resolver=audit_export_content_store_resolver,
+                    worker_id=coordination_token.worker_id,
                 )
 
             # Emit RunSummary event with final metrics.  Map the new

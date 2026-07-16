@@ -9,7 +9,7 @@ import pytest
 
 from elspeth.core.landscape import database as landscape_database
 from elspeth.core.landscape.database import LandscapeDB
-from tests.unit.core.landscape.test_artifact_idempotency_migration import _epoch_and_schema, _seed_current_database
+from tests.unit.core.landscape.test_artifact_idempotency_migration import _epoch_and_schema, _identity_epochs, _seed_current_database
 
 
 def _seed_operation_and_call(db_path: Path) -> None:
@@ -44,12 +44,14 @@ def _seed_operation_and_call(db_path: Path) -> None:
         connection.commit()
 
 
-def _schema_and_rows(db_path: Path) -> tuple[int, list[tuple[object, ...]], list[tuple[object, ...]], list[tuple[object, ...]]]:
+def _schema_and_rows(
+    db_path: Path,
+) -> tuple[int, list[tuple[object, ...]], list[tuple[object, ...]], list[tuple[object, ...]], tuple[int, ...] | None]:
     epoch, schema = _epoch_and_schema(db_path)
     with sqlite3.connect(db_path) as connection:
         operations = connection.execute("SELECT * FROM operations ORDER BY operation_id").fetchall()
         artifacts = connection.execute("SELECT * FROM artifacts ORDER BY artifact_id").fetchall()
-    return epoch, schema, operations, artifacts
+    return epoch, schema, operations, artifacts, _identity_epochs(db_path)
 
 
 def test_epoch_25_migrates_to_26_and_preserves_legacy_rows(tmp_path: Path) -> None:
@@ -100,6 +102,7 @@ def test_epoch_25_migrates_to_26_and_preserves_legacy_rows(tmp_path: Path) -> No
             ]
             assert witness_columns == ["run_id", "status", "completed_at"]
             assert connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall() == []
+            assert connection.exec_driver_sql("SELECT schema_epoch FROM elspeth_schema_identity").scalar_one() == 26
     finally:
         db.close()
 

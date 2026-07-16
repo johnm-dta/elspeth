@@ -154,6 +154,7 @@ def _rewrite_tokens_as_epoch_23(engine: Engine) -> None:
         ):
             cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
         cursor.execute("DROP INDEX IF EXISTS uq_artifacts_run_idempotency_key")
+        cursor.execute("DROP TABLE elspeth_schema_identity")
         cursor.execute("PRAGMA user_version = 23")
         raw.commit()
         cursor.execute("PRAGMA foreign_keys = ON")
@@ -437,6 +438,10 @@ def test_epoch_23_database_migrates_atomically_and_matches_fresh_schema(tmp_path
     predecessor_engine = create_engine(migrated_url)
     _rewrite_tokens_as_epoch_23(predecessor_engine)
     predecessor_engine.dispose()
+    with sqlite3.connect(migrated_path) as connection:
+        assert (
+            connection.execute("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'elspeth_schema_identity'").fetchone() is None
+        )
 
     migrated = LandscapeDB.from_url(migrated_url)
     try:
@@ -448,6 +453,8 @@ def test_epoch_23_database_migrates_atomically_and_matches_fresh_schema(tmp_path
             ).one()
             assert tuple(token_row) == (row_id, "run-A")
             assert conn.exec_driver_sql("PRAGMA foreign_key_check").fetchall() == []
+            identity_epoch = conn.exec_driver_sql("SELECT schema_epoch FROM elspeth_schema_identity").scalar_one()
+            assert identity_epoch == 26
         assert probe_schema_shape(migrated.engine) is LandscapeSchemaShape.MATCHES
 
         fresh = LandscapeDB(f"sqlite:///{tmp_path / 'fresh.db'}")

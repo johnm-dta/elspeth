@@ -562,6 +562,157 @@ def _remove_exact_tree(path: Path, files: Sequence[BundleFileEntry]) -> bool:
     return True
 
 
+@dataclass(slots=True)
+class _PinnedBundleParent:
+    """Directory capability pinned beneath its immediate no-follow parent."""
+
+    path: Path
+    descriptor: int
+    anchor_descriptor: int
+    entry_name: str
+    identity: os.stat_result
+
+    def close(self) -> None:
+        os.close(self.descriptor)
+        os.close(self.anchor_descriptor)
+
+    def is_still_bound(self) -> bool:
+        try:
+            observed = os.stat(self.entry_name, dir_fd=self.anchor_descriptor, follow_symlinks=False)
+        except OSError:
+            return False
+        return stat.S_ISDIR(observed.st_mode) and observed.st_dev == self.identity.st_dev and observed.st_ino == self.identity.st_ino
+
+
+def _open_pinned_bundle_parent(target: Path) -> _PinnedBundleParent:
+    """Open every parent component with ``O_NOFOLLOW`` and retain its anchor."""
+    parent = target.parent
+    if not parent.is_absolute():
+        raise AuditExportBundlePreconditionError("bundle target parent must be absolute")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    current = os.open(parent.anchor, flags)
+    parts = parent.parts[1:]
+    if not parts:
+        anchor = os.dup(current)
+        identity = os.fstat(current)
+        return _PinnedBundleParent(parent, current, anchor, ".", identity)
+    try:
+        for index, part in enumerate(parts):
+            child = os.open(part, flags, dir_fd=current)
+            if index == len(parts) - 1:
+                identity = os.fstat(child)
+                return _PinnedBundleParent(parent, child, current, part, identity)
+            os.close(current)
+            current = child
+    except BaseException:
+        os.close(current)
+        raise
+    raise AssertionError("absolute bundle parent traversal must terminate")
+
+
+def _directory_fd_matches(directory_fd: int, files: Sequence[BundleFileEntry]) -> bool:
+    try:
+        names = os.listdir(directory_fd)
+    except OSError:
+        return False
+    expected_names = {entry.relative_path for entry in files}
+    if set(names) != expected_names or len(names) != len(expected_names):
+        return False
+    if len({name.casefold() for name in names}) != len(names):
+        return False
+    for entry in files:
+        file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(entry.relative_path, file_flags, dir_fd=directory_fd)
+        except OSError:
+            return False
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode) or before.st_size != entry.size_bytes:
+                return False
+            digest = hashlib.sha256()
+            while chunk := os.read(descriptor, _COPY_CHUNK_BYTES):
+                digest.update(chunk)
+            after = os.fstat(descriptor)
+            if (
+                before.st_dev != after.st_dev
+                or before.st_ino != after.st_ino
+                or before.st_size != after.st_size
+                or before.st_mtime_ns != after.st_mtime_ns
+                or digest.hexdigest() != entry.content_hash
+            ):
+                return False
+        finally:
+            os.close(descriptor)
+    return True
+
+
+def _tree_matches_at(parent_fd: int, name: str, files: Sequence[BundleFileEntry]) -> bool:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        directory_fd = os.open(name, flags, dir_fd=parent_fd)
+    except OSError:
+        return False
+    try:
+        return _directory_fd_matches(directory_fd, files)
+    finally:
+        os.close(directory_fd)
+
+
+def _target_kind_at(parent_fd: int, name: str) -> str:
+    try:
+        result = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return "absent"
+    if stat.S_ISLNK(result.st_mode):
+        return "symlink"
+    if stat.S_ISDIR(result.st_mode):
+        return "directory"
+    return "other"
+
+
+def _remove_exact_tree_at(parent_fd: int, name: str, files: Sequence[BundleFileEntry]) -> bool:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        directory_fd = os.open(name, flags, dir_fd=parent_fd)
+    except OSError:
+        return False
+    try:
+        identity = os.fstat(directory_fd)
+        if not _directory_fd_matches(directory_fd, files):
+            return False
+        for entry in files:
+            os.unlink(entry.relative_path, dir_fd=directory_fd)
+        observed = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if observed.st_dev != identity.st_dev or observed.st_ino != identity.st_ino:
+            return False
+    except OSError:
+        return False
+    finally:
+        os.close(directory_fd)
+    try:
+        os.rmdir(name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    except OSError:
+        return False
+    return True
+
+
+def _fsync_tree_at(parent_fd: int, name: str, files: Sequence[BundleFileEntry]) -> bool:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        directory_fd = os.open(name, flags, dir_fd=parent_fd)
+    except OSError:
+        return False
+    try:
+        if not _directory_fd_matches(directory_fd, files):
+            return False
+        os.fsync(directory_fd)
+        return True
+    finally:
+        os.close(directory_fd)
+
+
 def prepare_audit_export_bundle(
     *,
     target_path: Path,
@@ -711,45 +862,74 @@ def _after_parent_fsync_before_return(_target: Path) -> None:
 def commit_audit_export_bundle(plan: SinkEffectPlan) -> SinkEffectCommitResult:
     """Publish the staged bundle once, or converge on an exact existing tree."""
     evidence, target, staging, descriptor = _parse_plan(plan)
-    if _tree_matches(target, evidence.files):
-        if staging.exists() and not _remove_exact_tree(staging, evidence.files):
-            raise AuditExportBundlePreconditionError("exact target has a divergent leftover staging path")
-        return _commit_result(descriptor, "reconciled_exact_existing")
-    if target.exists() or target.is_symlink():
-        raise AuditExportBundleCollisionError("create-only bundle target exists with divergent content")
-    if not _tree_matches(staging, evidence.files):
-        raise AuditExportBundlePreconditionError("private bundle staging tree is absent or divergent")
-    _before_rename(staging, target)
+    parent = _open_pinned_bundle_parent(target)
     try:
-        _rename_noreplace(staging, target)
-    except OSError as exc:
-        if exc.errno != errno.EEXIST:
-            raise
-        if not _tree_matches(target, evidence.files):
-            raise AuditExportBundleCollisionError("rename collision target is not the exact planned bundle") from exc
-        if staging.exists() and not _remove_exact_tree(staging, evidence.files):
-            raise AuditExportBundlePreconditionError("rename collision left divergent staging content") from exc
-        return _commit_result(descriptor, "reconciled_exact_existing")
-    _after_rename_before_bundle_fsync(target)
-    _fsync_directory(target)
-    _after_bundle_fsync_before_parent_fsync(target)
-    _fsync_directory(target.parent)
-    _after_parent_fsync_before_return(target)
-    if not _tree_matches(target, evidence.files):
-        raise AuditExportBundlePreconditionError("published bundle changed before commit returned")
-    return _commit_result(descriptor, "rename_noreplace")
+        if not parent.is_still_bound():
+            raise AuditExportBundlePreconditionError("bundle target parent changed before commit")
+        if _tree_matches_at(parent.descriptor, target.name, evidence.files):
+            if _target_kind_at(parent.descriptor, staging.name) != "absent" and not _remove_exact_tree_at(
+                parent.descriptor, staging.name, evidence.files
+            ):
+                raise AuditExportBundlePreconditionError("exact target has a divergent leftover staging path")
+            if not parent.is_still_bound():
+                raise AuditExportBundlePreconditionError("bundle target parent changed during reconciliation")
+            return _commit_result(descriptor, "reconciled_exact_existing")
+        if _target_kind_at(parent.descriptor, target.name) != "absent":
+            raise AuditExportBundleCollisionError("create-only bundle target exists with divergent content")
+        if not _tree_matches_at(parent.descriptor, staging.name, evidence.files):
+            raise AuditExportBundlePreconditionError("private bundle staging tree is absent or divergent")
+        _before_rename(staging, target)
+        if not parent.is_still_bound():
+            raise AuditExportBundlePreconditionError("bundle target parent changed before publication")
+        try:
+            _rename_noreplace_at(parent.descriptor, staging.name, target.name)
+        except OSError as exc:
+            if exc.errno != errno.EEXIST:
+                raise
+            if not _tree_matches_at(parent.descriptor, target.name, evidence.files):
+                raise AuditExportBundleCollisionError("rename collision target is not the exact planned bundle") from exc
+            if _target_kind_at(parent.descriptor, staging.name) != "absent" and not _remove_exact_tree_at(
+                parent.descriptor, staging.name, evidence.files
+            ):
+                raise AuditExportBundlePreconditionError("rename collision left divergent staging content") from exc
+            if not parent.is_still_bound():
+                raise AuditExportBundlePreconditionError("bundle target parent changed during collision reconciliation") from exc
+            return _commit_result(descriptor, "reconciled_exact_existing")
+        _after_rename_before_bundle_fsync(target)
+        if not _fsync_tree_at(parent.descriptor, target.name, evidence.files):
+            raise AuditExportBundlePreconditionError("published bundle changed before directory fsync")
+        _after_bundle_fsync_before_parent_fsync(target)
+        os.fsync(parent.descriptor)
+        _after_parent_fsync_before_return(target)
+        if not parent.is_still_bound():
+            raise AuditExportBundlePreconditionError("bundle target parent changed during publication")
+        if not _tree_matches_at(parent.descriptor, target.name, evidence.files):
+            raise AuditExportBundlePreconditionError("published bundle changed before commit returned")
+        return _commit_result(descriptor, "rename_noreplace")
+    finally:
+        parent.close()
 
 
 def reconcile_audit_export_bundle(plan: SinkEffectPlan) -> SinkEffectReconcileResult:
     """Classify the target using the closed exact/not-applied/unknown set."""
     try:
         evidence, target, staging, descriptor = _parse_plan(plan)
-        if _tree_matches(target, evidence.files):
-            return SinkEffectReconcileResult.applied(descriptor, evidence={"publication": "exact_tree"})
-        target_kind = _target_kind(target)
-        if target_kind == "absent" and _tree_matches(staging, evidence.files):
-            return SinkEffectReconcileResult.not_applied(evidence={"staging": "exact", "target": "absent"})
-        return SinkEffectReconcileResult.unknown(evidence={"staging": "divergent", "target": target_kind})
+        parent = _open_pinned_bundle_parent(target)
+        try:
+            if not parent.is_still_bound():
+                return SinkEffectReconcileResult.unknown(evidence={"reason": "parent_replaced"})
+            if _tree_matches_at(parent.descriptor, target.name, evidence.files):
+                if not parent.is_still_bound():
+                    return SinkEffectReconcileResult.unknown(evidence={"reason": "parent_replaced"})
+                return SinkEffectReconcileResult.applied(descriptor, evidence={"publication": "exact_tree"})
+            target_kind = _target_kind_at(parent.descriptor, target.name)
+            if target_kind == "absent" and _tree_matches_at(parent.descriptor, staging.name, evidence.files):
+                if not parent.is_still_bound():
+                    return SinkEffectReconcileResult.unknown(evidence={"reason": "parent_replaced"})
+                return SinkEffectReconcileResult.not_applied(evidence={"staging": "exact", "target": "absent"})
+            return SinkEffectReconcileResult.unknown(evidence={"staging": "divergent", "target": target_kind})
+        finally:
+            parent.close()
     except (AuditExportBundleError, OSError, ValueError, TypeError) as exc:
         return SinkEffectReconcileResult.unknown(evidence={"reason": type(exc).__name__})
 
@@ -780,6 +960,21 @@ def _rename_noreplace(source: Path, destination: Path) -> None:
     if result != 0:
         error_number = ctypes.get_errno()
         raise OSError(error_number, os.strerror(error_number), str(destination))
+
+
+def _rename_noreplace_at(parent_fd: int, source_name: str, destination_name: str) -> None:
+    if _RENAMEAT2 is None:
+        raise OSError(errno.ENOSYS, "libc does not expose renameat2")
+    result = _RENAMEAT2(
+        ctypes.c_int(parent_fd),
+        ctypes.c_char_p(os.fsencode(source_name)),
+        ctypes.c_int(parent_fd),
+        ctypes.c_char_p(os.fsencode(destination_name)),
+        ctypes.c_uint(_RENAME_NOREPLACE),
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), destination_name)
 
 
 def _statfs_type(path: Path) -> int:

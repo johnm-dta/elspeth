@@ -1325,6 +1325,31 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
             "trg_chat_messages_immutable_content) the test is pinning."
         ),
     ),
+    # ------ tests/testcontainer/web/test_schema_probe_postgres.py ------
+    # The PostgreSQL trigger proof deliberately seeds the protected rows with
+    # raw SQL so it can mutate them through the same low-level connection and
+    # prove the database triggers themselves enforce append-only semantics.
+    ReviewedWriter(
+        path="tests/testcontainer/web/test_schema_probe_postgres.py",
+        enclosing_symbol="_seed_postgres_trigger_rows",
+        table="composition_states",
+        operation="raw_string_in_text",
+        purpose=(
+            "PostgreSQL trigger fixture: seed the composition-state FK anchor "
+            "with raw SQL before directly exercising immutable audit triggers."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/testcontainer/web/test_schema_probe_postgres.py",
+        enclosing_symbol="_seed_postgres_trigger_rows",
+        table="chat_messages",
+        operation="raw_string_in_text",
+        purpose=(
+            "PostgreSQL trigger fixture: seed the protected chat row with raw "
+            "SQL so update/delete trigger enforcement is tested independently "
+            "of the session service."
+        ),
+    ),
 )
 
 

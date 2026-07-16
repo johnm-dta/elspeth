@@ -367,7 +367,7 @@ class SinkEffectFinalization:
     def _validate_partition(request: SinkEffectFinalizeRequest, members: Sequence[Row[Any]]) -> None:
         durable_ordinals = tuple(int(member.ordinal) for member in members)
         requested_ordinals = tuple(request.accepted_ordinals) + tuple(request.diverted_ordinals)
-        if requested_ordinals != tuple(sorted(durable_ordinals)):
+        if tuple(sorted(requested_ordinals)) != tuple(sorted(durable_ordinals)):
             raise LandscapeRecordError("finalization accepted/diverted ordinals must exactly partition durable membership")
         expected = list(range(len(members)))
         if list(durable_ordinals) != expected:

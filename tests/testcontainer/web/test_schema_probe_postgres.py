@@ -25,9 +25,9 @@ from elspeth.contracts.enums import NodeType
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import SchemaContract
-from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
+from elspeth.core.landscape.database import _REQUIRED_TRIGGERS, LandscapeDB, SchemaCompatibilityError
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH
+from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, audit_export_snapshot_chunks_table
 from elspeth.core.landscape.schema import schema_identity_table as landscape_schema_identity_table
 from elspeth.core.schema_identity import SCHEMA_IDENTITY_APPLICATION_ID
 from elspeth.core.schema_shape import _text_builtin_identity_rows_on_connection
@@ -172,6 +172,69 @@ def test_landscape_tokens_bind_row_id_and_run_id_to_the_same_row(postgres_engine
         and tuple(foreign_key["referred_columns"]) == ("row_id", "run_id")
         for foreign_key in foreign_keys
     )
+
+
+def test_postgres_landscape_trigger_inventory_validates_and_unsealed_chunk_mutations_apply(postgres_engine: Engine) -> None:
+    """Fresh PostgreSQL has the complete trigger contract and preserves row semantics."""
+    init_landscape_schema(postgres_engine)
+
+    with postgres_engine.connect() as conn:
+        trigger_names = set(
+            conn.exec_driver_sql("SELECT trigger_name FROM information_schema.triggers WHERE trigger_schema = current_schema()").scalars()
+        )
+    assert trigger_names >= set(_REQUIRED_TRIGGERS)
+
+    url = postgres_engine.url.render_as_string(hide_password=False)
+    validated = LandscapeDB.from_url(url, create_tables=False)
+    validated.close()
+
+    content_hash = "a" * 64
+    with postgres_engine.connect() as conn:
+        transaction = conn.begin()
+        try:
+            conn.execute(
+                audit_export_snapshot_chunks_table.insert().values(
+                    snapshot_id="unsealed-postgres-snapshot",
+                    ordinal=0,
+                    content_ref=f"sha256:{content_hash}",
+                    content_hash=content_hash,
+                    size_bytes=10,
+                    record_count=1,
+                    predecessor_seal_hash=None,
+                    cumulative_records=1,
+                    cumulative_bytes=10,
+                    chunk_seal_hash="b" * 64,
+                )
+            )
+            updated = conn.execute(
+                update(audit_export_snapshot_chunks_table)
+                .where(audit_export_snapshot_chunks_table.c.snapshot_id == "unsealed-postgres-snapshot")
+                .values(size_bytes=11, cumulative_bytes=11)
+            )
+            assert updated.rowcount == 1
+            assert conn.execute(
+                select(
+                    audit_export_snapshot_chunks_table.c.size_bytes,
+                    audit_export_snapshot_chunks_table.c.cumulative_bytes,
+                ).where(audit_export_snapshot_chunks_table.c.snapshot_id == "unsealed-postgres-snapshot")
+            ).one() == (11, 11)
+
+            deleted = conn.execute(
+                audit_export_snapshot_chunks_table.delete().where(
+                    audit_export_snapshot_chunks_table.c.snapshot_id == "unsealed-postgres-snapshot"
+                )
+            )
+            assert deleted.rowcount == 1
+            assert (
+                conn.execute(
+                    select(audit_export_snapshot_chunks_table.c.snapshot_id).where(
+                        audit_export_snapshot_chunks_table.c.snapshot_id == "unsealed-postgres-snapshot"
+                    )
+                ).first()
+                is None
+            )
+        finally:
+            transaction.rollback()
 
 
 def test_postgres_session_init_does_not_poison_later_sqlite_schema(postgres_engine: Engine) -> None:

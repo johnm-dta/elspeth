@@ -148,7 +148,7 @@ class CSVSink(BaseSink):
     name = "csv"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:333e1458d2ad08f2"
+    source_file_hash: str | None = "sha256:626b4bd0ed981f80"
     config_model = CSVSinkConfig
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"append", "write"})
@@ -369,12 +369,17 @@ class CSVSink(BaseSink):
             return prepare_audit_export_bundle(target_path=self._requested_path, request=request)
         if type(request.effect_input) is not SinkEffectPipelineMembersInput:
             raise TypeError("CSVSink effects require pipeline member input")
-        members = request.effect_input.target_snapshot_members
+        members = request.effect_input.members
+        target_snapshot_members = request.effect_input.target_snapshot_members
+        current_by_effect_id = {member.member_effect_id: member for member in members}
         target = Path(str(request.inspection.evidence["target_path"]))
         predecessor_declared = bool(request.inspection.evidence["predecessor_declared"])
-        include_baseline = predecessor_declared or self._mode == "append"
+        has_predecessor_snapshot_members = any(member.member_effect_id not in current_by_effect_id for member in target_snapshot_members)
+        include_baseline = (predecessor_declared and not has_predecessor_snapshot_members) or (
+            self._mode == "append" and not predecessor_declared
+        )
         baseline_nonempty = include_baseline and target.exists() and target.stat().st_size > 0
-        rows = [deep_thaw(member.row) for member in members]
+        rows = [deep_thaw(member.row) for member in target_snapshot_members]
 
         if baseline_nonempty:
             validation = self.validate_output_target()
@@ -409,15 +414,18 @@ class CSVSink(BaseSink):
             else:
                 yield encoder.encode(header_text())
             locked_fields = set(data_fields)
-            for member, row in zip(members, rows, strict=True):
+            for snapshot_member, row in zip(target_snapshot_members, rows, strict=True):
+                current_member = current_by_effect_id.get(snapshot_member.member_effect_id)
                 extra_fields = set(row) - locked_fields
                 if extra_fields:
                     reason = "CSV row contains fields outside the established columns: " + ", ".join(
                         sorted(str(field) for field in extra_fields)
                     )
-                    self._divert_row(row, row_index=member.ordinal, reason=reason)
-                    diverted.append(member.ordinal)
-                    diversion_attribution.append(build_diversion_attribution(ordinal=member.ordinal, reason=reason))
+                    if current_member is None:
+                        raise ValueError(f"Predecessor CSV snapshot is incompatible: {reason}")
+                    self._divert_row(row, row_index=current_member.ordinal, reason=reason)
+                    diverted.append(current_member.ordinal)
+                    diversion_attribution.append(build_diversion_attribution(ordinal=current_member.ordinal, reason=reason))
                     continue
                 row_buffer = io.StringIO(newline="")
                 writer = csv.DictWriter(row_buffer, fieldnames=data_fields, delimiter=self._delimiter)
@@ -427,21 +435,26 @@ class CSVSink(BaseSink):
                     row_text.encode(self._encoding)
                 except UnicodeEncodeError as exc:
                     reason = f"CSV encoding ({self._encoding}) failed: {exc}"
+                    if current_member is None:
+                        raise ValueError(f"Predecessor CSV snapshot is incompatible: {reason}") from exc
                     self._divert_row(
                         row,
-                        row_index=member.ordinal,
+                        row_index=current_member.ordinal,
                         reason=reason,
                     )
-                    diverted.append(member.ordinal)
-                    diversion_attribution.append(build_diversion_attribution(ordinal=member.ordinal, reason=reason))
+                    diverted.append(current_member.ordinal)
+                    diversion_attribution.append(build_diversion_attribution(ordinal=current_member.ordinal, reason=reason))
                     continue
                 except csv.Error as exc:
                     reason = f"CSV serialization failed: {exc}"
-                    self._divert_row(row, row_index=member.ordinal, reason=reason)
-                    diverted.append(member.ordinal)
-                    diversion_attribution.append(build_diversion_attribution(ordinal=member.ordinal, reason=reason))
+                    if current_member is None:
+                        raise ValueError(f"Predecessor CSV snapshot is incompatible: {reason}") from exc
+                    self._divert_row(row, row_index=current_member.ordinal, reason=reason)
+                    diverted.append(current_member.ordinal)
+                    diversion_attribution.append(build_diversion_attribution(ordinal=current_member.ordinal, reason=reason))
                     continue
-                accepted.append(member.ordinal)
+                if current_member is not None:
+                    accepted.append(current_member.ordinal)
                 yield encoder.encode(row_text)
             final = encoder.encode("", final=True)
             if final:

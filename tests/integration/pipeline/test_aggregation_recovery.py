@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from elspeth.contracts import (
     Determinism,
@@ -49,7 +49,7 @@ from elspeth.core.config import AggregationSettings, CheckpointSettings, SourceS
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.core.landscape.schema import batch_members_table, batches_table, token_work_items_table
+from elspeth.core.landscape.schema import batch_members_table, batches_table, sink_effects_table, token_work_items_table
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.results import TransformResult
@@ -292,6 +292,25 @@ class TestFlushOutputJournalDurability:
         # No state where inputs are consumed and the output is absent:
         # nothing remains blocked at the barrier.
         assert not [row for row in journal if row.status == "blocked"]
+
+        # A real replacement process may take over an external-effect lease
+        # only after the crashed worker's lease expires.  The injected
+        # RuntimeError unwinds in-process, so advance that crash-recovery
+        # boundary explicitly instead of making resume steal a live lease.
+        expired_at = datetime.now(UTC) - timedelta(seconds=1)
+        with db.write_connection() as conn:
+            expired = conn.execute(
+                update(sink_effects_table)
+                .where(
+                    sink_effects_table.c.run_id == run_id,
+                    sink_effects_table.c.state == "in_flight",
+                )
+                .values(
+                    lease_heartbeat_at=expired_at - timedelta(seconds=1),
+                    lease_expires_at=expired_at,
+                )
+            )
+        assert expired.rowcount == 1
 
         # ── Resume: the journal-durable output reaches the sink without
         # re-running the transform or the source.

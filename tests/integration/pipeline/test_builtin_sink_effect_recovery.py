@@ -22,6 +22,7 @@ from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.infrastructure.base import BaseSink
 from elspeth.plugins.sinks.csv_sink import CSVSink
 from elspeth.plugins.sinks.json_sink import JSONSink
+from elspeth.plugins.sinks.text_sink import TextSink
 from tests.fixtures.base_classes import create_observed_contract, inject_write_failure
 from tests.fixtures.landscape import make_factory, register_test_node
 
@@ -102,6 +103,20 @@ def _json_sink(path: Path, *, on_write_failure: str = "discard") -> JSONSink:
             {
                 "path": str(path),
                 "format": "jsonl",
+                "mode": "write",
+                "schema": {"mode": "observed"},
+            }
+        ),
+        on_write_failure,
+    )
+
+
+def _text_sink(path: Path, *, on_write_failure: str = "discard") -> TextSink:
+    return inject_write_failure(
+        TextSink(
+            {
+                "path": str(path),
+                "field": "message",
                 "mode": "write",
                 "schema": {"mode": "observed"},
             }
@@ -361,6 +376,59 @@ def test_builtin_local_sink_response_loss_reconciles_without_duplicate_publicati
         assert outcome is not None
         assert outcome.outcome is TerminalOutcome.SUCCESS
         assert outcome.path is TerminalPath.DEFAULT_FLOW
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("kind", ("csv", "json", "text"))
+def test_builtin_local_sink_second_effect_classifies_only_current_members(
+    tmp_path: Path,
+    kind: Literal["csv", "json", "text"],
+) -> None:
+    suffix = {"csv": ".csv", "json": ".jsonl", "text": ".txt"}[kind]
+    output = tmp_path / f"second-effect{suffix}"
+    db = LandscapeDB(f"sqlite:///{tmp_path / f'{kind}-second-effect.db'}")
+    try:
+        factory, run_id, source_id = _begin(db)
+        sink_id = _register_sink(factory, run_id, name="output", plugin_name=kind)
+        rows: list[dict[str, object]] = [{"message": "one"}, {"message": "two"}] if kind == "text" else [{"id": 1}, {"id": 2}]
+        first_token, second_token = _tokens(factory, run_id=run_id, source_id=source_id, rows=rows)
+
+        def configured_sink() -> CSVSink | JSONSink | TextSink:
+            sink = _csv_sink(output) if kind == "csv" else _json_sink(output) if kind == "json" else _text_sink(output)
+            sink.node_id = sink_id
+            return sink
+
+        first_artifact, first_counts = _write(
+            factory=factory,
+            run_id=run_id,
+            sink=configured_sink(),
+            tokens=[first_token],
+        )
+        second_artifact, second_counts = _write(
+            factory=factory,
+            run_id=run_id,
+            sink=configured_sink(),
+            tokens=[second_token],
+        )
+
+        assert first_artifact is not None
+        assert second_artifact is not None
+        assert first_counts == DiversionCounts()
+        assert second_counts == DiversionCounts()
+        if kind == "csv":
+            with output.open(newline="", encoding="utf-8") as stream:
+                assert list(csv.DictReader(stream)) == [{"id": "1"}, {"id": "2"}]
+        elif kind == "json":
+            assert [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()] == [{"id": 1}, {"id": 2}]
+        else:
+            assert output.read_bytes() == b"one\ntwo\n"
+
+        effects = factory.execution.sink_effects.get_effects_for_run(run_id)
+        assert len(effects) == 2
+        second_effect = next(effect for effect in effects if effect.predecessor_effect_id is not None)
+        second_members = factory.execution.sink_effects.get_members(second_effect.effect_id)
+        assert [(member.ordinal, member.prepared_disposition) for member in second_members] == [(0, "accepted")]
     finally:
         db.close()
 

@@ -57,4 +57,24 @@ landscape:
     enabled: true
     sink: audit_export
     format: json
-    sign: false
+    signing_mode: unsigned
+    signer_key_id: UNSIGNED
+    total_record_limit: 10000
+    total_byte_limit: 10000000
+    chunk_limit: 100
+    per_chunk_record_limit: 1000
+    per_chunk_byte_limit: 1000000
+    spool_root: .elspeth/audit-export-spool/audit-export-example
+    spool_cleanup_age_seconds: 3600
+    spool_cleanup_byte_budget: 10000000
+    spool_cleanup_count_budget: 100
+    content_store:
+      content_store_id: audit-export-example-v1
+      namespace: audit-export-example
+      root: .elspeth/audit-export-content-store/audit-export-example
+      policy_version: audit-store-policy-v1
+      retention_days: 365
+      durability: fsync
+      orphan_grace_period_seconds: 7200
+      reference_safe_gc: true
+      cleanup_scope: candidate_unreferenced

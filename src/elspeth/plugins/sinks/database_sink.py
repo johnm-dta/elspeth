@@ -213,7 +213,7 @@ class DatabaseSink(BaseSink):
     name = "database"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:9cd8b3ada5a0c96e"
+    source_file_hash: str | None = "sha256:d89296f559d8e4d9"
     config_model = DatabaseSinkConfig
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"append"})

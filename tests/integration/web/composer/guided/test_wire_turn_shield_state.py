@@ -142,13 +142,16 @@ def _make_guided_app(
     )
 
     class _FullSchemaProfiles:
-        """Keep this legacy LLM-authoring fixture full-schema while exposing real profile availability."""
+        """Expose the real profile schema and availability used by guided commits."""
 
-        def public_schema(self, _plugin_id, full_schema, *, available_aliases):
-            return full_schema
+        def public_schema(self, plugin_id, full_schema, *, available_aliases):
+            return base_profiles.public_schema(plugin_id, full_schema, available_aliases=available_aliases)
 
         def profile_availability(self, plugin_id, *, principal, inventory):
             return base_profiles.profile_availability(plugin_id, principal=principal, inventory=inventory)
+
+        def lower_options(self, plugin_id, *, alias, safe_options):
+            return base_profiles.lower_options(plugin_id, alias=alias, safe_options=safe_options)
 
         def check_local_requirements(self, plugin_id, alias):
             del plugin_id, alias
@@ -268,6 +271,7 @@ def _fake_llm_chain_response() -> SimpleNamespace:
                                                         "model": "anthropic/claude-sonnet-4.6",
                                                         "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
                                                         "prompt_template": "Summarize {{ row.text }} and return JSON.",
+                                                        "required_input_fields": ["text"],
                                                         "schema": {"mode": "observed"},
                                                     },
                                                     "rationale": "summarise each row with an llm transform",
@@ -350,6 +354,7 @@ def _drive_to_wire_turn(client: TestClient, session_id: str) -> dict:
 
     # Accept the proposed LLM chain → produces confirm_wiring turn.
     result = _respond(client, session_id, chosen=["accept"])
+    assert result["next_turn"] is not None, result
     assert result["next_turn"]["type"] == "confirm_wiring", result["next_turn"]
     return result["next_turn"]
 

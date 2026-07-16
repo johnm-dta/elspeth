@@ -36,6 +36,8 @@ from elspeth.core.landscape.schema import (
     schema_identity_table,
 )
 from elspeth.core.schema_identity import (
+    SCHEMA_IDENTITY_APPLICATION_ID,
+    SCHEMA_IDENTITY_SINGLETON_ID,
     SCHEMA_IDENTITY_TABLE_NAME,
     SchemaIdentityMismatch,
     insert_schema_identity,
@@ -345,7 +347,7 @@ def _sqlite_epoch_24_shape_metadata() -> MetaData:
 
 
 def _sqlite_epoch_23_shape_metadata() -> MetaData:
-    """Return epoch-24 predecessor metadata with the token ownership FK removed."""
+    """Return the exact pre-identity epoch-23 Landscape shape."""
     predecessor = _sqlite_epoch_24_shape_metadata()
 
     tokens = predecessor.tables["tokens"]
@@ -360,7 +362,42 @@ def _sqlite_epoch_23_shape_metadata() -> MetaData:
     for element in constraint.elements:
         element.parent.foreign_keys.discard(element)
         tokens.foreign_keys.discard(element)
+    predecessor.remove(predecessor.tables[SCHEMA_IDENTITY_TABLE_NAME])
     return predecessor
+
+
+def _create_sqlite_schema_identity(cursor: Any, *, schema_epoch: int) -> None:
+    """Create and stamp the epoch-24 identity table inside its migration txn."""
+    cursor.execute(_compile_sqlite_table_ddl(schema_identity_table))
+    cursor.execute(
+        f"""
+        INSERT INTO {SCHEMA_IDENTITY_TABLE_NAME} (
+            singleton_id, application_id, store_kind, schema_epoch
+        ) VALUES (?, ?, 'landscape', ?)
+        """,
+        (SCHEMA_IDENTITY_SINGLETON_ID, SCHEMA_IDENTITY_APPLICATION_ID, schema_epoch),
+    )
+    if cursor.rowcount != 1:
+        raise AuditIntegrityError("SQLite schema migration did not create exactly one Landscape identity row")
+
+
+def _advance_sqlite_schema_identity(cursor: Any, *, predecessor_epoch: int, target_epoch: int) -> None:
+    """Advance the identity singleton in the same transaction as physical DDL."""
+    cursor.execute(
+        f"""
+        UPDATE {SCHEMA_IDENTITY_TABLE_NAME}
+        SET schema_epoch = ?
+        WHERE singleton_id = ?
+          AND application_id = ?
+          AND store_kind = 'landscape'
+          AND schema_epoch = ?
+        """,
+        (target_epoch, SCHEMA_IDENTITY_SINGLETON_ID, SCHEMA_IDENTITY_APPLICATION_ID, predecessor_epoch),
+    )
+    if cursor.rowcount != 1:
+        raise AuditIntegrityError(
+            f"SQLite schema migration could not atomically advance the Landscape identity from epoch {predecessor_epoch} to {target_epoch}"
+        )
 
 
 def _query_base_param_name(key: str) -> str:
@@ -891,11 +928,14 @@ def _landscape_identity_issue(
     bind: Engine | Connection,
     inspector: Inspector,
     existing_tables: set[str],
+    *,
+    schema_epoch: int = SQLITE_SCHEMA_EPOCH,
+    identity_required: bool = True,
 ) -> SchemaIdentityMismatch | Literal["identity_table", "identity_shape"] | None:
     """Return a static issue code for cross-dialect Landscape identity drift."""
     if SCHEMA_IDENTITY_TABLE_NAME not in existing_tables:
         other_landscape_tables = existing_tables.intersection(set(metadata.tables) - {SCHEMA_IDENTITY_TABLE_NAME})
-        return "identity_table" if other_landscape_tables else None
+        return "identity_table" if identity_required and other_landscape_tables else None
 
     columns = {str(column["name"]) for column in inspector.get_columns(SCHEMA_IDENTITY_TABLE_NAME)}
     if columns != {"singleton_id", "application_id", "store_kind", "schema_epoch"}:
@@ -906,7 +946,7 @@ def _landscape_identity_issue(
     else:
         with bind.connect() as connection:
             rows = read_schema_identities(connection, schema_identity_table)
-    return schema_identity_mismatch(rows, store_kind="landscape", schema_epoch=SQLITE_SCHEMA_EPOCH)
+    return schema_identity_mismatch(rows, store_kind="landscape", schema_epoch=schema_epoch)
 
 
 def _missing_additive_indexes(inspector: Inspector, present_tables: set[str]) -> frozenset[str]:
@@ -1528,6 +1568,7 @@ class LandscapeDB:
                         f"Epoch-24 migration produced foreign-key violations; refusing to commit: {foreign_key_violations[:10]!r}"
                     )
 
+                _create_sqlite_schema_identity(cursor, schema_epoch=24)
                 cursor.execute("PRAGMA user_version = 24")
                 raw.commit()
         except Exception as exc:
@@ -1665,6 +1706,7 @@ class LandscapeDB:
                     )
 
                 cursor.execute(_SQLITE_EPOCH_25_ARTIFACT_INDEX_DDL)
+                _advance_sqlite_schema_identity(cursor, predecessor_epoch=24, target_epoch=25)
                 cursor.execute("PRAGMA user_version = 25")
                 raw.commit()
         except Exception as exc:
@@ -1911,6 +1953,7 @@ class LandscapeDB:
                     raise AuditIntegrityError(f"Epoch-26 migration physical trigger manifest is incomplete: {missing_triggers!r}")
 
                 _assert_sqlite_epoch_26_manifest(cursor)
+                _advance_sqlite_schema_identity(cursor, predecessor_epoch=25, target_epoch=26)
                 cursor.execute("PRAGMA user_version = 26")
                 raw.commit()
         except Exception as exc:
@@ -2109,7 +2152,18 @@ class LandscapeDB:
         expected_tables = set(validation_metadata.tables.keys())
         present_landscape_tables = existing_tables & expected_tables
         schema_epoch = self._get_sqlite_schema_epoch() if self.connection_string.startswith("sqlite") else 0
-        identity_issue = _landscape_identity_issue(self.engine, inspector, existing_tables) if existing_tables else None
+        expected_identity_epoch = schema_epoch if schema_epoch in allowed_sqlite_epochs else SQLITE_SCHEMA_EPOCH
+        identity_issue = (
+            _landscape_identity_issue(
+                self.engine,
+                inspector,
+                existing_tables,
+                schema_epoch=expected_identity_epoch,
+                identity_required=SCHEMA_IDENTITY_TABLE_NAME in expected_tables,
+            )
+            if existing_tables
+            else None
+        )
 
         epoch_incompatible = schema_epoch not in (0, SQLITE_SCHEMA_EPOCH) and schema_epoch not in allowed_sqlite_epochs
         if epoch_incompatible and not present_landscape_tables:

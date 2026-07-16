@@ -321,6 +321,32 @@ def test_each_crash_seam_reconciles_closed(
     assert bundle_effects.reconcile_audit_export_bundle(plan).kind is expected
 
 
+@pytest.mark.parametrize("seam", ["_before_rename", "_after_rename_before_bundle_fsync"])
+def test_commit_parent_replacement_cannot_redirect_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seam: str,
+) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    plan = _prepare(parent / "audit")
+    moved_parent = tmp_path / "moved-parent"
+
+    def replace_parent(*_paths: Path) -> None:
+        parent.rename(moved_parent)
+        parent.symlink_to(victim, target_is_directory=True)
+
+    monkeypatch.setattr(bundle_effects, seam, replace_parent)
+
+    with pytest.raises(bundle_effects.AuditExportBundlePreconditionError, match="parent"):
+        bundle_effects.commit_audit_export_bundle(plan)
+
+    assert not (victim / "audit").exists()
+    assert bundle_effects.reconcile_audit_export_bundle(plan).kind is SinkEffectReconcileKind.UNKNOWN
+
+
 @pytest.mark.parametrize("mutation", ["extra", "missing", "changed_manifest", "symlink", "case_alias"])
 def test_divergent_existing_tree_is_unknown_and_never_replaced(tmp_path: Path, mutation: str) -> None:
     plan = _prepare(tmp_path / "audit")

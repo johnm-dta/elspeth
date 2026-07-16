@@ -54,6 +54,15 @@ def _executor() -> SinkExecutor:
     return SinkExecutor(SimpleNamespace(), SimpleNamespace(), SimpleNamespace(), "run-1")  # type: ignore[arg-type]
 
 
+def test_default_effect_lease_owner_is_unique_per_executor() -> None:
+    first = _executor()
+    second = _executor()
+
+    assert first._worker_id.startswith("sink-effects:run-1:")
+    assert second._worker_id.startswith("sink-effects:run-1:")
+    assert first._worker_id != second._worker_id
+
+
 def test_non_empty_legacy_execution_refuses_before_publication() -> None:
     sink = _ForbiddenLegacySink()
     token = SimpleNamespace(row_data=_Row())

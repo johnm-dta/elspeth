@@ -13,6 +13,7 @@ from elspeth.contracts.export_records import (
     SinkEffectExportRecord,
     SinkEffectMemberExportRecord,
 )
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.export_mappers import (
     sink_effect_attempt_to_export_record,
@@ -33,6 +34,9 @@ class SinkEffectRecoveryHistory:
     member_progress: Mapping[str, int]
     response_lost_attempts: int
     operator_guidance: str
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "member_progress")
 
 
 def load_sink_effect_recovery_history(db: LandscapeDB, effect_id: str) -> SinkEffectRecoveryHistory | None:

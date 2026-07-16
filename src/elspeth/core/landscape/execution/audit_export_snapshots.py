@@ -441,6 +441,30 @@ class AuditExportSnapshotRepository:
         chunks = tuple(self._chunk_loader.load(row) for row in chunk_rows)
         return AuditExportSnapshotWinner(snapshot=snapshot, chunks=chunks)
 
+    def find_lineage_signer_key_ids(
+        self,
+        connection: Connection,
+        key: AuditExportSnapshotRegistryKey,
+    ) -> tuple[str, ...]:
+        """Return signer identities already sealed for this export lineage."""
+        if not isinstance(connection, Connection):
+            raise TypeError("connection must be a SQLAlchemy Connection")
+        if type(key) is not AuditExportSnapshotRegistryKey:
+            raise TypeError("key must be exact AuditExportSnapshotRegistryKey")
+        table = audit_export_snapshots_table.c
+        rows = connection.execute(
+            select(table.signer_key_id)
+            .where(
+                table.source_run_id == key.source_run_id,
+                table.exporter_version == key.exporter_version,
+                table.serialization_version == key.serialization_version,
+                table.export_format == key.export_format.value,
+            )
+            .distinct()
+            .order_by(table.signer_key_id)
+        ).scalars()
+        return tuple(rows)
+
     @staticmethod
     def _assert_candidate_equals_winner(
         candidate: AuditExportSnapshotCandidate,

@@ -1546,11 +1546,22 @@ class ExecutionServiceImpl:
                     "lifespan before any pipeline executes; this is a wiring bug."
                 )
 
+            audit_export_content_store = None
+            audit_export_content_store_resolver = None
+            if settings.landscape.export.enabled:
+                from elspeth.core.audit_export_content_store import create_audit_export_content_store
+
+                audit_export_content_store, audit_export_content_store_resolver = create_audit_export_content_store(
+                    settings.landscape.export
+                )
+
             result = orchestrator.run(
                 pipeline_config,
                 graph=graph,
                 settings=settings,
                 payload_store=payload_store,
+                audit_export_content_store=audit_export_content_store,
+                audit_export_content_store_resolver=audit_export_content_store_resolver,
                 secret_resolutions=secret_resolution_inputs or None,
                 shutdown_event=shutdown_event,  # B2: NEVER omit this
                 sink_factory=make_policy_bound_sink_factory(

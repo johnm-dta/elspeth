@@ -1214,6 +1214,7 @@ class AuditExportContentStoreSettings(BaseModel):
 
     content_store_id: str
     namespace: str
+    root: Path
     policy_version: str = Field(min_length=1, max_length=64)
     retention_days: int = Field(gt=0, le=36_500)
     durability: Literal["fsync", "replicated"]
@@ -1230,6 +1231,21 @@ class AuditExportContentStoreSettings(BaseModel):
     @classmethod
     def validate_namespace(cls, value: str) -> str:
         return validate_content_namespace(value)
+
+    @field_validator("root", mode="before")
+    @classmethod
+    def validate_root(cls, value: object) -> object:
+        if not isinstance(value, (str, Path)):
+            raise TypeError("content store root must be a filesystem path")
+        path = Path(value)
+        if path.is_absolute() or ".." in path.parts or path.parts[:2] != (".elspeth", "audit-export-content-store"):
+            raise ValueError("content store root must be inside the code-owned .elspeth/audit-export-content-store root")
+        if path.exists():
+            if not path.is_dir():
+                raise ValueError("content store root must be a directory")
+            if path.stat().st_mode & 0o077:
+                raise ValueError("content store root must be private (no group/world permissions)")
+        return path
 
     @field_validator("reference_safe_gc")
     @classmethod

@@ -38,6 +38,7 @@ def _enabled_config(**overrides: object) -> dict[str, object]:
         "content_store": {
             "content_store_id": "archive-primary-v1",
             "namespace": "audit-export",
+            "root": ".elspeth/audit-export-content-store/primary",
             "policy_version": "audit-store-policy-v1",
             "retention_days": 365,
             "durability": "fsync",
@@ -57,6 +58,7 @@ def test_enabled_export_requires_complete_explicit_bounded_resource_policy() -> 
     assert settings.spool_root == Path(".elspeth/audit-export-spool")
     assert settings.content_store is not None
     assert settings.content_store.content_store_id == "archive-primary-v1"
+    assert settings.content_store.root == Path(".elspeth/audit-export-content-store/primary")
 
     for field in (
         "total_record_limit",
@@ -167,6 +169,16 @@ def test_existing_world_accessible_spool_root_is_rejected(tmp_path: Path, monkey
     spool.chmod(0o755)
     with pytest.raises(ValidationError, match="private"):
         LandscapeExportSettings(**_enabled_config())
+
+
+@pytest.mark.parametrize(
+    "root",
+    ["/tmp/audit-export-content", "../audit-export-content", ".elspeth/audit-export-spool/content"],
+)
+def test_content_store_root_is_explicit_and_inside_code_owned_root(root: str) -> None:
+    content_store = {**_enabled_config()["content_store"], "root": root}  # type: ignore[dict-item]
+    with pytest.raises(ValidationError, match="root"):
+        LandscapeExportSettings(**_enabled_config(content_store=content_store))
 
 
 @pytest.mark.parametrize(

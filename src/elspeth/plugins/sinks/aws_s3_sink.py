@@ -659,7 +659,7 @@ class AWSS3Sink(BaseSink):
     name = "aws_s3"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c8a09119b4079bb2"
+    source_file_hash: str | None = "sha256:913fabb42b3c197b"
     config_model = AWSS3SinkConfig
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"write"})

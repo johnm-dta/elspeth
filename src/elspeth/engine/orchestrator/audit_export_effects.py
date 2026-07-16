@@ -59,6 +59,21 @@ from elspeth.engine.executors.sink_effects import (
 )
 
 
+def _acquire_signer_lineage_authority(connection: Any, key: AuditExportSnapshotRegistryKey) -> None:
+    """Serialize the signer-policy recheck with registry insertion."""
+    if connection.dialect.name == "sqlite":
+        # ``LandscapeDB.write_connection`` already holds BEGIN IMMEDIATE.
+        return
+    if connection.dialect.name == "postgresql":
+        lineage = "\x1f".join((key.source_run_id, key.exporter_version, key.serialization_version, key.export_format.value))
+        connection.exec_driver_sql(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (lineage,),
+        )
+        return
+    raise RuntimeError(f"unsupported Landscape backend {connection.dialect.name!r}")
+
+
 def _required_limit(value: int | None, field_name: str) -> int:
     if type(value) is not int or value < 1:
         raise ValueError(f"enabled audit export requires positive {field_name}")
@@ -282,6 +297,8 @@ def prepare_audit_export_snapshot(
     witness: AuditExportTerminalWitness | None = None
     spool: BinaryIO | None = None
     with open_export_read_transaction(db.engine) as read_model:
+        for existing_signer_key_id in snapshots.find_lineage_signer_key_ids(read_model.connection, key):
+            config.assert_signer_rotation_allowed(existing_signer_key_id=existing_signer_key_id)
         winner = snapshots.find_winner(read_model.connection, key)
         if winner is None:
             witness = read_model.get_export_terminal_witness(run_id)
@@ -359,7 +376,10 @@ def prepare_audit_export_snapshot(
             config=config,
             content_store_id=content_store.content_store_id,
         )
-        with db.engine.begin() as connection:
+        with db.write_connection() as connection:
+            _acquire_signer_lineage_authority(connection, key)
+            for existing_signer_key_id in snapshots.find_lineage_signer_key_ids(connection, key):
+                config.assert_signer_rotation_allowed(existing_signer_key_id=existing_signer_key_id)
             registration = snapshots.register_candidate(
                 connection,
                 candidate,

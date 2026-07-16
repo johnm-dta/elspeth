@@ -1015,6 +1015,7 @@ landscape:
     content_store:
       content_store_id: audit-archive-v1
       namespace: audit-exports
+      root: .elspeth/audit-export-content-store/primary
       policy_version: retention-v1
       retention_days: 2555
       durability: replicated
@@ -1141,6 +1142,7 @@ compatibility record rather than relying on a structural probe alone.
 | `content_store` | object | required when enabled | Explicit durable immutable-content policy |
 | `content_store.content_store_id` | string | required | Credential-free store identity persisted with snapshots |
 | `content_store.namespace` | string | required | Credential-free content namespace |
+| `content_store.root` | path | required | Private local content root below `.elspeth/audit-export-content-store` |
 | `content_store.policy_version` | string | required | Retention/durability policy version |
 | `content_store.retention_days` | int | required | Retention period |
 | `content_store.durability` | string | required | `fsync` or `replicated` |

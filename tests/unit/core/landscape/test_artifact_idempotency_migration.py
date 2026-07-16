@@ -104,6 +104,17 @@ def _rewrite_current_as_epoch_25(db_path: Path) -> None:
             "audit_export_snapshots",
         ):
             conn.execute(f"DROP TABLE {table_name}")
+        identity_update = conn.execute(
+            """
+            UPDATE elspeth_schema_identity
+            SET schema_epoch = 25
+            WHERE singleton_id = 1
+              AND application_id = 'elspeth'
+              AND store_kind = 'landscape'
+              AND schema_epoch = 26
+            """
+        )
+        assert identity_update.rowcount == 1
         conn.execute("PRAGMA user_version = 25")
         conn.commit()
         conn.execute("PRAGMA foreign_keys = ON")
@@ -185,7 +196,27 @@ def _seed_current_database(db_path: Path) -> str:
 def _rewrite_as_epoch_24(engine: Engine) -> None:
     with engine.begin() as conn:
         conn.exec_driver_sql(f"DROP INDEX {_ARTIFACT_INDEX}")
+        result = conn.exec_driver_sql(
+            """
+            UPDATE elspeth_schema_identity
+            SET schema_epoch = 24
+            WHERE singleton_id = 1
+              AND application_id = 'elspeth'
+              AND store_kind = 'landscape'
+              AND schema_epoch = 25
+            """
+        )
+        assert result.rowcount == 1
         conn.exec_driver_sql("PRAGMA user_version = 24")
+
+
+def _identity_epochs(db_path: Path) -> tuple[int, ...] | None:
+    """Return the physical identity stamp, or ``None`` before epoch 24."""
+    with sqlite3.connect(db_path) as conn:
+        table_exists = conn.execute("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'elspeth_schema_identity'").fetchone()
+        if table_exists is None:
+            return None
+        return tuple(int(row[0]) for row in conn.execute("SELECT schema_epoch FROM elspeth_schema_identity ORDER BY singleton_id"))
 
 
 def _epoch_and_schema(db_path: Path) -> tuple[int, list[tuple[object, ...]]]:
@@ -271,6 +302,7 @@ def test_epoch_24_migrates_to_25_and_preserves_artifact(tmp_path: Path) -> None:
     predecessor = create_engine(url)
     _rewrite_as_epoch_24(predecessor)
     predecessor.dispose()
+    assert _identity_epochs(db_path) == (24,)
 
     migrated = LandscapeDB(url)
     try:
@@ -280,6 +312,7 @@ def test_epoch_24_migrates_to_25_and_preserves_artifact(tmp_path: Path) -> None:
         assert tuple(artifact) == ("artifact-migration-original", "sha256:migration")
         assert _ARTIFACT_INDEX in _artifact_indexes(migrated.engine)
         assert probe_schema_shape(migrated.engine) is LandscapeSchemaShape.MATCHES
+        assert _identity_epochs(db_path) == (26,)
     finally:
         migrated.close()
 
@@ -291,6 +324,7 @@ def test_epoch_23_migrates_sequentially_through_24_to_25(tmp_path: Path) -> None
     _rewrite_as_epoch_24(predecessor)
     _rewrite_tokens_as_epoch_23(predecessor)
     predecessor.dispose()
+    assert _identity_epochs(db_path) is None
 
     migrated = LandscapeDB(url)
     try:
@@ -300,6 +334,7 @@ def test_epoch_23_migrates_sequentially_through_24_to_25(tmp_path: Path) -> None
         assert any(str(row[2]) == "rows" and str(row[3]) == "run_id" and str(row[4]) == "run_id" for row in token_fks)
         assert _ARTIFACT_INDEX in _artifact_indexes(migrated.engine)
         assert probe_schema_shape(migrated.engine) is LandscapeSchemaShape.MATCHES
+        assert _identity_epochs(db_path) == (26,)
     finally:
         migrated.close()
 
@@ -356,6 +391,7 @@ def test_epoch_24_duplicate_key_refuses_without_mutation(tmp_path: Path, diverge
 
     assert _epoch_and_schema(db_path) == before
     assert before[0] == 24
+    assert _identity_epochs(db_path) == (24,)
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT count(*) FROM artifacts").fetchone() == (2,)
 
@@ -498,6 +534,7 @@ def test_epoch_24_static_pool_failure_rolls_back_index_and_epoch(
     assert statements.index(expected_index_ddl) < statements.index("PRAGMA user_version = 25")
     assert _epoch_and_schema(db_path) == before
     assert before[0] == 24
+    assert _identity_epochs(db_path) == (24,)
 
 
 def test_epoch_24_single_connection_queue_pool_failure_rolls_back_and_returns_safe_connection(

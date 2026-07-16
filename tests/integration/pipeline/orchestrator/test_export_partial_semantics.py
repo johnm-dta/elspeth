@@ -120,6 +120,7 @@ def _make_export_enabled_settings() -> ElspethSettings:
                 "content_store": {
                     "content_store_id": "audit-store-v1",
                     "namespace": "audit/export",
+                    "root": ".elspeth/audit-export-content-store/partial-semantics",
                     "policy_version": "v1",
                     "retention_days": 30,
                     "durability": "fsync",

@@ -10,6 +10,7 @@ REPOSITORY_AUDIT_ROOT = REPO_ROOT / "tests" / "unit" / "core" / "landscape" / "r
 
 PRODUCTION_PATH_AUDIT_TESTS = frozenset(
     {
+        "test_artifact_idempotency_contention.py",
         "test_audit_field_separation.py",
         "test_can_drop_rows_roundtrip.py",
         "test_export.py",

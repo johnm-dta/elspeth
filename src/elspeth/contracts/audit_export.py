@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, BinaryIO, Final, Literal, Protocol, cast, runt
 from elspeth.contracts.audit import AuditExportSnapshot, AuditExportSnapshotChunk
 from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.hashing import canonical_json
 from elspeth.contracts.sink_effects import AuditExportFormat, AuditExportSigningMode
 
@@ -957,6 +958,9 @@ class AuditExportDerivedBundle:
     signing_body: bytes
     signed_manifest_bytes: bytes
 
+    def __post_init__(self) -> None:
+        freeze_fields(self, "record_objects", "final_manifest")
+
     @property
     def source_completed_at(self) -> str:
         return self.config.source_completed_at
@@ -1013,6 +1017,9 @@ class AuditExportSpooledBundle:
     signed_manifest_bytes: bytes
     chunk_offsets: tuple[tuple[int, int], ...]
     signed_manifest_offset: tuple[int, int]
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "final_manifest")
 
     @property
     def record_count(self) -> int:

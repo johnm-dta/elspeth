@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Final, NoReturn, final
 from urllib.parse import parse_qsl, urlsplit
 
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
-from elspeth.contracts.freeze import deep_freeze, deep_thaw, require_int
+from elspeth.contracts.freeze import deep_freeze, deep_thaw, freeze_fields, require_int
 from elspeth.contracts.hashing import canonical_json
 from elspeth.contracts.results import ArtifactDescriptor, require_no_artifact_uri_credentials
 from elspeth.contracts.secret_scrub import scrub_payload_for_audit, scrub_text_for_audit
@@ -339,6 +339,7 @@ class SinkEffectMemberCandidate:
             raise TypeError("row must be a mapping")
         object.__setattr__(self, "row", deep_freeze(frozen_row))
         object.__setattr__(self, "pending_identity", _freeze_bounded_evidence(self.pending_identity, "pending_identity"))
+        freeze_fields(self, "pending_identity")
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,6 +424,7 @@ class SinkEffectReservationRequest:
             for ordinal, member in enumerate(sorted(members, key=lambda member: member.ordinal))
         )
         object.__setattr__(self, "members", members)
+        freeze_fields(self, "members")
 
         if self.role is SinkEffectRole.PRIMARY and self.primary_effect_id is not None:
             raise ValueError("primary effects cannot refer to another primary effect")
@@ -475,6 +477,7 @@ class SinkEffectAttemptResult:
             raise ValueError("latency_ms must be finite and non-negative")
         object.__setattr__(self, "latency_ms", float(self.latency_ms))
         object.__setattr__(self, "evidence", _freeze_bounded_evidence(self.evidence, "evidence"))
+        freeze_fields(self, "evidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -516,7 +519,8 @@ class SinkEffectFinalizationMember:
     def __post_init__(self) -> None:
         if type(self.ordinal) is not int or self.ordinal < 0:
             raise ValueError("ordinal must be a non-negative exact int")
-        if not isinstance(self.output_data, Mapping):
+        output_data = self.output_data
+        if not isinstance(output_data, Mapping):
             raise TypeError("output_data must be a mapping")
         if isinstance(self.duration_ms, bool) or not isinstance(self.duration_ms, int | float):
             raise TypeError("duration_ms must be a finite non-negative number")
@@ -528,6 +532,7 @@ class SinkEffectFinalizationMember:
         object.__setattr__(self, "output_data", deep_freeze(self.output_data))
         if self.context is not None:
             object.__setattr__(self, "context", _freeze_bounded_evidence(self.context, "evidence"))
+        freeze_fields(self, "output_data", "context")
 
 
 @dataclass(frozen=True, slots=True)
@@ -590,6 +595,7 @@ class SinkEffectFinalizeRequest:
         object.__setattr__(self, "members", finalization_members)
         object.__setattr__(self, "evidence", _freeze_bounded_evidence(self.evidence, "evidence"))
         object.__setattr__(self, "operation_duration_ms", float(self.operation_duration_ms))
+        freeze_fields(self, "accepted_ordinals", "diverted_ordinals", "evidence", "members")
 
 
 @dataclass(frozen=True, slots=True)
@@ -650,6 +656,7 @@ class SinkEffectIdentity:
             raise ValueError("audit-export identity requires zero members and complete snapshot hashes")
         object.__setattr__(self, "members", members)
         object.__setattr__(self, "member_ids", member_ids)
+        freeze_fields(self, "members", "member_ids")
 
 
 @dataclass(frozen=True, slots=True)

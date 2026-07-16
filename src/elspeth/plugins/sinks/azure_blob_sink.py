@@ -338,7 +338,7 @@ class AzureBlobSink(BaseSink):
     name = "azure_blob"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:bfa2e83797938e0d"
+    source_file_hash: str | None = "sha256:bd72e72cd6798bc9"
     config_model = AzureBlobSinkConfig
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"write"})

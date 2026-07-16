@@ -131,6 +131,7 @@ def export_landscape(
     payload_store: PayloadStore,
     audit_export_content_store: AuditExportContentStore,
     audit_export_content_store_resolver: AuditExportContentStoreResolver,
+    worker_id: str,
     prepared_binding: SinkEffectRuntimeBinding | None = None,
     sink_effect_admission: object | None = None,
 ) -> None:
@@ -159,6 +160,9 @@ def export_landscape(
     from elspeth.engine.orchestrator.audit_export_effects import execute_audit_export_effect, prepare_audit_export_snapshot
 
     export_config = settings.landscape.export
+
+    if type(worker_id) is not str or not worker_id.strip():
+        raise ValueError("audit export worker_id must be a non-empty exact string")
 
     if not isinstance(audit_export_content_store, AuditExportContentStore):
         raise TypeError("audit_export_content_store must implement AuditExportContentStore")
@@ -237,7 +241,7 @@ def export_landscape(
             sink=sink,
             sink_node_id=sink.node_id,
             target_config=dict(settings.sinks[sink_name].options),
-            worker_id=f"audit-export:{run_id}",
+            worker_id=worker_id,
         )
     finally:
         sink.close()

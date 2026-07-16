@@ -17,7 +17,7 @@ from enum import StrEnum
 from typing import Literal, Protocol, cast
 
 from elspeth.contracts.audit import SinkEffect, SinkEffectAttempt, SinkEffectMemberRecord
-from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.hashing import canonical_json, stable_hash
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.contracts.sink_effects import (
@@ -142,6 +142,7 @@ class SinkEffectExecutionRequest:
         if tuple(member.ordinal for member in members) != tuple(sorted({member.ordinal for member in members})):
             raise ValueError("finalization member ordinals must be unique and ascending")
         object.__setattr__(self, "finalization_members", members)
+        freeze_fields(self, "finalization_members")
 
 
 class SinkEffectCoordinator:

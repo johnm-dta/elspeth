@@ -25,6 +25,7 @@ from elspeth.contracts.sink_effects import (
     SinkEffectFinalizationMember,
     SinkEffectFinalizationResult,
     SinkEffectFinalizeRequest,
+    SinkEffectInspection,
     SinkEffectReconcileKind,
     SinkEffectReconcileResult,
     SinkEffectState,
@@ -38,7 +39,10 @@ from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.execution.artifacts import ArtifactRepository
 from elspeth.core.landscape.execution.node_states import NodeStateRepository
-from elspeth.core.landscape.execution.sink_effect_attempt_results import encode_sink_effect_returned_result
+from elspeth.core.landscape.execution.sink_effect_attempt_results import (
+    decode_sink_effect_returned_result,
+    encode_sink_effect_returned_result,
+)
 from elspeth.core.landscape.model_loaders import (
     ArtifactLoader,
     NodeStateLoader,
@@ -572,6 +576,16 @@ class SinkEffectFinalization:
         )
         if attempt.action != expected_action:
             raise LandscapeRecordError("finalization attempt action disagrees with publication evidence kind")
+        if attempt.member_ordinal is not None:
+            # Member-scoped winner: the group partition is derived from the
+            # durable per-member dispositions (already validated when each
+            # member result completed), so a single member attempt's
+            # group-wide ordinal claim legitimately differs from the request
+            # partition when a sibling diverted. Bind the finalization to the
+            # winner's durable descriptor and evidence instead.
+            SinkEffectFinalization._validate_member_scoped_attempt(request, attempt)
+            assert operation.operation_id is not None
+            return
         if request.publication_evidence_kind == "reconciled":
             if request.reconcile_kind is not SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR:
                 raise LandscapeRecordError("reconciled finalization requires APPLIED_WITH_EXACT_DESCRIPTOR")
@@ -603,6 +617,20 @@ class SinkEffectFinalization:
         ):
             raise LandscapeRecordError("finalization evidence differs from the returned attempt winner")
         assert operation.operation_id is not None
+
+    @staticmethod
+    def _validate_member_scoped_attempt(request: SinkEffectFinalizeRequest, attempt: Row[Any]) -> None:
+        if attempt.evidence_json is None or attempt.evidence_hash != sha256(attempt.evidence_json.encode("utf-8")).hexdigest():
+            raise LandscapeRecordError("member-scoped finalization attempt evidence is missing or divergent")
+        decoded = decode_sink_effect_returned_result(SinkEffectAttemptAction(attempt.action), attempt.evidence_json)
+        if isinstance(decoded, SinkEffectInspection):
+            raise LandscapeRecordError("member-scoped finalization attempt decoded to a non-result envelope")
+        if isinstance(decoded, SinkEffectReconcileResult) and decoded.kind is not SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR:
+            raise LandscapeRecordError("member-scoped reconciled finalization requires APPLIED_WITH_EXACT_DESCRIPTOR")
+        if decoded.descriptor != request.descriptor:
+            raise LandscapeRecordError("member-scoped finalization descriptor differs from the returned attempt winner")
+        if deep_thaw(decoded.evidence) != deep_thaw(request.evidence):
+            raise LandscapeRecordError("member-scoped finalization evidence differs from the returned attempt winner")
 
     @staticmethod
     def _advance_stream_head(conn: Connection, effect: Row[Any], descriptor_hash: str) -> None:

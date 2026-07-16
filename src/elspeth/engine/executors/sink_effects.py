@@ -385,6 +385,11 @@ class SinkEffectCoordinator:
             last_exact = self._latest_exact_member_result(plan.effect_id)
         result, attempt = last_exact
         self._fault(SinkEffectExecutionSeam.AFTER_RETURN_BEFORE_FINALIZE)
+        # The final group partition comes from the durable per-member
+        # dispositions, never from the last member result's group-wide claim:
+        # a diverted earlier member would otherwise be finalized as accepted
+        # (elspeth-d88f8eee34).
+        accepted_ordinals, diverted_ordinals = self._prepared_partition(plan.effect_id, request)
         if isinstance(result, SinkEffectCommitResult):
             finalized = self._finalize(
                 effect_id=plan.effect_id,
@@ -392,8 +397,8 @@ class SinkEffectCoordinator:
                 lease=lease,
                 descriptor=result.descriptor,
                 evidence=result.evidence,
-                accepted_ordinals=tuple(result.accepted_ordinals),
-                diverted_ordinals=tuple(result.diverted_ordinals),
+                accepted_ordinals=accepted_ordinals,
+                diverted_ordinals=diverted_ordinals,
                 attempt_id=attempt.attempt_id,
                 evidence_kind="returned",
                 reconcile_kind=None,
@@ -407,8 +412,8 @@ class SinkEffectCoordinator:
                 lease=lease,
                 descriptor=result.descriptor,
                 evidence=result.evidence,
-                accepted_ordinals=tuple(member.ordinal for member in request.finalization_members),
-                diverted_ordinals=(),
+                accepted_ordinals=accepted_ordinals,
+                diverted_ordinals=diverted_ordinals,
                 attempt_id=attempt.attempt_id,
                 evidence_kind="reconciled",
                 reconcile_kind=result.kind,

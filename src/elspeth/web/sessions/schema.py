@@ -24,7 +24,8 @@ from elspeth.web.sessions.models import (
 _SQLITE_INTERNAL_TABLES: frozenset[str] = frozenset({"sqlite_sequence"})
 _SESSION_METADATA_CREATE_LOCK = Lock()
 
-# Required SQLite triggers. These triggers enforce audit invariants
+# Required audit triggers. Both supported database dialects install these
+# stable trigger names to enforce invariants
 # that cannot be expressed as table CHECK constraints:
 #
 # * ``trg_interpretation_events_immutable_resolved`` — resolved
@@ -50,10 +51,10 @@ _SESSION_METADATA_CREATE_LOCK = Lock()
 #
 # The validator catches the case where schema bootstrap succeeded but the
 # trigger DDL failed silently (e.g., if the DDL event listener was removed
-# or reordered). Live validation against ``sqlite_master`` so a dropped
-# trigger on an existing DB is caught at startup, not at the first attempt
-# to mutate the protected rows.
-_REQUIRED_SQLITE_TRIGGERS: frozenset[str] = frozenset(
+# or reordered). Live validation against each dialect's system catalogue
+# means a dropped or disabled trigger is caught at startup, not at the first
+# attempt to mutate the protected rows.
+_REQUIRED_AUDIT_TRIGGERS: frozenset[str] = frozenset(
     {
         "trg_interpretation_events_immutable_resolved",
         "trg_interpretation_events_no_delete_resolved",
@@ -268,7 +269,7 @@ def _validate_current_schema(bind: Engine | Connection) -> None:
 
 
 def _validate_required_triggers(bind: Engine | Connection) -> None:
-    """Confirm the required SQLite triggers are present in the live DB.
+    """Confirm the required audit triggers are present in the live DB.
 
     Catches the case where ``metadata.create_all`` succeeded but a trigger
     listener was bypassed or removed, OR where a trigger on an existing DB
@@ -278,18 +279,51 @@ def _validate_required_triggers(bind: Engine | Connection) -> None:
     otherwise only surface the next time someone tried to mutate a
     protected row (which may be never on a quiescent DB).
     """
-    if bind.dialect.name != "sqlite":
-        return
+    if bind.dialect.name == "sqlite":
+        query = text("SELECT name FROM sqlite_master WHERE type='trigger'")
+    elif bind.dialect.name == "postgresql":
+        query = text(
+            """
+            SELECT trigger.tgname
+            FROM pg_catalog.pg_trigger AS trigger
+            JOIN pg_catalog.pg_class AS relation ON relation.oid = trigger.tgrelid
+            JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+            WHERE NOT trigger.tgisinternal
+              AND trigger.tgenabled IN ('O', 'A')
+              AND namespace.nspname = current_schema()
+              AND (
+                (relation.relname = 'interpretation_events' AND trigger.tgname IN (
+                  'trg_interpretation_events_immutable_resolved',
+                  'trg_interpretation_events_no_delete_resolved'
+                ))
+                OR (relation.relname = 'composer_completion_events' AND trigger.tgname IN (
+                  'trg_composer_completion_events_no_update',
+                  'trg_composer_completion_events_no_delete'
+                ))
+                OR (relation.relname = 'chat_messages' AND trigger.tgname IN (
+                  'trg_chat_messages_immutable_content',
+                  'trg_chat_messages_no_delete'
+                ))
+              )
+            """
+        )
+    else:
+        _schema_error(
+            "audit trigger validation unsupported dialect",
+            expected=["postgresql", "sqlite"],
+            actual=[bind.dialect.name],
+        )
+
     if isinstance(bind, Connection):
-        present = {str(row[0]) for row in bind.execute(text("SELECT name FROM sqlite_master WHERE type='trigger'"))}
+        present = {str(row[0]) for row in bind.execute(query)}
     else:
         with bind.connect() as connection:
-            present = {str(row[0]) for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='trigger'"))}
-    missing = _REQUIRED_SQLITE_TRIGGERS - present
+            present = {str(row[0]) for row in connection.execute(query)}
+    missing = _REQUIRED_AUDIT_TRIGGERS - present
     if missing:
         _schema_error(
-            "missing SQLite trigger(s)",
-            expected=sorted(_REQUIRED_SQLITE_TRIGGERS),
+            "missing audit trigger(s)",
+            expected=sorted(_REQUIRED_AUDIT_TRIGGERS),
             actual=sorted(present),
         )
 

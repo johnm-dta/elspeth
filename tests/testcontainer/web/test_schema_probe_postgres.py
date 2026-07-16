@@ -15,7 +15,7 @@ import pytest
 import structlog
 from sqlalchemy import Connection, Engine, create_engine, inspect, select, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, OperationalError, SQLAlchemyError
 from sqlalchemy.pool import NullPool
 from testcontainers.postgres import PostgresContainer
 from tests.unit.core.test_schema_shape import _static_check_issues
@@ -86,6 +86,204 @@ def test_postgres_session_init_does_not_poison_later_sqlite_schema(postgres_engi
     initialize_session_schema(sqlite_engine)
 
     assert inspect(sqlite_engine).get_foreign_keys("chat_messages")
+
+
+def _seed_postgres_trigger_rows(postgres_engine: Engine, *, session_id: str, include_completion: bool) -> None:
+    with postgres_engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO sessions (
+                    id, user_id, auth_provider_type, title, trust_mode,
+                    density_default, created_at, updated_at,
+                    interpretation_review_disabled
+                ) VALUES (
+                    :session_id, 'trigger-user', 'local', 'Trigger proof',
+                    'auto_commit', 'high', CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP, false
+                )
+                """
+            ),
+            {"session_id": session_id},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO composition_states (
+                    id, session_id, version, is_valid, created_at, provenance
+                ) VALUES (
+                    :state_id, :session_id, 1, false, CURRENT_TIMESTAMP,
+                    'session_seed'
+                )
+                """
+            ),
+            {"state_id": f"{session_id}-state", "session_id": session_id},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO chat_messages (
+                    id, session_id, role, content, sequence_no,
+                    writer_principal, created_at
+                ) VALUES (
+                    :message_id, :session_id, 'user', 'original', 1,
+                    'route_user_message', CURRENT_TIMESTAMP
+                )
+                """
+            ),
+            {"message_id": f"{session_id}-message", "session_id": session_id},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO interpretation_events (
+                    id, session_id, choice, created_at, resolved_at, actor,
+                    interpretation_source
+                ) VALUES (
+                    :event_id, :session_id, 'opted_out', CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP, 'trigger-user',
+                    'auto_interpreted_opt_out'
+                )
+                """
+            ),
+            {"event_id": f"{session_id}-interpretation", "session_id": session_id},
+        )
+        if include_completion:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO composer_completion_events (
+                        id, session_id, composition_state_id, event_type,
+                        actor, created_at
+                    ) VALUES (
+                        :event_id, :session_id, :state_id, 'export_yaml',
+                        'trigger-user', CURRENT_TIMESTAMP
+                    )
+                    """
+                ),
+                {
+                    "event_id": f"{session_id}-completion",
+                    "session_id": session_id,
+                    "state_id": f"{session_id}-state",
+                },
+            )
+
+
+def test_postgres_session_audit_triggers_are_installed_and_enforced(postgres_engine: Engine) -> None:
+    init_session_schema(postgres_engine)
+
+    with postgres_engine.connect() as conn:
+        names = {
+            str(row[0])
+            for row in conn.execute(
+                text(
+                    """
+                    SELECT trigger.tgname
+                    FROM pg_catalog.pg_trigger AS trigger
+                    JOIN pg_catalog.pg_class AS relation
+                      ON relation.oid = trigger.tgrelid
+                    JOIN pg_catalog.pg_namespace AS namespace
+                      ON namespace.oid = relation.relnamespace
+                    WHERE NOT trigger.tgisinternal
+                      AND namespace.nspname = current_schema()
+                    """
+                )
+            )
+        }
+    assert names == {
+        "trg_interpretation_events_immutable_resolved",
+        "trg_interpretation_events_no_delete_resolved",
+        "trg_composer_completion_events_no_update",
+        "trg_composer_completion_events_no_delete",
+        "trg_chat_messages_immutable_content",
+        "trg_chat_messages_no_delete",
+    }
+
+    protected_session = "trigger-protected"
+    _seed_postgres_trigger_rows(postgres_engine, session_id=protected_session, include_completion=True)
+
+    blocked_mutations = (
+        ("UPDATE interpretation_events SET actor = 'attacker' WHERE id = :row_id", f"{protected_session}-interpretation"),
+        ("DELETE FROM interpretation_events WHERE id = :row_id", f"{protected_session}-interpretation"),
+        ("UPDATE composer_completion_events SET actor = 'attacker' WHERE id = :row_id", f"{protected_session}-completion"),
+        ("DELETE FROM composer_completion_events WHERE id = :row_id", f"{protected_session}-completion"),
+        ("UPDATE chat_messages SET content = 'tampered' WHERE id = :row_id", f"{protected_session}-message"),
+        ("DELETE FROM chat_messages WHERE id = :row_id", f"{protected_session}-message"),
+    )
+    for statement, row_id in blocked_mutations:
+        with pytest.raises(DBAPIError, match=r"append-only|immutable"), postgres_engine.begin() as conn:
+            conn.execute(text(statement), {"row_id": row_id})
+
+    with pytest.raises(DBAPIError, match="append-only"), postgres_engine.begin() as conn:
+        conn.execute(text("DELETE FROM sessions WHERE id = :session_id"), {"session_id": protected_session})
+
+    with postgres_engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO interpretation_events (
+                    id, session_id, composition_state_id, affected_node_id,
+                    tool_call_id, user_term, kind, llm_draft, choice,
+                    created_at, actor, model_identifier, model_version,
+                    provider, composer_skill_hash, interpretation_source
+                ) VALUES (
+                    :event_id, :session_id, :state_id, 'llm-node',
+                    'pending-tool-call', 'term', 'vague_term', 'draft',
+                    'pending', CURRENT_TIMESTAMP, 'trigger-user', 'model-id',
+                    'model-version', 'provider', :skill_hash, 'user_approved'
+                )
+                """
+            ),
+            {
+                "event_id": f"{protected_session}-pending",
+                "session_id": protected_session,
+                "state_id": f"{protected_session}-state",
+                "skill_hash": "0" * 64,
+            },
+        )
+        conn.execute(
+            text("DELETE FROM interpretation_events WHERE id = :event_id"),
+            {"event_id": f"{protected_session}-pending"},
+        )
+
+    cascade_session = "trigger-cascade"
+    _seed_postgres_trigger_rows(postgres_engine, session_id=cascade_session, include_completion=False)
+    with postgres_engine.begin() as conn:
+        conn.execute(text("DELETE FROM sessions WHERE id = :session_id"), {"session_id": cascade_session})
+        assert (
+            conn.execute(
+                text("SELECT count(*) FROM interpretation_events WHERE session_id = :session_id"),
+                {"session_id": cascade_session},
+            ).scalar_one()
+            == 0
+        )
+        assert (
+            conn.execute(
+                text("SELECT count(*) FROM chat_messages WHERE session_id = :session_id"),
+                {"session_id": cascade_session},
+            ).scalar_one()
+            == 0
+        )
+
+
+@pytest.mark.parametrize(
+    "trigger_mutation",
+    [
+        "DROP TRIGGER trg_chat_messages_no_delete ON chat_messages",
+        "ALTER TABLE chat_messages DISABLE TRIGGER trg_chat_messages_no_delete",
+    ],
+)
+def test_missing_or_disabled_postgres_audit_trigger_marks_session_schema_stale(
+    postgres_engine: Engine,
+    trigger_mutation: str,
+) -> None:
+    init_session_schema(postgres_engine)
+    with postgres_engine.begin() as conn:
+        conn.exec_driver_sql(trigger_mutation)
+
+    assert probe_session_schema(postgres_engine) is SchemaState.STALE
+    with pytest.raises(SessionSchemaError, match="trigger"):
+        initialize_session_schema(postgres_engine)
 
 
 def test_preferences_upsert_round_trips_on_postgres(postgres_engine: Engine) -> None:

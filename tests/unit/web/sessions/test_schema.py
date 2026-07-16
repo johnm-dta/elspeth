@@ -73,15 +73,24 @@ def test_initialize_session_schema_creates_current_schema_without_alembic_table(
     assert "ck_blobs_ready_hash" in {check["name"] for check in inspector.get_check_constraints("blobs")}
 
 
-def test_sqlite_trigger_ddl_is_not_emitted_for_postgres_schema() -> None:
-    """SQLite trigger bodies must not leak into PostgreSQL schema bootstrap."""
+def test_postgres_schema_emits_native_audit_trigger_ddl() -> None:
+    """PostgreSQL bootstrap emits all native triggers, never SQLite syntax."""
     emitted: list[str] = []
     engine = create_mock_engine("postgresql://", lambda sql, *_, **__: emitted.append(str(sql)))
 
     _create_all_on_mock_engine(engine)
 
     assert any("CREATE TABLE chat_messages" in statement for statement in emitted)
-    assert not any("CREATE TRIGGER" in statement for statement in emitted)
+    ddl = "\n".join(emitted)
+    for trigger_name in (
+        "trg_interpretation_events_immutable_resolved",
+        "trg_interpretation_events_no_delete_resolved",
+        "trg_composer_completion_events_no_update",
+        "trg_composer_completion_events_no_delete",
+        "trg_chat_messages_immutable_content",
+        "trg_chat_messages_no_delete",
+    ):
+        assert f"CREATE TRIGGER {trigger_name}" in ddl
     assert not any("SELECT RAISE" in statement for statement in emitted)
 
 

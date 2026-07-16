@@ -1034,11 +1034,11 @@ skill_markdown_history_table = Table(
 # ``metadata.create_all`` calls. ``event.listen`` is **table-scoped**, not
 # metadata-scoped, so the trigger DDL fires only when this specific table
 # is created (not on every metadata.create_all() call for tables that
-# already exist). The DDL bodies below are SQLite trigger syntax and must
-# stay guarded by ``execute_if(dialect="sqlite")``; PostgreSQL schema
-# portability is proved by its table/check/index DDL and the explicit
-# testcontainer lane, while SQLite trigger presence is validated in
-# sessions.schema.
+# already exist). Each invariant has dialect-specific DDL below. SQLite uses
+# ``RAISE(ABORT)``; PostgreSQL uses PL/pgSQL functions that raise SQLSTATE
+# 23000 so SQLAlchemy classifies the refusal as an integrity error. Trigger
+# names are identical across dialects because sessions.schema validates the
+# live catalogue by those stable names.
 event.listen(
     interpretation_events_table,
     "after_create",
@@ -1062,6 +1062,42 @@ event.listen(
     interpretation_events_table,
     "after_create",
     DDL(  # type: ignore[no-untyped-call]
+        """
+        CREATE OR REPLACE FUNCTION elspeth_interpretation_events_immutable_resolved()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF OLD.resolved_at IS NOT NULL AND (
+            NEW.accepted_value IS DISTINCT FROM OLD.accepted_value OR
+            NEW.resolved_at IS DISTINCT FROM OLD.resolved_at OR
+            NEW.actor IS DISTINCT FROM OLD.actor OR
+            NEW.choice IS DISTINCT FROM OLD.choice
+          ) THEN
+            RAISE EXCEPTION 'interpretation_events: resolved rows are immutable'
+              USING ERRCODE = '23000';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+    ).execute_if(dialect="postgresql"),
+)
+
+event.listen(
+    interpretation_events_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER trg_interpretation_events_immutable_resolved "
+        "BEFORE UPDATE ON interpretation_events "
+        "FOR EACH ROW EXECUTE FUNCTION elspeth_interpretation_events_immutable_resolved()"
+    ).execute_if(dialect="postgresql"),
+)
+
+event.listen(
+    interpretation_events_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
         "CREATE TRIGGER IF NOT EXISTS trg_interpretation_events_no_delete_resolved "
         "BEFORE DELETE ON interpretation_events "
         "FOR EACH ROW "
@@ -1071,6 +1107,38 @@ event.listen(
         "  SELECT RAISE(ABORT, 'interpretation_events: resolved rows are append-only'); "
         "END;"
     ).execute_if(dialect="sqlite"),
+)
+
+event.listen(
+    interpretation_events_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        """
+        CREATE OR REPLACE FUNCTION elspeth_interpretation_events_no_delete_resolved()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF OLD.resolved_at IS NOT NULL
+             AND EXISTS (SELECT 1 FROM sessions WHERE sessions.id = OLD.session_id) THEN
+            RAISE EXCEPTION 'interpretation_events: resolved rows are append-only'
+              USING ERRCODE = '23000';
+          END IF;
+          RETURN OLD;
+        END;
+        $$
+        """
+    ).execute_if(dialect="postgresql"),
+)
+
+event.listen(
+    interpretation_events_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER trg_interpretation_events_no_delete_resolved "
+        "BEFORE DELETE ON interpretation_events "
+        "FOR EACH ROW EXECUTE FUNCTION elspeth_interpretation_events_no_delete_resolved()"
+    ).execute_if(dialect="postgresql"),
 )
 
 # Phase 6A — completion-event triggers.
@@ -1099,12 +1167,68 @@ event.listen(
     composer_completion_events_table,
     "after_create",
     DDL(  # type: ignore[no-untyped-call]
+        """
+        CREATE OR REPLACE FUNCTION elspeth_composer_completion_events_no_update()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          RAISE EXCEPTION 'composer_completion_events is append-only; UPDATE is forbidden'
+            USING ERRCODE = '23000';
+        END;
+        $$
+        """
+    ).execute_if(dialect="postgresql"),
+)
+
+event.listen(
+    composer_completion_events_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER trg_composer_completion_events_no_update "
+        "BEFORE UPDATE ON composer_completion_events "
+        "FOR EACH ROW EXECUTE FUNCTION elspeth_composer_completion_events_no_update()"
+    ).execute_if(dialect="postgresql"),
+)
+
+event.listen(
+    composer_completion_events_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
         "CREATE TRIGGER IF NOT EXISTS trg_composer_completion_events_no_delete "
         "BEFORE DELETE ON composer_completion_events "
         "BEGIN "
         "  SELECT RAISE(ABORT, 'composer_completion_events is append-only; DELETE is forbidden'); "
         "END;"
     ).execute_if(dialect="sqlite"),
+)
+
+event.listen(
+    composer_completion_events_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        """
+        CREATE OR REPLACE FUNCTION elspeth_composer_completion_events_no_delete()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          RAISE EXCEPTION 'composer_completion_events is append-only; DELETE is forbidden'
+            USING ERRCODE = '23000';
+        END;
+        $$
+        """
+    ).execute_if(dialect="postgresql"),
+)
+
+event.listen(
+    composer_completion_events_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER trg_composer_completion_events_no_delete "
+        "BEFORE DELETE ON composer_completion_events "
+        "FOR EACH ROW EXECUTE FUNCTION elspeth_composer_completion_events_no_delete()"
+    ).execute_if(dialect="postgresql"),
 )
 
 event.listen(
@@ -1123,6 +1247,34 @@ event.listen(
     chat_messages_table,
     "after_create",
     DDL(  # type: ignore[no-untyped-call]
+        """
+        CREATE OR REPLACE FUNCTION elspeth_chat_messages_immutable_content()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          RAISE EXCEPTION 'chat_messages.content is append-only'
+            USING ERRCODE = '23000';
+        END;
+        $$
+        """
+    ).execute_if(dialect="postgresql"),
+)
+
+event.listen(
+    chat_messages_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER trg_chat_messages_immutable_content "
+        "BEFORE UPDATE OF content ON chat_messages "
+        "FOR EACH ROW EXECUTE FUNCTION elspeth_chat_messages_immutable_content()"
+    ).execute_if(dialect="postgresql"),
+)
+
+event.listen(
+    chat_messages_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
         "CREATE TRIGGER IF NOT EXISTS trg_chat_messages_no_delete "
         "BEFORE DELETE ON chat_messages "
         "FOR EACH ROW "
@@ -1131,6 +1283,37 @@ event.listen(
         "  SELECT RAISE(ABORT, 'chat_messages rows are append-only'); "
         "END;"
     ).execute_if(dialect="sqlite"),
+)
+
+event.listen(
+    chat_messages_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        """
+        CREATE OR REPLACE FUNCTION elspeth_chat_messages_no_delete()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM sessions WHERE id = OLD.session_id) THEN
+            RAISE EXCEPTION 'chat_messages rows are append-only'
+              USING ERRCODE = '23000';
+          END IF;
+          RETURN OLD;
+        END;
+        $$
+        """
+    ).execute_if(dialect="postgresql"),
+)
+
+event.listen(
+    chat_messages_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER trg_chat_messages_no_delete "
+        "BEFORE DELETE ON chat_messages "
+        "FOR EACH ROW EXECUTE FUNCTION elspeth_chat_messages_no_delete()"
+    ).execute_if(dialect="postgresql"),
 )
 
 runs_table = Table(

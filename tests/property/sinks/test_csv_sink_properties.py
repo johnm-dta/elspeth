@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import keyword
 import tempfile
 from pathlib import Path
 
@@ -30,8 +31,8 @@ row_strategy = st.fixed_dictionaries(
 )
 rows_strategy = st.lists(row_strategy, min_size=1, max_size=5)
 
-# CSV schema fields must be valid identifiers to pass schema parsing.
-identifier_headers = st.from_regex(r"[A-Za-z_][A-Za-z0-9_]*", fullmatch=True)
+# CSV schema fields must be valid non-keyword identifiers to pass schema parsing.
+identifier_headers = st.from_regex(r"[A-Za-z_][A-Za-z0-9_]*", fullmatch=True).filter(lambda name: not keyword.iskeyword(name))
 
 
 # =============================================================================

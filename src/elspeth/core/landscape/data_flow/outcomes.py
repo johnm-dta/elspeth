@@ -36,6 +36,8 @@ from elspeth.core.landscape.schema import (
     batches_table,
     node_states_table,
     nodes_table,
+    sink_effect_members_table,
+    sink_effects_table,
     token_outcomes_table,
     token_parents_table,
     tokens_table,
@@ -247,6 +249,7 @@ class TokenOutcomeRepository:
         sink_node_id: str | None,
         artifact_id: str | None,
         conn: Connection | None = None,
+        lock_witnesses: bool = True,
     ) -> None:
         """Validate ADR-019 real-time cross-table invariants.
 
@@ -256,7 +259,7 @@ class TokenOutcomeRepository:
         """
         pair = (outcome, path)
 
-        if conn is not None:
+        if conn is not None and lock_witnesses:
             self._lock_cross_table_witnesses(ref, outcome, path, artifact_id=artifact_id, conn=conn)
 
         if pair == (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK):
@@ -298,7 +301,7 @@ class TokenOutcomeRepository:
                     f"node_state at sink_node_id={sink_node_id!r}."
                 )
 
-            artifact_query = (
+            legacy_artifact_query = (
                 select(artifacts_table.c.artifact_id)
                 .select_from(
                     artifacts_table.join(
@@ -322,7 +325,30 @@ class TokenOutcomeRepository:
                 .where(node_states_table.c.status == NodeStateStatus.COMPLETED.value)
                 .where(nodes_table.c.node_type == NodeType.SINK.value)
             )
-            artifact_row = self._execute_fetchone(artifact_query, conn=conn)
+            artifact_row = self._execute_fetchone(legacy_artifact_query, conn=conn)
+            if artifact_row is None:
+                effect_artifact_query = (
+                    select(artifacts_table.c.artifact_id)
+                    .select_from(
+                        artifacts_table.join(
+                            sink_effects_table,
+                            and_(
+                                artifacts_table.c.sink_effect_id == sink_effects_table.c.effect_id,
+                                artifacts_table.c.run_id == sink_effects_table.c.run_id,
+                                artifacts_table.c.sink_node_id == sink_effects_table.c.sink_node_id,
+                            ),
+                        ).join(
+                            sink_effect_members_table,
+                            sink_effect_members_table.c.effect_id == sink_effects_table.c.effect_id,
+                        )
+                    )
+                    .where(artifacts_table.c.artifact_id == artifact_id)
+                    .where(artifacts_table.c.run_id == ref.run_id)
+                    .where(artifacts_table.c.sink_node_id == sink_node_id)
+                    .where(sink_effect_members_table.c.token_id == ref.token_id)
+                    .where(sink_effect_members_table.c.run_id == ref.run_id)
+                )
+                artifact_row = self._execute_fetchone(effect_artifact_query, conn=conn)
             if artifact_row is None:
                 raise AuditIntegrityError(
                     f"ADR-019 I1c violation for token {ref.token_id}: "
@@ -379,6 +405,7 @@ class TokenOutcomeRepository:
         error_hash: str | None = None,
         context: Mapping[str, object] | None = None,
         conn: Connection | None = None,
+        dependencies_prelocked: bool = False,
     ) -> str:
         """Record a token's (outcome, path) audit terminal in the audit trail.
 
@@ -437,7 +464,8 @@ class TokenOutcomeRepository:
             # cross-table invariant. Make that dependency explicit and first
             # for every repository-owned outcome transaction. Composed callers
             # prelock their whole batch before any state/artifact mutations.
-            self.lock_token_outcome_dependencies((ref,), conn=active_conn)
+            if not dependencies_prelocked:
+                self.lock_token_outcome_dependencies((ref,), conn=active_conn)
             self._ownership.validate_token_run_ownership(ref, conn=active_conn)
             self._validate_cross_table_invariants(
                 ref,
@@ -447,6 +475,7 @@ class TokenOutcomeRepository:
                 sink_node_id=sink_node_id,
                 artifact_id=artifact_id,
                 conn=active_conn,
+                lock_witnesses=not dependencies_prelocked,
             )
 
             outcome_id = f"out_{generate_id()[:12]}"

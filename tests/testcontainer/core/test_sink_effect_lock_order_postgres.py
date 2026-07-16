@@ -6,6 +6,7 @@ import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import func, select
@@ -15,9 +16,22 @@ from tests.fixtures.landscape import make_factory, register_test_node
 
 from elspeth.contracts import NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.audit import DISCARD_SINK_NAME, TokenRef
-from elspeth.contracts.sink_effects import SinkEffectInputKind, SinkEffectMemberCandidate, SinkEffectRole
+from elspeth.contracts.results import ArtifactDescriptor
+from elspeth.contracts.sink_effects import (
+    SINK_EFFECT_PROTOCOL_VERSION,
+    SinkEffectAttemptAction,
+    SinkEffectDescriptorMode,
+    SinkEffectInputKind,
+    SinkEffectInspectionMode,
+    SinkEffectMemberCandidate,
+    SinkEffectPlan,
+    SinkEffectRole,
+)
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.errors import LandscapeRecordError
+from elspeth.core.landscape.execution.sink_effect_finalization import SinkEffectFinalizationMember, SinkEffectFinalizeRequest
 from elspeth.core.landscape.execution.sink_effect_identity import compute_pipeline_effect_identity, resolve_sink_effect_members
+from elspeth.core.landscape.execution.sink_effect_lifecycle import SinkEffectAttemptRequest, SinkEffectAttemptResult
 from elspeth.core.landscape.execution.sink_effect_reservation import SinkEffectReservationRequest
 from elspeth.core.landscape.schema import sink_effect_members_table, sink_effects_table, token_outcomes_table
 
@@ -114,6 +128,165 @@ def test_concurrent_reservation_reverse_arrival_uses_ascending_locks_and_one_eff
     assert sum(result.new_effect is not None for result in results) == 1
     with db.read_only_connection() as conn:
         assert conn.scalar(select(func.count()).select_from(sink_effects_table)) == 1
+
+
+def test_finalization_vs_outcome_mutation_uses_distinct_backends_and_token_first_order(
+    postgres_db: LandscapeDB,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = postgres_db
+    finalizer_factory = make_factory(db)
+    outcome_factory = make_factory(db)
+    run = finalizer_factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+    source = register_test_node(finalizer_factory.data_flow, run.run_id, "finalize-source", node_type=NodeType.SOURCE, plugin_name="source")
+    sink = register_test_node(finalizer_factory.data_flow, run.run_id, "finalize-sink", node_type=NodeType.SINK, plugin_name="sink")
+    payload = {"ordinal": 0}
+    row = finalizer_factory.data_flow.create_row(
+        run_id=run.run_id,
+        source_node_id=source,
+        row_index=0,
+        data=payload,
+        source_row_index=0,
+        ingest_sequence=0,
+    )
+    token = finalizer_factory.data_flow.create_token(row.row_id)
+    finalizer_factory.execution.begin_node_state(
+        token_id=token.token_id,
+        node_id=sink,
+        run_id=run.run_id,
+        step_index=0,
+        input_data=payload,
+    )
+    members = resolve_sink_effect_members(finalizer_factory, [SinkEffectMemberCandidate(token_id=token.token_id, row=payload)])
+    identity = compute_pipeline_effect_identity(
+        run_id=run.run_id,
+        sink_node_id=sink,
+        role=SinkEffectRole.PRIMARY,
+        sink_config={"name": "sink"},
+        target_config={"path": "finalize.jsonl"},
+        members=members,
+    )
+    effect = finalizer_factory.execution.sink_effects.reserve(
+        SinkEffectReservationRequest(
+            run_id=run.run_id,
+            sink_node_id=sink,
+            role=SinkEffectRole.PRIMARY,
+            input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            requested_target_hash=identity.requested_target_hash,
+            members=members,
+            audit_export_snapshot_id=None,
+            config_hash=identity.config_hash,
+            replacing_target=False,
+            primary_effect_id=None,
+        )
+    ).new_effect
+    assert effect is not None
+    descriptor = ArtifactDescriptor(
+        artifact_type="file",
+        path_or_uri="file:///tmp/finalize.jsonl",
+        content_hash="d" * 64,
+        size_bytes=12,
+    )
+    finalizer_factory.execution.sink_effects.complete_plan(
+        effect.effect_id,
+        SinkEffectPlan(
+            effect_id=effect.effect_id,
+            protocol_version=SINK_EFFECT_PROTOCOL_VERSION,
+            input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            descriptor_mode=SinkEffectDescriptorMode.PRECOMPUTED,
+            inspection_mode=SinkEffectInspectionMode.NO_INSPECTION_REQUIRED,
+            target=descriptor.path_or_uri,
+            plan_hash="a" * 64,
+            payload_hash="b" * 64,
+            expected_descriptor=descriptor,
+            safe_evidence={"inspection_reference": "no-inspection-required:v1"},
+        ),
+    )
+    lease = finalizer_factory.execution.sink_effects.acquire_lease(
+        effect.effect_id,
+        owner="worker-a",
+        ttl=timedelta(seconds=30),
+    )
+    attempt = finalizer_factory.execution.sink_effects.begin_attempt(
+        SinkEffectAttemptRequest(
+            effect_id=effect.effect_id,
+            member_ordinal=None,
+            generation=lease.generation,
+            action=SinkEffectAttemptAction.COMMIT,
+            request_hash="a" * 64,
+        )
+    )
+    finalizer_factory.execution.sink_effects.record_attempt_result(
+        SinkEffectAttemptResult(attempt_id=attempt.attempt_id, evidence={"result": "exact"}, latency_ms=1.0)
+    )
+    request = SinkEffectFinalizeRequest(
+        effect_id=effect.effect_id,
+        lease_owner=lease.owner,
+        generation=lease.generation,
+        descriptor=descriptor,
+        publication_performed=True,
+        publication_evidence_kind="returned",
+        accepted_ordinals=(0,),
+        diverted_ordinals=(),
+        evidence={"result": "exact"},
+        members=(
+            SinkEffectFinalizationMember(
+                ordinal=0,
+                output_data={"row": payload},
+                duration_ms=1.0,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="sink",
+            ),
+        ),
+        attempt_id=attempt.attempt_id,
+    )
+    finalizer_holds_token = threading.Event()
+    release_finalizer = threading.Event()
+    outcome_approached_token = threading.Event()
+    backend_pids: dict[str, int] = {}
+
+    def after_token_locks(pid: int, token_ids: tuple[str, ...]) -> None:
+        assert token_ids == tuple(sorted(token_ids))
+        backend_pids["finalizer"] = pid
+        finalizer_holds_token.set()
+        assert release_finalizer.wait(timeout=5)
+
+    original_outcome_lock = outcome_factory.data_flow.outcomes.lock_token_outcome_dependencies
+
+    def outcome_lock(refs: tuple[TokenRef, ...], *, conn: Connection) -> None:
+        backend_pids["outcome"] = int(conn.exec_driver_sql("SELECT pg_backend_pid()").scalar_one())
+        outcome_approached_token.set()
+        original_outcome_lock(refs, conn=conn)
+
+    monkeypatch.setattr(finalizer_factory.execution.sink_effects._finalization, "_after_token_locks", after_token_locks)
+    monkeypatch.setattr(outcome_factory.data_flow.outcomes, "lock_token_outcome_dependencies", outcome_lock)
+
+    def competing_outcome() -> str:
+        return outcome_factory.data_flow.record_token_outcome(
+            TokenRef(token_id=token.token_id, run_id=run.run_id),
+            TerminalOutcome.SUCCESS,
+            TerminalPath.DEFAULT_FLOW,
+            sink_name="sink",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        finalization = pool.submit(finalizer_factory.execution.sink_effects.finalize, request)
+        assert finalizer_holds_token.wait(timeout=5)
+        outcome = pool.submit(competing_outcome)
+        assert outcome_approached_token.wait(timeout=5)
+        release_finalizer.set()
+        winner = finalization.result(timeout=10)
+        with pytest.raises(LandscapeRecordError):
+            outcome.result(timeout=10)
+
+    assert backend_pids["finalizer"] != backend_pids["outcome"]
+    assert winner.effect.state.value == "finalized"
+    with db.read_only_connection() as conn:
+        assert (
+            conn.scalar(select(func.count()).select_from(token_outcomes_table).where(token_outcomes_table.c.token_id == token.token_id))
+            == 1
+        )
 
 
 def test_concurrent_disjoint_reservations_form_one_stream_predecessor_chain(

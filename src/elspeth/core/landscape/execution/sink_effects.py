@@ -11,6 +11,11 @@ from elspeth.contracts.audit import SinkEffect, SinkEffectAttempt, SinkEffectMem
 from elspeth.contracts.sink_effects import SinkEffectInputKind, SinkEffectMember, SinkEffectPlan, SinkEffectRole
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.execution.sink_effect_finalization import (
+    SinkEffectFinalization,
+    SinkEffectFinalizationResult,
+    SinkEffectFinalizeRequest,
+)
 from elspeth.core.landscape.execution.sink_effect_lifecycle import (
     SinkEffectAttemptRequest,
     SinkEffectAttemptResult,
@@ -44,6 +49,7 @@ class SinkEffectRepository:
         self._stream_loader = stream_loader
         self._reservation = SinkEffectReservation(db, effect_loader=effect_loader)
         self._lifecycle = SinkEffectLifecycle(db, effect_loader=effect_loader)
+        self._finalization = SinkEffectFinalization(db, ops, effect_loader=effect_loader)
 
     def reserve(
         self,
@@ -126,6 +132,10 @@ class SinkEffectRepository:
 
     def mark_response_lost(self, attempt_id: str) -> SinkEffectAttempt:
         return self._lifecycle.mark_response_lost(attempt_id)
+
+    def finalize(self, request: SinkEffectFinalizeRequest) -> SinkEffectFinalizationResult:
+        """Finalize one exact effect winner and all dependent audit state."""
+        return self._finalization.finalize(request)
 
     def get_members(self, effect_id: str) -> tuple[SinkEffectMemberRecord, ...]:
         rows = self._ops.execute_fetchall(

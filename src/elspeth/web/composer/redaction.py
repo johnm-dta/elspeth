@@ -1304,7 +1304,17 @@ class _NodeTriggerModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class _PipelineNodeModel(BaseModel):
+class _AuthoringNodeOptionsModel(BaseModel):
+    """Shared redaction-bearing surface for authored transform options."""
+
+    id: str
+    options: _LlmJsonObject = Field(default_factory=dict)
+    on_error: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _PipelineNodeModel(_AuthoringNodeOptionsModel):
     """Nested model for ``set_pipeline.nodes[*]``.
 
     Mirrors the JSON schema's ``nodes`` array-item shape declared at
@@ -1364,13 +1374,10 @@ class _PipelineNodeModel(BaseModel):
     ``docs/composer/evidence/composer-phase-2-followup-prompt-F1-F6.md``.
     """
 
-    id: str
     node_type: str
     input: str
     plugin: str | None = None
     on_success: str | None = None
-    on_error: str | None = None
-    options: _LlmJsonObject = Field(default_factory=dict)
     condition: str | None = None
     routes: dict[str, str] | None = None
     fork_to: list[str] | None = None
@@ -1380,6 +1387,25 @@ class _PipelineNodeModel(BaseModel):
     trigger: _NodeTriggerModel | None = None
     output_mode: str | None = None
     expected_output_count: int | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _SpliceTransformNodeModel(_AuthoringNodeOptionsModel):
+    """Caller-authored portion of a transform whose routing is server-derived."""
+
+    plugin: str
+    options: _LlmJsonObject
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class SpliceTransformArgumentsModel(BaseModel):
+    """Redaction-bearing arguments for one direct-path transform insertion."""
+
+    predecessor_id: str
+    successor_id: str
+    node: _SpliceTransformNodeModel
 
     model_config = ConfigDict(extra="forbid")
 
@@ -2848,6 +2874,7 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
         "set_source_from_blob": ToolRedaction(argument_model=SetSourceFromBlobArgumentsModel),
         # full-pipeline mutations.
         "set_pipeline": ToolRedaction(argument_model=SetPipelineArgumentsModel),
+        "splice_transform": ToolRedaction(argument_model=SpliceTransformArgumentsModel),
         "apply_pipeline_recipe": ToolRedaction(argument_model=ApplyPipelineRecipeArgumentsModel),
         # option-patch tools.
         "patch_source_options": ToolRedaction(argument_model=PatchSourceOptionsArgumentsModel),

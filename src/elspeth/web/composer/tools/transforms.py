@@ -12,6 +12,7 @@ from pydantic import ValidationError as PydanticValidationError
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     PatchNodeOptionsArgumentsModel,
+    SpliceTransformArgumentsModel,
 )
 from elspeth.web.composer.state import (
     CoalesceBranches,
@@ -20,6 +21,7 @@ from elspeth.web.composer.state import (
     EdgeType,
     NodeSpec,
     NodeType,
+    SourceSpec,
     _batch_aware_placement_error,
     _batch_aware_required_input_fields_error,
     _validate_gate_expression,
@@ -38,6 +40,7 @@ from elspeth.web.composer.tools._common import (
     _options_with_default_llm_reviews,
     _plugin_policy_failure,
     _prevalidate_transform_for_context,
+    _reserved_connection_names,
     _runtime_owned_llm_option_error,
     _validate_aggregation_trigger,
     _validate_mutation_arguments,
@@ -49,9 +52,16 @@ from elspeth.web.composer.tools.declarations import (
     ToolDeclaration,
     ToolKind,
 )
-from elspeth.web.interpretation_state import composition_review_contract_error
+from elspeth.web.interpretation_state import (
+    composition_review_contract_error,
+    reconcile_authoritative_reviews,
+    serialize_authoring_review_options,
+)
 
 _NODE_ROUTING_OPTION_PATCH_KEYS: Final[frozenset[str]] = frozenset({"input", "on_success", "on_error", "routes", "fork_to"})
+_SPLICE_CONNECTION_ATTEMPTS: Final[int] = 32
+_SPLICE_CONNECTION_MAX_LENGTH: Final[int] = 64
+_SPLICE_EDGE_ID_MAX_LENGTH: Final[int] = 160
 
 
 class _UpsertNodeArgumentsModel(BaseModel):
@@ -291,6 +301,66 @@ _UPSERT_NODE_DECLARATION = ToolDeclaration(
 )
 
 
+def _handle_splice_transform(
+    arguments: dict[str, Any],
+    state: CompositionState,
+    context: ToolContext,
+) -> ToolResult:
+    result = _execute_splice_transform(arguments, state, context)
+    if not result.success:
+        return result
+    validated = SpliceTransformArgumentsModel.model_validate(arguments)
+    return _attach_post_call_hints(
+        result,
+        context.catalog,
+        plugin_type="transform",
+        tool_name="splice_transform",
+        plugin_name=validated.node.plugin,
+        config_snapshot=validated.node.options,
+    )
+
+
+_SPLICE_TRANSFORM_DECLARATION = ToolDeclaration(
+    name="splice_transform",
+    handler=_handle_splice_transform,
+    kind=ToolKind.MUTATION,
+    description=(
+        "Insert one transform between a predecessor and successor on an existing direct linear on_success path. "
+        "Use this for insert/between/before/after edits; the server derives input, on_success, connection, and edge IDs."
+    ),
+    json_schema={
+        "type": "object",
+        "properties": {
+            "predecessor_id": {
+                "type": "string",
+                "description": "Existing source or transform immediately before the insertion point.",
+            },
+            "successor_id": {
+                "type": "string",
+                "description": "Existing transform immediately after the insertion point.",
+            },
+            "node": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Unique ID for the inserted transform."},
+                    "plugin": {"type": "string", "description": "Transform plugin name."},
+                    "options": {"type": "object", "description": "Plugin-specific authored options."},
+                    "on_error": {
+                        "type": ["string", "null"],
+                        "description": "Optional error route; defaults to discard.",
+                    },
+                },
+                "required": ["id", "plugin", "options"],
+                "additionalProperties": False,
+            },
+        },
+        "required": ["predecessor_id", "successor_id", "node"],
+        "additionalProperties": False,
+    },
+    augments_on_failure=True,
+)
+
+
 def _handle_upsert_edge(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -466,6 +536,83 @@ def _execute_upsert_queue_node(
     return _mutation_result(new_state, tuple(sorted(affected)))
 
 
+def _prepare_transform_candidate(
+    *,
+    state: CompositionState,
+    context: ToolContext,
+    tool_name: str,
+    node_id: str,
+    node_type: NodeType,
+    plugin: str | None,
+    input_name: str,
+    on_success: str | None,
+    on_error: str | None,
+    options: Mapping[str, Any],
+    trigger: Mapping[str, Any] | None = None,
+    output_mode: str | None = None,
+    expected_output_count: int | None = None,
+) -> NodeSpec | ToolResult:
+    """Validate and prepare one transform candidate without mutating state."""
+    if plugin is None:
+        return _failure_result(state, f"Node '{node_id}': transform plugin is required.")
+    runtime_owned_error = _runtime_owned_llm_option_error(plugin, options, tool_name=tool_name)
+    if runtime_owned_error is not None:
+        return _failure_result(state, f"Node '{node_id}': {runtime_owned_error}")
+    credential_error = _credential_wiring_contract_failure(
+        state,
+        component_id=node_id,
+        component_type="node",
+        plugin_type="transform",
+        plugin_name=plugin,
+        options=options,
+    )
+    if credential_error is not None:
+        return credential_error
+    plugin_error = _validate_plugin_name(context, "transform", plugin)
+    if plugin_error is not None:
+        return _plugin_policy_failure(state, plugin_error)
+    batch_placement_error = _batch_aware_placement_error(node_id, node_type, plugin, output_mode)
+    if batch_placement_error is not None:
+        return _failure_result(state, batch_placement_error)
+    batch_required_error = _batch_aware_required_input_fields_error(node_id, plugin, options)
+    if batch_required_error is not None:
+        return _failure_result(state, batch_required_error)
+
+    review_options = _options_with_default_llm_reviews(node_id=node_id, plugin=plugin, options=options)
+    prevalidation_error = _prevalidate_transform_for_context(context, plugin, review_options)
+    if prevalidation_error is not None:
+        return _failure_result(state, prevalidation_error)
+    provider_policy_error = _validate_transform_provider_config_policy(options, plugin=plugin)
+    if provider_policy_error is not None:
+        return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
+    provider_path_error = _validate_transform_provider_config_path(options, context.data_dir, session_id=context.session_id)
+    if provider_path_error is not None:
+        return _failure_result(state, f"Node '{node_id}': {provider_path_error}")
+    if node_type == "aggregation":
+        trigger_error = _validate_aggregation_trigger(dict(trigger) if trigger is not None else None)
+        if trigger_error is not None:
+            return _failure_result(state, f"Node '{node_id}': {trigger_error}")
+
+    return NodeSpec(
+        id=node_id,
+        node_type=node_type,
+        plugin=plugin,
+        input=input_name,
+        on_success=on_success,
+        on_error=on_error or "discard",
+        options=review_options,
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+        trigger=trigger,
+        output_mode=output_mode,
+        expected_output_count=expected_output_count,
+    )
+
+
 def _execute_upsert_node(
     args: dict[str, Any],
     state: CompositionState,
@@ -476,112 +623,70 @@ def _execute_upsert_node(
     node_id = validated.id
     node_type = validated.node_type
     if node_type == "queue":
-        # A queue is a structural pass-through fan-in point with no plugin,
-        # no routing, and no plugin options — so the plugin/credential/review
-        # gates below do not apply. The ONLY intrinsic constraint is
-        # queue_node_contract_error (state.py), the single source of truth
-        # shared with state validation and YAML generation. Pipeline
-        # completeness (producers/downstream) stays validation telemetry, so an
-        # orphan queue inserted during incremental authoring still persists.
         return _execute_upsert_queue_node(validated, state)
-    plugin = validated.plugin
-    node_options = validated.options
-    runtime_owned_error = _runtime_owned_llm_option_error(
-        plugin,
-        node_options,
-        tool_name="upsert_node",
-    )
-    if runtime_owned_error is not None:
-        return _failure_result(state, f"Node '{node_id}': {runtime_owned_error}")
-    credential_error = _credential_wiring_contract_failure(
-        state,
-        component_id=node_id,
-        component_type="node",
-        plugin_type="transform" if plugin is not None else None,
-        plugin_name=plugin,
-        options=node_options,
-    )
-    if credential_error is not None:
-        return credential_error
 
-    # Validate plugin for types that require one.
-    # Gates and coalesces intentionally have plugin=None (they're expression-based or
-    # structural, not plugin-driven), so the "and plugin is not None" guard covers them.
-    # NodeSpec documents this: "plugin: Plugin name. None for gates and coalesces."
-    if node_type in ("transform", "aggregation") and plugin is not None:
-        plugin_error = _validate_plugin_name(context, "transform", plugin)
-        if plugin_error is not None:
-            return _plugin_policy_failure(state, plugin_error)
-
-        batch_placement_error = _batch_aware_placement_error(node_id, node_type, plugin, validated.output_mode)
-        if batch_placement_error is not None:
-            return _failure_result(state, batch_placement_error)
-
-        batch_required_error = _batch_aware_required_input_fields_error(node_id, plugin, node_options)
-        if batch_required_error is not None:
-            return _failure_result(state, batch_required_error)
-
-        review_options = _options_with_default_llm_reviews(
+    if node_type in ("transform", "aggregation"):
+        prepared = _prepare_transform_candidate(
+            state=state,
+            context=context,
+            tool_name="upsert_node",
             node_id=node_id,
-            plugin=plugin,
-            options=node_options,
+            node_type=node_type,
+            plugin=validated.plugin,
+            input_name=validated.input,
+            on_success=validated.on_success,
+            on_error=validated.on_error,
+            options=validated.options,
+            trigger=validated.trigger,
+            output_mode=validated.output_mode,
+            expected_output_count=validated.expected_output_count,
         )
-        prevalidation_error = _prevalidate_transform_for_context(context, plugin, review_options)
-        if prevalidation_error is not None:
-            return _failure_result(state, prevalidation_error)
-
-        provider_policy_error = _validate_transform_provider_config_policy(node_options, plugin=plugin)
-        if provider_policy_error is not None:
-            return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
-
-        # S2: confine nested provider_config persist_directory (RAG retrieval).
-        provider_path_error = _validate_transform_provider_config_path(node_options, context.data_dir, session_id=context.session_id)
-        if provider_path_error is not None:
-            return _failure_result(state, f"Node '{node_id}': {provider_path_error}")
-
-    # Validate gate condition expression at composition time.
-    # Gives the LLM immediate feedback on syntax/security errors.
-    condition = validated.condition
-    if node_type == "gate" and condition is not None:
-        expr_error = _validate_gate_expression(condition)
-        if expr_error is not None:
-            return _failure_result(state, f"Node '{node_id}': {expr_error}")
-        parity_error = _validate_gate_route_parity(condition, validated.routes)
-        if parity_error is not None:
-            return _failure_result(state, f"Node '{node_id}': {parity_error}")
-    if node_type == "aggregation":
-        trigger_error = _validate_aggregation_trigger(validated.trigger)
-        if trigger_error is not None:
-            return _failure_result(state, f"Node '{node_id}': {trigger_error}")
-
-    fork_to: tuple[str, ...] | None = tuple(validated.fork_to) if validated.fork_to is not None else None
-
-    branches: CoalesceBranches | None = None
-    if validated.branches is not None:
-        branches = dict(validated.branches) if isinstance(validated.branches, Mapping) else tuple(validated.branches)
-
-    node = NodeSpec(
-        id=node_id,
-        node_type=node_type,
-        plugin=plugin,
-        input=validated.input,
-        on_success=validated.on_success,
-        on_error=validated.on_error or ("discard" if node_type in ("transform", "aggregation") else None),
-        options=_options_with_default_llm_reviews(
-            node_id=node_id,
-            plugin=plugin,
-            options=node_options,
-        ),
-        condition=validated.condition,
-        routes=validated.routes,
-        fork_to=fork_to,
-        branches=branches,
-        policy=validated.policy,
-        merge=validated.merge,
-        trigger=validated.trigger,
-        output_mode=validated.output_mode,
-        expected_output_count=validated.expected_output_count,
-    )
+        if isinstance(prepared, ToolResult):
+            return prepared
+        node = prepared
+    else:
+        runtime_owned_error = _runtime_owned_llm_option_error(validated.plugin, validated.options, tool_name="upsert_node")
+        if runtime_owned_error is not None:
+            return _failure_result(state, f"Node '{node_id}': {runtime_owned_error}")
+        credential_error = _credential_wiring_contract_failure(
+            state,
+            component_id=node_id,
+            component_type="node",
+            plugin_type=None,
+            plugin_name=validated.plugin,
+            options=validated.options,
+        )
+        if credential_error is not None:
+            return credential_error
+        if node_type == "gate" and validated.condition is not None:
+            expr_error = _validate_gate_expression(validated.condition)
+            if expr_error is not None:
+                return _failure_result(state, f"Node '{node_id}': {expr_error}")
+            parity_error = _validate_gate_route_parity(validated.condition, validated.routes)
+            if parity_error is not None:
+                return _failure_result(state, f"Node '{node_id}': {parity_error}")
+        fork_to: tuple[str, ...] | None = tuple(validated.fork_to) if validated.fork_to is not None else None
+        branches: CoalesceBranches | None = None
+        if validated.branches is not None:
+            branches = dict(validated.branches) if isinstance(validated.branches, Mapping) else tuple(validated.branches)
+        node = NodeSpec(
+            id=node_id,
+            node_type=node_type,
+            plugin=validated.plugin,
+            input=validated.input,
+            on_success=validated.on_success,
+            on_error=validated.on_error,
+            options=validated.options,
+            condition=validated.condition,
+            routes=validated.routes,
+            fork_to=fork_to,
+            branches=branches,
+            policy=validated.policy,
+            merge=validated.merge,
+            trigger=validated.trigger,
+            output_mode=validated.output_mode,
+            expected_output_count=validated.expected_output_count,
+        )
 
     new_state = state.with_node(node)
     review_contract_error = composition_review_contract_error(new_state)
@@ -596,6 +701,308 @@ def _execute_upsert_node(
             affected.add(edge.to_node)
 
     return _mutation_result(new_state, tuple(sorted(affected)))
+
+
+def _splice_connection_name(node_id: str, state: CompositionState) -> str | None:
+    fragment = "".join(character if character.isalnum() or character in "_-" else "_" for character in node_id).strip("_-")
+    if not fragment:
+        fragment = "transform"
+    reserved = (
+        _reserved_connection_names(state)
+        | set(state.sources)
+        | {node.id for node in state.nodes}
+        | {output.name for output in state.outputs}
+    )
+    for attempt in range(1, _SPLICE_CONNECTION_ATTEMPTS + 1):
+        suffix = "" if attempt == 1 else f"_{attempt}"
+        stem_length = _SPLICE_CONNECTION_MAX_LENGTH - len("_out") - len(suffix)
+        candidate = f"{fragment[:stem_length]}_out{suffix}"
+        if candidate not in reserved:
+            return candidate
+    return None
+
+
+def _splice_edge_id(direct_edge_id: str, node_id: str) -> str:
+    marker = "__splice__"
+    node_fragment_length = max(1, _SPLICE_EDGE_ID_MAX_LENGTH - len(marker) - 1)
+    suffix = f"{marker}{node_id[:node_fragment_length]}"
+    stem_length = max(1, _SPLICE_EDGE_ID_MAX_LENGTH - len(suffix))
+    return f"{direct_edge_id[:stem_length]}{suffix}"
+
+
+def _normalized_splice_node_projection(node: NodeSpec) -> dict[str, Any]:
+    return {
+        "id": node.id,
+        "plugin": node.plugin,
+        "on_error": node.on_error or "discard",
+        "options": serialize_authoring_review_options(node.options),
+    }
+
+
+def _splice_predecessor(
+    state: CompositionState,
+    predecessor_id: str,
+) -> SourceSpec | NodeSpec | None:
+    if predecessor_id in state.sources:
+        return state.sources[predecessor_id]
+    return next((node for node in state.nodes if node.id == predecessor_id), None)
+
+
+def _splice_topology_error(
+    state: CompositionState,
+    *,
+    predecessor_id: str,
+    successor: NodeSpec,
+    inserted: NodeSpec | None = None,
+) -> str | None:
+    predecessor = _splice_predecessor(state, predecessor_id)
+    if predecessor is None:
+        return f"Splice predecessor '{predecessor_id}' not found."
+    if isinstance(predecessor, NodeSpec) and predecessor.node_type != "transform":
+        return "splice_transform supports only source or transform predecessors on a direct linear path."
+    if successor.node_type != "transform":
+        return "splice_transform requires a transform successor on a direct linear path."
+    for node in (predecessor, successor):
+        if isinstance(node, NodeSpec) and (
+            node.condition is not None
+            or node.routes is not None
+            or node.fork_to is not None
+            or node.branches is not None
+            or node.node_type in {"gate", "coalesce", "queue"}
+        ):
+            return "splice_transform does not support gates, forks, queues, coalesces, or branched paths."
+        if isinstance(node, NodeSpec) and node.on_error not in (None, "discard"):
+            return "splice_transform does not support predecessors or successors with routed error branches."
+
+    if inserted is None:
+        predecessor_output = predecessor.on_success
+        if not isinstance(predecessor_output, str) or not predecessor_output or predecessor_output == "discard":
+            return "Splice predecessor has no direct on_success connection."
+        if predecessor_output != successor.input:
+            return "Splice predecessor and successor do not share one direct on_success connection."
+        matching = [
+            edge
+            for edge in state.edges
+            if edge.from_node == predecessor_id and edge.to_node == successor.id and edge.edge_type == "on_success"
+        ]
+        if len(matching) != 1:
+            return "Splice path must have exactly one direct visual on_success edge."
+        if any(edge.from_node == predecessor_id and edge is not matching[0] for edge in state.edges):
+            return "Splice predecessor has an ambiguous or branched visual path."
+        if any(edge.to_node == successor.id and edge is not matching[0] for edge in state.edges):
+            return "Splice successor has an ambiguous or branched visual path."
+        other_consumers = [node.id for node in state.nodes if node.id != successor.id and node.input == predecessor_output]
+        if other_consumers or predecessor_output in {output.name for output in state.outputs}:
+            return "Splice connection has multiple consumers or terminates at a sink."
+        return None
+
+    if (
+        inserted.node_type != "transform"
+        or inserted.condition is not None
+        or inserted.routes is not None
+        or inserted.fork_to is not None
+        or inserted.branches is not None
+        or inserted.policy is not None
+        or inserted.merge is not None
+        or inserted.trigger is not None
+        or inserted.output_mode is not None
+        or inserted.expected_output_count is not None
+    ):
+        return "Existing splice node is not a canonical transform."
+    if predecessor.on_success != inserted.input or inserted.on_success != successor.input:
+        return "Existing splice topology does not match the server-derived direct path."
+    predecessor_consumers = [node.id for node in state.nodes if node.id != inserted.id and node.input == predecessor.on_success]
+    inserted_consumers = [node.id for node in state.nodes if node.id != successor.id and node.input == inserted.on_success]
+    output_names = {output.name for output in state.outputs}
+    if predecessor_consumers or inserted_consumers or predecessor.on_success in output_names or inserted.on_success in output_names:
+        return "Existing splice topology contains multiple consumers or terminates at a sink."
+    try:
+        inserted_index = next(index for index, node in enumerate(state.nodes) if node is inserted)
+        successor_index = next(index for index, node in enumerate(state.nodes) if node is successor)
+    except StopIteration:
+        return "Existing splice topology is incomplete."
+    if inserted_index + 1 != successor_index:
+        return "Existing splice node is not immediately before its successor."
+    predecessor_edges = [
+        (index, edge)
+        for index, edge in enumerate(state.edges)
+        if edge.from_node == predecessor_id and edge.to_node == inserted.id and edge.edge_type == "on_success"
+    ]
+    successor_edges = [
+        (index, edge)
+        for index, edge in enumerate(state.edges)
+        if edge.from_node == inserted.id and edge.to_node == successor.id and edge.edge_type == "on_success"
+    ]
+    if len(predecessor_edges) != 1 or len(successor_edges) != 1:
+        return "Existing splice topology does not have exactly two direct visual edges."
+    predecessor_edge_index, predecessor_edge = predecessor_edges[0]
+    successor_edge_index, successor_edge = successor_edges[0]
+    if successor_edge_index != predecessor_edge_index + 1:
+        return "Existing splice edges are not in canonical adjacent order."
+    if successor_edge.id != _splice_edge_id(predecessor_edge.id, inserted.id):
+        return "Existing splice edge identity differs from the server-derived identity."
+    allowed_edge_ids = {predecessor_edge.id, successor_edge.id}
+    if any(
+        edge.id not in allowed_edge_ids and (edge.from_node in {predecessor_id, inserted.id} or edge.to_node in {inserted.id, successor.id})
+        for edge in state.edges
+    ):
+        return "Existing splice topology contains a conflicting visual path."
+    return None
+
+
+def _execute_splice_transform(
+    args: dict[str, Any],
+    state: CompositionState,
+    context: ToolContext,
+) -> ToolResult:
+    """Atomically insert one transform on an existing direct linear path."""
+    validated = cast(
+        SpliceTransformArgumentsModel,
+        _validate_mutation_arguments(SpliceTransformArgumentsModel, args, "splice_transform arguments"),
+    )
+    predecessor_id = validated.predecessor_id
+    successor_id = validated.successor_id
+    node_args = validated.node
+    if predecessor_id == successor_id or node_args.id in {predecessor_id, successor_id}:
+        return _failure_result(state, "Splice predecessor, successor, and inserted node IDs must be distinct.")
+    if len({node.id for node in state.nodes}) != len(state.nodes):
+        return _failure_result(state, "splice_transform refuses a state with duplicate node IDs.")
+    if len({edge.id for edge in state.edges}) != len(state.edges):
+        return _failure_result(state, "splice_transform refuses a state with duplicate edge IDs.")
+    successor = next((node for node in state.nodes if node.id == successor_id), None)
+    if successor is None:
+        return _failure_result(state, f"Splice successor '{successor_id}' not found or is not a transform.")
+
+    existing = next((node for node in state.nodes if node.id == node_args.id), None)
+    if existing is not None:
+        topology_error = _splice_topology_error(
+            state,
+            predecessor_id=predecessor_id,
+            successor=successor,
+            inserted=existing,
+        )
+        if topology_error is not None:
+            return _failure_result(state, topology_error)
+        prepared_replay = _prepare_transform_candidate(
+            state=state,
+            context=context,
+            tool_name="splice_transform",
+            node_id=node_args.id,
+            node_type="transform",
+            plugin=node_args.plugin,
+            input_name=existing.input,
+            on_success=existing.on_success,
+            on_error=node_args.on_error,
+            options=node_args.options,
+        )
+        if isinstance(prepared_replay, ToolResult):
+            return prepared_replay
+        try:
+            identical = _normalized_splice_node_projection(prepared_replay) == _normalized_splice_node_projection(existing)
+        except (KeyError, TypeError, ValueError):
+            identical = False
+        if not identical:
+            return _failure_result(state, f"Node '{node_args.id}' already exists with a divergent splice definition.")
+        return _mutation_result(
+            state,
+            (predecessor_id, node_args.id, successor_id),
+            data={
+                "already_applied": True,
+                "predecessor_id": predecessor_id,
+                "successor_id": successor_id,
+                "inserted_node_id": node_args.id,
+                "derived_connection": existing.on_success,
+            },
+        )
+
+    if node_args.id in state.sources or node_args.id in {output.name for output in state.outputs}:
+        return _failure_result(state, f"Inserted node ID '{node_args.id}' collides with an existing source or sink.")
+    topology_error = _splice_topology_error(state, predecessor_id=predecessor_id, successor=successor)
+    if topology_error is not None:
+        return _failure_result(state, topology_error)
+    predecessor = _splice_predecessor(state, predecessor_id)
+    assert predecessor is not None
+    predecessor_output = predecessor.on_success
+    assert isinstance(predecessor_output, str)
+    direct_edge_index, direct_edge = next(
+        (index, edge)
+        for index, edge in enumerate(state.edges)
+        if edge.from_node == predecessor_id and edge.to_node == successor_id and edge.edge_type == "on_success"
+    )
+    connection_name = _splice_connection_name(node_args.id, state)
+    if connection_name is None:
+        return _failure_result(state, "No bounded collision-free splice connection name is available.")
+    new_edge_id = _splice_edge_id(direct_edge.id, node_args.id)
+    if new_edge_id in {edge.id for edge in state.edges}:
+        return _failure_result(state, f"Derived splice edge ID '{new_edge_id}' collides with an existing edge.")
+    prepared = _prepare_transform_candidate(
+        state=state,
+        context=context,
+        tool_name="splice_transform",
+        node_id=node_args.id,
+        node_type="transform",
+        plugin=node_args.plugin,
+        input_name=predecessor_output,
+        on_success=connection_name,
+        on_error=node_args.on_error,
+        options=node_args.options,
+    )
+    if isinstance(prepared, ToolResult):
+        return prepared
+
+    successor_rewired = replace(successor, input=connection_name)
+    successor_index = next(index for index, node in enumerate(state.nodes) if node is successor)
+    nodes = (*state.nodes[:successor_index], prepared, successor_rewired, *state.nodes[successor_index + 1 :])
+    predecessor_edge = replace(direct_edge, to_node=prepared.id)
+    successor_edge = EdgeSpec(
+        id=new_edge_id,
+        from_node=prepared.id,
+        to_node=successor.id,
+        edge_type="on_success",
+        label=None,
+    )
+    edges = (*state.edges[:direct_edge_index], predecessor_edge, successor_edge, *state.edges[direct_edge_index + 1 :])
+    proposed = CompositionState(
+        sources=state.sources,
+        nodes=nodes,
+        edges=edges,
+        outputs=state.outputs,
+        metadata=state.metadata,
+        version=state.version,
+        guided_session=state.guided_session,
+    )
+    try:
+        reconciled = reconcile_authoritative_reviews(state, proposed)
+    except (KeyError, TypeError, ValueError):
+        return _failure_result(
+            state,
+            "Authoritative interpretation-review reconciliation failed. Re-inspect the pipeline and retry.",
+            error_code="review_reconciliation_failed",
+        )
+    review_contract_error = composition_review_contract_error(reconciled)
+    if review_contract_error is not None:
+        return _failure_result(state, review_contract_error)
+    profile_validation = context.catalog.validate_composition_state(reconciled)
+    if not profile_validation.validation.is_valid:
+        return _failure_result(
+            state,
+            "Spliced pipeline failed context-aware validation.",
+            error_code="splice_validation_failed",
+        )
+    new_state = replace(reconciled, version=state.version + 1)
+    return _mutation_result(
+        new_state,
+        (predecessor_id, prepared.id, successor.id),
+        data={
+            "already_applied": False,
+            "predecessor_id": predecessor_id,
+            "successor_id": successor.id,
+            "inserted_node_id": prepared.id,
+            "derived_connection": connection_name,
+            "replaced_edge_id": direct_edge.id,
+            "new_edge_id": new_edge_id,
+        },
+    )
 
 
 def _execute_upsert_edge(
@@ -964,6 +1371,7 @@ TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (
     _LIST_TRANSFORMS_DECLARATION,
     _LIST_SINKS_DECLARATION,
     _UPSERT_NODE_DECLARATION,
+    _SPLICE_TRANSFORM_DECLARATION,
     _UPSERT_EDGE_DECLARATION,
     _REMOVE_NODE_DECLARATION,
     _REMOVE_EDGE_DECLARATION,

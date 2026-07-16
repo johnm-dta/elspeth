@@ -529,7 +529,8 @@ class TestStep3DiscoveryTierMigration:
                         "description": (
                             "Optional: return only one component — 'source', a node ID, or an output name. "
                             "Accepted full-state aliases: omit component, pass 'full', 'all', 'pipeline', "
-                            "or pass the empty string."
+                            "or pass the empty string. Use 'set_pipeline_arguments' for the exact public "
+                            "payload accepted by set_pipeline; ordinary inspection output is diagnostic only."
                         ),
                     },
                 },
@@ -755,7 +756,7 @@ class TestStep3MutationTierMigration:
         mutations = [d for d in _REGISTERED_TOOLS if d.kind is ToolKind.MUTATION]
         for d in mutations:
             assert d.cacheable is False, f"{d.name} mutation must not be cacheable"
-        # Confirm we have all 14 standard mutations.
+        # Confirm we have all standard mutations.
         names = {d.name for d in mutations}
         expected = {
             "set_source",
@@ -772,6 +773,7 @@ class TestStep3MutationTierMigration:
             "set_pipeline",
             "clear_source",
             "apply_pipeline_recipe",
+            "splice_transform",
         }
         assert names == expected
 

@@ -488,6 +488,30 @@ def test_azure_effect_diverts_fixed_schema_extra_and_publishes_good_rows() -> No
     assert reconciled.diverted_ordinals == (1,)
 
 
+def test_s3_csv_effect_applies_display_headers_before_serialization() -> None:
+    """Custom display headers must not reject rows keyed by pipeline names (elspeth-3718ff4c28)."""
+    store = _S3Store()
+    sink = _s3(
+        store,
+        key="runs/{{ run_id }}/{{ timestamp }}/out.csv",
+        format="csv",
+        headers={"id": "ID", "name": "Name"},
+    )
+    members = (
+        _member(0, {"id": "1", "name": "Ada"}),
+        _member(1, {"id": "2", "name": "Grace"}),
+    )
+
+    plan = _prepare(sink, effect_id="5" * 64, current=members, target_snapshot=members)
+
+    assert plan.safe_evidence["accepted_ordinals"] == (0, 1)
+    assert plan.safe_evidence["diverted_ordinals"] == ()
+
+    sink.commit_effect(plan, _CTX)
+    assert store.value is not None
+    assert store.value.body.decode("utf-8") == "ID,Name\r\n1,Ada\r\n2,Grace\r\n"
+
+
 def test_remote_effect_evidence_rejects_missing_or_invalid_diversion_attribution() -> None:
     store = _S3Store()
     member = _member(0, {"id": "x" * 100})

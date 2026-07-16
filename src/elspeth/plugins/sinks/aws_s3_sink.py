@@ -503,8 +503,15 @@ def _serialize_rows_to_spool(
     fieldnames: Sequence[str],
     max_object_bytes: int,
     max_record_chars: int,
+    header_fields: Sequence[str] | None = None,
 ) -> _SerializedObject:
-    """Incrementally serialize rows into an owned, bounded 8 MiB spool."""
+    """Incrementally serialize rows into an owned, bounded 8 MiB spool.
+
+    ``fieldnames`` are the pipeline field names used to look up row values and
+    validate row shape. ``header_fields`` optionally supplies the display
+    labels written as the CSV header record (defaults to ``fieldnames``); rows
+    always stay keyed by pipeline names.
+    """
     body = cast(
         "BinaryIO",
         tempfile.SpooledTemporaryFile(max_size=_SPOOL_MEMORY_BYTES, mode="w+b"),  # noqa: SIM115 - ownership is returned
@@ -516,7 +523,7 @@ def _serialize_rows_to_spool(
             text_writer = _EncodedTextWriter(writer, csv_options.encoding)
             csv_writer = csv.writer(text_writer, delimiter=csv_options.delimiter, lineterminator="\r\n")
             if csv_options.include_header:
-                header_values = list(fieldnames)
+                header_values = list(fieldnames) if header_fields is None else list(header_fields)
                 if _csv_record_chars(header_values, csv_options.delimiter) > max_record_chars:
                     raise S3RecordSizeLimitError
                 csv_writer.writerow(header_values)
@@ -659,7 +666,7 @@ class AWSS3Sink(BaseSink):
     name = "aws_s3"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:913fabb42b3c197b"
+    source_file_hash: str | None = "sha256:8a3045dca771fd96"
     config_model = AWSS3SinkConfig
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"write"})
@@ -870,9 +877,10 @@ class AWSS3Sink(BaseSink):
             displayed_rows,
             format=self._format,
             csv_options=self._csv_options,
-            fieldnames=display_fields,
+            fieldnames=data_fields if self._format == "csv" else display_fields,
             max_object_bytes=self._max_object_bytes,
             max_record_chars=self._max_record_chars,
+            header_fields=display_fields if self._format == "csv" else None,
         )
 
         def chunks() -> Iterator[bytes]:

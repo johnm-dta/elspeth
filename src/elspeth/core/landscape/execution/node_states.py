@@ -940,26 +940,29 @@ class NodeStateRepository:
         enforce_group_id: bool,
     ) -> list[RoutingEvent]:
         """Return one complete retry, including compatible pre-stable-ID rows."""
+        expected_group_id = expected_events[0].routing_group_id
         durable_group_ids = {str(row.routing_group_id) for row in rows}
         if len(durable_group_ids) != 1:
             raise AuditIntegrityError(
                 f"Routing decision conflict for state={expected_events[0].state_id!r}: multiple durable routing groups exist"
             )
+        durable_group_id = next(iter(durable_group_ids))
         if len(rows) != len(expected_events):
             raise AuditIntegrityError(
                 f"Routing decision conflict for state={expected_events[0].state_id!r}: "
                 f"complete routing decision has {len(rows)} durable route(s), retry has {len(expected_events)}"
             )
 
-        # Before stable IDs, either identity could remain random when the
-        # caller supplied only the other one. Match omitted identities by the
-        # complete durable semantics; identities explicitly supplied by the
-        # caller remain strict. Fresh inserts enforce both on readback below.
+        # Before stable IDs, an omitted event identity could remain random when
+        # the caller supplied the group, or both identities could be random.
+        # A fully default row already in today's deterministic group must still
+        # carry today's deterministic event ID. Explicit identities are strict.
+        allow_legacy_event_identity = not enforce_event_ids and (enforce_group_id or durable_group_id != expected_group_id)
         loaded: list[RoutingEvent] = []
         for row, expected, run_id in zip(rows, expected_events, run_ids, strict=True):
             durable = self._routing_event_loader.load(row)
             identity_differs = (enforce_group_id and durable.routing_group_id != expected.routing_group_id) or (
-                enforce_event_ids and durable.event_id != expected.event_id
+                not allow_legacy_event_identity and durable.event_id != expected.event_id
             )
             content_differs = (
                 durable.state_id != expected.state_id

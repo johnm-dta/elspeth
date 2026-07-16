@@ -369,8 +369,11 @@ def prepare_remote_object(
     algorithm = _checksum_algorithm(checksum_algorithm)
     accepted = tuple(accepted_ordinals)
     diverted = tuple(diverted_ordinals)
-    initial_no_publication = not accepted and not exists and predecessor_descriptor is None
-    if initial_no_publication:
+    # A zero-accepted effect without a declared predecessor publishes nothing:
+    # staging an empty/header-only body here would conditionally REPLACE any
+    # object already at the target. Existing targets stay untouched.
+    virtual_no_publication = not accepted and predecessor_descriptor is None
+    if virtual_no_publication:
         path.unlink(missing_ok=True)
         staged_hash = hashlib.sha256(b"").hexdigest()
         staged_size = 0
@@ -390,7 +393,7 @@ def prepare_remote_object(
         size_bytes=staged_size,
     )
     inherited = predecessor_descriptor == descriptor
-    if initial_no_publication:
+    if virtual_no_publication:
         publication_kind = "virtual"
         descriptor_mode = SinkEffectDescriptorMode.NO_PUBLICATION
     elif inherited:
@@ -490,7 +493,14 @@ def validate_remote_plan(plan: SinkEffectPlan, *, provider: str, require_stage: 
 
 
 def remote_commit_result(plan: SinkEffectPlan, evidence: RemoteObjectPlanEvidence) -> SinkEffectCommitResult:
+    """Build the commit result and release the now-durable effect body spool.
+
+    Callers invoke this only after the provider has durably confirmed the
+    conditional write, so the effect-addressed stage has served its purpose
+    and is removed to keep ordinary batches from accumulating spool files.
+    """
     assert plan.expected_descriptor is not None
+    Path(evidence.staging_path).unlink(missing_ok=True)
     return SinkEffectCommitResult(
         descriptor=plan.expected_descriptor,
         evidence={
@@ -521,6 +531,11 @@ def reconcile_remote_observation(
     )
     if exact:
         assert plan.expected_descriptor is not None
+        # The remote object carries this exact effect's identity, so the
+        # durable body has been applied and its spool can be released. All
+        # other outcomes keep the stage: NOT_APPLIED may still commit, and
+        # UNKNOWN must preserve evidence for investigation.
+        Path(evidence.staging_path).unlink(missing_ok=True)
         return SinkEffectReconcileResult.applied(
             plan.expected_descriptor,
             evidence={"effect_id": plan.effect_id, "provider": evidence.provider, "reconciled": "exact_metadata"},

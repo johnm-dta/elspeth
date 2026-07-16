@@ -413,6 +413,49 @@ def test_initial_all_diverted_azure_effect_is_virtual_without_upload() -> None:
     assert [request["operation"] for request in store.requests] == ["properties"]
 
 
+def test_existing_target_all_diverted_s3_effect_is_virtual_without_replacement() -> None:
+    """Zero-accepted effects must never replace an existing object (elspeth-7b46cad846)."""
+    store = _S3Store()
+    existing_body = b'[{"id": "existing"}]'
+    store.value = _Object(existing_body, '"etag-existing"', {})
+    member = _member(0, {"id": "x" * 100})
+    sink = _s3(store, max_record_chars=10)
+
+    plan = _prepare(sink, effect_id="6" * 64, current=(member,), target_snapshot=(member,))
+
+    assert plan.descriptor_mode is SinkEffectDescriptorMode.NO_PUBLICATION
+    assert plan.safe_evidence["publication_kind"] == "virtual"
+    assert plan.safe_evidence["accepted_ordinals"] == ()
+    assert plan.safe_evidence["diverted_ordinals"] == (0,)
+    assert not Path(str(plan.safe_evidence["staging_path"])).exists()
+    assert [request["operation"] for request in store.requests] == ["head"]
+    assert store.value.body == existing_body
+
+
+def test_existing_target_all_diverted_azure_effect_is_virtual_without_replacement() -> None:
+    """Zero-accepted effects must never replace an existing blob (elspeth-7b46cad846)."""
+    store = _AzureStore()
+    existing_body = b'[{"id": "existing"}]'
+    store.value = _Object(existing_body, '"etag-existing"', {})
+    member = _member(0, {"id": 1, "name": "Ada", "extra": "divert"})
+    sink = _azure(
+        store,
+        format="csv",
+        blob_path="out.csv",
+        schema={"mode": "fixed", "fields": ["id: int", "name: str"]},
+    )
+
+    plan = _prepare(sink, effect_id="7" * 64, current=(member,), target_snapshot=(member,))
+
+    assert plan.descriptor_mode is SinkEffectDescriptorMode.NO_PUBLICATION
+    assert plan.safe_evidence["publication_kind"] == "virtual"
+    assert plan.safe_evidence["accepted_ordinals"] == ()
+    assert plan.safe_evidence["diverted_ordinals"] == (0,)
+    assert not Path(str(plan.safe_evidence["staging_path"])).exists()
+    assert [request["operation"] for request in store.requests] == ["properties"]
+    assert store.value.body == existing_body
+
+
 def test_azure_fresh_process_successor_and_response_loss_reconcile() -> None:
     store = _AzureStore()
     first_member = _member(0, {"id": 1})
@@ -488,6 +531,30 @@ def test_azure_effect_diverts_fixed_schema_extra_and_publishes_good_rows() -> No
     assert reconciled.diverted_ordinals == (1,)
 
 
+def test_s3_csv_effect_applies_display_headers_before_serialization() -> None:
+    """Custom display headers must not reject rows keyed by pipeline names (elspeth-3718ff4c28)."""
+    store = _S3Store()
+    sink = _s3(
+        store,
+        key="runs/{{ run_id }}/{{ timestamp }}/out.csv",
+        format="csv",
+        headers={"id": "ID", "name": "Name"},
+    )
+    members = (
+        _member(0, {"id": "1", "name": "Ada"}),
+        _member(1, {"id": "2", "name": "Grace"}),
+    )
+
+    plan = _prepare(sink, effect_id="5" * 64, current=members, target_snapshot=members)
+
+    assert plan.safe_evidence["accepted_ordinals"] == (0, 1)
+    assert plan.safe_evidence["diverted_ordinals"] == ()
+
+    sink.commit_effect(plan, _CTX)
+    assert store.value is not None
+    assert store.value.body.decode("utf-8") == "ID,Name\r\n1,Ada\r\n2,Grace\r\n"
+
+
 def test_remote_effect_evidence_rejects_missing_or_invalid_diversion_attribution() -> None:
     store = _S3Store()
     member = _member(0, {"id": "x" * 100})
@@ -542,6 +609,56 @@ def test_effect_plan_body_is_durable_and_not_process_local(tmp_path: Any, monkey
         assert isinstance(stream, io.BufferedReader)
         assert json.load(stream) == [{"id": 1}]
     assert "payload" not in plan.safe_evidence
+
+
+@pytest.mark.parametrize("factory", [_s3, _azure])
+def test_remote_commit_removes_effect_body_spool(factory: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Successful finalization must not leave body spools on disk (elspeth-6543d78f06)."""
+    monkeypatch.setenv("ELSPETH_EFFECT_SPOOL_DIR", str(tmp_path))
+    store = _S3Store() if factory is _s3 else _AzureStore()
+    member = _member(0, {"id": 1})
+    sink = factory(store)
+    plan = _prepare(sink, effect_id="a1" * 32, current=(member,), target_snapshot=(member,))
+    stage = Path(str(plan.safe_evidence["staging_path"]))
+    assert stage.exists()
+
+    sink.commit_effect(plan, _CTX)
+
+    assert store.value is not None
+    assert not stage.exists()
+
+
+def test_reconcile_applied_exact_removes_effect_body_spool(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reconciling an applied effect must clean its body spool (elspeth-6543d78f06)."""
+    monkeypatch.setenv("ELSPETH_EFFECT_SPOOL_DIR", str(tmp_path))
+    store = _S3Store()
+    member = _member(0, {"id": 1})
+    sink = _s3(store)
+    plan = _prepare(sink, effect_id="b2" * 32, current=(member,), target_snapshot=(member,))
+    stage = Path(str(plan.safe_evidence["staging_path"]))
+    store.response_loss = True
+    with pytest.raises(RuntimeError, match="outcome is unknown"):
+        sink.commit_effect(plan, _CTX)
+    assert stage.exists()
+
+    result = _s3(store).reconcile_effect(plan, _CTX)
+
+    assert result.kind is SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR
+    assert not stage.exists()
+
+
+def test_reconcile_not_applied_keeps_effect_body_spool_for_retry(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unapplied effect keeps its durable body so commit can still run (elspeth-6543d78f06)."""
+    monkeypatch.setenv("ELSPETH_EFFECT_SPOOL_DIR", str(tmp_path))
+    store = _S3Store()
+    member = _member(0, {"id": 1})
+    plan = _prepare(_s3(store), effect_id="c3" * 32, current=(member,), target_snapshot=(member,))
+    stage = Path(str(plan.safe_evidence["staging_path"]))
+
+    result = _s3(store).reconcile_effect(plan, _CTX)
+
+    assert result.kind is SinkEffectReconcileKind.NOT_APPLIED
+    assert stage.exists()
 
 
 @pytest.mark.parametrize("factory", [_s3, _azure])

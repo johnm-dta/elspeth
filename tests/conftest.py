@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Iterator
 
 import pytest
 from hypothesis import Phase, Verbosity, settings
@@ -133,6 +134,22 @@ def _allow_raw_secrets_in_tests(monkeypatch: pytest.MonkeyPatch) -> None:
     with FrameworkBugError.  This fixture ensures consistent behaviour.
     """
     monkeypatch.setenv("ELSPETH_ALLOW_RAW_SECRETS", "true")
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _sink_effect_spool_outside_repo(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Keep the default sink-effect spool out of the repository tree.
+
+    The remote-object spool defaults to the project-local
+    ``.elspeth/sink-effect-spool`` (CWD-relative), so tests that prepare
+    remote effects without an explicit override would otherwise write into
+    the checkout. Tests asserting spool behaviour still win: function-scoped
+    monkeypatch.setenv/delenv overrides this session-level default.
+    """
+    patch = pytest.MonkeyPatch()
+    patch.setenv("ELSPETH_EFFECT_SPOOL_DIR", str(tmp_path_factory.mktemp("sink-effect-spool")))
+    yield
+    patch.undo()
 
 
 @pytest.fixture(autouse=True)

@@ -3756,107 +3756,115 @@
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "0482adae841c56f9"
+      "fingerprint": "05675f6b3a099e42"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "3f1b2f884051106a"
+      "fingerprint": "2655942a98f6f55f"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "443f47e649dd3f7d"
+      "fingerprint": "32a28254972af4fb"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "46428f2c2f3da4c8"
+      "fingerprint": "341ca3311450f50c"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "4e8f83e6d9c1547b"
+      "fingerprint": "36b0aa5b3c3a898f"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "56d51fc1801c31cf"
+      "fingerprint": "40ddff942b80c339"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "595a0b2afb8ace7c"
+      "fingerprint": "4950082de4b75192"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "60d33e592acc0cb1"
+      "fingerprint": "4e73098f472f457d"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "65ffb58c681b4fde"
+      "fingerprint": "5398d2d6d398d109"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "6e4b51f741ef2029"
+      "fingerprint": "54ffed21b487f36a"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "74a4f0a0befd1101"
+      "fingerprint": "5533339c34245b5e"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "7b26a30cb64ee47a"
+      "fingerprint": "5e427954590b7a0b"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "8491bed8de3e730d"
+      "fingerprint": "639932f336a66e85"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "84cee227a7053a1c"
+      "fingerprint": "6cb166f53ca914cb"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "88a60ae16ff375ed"
+      "fingerprint": "71073ab9d45d9675"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "8bbb81da89106c71"
+      "fingerprint": "980251ed74211098"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "8c56f22974e1ea64"
+      "fingerprint": "a65ccd0ca565b19a"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "8cc494dff09c0e6e"
+      "fingerprint": "b4729dc0829703fd"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "90b6b35f008787b7"
+      "fingerprint": "ba1912705c61eb09"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "935e20afbbe647ea"
+      "fingerprint": "c650d23dd4982416"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "98cc311f28eb772b"
+      "fingerprint": "cdea04141f9ba602"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "b5eaed6e499bcd03"
+      "fingerprint": "d3f8cf20ac4ed62a"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "cb9a67aa94571a5f"
+      "fingerprint": "d8732f817b562eff"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "d4bc23aac09189f2"
+      "fingerprint": "e79ebd7bcb22a3fb"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "f459b865d8e10365"
+      "fingerprint": "f306054c5ae932fb"
     },
     {
       "file_path": "engine/executors/sink_effects.py",
-      "fingerprint": "fa3596f5117cc818"
+      "fingerprint": "f343c31da366ba5f"
+    },
+    {
+      "file_path": "engine/executors/sink_effects.py",
+      "fingerprint": "f3fe5892a899f28b"
+    },
+    {
+      "file_path": "engine/executors/sink_effects.py",
+      "fingerprint": "f6af15d582d96199"
     },
     {
       "file_path": "engine/executors/state_guard.py",
@@ -5172,6 +5180,10 @@
     },
     {
       "file_path": "plugins/sinks/aws_s3_sink.py",
+      "fingerprint": "0263ad5ae544f2f9"
+    },
+    {
+      "file_path": "plugins/sinks/aws_s3_sink.py",
       "fingerprint": "04736674b9378202"
     },
     {
@@ -5185,6 +5197,14 @@
     {
       "file_path": "plugins/sinks/aws_s3_sink.py",
       "fingerprint": "11a1b2567abd4165"
+    },
+    {
+      "file_path": "plugins/sinks/aws_s3_sink.py",
+      "fingerprint": "11a821ca76e6ded3"
+    },
+    {
+      "file_path": "plugins/sinks/aws_s3_sink.py",
+      "fingerprint": "11cf511b0fac142d"
     },
     {
       "file_path": "plugins/sinks/aws_s3_sink.py",
@@ -5244,10 +5264,6 @@
     },
     {
       "file_path": "plugins/sinks/aws_s3_sink.py",
-      "fingerprint": "4ce5469b98d87326"
-    },
-    {
-      "file_path": "plugins/sinks/aws_s3_sink.py",
       "fingerprint": "581964922a23516d"
     },
     {
@@ -5280,19 +5296,11 @@
     },
     {
       "file_path": "plugins/sinks/aws_s3_sink.py",
-      "fingerprint": "8509e7247fb59726"
-    },
-    {
-      "file_path": "plugins/sinks/aws_s3_sink.py",
       "fingerprint": "890c62f3e112a083"
     },
     {
       "file_path": "plugins/sinks/aws_s3_sink.py",
       "fingerprint": "8cc4c14aca8862bf"
-    },
-    {
-      "file_path": "plugins/sinks/aws_s3_sink.py",
-      "fingerprint": "8d423a068ea4c6f2"
     },
     {
       "file_path": "plugins/sinks/aws_s3_sink.py",
@@ -5308,6 +5316,10 @@
     },
     {
       "file_path": "plugins/sinks/aws_s3_sink.py",
+      "fingerprint": "9482fb45c811d7a5"
+    },
+    {
+      "file_path": "plugins/sinks/aws_s3_sink.py",
       "fingerprint": "96b313143217e481"
     },
     {
@@ -5320,7 +5332,15 @@
     },
     {
       "file_path": "plugins/sinks/aws_s3_sink.py",
+      "fingerprint": "992201f28fec3b9c"
+    },
+    {
+      "file_path": "plugins/sinks/aws_s3_sink.py",
       "fingerprint": "9967b9e24f84e311"
+    },
+    {
+      "file_path": "plugins/sinks/aws_s3_sink.py",
+      "fingerprint": "9a789e24703a421c"
     },
     {
       "file_path": "plugins/sinks/aws_s3_sink.py",
@@ -5336,19 +5356,11 @@
     },
     {
       "file_path": "plugins/sinks/aws_s3_sink.py",
-      "fingerprint": "a39693884d12f219"
-    },
-    {
-      "file_path": "plugins/sinks/aws_s3_sink.py",
-      "fingerprint": "a62e7294cf1dd6d3"
+      "fingerprint": "a39e7b532562d327"
     },
     {
       "file_path": "plugins/sinks/aws_s3_sink.py",
       "fingerprint": "a641669042670b39"
-    },
-    {
-      "file_path": "plugins/sinks/aws_s3_sink.py",
-      "fingerprint": "ab899e6014eff0b2"
     },
     {
       "file_path": "plugins/sinks/aws_s3_sink.py",
@@ -5388,11 +5400,7 @@
     },
     {
       "file_path": "plugins/sinks/aws_s3_sink.py",
-      "fingerprint": "d0ae810ed8174842"
-    },
-    {
-      "file_path": "plugins/sinks/aws_s3_sink.py",
-      "fingerprint": "d3a6bccc76f9ff26"
+      "fingerprint": "c83489695f34c69a"
     },
     {
       "file_path": "plugins/sinks/aws_s3_sink.py",
@@ -5401,10 +5409,6 @@
     {
       "file_path": "plugins/sinks/aws_s3_sink.py",
       "fingerprint": "da90900113c30ea1"
-    },
-    {
-      "file_path": "plugins/sinks/aws_s3_sink.py",
-      "fingerprint": "dbea89bb245f9a32"
     },
     {
       "file_path": "plugins/sinks/aws_s3_sink.py",
@@ -5441,6 +5445,10 @@
     {
       "file_path": "plugins/sinks/aws_s3_sink.py",
       "fingerprint": "fa85f29652f2ff43"
+    },
+    {
+      "file_path": "plugins/sinks/aws_s3_sink.py",
+      "fingerprint": "fafe55e9f8971ef2"
     },
     {
       "file_path": "plugins/sinks/azure_blob_sink.py",

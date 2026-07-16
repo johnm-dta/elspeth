@@ -661,6 +661,95 @@ def test_reconcile_not_applied_keeps_effect_body_spool_for_retry(tmp_path: Any, 
     assert stage.exists()
 
 
+def test_effect_spool_defaults_to_project_local_durable_root(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without an explicit override the spool must be co-durable with the
+    project state, not a /tmp directory that reboots and tmp-cleaners empty
+    while the PREPARED plan survives in the landscape DB (elspeth-501ce2e9e9)."""
+    monkeypatch.delenv("ELSPETH_EFFECT_SPOOL_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    store = _S3Store()
+    member = _member(0, {"id": 1})
+    plan = _prepare(_s3(store), effect_id="d4" * 32, current=(member,), target_snapshot=(member,))
+    stage = Path(str(plan.safe_evidence["staging_path"]))
+    assert stage.is_file()
+    assert (tmp_path / ".elspeth" / "sink-effect-spool").resolve() in stage.parents
+
+
+@pytest.mark.parametrize("factory", [_s3, _azure])
+def test_restage_rebuilds_missing_stage_for_commit(factory: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A lost staged body is re-derived from members and committed (elspeth-501ce2e9e9)."""
+    monkeypatch.setenv("ELSPETH_EFFECT_SPOOL_DIR", str(tmp_path))
+    store = _S3Store() if factory is _s3 else _AzureStore()
+    member = _member(0, {"id": 1})
+    sink = factory(store)
+    plan = _prepare(sink, effect_id="e5" * 32, current=(member,), target_snapshot=(member,))
+    stage = Path(str(plan.safe_evidence["staging_path"]))
+    stage.unlink()
+
+    effect_input = SinkEffectPipelineMembersInput(members=(member,), target_snapshot_members=(member,))
+    sink.restage_effect(plan, effect_input, _CTX)
+
+    assert stage.is_file()
+    sink.commit_effect(plan, _CTX)
+    assert store.value is not None
+    assert json.loads(store.value.body) == [{"id": 1}]
+
+
+def test_restage_leaves_present_stage_untouched(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Restage is repair, not re-preparation: a present stage short-circuits
+    before any re-serialization, so even divergent input cannot rewrite it."""
+    monkeypatch.setenv("ELSPETH_EFFECT_SPOOL_DIR", str(tmp_path))
+    store = _S3Store()
+    member = _member(0, {"id": 1})
+    sink = _s3(store)
+    plan = _prepare(sink, effect_id="f6" * 32, current=(member,), target_snapshot=(member,))
+    stage = Path(str(plan.safe_evidence["staging_path"]))
+    original = stage.read_bytes()
+
+    tampered = _member(0, {"id": 2})
+    sink.restage_effect(plan, SinkEffectPipelineMembersInput(members=(tampered,), target_snapshot_members=(tampered,)), _CTX)
+
+    assert stage.read_bytes() == original
+
+
+def test_restage_fails_closed_on_divergent_rederivation(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-derived bytes that do not hash to the plan's staged_hash must not be
+    committed: the stage stays absent and commit keeps failing closed."""
+    monkeypatch.setenv("ELSPETH_EFFECT_SPOOL_DIR", str(tmp_path))
+    store = _S3Store()
+    member = _member(0, {"id": 1})
+    sink = _s3(store)
+    plan = _prepare(sink, effect_id="a7" * 32, current=(member,), target_snapshot=(member,))
+    stage = Path(str(plan.safe_evidence["staging_path"]))
+    stage.unlink()
+
+    tampered = _member(0, {"id": 2})
+    with pytest.raises(remote_effects.RemoteObjectPreconditionError, match="diverges from the durable plan"):
+        sink.restage_effect(plan, SinkEffectPipelineMembersInput(members=(tampered,), target_snapshot_members=(tampered,)), _CTX)
+
+    assert not stage.exists()
+    with pytest.raises(remote_effects.RemoteObjectPreconditionError, match="body is unavailable"):
+        sink.commit_effect(plan, _CTX)
+    assert store.value is None
+
+
+def test_restage_fails_closed_on_divergent_partition(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A re-derivation whose accepted/diverted partition differs from the plan
+    is refused before any bytes are staged."""
+    monkeypatch.setenv("ELSPETH_EFFECT_SPOOL_DIR", str(tmp_path))
+    store = _S3Store()
+    sink = _s3(store, max_record_chars=50)
+    member = _member(0, {"id": 1})
+    plan = _prepare(sink, effect_id="b8" * 32, current=(member,), target_snapshot=(member,))
+    stage = Path(str(plan.safe_evidence["staging_path"]))
+    stage.unlink()
+
+    oversize = _member(0, {"id": "x" * 100})
+    with pytest.raises(remote_effects.RemoteObjectPreconditionError, match="partition diverges"):
+        sink.restage_effect(plan, SinkEffectPipelineMembersInput(members=(oversize,), target_snapshot_members=(oversize,)), _CTX)
+    assert not stage.exists()
+
+
 @pytest.mark.parametrize("factory", [_s3, _azure])
 def test_remote_sinks_have_no_process_local_publication_authority(factory: Any) -> None:
     store = _S3Store() if factory is _s3 else _AzureStore()

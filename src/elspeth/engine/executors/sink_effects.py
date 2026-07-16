@@ -119,6 +119,22 @@ class _MemberSinkEffectAdapter(_SinkEffectAdapter, Protocol):
     ) -> SinkEffectReconcileResult: ...
 
 
+class _RestagingSinkEffectAdapter(_SinkEffectAdapter, Protocol):
+    """Opt-in capability for sinks whose staged bodies live in a spool.
+
+    Spool files can be lost while the durable plan survives (reboot,
+    container restart, tmp-cleaner); restage re-derives the body from the
+    effect input and verifies it against the plan before commit runs.
+    """
+
+    def restage_effect(
+        self,
+        plan: SinkEffectPlan,
+        effect_input: SinkEffectPipelineMembersInput,
+        ctx: RestrictedSinkEffectContext,
+    ) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class SinkEffectExecutionRequest:
     """Complete caller-owned input needed to execute and finalize one effect."""
@@ -291,6 +307,15 @@ class SinkEffectCoordinator:
             self._fault(SinkEffectExecutionSeam.AFTER_FINALIZE_BEFORE_RESPONSE)
             return result
 
+        if self._is_restaging_adapter(sink, request.effect_input):
+            # Repair a spool-lost staged body from durable inputs before the
+            # commit attempt opens; a failed re-derivation is a local
+            # precondition failure and must not accrete attempt rows.
+            cast("_RestagingSinkEffectAdapter", sink).restage_effect(
+                plan,
+                cast("SinkEffectPipelineMembersInput", request.effect_input),
+                ctx,
+            )
         commit, commit_attempt_id = self._commit(plan, sink, ctx, lease)
         self._fault(SinkEffectExecutionSeam.AFTER_RETURN_BEFORE_FINALIZE)
         result = self._finalize(
@@ -307,6 +332,10 @@ class SinkEffectCoordinator:
         )
         self._fault(SinkEffectExecutionSeam.AFTER_FINALIZE_BEFORE_RESPONSE)
         return result
+
+    @staticmethod
+    def _is_restaging_adapter(sink: object, effect_input: object) -> bool:
+        return isinstance(effect_input, SinkEffectPipelineMembersInput) and callable(getattr(sink, "restage_effect", None))
 
     @staticmethod
     def _is_member_effect_adapter(sink: object, effect_input: object) -> bool:

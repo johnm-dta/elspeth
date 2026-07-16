@@ -59,6 +59,8 @@ from elspeth.plugins.sinks._remote_object_effects import (
     prepare_remote_object,
     reconcile_remote_observation,
     remote_commit_result,
+    remote_stage_missing,
+    restage_remote_object,
     validate_remote_plan,
 )
 
@@ -666,7 +668,7 @@ class AWSS3Sink(BaseSink):
     name = "aws_s3"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:8a3045dca771fd96"
+    source_file_hash: str | None = "sha256:1f34674910e495ab"
     config_model = AWSS3SinkConfig
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"write"})
@@ -861,15 +863,11 @@ class AWSS3Sink(BaseSink):
         ]
         return rows, tuple(accepted), tuple(diverted), tuple(diversion_attribution)
 
-    def prepare_effect(
+    def _staged_effect_body(
         self,
-        request: SinkEffectPrepareRequest,
-        ctx: RestrictedSinkEffectContext,
-    ) -> SinkEffectPlan:
-        del ctx
-        if type(request.effect_input) is not SinkEffectPipelineMembersInput:
-            raise TypeError("AWSS3Sink effects require pipeline member input")
-        rows, accepted, diverted, diversion_attribution = self._preflight_effect_members(request.effect_input)
+        effect_input: SinkEffectPipelineMembersInput,
+    ) -> tuple[Any, tuple[int, ...], tuple[int, ...], tuple[Any, ...]]:
+        rows, accepted, diverted, diversion_attribution = self._preflight_effect_members(effect_input)
         data_fields = self._get_fieldnames_from_schema_or_rows(rows)
         display_fields = self._display_fieldnames(data_fields)
         displayed_rows = apply_display_headers(self, rows) if self._format in {"json", "jsonl"} else rows
@@ -882,6 +880,17 @@ class AWSS3Sink(BaseSink):
             max_record_chars=self._max_record_chars,
             header_fields=display_fields if self._format == "csv" else None,
         )
+        return serialized, accepted, diverted, diversion_attribution
+
+    def prepare_effect(
+        self,
+        request: SinkEffectPrepareRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectPlan:
+        del ctx
+        if type(request.effect_input) is not SinkEffectPipelineMembersInput:
+            raise TypeError("AWSS3Sink effects require pipeline member input")
+        serialized, accepted, diverted, diversion_attribution = self._staged_effect_body(request.effect_input)
 
         def chunks() -> Iterator[bytes]:
             serialized.body.seek(0)
@@ -915,6 +924,42 @@ class AWSS3Sink(BaseSink):
                 predecessor_descriptor=predecessor,
                 checksum_algorithm="sha256",
                 diversion_attribution=diversion_attribution,
+            )
+        finally:
+            serialized.close()
+
+    def restage_effect(
+        self,
+        plan: SinkEffectPlan,
+        effect_input: SinkEffectPipelineMembersInput,
+        ctx: RestrictedSinkEffectContext,
+    ) -> None:
+        """Rebuild this plan's staged body if the spool lost it (repair only).
+
+        A present stage short-circuits before any re-serialization; a missing
+        one is re-derived from durable members and verified against the
+        plan-sealed staged hash, failing closed on divergence.
+        """
+        del ctx
+        if type(effect_input) is not SinkEffectPipelineMembersInput:
+            raise TypeError("AWSS3Sink effects require pipeline member input")
+        if not remote_stage_missing(plan, provider="aws_s3"):
+            return
+        serialized, accepted, diverted, _diversion_attribution = self._staged_effect_body(effect_input)
+
+        def chunks() -> Iterator[bytes]:
+            serialized.body.seek(0)
+            while chunk := serialized.body.read(_WRITE_CHUNK_BYTES):
+                yield chunk
+
+        try:
+            restage_remote_object(
+                plan,
+                provider="aws_s3",
+                body_chunks=chunks(),
+                max_bytes=self._max_object_bytes,
+                accepted_ordinals=accepted,
+                diverted_ordinals=diverted,
             )
         finally:
             serialized.close()

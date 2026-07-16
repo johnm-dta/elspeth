@@ -64,6 +64,8 @@ from elspeth.plugins.sinks._remote_object_effects import (
     prepare_remote_object,
     reconcile_remote_observation,
     remote_commit_result,
+    remote_stage_missing,
+    restage_remote_object,
     validate_remote_plan,
 )
 
@@ -338,7 +340,7 @@ class AzureBlobSink(BaseSink):
     name = "azure_blob"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:13fb018294a904dc"
+    source_file_hash: str | None = "sha256:5479c3a1e0e4d7ef"
     config_model = AzureBlobSinkConfig
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"write"})
@@ -601,6 +603,33 @@ class AzureBlobSink(BaseSink):
     @staticmethod
     def _is_conditional_failure(error: BaseException) -> bool:
         return type(error).__name__ in {"ResourceExistsError", "ResourceModifiedError"} or getattr(error, "status_code", None) in {409, 412}
+
+    def restage_effect(
+        self,
+        plan: SinkEffectPlan,
+        effect_input: SinkEffectPipelineMembersInput,
+        ctx: RestrictedSinkEffectContext,
+    ) -> None:
+        """Rebuild this plan's staged body if the spool lost it (repair only).
+
+        A present stage short-circuits before any re-serialization; a missing
+        one is re-derived from durable members and verified against the
+        plan-sealed staged hash, failing closed on divergence.
+        """
+        del ctx
+        if type(effect_input) is not SinkEffectPipelineMembersInput:
+            raise TypeError("AzureBlobSink effects require pipeline member input")
+        if not remote_stage_missing(plan, provider="azure_blob"):
+            return
+        rows, accepted, diverted, _diversion_attribution = self._preflight_effect_members(effect_input)
+        restage_remote_object(
+            plan,
+            provider="azure_blob",
+            body_chunks=(self._serialize_rows(rows),),
+            max_bytes=self._max_blob_bytes,
+            accepted_ordinals=accepted,
+            diverted_ordinals=diverted,
+        )
 
     def commit_effect(
         self,

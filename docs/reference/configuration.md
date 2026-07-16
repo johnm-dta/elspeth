@@ -1171,6 +1171,19 @@ coordinated lease/heartbeat policy. Do not raise staging or object limits by
 bypassing validation: split the workload or change the reviewed adapter
 contract.
 
+### Remote effect body spool
+
+S3 and Azure Blob effects stage their serialized bodies in a filesystem spool
+before the conditional publish. The location is `ELSPETH_EFFECT_SPOOL_DIR`
+when set, otherwise the project-local `.elspeth/sink-effect-spool/` (resolved
+against the working directory, like the audit-export spool). Place the spool
+on storage as durable as the landscape database — prepared plans reference
+their staged bodies across process restarts. A body lost anyway (reboot,
+tmp-cleaner) is re-derived from durable member payloads at commit time and
+verified against the plan's sealed hash; a divergent re-derivation fails
+closed. Do not repoint the spool while effects are in flight: plans seal their
+stage path and a moved spool fails closed until the location is restored.
+
 ### JSONL Change Journal
 
 Enable a redundant JSONL change journal for emergency backup. This is **not** the canonical audit record—use when you need a text-based, append-only backup stream.

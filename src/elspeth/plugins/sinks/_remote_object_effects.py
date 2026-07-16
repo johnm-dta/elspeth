@@ -271,7 +271,11 @@ def _spool_root() -> Path:
     configured = os.environ.get("ELSPETH_EFFECT_SPOOL_DIR")
     if configured:
         return Path(configured).resolve(strict=False)
-    return Path(tempfile.gettempdir()).joinpath("elspeth-sink-effects").resolve(strict=False)
+    # Staged bodies are referenced by durable PREPARED plans, so the spool
+    # must share the landscape DB's durability the way local-file sinks stage
+    # next to their targets. A gettempdir() spool loses parked bodies to
+    # reboots and /tmp age-cleaners while the plans that promise them survive.
+    return Path(".elspeth", "sink-effect-spool").resolve(strict=False)
 
 
 def _stage_path(effect_id: str, provider: str) -> Path:
@@ -492,6 +496,46 @@ def validate_remote_plan(plan: SinkEffectPlan, *, provider: str, require_stage: 
     return evidence, stage
 
 
+def remote_stage_missing(plan: SinkEffectPlan, *, provider: str) -> bool:
+    """Report whether the plan's effect-addressed staged body is absent."""
+    _evidence, stage = validate_remote_plan(plan, provider=provider, require_stage=False)
+    return not stage.is_file()
+
+
+def restage_remote_object(
+    plan: SinkEffectPlan,
+    *,
+    provider: str,
+    body_chunks: Iterable[bytes],
+    max_bytes: int,
+    accepted_ordinals: Sequence[int],
+    diverted_ordinals: Sequence[int],
+) -> None:
+    """Re-derive a lost staged body and verify it against the plan seal.
+
+    The spool is repairable state: member payloads persist durably in the
+    payload store and the plan seals the exact bytes it promised to publish
+    (staged hash, size, and checksum), so a body lost to a reboot or a
+    tmp-cleaner is rebuilt in place instead of wedging the stream on every
+    re-drive. A divergent re-derivation fails closed before any provider I/O
+    and leaves no stage behind.
+    """
+    evidence, stage = validate_remote_plan(plan, provider=provider, require_stage=False)
+    if stage.is_file():
+        return
+    if tuple(accepted_ordinals) != evidence.accepted_ordinals or tuple(diverted_ordinals) != evidence.diverted_ordinals:
+        raise RemoteObjectPreconditionError("re-derived member partition diverges from the durable plan")
+    staged_hash, staged_size, checksum_b64 = _write_stage(
+        path=stage,
+        chunks=body_chunks,
+        max_bytes=max_bytes,
+        checksum_algorithm=evidence.checksum_algorithm,
+    )
+    if staged_hash != evidence.staged_hash or staged_size != evidence.staged_size or checksum_b64 != evidence.checksum_b64:
+        stage.unlink(missing_ok=True)
+        raise RemoteObjectPreconditionError("re-derived remote object body diverges from the durable plan")
+
+
 def remote_commit_result(plan: SinkEffectPlan, evidence: RemoteObjectPlanEvidence) -> SinkEffectCommitResult:
     """Build the commit result and release the now-durable effect body spool.
 
@@ -572,5 +616,7 @@ __all__ = [
     "prepare_remote_object",
     "reconcile_remote_observation",
     "remote_commit_result",
+    "remote_stage_missing",
+    "restage_remote_object",
     "validate_remote_plan",
 ]

@@ -102,6 +102,17 @@ witnesses. A timeout after the request body was sent is response-lost, not
 `NOT_APPLIED`. Reconcile the exact key and planned content hash. Never turn a
 precondition failure into an unconditional overwrite.
 
+Remote effect bodies stage in a filesystem spool: `ELSPETH_EFFECT_SPOOL_DIR`
+when set, otherwise the project-local `.elspeth/sink-effect-spool/`. The spool
+must live on storage that shares the landscape DB's durability. A staged body
+lost to a reboot or cleaner is not fatal: before commit the coordinator
+re-derives it from durable member payloads and verifies it against the
+plan-sealed staged hash, failing closed if the re-derivation diverges. Do not
+change the spool location while effects are PREPARED but not FINALIZED — plans
+seal their effect-addressed stage path, so a moved spool fails closed with
+"stage is not the configured effect-addressed path" until the original
+location is restored.
+
 ### Database sinks
 
 Provision the adapter's target-side ledger and its uniqueness constraints with

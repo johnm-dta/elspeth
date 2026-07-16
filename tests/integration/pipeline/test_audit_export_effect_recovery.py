@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import cast
 from unittest.mock import patch
 
@@ -42,7 +42,7 @@ from elspeth.core.audit_export_content_store import FilesystemAuditExportContent
 from elspeth.core.config import AuditExportContentStoreSettings, LandscapeExportSettings
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.core.landscape.schema import audit_export_snapshots_table, runs_table
+from elspeth.core.landscape.schema import audit_export_snapshots_table, runs_table, sink_effects_table
 from elspeth.engine.executors.sink_effects import SinkEffectExecutionSeam, SinkEffectInjectedFault
 from elspeth.engine.orchestrator.audit_export_effects import execute_audit_export_effect, prepare_audit_export_snapshot
 from tests.fixtures.landscape import register_test_node
@@ -776,5 +776,204 @@ def test_csv_sink_recovers_exact_bundle_without_republication(
         assert (target / _audit_export_bundle_effects.AUDIT_MANIFEST_NAME).read_bytes() == snapshot.reader.read_verified_signed_manifest()
         assert publications == [target]
         assert result.artifact.path_or_uri.endswith("/audit-bundle")
+    finally:
+        db.close()
+
+
+def _resume_settings_bundle(sink_options: dict[str, object], config: LandscapeExportSettings) -> SimpleNamespace:
+    """Settings view carrying the exact export authority resume_audit_export reads."""
+    return SimpleNamespace(
+        sinks={"output": SimpleNamespace(options=dict(sink_options))},
+        landscape=SimpleNamespace(export=config),
+    )
+
+
+def _json_sink_factory(sink_options: dict[str, object]):  # type: ignore[no-untyped-def]
+    from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose, SinkEffectRuntimeBinding
+    from elspeth.plugins.sinks.json_sink import JSONSink
+
+    def factory(sink_name: str) -> SinkEffectRuntimeBinding:
+        sink = JSONSink(dict(sink_options))
+        return SinkEffectRuntimeBinding(
+            sink_name=sink_name,
+            sink=sink,
+            sink_type=JSONSink,
+            config_fingerprint=stable_hash(dict(sink_options)),
+            purpose=SinkEffectExecutionPurpose.AUDIT_EXPORT,
+            effect_mode=JSONSink._resolve_sink_effect_mode(
+                dict(sink_options),
+                purpose=SinkEffectExecutionPurpose.AUDIT_EXPORT,
+            ),
+        )
+
+    return factory
+
+
+def _set_export_status_row(db: LandscapeDB, run_id: str, status: str | None, error: str | None = None) -> None:
+    with db.engine.begin() as connection:
+        connection.execute(runs_table.update().where(runs_table.c.run_id == run_id).values(export_status=status, export_error=error))
+
+
+def test_resume_audit_export_recovers_lost_publication_response_end_to_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """elspeth-8fd1f415b9: a completed run whose export crashed mid-publication
+    (export PENDING/FAILED, effect PREPARED/IN_FLIGHT) is recoverable through
+    the production resume driver: the snapshot winner is reused, the durable
+    effect is reconciled without republication, and export status converges
+    to COMPLETED."""
+    from elspeth.contracts import ExportStatus
+    from elspeth.engine.orchestrator.export import resume_audit_export
+    from elspeth.plugins.sinks import _local_file_effects
+
+    monkeypatch.chdir(tmp_path)
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'resume-driver.db'}")
+    store = _MemoryContentStore()
+    resolver = AuditExportContentStoreResolver()
+    resolver.register(store)
+    try:
+        _insert_terminal_run(db)
+        # The crashed original attempt left the export marked PENDING.
+        _set_export_status_row(db, "run-export", "pending")
+
+        output = tmp_path / "audit.jsonl"
+        sink_options: dict[str, object] = {
+            "path": str(output),
+            "format": "jsonl",
+            "mode": "write",
+            "schema": {"mode": "observed"},
+        }
+        settings = _resume_settings_bundle(sink_options, _config())
+        sink_factory = _json_sink_factory(sink_options)
+
+        # Attempt 1: the publication lands durably but the response is lost.
+        def lose_response(_target: Path) -> None:
+            raise RuntimeError("publication response lost")
+
+        monkeypatch.setattr(_local_file_effects, "_after_replace", lose_response)
+        with pytest.raises(RuntimeError, match="publication response lost"):
+            resume_audit_export(
+                db,
+                "run-export",
+                settings,
+                sink_factory,
+                payload_store=object(),
+                audit_export_content_store=store,
+                audit_export_content_store_resolver=resolver,
+                worker_id="audit-export-resume-worker-1",
+            )
+
+        run = RecorderFactory(db).run_lifecycle.get_run("run-export")
+        assert run is not None
+        assert run.export_status is ExportStatus.FAILED
+        assert run.export_error is not None and "publication response lost" in run.export_error
+
+        # The crashed worker never released its effect lease; model the
+        # production recovery window by letting the lease lapse (a live lease
+        # correctly refuses takeover — SinkEffectPredecessorPending).
+        with db.engine.begin() as connection:
+            connection.execute(
+                sink_effects_table.update()
+                .where(sink_effects_table.c.run_id == "run-export")
+                .values(
+                    lease_expires_at=datetime(2020, 1, 1, tzinfo=UTC),
+                    lease_heartbeat_at=datetime(2020, 1, 1, tzinfo=UTC),
+                )
+            )
+
+        # Attempt 2: resume reconciles the applied effect without republishing.
+        republications: list[Path] = []
+        monkeypatch.setattr(_local_file_effects, "_after_replace", lambda path: republications.append(path))
+        resume_audit_export(
+            db,
+            "run-export",
+            settings,
+            sink_factory,
+            payload_store=object(),
+            audit_export_content_store=store,
+            audit_export_content_store_resolver=resolver,
+            worker_id="audit-export-resume-worker-2",
+        )
+
+        run = RecorderFactory(db).run_lifecycle.get_run("run-export")
+        assert run is not None
+        assert run.export_status is ExportStatus.COMPLETED
+        assert republications == [], "reconciled effect must not republish"
+        snapshot = prepare_audit_export_snapshot(
+            db,
+            run_id="run-export",
+            config=_config(),
+            signing_key=None,
+            content_store=store,
+            content_store_resolver=resolver,
+        )
+        expected = b"".join(snapshot.reader.iter_verified_chunks()) + snapshot.reader.read_verified_signed_manifest()
+        assert output.read_bytes() == expected
+    finally:
+        db.close()
+
+
+def test_resume_audit_export_refuses_ineligible_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail closed: resume refuses missing runs, non-export-terminal runs, and
+    already-completed exports before any mutation or publication."""
+    from elspeth.engine.orchestrator.export import resume_audit_export
+
+    monkeypatch.chdir(tmp_path)
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'resume-refusals.db'}")
+    store = _MemoryContentStore()
+    resolver = AuditExportContentStoreResolver()
+    resolver.register(store)
+    sink_options: dict[str, object] = {
+        "path": str(tmp_path / "audit.jsonl"),
+        "format": "jsonl",
+        "mode": "write",
+        "schema": {"mode": "observed"},
+    }
+    settings = _resume_settings_bundle(sink_options, _config())
+    sink_factory = _json_sink_factory(sink_options)
+
+    def attempt(run_id: str) -> None:
+        resume_audit_export(
+            db,
+            run_id,
+            settings,
+            sink_factory,
+            payload_store=object(),
+            audit_export_content_store=store,
+            audit_export_content_store_resolver=resolver,
+            worker_id="audit-export-resume-worker",
+        )
+
+    try:
+        with pytest.raises(ValueError, match="not found"):
+            attempt("run-missing")
+
+        with db.engine.begin() as connection:
+            connection.execute(
+                runs_table.insert().values(
+                    run_id="run-running",
+                    started_at=_COMPLETED_AT,
+                    completed_at=None,
+                    config_hash="0" * 64,
+                    settings_json="{}",
+                    canonical_version="v1",
+                    status="running",
+                    openrouter_catalog_sha256="1" * 64,
+                    openrouter_catalog_source="bundled",
+                )
+            )
+        with pytest.raises(ValueError, match="export-terminal"):
+            attempt("run-running")
+
+        _insert_terminal_run(db, "run-export-done")
+        _set_export_status_row(db, "run-export-done", "completed")
+        with pytest.raises(ValueError, match="already completed"):
+            attempt("run-export-done")
+
+        assert store.put_count == 0, "refusals must precede any content-store write"
     finally:
         db.close()

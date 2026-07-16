@@ -261,3 +261,99 @@ def export_landscape(
         )
     finally:
         sink.close()
+
+
+def audit_export_resume_refusal(run: object | None, run_id: str) -> str | None:
+    """Return why ``run`` cannot have its audit export resumed, or None if it can.
+
+    Fail-closed eligibility gate shared by :func:`resume_audit_export` and its
+    production drivers (elspeth-8fd1f415b9): resume applies only to runs that
+    are immutable export-terminal and whose export has not already completed.
+    """
+    from elspeth.contracts import ExportStatus
+    from elspeth.core.landscape.export_read_model import _EXPORT_TERMINAL
+
+    if run is None:
+        return f"run {run_id!r} not found in the audit database"
+    status = run.status  # type: ignore[attr-defined]
+    if status not in _EXPORT_TERMINAL:
+        return f"run {run_id!r} has status {status.value!r}, which is not export-terminal; audit export resume requires a finalized run"
+    if run.export_status is ExportStatus.COMPLETED:  # type: ignore[attr-defined]
+        return f"run {run_id!r} audit export already completed; refusing to re-run publication"
+    return None
+
+
+def resume_audit_export(
+    db: LandscapeDB,
+    run_id: str,
+    settings: ElspethSettings,
+    sink_factory: Callable[[str], SinkEffectRuntimeBinding],
+    *,
+    payload_store: PayloadStore,
+    audit_export_content_store: AuditExportContentStore,
+    audit_export_content_store_resolver: AuditExportContentStoreResolver,
+    worker_id: str,
+) -> None:
+    """Resume audit-export recovery for a finalized run (elspeth-8fd1f415b9).
+
+    Production driver for the window after run finalization where a crash or
+    transient target failure left the run's export PENDING/FAILED (or unset)
+    and its durable sink effect PREPARED/IN_FLIGHT. Re-drives the export
+    pipeline: the immutable snapshot winner is reused (never re-derived), the
+    deterministic export node registration is idempotent, and
+    SinkEffectCoordinator reconciles the durable effect so publication happens
+    exactly once.
+
+    Mirrors ``RunLifecycleCoordinator.execute_export_phase`` status semantics:
+    export status transitions PENDING -> COMPLETED on success and
+    PENDING -> FAILED (with the error recorded) on failure.
+
+    Raises:
+        ValueError: If export is not enabled, the run does not exist, the run
+            is not export-terminal, or its export already completed.
+        Exception: Re-raises any export failure after recording FAILED status.
+    """
+    from elspeth.contracts import ExportStatus
+    from elspeth.core.landscape.factory import RecorderFactory
+    from elspeth.engine._best_effort import best_effort
+
+    export_config = settings.landscape.export
+    if not export_config.enabled:
+        raise ValueError("audit export is not enabled in settings; nothing to resume")
+
+    factory = RecorderFactory(db, payload_store=payload_store)
+    run = factory.run_lifecycle.get_run(run_id)
+    refusal = audit_export_resume_refusal(run, run_id)
+    if refusal is not None:
+        raise ValueError(refusal)
+
+    factory.run_lifecycle.set_export_status(
+        run_id,
+        status=ExportStatus.PENDING,
+        export_format=export_config.format,
+        export_sink=export_config.sink,
+    )
+    try:
+        export_landscape(
+            db,
+            run_id,
+            settings,
+            sink_factory,
+            payload_store=payload_store,
+            audit_export_content_store=audit_export_content_store,
+            audit_export_content_store_resolver=audit_export_content_store_resolver,
+            worker_id=worker_id,
+        )
+    except Exception as export_error:
+        with best_effort(
+            "Export status FAILED recording on resume",
+            run_id=run_id,
+            original_error=type(export_error).__name__,
+        ):
+            factory.run_lifecycle.set_export_status(
+                run_id,
+                status=ExportStatus.FAILED,
+                error=str(export_error),
+            )
+        raise
+    factory.run_lifecycle.set_export_status(run_id, status=ExportStatus.COMPLETED)

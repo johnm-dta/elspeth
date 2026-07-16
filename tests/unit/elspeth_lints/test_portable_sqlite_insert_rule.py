@@ -90,6 +90,103 @@ def test_both_dialect_branches_without_postgresql_insert_import_are_rejected() -
     assert len(findings) == 1
 
 
+def test_postgresql_branch_invoking_sqlite_builder_is_rejected() -> None:
+    findings = _analyze(
+        """
+        from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        def write(conn, table, values):
+            dialect = conn.dialect.name
+            if dialect == "sqlite":
+                stmt = sqlite_insert(table).values(**values)
+            elif dialect == "postgresql":
+                stmt = sqlite_insert(table).values(**values)
+            else:
+                raise NotImplementedError(dialect)
+            return conn.execute(stmt)
+        """
+    )
+
+    assert len(findings) == 1
+    assert findings[0].rule_id == "contract_invariants.portable_sqlite_insert"
+    assert findings[0].line == 10
+    assert "postgresql" in findings[0].message
+    assert "sqlite_insert" in findings[0].message
+
+
+def test_sqlite_branch_invoking_postgresql_builder_is_rejected() -> None:
+    findings = _analyze(
+        """
+        from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        def write(conn, table, values):
+            dialect = conn.dialect.name
+            if dialect == "sqlite":
+                stmt = postgresql_insert(table).values(**values)
+            elif dialect == "postgresql":
+                stmt = postgresql_insert(table).values(**values)
+            else:
+                raise NotImplementedError(dialect)
+            return conn.execute(stmt)
+        """
+    )
+
+    assert len(findings) == 1
+    assert findings[0].line == 8
+    assert "sqlite" in findings[0].message
+    assert "postgresql_insert" in findings[0].message
+
+
+def test_misbound_branches_report_each_wrong_call() -> None:
+    findings = _analyze(
+        """
+        from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        def write(conn, table, values):
+            dialect = conn.dialect.name
+            if dialect == "sqlite":
+                stmt = postgresql_insert(table).values(**values)
+            elif dialect == "postgresql":
+                stmt = sqlite_insert(table).values(**values)
+            else:
+                raise NotImplementedError(dialect)
+            return conn.execute(stmt)
+        """
+    )
+
+    assert len(findings) == 2
+    assert [finding.line for finding in findings] == [8, 10]
+
+
+def test_branch_local_builder_imports_bound_to_their_branches_are_accepted() -> None:
+    findings = _analyze(
+        """
+        def resolve(engine, table, values):
+            dialect = engine.dialect.name
+            if dialect == "sqlite":
+                from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+                def build(table, values):
+                    return sqlite_insert(table).values(**values)
+
+                return build
+            if dialect == "postgresql":
+                from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+
+                def build(table, values):
+                    return postgresql_insert(table).values(**values)
+
+                return build
+            raise NotImplementedError(dialect)
+        """
+    )
+
+    assert findings == []
+
+
 def test_unrelated_sqlite_import_is_accepted() -> None:
     findings = _analyze(
         """

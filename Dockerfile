@@ -114,8 +114,13 @@ WORKDIR /app
 # Create standard mount point directories
 # These will typically be mounted from host
 # /app/state is for the default audit.db location (sqlite:///./state/audit.db)
-RUN mkdir -p /app/config /app/input /app/output /app/state /app/secrets && \
+RUN mkdir -p /app/config /app/input /app/ops /app/output /app/state /app/secrets && \
     chown -R elspeth:elspeth /app
+
+# Versioned, one-shot schema command used only by the release deployment task.
+# Runtime database URLs remain environment-only and are never baked into the
+# image. No other repository scripts are copied into the runtime stage.
+COPY --chown=elspeth:elspeth scripts/migrate_release_0_7_1_aws_ecs_schema.py /app/ops/migrate_release_0_7_1_aws_ecs_schema.py
 
 # Switch to non-root user
 USER elspeth

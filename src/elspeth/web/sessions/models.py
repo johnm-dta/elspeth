@@ -13,6 +13,7 @@ Landscape audit database.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal
 
 from sqlalchemy import (
@@ -1008,6 +1009,167 @@ skill_markdown_history_table = Table(
     Column("first_seen_at", DateTime(timezone=True), nullable=False),
 )
 
+
+@dataclass(frozen=True, slots=True)
+class PostgresqlAuditDDL:
+    """One immutable PostgreSQL audit-trigger installation unit."""
+
+    table: Table
+    trigger_name: str
+    function_name: str
+    function_sql: str
+    trigger_sql: str
+
+
+# This tuple is the sole authority for the PostgreSQL audit DDL installed by
+# both fresh metadata bootstrap and the release-0.7.1 one-shot migration.  Use
+# CREATE FUNCTION rather than CREATE OR REPLACE: both supported callers prove
+# the functions absent before installation, so replacement would only hide an
+# unrecognized mixed state.
+POSTGRESQL_AUDIT_DDL_COHORT: tuple[PostgresqlAuditDDL, ...] = (
+    PostgresqlAuditDDL(
+        table=interpretation_events_table,
+        trigger_name="trg_interpretation_events_immutable_resolved",
+        function_name="elspeth_interpretation_events_immutable_resolved",
+        function_sql="""
+        CREATE FUNCTION elspeth_interpretation_events_immutable_resolved()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF OLD.resolved_at IS NOT NULL AND (
+            NEW.accepted_value IS DISTINCT FROM OLD.accepted_value OR
+            NEW.resolved_at IS DISTINCT FROM OLD.resolved_at OR
+            NEW.actor IS DISTINCT FROM OLD.actor OR
+            NEW.choice IS DISTINCT FROM OLD.choice
+          ) THEN
+            RAISE EXCEPTION 'interpretation_events: resolved rows are immutable'
+              USING ERRCODE = '23000';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """,
+        trigger_sql=(
+            "CREATE TRIGGER trg_interpretation_events_immutable_resolved "
+            "BEFORE UPDATE ON interpretation_events "
+            "FOR EACH ROW EXECUTE FUNCTION elspeth_interpretation_events_immutable_resolved()"
+        ),
+    ),
+    PostgresqlAuditDDL(
+        table=interpretation_events_table,
+        trigger_name="trg_interpretation_events_no_delete_resolved",
+        function_name="elspeth_interpretation_events_no_delete_resolved",
+        function_sql="""
+        CREATE FUNCTION elspeth_interpretation_events_no_delete_resolved()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF OLD.resolved_at IS NOT NULL
+             AND EXISTS (SELECT 1 FROM sessions WHERE sessions.id = OLD.session_id) THEN
+            RAISE EXCEPTION 'interpretation_events: resolved rows are append-only'
+              USING ERRCODE = '23000';
+          END IF;
+          RETURN OLD;
+        END;
+        $$
+        """,
+        trigger_sql=(
+            "CREATE TRIGGER trg_interpretation_events_no_delete_resolved "
+            "BEFORE DELETE ON interpretation_events "
+            "FOR EACH ROW EXECUTE FUNCTION elspeth_interpretation_events_no_delete_resolved()"
+        ),
+    ),
+    PostgresqlAuditDDL(
+        table=composer_completion_events_table,
+        trigger_name="trg_composer_completion_events_no_update",
+        function_name="elspeth_composer_completion_events_no_update",
+        function_sql="""
+        CREATE FUNCTION elspeth_composer_completion_events_no_update()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          RAISE EXCEPTION 'composer_completion_events is append-only; UPDATE is forbidden'
+            USING ERRCODE = '23000';
+        END;
+        $$
+        """,
+        trigger_sql=(
+            "CREATE TRIGGER trg_composer_completion_events_no_update "
+            "BEFORE UPDATE ON composer_completion_events "
+            "FOR EACH ROW EXECUTE FUNCTION elspeth_composer_completion_events_no_update()"
+        ),
+    ),
+    PostgresqlAuditDDL(
+        table=composer_completion_events_table,
+        trigger_name="trg_composer_completion_events_no_delete",
+        function_name="elspeth_composer_completion_events_no_delete",
+        function_sql="""
+        CREATE FUNCTION elspeth_composer_completion_events_no_delete()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          RAISE EXCEPTION 'composer_completion_events is append-only; DELETE is forbidden'
+            USING ERRCODE = '23000';
+        END;
+        $$
+        """,
+        trigger_sql=(
+            "CREATE TRIGGER trg_composer_completion_events_no_delete "
+            "BEFORE DELETE ON composer_completion_events "
+            "FOR EACH ROW EXECUTE FUNCTION elspeth_composer_completion_events_no_delete()"
+        ),
+    ),
+    PostgresqlAuditDDL(
+        table=chat_messages_table,
+        trigger_name="trg_chat_messages_immutable_content",
+        function_name="elspeth_chat_messages_immutable_content",
+        function_sql="""
+        CREATE FUNCTION elspeth_chat_messages_immutable_content()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          RAISE EXCEPTION 'chat_messages.content is append-only'
+            USING ERRCODE = '23000';
+        END;
+        $$
+        """,
+        trigger_sql=(
+            "CREATE TRIGGER trg_chat_messages_immutable_content "
+            "BEFORE UPDATE OF content ON chat_messages "
+            "FOR EACH ROW EXECUTE FUNCTION elspeth_chat_messages_immutable_content()"
+        ),
+    ),
+    PostgresqlAuditDDL(
+        table=chat_messages_table,
+        trigger_name="trg_chat_messages_no_delete",
+        function_name="elspeth_chat_messages_no_delete",
+        function_sql="""
+        CREATE FUNCTION elspeth_chat_messages_no_delete()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM sessions WHERE id = OLD.session_id) THEN
+            RAISE EXCEPTION 'chat_messages rows are append-only'
+              USING ERRCODE = '23000';
+          END IF;
+          RETURN OLD;
+        END;
+        $$
+        """,
+        trigger_sql=(
+            "CREATE TRIGGER trg_chat_messages_no_delete "
+            "BEFORE DELETE ON chat_messages "
+            "FOR EACH ROW EXECUTE FUNCTION elspeth_chat_messages_no_delete()"
+        ),
+    ),
+)
+
 # F-4 / F-23 — append-only triggers.
 #
 # ``trg_interpretation_events_immutable_resolved`` protects the audit
@@ -1067,42 +1229,6 @@ event.listen(
     interpretation_events_table,
     "after_create",
     DDL(  # type: ignore[no-untyped-call]
-        """
-        CREATE OR REPLACE FUNCTION elspeth_interpretation_events_immutable_resolved()
-        RETURNS trigger
-        LANGUAGE plpgsql
-        AS $$
-        BEGIN
-          IF OLD.resolved_at IS NOT NULL AND (
-            NEW.accepted_value IS DISTINCT FROM OLD.accepted_value OR
-            NEW.resolved_at IS DISTINCT FROM OLD.resolved_at OR
-            NEW.actor IS DISTINCT FROM OLD.actor OR
-            NEW.choice IS DISTINCT FROM OLD.choice
-          ) THEN
-            RAISE EXCEPTION 'interpretation_events: resolved rows are immutable'
-              USING ERRCODE = '23000';
-          END IF;
-          RETURN NEW;
-        END;
-        $$
-        """
-    ).execute_if(dialect="postgresql"),
-)
-
-event.listen(
-    interpretation_events_table,
-    "after_create",
-    DDL(  # type: ignore[no-untyped-call]
-        "CREATE TRIGGER trg_interpretation_events_immutable_resolved "
-        "BEFORE UPDATE ON interpretation_events "
-        "FOR EACH ROW EXECUTE FUNCTION elspeth_interpretation_events_immutable_resolved()"
-    ).execute_if(dialect="postgresql"),
-)
-
-event.listen(
-    interpretation_events_table,
-    "after_create",
-    DDL(  # type: ignore[no-untyped-call]
         "CREATE TRIGGER IF NOT EXISTS trg_interpretation_events_no_delete_resolved "
         "BEFORE DELETE ON interpretation_events "
         "FOR EACH ROW "
@@ -1112,38 +1238,6 @@ event.listen(
         "  SELECT RAISE(ABORT, 'interpretation_events: resolved rows are append-only'); "
         "END;"
     ).execute_if(dialect="sqlite"),
-)
-
-event.listen(
-    interpretation_events_table,
-    "after_create",
-    DDL(  # type: ignore[no-untyped-call]
-        """
-        CREATE OR REPLACE FUNCTION elspeth_interpretation_events_no_delete_resolved()
-        RETURNS trigger
-        LANGUAGE plpgsql
-        AS $$
-        BEGIN
-          IF OLD.resolved_at IS NOT NULL
-             AND EXISTS (SELECT 1 FROM sessions WHERE sessions.id = OLD.session_id) THEN
-            RAISE EXCEPTION 'interpretation_events: resolved rows are append-only'
-              USING ERRCODE = '23000';
-          END IF;
-          RETURN OLD;
-        END;
-        $$
-        """
-    ).execute_if(dialect="postgresql"),
-)
-
-event.listen(
-    interpretation_events_table,
-    "after_create",
-    DDL(  # type: ignore[no-untyped-call]
-        "CREATE TRIGGER trg_interpretation_events_no_delete_resolved "
-        "BEFORE DELETE ON interpretation_events "
-        "FOR EACH ROW EXECUTE FUNCTION elspeth_interpretation_events_no_delete_resolved()"
-    ).execute_if(dialect="postgresql"),
 )
 
 # Phase 6A — completion-event triggers.
@@ -1172,68 +1266,12 @@ event.listen(
     composer_completion_events_table,
     "after_create",
     DDL(  # type: ignore[no-untyped-call]
-        """
-        CREATE OR REPLACE FUNCTION elspeth_composer_completion_events_no_update()
-        RETURNS trigger
-        LANGUAGE plpgsql
-        AS $$
-        BEGIN
-          RAISE EXCEPTION 'composer_completion_events is append-only; UPDATE is forbidden'
-            USING ERRCODE = '23000';
-        END;
-        $$
-        """
-    ).execute_if(dialect="postgresql"),
-)
-
-event.listen(
-    composer_completion_events_table,
-    "after_create",
-    DDL(  # type: ignore[no-untyped-call]
-        "CREATE TRIGGER trg_composer_completion_events_no_update "
-        "BEFORE UPDATE ON composer_completion_events "
-        "FOR EACH ROW EXECUTE FUNCTION elspeth_composer_completion_events_no_update()"
-    ).execute_if(dialect="postgresql"),
-)
-
-event.listen(
-    composer_completion_events_table,
-    "after_create",
-    DDL(  # type: ignore[no-untyped-call]
         "CREATE TRIGGER IF NOT EXISTS trg_composer_completion_events_no_delete "
         "BEFORE DELETE ON composer_completion_events "
         "BEGIN "
         "  SELECT RAISE(ABORT, 'composer_completion_events is append-only; DELETE is forbidden'); "
         "END;"
     ).execute_if(dialect="sqlite"),
-)
-
-event.listen(
-    composer_completion_events_table,
-    "after_create",
-    DDL(  # type: ignore[no-untyped-call]
-        """
-        CREATE OR REPLACE FUNCTION elspeth_composer_completion_events_no_delete()
-        RETURNS trigger
-        LANGUAGE plpgsql
-        AS $$
-        BEGIN
-          RAISE EXCEPTION 'composer_completion_events is append-only; DELETE is forbidden'
-            USING ERRCODE = '23000';
-        END;
-        $$
-        """
-    ).execute_if(dialect="postgresql"),
-)
-
-event.listen(
-    composer_completion_events_table,
-    "after_create",
-    DDL(  # type: ignore[no-untyped-call]
-        "CREATE TRIGGER trg_composer_completion_events_no_delete "
-        "BEFORE DELETE ON composer_completion_events "
-        "FOR EACH ROW EXECUTE FUNCTION elspeth_composer_completion_events_no_delete()"
-    ).execute_if(dialect="postgresql"),
 )
 
 event.listen(
@@ -1252,34 +1290,6 @@ event.listen(
     chat_messages_table,
     "after_create",
     DDL(  # type: ignore[no-untyped-call]
-        """
-        CREATE OR REPLACE FUNCTION elspeth_chat_messages_immutable_content()
-        RETURNS trigger
-        LANGUAGE plpgsql
-        AS $$
-        BEGIN
-          RAISE EXCEPTION 'chat_messages.content is append-only'
-            USING ERRCODE = '23000';
-        END;
-        $$
-        """
-    ).execute_if(dialect="postgresql"),
-)
-
-event.listen(
-    chat_messages_table,
-    "after_create",
-    DDL(  # type: ignore[no-untyped-call]
-        "CREATE TRIGGER trg_chat_messages_immutable_content "
-        "BEFORE UPDATE OF content ON chat_messages "
-        "FOR EACH ROW EXECUTE FUNCTION elspeth_chat_messages_immutable_content()"
-    ).execute_if(dialect="postgresql"),
-)
-
-event.listen(
-    chat_messages_table,
-    "after_create",
-    DDL(  # type: ignore[no-untyped-call]
         "CREATE TRIGGER IF NOT EXISTS trg_chat_messages_no_delete "
         "BEFORE DELETE ON chat_messages "
         "FOR EACH ROW "
@@ -1290,36 +1300,17 @@ event.listen(
     ).execute_if(dialect="sqlite"),
 )
 
-event.listen(
-    chat_messages_table,
-    "after_create",
-    DDL(  # type: ignore[no-untyped-call]
-        """
-        CREATE OR REPLACE FUNCTION elspeth_chat_messages_no_delete()
-        RETURNS trigger
-        LANGUAGE plpgsql
-        AS $$
-        BEGIN
-          IF EXISTS (SELECT 1 FROM sessions WHERE id = OLD.session_id) THEN
-            RAISE EXCEPTION 'chat_messages rows are append-only'
-              USING ERRCODE = '23000';
-          END IF;
-          RETURN OLD;
-        END;
-        $$
-        """
-    ).execute_if(dialect="postgresql"),
-)
-
-event.listen(
-    chat_messages_table,
-    "after_create",
-    DDL(  # type: ignore[no-untyped-call]
-        "CREATE TRIGGER trg_chat_messages_no_delete "
-        "BEFORE DELETE ON chat_messages "
-        "FOR EACH ROW EXECUTE FUNCTION elspeth_chat_messages_no_delete()"
-    ).execute_if(dialect="postgresql"),
-)
+for postgresql_audit_ddl in POSTGRESQL_AUDIT_DDL_COHORT:
+    event.listen(
+        postgresql_audit_ddl.table,
+        "after_create",
+        DDL(postgresql_audit_ddl.function_sql).execute_if(dialect="postgresql"),  # type: ignore[no-untyped-call]
+    )
+    event.listen(
+        postgresql_audit_ddl.table,
+        "after_create",
+        DDL(postgresql_audit_ddl.trigger_sql).execute_if(dialect="postgresql"),  # type: ignore[no-untyped-call]
+    )
 
 runs_table = Table(
     "runs",

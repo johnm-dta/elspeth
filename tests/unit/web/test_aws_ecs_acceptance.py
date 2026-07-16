@@ -34,6 +34,7 @@ from elspeth.contracts.sink_effects import (
 )
 from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH
 from elspeth.web import aws_ecs_acceptance as acceptance
+from elspeth.web.sessions.models import SESSION_SCHEMA_EPOCH
 
 EXPECTED_COMMANDS = {
     "capture",
@@ -5309,7 +5310,7 @@ def test_compatibility_record_is_bound_to_resolved_scenario_and_stored_by_hash(t
         "previous_package_version": "0.7.0",
         "schema_facts": {
             "candidate": {
-                "session_epoch": 27,
+                "session_epoch": SESSION_SCHEMA_EPOCH,
                 "landscape_epoch": SQLITE_SCHEMA_EPOCH,
                 "run_web_plugin_policy_present": True,
             },
@@ -5318,7 +5319,9 @@ def test_compatibility_record_is_bound_to_resolved_scenario_and_stored_by_hash(t
                 "landscape_epoch": 23,
                 "run_web_plugin_policy_present": True,
             },
-            "structural_changes": "landscape_epoch_23_to_25_token_ownership_and_artifact_idempotency",
+            "structural_changes": (
+                "landscape_epoch_23_to_27_token_ownership_artifact_idempotency_sink_effect_ledger_and_coalesce_receipts"
+            ),
             "semantics_only_changes": "none",
             "archive_export_decision": "required_before_forward_migration",
             "destructive_reset_required": False,
@@ -5373,7 +5376,12 @@ def test_compatibility_record_is_bound_to_resolved_scenario_and_stored_by_hash(t
         (("previous_image_digest",), "sha256:" + "f" * 64),
         (("previous_package_version",), "0.7.1"),
         (("schema_facts", "candidate", "landscape_epoch"), 22),
+        (("schema_facts", "candidate", "session_epoch"), SESSION_SCHEMA_EPOCH - 1),
         (("schema_facts", "previous", "session_epoch"), 26),
+        (
+            ("schema_facts", "structural_changes"),
+            "landscape_epoch_23_to_25_token_ownership_and_artifact_idempotency",
+        ),
     ):
         mutated = json.loads(json.dumps(record))
         target = mutated
@@ -5402,6 +5410,29 @@ def test_compatibility_record_is_bound_to_resolved_scenario_and_stored_by_hash(t
     assert receipt["approvals_present"] is True
     assert receipt["previous_package_version"] == "0.7.0"
     assert "database-operator" not in json.dumps(receipt)
+
+
+def test_compatibility_schema_facts_track_current_epochs() -> None:
+    """Regression: elspeth-7f4c87b341 — the compatibility validators must demand
+    the CURRENT candidate epochs and a migration label naming the current
+    landscape epoch, so truthful facts are accepted and a future epoch bump
+    fails here instead of silently requiring a false attestation."""
+    facts = acceptance._expected_schema_facts("B")
+    candidate = facts["candidate"]
+    assert isinstance(candidate, dict)
+    assert candidate["session_epoch"] == SESSION_SCHEMA_EPOCH
+    assert candidate["landscape_epoch"] == SQLITE_SCHEMA_EPOCH
+    previous = facts["previous"]
+    assert isinstance(previous, dict)
+    label = facts["structural_changes"]
+    assert isinstance(label, str)
+    # The migration label must span the pinned rollback baseline to the
+    # current landscape epoch; an epoch bump without a label update is drift.
+    assert label.startswith(f"landscape_epoch_{previous['landscape_epoch']}_to_{SQLITE_SCHEMA_EPOCH}_")
+    facts_a = acceptance._expected_schema_facts("A")
+    assert facts_a["previous"] is None
+    assert facts_a["structural_changes"] == "initial_create"
+    assert facts_a["archive_export_decision"] == "not_applicable"
 
 
 def test_receipt_store_rejects_unprotected_or_raw_secret_shaped_documents(tmp_path: Path) -> None:

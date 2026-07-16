@@ -92,6 +92,7 @@ from elspeth.web.plugin_policy.availability import build_plugin_snapshot
 from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
 from elspeth.web.plugin_policy.models import PluginId
 from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
+from elspeth.web.sessions.models import SESSION_SCHEMA_EPOCH
 
 _METRIC_NAME = "operator.acceptance.sentinel"
 _TRACE_NAMES = ("RunStarted", "RunFinished")
@@ -361,6 +362,45 @@ _TERMINAL_GATE_CHECK_ID = "cleanup"
 _APPLICATION_SCENARIO_IDS = frozenset({"A", "B"})
 _CANDIDATE_PACKAGE_VERSION = "0.7.1"
 _ROLLBACK_PACKAGE_VERSION = "0.7.0"
+# Facts pinned to the Scenario B rollback baseline (the 0.7.0 image), and the
+# behaviour-named structural migration from that baseline to the current
+# landscape epoch. The label is deliberately a literal: it must be rewritten —
+# not silently renumbered — whenever SQLITE_SCHEMA_EPOCH moves, and
+# test_compatibility_schema_facts_track_current_epochs enforces that.
+_ROLLBACK_BASELINE_SESSION_EPOCH = 27
+_ROLLBACK_BASELINE_LANDSCAPE_EPOCH = 23
+_SCENARIO_B_STRUCTURAL_CHANGES = "landscape_epoch_23_to_27_token_ownership_artifact_idempotency_sink_effect_ledger_and_coalesce_receipts"
+
+
+def _expected_schema_facts(scenario_id: str) -> dict[str, object]:
+    """Truthful release/schema facts the compatibility authority must attest.
+
+    Candidate facts track the live schema-epoch constants so the validators
+    always demand the current build's truth; previous facts are pinned to the
+    Scenario B rollback baseline.
+    """
+    return {
+        "candidate": {
+            "session_epoch": SESSION_SCHEMA_EPOCH,
+            "landscape_epoch": SQLITE_SCHEMA_EPOCH,
+            "run_web_plugin_policy_present": True,
+        },
+        "previous": (
+            {
+                "session_epoch": _ROLLBACK_BASELINE_SESSION_EPOCH,
+                "landscape_epoch": _ROLLBACK_BASELINE_LANDSCAPE_EPOCH,
+                "run_web_plugin_policy_present": True,
+            }
+            if scenario_id == "B"
+            else None
+        ),
+        "structural_changes": (_SCENARIO_B_STRUCTURAL_CHANGES if scenario_id == "B" else "initial_create"),
+        "semantics_only_changes": "none",
+        "archive_export_decision": ("required_before_forward_migration" if scenario_id == "B" else "not_applicable"),
+        "destructive_reset_required": False,
+    }
+
+
 _INFRASTRUCTURE_APPROVAL_SCOPES = frozenset({"A", "B", "bootstrap"})
 SCENARIO_ASSIGNMENT_NAMES = (
     "ACTIVE_SCENARIO_ID",
@@ -7758,28 +7798,7 @@ def validate_compatibility_record(
     baseline_tag = ecr["baseline_tag"] if scenario_id == "B" else ""
     baseline_match = re.search(r"baseline-([0-9a-f]{40})$", cast(str, baseline_tag)) if baseline_tag else None
     previous_source_sha = baseline_match.group(1) if baseline_match is not None else ""
-    expected_schema_facts = {
-        "candidate": {
-            "session_epoch": 27,
-            "landscape_epoch": SQLITE_SCHEMA_EPOCH,
-            "run_web_plugin_policy_present": True,
-        },
-        "previous": (
-            {
-                "session_epoch": 27,
-                "landscape_epoch": 23,
-                "run_web_plugin_policy_present": True,
-            }
-            if scenario_id == "B"
-            else None
-        ),
-        "structural_changes": (
-            "landscape_epoch_23_to_25_token_ownership_and_artifact_idempotency" if scenario_id == "B" else "initial_create"
-        ),
-        "semantics_only_changes": "none",
-        "archive_export_decision": "required_before_forward_migration" if scenario_id == "B" else "not_applicable",
-        "destructive_reset_required": False,
-    }
+    expected_schema_facts = _expected_schema_facts(scenario_id)
     if (
         record["acceptance_run_id"] != manifest["acceptance_run_id"]
         or record["scenario_id"] != scenario_id
@@ -7928,28 +7947,7 @@ def _validate_compatibility_receipt(
         or any(type(payload[field]) is not bool for field in ("backward_compatible", "rollback_permitted"))
     ):
         raise AcceptanceCheckError("receipt_store_schema")
-    expected_schema_facts = {
-        "candidate": {
-            "session_epoch": 27,
-            "landscape_epoch": SQLITE_SCHEMA_EPOCH,
-            "run_web_plugin_policy_present": True,
-        },
-        "previous": (
-            {
-                "session_epoch": 27,
-                "landscape_epoch": 23,
-                "run_web_plugin_policy_present": True,
-            }
-            if scenario_id == "B"
-            else None
-        ),
-        "structural_changes": (
-            "landscape_epoch_23_to_25_token_ownership_and_artifact_idempotency" if scenario_id == "B" else "initial_create"
-        ),
-        "semantics_only_changes": "none",
-        "archive_export_decision": "required_before_forward_migration" if scenario_id == "B" else "not_applicable",
-        "destructive_reset_required": False,
-    }
+    expected_schema_facts = _expected_schema_facts(scenario_id)
     if payload["schema_facts"] != expected_schema_facts:
         raise AcceptanceCheckError("receipt_store_binding")
     _control_timestamp(payload["expires_at"])

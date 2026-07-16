@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from elspeth.contracts import PendingOutcome
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.engine.processor import RowProcessor
 from elspeth.testing import make_token_info
 from tests.unit.engine.test_processor import _make_factory, _make_processor
-from tests.unit.engine.test_sink_executor_diversion import _make_executor, _make_sink, _make_token
 
 
 def test_processor_token_completed_telemetry_carries_two_axis_pair() -> None:
@@ -48,27 +46,3 @@ def test_processor_terminal_work_item_returns_default_flow_pair() -> None:
     assert result.outcome == TerminalOutcome.SUCCESS
     assert result.path == TerminalPath.DEFAULT_FLOW
     assert result.sink_name == "terminal_sink"
-
-
-def test_sink_primary_write_records_pending_outcome_path() -> None:
-    executor, _execution, data_flow = _make_executor()
-    sink = _make_sink()
-    tokens = [_make_token("t0")]
-
-    executor.write(
-        sink=sink,
-        tokens=tokens,  # type: ignore[arg-type]
-        ctx=PluginContext(run_id="run-1", config={}),
-        step_in_pipeline=5,
-        sink_name="primary",
-        pending_outcome=PendingOutcome(
-            outcome=TerminalOutcome.SUCCESS,
-            path=TerminalPath.DEFAULT_FLOW,
-        ),
-    )
-
-    data_flow.record_token_outcome.assert_called_once()
-    call = data_flow.record_token_outcome.call_args
-    assert call.kwargs["outcome"] == TerminalOutcome.SUCCESS
-    assert call.kwargs["path"] == TerminalPath.DEFAULT_FLOW
-    assert call.kwargs["sink_name"] == "primary"

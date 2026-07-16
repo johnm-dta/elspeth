@@ -52,6 +52,9 @@ from elspeth.core.landscape.model_loaders import (
     NodeStateLoader,
     OperationLoader,
     RoutingEventLoader,
+    SinkEffectLoader,
+    SinkEffectMemberLoader,
+    SinkEffectStreamLoader,
 )
 from elspeth.core.landscape.schema import node_states_table, routing_events_table
 from elspeth.core.payload_store import FilesystemPayloadStore
@@ -87,6 +90,9 @@ def _make_repo(
         batch_loader=BatchLoader(),
         batch_member_loader=BatchMemberLoader(),
         artifact_loader=ArtifactLoader(),
+        sink_effect_loader=SinkEffectLoader(),
+        sink_effect_member_loader=SinkEffectMemberLoader(),
+        sink_effect_stream_loader=SinkEffectStreamLoader(),
         payload_store=payload_store,
     )
     factory = make_factory(db)

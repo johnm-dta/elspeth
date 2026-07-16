@@ -201,11 +201,7 @@ def _freeze_runtime_val_registries_before_begin_run(monkeypatch: pytest.MonkeyPa
         from elspeth.contracts import ResolvedSinkEffectMode, SinkEffectExecutionPurpose
         from elspeth.engine.orchestrator import PipelineConfig
 
-        if (
-            not isinstance(config, PipelineConfig)
-            or config.sink_effect_modes
-            or not all(type(sink).__module__.startswith("tests.") for sink in config.sinks.values())
-        ):
+        if not isinstance(config, PipelineConfig) or config.sink_effect_modes:
             return config
         modes: dict[str, str] = {}
         for sink_name, sink in config.sinks.items():
@@ -213,6 +209,8 @@ def _freeze_runtime_val_registries_before_begin_run(monkeypatch: pytest.MonkeyPa
             if resolver is None:
                 continue
             resolved = resolver(dict(sink.config), purpose=SinkEffectExecutionPurpose.FRESH)
+            if resolved is None:
+                continue
             if not isinstance(resolved, ResolvedSinkEffectMode):
                 raise TypeError("test sink effect resolver must return ResolvedSinkEffectMode")
             modes[sink_name] = resolved.value

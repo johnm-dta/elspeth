@@ -50,9 +50,42 @@ CREATE TABLE tokens_epoch_23 (
 )
 """
 
+_LEGACY_OPERATIONS_DDL = """
+CREATE TABLE operations_epoch_25 (
+    operation_id VARCHAR(64) NOT NULL PRIMARY KEY,
+    run_id VARCHAR(64) NOT NULL REFERENCES runs(run_id),
+    node_id VARCHAR(64) NOT NULL,
+    operation_type VARCHAR(32) NOT NULL,
+    started_at DATETIME NOT NULL,
+    completed_at DATETIME,
+    status VARCHAR(16) NOT NULL,
+    input_data_ref VARCHAR(256), input_data_hash VARCHAR(64),
+    output_data_ref VARCHAR(256), output_data_hash VARCHAR(64),
+    error_message TEXT, duration_ms FLOAT,
+    FOREIGN KEY(node_id, run_id) REFERENCES nodes(node_id, run_id)
+)
+"""
+
+_LEGACY_ARTIFACTS_DDL = """
+CREATE TABLE artifacts_epoch_25 (
+    artifact_id VARCHAR(64) NOT NULL PRIMARY KEY,
+    run_id VARCHAR(64) NOT NULL REFERENCES runs(run_id),
+    produced_by_state_id VARCHAR(64) NOT NULL,
+    sink_node_id VARCHAR(64) NOT NULL,
+    artifact_type VARCHAR(64) NOT NULL,
+    path_or_uri VARCHAR(512) NOT NULL,
+    content_hash VARCHAR(64) NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    idempotency_key VARCHAR(256),
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY(produced_by_state_id, run_id) REFERENCES node_states(state_id, run_id),
+    FOREIGN KEY(sink_node_id, run_id) REFERENCES nodes(node_id, run_id)
+)
+"""
+
 
 def _rewrite_tokens_as_epoch_23(engine: Engine) -> None:
-    """Rebuild only ``tokens`` into the predecessor shape and stamp epoch 23."""
+    """Rebuild the current schema into the genuine epoch-23 predecessor."""
     raw = engine.raw_connection()
     try:
         cursor = raw.cursor()
@@ -78,6 +111,48 @@ def _rewrite_tokens_as_epoch_23(engine: Engine) -> None:
         cursor.execute("CREATE INDEX ix_tokens_expand_group_id ON tokens (expand_group_id)")
         cursor.execute("CREATE INDEX ix_tokens_row_id ON tokens (row_id)")
         cursor.execute("CREATE INDEX ix_tokens_run_id ON tokens (run_id)")
+
+        cursor.execute(_LEGACY_OPERATIONS_DDL)
+        cursor.execute(
+            """
+            INSERT INTO operations_epoch_25
+            SELECT operation_id, run_id, node_id, operation_type, started_at,
+                   completed_at, status, input_data_ref, input_data_hash,
+                   output_data_ref, output_data_hash, error_message, duration_ms
+            FROM operations
+            """
+        )
+        cursor.execute("DROP TABLE operations")
+        cursor.execute("ALTER TABLE operations_epoch_25 RENAME TO operations")
+        cursor.execute("CREATE INDEX ix_operations_node_run ON operations(node_id, run_id)")
+        cursor.execute("CREATE INDEX ix_operations_run_id ON operations(run_id)")
+
+        cursor.execute(_LEGACY_ARTIFACTS_DDL)
+        cursor.execute(
+            """
+            INSERT INTO artifacts_epoch_25
+            SELECT artifact_id, run_id, produced_by_state_id, sink_node_id,
+                   artifact_type, path_or_uri, content_hash, size_bytes,
+                   idempotency_key, created_at
+            FROM artifacts
+            """
+        )
+        cursor.execute("DROP TABLE artifacts")
+        cursor.execute("ALTER TABLE artifacts_epoch_25 RENAME TO artifacts")
+        cursor.execute("CREATE INDEX ix_artifacts_run ON artifacts(run_id)")
+
+        cursor.execute("DROP INDEX IF EXISTS uq_runs_export_witness")
+        cursor.execute("DROP INDEX IF EXISTS uq_tokens_identity_row_run")
+        for table_name in (
+            "sink_effect_attempts",
+            "sink_effect_export_snapshots",
+            "sink_effect_members",
+            "sink_effects",
+            "sink_effect_streams",
+            "audit_export_snapshot_chunks",
+            "audit_export_snapshots",
+        ):
+            cursor.execute(f"DROP TABLE {table_name}")
         cursor.execute("DROP INDEX IF EXISTS uq_artifacts_run_idempotency_key")
         cursor.execute("PRAGMA user_version = 23")
         raw.commit()
@@ -297,7 +372,7 @@ def _injected_migration_db(
 
 
 def test_current_epoch_preserves_epoch_24_token_row_run_ownership_for_sqlite_and_postgres() -> None:
-    assert SQLITE_SCHEMA_EPOCH == 25
+    assert SQLITE_SCHEMA_EPOCH == 26
     assert (
         "tokens",
         ("row_id", "run_id"),
@@ -366,7 +441,7 @@ def test_epoch_23_database_migrates_atomically_and_matches_fresh_schema(tmp_path
     migrated = LandscapeDB.from_url(migrated_url)
     try:
         with migrated.engine.connect() as conn:
-            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 25
+            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 26
             token_row = conn.exec_driver_sql(
                 "SELECT row_id, run_id FROM tokens WHERE token_id = ?",
                 (token_id,),
@@ -447,7 +522,7 @@ def test_epoch_23_concurrent_openers_handle_predecessor_validation_race(
         assert errors == []
         assert len(opened) == 2
         with opened[0].engine.connect() as conn:
-            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 25
+            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 26
         assert _token_row_run_fk(opened[0].engine) == [("row_id", "row_id"), ("run_id", "run_id")]
     finally:
         for db in opened:
@@ -473,7 +548,7 @@ def test_epoch_23_migration_succeeds_with_single_connection_queue_pool(tmp_path:
     try:
         assert isinstance(migrated.engine.pool, QueuePool)
         with migrated.engine.connect() as conn:
-            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 25
+            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 26
         assert _token_row_run_fk(migrated.engine) == [("row_id", "row_id"), ("run_id", "run_id")]
     finally:
         migrated.close()

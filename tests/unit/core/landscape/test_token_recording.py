@@ -1031,6 +1031,7 @@ class TestRecordTokenOutcomeAtomicity:
             sink_node_id: str | None,
             artifact_id: str | None,
             conn: Connection | None = None,
+            lock_witnesses: bool = True,
         ) -> None:
             invariant_connections.append(conn)
             original_invariants(
@@ -1041,6 +1042,7 @@ class TestRecordTokenOutcomeAtomicity:
                 sink_node_id=sink_node_id,
                 artifact_id=artifact_id,
                 conn=conn,
+                lock_witnesses=lock_witnesses,
             )
 
         monkeypatch.setattr(outcomes._ownership, "validate_token_run_ownership", capture_ownership)
@@ -1083,6 +1085,7 @@ class TestRecordTokenOutcomeAtomicity:
             sink_node_id: str | None,
             artifact_id: str | None,
             conn: Connection | None = None,
+            lock_witnesses: bool = True,
         ) -> None:
             original_invariants(
                 ref,
@@ -1092,6 +1095,7 @@ class TestRecordTokenOutcomeAtomicity:
                 sink_node_id=sink_node_id,
                 artifact_id=artifact_id,
                 conn=conn,
+                lock_witnesses=lock_witnesses,
             )
             mutation = (
                 update(node_states_table)
@@ -1146,6 +1150,7 @@ class TestRecordTokenOutcomeAtomicity:
             sink_node_id: str | None,
             artifact_id: str | None,
             conn: Connection | None = None,
+            lock_witnesses: bool = True,
         ) -> None:
             seen_connections.append(conn)
             original_invariants(
@@ -1156,6 +1161,7 @@ class TestRecordTokenOutcomeAtomicity:
                 sink_node_id=sink_node_id,
                 artifact_id=artifact_id,
                 conn=conn,
+                lock_witnesses=lock_witnesses,
             )
 
         monkeypatch.setattr(outcomes, "_validate_cross_table_invariants", capture_invariants)

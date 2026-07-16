@@ -478,8 +478,20 @@ class LandscapeExporter:
                 signer_key_id=signer_key_id,
                 signing_key=signing_key,
             )
-        elif derivation_config.source_run_id != run_id:
-            raise ValueError("derivation config source_run_id does not match requested run")
+        else:
+            # An explicitly supplied config (per-call or instance-level) must
+            # agree with the caller's sign request in BOTH directions
+            # (elspeth-f7d63e2d56): an unsigned config must not silently
+            # downgrade sign=True, and an HMAC config must not silently sign
+            # a sign=False export. Publication integrity fails closed.
+            if derivation_config.source_run_id != run_id:
+                raise ValueError("derivation config source_run_id does not match requested run")
+            expected_signing_mode = "hmac_sha256" if sign else "unsigned"
+            if derivation_config.signing_mode != expected_signing_mode:
+                raise ValueError(
+                    f"derivation config signing_mode {derivation_config.signing_mode!r} contradicts the "
+                    f"requested export (sign={sign} requires signing_mode {expected_signing_mode!r})"
+                )
         return derivation_config
 
     def iter_unsigned_run_records(self, run_id: str) -> Iterator[ExportRecord]:

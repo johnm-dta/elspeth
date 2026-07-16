@@ -1101,6 +1101,112 @@ class TestExportRunStreaming:
 
 
 # ===========================================================================
+# derivation config vs sign request (elspeth-f7d63e2d56)
+# ===========================================================================
+
+
+def _make_derivation_config(
+    *,
+    signing_mode: str,
+    signer_key_id: str,
+    signing_key: bytes | None,
+    source_run_id: str = "run-1",
+) -> Any:
+    from elspeth.contracts.audit_export import (
+        AUDIT_EXPORT_SERIALIZATION_VERSION,
+        AuditExportDerivationConfig,
+    )
+
+    return AuditExportDerivationConfig(
+        source_run_id=source_run_id,
+        source_status="completed",
+        source_completed_at="2026-01-15T13:00:00.000000Z",
+        export_format="json",
+        exporter_version="landscape-exporter-v1",
+        serialization_version=AUDIT_EXPORT_SERIALIZATION_VERSION,
+        chunking_algorithm_version="record-framing-v1",
+        include_raw_error_rows=False,
+        per_chunk_byte_limit=64 * 1024 * 1024,
+        per_chunk_record_limit=1_000_000,
+        signing_mode=signing_mode,  # type: ignore[arg-type]
+        signer_key_id=signer_key_id,
+        signing_key=signing_key,
+    )
+
+
+def _unsigned_config() -> Any:
+    return _make_derivation_config(signing_mode="unsigned", signer_key_id="UNSIGNED", signing_key=None)
+
+
+def _hmac_config() -> Any:
+    return _make_derivation_config(signing_mode="hmac_sha256", signer_key_id="explicit-signer-v1", signing_key=b"explicit-key")
+
+
+class TestDerivationConfigSignEnforcement:
+    """An explicit derivation config must never override the sign request.
+
+    Regression lock for elspeth-f7d63e2d56: only source_run_id was checked,
+    so an unsigned config silently downgraded sign=True exports and an HMAC
+    config silently signed sign=False exports — in a publication-integrity
+    surface, both directions must fail closed instead.
+    """
+
+    def test_sign_true_with_unsigned_config_fails_closed(self) -> None:
+        exporter = _make_exporter(signing_key=b"test-key")
+        with pytest.raises(ValueError, match="signing_mode"):
+            exporter.derive_run_bundle("run-1", sign=True, derivation_config=_unsigned_config())
+
+    def test_sign_false_with_hmac_config_fails_closed(self) -> None:
+        exporter = _make_exporter()
+        with pytest.raises(ValueError, match="signing_mode"):
+            exporter.derive_run_bundle("run-1", sign=False, derivation_config=_hmac_config())
+
+    def test_export_run_sign_false_with_instance_hmac_config_fails_closed(self) -> None:
+        """The public iterator must not silently emit signed records."""
+        exporter = LandscapeExporter(
+            _fake_landscape_db(),
+            read_model=_make_export_read_model(),
+            derivation_config=_hmac_config(),
+        )
+        with pytest.raises(ValueError, match="signing_mode"):
+            list(exporter.export_run("run-1"))
+
+    def test_export_run_sign_true_with_instance_unsigned_config_fails_closed(self) -> None:
+        exporter = LandscapeExporter(
+            _fake_landscape_db(),
+            signing_key=b"test-key",
+            signer_key_id="test-signer-v1",
+            read_model=_make_export_read_model(),
+            derivation_config=_unsigned_config(),
+        )
+        with pytest.raises(ValueError, match="signing_mode"):
+            list(exporter.export_run("run-1", sign=True))
+
+    def test_matching_unsigned_config_still_exports(self) -> None:
+        exporter = _make_exporter()
+        bundle = exporter.derive_run_bundle("run-1", sign=False, derivation_config=_unsigned_config())
+        assert bundle.final_manifest["signature"] is None
+        assert "signature" not in bundle.record_objects[0]
+
+    def test_matching_hmac_config_still_exports(self) -> None:
+        exporter = _make_exporter(signing_key=b"test-key")
+        bundle = exporter.derive_run_bundle("run-1", sign=True, derivation_config=_hmac_config())
+        assert bundle.final_manifest["signature"] is not None
+        assert "signature" in bundle.record_objects[0]
+
+    def test_mismatched_source_run_id_still_fails_closed(self) -> None:
+        exporter = _make_exporter()
+        config = _make_derivation_config(
+            signing_mode="unsigned",
+            signer_key_id="UNSIGNED",
+            signing_key=None,
+            source_run_id="other-run",
+        )
+        with pytest.raises(ValueError, match="source_run_id"):
+            exporter.derive_run_bundle("run-1", sign=False, derivation_config=config)
+
+
+# ===========================================================================
 # export_run — deep-thawed JSON-lines output (elspeth-9f8a0e61a6)
 # ===========================================================================
 

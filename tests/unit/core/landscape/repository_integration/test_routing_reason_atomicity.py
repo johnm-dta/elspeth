@@ -427,6 +427,68 @@ def test_legacy_single_default_retry_returns_random_id_row(tmp_path: Path) -> No
         assert factory.query.get_routing_events(STATE_ID) == [retried]
 
 
+def test_legacy_group_only_retry_returns_random_event_id_without_append(tmp_path: Path) -> None:
+    """A caller-stable legacy group does not imply a deterministic event ID."""
+    db_url = f"sqlite:///{tmp_path / 'audit.db'}"
+    payload_dir = tmp_path / "payloads"
+    _seed_routing_state(db_url)
+    store = FilesystemPayloadStore(payload_dir)
+    reason_ref = store.store(b'{"condition":"row[\'route\'] == \'accepted\'","result":"true"}')
+    _insert_legacy_routing_group(
+        db_url,
+        group_id="caller-stable-legacy-group",
+        event_prefix="legacy-random-event",
+        edge_ids=(EDGE_ID,),
+        reason_hash=stable_hash(REASON),
+        reason_ref=reason_ref,
+    )
+
+    with LandscapeDB.from_url(db_url, create_tables=False) as reopened:
+        factory = RecorderFactory(reopened, payload_store=store)
+        retried = factory.execution.record_routing_event(
+            STATE_ID,
+            EDGE_ID,
+            RoutingMode.MOVE,
+            reason=REASON,
+            routing_group_id="caller-stable-legacy-group",
+        )
+        assert retried.event_id == "legacy-random-event-0"
+        assert retried.routing_group_id == "caller-stable-legacy-group"
+        assert factory.query.get_routing_events(STATE_ID) == [retried]
+
+
+def test_legacy_retry_with_explicit_event_id_remains_strict(tmp_path: Path) -> None:
+    """An explicit event identity cannot alias a different durable legacy ID."""
+    db_url = f"sqlite:///{tmp_path / 'audit.db'}"
+    payload_dir = tmp_path / "payloads"
+    _seed_routing_state(db_url)
+    store = FilesystemPayloadStore(payload_dir)
+    reason_ref = store.store(b'{"condition":"row[\'route\'] == \'accepted\'","result":"true"}')
+    _insert_legacy_routing_group(
+        db_url,
+        group_id="caller-stable-strict-group",
+        event_prefix="legacy-durable-event",
+        edge_ids=(EDGE_ID,),
+        reason_hash=stable_hash(REASON),
+        reason_ref=reason_ref,
+    )
+
+    with LandscapeDB.from_url(db_url, create_tables=False) as reopened:
+        factory = RecorderFactory(reopened, payload_store=store)
+        with pytest.raises(AuditIntegrityError, match="durable event differs"):
+            factory.execution.record_routing_event(
+                STATE_ID,
+                EDGE_ID,
+                RoutingMode.MOVE,
+                reason=REASON,
+                event_id="explicit-different-event-id",
+                routing_group_id="caller-stable-strict-group",
+            )
+        durable = factory.query.get_routing_events(STATE_ID)
+        assert len(durable) == 1
+        assert durable[0].event_id == "legacy-durable-event-0"
+
+
 def test_legacy_multi_default_retry_returns_random_id_group(tmp_path: Path) -> None:
     """A pre-change fork is retried without appending deterministic IDs."""
     db_url = f"sqlite:///{tmp_path / 'audit.db'}"

@@ -1101,6 +1101,69 @@ class TestExportRunStreaming:
 
 
 # ===========================================================================
+# export_run — deep-thawed JSON-lines output (elspeth-9f8a0e61a6)
+# ===========================================================================
+
+
+class TestExportRunDeepThaw:
+    """export_run must yield deeply thawed, json.dumps-compatible records.
+
+    Regression lock for elspeth-9f8a0e61a6, fixed by d9d680b5e: the earlier
+    ``dict(record)`` thawed only the top level of the deep-frozen bundle
+    records, leaving nested tuples and mappingproxy objects that broke
+    ``json.dumps()`` (e.g. node ``schema_fields``). The commit shipped
+    without a test; this pins the contract for the streaming path too.
+    """
+
+    @staticmethod
+    def _assert_json_native(value: Any, path: str) -> None:
+        if isinstance(value, dict):
+            assert type(value) is dict, f"{path} is {type(value).__name__}, not dict"
+            for key, child in value.items():
+                TestExportRunDeepThaw._assert_json_native(child, f"{path}.{key}")
+        elif isinstance(value, list):
+            assert type(value) is list, f"{path} is {type(value).__name__}, not list"
+            for index, child in enumerate(value):
+                TestExportRunDeepThaw._assert_json_native(child, f"{path}[{index}]")
+        else:
+            assert value is None or isinstance(value, str | int | float | bool), (
+                f"{path} is non-JSON type {type(value).__name__}: {value!r}"
+            )
+
+    def test_unsigned_records_are_json_lines_compatible(self) -> None:
+        """Every yielded record — nested containers included — must json.dumps."""
+        import json as json_module
+
+        exporter = _make_exporter(nodes=[_NODE], edges=[_EDGE], rows=[_make_row(0)])
+        records = list(exporter.export_run("run-1"))
+
+        assert records, "export must yield records"
+        for record in records:
+            json_module.dumps(record)  # raises TypeError on frozen leftovers
+            self._assert_json_native(record, record["record_type"])
+
+    def test_signed_records_are_json_lines_compatible(self) -> None:
+        import json as json_module
+
+        exporter = _make_exporter(signing_key=b"thaw-key", nodes=[_NODE], edges=[_EDGE], rows=[_make_row(0)])
+        records = list(exporter.export_run("run-1", sign=True))
+
+        assert records[-1]["record_type"] == "manifest"
+        for record in records:
+            json_module.dumps(record)
+            self._assert_json_native(record, record["record_type"])
+
+    def test_nested_node_schema_fields_are_thawed(self) -> None:
+        """The exact failure shape from the report: nested list/dict values."""
+        exporter = _make_exporter(nodes=[_NODE])
+        node_record = next(r for r in exporter.export_run("run-1") if r["record_type"] == "node")
+
+        schema_fields = node_record["schema_fields"]
+        assert type(schema_fields) is list, type(schema_fields).__name__
+        assert type(schema_fields[0]) is dict, type(schema_fields[0]).__name__
+
+
+# ===========================================================================
 # Record types — field mapping
 # ===========================================================================
 

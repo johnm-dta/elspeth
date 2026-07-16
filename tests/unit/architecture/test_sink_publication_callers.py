@@ -12,14 +12,7 @@ _SOURCE_ROOT = _ROOT / "src" / "elspeth"
 
 # Only the explicit executor compatibility lane remains. Audit export has no
 # direct publication path; effect-capable execution owns it exclusively.
-_EXPECTED_CALLS = Counter(
-    {
-        ("engine/executors/sink.py", "_write_primary", "legacy_sink", "write", "Task 15"): 1,
-        ("engine/executors/sink.py", "_write_primary", "legacy_sink", "flush", "Task 15"): 1,
-        ("engine/executors/sink.py", "_handle_failsink_diversions", "legacy_failsink", "write", "Task 15"): 1,
-        ("engine/executors/sink.py", "_handle_failsink_diversions", "legacy_failsink", "flush", "Task 15"): 1,
-    }
-)
+_EXPECTED_CALLS: Counter[tuple[str, str, str, str, str]] = Counter()
 
 
 def _terminal_name(expression: ast.expr) -> str | None:

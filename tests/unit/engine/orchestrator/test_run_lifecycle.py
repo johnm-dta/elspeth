@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from elspeth.contracts.audit_export import AuditExportContentStoreResolver
-from elspeth.engine.orchestrator.run_lifecycle import RunLifecycleCoordinator
+from elspeth.engine.orchestrator.run_lifecycle import ExecuteRun, InitializeDatabasePhase, RunLifecycleCoordinator
 
 
 def test_execute_export_phase_forwards_explicit_payload_and_content_stores() -> None:
@@ -83,8 +83,8 @@ def test_run_validates_export_resources_before_any_irreversible_work(omitted: st
     checkpoints deleted, or its leader seat released — not after."""
     coordinator = object.__new__(RunLifecycleCoordinator)
     coordinator._checkpoints = SimpleNamespace(reset_sequence=lambda: None)
-    initialize_database_phase = Mock(side_effect=_DatabasePhaseReached)
-    execute_run = Mock(side_effect=AssertionError("run body must never start"))
+    initialize_database_phase = Mock(spec=InitializeDatabasePhase, side_effect=_DatabasePhaseReached)
+    execute_run = Mock(spec=ExecuteRun, side_effect=AssertionError("run body must never start"))
     resources = dict(_EXPORT_RESOURCES)
     resources[omitted] = None
 
@@ -113,8 +113,8 @@ def test_run_with_export_disabled_does_not_require_export_resources() -> None:
     (validation stays scoped to export-enabled runs)."""
     coordinator = object.__new__(RunLifecycleCoordinator)
     coordinator._checkpoints = SimpleNamespace(reset_sequence=lambda: None)
-    initialize_database_phase = Mock(side_effect=_DatabasePhaseReached)
-    execute_run = Mock(side_effect=AssertionError("run body must never start"))
+    initialize_database_phase = Mock(spec=InitializeDatabasePhase, side_effect=_DatabasePhaseReached)
+    execute_run = Mock(spec=ExecuteRun, side_effect=AssertionError("run body must never start"))
     settings = SimpleNamespace(landscape=SimpleNamespace(export=SimpleNamespace(enabled=False)))
 
     with (

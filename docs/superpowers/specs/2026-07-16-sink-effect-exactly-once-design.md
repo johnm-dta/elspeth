@@ -24,8 +24,10 @@ state rather than to a complete logical effect.
 
 1. Landscape reserves a deterministic sink effect, ordered membership,
    artifact ID, and artifact idempotency key before publication.
-2. Effect identity is based on logical run/sink/role/membership facts. It never
-   contains an attempt-scoped node-state ID.
+2. Effect identity is based on logical run/sink/role plus exactly one closed
+   input: ordered membership facts or the immutable audit snapshot and complete
+   final-manifest descriptor. It never contains an attempt-scoped node-state
+   ID.
 3. Membership order comes from durable data-flow order, not list arrival,
    lexical state-ID sorting, or the first row in a batch.
 4. Every production sink publication path, including post-run audit export,
@@ -151,7 +153,8 @@ requires a non-reserved, operator-visible, credential-free `signer_key_id`.
 
 `AuditExportSignedManifestInput(content_ref, content_hash, size_bytes,
 manifest_schema, derivation_version, signature_algorithm, signature_key_id,
-signature)` is the public immutable descriptor for the one final manifest. Its reference/hash
+record_chain_algorithm, final_hash, signature)` is the public immutable
+descriptor for the one final manifest. Its reference/hash
 equality and lowercase-hex/positive-size rules match a chunk descriptor, but
 it is not a data chunk and is excluded from `chunk_count`, `record_count`, and
 `total_bytes`. `manifest_schema` is exactly
@@ -159,7 +162,10 @@ it is not a data chunk and is excluded from `chunk_count`, `record_count`, and
 `AuditExportSigningMode` used by the parent; `signature_key_id` equals the
 parent `signer_key_id`; and public `signature` maps exactly to the registry's
 internal `signature_hex`. It is lowercase 64-hex for `HMAC_SHA256` and `None`
-for `UNSIGNED`.
+for `UNSIGNED`. `record_chain_algorithm` is the mode-specific literal and
+`final_hash` is its lowercase 64-hex result. Descriptor `manifest_schema`,
+`record_chain_algorithm`, and `final_hash` map exactly to registry
+`signed_manifest_schema`, `record_chain_algorithm`, and `final_hash`.
 
 `SinkEffectPrepareRequest(effect_id, effect_input, inspection)` accepts only
 that union. Its `input_kind` is derived from `effect_input` and is never
@@ -278,6 +284,64 @@ role (PRIMARY or FAILSINK)
 ordered [(token ID, row ID, canonical payload hash)] membership
 pending outcome/path/error-hash identity where applicable
 ```
+
+That member formula is the `PIPELINE_MEMBERS` branch. The
+`AUDIT_EXPORT_SNAPSHOT` branch has zero members and uses two exact RFC 8785
+components. First compute:
+
+```text
+final_manifest_identity_hash = H(C(
+  "sink-effect-audit-export-final-manifest-v1",
+  {
+    content_hash, content_ref, derivation_version, final_hash,
+    manifest_schema, record_chain_algorithm, signature,
+    signature_algorithm, signature_key_id, size_bytes
+  }
+))
+```
+
+The object is the complete immutable `AuditExportSignedManifestInput` with no
+omitted/defaulted fields: `signature` is the exact credential-safe lowercase
+hex string or JSON null. Then compute the export effect ID from:
+
+```text
+H(C("sink-effect-audit-export-effect-v1", {
+  export_format,
+  final_manifest_identity_hash,
+  input_kind: "audit_export_snapshot",
+  manifest_hash,
+  protocol_version,
+  registry_key_hash,
+  role,
+  serialization_version,
+  signer_key_id,
+  signing_mode,
+  sink_node_id,
+  snapshot_hash,
+  snapshot_id,
+  source_run_id,
+  target_config_hash
+}))
+```
+
+The parent/descriptor cross-mapping is validated before hashing:
+`signature_algorithm == signing_mode`, `signature_key_id == signer_key_id`,
+and the mode-specific `record_chain_algorithm`, `final_hash`, and nullable
+signature equal the immutable registry row and final manifest. The exact
+`registry_key_hash` transitively binds exporter/public-config versions; the
+formula duplicates serialization/format/signing fields so a forged registry
+loader cannot hide a mismatch. `target_config_hash` binds the credential-free
+publication target/configuration to the effect only. It remains absent from
+snapshot identity, so the same snapshot/final-manifest winner exported to two
+targets yields one snapshot and two effect IDs.
+
+Two byte-distinct final manifests therefore cannot share an effect ID merely
+because their data-chunk `manifest_hash`/`snapshot_hash` match. An identical
+descriptor, including identical public signature/null and record-chain result,
+converges exactly; changing any descriptor field changes
+`final_manifest_identity_hash` and hence the effect ID. A same logical registry
+key carrying divergent descriptor fields still fails the registry winner
+exact-compare before reservation.
 
 `artifact_id` and `artifact.idempotency_key` are derived from the effect ID
 and reserved in the same transaction as membership. They are not generated at
@@ -505,6 +569,93 @@ provider body, or unbounded record payload. The operational
 `runs.exported_at` written only after effect finalization is not this canonical
 field and is excluded from the source snapshot.
 
+The registry row is structurally self-consistent before any loader runs.
+`MAX_AUDIT_EXPORT_SIGNED_MANIFEST_BYTES = 64 * 1024` is a code-owned schema
+constant. Fresh SQLite and PostgreSQL DDL install these exact named CHECKs:
+
+```text
+ck_audit_export_snapshots_manifest_hash_hex
+ck_audit_export_snapshots_snapshot_hash_hex
+ck_audit_export_snapshots_snapshot_seal_hash_hex
+ck_audit_export_snapshots_last_chunk_seal_hash_hex
+ck_audit_export_snapshots_final_hash_hex
+ck_audit_export_snapshots_signed_manifest_hash_hex
+ck_audit_export_snapshots_signed_manifest_ref
+ck_audit_export_snapshots_signed_manifest_size
+ck_audit_export_snapshots_manifest_schema
+ck_audit_export_snapshots_derivation_version
+ck_audit_export_snapshots_signing_tuple
+```
+
+Each `*_hex` CHECK requires exactly 64 lowercase hexadecimal characters. Its
+SQLite predicate is `length(value)=64 AND value NOT GLOB '*[^0-9a-f]*'`; its
+PostgreSQL predicate is `value ~ '^[0-9a-f]{64}$'`. The ref CHECK is exactly
+`signed_manifest_ref = 'sha256:' || signed_manifest_hash`. Size is
+`signed_manifest_size_bytes BETWEEN 1 AND 65536`. Schema and derivation are
+the literals `elspeth.audit-export-manifest.v2` and
+`audit-export-derivation-v1`.
+
+The signing-tuple CHECK has exactly two legal branches:
+
+```text
+HMAC:
+  signing_mode = 'hmac_sha256'
+  AND signer_key_id <> 'UNSIGNED'
+  AND length(trim(signer_key_id)) > 0
+  AND signature_hex is lowercase 64-hex
+  AND record_chain_algorithm =
+      'sha256_concat_hmac_sha256_signatures_v1'
+
+UNSIGNED:
+  signing_mode = 'unsigned'
+  AND signer_key_id = 'UNSIGNED'
+  AND signature_hex IS NULL
+  AND record_chain_algorithm = 'sha256_concat_record_sha256_v1'
+```
+
+In the HMAC branch, “lowercase 64-hex” expands to
+`signature_hex IS NOT NULL AND length(signature_hex)=64 AND signature_hex NOT
+GLOB '*[^0-9a-f]*'` on SQLite, and to `signature_hex IS NOT NULL AND
+signature_hex ~ '^[0-9a-f]{64}$'` on PostgreSQL. The explicit non-null term is
+required because SQL CHECK expressions accept an unknown/null result.
+
+There is deliberately no redundant registry `signature_algorithm` column;
+the public descriptor/final object derives it from, and exact-compares it to,
+`signing_mode`. If such a column is ever added, it must join this CHECK and
+equal `signing_mode` in both branches. `final_hash` is separately hex-checked
+and its semantic recomputation remains a loader responsibility.
+
+The constraint names and dialect-specific canonical SQL join
+`_REQUIRED_CHECK_CONSTRAINTS`, fresh-schema shape probes, and the epoch-26
+physical manifest/fingerprint. That guard also names the supporting indexes
+`uq_runs_export_witness`, `uq_audit_export_snapshots_registry_key`, and
+`uq_audit_export_snapshot_chunks_terminal`. The registry index uses the exact
+winner tuple shown above; the terminal index uses `(snapshot_id, ordinal,
+chunk_seal_hash, cumulative_records, cumulative_bytes)` in that order to back
+the deferred terminal FK. The guard also names triggers
+`trg_audit_export_chunk_insert_validate`,
+`trg_audit_export_snapshot_insert_seal`,
+`trg_audit_export_snapshot_immutable`, and
+`trg_audit_export_chunk_immutable`. PostgreSQL uses the corresponding exact
+function names `fn_audit_export_chunk_insert_validate`,
+`fn_audit_export_snapshot_insert_seal`,
+`fn_audit_export_snapshot_immutable`, and
+`fn_audit_export_chunk_immutable`; function bodies are fingerprinted with their
+triggers. SQLite trigger SQL is
+fingerprinted directly. Anonymous or semantically similar replacement objects
+do not satisfy the required guards.
+
+Raw SQLite and real PostgreSQL DML tests mutate each of the six named hashes,
+and the HMAC signature, to uppercase, non-hex, short, and long values; supply a
+syntactically valid but different signed-manifest ref; use
+zero/negative/over-bound size; change the schema/derivation literal; and
+exercise every mixed signing-mode/signer/null-signature/algorithm tuple. Each
+row is rejected by SQL. The epoch-25-to-26 migration installs and fingerprints
+the same checks in its transaction; failure injection proves rollback leaves
+no named constraint/trigger/index or partial rebuilt table. Loader/reader
+recomputation of hashes, HMAC, canonical bytes, and record-chain semantics is
+defense in depth after this structural authority, not a substitute for it.
+
 An `ExportReadModel` and its query adapters are connection-bound: no method
 opens a second connection. Materialization opens PostgreSQL with isolation
 level `REPEATABLE READ` before `BEGIN`, or issues SQLite `BEGIN` on one
@@ -602,8 +753,9 @@ durable bounded content store, not Landscape.
 This association stores exactly one `(effect_id, snapshot_id)` for an
 `AUDIT_EXPORT_SNAPSHOT` effect and is forbidden for `PIPELINE_MEMBERS`. Its
 unique effect FK prevents one effect from changing snapshots. Effect identity
-binds the registry key, aggregate manifest/snapshot hash, sink configuration,
-and credential-free target.
+binds the registry key, aggregate data manifest/snapshot hashes, complete
+immutable final-manifest descriptor/component, sink configuration, and
+credential-free target through the exact formula above.
 
 ### Audit-export configuration and stores
 
@@ -737,13 +889,26 @@ snapshot seal:
    per_chunk_record_limit, record_count, registry_key_hash,
    snapshot_hash, snapshot_id, source_completed_at, source_run_id,
    source_status, total_bytes}
+
+export final-manifest identity:
+  {content_hash, content_ref, derivation_version, final_hash,
+   manifest_schema, record_chain_algorithm, signature,
+   signature_algorithm, signature_key_id, size_bytes}
+
+export effect identity:
+  {export_format, final_manifest_identity_hash, input_kind, manifest_hash,
+   protocol_version, registry_key_hash, role, serialization_version,
+   signer_key_id, signing_mode, sink_node_id, snapshot_hash, snapshot_id,
+   source_run_id, target_config_hash}
 ```
 
 The corresponding tags are, respectively,
 `audit-export-public-config-v1`, `audit-export-registry-key-v1`,
 `audit-export-snapshot-content-v1`, `audit-export-snapshot-id-v1`,
-`audit-export-chunk-seal-v1`, `audit-export-manifest-v1`, and
-`audit-export-snapshot-seal-v1`. `predecessor.kind="genesis"` is the only
+`audit-export-chunk-seal-v1`, `audit-export-manifest-v1`,
+`audit-export-snapshot-seal-v1`,
+`sink-effect-audit-export-final-manifest-v1`, and
+`sink-effect-audit-export-effect-v1`. `predecessor.kind="genesis"` is the only
 GENESIS representation; it has no `hash` key. A later predecessor must use the
 second exact object shape. The snapshot-content chunks intentionally omit refs,
 snapshot ID, and seals; content hash plus size/order/totals defines content.
@@ -1333,9 +1498,11 @@ release notes.
 Audit export never synthesizes pipeline tokens. Before registering an export
 node/effect/operation/call, the export coordinator materializes or reuses the
 typed `AUDIT_EXPORT_SNAPSHOT` registry winner. The effect has zero token
-members, one snapshot association, and an identity over the manifest hash plus
-safe sink target/configuration. It otherwise uses the same inspect, immutable
-plan, attempt, lease, commit, reconcile, and finalization lifecycle.
+members, one snapshot association, and exactly the Task 6 identity over the
+immutable snapshot, complete final-manifest descriptor/component, and safe
+sink target/configuration. This coordinator consumes that identity and neither
+derives nor redefines it. It otherwise uses the same inspect, immutable plan,
+attempt, lease, commit, reconcile, and finalization lifecycle.
 
 JSON audit export replays the ordered verified data chunks and then writes the
 exact bytes from `read_verified_signed_manifest()` as the one final record; it
@@ -1511,7 +1678,11 @@ exact bytes/metadata, exact audit attempt history, and convergent recovery.
 - no member can be rebound within the same run/sink/role;
 - pipeline-member/export-snapshot XOR rejects every mixed or empty shape; and
 - concurrent exporters reuse one snapshot/effect winner without synthetic
-  tokens, even when later export audit rows change the live database.
+  tokens, even when later export audit rows change the live database;
+- audit-export effect identity binds every immutable final-manifest descriptor
+  field plus the target config: identical complete descriptors converge,
+  every valid field difference changes the effect ID, and divergent
+  descriptors under one registry key fail exact comparison;
 - frozen prepare inputs reject mutation, dense-order/count/sum violations,
   unsupported formats/signing modes, mismatched reader bindings, and attempts
   to serialize the reader capability;
@@ -1597,6 +1768,9 @@ exact bytes/metadata, exact audit attempt history, and convergent recovery.
   snapshot terminal/composite FKs, immutable mutation guards, dense chunk
   predecessor-reference/cumulative-total validation, and partial-graph
   rollback, with separate loader/reader cryptographic-forgery tests;
+- raw SQLite and real PostgreSQL registry DML, on fresh and migrated schemas,
+  enforce the six lowercase hash fields, exact signed-manifest ref/hash,
+  bounded size, literal schema/derivation version, and closed signing tuple;
 - content-store candidate rollback/orphan cleanup proves shared and winner data
   chunks/final manifests survive, and only unreferenced candidate-owned objects
   age out;
@@ -1630,7 +1804,8 @@ of production execution.
    and one artifact identity.
 3. Pipeline membership is complete, ordered by durable ingest/lineage
    authority, and independent of attempts and caller batch shape; audit-export
-   input has zero token members and exactly one immutable snapshot.
+   input has zero token members and exactly one immutable snapshot whose full
+   final-manifest descriptor is bound into effect identity.
 4. Concurrent same-effect calls converge; generation fences Landscape
    finalization; stale owners cannot mutate audit state; all composed
    PostgreSQL paths obey the one token/state/stream/effect/artifact-operation
@@ -1658,6 +1833,6 @@ of production execution.
 14. Audit export materializes one bounded immutable export-terminal
     repeatable-read snapshot
     before export audit rows, closes the DB transaction before chunk-store I/O,
-    binds the credential-free signer key identity, reuses one concurrent
-    winner, and recovers JSON/CSV publication without live-table rereads or
-    direct `write()`/`flush()`.
+    binds the complete final-manifest descriptor and credential-free target
+    identity, reuses one concurrent snapshot winner, and recovers JSON/CSV
+    publication without live-table rereads or direct `write()`/`flush()`.

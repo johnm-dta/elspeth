@@ -274,8 +274,9 @@ and reject count/byte sum mismatches, derive `input_kind` rather
 than accepting it, require exact plan-kind equality, and reject a reader whose
 `snapshot_id`/`manifest_hash`/`chunk_count` binding differs. Add signed and
 unsigned `AuditExportSignedManifestInput` cases; reject wrong ref/hash/size,
-signature algorithm/key/signature mapping, or a reader bound to a different
-final-manifest descriptor. Prove `iter_verified_chunks()` cannot yield the
+schema/derivation, record-chain/final-hash, signature
+algorithm/key/signature mapping, or a reader bound to a different final
+manifest descriptor. Prove `iter_verified_chunks()` cannot yield the
 manifest, `read_verified_signed_manifest()` takes no reference argument and
 returns only the bound verified final bytes, and the reader is excluded from
 comparison/repr and cannot enter `safe_evidence` or persisted serialization.
@@ -416,6 +417,8 @@ class AuditExportSignedManifestInput:
     derivation_version: str
     signature_algorithm: AuditExportSigningMode
     signature_key_id: str
+    record_chain_algorithm: str
+    final_hash: str
     signature: str | None
 
 
@@ -569,7 +572,10 @@ Unsigned input requires `signer_key_id == "UNSIGNED"`; HMAC input requires a
 non-reserved credential-free ID. The final-manifest descriptor uses the same
 exact ref/hash relation, positive exact size, literal
 `elspeth.audit-export-manifest.v2` schema, derivation version, signing mode,
-signer ID, and nullable/lowercase signature as the parent/registry. It is not a
+signer ID, mode-specific record-chain algorithm, lowercase `final_hash`, and
+nullable/lowercase signature as the parent/registry. Descriptor
+`manifest_schema` maps to registry `signed_manifest_schema`; chain/final fields
+retain their names. It is not a
 data chunk and is excluded from data totals. Reader binding fields and the
 final-manifest descriptor must equal the input, and the reader must expose no
 arbitrary-ref method or credentials. Its factory verifies signature material,
@@ -784,7 +790,9 @@ git commit -m "feat(export): define durable snapshot configuration"
 **Files:**
 
 - Modify: `src/elspeth/core/landscape/schema.py`
+- Modify: `src/elspeth/core/landscape/database.py`
 - Modify: `src/elspeth/contracts/audit.py`
+- Modify: `src/elspeth/contracts/audit_export.py`
 - Modify: `src/elspeth/core/landscape/model_loaders.py`
 - Test: `tests/unit/core/landscape/test_sink_effect_schema.py`
 - Test: `tests/unit/core/landscape/test_audit_export_snapshot_schema.py`
@@ -840,6 +848,22 @@ mismatch, and `UPDATE`/`DELETE` of sealed rows. Separate loader/restricted-
 reader tests forge chunk/content/manifest/snapshot hashes because portable SQL
 cannot recompute SHA-256. PostgreSQL tests must use a real backend, not
 compiled DDL assertions.
+
+At the registry row itself, raw SQLite and real PostgreSQL DML are the first
+structural authority. Parametrize `manifest_hash`, `snapshot_hash`,
+`snapshot_seal_hash`, `last_chunk_seal_hash`, `final_hash`, and
+`signed_manifest_hash` with uppercase, non-hex, 63-character, and 65-character
+values, keeping the ref aligned when `signed_manifest_hash` changes so each
+hex predicate is isolated. Separately reject a well-formed
+`signed_manifest_ref` whose digest differs from `signed_manifest_hash`,
+zero/negative/over-64-KiB manifest sizes, any `signed_manifest_schema` except
+`elspeth.audit-export-manifest.v2`, and any unsupported
+`derivation_version`. Cross-product signing mode, signer ID, nullable
+signature, and record-chain algorithm; independently reject an HMAC signature
+that is uppercase, non-hex, 63-character, or 65-character. Only the exact HMAC
+and UNSIGNED tuples in the design may commit. Do not add a redundant
+`signature_algorithm` registry column; if implementation does, raw DML must
+also prove it equals `signing_mode` in both branches.
 
 Add exact lifecycle-witness cases on both backends:
 
@@ -954,6 +978,24 @@ ID or `UNSIGNED`, never key material or a low-entropy key digest.
 The row CHECK accepts only `completed`, `completed_with_failures`, or `empty`
 with non-null completion. It rejects both resumable `failed` and `interrupted`.
 
+Define `MAX_AUDIT_EXPORT_SIGNED_MANIFEST_BYTES: Final = 64 * 1024` in
+`contracts/audit_export.py` and install every exact named registry CHECK from
+the design. Compile the six lowercase-hex predicates per dialect: SQLite uses
+`length(value)=64 AND value NOT GLOB '*[^0-9a-f]*'`; PostgreSQL uses
+`value ~ '^[0-9a-f]{64}$'`. The exact-ref predicate uses SQL concatenation,
+size is `BETWEEN 1 AND 65536`, schema/derivation are literal equality, and
+`ck_audit_export_snapshots_signing_tuple` is the closed two-branch expression.
+Its HMAC branch explicitly requires `signature_hex IS NOT NULL` and applies
+the same dialect-specific lowercase-64-hex predicate; do not rely on a nullable
+CHECK expression, because SQL accepts unknown/null CHECK results.
+Register all eleven names in `_REQUIRED_CHECK_CONSTRAINTS`; include their exact
+dialect-specific canonical SQL in fresh-schema shape validation and the
+epoch-26 physical manifest/fingerprint. Add the design's exact registry-key
+and terminal-descriptor index names/column order to `_REQUIRED_INDEXES`, and
+the four exact trigger names plus PostgreSQL function names/bodies to the
+required physical-object guard. Loader checks recompute bytes and
+cryptographic semantics only after SQL has enforced this structural tuple.
+
 Chunk rows include ordinal, credential-free ref/hash, size/count,
 predecessor seal, cumulative byte/record totals, and chunk seal. Chunks insert
 before their registry parent under a deferred FK. Install SQLite and
@@ -1014,7 +1056,7 @@ Expected: metadata invariants pass on SQLite and PostgreSQL 16.
 - [ ] **Step 6: Commit the metadata boundary**
 
 ```bash
-git add src/elspeth/core/landscape/schema.py src/elspeth/contracts/audit.py src/elspeth/core/landscape/model_loaders.py tests/unit/core/landscape/test_sink_effect_schema.py tests/unit/core/landscape/test_audit_export_snapshot_schema.py tests/unit/core/landscape/test_schema_epoch_and_required_columns.py tests/testcontainer/core/test_sink_effect_schema_postgres.py tests/testcontainer/web/test_schema_probe_postgres.py
+git add src/elspeth/core/landscape/schema.py src/elspeth/core/landscape/database.py src/elspeth/contracts/audit.py src/elspeth/contracts/audit_export.py src/elspeth/core/landscape/model_loaders.py tests/unit/core/landscape/test_sink_effect_schema.py tests/unit/core/landscape/test_audit_export_snapshot_schema.py tests/unit/core/landscape/test_schema_epoch_and_required_columns.py tests/testcontainer/core/test_sink_effect_schema_postgres.py tests/testcontainer/web/test_schema_probe_postgres.py
 git commit -m "feat(landscape): define epoch 26 sink effects"
 ```
 
@@ -1074,6 +1116,9 @@ export-terminal run, its chunks, and registry row and commit successfully;
 the test must fail on any SQLite `foreign key mismatch`. Raw registry inserts
 for `failed` and `interrupted` witnesses remain invalid, while each run can
 still take over to `running` with `completed_at = NULL`.
+Run the Task 3 raw registry matrix against the migrated table too: all six hash
+CHECKs, exact ref/hash equality, size bound, schema/derivation literals, and
+every mixed signing tuple must reject identically after upgrade.
 
 - [ ] **Step 2: Run the migration tests and confirm epoch 25 is rejected**
 
@@ -1172,12 +1217,16 @@ SQLite deferred XOR FKs, chunk predecessor/cumulative `BEFORE INSERT`, registry
 density/terminal-seal, and sealed-row immutable triggers from Task 3 inside the
 migration transaction. The epoch-26 physical manifest/fingerprint includes
 `uq_runs_export_witness`, its unique flag, non-partial shape, ordered key
-columns, and canonical SQL alongside every installed table, column, FK, and
-trigger. After `PRAGMA foreign_key_check`, compare the installed index and
-trigger names/shapes/SQL fingerprints to that manifest before stamping 26.
+columns, and canonical SQL alongside every installed table, column, FK, CHECK,
+index, and trigger. It explicitly fingerprints all eleven named
+`ck_audit_export_snapshots_*` constraints, including each SQLite canonical
+predicate and the HMAC/UNSIGNED branch ordering. After
+`PRAGMA foreign_key_check`, compare the installed constraint/index/trigger
+names, shapes, and SQL fingerprints to that manifest before stamping 26.
 Inject a failure after each replacement table creation/copy/drop/rename and
-after each new-object family. Assert the exact operation+call and artifact rows,
-full schema, epoch 25, and absence of partial objects after every rollback.
+after each new-object/constraint family. Assert the exact operation+call and
+artifact rows, full schema, epoch 25, and absence of partial named checks or
+other objects after every rollback.
 
 - [ ] **Step 4: Run migration and compatibility suites**
 
@@ -1334,7 +1383,11 @@ git commit -m "feat(landscape): link artifacts to sink effects"
 
 **Files:**
 
+- Modify: `src/elspeth/contracts/audit_export.py`
+- Modify: `src/elspeth/contracts/sink_effects.py`
 - Create: `src/elspeth/core/landscape/execution/sink_effect_identity.py`
+- Test: `tests/unit/contracts/test_audit_export_hashing.py`
+- Test: `tests/unit/contracts/test_sink_effect_contract.py`
 - Test: `tests/unit/core/landscape/test_sink_effect_identity.py`
 - Test: `tests/property/core/test_sink_effect_identity_properties.py`
 
@@ -1370,17 +1423,63 @@ def test_audit_export_identity_binds_manifest_without_synthetic_members() -> Non
     assert identity.input_kind is SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT
     assert identity.member_ids == ()
     assert identity.snapshot_hash == EXPORT_SNAPSHOT.snapshot_hash
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "content_hash",
+        "content_ref",
+        "size_bytes",
+        "derivation_version",
+        "manifest_schema",
+        "signature_algorithm",
+        "signature_key_id",
+        "record_chain_algorithm",
+        "final_hash",
+        "signature",
+    ],
+)
+def test_audit_export_identity_component_binds_every_final_manifest_field(field: str) -> None:
+    baseline_payload = final_manifest_identity_payload(EXPORT_SNAPSHOT.signed_manifest)
+    changed_payload = replace_exactly_one_safe_scalar(baseline_payload, field)
+    assert hash_final_manifest_identity_payload(changed_payload) != hash_final_manifest_identity_payload(baseline_payload)
+
+
+def test_exact_final_manifest_descriptor_converges_across_reader_instances() -> None:
+    first = replace(EXPORT_SNAPSHOT, reader=reader_factory(EXPORT_SNAPSHOT))
+    second = replace(EXPORT_SNAPSHOT, reader=reader_factory(EXPORT_SNAPSHOT))
+    assert first.reader is not second.reader
+    assert compute_audit_export_effect_identity(first, SAFE_TARGET_CONFIG) == compute_audit_export_effect_identity(
+        second,
+        SAFE_TARGET_CONFIG,
+    )
 ```
 
 Property tests generate DAG-shaped lineage within limits and prove reversed
-arrival produces the same ordered membership/effect ID.
+arrival produces the same ordered membership/effect ID. Export properties vary
+parent `signing_mode`/`signer_key_id` against descriptor
+`signature_algorithm`/`signature_key_id`, all nullable-signature and
+record-chain tuples, target config, and same-key registry descriptors. Invalid
+cross-mappings fail before hashing/reservation; every valid descriptor field
+change produces a different effect ID, while the same complete descriptor and
+target converge. A same registry key with divergent descriptor data fails the
+winner exact-compare rather than reserving either identity.
+
+The scalar-component test changes exactly one serialized descriptor key at a
+time, including a syntactically valid alternate ref and null/string signature,
+to prove the formula binds it even when the higher-level constructor would
+reject the isolated combination. Separate public-input tests apply the minimum
+required paired update (for example content hash+ref or signing mode+algorithm)
+and prove the valid whole effect ID changes; isolated invalid tuples fail before
+identity calculation.
 
 - [ ] **Step 2: Run tests and verify resolver absence**
 
 Run:
 
 ```bash
-.venv/bin/pytest -q tests/unit/core/landscape/test_sink_effect_identity.py tests/property/core/test_sink_effect_identity_properties.py
+.venv/bin/pytest -q tests/unit/contracts/test_audit_export_hashing.py tests/unit/contracts/test_sink_effect_contract.py tests/unit/core/landscape/test_sink_effect_identity.py tests/property/core/test_sink_effect_identity_properties.py
 ```
 
 Expected: FAIL because the identity module does not exist.
@@ -1402,18 +1501,29 @@ and order members by `(ingest_sequence, lineage_structure, token_id)`. Hash
 canonical row payload and the complete ordered identity with the protocol
 version. Derive `effect_id`, `artifact_id`, `artifact_idempotency_key`,
 `stream_id`, and member sub-effect IDs from labeled hashes.
-For `AUDIT_EXPORT_SNAPSHOT`, derive the effect/artifact identities from the
-registry key, manifest/snapshot hash, protocol/exporter/serialization versions,
-format/signing mode, and credential-free target/config hash. It has zero member
-IDs and must not invoke token-lineage resolution.
+For `AUDIT_EXPORT_SNAPSHOT`, add the two exact closed `C` tags and payload
+validators from the design to `contracts/audit_export.py`. Compute
+`final_manifest_identity_hash` over every immutable
+`AuditExportSignedManifestInput` field: content hash, exact ref, size,
+derivation version, literal manifest schema, signature algorithm/key,
+record-chain algorithm, final hash, and exact lowercase signature or null.
+Then derive the effect/artifact identities from the protocol/input kind,
+source run, sink node/role, registry key, snapshot ID/hash, data manifest hash,
+serialization/format, parent signing mode/signer ID, that final-manifest
+component, and credential-free target/config hash. Validate the exact
+parent/descriptor/registry cross-mapping before hashing. The registry key
+transitively binds exporter/public-config versions; do not invent an unverified
+duplicate exporter-version input. The export effect has zero member IDs and
+must not invoke token-lineage resolution. Target config remains in effect
+identity and absent from snapshot identity.
 
 - [ ] **Step 4: Run unit/property tests and commit**
 
 Run:
 
 ```bash
-.venv/bin/pytest -q tests/unit/core/landscape/test_sink_effect_identity.py tests/property/core/test_sink_effect_identity_properties.py
-.venv/bin/mypy src/elspeth/core/landscape/execution/sink_effect_identity.py
+.venv/bin/pytest -q tests/unit/contracts/test_audit_export_hashing.py tests/unit/contracts/test_sink_effect_contract.py tests/unit/core/landscape/test_sink_effect_identity.py tests/property/core/test_sink_effect_identity_properties.py
+.venv/bin/mypy src/elspeth/contracts/audit_export.py src/elspeth/contracts/sink_effects.py src/elspeth/core/landscape/execution/sink_effect_identity.py
 ```
 
 Expected: all examples pass within the configured Hypothesis budget.
@@ -1421,7 +1531,7 @@ Expected: all examples pass within the configured Hypothesis budget.
 Commit:
 
 ```bash
-git add src/elspeth/core/landscape/execution/sink_effect_identity.py tests/unit/core/landscape/test_sink_effect_identity.py tests/property/core/test_sink_effect_identity_properties.py
+git add src/elspeth/contracts/audit_export.py src/elspeth/contracts/sink_effects.py src/elspeth/core/landscape/execution/sink_effect_identity.py tests/unit/contracts/test_audit_export_hashing.py tests/unit/contracts/test_sink_effect_contract.py tests/unit/core/landscape/test_sink_effect_identity.py tests/property/core/test_sink_effect_identity_properties.py
 git commit -m "feat(landscape): derive ordered sink effect identity"
 ```
 
@@ -2069,8 +2179,10 @@ fresh transaction before exact deletion. The coordinator reserves one
 zero-member `AUDIT_EXPORT_SNAPSHOT` effect with one
 snapshot association and replays only verified data chunks followed by the
 verified v2 manifest through an effect-capable fake/JSON adapter. Effect
-identity binds the data manifest, final-manifest descriptor, and safe
-target configuration. Export audit rows are registered only after the
+reservation receives the already-defined Task 6 identity, which binds the data
+manifest, complete final-manifest descriptor/component, and safe target
+configuration; Task 10 must not derive, omit, or redefine identity fields.
+Export audit rows are registered only after the
 snapshot winner exists, making self-recursion structural.
 
 - [ ] **Step 4: Run caller-level and existing sink/diversion tests**

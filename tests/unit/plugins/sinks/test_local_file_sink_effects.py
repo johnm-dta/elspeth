@@ -16,6 +16,7 @@ from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.contracts.sink_effects import (
     RestrictedSinkEffectContext,
     SinkEffectDescriptorMode,
+    SinkEffectInputKind,
     SinkEffectInspectionRequest,
     SinkEffectMember,
     SinkEffectPipelineMembersInput,
@@ -120,8 +121,8 @@ def test_local_effect_plans_persist_exact_diversion_attribution(tmp_path: Path, 
     configured.commit_effect(plan, _CTX)
     recovered = configured.reconcile_effect(plan, _CTX)
     assert recovered.kind is SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR
-    assert recovered.accepted_ordinals == (0,)
-    assert recovered.diverted_ordinals == (1,)
+    assert recovered.accepted_ordinals is None
+    assert recovered.diverted_ordinals is None
 
 
 def test_json_effect_plan_persists_exact_diversion_attribution(
@@ -146,6 +147,14 @@ def test_json_effect_plan_persists_exact_diversion_attribution(
     assert plan.safe_evidence["accepted_ordinals"] == (0,)
     assert plan.safe_evidence["diverted_ordinals"] == (1,)
     assert plan.safe_evidence["diversion_attribution"] == _expected_diversion_attribution(sink)
+
+
+def test_csv_effect_thaws_nested_values_before_serialization(tmp_path: Path) -> None:
+    sink = inject_write_failure(CSVSink({"path": str(tmp_path / "nested.csv"), "schema": _SCHEMA}))
+    plan = _prepare(sink, effect_id="b1" * 32, rows=[{"id": 1, "metadata": {"tags": ["a", "b"]}}])
+
+    with _stage_path(plan).open(newline="", encoding="utf-8") as stream:
+        assert list(csv.DictReader(stream)) == [{"id": "1", "metadata": "{'tags': ['a', 'b']}"}]
 
 
 def test_local_effect_evidence_rejects_missing_or_unmatched_diversion_attribution(tmp_path: Path) -> None:
@@ -269,7 +278,7 @@ def test_staging_enforces_streamed_byte_and_row_limits(tmp_path: Path) -> None:
     with pytest.raises(local_effects.LocalFileEffectLimitError, match="row limit"):
         local_effects.prepare_local_effect(
             effect_id="3" * 64,
-            input_kind=local_effects.SinkEffectInputKind.PIPELINE_MEMBERS,
+            input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
             inspection=inspection,
             chunks=(b"one",),
             row_count=2,
@@ -287,7 +296,7 @@ def test_staging_enforces_streamed_byte_and_row_limits(tmp_path: Path) -> None:
         )
         local_effects.prepare_local_effect(
             effect_id="4" * 64,
-            input_kind=local_effects.SinkEffectInputKind.PIPELINE_MEMBERS,
+            input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
             inspection=byte_inspection,
             chunks=(b"too-large",),
             row_count=1,
@@ -345,9 +354,9 @@ def test_local_sink_capabilities_are_declared_by_input_kind(tmp_path: Path) -> N
     json_sink = JSONSink({"path": str(tmp_path / "out.json"), "schema": _SCHEMA})
     text_sink = TextSink({"path": str(tmp_path / "out.txt"), "field": "message", "schema": _SCHEMA})
 
-    validate_sink_effect_capability(csv_sink, "write", local_effects.SinkEffectInputKind.PIPELINE_MEMBERS)
-    validate_sink_effect_capability(json_sink, "write", local_effects.SinkEffectInputKind.PIPELINE_MEMBERS)
-    validate_sink_effect_capability(text_sink, "write", local_effects.SinkEffectInputKind.PIPELINE_MEMBERS)
+    validate_sink_effect_capability(csv_sink, "write", SinkEffectInputKind.PIPELINE_MEMBERS)
+    validate_sink_effect_capability(json_sink, "write", SinkEffectInputKind.PIPELINE_MEMBERS)
+    validate_sink_effect_capability(text_sink, "write", SinkEffectInputKind.PIPELINE_MEMBERS)
 
 
 def test_effect_inspection_applies_deferred_collision_policy(tmp_path: Path) -> None:
@@ -409,7 +418,7 @@ def test_no_publication_uses_exact_virtual_and_inherited_descriptors(tmp_path: P
     )
     virtual = local_effects.prepare_local_effect(
         effect_id="a1" * 32,
-        input_kind=local_effects.SinkEffectInputKind.PIPELINE_MEMBERS,
+        input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
         inspection=virtual_inspection,
         chunks=(),
         row_count=0,
@@ -442,7 +451,7 @@ def test_no_publication_uses_exact_virtual_and_inherited_descriptors(tmp_path: P
     )
     inherited = local_effects.prepare_local_effect(
         effect_id="a2" * 32,
-        input_kind=local_effects.SinkEffectInputKind.PIPELINE_MEMBERS,
+        input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
         inspection=inherited_inspection,
         chunks=local_effects.iter_path_chunks(target),
         row_count=0,

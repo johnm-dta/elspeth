@@ -17,6 +17,7 @@ from pydantic import Field, field_validator, model_validator
 from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
 from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.sink import OutputValidationResult
 from elspeth.contracts.sink_effects import (
@@ -199,7 +200,7 @@ class TextSink(BaseSink):
                 yield from iter_path_chunks(target)
             missing = object()
             for member in members:
-                row = dict(member.row)
+                row = deep_thaw(member.row)
                 value = row.get(self._field, missing)
                 reason: str | None = None
                 encoded: bytes | None = None

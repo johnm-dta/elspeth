@@ -498,7 +498,7 @@ class DatabaseSink(BaseSink):
         target_columns = set(target_columns_value)
 
         members: list[dict[str, object]] = []
-        source_rows = [dict(member.row) for member in effect_input.members]
+        source_rows = [deep_thaw(member.row) for member in effect_input.members]
         serialized_rows = self._serialize_any_typed_fields(source_rows)
         for member, serialized_row in zip(effect_input.members, serialized_rows, strict=True):
             extra = sorted(set(serialized_row) - target_columns)

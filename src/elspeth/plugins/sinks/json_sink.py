@@ -20,6 +20,7 @@ from pydantic import Field, model_validator
 from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.errors import SinkEffectCapabilityError
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.header_modes import HeaderMode
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
@@ -428,7 +429,7 @@ class JSONSink(BaseSink):
         diversion_attribution: list[DiversionAttribution] = []
 
         def serialized_rows() -> Iterator[tuple[int, str]]:
-            source_rows = [dict(member.row) for member in members]
+            source_rows = [deep_thaw(member.row) for member in members]
             output_rows = apply_display_headers(self, source_rows)
             for member, original, output in zip(members, source_rows, output_rows, strict=True):
                 try:

@@ -23,6 +23,7 @@ from elspeth.contracts import errors as contract_errors
 from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.header_modes import HeaderMode, parse_header_mode
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.sink_effects import (
@@ -819,7 +820,7 @@ class AWSS3Sink(BaseSink):
         diversion_attribution: list[DiversionAttribution] = []
         diverted_keys: set[tuple[str, str]] = set()
         for member in effect_input.members:
-            row = dict(member.row)
+            row = deep_thaw(member.row)
             probe_fields = self._get_fieldnames_from_schema_or_rows([row])
             probe_rows = apply_display_headers(self, [row]) if self._format in {"json", "jsonl"} else [row]
             try:
@@ -847,7 +848,9 @@ class AWSS3Sink(BaseSink):
                 serialized.close()
                 accepted.append(member.ordinal)
         rows = [
-            dict(member.row) for member in effect_input.target_snapshot_members if (member.token_id, member.row_id) not in diverted_keys
+            deep_thaw(member.row)
+            for member in effect_input.target_snapshot_members
+            if (member.token_id, member.row_id) not in diverted_keys
         ]
         return rows, tuple(accepted), tuple(diverted), tuple(diversion_attribution)
 

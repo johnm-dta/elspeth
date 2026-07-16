@@ -440,7 +440,22 @@ def prepare_local_effect(
     except ValueError as exc:
         _remove_exact_staging(staging, staged)
         raise LocalFilePreconditionError(str(exc)) from exc
-    if (
+    descriptor_hash = staged.content_hash
+    descriptor_size = staged.size_bytes
+    if input_kind is SinkEffectInputKind.PIPELINE_MEMBERS and not accepted:
+        descriptor_mode = SinkEffectDescriptorMode.NO_PUBLICATION
+        if predecessor.exists:
+            if predecessor.content_hash is None or predecessor.size_bytes is None:
+                _remove_exact_staging(staging, staged)
+                raise LocalFilePreconditionError("existing no-publication predecessor has incomplete descriptor evidence")
+            publication_kind = "inherited"
+            descriptor_hash = predecessor.content_hash
+            descriptor_size = predecessor.size_bytes
+        else:
+            publication_kind = "virtual"
+            descriptor_hash = hashlib.sha256(b"").hexdigest()
+            descriptor_size = 0
+    elif (
         not diverted
         and predecessor.exists
         and predecessor.content_hash == staged.content_hash
@@ -464,8 +479,8 @@ def prepare_local_effect(
         predecessor_size=predecessor.size_bytes,
         predecessor_file_id=predecessor.file_id,
         predecessor_declared=predecessor_declared,
-        staged_hash=staged.content_hash,
-        staged_size=staged.size_bytes,
+        staged_hash=descriptor_hash,
+        staged_size=descriptor_size,
         staged_file_id=staged.file_id,
         encoding=encoding,
         format_name=format_name,
@@ -476,7 +491,7 @@ def prepare_local_effect(
         diversion_attribution=attribution,
     )
     evidence = evidence_value.as_mapping()
-    descriptor = ArtifactDescriptor.for_file(path=str(target), content_hash=staged.content_hash, size_bytes=staged.size_bytes)
+    descriptor = ArtifactDescriptor.for_file(path=str(target), content_hash=descriptor_hash, size_bytes=descriptor_size)
     if descriptor_mode is SinkEffectDescriptorMode.NO_PUBLICATION:
         staging.unlink()
         _fsync_directory(staging.parent)
@@ -495,7 +510,7 @@ def prepare_local_effect(
                 descriptor=descriptor,
                 evidence=evidence,
             ),
-            payload_hash=staged.content_hash,
+            payload_hash=descriptor_hash,
             expected_descriptor=descriptor,
             safe_evidence=evidence,
         )
@@ -644,8 +659,6 @@ def reconcile_local_effect(plan: SinkEffectPlan) -> SinkEffectReconcileResult:
         return SinkEffectReconcileResult.applied(
             expected,
             evidence={"file_id": evidence.staged_file_id, "publication": "atomic_replace"},
-            accepted_ordinals=evidence.accepted_ordinals,
-            diverted_ordinals=evidence.diverted_ordinals,
         )
 
     candidate_exact = _matches(

@@ -8,6 +8,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import md5, sha256
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
@@ -134,7 +135,7 @@ class _S3Store:
             raise _S3PreconditionFailed()
         body = request["Body"]
         assert hasattr(body, "read")
-        payload = body.read()  # type: ignore[union-attr]
+        payload = body.read()
         assert type(payload) is bytes
         etag = f'"etag-{len(self.requests)}"'
         metadata = request["Metadata"]
@@ -177,7 +178,7 @@ class _AzureBlob:
         if "etag" in request and (self._store.value is None or request["etag"] != self._store.value.etag):
             raise _AzurePreconditionFailed()
         if hasattr(data, "read"):
-            payload = data.read()  # type: ignore[union-attr]
+            payload = data.read()
         else:
             payload = data
         assert type(payload) is bytes
@@ -250,6 +251,19 @@ def test_remote_sinks_declare_recoverable_pipeline_effects(factory: Any) -> None
     store = _S3Store() if factory is _s3 else _AzureStore()
     sink = factory(store)
     validate_sink_effect_capability(sink, "write", SinkEffectInputKind.PIPELINE_MEMBERS)
+
+
+@pytest.mark.parametrize("factory", [_s3, _azure])
+def test_remote_json_effects_thaw_nested_member_rows(factory: Any) -> None:
+    store = _S3Store() if factory is _s3 else _AzureStore()
+    nested = {"id": 1, "payload": {"flags": [True, False], "items": [{"code": "A"}]}}
+    member = _member(0, nested)
+
+    plan = _prepare(factory(store), effect_id="ab" * 32, current=(member,), target_snapshot=(member,))
+
+    assert plan.safe_evidence["accepted_ordinals"] == (0,)
+    assert plan.safe_evidence["diverted_ordinals"] == ()
+    assert json.loads(Path(str(plan.safe_evidence["staging_path"])).read_bytes()) == [nested]
 
 
 def test_s3_fresh_process_successor_uses_snapshot_and_etag_condition() -> None:
@@ -379,13 +393,9 @@ def test_azure_fresh_process_successor_and_response_loss_reconcile() -> None:
     assert upload_requests[0]["if_none_match"] == "*"
     assert upload_requests[1]["etag"] == '"etag-2"'
     assert upload_requests[1]["metadata"]["elspeth_protocol_version"] == "sink-effect-v1"  # type: ignore[index]
-    assert (
-        upload_requests[1]["content_settings"].content_md5
-        == md5(  # type: ignore[union-attr]
-            store.value.body,
-            usedforsecurity=False,
-        ).digest()
-    )
+    content_settings = upload_requests[1]["content_settings"]
+    assert hasattr(content_settings, "content_md5")
+    assert content_settings.content_md5 == md5(store.value.body, usedforsecurity=False).digest()
     reconciled = _azure(store).reconcile_effect(second_plan, _CTX)
     assert reconciled.kind is SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR
     assert reconciled.descriptor == second_plan.expected_descriptor

@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
 from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.header_modes import HeaderMode, parse_header_mode
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.sink_effects import (
@@ -528,7 +529,7 @@ class AzureBlobSink(BaseSink):
         diversion_attribution: list[DiversionAttribution] = []
         diverted_keys: set[tuple[str, str]] = set()
         for member in effect_input.members:
-            row = dict(member.row)
+            row = deep_thaw(member.row)
             output_row = apply_display_headers(self, [row])[0] if self._format in {"json", "jsonl"} else row
             try:
                 self._serialize_rows([output_row])
@@ -545,7 +546,9 @@ class AzureBlobSink(BaseSink):
             else:
                 accepted.append(member.ordinal)
         rows = [
-            dict(member.row) for member in effect_input.target_snapshot_members if (member.token_id, member.row_id) not in diverted_keys
+            deep_thaw(member.row)
+            for member in effect_input.target_snapshot_members
+            if (member.token_id, member.row_id) not in diverted_keys
         ]
         if self._format in {"json", "jsonl"}:
             rows = apply_display_headers(self, rows)

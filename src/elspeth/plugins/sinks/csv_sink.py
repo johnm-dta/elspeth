@@ -22,6 +22,7 @@ from pydantic import Field, field_validator, model_validator
 from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.errors import SinkEffectCapabilityError
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.sink_effects import (
     SINK_EFFECT_PROTOCOL_VERSION,
@@ -373,7 +374,7 @@ class CSVSink(BaseSink):
         predecessor_declared = bool(request.inspection.evidence["predecessor_declared"])
         include_baseline = predecessor_declared or self._mode == "append"
         baseline_nonempty = include_baseline and target.exists() and target.stat().st_size > 0
-        rows = [dict(member.row) for member in members]
+        rows = [deep_thaw(member.row) for member in members]
 
         if baseline_nonempty:
             validation = self.validate_output_target()

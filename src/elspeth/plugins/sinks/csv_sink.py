@@ -148,7 +148,7 @@ class CSVSink(BaseSink):
     name = "csv"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:626b4bd0ed981f80"
+    source_file_hash: str | None = "sha256:ce58617c86d664f5"
     config_model = CSVSinkConfig
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"append", "write"})
@@ -165,6 +165,11 @@ class CSVSink(BaseSink):
         cfg = CSVSinkConfig.from_dict(dict(config), plugin_name=cls.name)
         if purpose is SinkEffectExecutionPurpose.AUDIT_EXPORT:
             cls._validate_audit_export_config(cfg)
+        if purpose is SinkEffectExecutionPurpose.RESUME:
+            # configure_for_resume() switches the live sink to canonical
+            # append before admission is issued; the resolved mode must claim
+            # the mode resume actually executes (elspeth-fc9906e398).
+            return ResolvedSinkEffectMode("append")
         return ResolvedSinkEffectMode(cfg.mode)
 
     @classmethod

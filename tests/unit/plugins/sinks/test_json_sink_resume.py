@@ -374,3 +374,26 @@ class TestJSONSinkResumeEndToEnd:
         lines = content.strip().split("\n")
         assert len(lines) == 1
         assert json.loads(lines[0]) == {"id": 2}
+
+
+class TestJSONSinkResumeModeResolution:
+    """elspeth-fc9906e398: resolved effect mode must claim what resume executes."""
+
+    def test_resume_purpose_resolves_post_resume_append_mode(self) -> None:
+        """A write-configured JSONL sink resumes in append mode; the resolver must say so."""
+        from elspeth.contracts.sink_effects import ResolvedSinkEffectMode, SinkEffectExecutionPurpose
+
+        config = {"path": "/tmp/out.jsonl", "schema": {"mode": "observed"}, "format": "jsonl", "mode": "write"}
+
+        resolved = JSONSink._resolve_sink_effect_mode(config, purpose=SinkEffectExecutionPurpose.RESUME)
+
+        assert resolved == ResolvedSinkEffectMode("append")
+
+    def test_fresh_purpose_keeps_configured_mode(self) -> None:
+        from elspeth.contracts.sink_effects import ResolvedSinkEffectMode, SinkEffectExecutionPurpose
+
+        config = {"path": "/tmp/out.jsonl", "schema": {"mode": "observed"}, "format": "jsonl", "mode": "write"}
+
+        resolved = JSONSink._resolve_sink_effect_mode(config, purpose=SinkEffectExecutionPurpose.FRESH)
+
+        assert resolved == ResolvedSinkEffectMode("write")

@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.contracts.run_result import RunResult
+    from elspeth.core.config import SecretsConfig
     from elspeth.core.landscape import LandscapeDB
     from elspeth.engine import Orchestrator, PipelineConfig
     from elspeth.engine.orchestrator import RowPlugin
@@ -452,6 +453,25 @@ def _load_raw_yaml(config_path: Path) -> dict[str, Any]:
     return raw_config
 
 
+def _parse_raw_secrets_config(raw_config: Mapping[str, Any]) -> SecretsConfig:
+    """Extract and validate the literal ``secrets`` block from raw (unexpanded) YAML.
+
+    Shared by the raw sink-effect preflight and the settings loader so both
+    read one authoritative interpretation of which environment variables the
+    secret-loading phase will populate.
+    """
+    from elspeth.core.config import SecretsConfig
+
+    secrets_obj = raw_config.get("secrets", {})
+    if secrets_obj is None:
+        secrets_dict: dict[str, Any] = {}
+    else:
+        if not isinstance(secrets_obj, Mapping):
+            raise ValueError(f"'secrets' must be a mapping/object, got {type(secrets_obj).__name__}")
+        secrets_dict = dict(secrets_obj)
+    return SecretsConfig(**secrets_dict)
+
+
 def _load_settings_with_secrets(
     settings_path: Path,
 ) -> tuple[ElspethSettings, list[SecretResolutionInput]]:
@@ -481,21 +501,12 @@ def _load_settings_with_secrets(
         ValidationError: Pydantic validation error (secrets config or full config)
         SecretLoadError: Key Vault secret loading failed
     """
-    from elspeth.core.config import SecretsConfig
-
     # Phase 1: Parse YAML to extract secrets config (no ${VAR} resolution yet)
     # NOTE: vault_url must be literal per design - ${VAR} not supported
     raw_config = _load_raw_yaml(settings_path)
 
     # Extract and validate secrets config
-    secrets_obj = raw_config.get("secrets", {})
-    if secrets_obj is None:
-        secrets_dict: dict[str, Any] = {}
-    else:
-        if not isinstance(secrets_obj, Mapping):
-            raise ValueError(f"'secrets' must be a mapping/object, got {type(secrets_obj).__name__}")
-        secrets_dict = dict(secrets_obj)
-    secrets_config = SecretsConfig(**secrets_dict)
+    secrets_config = _parse_raw_secrets_config(raw_config)
 
     # Phase 2: Load secrets from Key Vault if configured
     # Returns resolution records for later audit recording
@@ -553,6 +564,30 @@ def _preflight_execution_sinks(
     return sinks, modes, admission
 
 
+def _configure_execution_sinks_for_resume(execution_sinks: Mapping[str, SinkProtocol]) -> None:
+    """Switch live execution sinks to their resume (append) mode.
+
+    Must run BEFORE sink-effect admission is issued so the admission receipt
+    and the durable effect identity bind the mode resume actually executes
+    (elspeth-fc9906e398). Uses the polymorphic resume capability: each sink
+    self-configures via configure_for_resume().
+    """
+    for sink_name, sink in execution_sinks.items():
+        if not sink.supports_resume:
+            typer.echo(
+                f"Error: Cannot resume with sink '{sink_name}' (plugin: {sink.name}). "
+                f"This sink does not support resume/append mode.\n"
+                f"Hint: Use a different sink type or start a new run.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        try:
+            sink.configure_for_resume()
+        except NotImplementedError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1) from None
+
+
 def _preflight_raw_settings_sink_effects(settings_path: Path, *, purpose: object) -> None:
     """Run adapter-class eligibility before secrets or other startup work."""
     from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
@@ -564,13 +599,26 @@ def _preflight_raw_settings_sink_effects(settings_path: Path, *, purpose: object
     if not isinstance(purpose, SinkEffectExecutionPurpose):
         raise TypeError("Raw sink effect preflight purpose must be exact SinkEffectExecutionPurpose")
     raw_config = _load_raw_yaml(settings_path)
-    validate_sink_effect_eligibility_from_raw_config(raw_config, purpose=purpose)
+    # Supported ${VAR} expansion must complete before configuration-dependent
+    # mode/URL/dialect resolution (elspeth-19f2382cf4). Key Vault-mapped
+    # variables are only populated by the later secret-loading phase, so sinks
+    # referencing them are deferred to the post-expansion admission gates.
+    secrets_config = _parse_raw_secrets_config(raw_config)
+    deferrable_env_vars = frozenset(secrets_config.mapping) if secrets_config.source == "keyvault" else frozenset()
+    validate_sink_effect_eligibility_from_raw_config(
+        raw_config,
+        purpose=purpose,
+        expand_env_placeholders=True,
+        deferrable_env_vars=deferrable_env_vars,
+    )
     if purpose is SinkEffectExecutionPurpose.FRESH:
         export_settings = validate_landscape_export_settings_from_raw_config(raw_config)
         if export_settings.enabled:
             validate_sink_effect_eligibility_from_raw_config(
                 raw_config,
                 purpose=SinkEffectExecutionPurpose.AUDIT_EXPORT,
+                expand_env_placeholders=True,
+                deferrable_env_vars=deferrable_env_vars,
             )
 
 
@@ -2330,17 +2378,29 @@ def resume(
             settings_config,
             purpose=SinkEffectExecutionPurpose.RESUME,
         )
-        if execute:
-            execution_sinks, execution_sink_modes, sink_effect_admission = _preflight_execution_sinks(
-                settings_config,
-                plugins,
-                purpose=SinkEffectExecutionPurpose.RESUME,
-            )
     except contract_errors.TIER_1_ERRORS:
         raise
     except Exception as e:
         typer.echo(f"Sink effect preflight failed: {e}", err=True)
         raise typer.Exit(1) from None
+
+    if execute:
+        # Resume executes sinks in their post-resume live mode. Switch the
+        # live instances BEFORE admission is issued so the admission receipt
+        # and the durable effect identity bind the mode resume actually uses
+        # (elspeth-fc9906e398).
+        _configure_execution_sinks_for_resume(_execution_sinks_for_graph(settings_config, plugins.sinks))
+        try:
+            execution_sinks, execution_sink_modes, sink_effect_admission = _preflight_execution_sinks(
+                settings_config,
+                plugins,
+                purpose=SinkEffectExecutionPurpose.RESUME,
+            )
+        except contract_errors.TIER_1_ERRORS:
+            raise
+        except Exception as e:
+            typer.echo(f"Sink effect preflight failed: {e}", err=True)
+            raise typer.Exit(1) from None
 
     # Resolve database URL
     if database:
@@ -2494,30 +2554,16 @@ def resume(
 
         payload_store = FilesystemPayloadStore(payload_path)
 
-        # CRITICAL: Validate and configure sinks for resume mode
-        # Uses the already-instantiated sinks from plugins dict
+        # CRITICAL: Validate sink output targets for resume mode.
+        # The sinks were already switched to their resume (append) mode by
+        # _configure_execution_sinks_for_resume BEFORE admission was issued,
+        # so the admission receipt binds the live post-resume mode
+        # (elspeth-fc9906e398).
         from elspeth.plugins.sources.null_source import NullSource
 
         resume_sinks = {}
 
         for sink_name, sink in execution_sinks.items():
-            # Check if sink supports resume
-            if not sink.supports_resume:
-                typer.echo(
-                    f"Error: Cannot resume with sink '{sink_name}' (plugin: {sink.name}). "
-                    f"This sink does not support resume/append mode.\n"
-                    f"Hint: Use a different sink type or start a new run.",
-                    err=True,
-                )
-                raise typer.Exit(1)
-
-            # Configure sink for resume (switches to append mode)
-            try:
-                sink.configure_for_resume()
-            except NotImplementedError as e:
-                typer.echo(f"Error: {e}", err=True)
-                raise typer.Exit(1) from None
-
             # For sinks with headers: original, provide field resolution
             # mapping BEFORE validation so they can correctly compare display names
             if sink.needs_resume_field_resolution:

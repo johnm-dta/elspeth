@@ -1106,6 +1106,110 @@ def test_raw_sink_eligibility_rejects_present_non_mapping_options_before_manager
         )
 
 
+def _database_sink_raw_config(url_value: str) -> dict[str, object]:
+    """Raw sinks config for the documented database sink URL placeholder shape."""
+    return {
+        "sinks": {
+            "db_out": {
+                "plugin": "database",
+                "options": {
+                    "url": url_value,
+                    "table": "results",
+                    "schema": {"mode": "observed"},
+                    "if_exists": "append",
+                    "effect_ledger": {
+                        "table": "_elspeth_results_ledger",
+                        "permissions": ["insert", "select"],
+                    },
+                },
+            }
+        },
+    }
+
+
+def test_raw_sink_eligibility_expands_supported_env_placeholders_before_mode_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """elspeth-19f2382cf4: ${DATABASE_URL} must expand before URL/dialect resolution."""
+    from elspeth.plugins.infrastructure.runtime_factory import validate_sink_effect_eligibility_from_raw_config
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'results.db'}")
+
+    modes = validate_sink_effect_eligibility_from_raw_config(
+        _database_sink_raw_config("${DATABASE_URL}"),
+        purpose=SinkEffectExecutionPurpose.FRESH,
+        expand_env_placeholders=True,
+    )
+
+    assert modes == {"db_out": ResolvedSinkEffectMode("append")}
+
+
+def test_raw_sink_eligibility_expands_env_placeholder_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from elspeth.plugins.infrastructure.runtime_factory import validate_sink_effect_eligibility_from_raw_config
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    modes = validate_sink_effect_eligibility_from_raw_config(
+        _database_sink_raw_config("${DATABASE_URL:-sqlite:///" + str(tmp_path / "fallback.db") + "}"),
+        purpose=SinkEffectExecutionPurpose.FRESH,
+        expand_env_placeholders=True,
+    )
+
+    assert modes == {"db_out": ResolvedSinkEffectMode("append")}
+
+
+def test_raw_sink_eligibility_fails_fast_for_unset_env_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unset, non-deferrable variable fails with the loader's own clear error."""
+    from elspeth.plugins.infrastructure.runtime_factory import validate_sink_effect_eligibility_from_raw_config
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    with pytest.raises(ValueError, match="DATABASE_URL"):
+        validate_sink_effect_eligibility_from_raw_config(
+            _database_sink_raw_config("${DATABASE_URL}"),
+            purpose=SinkEffectExecutionPurpose.FRESH,
+            expand_env_placeholders=True,
+        )
+
+
+def test_raw_sink_eligibility_defers_keyvault_pending_placeholders(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A vault-mapped variable is unknowable before secret loading: defer, don't guess.
+
+    The Key Vault phase overrides any current process value, so deferral must
+    also win when the variable happens to be set in the environment. The
+    post-expansion admission gates re-run adapter mode resolution with the
+    fully loaded configuration and remain authoritative.
+    """
+    from elspeth.plugins.infrastructure.runtime_factory import validate_sink_effect_eligibility_from_raw_config
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    unresolved = validate_sink_effect_eligibility_from_raw_config(
+        _database_sink_raw_config("${DATABASE_URL}"),
+        purpose=SinkEffectExecutionPurpose.FRESH,
+        expand_env_placeholders=True,
+        deferrable_env_vars=frozenset({"DATABASE_URL"}),
+    )
+    assert unresolved == {}
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'stale.db'}")
+    shadowed = validate_sink_effect_eligibility_from_raw_config(
+        _database_sink_raw_config("${DATABASE_URL}"),
+        purpose=SinkEffectExecutionPurpose.FRESH,
+        expand_env_placeholders=True,
+        deferrable_env_vars=frozenset({"DATABASE_URL"}),
+    )
+    assert shadowed == {}
+
+
 @pytest.mark.parametrize("tamper", ["name", "sink", "config", "purpose"])
 def test_runtime_binding_rejects_name_instance_config_and_purpose_tampering(tamper: str) -> None:
     from dataclasses import replace

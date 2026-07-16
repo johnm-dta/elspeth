@@ -34,6 +34,7 @@ from elspeth.core.landscape.schema import metadata as landscape_metadata
 from elspeth.core.landscape.schema import runs_table
 from elspeth.core.schema_shape import (
     SchemaShapeIssue,
+    _sqlite_ddl_keyword_text,
     collect_metadata_shape_issues,
 )
 from elspeth.web.sessions.engine import create_session_engine
@@ -1936,3 +1937,87 @@ def test_collector_compares_postgresql_index_operator_classes(
         assert any(issue.subject == subject for issue in issues)
     else:
         assert issues == ()
+
+
+def _autoincrement_metadata() -> MetaData:
+    metadata = MetaData()
+    Table(
+        "events",
+        metadata,
+        Column("seq", Integer, primary_key=True, autoincrement=True),
+        sqlite_autoincrement=True,
+    )
+    return metadata
+
+
+def _autoincrement_issues_for_ddl(ddl: str) -> tuple[SchemaShapeIssue, ...]:
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(ddl)
+    return collect_metadata_shape_issues(
+        inspect(engine),
+        _autoincrement_metadata(),
+        dialect=engine.dialect,
+        present_tables=frozenset({"events"}),
+    )
+
+
+def test_collector_accepts_genuine_sqlite_autoincrement() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    _autoincrement_metadata().create_all(engine)
+
+    issues = collect_metadata_shape_issues(
+        inspect(engine),
+        _autoincrement_metadata(),
+        dialect=engine.dialect,
+        present_tables=frozenset({"events"}),
+    )
+
+    assert issues == ()
+
+
+@pytest.mark.parametrize(
+    "ddl",
+    [
+        # elspeth-e2f27fb78e: the proof phrase appearing only in a block
+        # comment must not prove a real AUTOINCREMENT declaration.
+        "CREATE TABLE events (seq INTEGER NOT NULL PRIMARY KEY /* PRIMARY KEY AUTOINCREMENT */)",
+        # ... nor in a line comment,
+        "CREATE TABLE events (seq INTEGER NOT NULL PRIMARY KEY) -- PRIMARY KEY AUTOINCREMENT",
+        # ... nor in a string literal,
+        "CREATE TABLE events (seq INTEGER NOT NULL PRIMARY KEY, CHECK ('PRIMARY KEY AUTOINCREMENT' <> ''))",
+        # ... nor in a quoted-identifier column name.
+        'CREATE TABLE events (seq INTEGER NOT NULL PRIMARY KEY, "PRIMARY KEY AUTOINCREMENT" TEXT)',
+    ],
+)
+def test_collector_rejects_autoincrement_visible_only_in_comment_or_quotes(ddl: str) -> None:
+    issues = _autoincrement_issues_for_ddl(ddl)
+
+    assert any(issue.subject == "events SQLite AUTOINCREMENT mismatch" for issue in issues)
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        # Block comments are blanked without fusing the surrounding tokens.
+        ("a/* PRIMARY KEY */b", "a                 b"),
+        # Line comments are blanked up to (but keeping) the newline.
+        ("a -- PRIMARY KEY\nb", "a               \nb"),
+        # An unterminated block comment is blanked to end-of-input (fail closed).
+        ("a /* PRIMARY KEY", "a               "),
+        # A doubled quote is an escape, not a terminator: the phrase after it
+        # is still inside the literal and must stay hidden.
+        ("x 'it''s PRIMARY KEY AUTOINCREMENT' y", "x                                   y"),
+        # Double-quoted and backtick-quoted identifiers and bracket
+        # identifiers are all hidden from keyword matching.
+        ('"PRIMARY KEY" z', "              z"),
+        ("`PRIMARY KEY` z", "              z"),
+        ("[PRIMARY KEY] z", "              z"),
+        # An unterminated string literal is blanked to end-of-input (fail closed).
+        ("x 'PRIMARY KEY AUTOINCREMENT", "x                           "),
+        # Genuine keywords outside comments and quotes are preserved verbatim.
+        ("seq INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT", "seq INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT"),
+    ],
+)
+def test_sqlite_ddl_keyword_text_hides_comments_and_quoted_regions(sql: str, expected: str) -> None:
+    assert _sqlite_ddl_keyword_text(sql) == expected

@@ -91,13 +91,25 @@ def test_bare_run_coordination_event_primary_key_is_divergent(engine: Engine) ->
     assert probe_schema_shape(engine) is LandscapeSchemaShape.DIVERGENT
 
 
-def test_autoincrement_word_in_sql_comment_does_not_prove_table_shape(engine: Engine) -> None:
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        # Bare keyword hidden in a block comment.
+        " PRIMARY KEY /* AUTOINCREMENT */",
+        # Full proof phrase hidden in a block comment: the proof regex must
+        # not accept comment text as a declaration (elspeth-e2f27fb78e).
+        " PRIMARY KEY /* PRIMARY KEY AUTOINCREMENT */",
+        # Full proof phrase hidden in a line comment.
+        " PRIMARY KEY -- PRIMARY KEY AUTOINCREMENT\n",
+    ],
+)
+def test_autoincrement_in_sql_comment_does_not_prove_table_shape(engine: Engine, replacement: str) -> None:
     _create_full(engine)
     with engine.connect() as conn:
         ddl = conn.exec_driver_sql("SELECT sql FROM sqlite_master WHERE type='table' AND name='run_coordination_events'").scalar_one()
         conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
         conn.exec_driver_sql("DROP TABLE run_coordination_events")
-        conn.exec_driver_sql(ddl.replace(" PRIMARY KEY AUTOINCREMENT", " PRIMARY KEY /* AUTOINCREMENT */"))
+        conn.exec_driver_sql(ddl.replace(" PRIMARY KEY AUTOINCREMENT", replacement))
         for index in metadata.tables["run_coordination_events"].indexes:
             index.create(conn)
         conn.commit()

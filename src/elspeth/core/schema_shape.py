@@ -631,6 +631,61 @@ def collect_metadata_shape_issues(
     return tuple(issues)
 
 
+def _sqlite_ddl_keyword_text(sql: str) -> str:
+    """Return ``sql`` with comments and quoted regions blanked to spaces.
+
+    The AUTOINCREMENT proof matches keywords against raw ``sqlite_master.sql``
+    text; without lexing, a comment (or string literal / quoted identifier)
+    that merely *contains* ``PRIMARY KEY AUTOINCREMENT`` would satisfy the
+    proof and a divergent schema would classify as current.  This walks the
+    four SQLite quoting forms ('...', "...", backticks, [...]) plus
+    ``--`` line and ``/* */`` block comments, replacing each region with
+    spaces so only genuine keyword tokens remain visible to the regex.
+    Blanking (rather than deleting) preserves token boundaries; unterminated
+    regions are blanked to end-of-input, which fails closed because the
+    proof keywords then cannot match.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch == "-" and sql.startswith("--", i):
+            end = sql.find("\n", i + 2)
+            end = n if end == -1 else end  # keep the newline itself
+            out.append(" " * (end - i))
+            i = end
+        elif ch == "/" and sql.startswith("/*", i):
+            close = sql.find("*/", i + 2)
+            end = n if close == -1 else close + 2
+            out.append(" " * (end - i))
+            i = end
+        elif ch in "'\"`":
+            # A doubled quote character is an escape inside all three forms.
+            end = i + 1
+            while end < n:
+                nxt = sql.find(ch, end)
+                if nxt == -1:
+                    end = n
+                    break
+                if sql.startswith(ch, nxt + 1):
+                    end = nxt + 2
+                    continue
+                end = nxt + 1
+                break
+            out.append(" " * (end - i))
+            i = end
+        elif ch == "[":
+            close = sql.find("]", i + 1)
+            end = n if close == -1 else close + 1
+            out.append(" " * (end - i))
+            i = end
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
 def _collect_sqlite_table_option_issues(
     issues: list[SchemaShapeIssue],
     inspector: Inspector,
@@ -649,7 +704,7 @@ def _collect_sqlite_table_option_issues(
     else:
         with bind.connect() as connection:
             ddl = connection.execute(statement, {"table_name": table.name}).scalar_one_or_none()
-    if type(ddl) is not str or re.search(r"\bPRIMARY\s+KEY\s+AUTOINCREMENT\b", ddl, flags=re.IGNORECASE) is None:
+    if type(ddl) is not str or re.search(r"\bPRIMARY\s+KEY\s+AUTOINCREMENT\b", _sqlite_ddl_keyword_text(ddl), flags=re.IGNORECASE) is None:
         issues.append(SchemaShapeIssue(f"{table.name} SQLite AUTOINCREMENT mismatch", True, False))
 
 

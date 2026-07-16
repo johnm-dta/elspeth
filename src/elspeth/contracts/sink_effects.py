@@ -1242,6 +1242,8 @@ class SinkEffectReconcileResult:
     kind: SinkEffectReconcileKind
     descriptor: ArtifactDescriptor | None = None
     evidence: Mapping[str, object] = field(default_factory=lambda: MappingProxyType({}))
+    accepted_ordinals: Sequence[int] | None = None
+    diverted_ordinals: Sequence[int] | None = None
 
     def __post_init__(self) -> None:
         _require_exact_enum(self.kind, SinkEffectReconcileKind, "kind")
@@ -1250,6 +1252,17 @@ class SinkEffectReconcileResult:
                 raise ValueError("APPLIED_WITH_EXACT_DESCRIPTOR requires an exact descriptor")
         elif self.descriptor is not None:
             raise ValueError(f"{self.kind.value} must not carry a descriptor")
+        if (self.accepted_ordinals is None) != (self.diverted_ordinals is None):
+            raise ValueError("accepted_ordinals and diverted_ordinals must both be present or both be absent")
+        if self.accepted_ordinals is not None and self.diverted_ordinals is not None:
+            if self.kind is not SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR:
+                raise ValueError(f"{self.kind.value} must not carry a result-derived ordinal partition")
+            accepted = _freeze_ordinal_sequence(self.accepted_ordinals, "accepted_ordinals")
+            diverted = _freeze_ordinal_sequence(self.diverted_ordinals, "diverted_ordinals")
+            if set(accepted) & set(diverted):
+                raise ValueError("accepted_ordinals and diverted_ordinals must not overlap")
+            object.__setattr__(self, "accepted_ordinals", tuple(accepted))
+            object.__setattr__(self, "diverted_ordinals", tuple(diverted))
         frozen_evidence = _freeze_bounded_evidence(self.evidence, "evidence")
         object.__setattr__(self, "evidence", deep_freeze(frozen_evidence))
 
@@ -1263,11 +1276,15 @@ class SinkEffectReconcileResult:
         descriptor: ArtifactDescriptor,
         *,
         evidence: Mapping[str, object],
+        accepted_ordinals: Sequence[int] | None = None,
+        diverted_ordinals: Sequence[int] | None = None,
     ) -> SinkEffectReconcileResult:
         return cls(
             kind=SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR,
             descriptor=descriptor,
             evidence=evidence,
+            accepted_ordinals=accepted_ordinals,
+            diverted_ordinals=diverted_ordinals,
         )
 
     @classmethod

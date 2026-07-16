@@ -8,6 +8,8 @@ from sqlalchemy import MetaData, Table, create_engine, select
 
 from elspeth.contracts import Determinism
 from elspeth.contracts.plugin_context import PluginContext
+from elspeth.contracts.sink_effects import ResolvedSinkEffectMode, SinkEffectExecutionPurpose, SinkEffectInputKind
+from elspeth.engine.orchestrator.preflight import SinkEffectCapabilityError, validate_sink_effect_capability
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.sinks.database_sink import DatabaseSink, DatabaseSinkConfig
 from tests.fixtures.base_classes import inject_write_failure
@@ -17,6 +19,78 @@ from tests.fixtures.factories import make_operation_context
 # DatabaseSink requires fixed-column structure, so we use strict mode
 # Tests that need specific fields define their own schema
 STRICT_SCHEMA = {"mode": "fixed", "fields": ["id: int", "name: str"]}
+EFFECT_LEDGER = {
+    "table": "_elspeth_sink_effects",
+    "schema_version": 1,
+    "permissions": ["select", "insert"],
+}
+
+
+class TestDatabaseSinkEffectCapability:
+    def test_raw_mode_resolution_rejects_missing_ledger_without_construction(self, tmp_path: Path) -> None:
+        with pytest.raises(SinkEffectCapabilityError, match="target-side effect ledger"):
+            DatabaseSink._resolve_sink_effect_mode(
+                {"url": f"sqlite:///{tmp_path / 'target.db'}", "table": "output", "schema": STRICT_SCHEMA},
+                purpose=SinkEffectExecutionPurpose.FRESH,
+            )
+
+    def test_raw_mode_resolution_accepts_declared_append_contract(self, tmp_path: Path) -> None:
+        mode = DatabaseSink._resolve_sink_effect_mode(
+            {
+                "url": f"sqlite:///{tmp_path / 'target.db'}",
+                "table": "output",
+                "schema": STRICT_SCHEMA,
+                "effect_ledger": EFFECT_LEDGER,
+            },
+            purpose=SinkEffectExecutionPurpose.FRESH,
+        )
+
+        assert mode == ResolvedSinkEffectMode("append")
+
+    def test_effect_capability_requires_operator_declared_target_ledger(self, tmp_path: Path) -> None:
+        target_path = tmp_path / "target.db"
+        sink = DatabaseSink({"url": f"sqlite:///{target_path}", "table": "output", "schema": STRICT_SCHEMA})
+
+        with pytest.raises(SinkEffectCapabilityError, match="target-side effect ledger"):
+            validate_sink_effect_capability(sink, "append", SinkEffectInputKind.PIPELINE_MEMBERS)
+        assert not target_path.exists()
+
+    def test_effect_capability_rejects_replace_before_target_io(self, tmp_path: Path) -> None:
+        target_path = tmp_path / "target.db"
+        sink = DatabaseSink(
+            {
+                "url": f"sqlite:///{target_path}",
+                "table": "output",
+                "schema": STRICT_SCHEMA,
+                "if_exists": "replace",
+                "effect_ledger": EFFECT_LEDGER,
+            }
+        )
+
+        with pytest.raises(SinkEffectCapabilityError, match=r"replace.*not supported"):
+            validate_sink_effect_capability(sink, "replace", SinkEffectInputKind.PIPELINE_MEMBERS)
+        assert not target_path.exists()
+
+    def test_effect_capability_rejects_unsupported_dialect_before_target_io(self) -> None:
+        sink = DatabaseSink(
+            {
+                "url": "mysql+pymysql://localhost/example",
+                "table": "output",
+                "schema": STRICT_SCHEMA,
+                "effect_ledger": EFFECT_LEDGER,
+            }
+        )
+
+        with pytest.raises(SinkEffectCapabilityError, match=r"dialect.*mysql"):
+            validate_sink_effect_capability(sink, "append", SinkEffectInputKind.PIPELINE_MEMBERS)
+
+    def test_config_schema_advertises_target_ledger_contract(self) -> None:
+        schema = DatabaseSink.get_config_schema()
+
+        ledger = schema["$defs"]["DatabaseEffectLedgerConfig"]
+        assert schema["properties"]["effect_ledger"]["anyOf"][0]["$ref"].endswith("DatabaseEffectLedgerConfig")
+        assert ledger["required"] == ["table", "permissions"]
+        assert ledger["properties"]["schema_version"]["const"] == 1
 
 
 class TestDatabaseSink:

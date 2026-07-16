@@ -67,12 +67,21 @@ def encode_sink_effect_returned_result(result: SinkEffectReturnedResult) -> Mapp
             "schema": "sink-effect-commit-result-v1",
         }
     if type(result) is SinkEffectReconcileResult:
-        return {
+        payload: dict[str, object] = {
             "descriptor": _descriptor_payload(result.descriptor),
             "evidence": deep_thaw(result.evidence),
             "kind": result.kind.value,
             "schema": "sink-effect-reconcile-result-v1",
         }
+        if result.accepted_ordinals is not None and result.diverted_ordinals is not None:
+            payload.update(
+                {
+                    "accepted_ordinals": list(result.accepted_ordinals),
+                    "diverted_ordinals": list(result.diverted_ordinals),
+                    "schema": "sink-effect-reconcile-result-v2",
+                }
+            )
+        return payload
     raise TypeError("result must be a closed sink-effect returned result")
 
 
@@ -112,12 +121,19 @@ def decode_sink_effect_returned_result(
                 accepted_ordinals=payload["accepted_ordinals"],
                 diverted_ordinals=payload["diverted_ordinals"],
             )
-        if set(payload) != {"descriptor", "evidence", "kind", "schema"} or payload["schema"] != "sink-effect-reconcile-result-v1":
+        v1_fields = {"descriptor", "evidence", "kind", "schema"}
+        v2_fields = {*v1_fields, "accepted_ordinals", "diverted_ordinals"}
+        if not (
+            (set(payload) == v1_fields and payload["schema"] == "sink-effect-reconcile-result-v1")
+            or (set(payload) == v2_fields and payload["schema"] == "sink-effect-reconcile-result-v2")
+        ):
             raise LandscapeRecordError("sink effect reconcile result envelope is divergent")
         return SinkEffectReconcileResult(
             kind=SinkEffectReconcileKind(payload["kind"]),
             descriptor=_load_descriptor(payload["descriptor"]),
             evidence=evidence,
+            accepted_ordinals=payload.get("accepted_ordinals"),
+            diverted_ordinals=payload.get("diverted_ordinals"),
         )
     except (KeyError, TypeError, ValueError) as exc:
         if isinstance(exc, LandscapeRecordError):

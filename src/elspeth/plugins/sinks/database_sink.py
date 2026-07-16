@@ -9,14 +9,16 @@ output correct types. Wrong types = upstream bug = crash.
 import hashlib
 import json
 import os
+import re
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
-from pydantic import Field, field_validator
-from sqlalchemy import Boolean, Column, Float, Integer, MetaData, Table, Text, create_engine, insert
-from sqlalchemy.exc import DataError, IntegrityError
+from pydantic import BaseModel, Field, field_validator, model_validator
+from sqlalchemy import Boolean, Column, Float, Integer, MetaData, String, Table, Text, create_engine, insert, select, text
+from sqlalchemy.engine import Connection, make_url
+from sqlalchemy.exc import DataError, IntegrityError, SQLAlchemyError
 
 if TYPE_CHECKING:
     from elspeth.contracts.sink import OutputValidationResult
@@ -26,8 +28,25 @@ from sqlalchemy.types import TypeEngine
 from elspeth.contracts import ArtifactDescriptor, CallStatus, CallType, Determinism, PluginSchema
 from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
-from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.errors import AuditIntegrityError, SinkEffectCapabilityError
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.plugin_assistance import PluginAssistance
+from elspeth.contracts.sink_effects import (
+    SINK_EFFECT_PROTOCOL_VERSION,
+    ResolvedSinkEffectMode,
+    RestrictedSinkEffectContext,
+    SinkEffectCommitResult,
+    SinkEffectDescriptorMode,
+    SinkEffectExecutionPurpose,
+    SinkEffectInputKind,
+    SinkEffectInspection,
+    SinkEffectInspectionMode,
+    SinkEffectInspectionRequest,
+    SinkEffectPipelineMembersInput,
+    SinkEffectPlan,
+    SinkEffectPrepareRequest,
+    SinkEffectReconcileResult,
+)
 from elspeth.contracts.url import SanitizedDatabaseUrl
 from elspeth.contracts.wire_visible_identity import reject_operator_required_placeholder_value
 from elspeth.core.canonical import canonical_json
@@ -49,6 +68,88 @@ SCHEMA_TYPE_TO_SQLALCHEMY: Mapping[str, type[TypeEngine[Any]]] = MappingProxyTyp
     }
 )
 
+_DATABASE_EFFECT_LEDGER_SCHEMA_VERSION = 1
+_DATABASE_EFFECT_LEDGER_PERMISSIONS = frozenset({"insert", "select"})
+_DATABASE_EFFECT_SUPPORTED_DIALECTS = frozenset({"postgresql", "sqlite"})
+_DATABASE_EFFECT_TABLE_NAME = re.compile(r"_elspeth_[A-Za-z0-9_]+\Z")
+_DATABASE_EFFECT_LEDGER_COLUMNS = frozenset(
+    {
+        "accepted_ordinals_json",
+        "accepted_payload_hash",
+        "completed",
+        "descriptor_json",
+        "diversion_hashes_json",
+        "diverted_ordinals_json",
+        "effect_id",
+        "evidence_json",
+        "payload_hash",
+        "plan_hash",
+        "protocol_version",
+        "schema_version",
+    }
+)
+
+
+class DatabaseEffectLedgerError(RuntimeError):
+    """The configured target-side Database effect ledger is absent or divergent."""
+
+
+class DatabaseEffectMarkerDivergence(DatabaseEffectLedgerError):
+    """A durable target marker exists but does not exactly bind the requested plan."""
+
+
+class DatabaseEffectLedgerConfig(BaseModel):
+    """Operator declaration for an already-provisioned target-side ledger."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    table: str = Field(description="Namespaced operator-provisioned target-side effect ledger table.")
+    schema_version: Literal[1] = Field(
+        default=1,
+        description="Expected target-side effect ledger schema version.",
+    )
+    permissions: frozenset[Literal["insert", "select"]] = Field(
+        description="Operator-declared permissions granted to the runtime identity.",
+    )
+
+    @field_validator("table")
+    @classmethod
+    def _validate_ledger_table(cls, value: str) -> str:
+        if _DATABASE_EFFECT_TABLE_NAME.fullmatch(value) is None:
+            raise ValueError("effect ledger table must be a namespaced identifier beginning with '_elspeth_'")
+        return reject_operator_required_placeholder_value(value, field_name="effect_ledger.table")
+
+    @model_validator(mode="after")
+    def _require_exact_permissions(self) -> "DatabaseEffectLedgerConfig":
+        if self.permissions != _DATABASE_EFFECT_LEDGER_PERMISSIONS:
+            raise ValueError("effect ledger permissions must declare exactly 'select' and 'insert'")
+        return self
+
+
+def database_effect_ledger_table(metadata: MetaData, table_name: str) -> Table:
+    """Build the version-1 operator provisioning table; runtime never calls create_all()."""
+    if _DATABASE_EFFECT_TABLE_NAME.fullmatch(table_name) is None:
+        raise ValueError("effect ledger table must be a namespaced identifier beginning with '_elspeth_'")
+    existing = metadata.tables.get(table_name)
+    if existing is not None:
+        return existing
+    return Table(
+        table_name,
+        metadata,
+        Column("effect_id", String(64), primary_key=True),
+        Column("schema_version", Integer, nullable=False),
+        Column("protocol_version", String(32), nullable=False),
+        Column("plan_hash", String(64), nullable=False),
+        Column("payload_hash", String(64), nullable=False),
+        Column("completed", Boolean, nullable=False),
+        Column("descriptor_json", Text, nullable=True),
+        Column("accepted_ordinals_json", Text, nullable=True),
+        Column("diverted_ordinals_json", Text, nullable=True),
+        Column("accepted_payload_hash", String(64), nullable=True),
+        Column("diversion_hashes_json", Text, nullable=True),
+        Column("evidence_json", Text, nullable=True),
+    )
+
 
 class DatabaseSinkConfig(DataPluginConfig):
     """Configuration for database sink plugin.
@@ -63,6 +164,10 @@ class DatabaseSinkConfig(DataPluginConfig):
     if_exists: Literal["append", "replace"] = Field(
         default="append",
         description="Whether to append to an existing table or replace it before writing.",
+    )
+    effect_ledger: DatabaseEffectLedgerConfig | None = Field(
+        default=None,
+        description="Operator declaration for the provisioned target-side exactly-once effect ledger.",
     )
 
     @field_validator("table")
@@ -110,10 +215,51 @@ class DatabaseSink(BaseSink):
     plugin_version = "1.0.0"
     source_file_hash: str | None = "sha256:9cd8b3ada5a0c96e"
     config_model = DatabaseSinkConfig
+    effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    supported_effect_modes = frozenset({"append"})
+    supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
     # determinism inherited from BaseSink (IO_WRITE)
 
     # Resume capability: Database can append to existing tables
     supports_resume: bool = True
+
+    @classmethod
+    def _resolve_sink_effect_mode(
+        cls,
+        config: Mapping[str, object],
+        *,
+        purpose: SinkEffectExecutionPurpose,
+    ) -> ResolvedSinkEffectMode | None:
+        del purpose
+        cfg = DatabaseSinkConfig.from_dict(dict(config), plugin_name=cls.name)
+        cls._validate_effect_config(cfg)
+        return ResolvedSinkEffectMode(cfg.if_exists)
+
+    @classmethod
+    def _validate_effect_config(cls, cfg: DatabaseSinkConfig) -> None:
+        if cfg.effect_ledger is None:
+            raise SinkEffectCapabilityError("Database sink recoverable publication requires an operator-declared target-side effect ledger")
+        if cfg.if_exists != "append":
+            raise SinkEffectCapabilityError(
+                "Database sink effect mode 'replace' is not supported; provision a new target table and use if_exists='append'"
+            )
+        dialect = make_url(cfg.url).get_backend_name()
+        if dialect not in _DATABASE_EFFECT_SUPPORTED_DIALECTS:
+            raise SinkEffectCapabilityError(
+                f"Database sink effect dialect {dialect!r} is unsupported; use SQLite or PostgreSQL with transactional markers"
+            )
+
+    def _validate_sink_effect_capability_configuration(
+        self,
+        *,
+        mode: str,
+        required_input_kind: SinkEffectInputKind,
+    ) -> None:
+        del required_input_kind
+        if mode != self._if_exists:
+            raise SinkEffectCapabilityError("Database sink effect mode does not match the configured if_exists mode")
+        cfg = DatabaseSinkConfig.from_dict(dict(self.config), plugin_name=self.name)
+        self._validate_effect_config(cfg)
 
     def configure_for_resume(self) -> None:
         """Configure database sink for resume mode.
@@ -138,6 +284,7 @@ class DatabaseSink(BaseSink):
         self._sanitized_url = SanitizedDatabaseUrl.from_raw_url(cfg.url, fail_if_no_key=fail_if_no_key)  # For audit trail
         self._table_name = cfg.table
         self._if_exists = cfg.if_exists
+        self._effect_ledger = cfg.effect_ledger
 
         # Store schema config for audit trail
         # DataPluginConfig ensures schema_config is not None
@@ -172,6 +319,599 @@ class DatabaseSink(BaseSink):
         self._table: Table | None = None
         self._metadata: MetaData | None = None
         self._table_replaced: bool = False  # Track if we've done the replace for this instance
+
+    def _target_reference(self) -> str:
+        ledger = self._require_effect_ledger_config()
+        identity_hash = hashlib.sha256(
+            canonical_json(
+                {
+                    "ledger_schema_version": ledger.schema_version,
+                    "ledger_table": ledger.table,
+                    "sanitized_url": self._sanitized_url.sanitized_url,
+                    "target_table": self._table_name,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        return f"database-target:sha256:{identity_hash}"
+
+    def _require_effect_ledger_config(self) -> DatabaseEffectLedgerConfig:
+        if self._effect_ledger is None:
+            raise DatabaseEffectLedgerError("Database sink requires an operator-provisioned target-side effect ledger")
+        return self._effect_ledger
+
+    def _inspect_target_contract(self) -> tuple[str, tuple[str, ...], str]:
+        """Verify target and ledger through read-only SQL/introspection only."""
+        from sqlalchemy import inspect as sqlalchemy_inspect
+
+        ledger_config = self._require_effect_ledger_config()
+        self._ensure_engine_and_metadata_initialized()
+        engine = self._engine
+        if engine is None:  # pragma: no cover - paired initializer invariant
+            raise RuntimeError("Database sink effect inspection called before engine initialization")
+        dialect = engine.dialect.name
+        if dialect not in _DATABASE_EFFECT_SUPPORTED_DIALECTS:
+            raise DatabaseEffectLedgerError(f"Database effect dialect {dialect!r} is unsupported")
+
+        inspector = sqlalchemy_inspect(engine)
+        if not inspector.has_table(ledger_config.table):
+            raise DatabaseEffectLedgerError(
+                f"Database target-side effect ledger {ledger_config.table!r} is missing; provision schema version {ledger_config.schema_version}"
+            )
+        ledger_columns = {column["name"]: column for column in inspector.get_columns(ledger_config.table)}
+        if set(ledger_columns) != _DATABASE_EFFECT_LEDGER_COLUMNS:
+            raise DatabaseEffectLedgerError(
+                f"Database target-side effect ledger {ledger_config.table!r} does not match schema version {ledger_config.schema_version}"
+            )
+        primary_key = inspector.get_pk_constraint(ledger_config.table).get("constrained_columns")
+        if primary_key != ["effect_id"]:
+            raise DatabaseEffectLedgerError("Database target-side effect ledger must use effect_id as its sole primary key")
+        required_not_null = _DATABASE_EFFECT_LEDGER_COLUMNS - {
+            "accepted_ordinals_json",
+            "accepted_payload_hash",
+            "descriptor_json",
+            "diversion_hashes_json",
+            "diverted_ordinals_json",
+            "evidence_json",
+        }
+        if any(bool(ledger_columns[name].get("nullable")) for name in required_not_null):
+            raise DatabaseEffectLedgerError("Database target-side effect ledger required columns must be NOT NULL")
+
+        if not inspector.has_table(self._table_name):
+            raise DatabaseEffectLedgerError(
+                f"Database target table {self._table_name!r} is missing; provision it before recoverable append publication"
+            )
+        target_columns = tuple(column["name"] for column in inspector.get_columns(self._table_name))
+        if not self._schema_config.is_observed and self._schema_config.fields is not None:
+            expected = {field.name for field in self._schema_config.fields}
+            observed = set(target_columns)
+            if self._schema_config.mode == "fixed" and observed != expected:
+                raise DatabaseEffectLedgerError("Database target table columns do not match the fixed sink schema")
+            if self._schema_config.mode == "flexible" and not expected <= observed:
+                raise DatabaseEffectLedgerError("Database target table is missing flexible sink schema columns")
+
+        with engine.connect() as conn:
+            ledger = Table(ledger_config.table, MetaData(), autoload_with=conn)
+            conn.execute(select(ledger.c.effect_id).where(text("1 = 0"))).all()
+            if dialect == "postgresql":
+                permissions = {
+                    permission: bool(
+                        conn.scalar(
+                            text("SELECT has_table_privilege(current_user, :table_name, :permission)"),
+                            {"table_name": ledger_config.table, "permission": permission.upper()},
+                        )
+                    )
+                    for permission in _DATABASE_EFFECT_LEDGER_PERMISSIONS
+                }
+                if not all(permissions.values()):
+                    raise DatabaseEffectLedgerError(
+                        "Database target-side effect ledger runtime identity lacks declared SELECT/INSERT permissions"
+                    )
+                if not bool(
+                    conn.scalar(
+                        text("SELECT has_table_privilege(current_user, :table_name, 'INSERT')"),
+                        {"table_name": self._table_name},
+                    )
+                ):
+                    raise DatabaseEffectLedgerError("Database target table runtime identity lacks INSERT permission")
+        contract_hash = hashlib.sha256(
+            canonical_json(
+                {
+                    "columns": sorted(_DATABASE_EFFECT_LEDGER_COLUMNS),
+                    "primary_key": ["effect_id"],
+                    "schema_version": ledger_config.schema_version,
+                    "table": ledger_config.table,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        return dialect, target_columns, contract_hash
+
+    def inspect_effect(
+        self,
+        request: SinkEffectInspectionRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectInspection:
+        del ctx
+        ledger_config = self._require_effect_ledger_config()
+        dialect, target_columns, contract_hash = self._inspect_target_contract()
+        target = self._target_reference()
+        return SinkEffectInspection(
+            mode=SinkEffectInspectionMode.INSPECTED,
+            reference=target,
+            evidence={
+                "dialect": dialect,
+                "effect_id": request.effect_id,
+                "ledger_contract_hash": contract_hash,
+                "ledger_schema_version": ledger_config.schema_version,
+                "ledger_table": ledger_config.table,
+                "permissions": sorted(ledger_config.permissions),
+                "target_columns": list(target_columns),
+                "target_table": self._table_name,
+            },
+        )
+
+    @staticmethod
+    def _database_effect_plan_hash(
+        *,
+        effect_id: str,
+        payload_hash: str,
+        target: str,
+        safe_evidence: Mapping[str, object],
+    ) -> str:
+        return hashlib.sha256(
+            canonical_json(
+                {
+                    "effect_id": effect_id,
+                    "payload_hash": payload_hash,
+                    "safe_evidence": deep_thaw(safe_evidence),
+                    "schema": "database-effect-plan-envelope-v1",
+                    "target": target,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def prepare_effect(
+        self,
+        request: SinkEffectPrepareRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectPlan:
+        del ctx
+        effect_input = request.effect_input
+        if type(effect_input) is not SinkEffectPipelineMembersInput:
+            raise TypeError("DatabaseSink effects require pipeline member input")
+        inspection = request.inspection
+        if inspection.mode is not SinkEffectInspectionMode.INSPECTED:
+            raise DatabaseEffectLedgerError("Database sink effects require a completed read-only target inspection")
+        target = self._target_reference()
+        if inspection.reference != target or inspection.evidence.get("effect_id") != request.effect_id:
+            raise DatabaseEffectLedgerError("Database sink effect inspection does not bind this exact target and effect")
+        ledger = self._require_effect_ledger_config()
+        if (
+            inspection.evidence.get("ledger_table") != ledger.table
+            or inspection.evidence.get("ledger_schema_version") != ledger.schema_version
+            or inspection.evidence.get("target_table") != self._table_name
+            or inspection.evidence.get("dialect") not in _DATABASE_EFFECT_SUPPORTED_DIALECTS
+        ):
+            raise DatabaseEffectLedgerError("Database sink effect inspection is divergent from configured target authority")
+        target_columns_value = inspection.evidence.get("target_columns")
+        if not isinstance(target_columns_value, tuple) or any(not isinstance(value, str) for value in target_columns_value):
+            raise DatabaseEffectLedgerError("Database sink effect inspection lacks exact target columns")
+        target_columns = set(target_columns_value)
+
+        members: list[dict[str, object]] = []
+        source_rows = [dict(member.row) for member in effect_input.members]
+        serialized_rows = self._serialize_any_typed_fields(source_rows)
+        for member, serialized_row in zip(effect_input.members, serialized_rows, strict=True):
+            extra = sorted(set(serialized_row) - target_columns)
+            if extra:
+                raise DatabaseEffectLedgerError(
+                    f"Database sink effect member {member.ordinal} has fields absent from target table: {extra}"
+                )
+            members.append(
+                {
+                    "ordinal": member.ordinal,
+                    "payload_hash": member.payload_hash,
+                    "row": serialized_row,
+                }
+            )
+        payload_hash = hashlib.sha256(canonical_json(members).encode("utf-8")).hexdigest()
+        safe_evidence: dict[str, object] = {
+            "dialect": inspection.evidence["dialect"],
+            "diversion_policy": "constraint-savepoint-v1",
+            "ledger_contract_hash": inspection.evidence["ledger_contract_hash"],
+            "ledger_schema_version": ledger.schema_version,
+            "ledger_table": ledger.table,
+            "members": members,
+            "schema": "database-effect-plan-v1",
+            "serializer": "rfc8785-sql-payload-v1",
+            "target_columns": sorted(target_columns),
+            "target_table": self._table_name,
+        }
+        plan_hash = self._database_effect_plan_hash(
+            effect_id=request.effect_id,
+            payload_hash=payload_hash,
+            target=target,
+            safe_evidence=safe_evidence,
+        )
+        return SinkEffectPlan(
+            effect_id=request.effect_id,
+            protocol_version=SINK_EFFECT_PROTOCOL_VERSION,
+            input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            descriptor_mode=SinkEffectDescriptorMode.RESULT_DERIVED,
+            inspection_mode=SinkEffectInspectionMode.INSPECTED,
+            target=target,
+            plan_hash=plan_hash,
+            payload_hash=payload_hash,
+            expected_descriptor=None,
+            safe_evidence=safe_evidence,
+        )
+
+    @staticmethod
+    def _require_canonical_json(value: object, *, field_name: str) -> object:
+        if not isinstance(value, str):
+            raise DatabaseEffectMarkerDivergence(f"Database effect marker {field_name} must be text")
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise DatabaseEffectMarkerDivergence(f"Database effect marker {field_name} is not JSON") from exc
+        if canonical_json(decoded) != value:
+            raise DatabaseEffectMarkerDivergence(f"Database effect marker {field_name} is not canonical JSON")
+        return decoded
+
+    def _parse_database_effect_plan(self, plan: SinkEffectPlan) -> list[tuple[int, dict[str, Any]]]:
+        if (
+            plan.protocol_version != SINK_EFFECT_PROTOCOL_VERSION
+            or plan.input_kind is not SinkEffectInputKind.PIPELINE_MEMBERS
+            or plan.descriptor_mode is not SinkEffectDescriptorMode.RESULT_DERIVED
+            or plan.inspection_mode is not SinkEffectInspectionMode.INSPECTED
+            or plan.expected_descriptor is not None
+            or plan.target != self._target_reference()
+        ):
+            raise DatabaseEffectLedgerError("Database effect plan does not match the supported result-derived protocol")
+        evidence = deep_thaw(plan.safe_evidence)
+        if type(evidence) is not dict or set(evidence) != {
+            "dialect",
+            "diversion_policy",
+            "ledger_contract_hash",
+            "ledger_schema_version",
+            "ledger_table",
+            "members",
+            "schema",
+            "serializer",
+            "target_columns",
+            "target_table",
+        }:
+            raise DatabaseEffectLedgerError("Database effect plan evidence has a divergent field set")
+        ledger = self._require_effect_ledger_config()
+        dialect = make_url(self._url).get_backend_name()
+        if (
+            evidence["schema"] != "database-effect-plan-v1"
+            or evidence["serializer"] != "rfc8785-sql-payload-v1"
+            or evidence["diversion_policy"] != "constraint-savepoint-v1"
+            or evidence["target_table"] != self._table_name
+            or evidence["ledger_table"] != ledger.table
+            or evidence["ledger_schema_version"] != ledger.schema_version
+            or evidence["dialect"] != dialect
+        ):
+            raise DatabaseEffectLedgerError("Database effect plan evidence diverges from configured target authority")
+        raw_members = evidence["members"]
+        if type(raw_members) is not list or not raw_members:
+            raise DatabaseEffectLedgerError("Database effect plan requires a non-empty ordered member list")
+        members: list[tuple[int, dict[str, Any]]] = []
+        payload_members: list[dict[str, object]] = []
+        for expected_ordinal, raw_member in enumerate(raw_members):
+            if type(raw_member) is not dict or set(raw_member) != {"ordinal", "payload_hash", "row"}:
+                raise DatabaseEffectLedgerError("Database effect plan member has a divergent field set")
+            ordinal = raw_member["ordinal"]
+            payload_hash = raw_member["payload_hash"]
+            row = raw_member["row"]
+            if type(ordinal) is not int or ordinal != expected_ordinal:
+                raise DatabaseEffectLedgerError("Database effect plan member ordinals must be dense and ordered")
+            if not isinstance(payload_hash, str) or re.fullmatch(r"[0-9a-f]{64}", payload_hash) is None:
+                raise DatabaseEffectLedgerError("Database effect plan member payload hash is invalid")
+            if type(row) is not dict or any(not isinstance(key, str) for key in row):
+                raise DatabaseEffectLedgerError("Database effect plan member row must be a canonical object")
+            detached_row = dict(row)
+            members.append((ordinal, detached_row))
+            payload_members.append({"ordinal": ordinal, "payload_hash": payload_hash, "row": detached_row})
+        expected_payload_hash = hashlib.sha256(canonical_json(payload_members).encode("utf-8")).hexdigest()
+        if plan.payload_hash != expected_payload_hash:
+            raise DatabaseEffectLedgerError("Database effect plan payload hash does not bind the ordered members")
+        expected_plan_hash = self._database_effect_plan_hash(
+            effect_id=plan.effect_id,
+            payload_hash=plan.payload_hash,
+            target=plan.target,
+            safe_evidence=evidence,
+        )
+        if plan.plan_hash != expected_plan_hash:
+            raise DatabaseEffectLedgerError("Database effect plan hash does not bind its exact evidence")
+        return members
+
+    @staticmethod
+    def _descriptor_json(descriptor: ArtifactDescriptor) -> str:
+        return canonical_json(
+            {
+                "artifact_type": descriptor.artifact_type,
+                "content_hash": descriptor.content_hash,
+                "metadata": None if descriptor.metadata is None else deep_thaw(descriptor.metadata),
+                "path_or_uri": descriptor.path_or_uri,
+                "size_bytes": descriptor.size_bytes,
+            }
+        )
+
+    @staticmethod
+    def _descriptor_from_json(value: object) -> ArtifactDescriptor:
+        decoded = DatabaseSink._require_canonical_json(value, field_name="descriptor_json")
+        if type(decoded) is not dict or set(decoded) != {
+            "artifact_type",
+            "content_hash",
+            "metadata",
+            "path_or_uri",
+            "size_bytes",
+        }:
+            raise DatabaseEffectMarkerDivergence("Database effect marker descriptor has a divergent field set")
+        try:
+            return ArtifactDescriptor(
+                artifact_type=decoded["artifact_type"],
+                path_or_uri=decoded["path_or_uri"],
+                content_hash=decoded["content_hash"],
+                size_bytes=decoded["size_bytes"],
+                metadata=decoded["metadata"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise DatabaseEffectMarkerDivergence("Database effect marker descriptor is invalid") from exc
+
+    @staticmethod
+    def _constraint_reason_hash(error: IntegrityError | DataError) -> str:
+        sqlstate = getattr(error.orig, "sqlstate", None) or getattr(error.orig, "pgcode", None)
+        return hashlib.sha256(
+            canonical_json(
+                {
+                    "driver_exception": type(error.orig).__name__,
+                    "sqlalchemy_exception": type(error).__name__,
+                    "sqlstate": sqlstate,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+
+    @classmethod
+    def _insert_effect_rows(
+        cls,
+        conn: Connection,
+        target: Table,
+        members: Sequence[tuple[int, dict[str, Any]]],
+    ) -> tuple[list[dict[str, Any]], tuple[int, ...], tuple[int, ...], tuple[dict[str, object], ...]]:
+        rows = [row for _ordinal, row in members]
+        batch_savepoint = conn.begin_nested()
+        try:
+            conn.execute(insert(target), rows)
+            batch_savepoint.commit()
+        except (IntegrityError, DataError):
+            batch_savepoint.rollback()
+        else:
+            return rows, tuple(ordinal for ordinal, _row in members), (), ()
+
+        accepted_rows: list[dict[str, Any]] = []
+        accepted_ordinals: list[int] = []
+        diverted_ordinals: list[int] = []
+        diversion_hashes: list[dict[str, object]] = []
+        for ordinal, row in members:
+            row_savepoint = conn.begin_nested()
+            try:
+                conn.execute(insert(target), [row])
+                row_savepoint.commit()
+            except (IntegrityError, DataError) as exc:
+                row_savepoint.rollback()
+                diverted_ordinals.append(ordinal)
+                diversion_hashes.append({"ordinal": ordinal, "reason_hash": cls._constraint_reason_hash(exc)})
+            else:
+                accepted_rows.append(row)
+                accepted_ordinals.append(ordinal)
+        return accepted_rows, tuple(accepted_ordinals), tuple(diverted_ordinals), tuple(diversion_hashes)
+
+    def _result_from_marker(
+        self,
+        marker: Mapping[str, object],
+        plan: SinkEffectPlan,
+        *,
+        member_count: int,
+    ) -> SinkEffectCommitResult:
+        if (
+            marker.get("effect_id") != plan.effect_id
+            or marker.get("schema_version") != _DATABASE_EFFECT_LEDGER_SCHEMA_VERSION
+            or marker.get("protocol_version") != SINK_EFFECT_PROTOCOL_VERSION
+            or marker.get("plan_hash") != plan.plan_hash
+            or marker.get("payload_hash") != plan.payload_hash
+            or marker.get("completed") is not True
+        ):
+            raise DatabaseEffectMarkerDivergence("Database effect marker does not exactly bind this effect plan")
+        accepted_value = self._require_canonical_json(marker.get("accepted_ordinals_json"), field_name="accepted_ordinals_json")
+        diverted_value = self._require_canonical_json(marker.get("diverted_ordinals_json"), field_name="diverted_ordinals_json")
+        diversion_hashes = self._require_canonical_json(marker.get("diversion_hashes_json"), field_name="diversion_hashes_json")
+        evidence_value = self._require_canonical_json(marker.get("evidence_json"), field_name="evidence_json")
+        if (
+            type(accepted_value) is not list
+            or type(diverted_value) is not list
+            or type(diversion_hashes) is not list
+            or type(evidence_value) is not dict
+        ):
+            raise DatabaseEffectMarkerDivergence("Database effect marker result fields have invalid JSON shapes")
+        accepted = tuple(accepted_value)
+        diverted = tuple(diverted_value)
+        if (
+            any(type(value) is not int or value < 0 for value in (*accepted, *diverted))
+            or accepted != tuple(sorted(set(accepted)))
+            or diverted != tuple(sorted(set(diverted)))
+            or set(accepted) & set(diverted)
+            or set(accepted) | set(diverted) != set(range(member_count))
+        ):
+            raise DatabaseEffectMarkerDivergence("Database effect marker ordinals are not a complete disjoint result partition")
+        if len(diversion_hashes) != len(diverted):
+            raise DatabaseEffectMarkerDivergence("Database effect marker diversion hashes do not cover diverted ordinals")
+        for ordinal, item in zip(diverted, diversion_hashes, strict=True):
+            if (
+                type(item) is not dict
+                or set(item) != {"ordinal", "reason_hash"}
+                or item["ordinal"] != ordinal
+                or not isinstance(item["reason_hash"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", item["reason_hash"]) is None
+            ):
+                raise DatabaseEffectMarkerDivergence("Database effect marker diversion hashes are invalid")
+        descriptor = self._descriptor_from_json(marker.get("descriptor_json"))
+        accepted_payload_hash = marker.get("accepted_payload_hash")
+        if accepted_payload_hash != descriptor.content_hash:
+            raise DatabaseEffectMarkerDivergence("Database effect marker accepted payload hash diverges from descriptor")
+        metadata = None if descriptor.metadata is None else deep_thaw(descriptor.metadata)
+        if (
+            descriptor.artifact_type != "database"
+            or type(metadata) is not dict
+            or metadata.get("table") != self._table_name
+            or metadata.get("row_count") != len(accepted)
+        ):
+            raise DatabaseEffectMarkerDivergence("Database effect marker descriptor does not bind the configured target/result")
+        expected_descriptor = ArtifactDescriptor.for_database(
+            url=self._sanitized_url,
+            table=self._table_name,
+            content_hash=descriptor.content_hash,
+            payload_size=descriptor.size_bytes,
+            row_count=len(accepted),
+        )
+        if descriptor != expected_descriptor:
+            raise DatabaseEffectMarkerDivergence("Database effect marker descriptor does not bind the configured database URL")
+        expected_evidence = {
+            "accepted_ordinals": list(accepted),
+            "descriptor": self._require_canonical_json(marker.get("descriptor_json"), field_name="descriptor_json"),
+            "diverted_ordinals": list(diverted),
+        }
+        if evidence_value != expected_evidence:
+            raise DatabaseEffectMarkerDivergence("Database effect marker evidence does not bind its exact result")
+        return SinkEffectCommitResult(
+            descriptor=descriptor,
+            evidence=evidence_value,
+            accepted_ordinals=accepted,
+            diverted_ordinals=diverted,
+        )
+
+    def _read_effect_marker(self, conn: Connection, ledger: Table, effect_id: str) -> Mapping[str, object] | None:
+        marker = conn.execute(select(ledger).where(ledger.c.effect_id == effect_id)).mappings().one_or_none()
+        return None if marker is None else cast("Mapping[str, object]", marker)
+
+    def _read_committed_effect_result(
+        self,
+        plan: SinkEffectPlan,
+        *,
+        member_count: int,
+    ) -> SinkEffectCommitResult | None:
+        self._ensure_engine_and_metadata_initialized()
+        engine = self._engine
+        if engine is None:  # pragma: no cover - paired initializer invariant
+            raise RuntimeError("Database sink effect marker read called before engine initialization")
+        ledger_config = self._require_effect_ledger_config()
+        with engine.connect() as conn:
+            ledger = Table(ledger_config.table, MetaData(), autoload_with=conn)
+            marker = self._read_effect_marker(conn, ledger, plan.effect_id)
+        if marker is None:
+            return None
+        return self._result_from_marker(marker, plan, member_count=member_count)
+
+    def commit_effect(
+        self,
+        plan: SinkEffectPlan,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectCommitResult:
+        del ctx
+        members = self._parse_database_effect_plan(plan)
+        self._ensure_engine_and_metadata_initialized()
+        engine = self._engine
+        if engine is None:  # pragma: no cover - paired initializer invariant
+            raise RuntimeError("Database sink effect commit called before engine initialization")
+        ledger_config = self._require_effect_ledger_config()
+        try:
+            with engine.begin() as conn:
+                ledger = Table(ledger_config.table, MetaData(), autoload_with=conn)
+                existing = self._read_effect_marker(conn, ledger, plan.effect_id)
+                if existing is not None:
+                    return self._result_from_marker(existing, plan, member_count=len(members))
+                target = Table(self._table_name, MetaData(), autoload_with=conn)
+                if engine.dialect.name == "sqlite":
+                    # Python's sqlite3 legacy transaction mode does not BEGIN
+                    # for SELECT/DDL, and a first SAVEPOINT can otherwise become
+                    # the outer transaction whose RELEASE commits accepted rows
+                    # before the marker insert. Establish a real outer write
+                    # transaction so every savepoint and the marker share it.
+                    driver_connection = conn.connection.driver_connection
+                    if not bool(getattr(driver_connection, "in_transaction", False)):
+                        conn.exec_driver_sql("BEGIN IMMEDIATE")
+                target_columns = set(target.columns.keys())
+                planned_columns = set(deep_thaw(plan.safe_evidence)["target_columns"])
+                if target_columns != planned_columns:
+                    raise DatabaseEffectLedgerError("Database target table columns changed after effect inspection")
+                accepted_rows, accepted, diverted, diversion_hashes = self._insert_effect_rows(conn, target, members)
+                canonical_payload = canonical_json(accepted_rows).encode("utf-8")
+                content_hash = hashlib.sha256(canonical_payload).hexdigest()
+                descriptor = ArtifactDescriptor.for_database(
+                    url=self._sanitized_url,
+                    table=self._table_name,
+                    content_hash=content_hash,
+                    payload_size=len(canonical_payload),
+                    row_count=len(accepted_rows),
+                )
+                evidence: dict[str, object] = {
+                    "accepted_ordinals": list(accepted),
+                    "descriptor": json.loads(self._descriptor_json(descriptor)),
+                    "diverted_ordinals": list(diverted),
+                }
+                conn.execute(
+                    insert(ledger).values(
+                        effect_id=plan.effect_id,
+                        schema_version=ledger_config.schema_version,
+                        protocol_version=SINK_EFFECT_PROTOCOL_VERSION,
+                        plan_hash=plan.plan_hash,
+                        payload_hash=plan.payload_hash,
+                        completed=True,
+                        descriptor_json=self._descriptor_json(descriptor),
+                        accepted_ordinals_json=canonical_json(list(accepted)),
+                        diverted_ordinals_json=canonical_json(list(diverted)),
+                        accepted_payload_hash=content_hash,
+                        diversion_hashes_json=canonical_json(list(diversion_hashes)),
+                        evidence_json=canonical_json(evidence),
+                    )
+                )
+                result = SinkEffectCommitResult(
+                    descriptor=descriptor,
+                    evidence=evidence,
+                    accepted_ordinals=accepted,
+                    diverted_ordinals=diverted,
+                )
+        except IntegrityError:
+            winner = self._read_committed_effect_result(plan, member_count=len(members))
+            if winner is None:
+                raise
+            return winner
+        return result
+
+    def reconcile_effect(
+        self,
+        plan: SinkEffectPlan,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectReconcileResult:
+        del ctx
+        members = self._parse_database_effect_plan(plan)
+        try:
+            result = self._read_committed_effect_result(plan, member_count=len(members))
+        except (DatabaseEffectLedgerError, SQLAlchemyError):
+            return SinkEffectReconcileResult.unknown(
+                evidence={"ledger_table": self._require_effect_ledger_config().table, "reason": "marker_divergent_or_unreadable"}
+            )
+        if result is None:
+            return SinkEffectReconcileResult.not_applied(
+                evidence={"ledger_table": self._require_effect_ledger_config().table, "marker": "absent"}
+            )
+        return SinkEffectReconcileResult.applied(
+            result.descriptor,
+            evidence=result.evidence,
+            accepted_ordinals=result.accepted_ordinals,
+            diverted_ordinals=result.diverted_ordinals,
+        )
 
     def _compute_any_typed_fields(self) -> frozenset[str]:
         """Identify fields with 'any' type from the schema config.

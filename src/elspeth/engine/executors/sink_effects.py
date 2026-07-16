@@ -259,14 +259,31 @@ class SinkEffectCoordinator:
             raise SinkEffectUnknownError(effect.effect_id)
         if reconciliation.kind is SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR:
             assert reconciliation.descriptor is not None
+            if plan.descriptor_mode is SinkEffectDescriptorMode.RESULT_DERIVED:
+                accepted = reconciliation.accepted_ordinals
+                diverted = reconciliation.diverted_ordinals
+                if accepted is None or diverted is None:
+                    raise LandscapeRecordError("result-derived reconciliation requires an exact accepted/diverted ordinal partition")
+                requested = {member.ordinal for member in request.finalization_members}
+                if set(accepted) & set(diverted) or set(accepted) | set(diverted) != requested:
+                    raise LandscapeRecordError(
+                        "result-derived reconciliation ordinal partition must be disjoint and exactly cover requested members"
+                    )
+                accepted_ordinals = tuple(accepted)
+                diverted_ordinals = tuple(diverted)
+            else:
+                if reconciliation.accepted_ordinals is not None or reconciliation.diverted_ordinals is not None:
+                    raise LandscapeRecordError("precomputed reconciliation must not carry result-derived ordinals")
+                accepted_ordinals = tuple(member.ordinal for member in request.finalization_members)
+                diverted_ordinals = ()
             result = self._finalize(
                 effect_id=effect.effect_id,
                 request=request,
                 lease=lease,
                 descriptor=reconciliation.descriptor,
                 evidence=reconciliation.evidence,
-                accepted_ordinals=tuple(member.ordinal for member in request.finalization_members),
-                diverted_ordinals=(),
+                accepted_ordinals=accepted_ordinals,
+                diverted_ordinals=diverted_ordinals,
                 attempt_id=reconcile_attempt_id,
                 evidence_kind="reconciled",
                 reconcile_kind=reconciliation.kind,

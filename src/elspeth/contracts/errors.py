@@ -35,6 +35,10 @@ if TYPE_CHECKING:
     from elspeth.contracts.coordination import RegisteredWorker
 
 
+class SinkEffectCapabilityError(ValueError):
+    """A sink cannot safely participate in recoverable effect publication."""
+
+
 def _scrub_traceback_for_audit(traceback_text: str) -> str:
     """Scrub traceback lines independently so safe frame diagnostics survive."""
     lines = traceback_text.splitlines(keepends=True)

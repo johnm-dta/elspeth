@@ -151,6 +151,65 @@ class _PrepareFailsOnceSink(_CumulativeObservableSink):
         return super().prepare_effect(request, ctx)
 
 
+class _ResultDerivedReconciledSink(_CumulativeObservableSink):
+    def prepare_effect(
+        self,
+        request: SinkEffectPrepareRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectPlan:
+        del ctx
+        self.prepare_calls += 1
+        assert isinstance(request.effect_input, SinkEffectPipelineMembersInput)
+        payload_hash = stable_hash([deep_thaw(member.row) for member in request.effect_input.members])
+        descriptor = ArtifactDescriptor(
+            artifact_type="database",
+            path_or_uri="database-result:sha256:" + "a" * 64,
+            content_hash=payload_hash,
+            size_bytes=1,
+            metadata={"table": "output", "row_count": 1},
+        )
+        self._target.effect_id = request.effect_id
+        self._target.descriptor = descriptor
+        return SinkEffectPlan(
+            effect_id=request.effect_id,
+            protocol_version=SINK_EFFECT_PROTOCOL_VERSION,
+            input_kind=request.input_kind,
+            descriptor_mode=SinkEffectDescriptorMode.RESULT_DERIVED,
+            inspection_mode=request.inspection.mode,
+            target=descriptor.path_or_uri,
+            plan_hash=stable_hash({"effect_id": request.effect_id, "payload_hash": payload_hash}),
+            payload_hash=payload_hash,
+            expected_descriptor=None,
+            safe_evidence={"inspection_reference": request.inspection.reference},
+        )
+
+    def reconcile_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectReconcileResult:
+        del ctx
+        self.reconcile_calls += 1
+        assert self._target.descriptor is not None
+        descriptor = self._target.descriptor
+        return SinkEffectReconcileResult.applied(
+            descriptor,
+            evidence={
+                "accepted_ordinals": [0],
+                "descriptor": {
+                    "artifact_type": descriptor.artifact_type,
+                    "content_hash": descriptor.content_hash,
+                    "metadata": deep_thaw(descriptor.metadata),
+                    "path_or_uri": descriptor.path_or_uri,
+                    "size_bytes": descriptor.size_bytes,
+                },
+                "diverted_ordinals": [1],
+            },
+            accepted_ordinals=(0,),
+            diverted_ordinals=(1,),
+        )
+
+    def commit_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectCommitResult:
+        del plan, ctx
+        raise AssertionError("exact result-derived reconciliation must not commit again")
+
+
 def _execution_request(run_id: str, sink_id: str, members: tuple[object, ...]) -> SinkEffectExecutionRequest:
     typed_members = tuple(members)
     reservation = _pipeline_request(run_id, sink_id, typed_members, replacing_target=True)  # type: ignore[arg-type]
@@ -201,6 +260,26 @@ def test_pipeline_executor_has_no_legacy_write_or_flush_publication_boundary() -
 def test_audit_export_has_no_legacy_write_or_flush_publication_boundary() -> None:
     assert _production_calls("src/elspeth/engine/orchestrator/export.py", "write") == []
     assert _production_calls("src/elspeth/engine/orchestrator/export.py", "flush") == []
+
+
+def test_result_derived_reconciliation_finalizes_exact_marker_partition() -> None:
+    db = make_landscape_db()
+    try:
+        factory = make_factory(db)
+        run_id, sink_id, members = _pipeline_members(factory, 2)
+        sink = _ResultDerivedReconciledSink(_CumulativeTarget())
+
+        result = SinkEffectCoordinator(factory=factory, worker_id="worker-a").execute(
+            _execution_request(run_id, sink_id, members),
+            sink,
+        )
+
+        assert len(result.state_ids) == 1
+        assert len(result.outcome_ids) == 1
+        assert sink.commit_calls == 0
+        assert sink.reconcile_calls == 1
+    finally:
+        db.close()
 
 
 def test_replacing_successor_prepares_cumulative_predecessor_and_current_members() -> None:

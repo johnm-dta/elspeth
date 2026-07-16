@@ -551,6 +551,12 @@ class SinkEffectFinalization:
                 kind=request.reconcile_kind,
                 descriptor=request.descriptor,
                 evidence=request.evidence,
+                accepted_ordinals=(
+                    request.accepted_ordinals if effect.descriptor_mode == SinkEffectDescriptorMode.RESULT_DERIVED.value else None
+                ),
+                diverted_ordinals=(
+                    request.diverted_ordinals if effect.descriptor_mode == SinkEffectDescriptorMode.RESULT_DERIVED.value else None
+                ),
             )
         else:
             if request.reconcile_kind is not None:

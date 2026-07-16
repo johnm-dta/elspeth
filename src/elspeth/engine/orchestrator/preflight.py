@@ -32,6 +32,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NoReturn, cast, final
 
+from elspeth.contracts.errors import SinkEffectCapabilityError
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.sink_effects import (
     SINK_EFFECT_PROTOCOL_VERSION,
@@ -64,10 +65,6 @@ if TYPE_CHECKING:
     from elspeth.core.config import AggregationSettings, ElspethSettings
     from elspeth.core.dag.graph import ExecutionGraph
     from elspeth.core.dag.wiring import WiredTransform
-
-
-class SinkEffectCapabilityError(ValueError):
-    """A sink cannot safely participate in recoverable effect publication."""
 
 
 _SINK_EFFECT_METHODS = ("inspect_effect", "prepare_effect", "commit_effect", "reconcile_effect")
@@ -129,6 +126,14 @@ def validate_sink_effect_capability(
             f"Sink {sink_name!r} does not declare the required effect protocol "
             f"{SINK_EFFECT_PROTOCOL_VERSION!r}; legacy sink execution is unsafe"
         )
+
+    config_validator_name = "_validate_sink_effect_capability_configuration"
+    config_validator = inspect.getattr_static(sink_type, config_validator_name, None)
+    if config_validator is not None:
+        if not callable(config_validator):
+            raise SinkEffectCapabilityError(f"Sink {sink_name!r} local effect capability validator must be callable")
+        bound_validator = getattr(sink, config_validator_name)
+        bound_validator(mode=mode, required_input_kind=required_input_kind)
 
     supported_modes = inspect.getattr_static(sink_type, "supported_effect_modes", None)
     if not isinstance(supported_modes, frozenset):

@@ -1,11 +1,13 @@
 """SinkExecutor - wraps sink.write() with artifact recording."""
 
+from __future__ import annotations
+
 import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic import ValidationError
 
@@ -38,16 +40,33 @@ from elspeth.contracts.errors import (
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.contracts.schema_contract import SchemaContract
+from elspeth.contracts.sink_effects import (
+    SinkEffectInputKind,
+    SinkEffectMemberCandidate,
+    SinkEffectPipelineMembersInput,
+    SinkEffectRole,
+)
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.errors import LandscapeRecordError
+from elspeth.core.landscape.execution.sink_effect_finalization import SinkEffectFinalizationMember
+from elspeth.core.landscape.execution.sink_effect_identity import compute_pipeline_effect_identity, resolve_sink_effect_members
+from elspeth.core.landscape.execution.sink_effect_reservation import SinkEffectReservationRequest
 from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.operations import track_operation
 from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.executors.declaration_dispatch import run_boundary_checks
+from elspeth.engine.executors.sink_effects import (
+    SinkEffectCoordinator,
+    SinkEffectExecutionRequest,
+    SinkEffectExecutionSeam,
+)
 from elspeth.engine.executors.sink_required_fields import _format_optional_missing_fields_context
 from elspeth.engine.spans import SpanFactory
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from elspeth.core.landscape.factory import RecorderFactory
 
 
 @runtime_checkable
@@ -76,6 +95,13 @@ class DiversionCounts:
     @property
     def total(self) -> int:
         return self.failsink_mode + self.discard_mode
+
+
+@dataclass(frozen=True, slots=True)
+class _EffectPrimaryWrite:
+    artifact: Artifact
+    diversions: tuple[RowDiversion, ...]
+    accepted_token_ids: frozenset[str]
 
 
 class SinkExecutor:
@@ -118,6 +144,10 @@ class SinkExecutor:
         data_flow: DataFlowRepository,
         span_factory: SpanFactory,
         run_id: str,
+        *,
+        factory: RecorderFactory | None = None,
+        worker_id: str | None = None,
+        sink_effect_fault_hook: Callable[[SinkEffectExecutionSeam], None] | None = None,
     ) -> None:
         """Initialize executor.
 
@@ -131,6 +161,9 @@ class SinkExecutor:
         self._data_flow = data_flow
         self._spans = span_factory
         self._run_id = run_id
+        self._factory = factory
+        self._worker_id = worker_id or f"sink-effects:{run_id}"
+        self._sink_effect_fault_hook = sink_effect_fault_hook
 
     def _uses_real_atomic_repositories(self) -> bool:
         return isinstance(self._execution, ExecutionRepository) and isinstance(self._data_flow, DataFlowRepository)
@@ -491,6 +524,40 @@ class SinkExecutor:
             raise
         return all_states
 
+    def _open_or_reuse_effect_states(
+        self,
+        *,
+        tokens: list[TokenInfo],
+        rows: list[dict[str, object]],
+        sink_node_id: str,
+        step_in_pipeline: int,
+        ctx: PluginContext,
+    ) -> list[tuple[TokenInfo, NodeStateOpen]]:
+        """Reuse the exact OPEN state set left by an interrupted effect call."""
+        token_ids = tuple(token.token_id for token in tokens)
+        open_ids = self._execution.get_open_node_state_ids(
+            self._run_id,
+            node_ids=(sink_node_id,),
+            token_ids=token_ids,
+        )
+        if not open_ids:
+            return self._open_primary_states(
+                tokens=tokens,
+                rows=rows,
+                sink_node_id=sink_node_id,
+                step_in_pipeline=step_in_pipeline,
+                ctx=ctx,
+            )
+        if set(open_ids) != set(token_ids):
+            raise AuditIntegrityError("interrupted sink effect has a partial OPEN node-state witness set")
+        states: list[tuple[TokenInfo, NodeStateOpen]] = []
+        for token in tokens:
+            state = self._execution.get_node_state(open_ids[token.token_id])
+            if not isinstance(state, NodeStateOpen) or state.token_id != token.token_id or state.node_id != sink_node_id:
+                raise AuditIntegrityError("interrupted sink effect OPEN node-state witness is divergent")
+            states.append((token, state))
+        return states
+
     def _write_primary(
         self,
         *,
@@ -566,7 +633,8 @@ class SinkExecutor:
                     # Reset diversion log and call sink.write()
                     sink._reset_diversion_log()
                     start = time.perf_counter()
-                    write_result = sink.write(rows, ctx)
+                    legacy_sink = sink
+                    write_result = legacy_sink.write(rows, ctx)
                     artifact_info, diversions = self._require_sink_write_result(
                         label=sink.name,
                         result=write_result,
@@ -587,7 +655,7 @@ class SinkExecutor:
                             )
 
                 # Flush primary sink for durability
-                sink.flush()
+                legacy_sink.flush()
 
                 # Set output data on operation handle for audit trail
                 handle.output_data = {
@@ -613,6 +681,128 @@ class SinkExecutor:
             raise
 
         return artifact_info, diversions, duration_ms
+
+    def _write_primary_effect(
+        self,
+        *,
+        sink: SinkProtocol,
+        effect_mode: str,
+        rows: list[dict[str, object]],
+        tokens: list[TokenInfo],
+        pending_outcome: PendingOutcome,
+        all_states: list[tuple[TokenInfo, NodeStateOpen]],
+        sink_name: str,
+        sink_node_id: str,
+    ) -> _EffectPrimaryWrite:
+        """Publish one primary batch through the durable effect coordinator."""
+        if self._factory is None:
+            raise OrchestrationInvariantError("effect-capable sink execution requires the owning RecorderFactory")
+        if pending_outcome.outcome is None:
+            raise OrchestrationInvariantError("buffered outcomes cannot cross the sink-effect publication boundary")
+
+        row_contracts = [token.row_data.contract for token in tokens]
+        try:
+            self._run_sink_boundary_checks(
+                sink=sink,
+                rows=rows,
+                tokens=tokens,
+                run_id=self._run_id,
+                node_id=sink_node_id,
+                row_contracts=row_contracts,
+            )
+            self._validate_sink_input(sink, rows, contracts=row_contracts)
+        except (DeclarationContractViolation, AggregateDeclarationContractViolation, SinkTransactionalInvariantError) as violation:
+            self._complete_states_failed(
+                states=all_states,
+                duration_ms=0.0,
+                error=self._build_boundary_error(exc=violation, phase="sink_write"),
+            )
+            self._record_boundary_failure_outcomes(
+                tokens=tokens,
+                sink_name=sink_name,
+                phase="sink_write",
+                violation=violation,
+            )
+            raise
+
+        pending_identity = {
+            "error_hash": pending_outcome.error_hash,
+            "outcome": pending_outcome.outcome.value,
+            "path": pending_outcome.path.value,
+            "scheduler_pending_sink": pending_outcome.scheduler_pending_sink,
+        }
+        candidates = tuple(
+            SinkEffectMemberCandidate(token_id=token.token_id, row=row, pending_identity=pending_identity)
+            for token, row in zip(tokens, rows, strict=True)
+        )
+        members = resolve_sink_effect_members(self._factory, candidates)  # type: ignore[arg-type]
+        target_config = dict(sink.config)
+        identity = compute_pipeline_effect_identity(
+            run_id=self._run_id,
+            sink_node_id=sink_node_id,
+            role=SinkEffectRole.PRIMARY,
+            sink_config={
+                "effect_mode": effect_mode,
+                "sink_name": sink_name,
+                "sink_type": f"{type(sink).__module__}.{type(sink).__qualname__}",
+            },
+            target_config=target_config,
+            members=members,
+        )
+        reservation = SinkEffectReservationRequest(
+            run_id=self._run_id,
+            sink_node_id=sink_node_id,
+            role=SinkEffectRole.PRIMARY,
+            input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            requested_target_hash=identity.requested_target_hash,
+            members=identity.members,
+            audit_export_snapshot_id=None,
+            config_hash=identity.config_hash,
+            replacing_target=True,
+            primary_effect_id=None,
+        )
+        token_by_id = {token.token_id: token for token in tokens}
+        finalization_members = tuple(
+            SinkEffectFinalizationMember(
+                ordinal=member.ordinal,
+                output_data={"row": dict(member.row)},
+                duration_ms=0.0,
+                outcome=pending_outcome.outcome,
+                path=pending_outcome.path,
+                sink_name=sink_name,
+                join_group_id=(token_by_id[member.token_id].join_group_id if pending_outcome.path is TerminalPath.COALESCED else None),
+                error_hash=pending_outcome.error_hash,
+            )
+            for member in identity.members
+        )
+        sink._reset_diversion_log()
+        result = SinkEffectCoordinator(
+            factory=self._factory,
+            worker_id=self._worker_id,
+            fault_hook=self._sink_effect_fault_hook,
+        ).execute(
+            SinkEffectExecutionRequest(
+                reservation=reservation,
+                effect_input=SinkEffectPipelineMembersInput(
+                    members=identity.members,
+                    target_snapshot_members=identity.members,
+                ),
+                finalization_members=finalization_members,
+            ),
+            sink,  # type: ignore[arg-type]  # capability was statically admitted before execution
+        )
+        durable_members = self._execution.sink_effects.get_members(result.effect.effect_id)
+        diverted_ordinals = {member.ordinal for member in durable_members if member.prepared_disposition == "diverted"}
+        get_diversions = getattr(sink, "_get_diversions", None)
+        diversions = tuple(get_diversions()) if callable(get_diversions) else ()
+        if {item.row_index for item in diversions} != diverted_ordinals:
+            raise AuditIntegrityError("effect result diversion evidence does not match the durable member partition")
+        accepted_token_ids = frozenset(member.token_id for member in durable_members if member.prepared_disposition == "accepted")
+        return _EffectPrimaryWrite(
+            artifact=result.artifact,
+            diversions=diversions,
+            accepted_token_ids=accepted_token_ids,
+        )
 
     def _complete_primary(
         self,
@@ -953,14 +1143,15 @@ class SinkExecutor:
                         divert_states_closed = True
                         raise
 
-                    failsink_write_result = failsink.write(enriched_rows, ctx)
+                    legacy_failsink = failsink
+                    failsink_write_result = legacy_failsink.write(enriched_rows, ctx)
                     failsink_artifact_info, _ = self._require_sink_write_result(
                         label=failsink_name,
                         result=failsink_write_result,
                         allow_diversions=False,
                     )
 
-                failsink.flush()
+                legacy_failsink.flush()
                 failsink_handle.output_data = {
                     "artifact_path": failsink_artifact_info.path_or_uri,
                     "content_hash": failsink_artifact_info.content_hash,
@@ -1187,6 +1378,7 @@ class SinkExecutor:
         *,
         sink_name: str,
         pending_outcome: PendingOutcome | None,
+        effect_mode: str | None = None,
         failsink: SinkProtocol | None = None,
         failsink_name: str | None = None,
         failsink_edge_id: str | None = None,
@@ -1259,33 +1451,65 @@ class SinkExecutor:
         primary_ctx.state_id = None
 
         # ── PRE-PHASE: Open node_states for ALL tokens at primary sink ──
-        all_states = self._open_primary_states(
-            tokens=tokens,
-            rows=rows,
-            sink_node_id=sink_node_id,
-            step_in_pipeline=step_in_pipeline,
-            ctx=primary_ctx,
-        )
+        if effect_mode is None:
+            all_states = self._open_primary_states(
+                tokens=tokens,
+                rows=rows,
+                sink_node_id=sink_node_id,
+                step_in_pipeline=step_in_pipeline,
+                ctx=primary_ctx,
+            )
+        else:
+            all_states = self._open_or_reuse_effect_states(
+                tokens=tokens,
+                rows=rows,
+                sink_node_id=sink_node_id,
+                step_in_pipeline=step_in_pipeline,
+                ctx=primary_ctx,
+            )
 
         # Index by token_id for O(1) lookup in Phases 2 and 3.
         state_by_token_id: dict[str, NodeStateOpen] = {token.token_id: state for token, state in all_states}
 
-        # ── PHASE 1: External I/O (inside track_operation) ──
-        artifact_info, diversions, duration_ms = self._write_primary(
-            sink=sink,
-            rows=rows,
-            tokens=tokens,
-            ctx=primary_ctx,
-            all_states=all_states,
-            sink_node_id=sink_node_id,
-        )
+        effect_write: _EffectPrimaryWrite | None = None
+        if effect_mode is None:
+            # Compatibility-only for isolated legacy test doubles. Runtime
+            # preflight admits production sinks only with an explicit effect
+            # mode, so live publication always takes the durable arm below.
+            artifact_info, diversions, duration_ms = self._write_primary(
+                sink=sink,
+                rows=rows,
+                tokens=tokens,
+                ctx=primary_ctx,
+                all_states=all_states,
+                sink_node_id=sink_node_id,
+            )
+        else:
+            effect_write = self._write_primary_effect(
+                sink=sink,
+                effect_mode=effect_mode,
+                rows=rows,
+                tokens=tokens,
+                pending_outcome=pending_outcome,
+                all_states=all_states,
+                sink_name=sink_name,
+                sink_node_id=sink_node_id,
+            )
+            artifact_info = ArtifactDescriptor(
+                artifact_type=effect_write.artifact.artifact_type,  # type: ignore[arg-type]
+                path_or_uri=effect_write.artifact.path_or_uri,
+                content_hash=effect_write.artifact.content_hash,
+                size_bytes=effect_write.artifact.size_bytes,
+            )
+            diversions = effect_write.diversions
+            duration_ms = 0.0
 
         # ── PHASE 2: Partition and complete primary tokens ──
         diverted_indices = {d.row_index for d in diversions}
         primary_tokens = [(token, i) for i, token in enumerate(tokens) if i not in diverted_indices]
         diverted_tokens = [(token, i) for i, token in enumerate(tokens) if i in diverted_indices]
 
-        artifact: Artifact | None = None
+        artifact: Artifact | None = None if effect_write is None else effect_write.artifact
 
         # Retrieve pre-opened states for diverted tokens. Built BEFORE Phase 2
         # so its cleanup envelope can close these anchors if Phase 2 fails —
@@ -1294,7 +1518,7 @@ class SinkExecutor:
             (token, idx, state_by_token_id[token.token_id]) for token, idx in diverted_tokens
         ]
 
-        if primary_tokens:
+        if primary_tokens and effect_write is None:
             # Retrieve pre-opened states for primary tokens.
             primary_states: list[tuple[TokenInfo, NodeStateOpen]] = [
                 (token, state_by_token_id[token.token_id]) for token, _ in primary_tokens
@@ -1310,6 +1534,20 @@ class SinkExecutor:
                 sink_node_id=sink_node_id,
                 on_token_written=on_token_written,
             )
+        elif primary_tokens and on_token_written is not None:
+            assert effect_write is not None
+            for token, _index in primary_tokens:
+                if token.token_id not in effect_write.accepted_token_ids:
+                    raise AuditIntegrityError("durable effect partition disagrees with accepted primary tokens")
+                try:
+                    on_token_written(token)
+                except contract_errors.TIER_1_ERRORS:
+                    raise
+                except Exception as exc:
+                    raise AuditIntegrityError(
+                        f"Checkpoint failed after durable sink effect for token {token.token_id}. "
+                        f"Original error: {type(exc).__name__}: {exc}"
+                    ) from exc
 
         # ── PHASE 3: Handle diversions ──
         # Diverted tokens already have node_states at the PRIMARY sink from

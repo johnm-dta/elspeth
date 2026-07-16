@@ -162,9 +162,16 @@ class SinkFlushCoordinator:
 
         from elspeth.engine.executors.sink import DiversionCounts, SinkExecutor
 
-        sink_executor = SinkExecutor(factory.execution, factory.data_flow, self._span_factory, run_id)
+        sink_executor = SinkExecutor(
+            factory.execution,
+            factory.data_flow,
+            self._span_factory,
+            run_id,
+            factory=factory,
+        )
         step = sink_step
         total_diversions = DiversionCounts()
+        effect_modes = getattr(config, "sink_effect_modes", {})
 
         def consume_group(
             live_pairs: list[tuple[TokenInfo, PendingOutcome | None]], group_pairs: list[tuple[TokenInfo, PendingOutcome | None]]
@@ -254,6 +261,7 @@ class SinkFlushCoordinator:
                     step_in_pipeline=step,
                     sink_name=sink_name,
                     pending_outcome=pending_outcome,
+                    effect_mode=effect_modes.get(sink_name),
                     failsink=failsink,
                     failsink_name=failsink_config_name,
                     failsink_edge_id=failsink_edge_id,

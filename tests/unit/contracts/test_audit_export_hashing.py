@@ -16,7 +16,10 @@ from elspeth.contracts.audit_export import (
     H,
     derive_public_export_config_hash,
     derive_registry_key_hash,
+    final_manifest_identity_payload,
+    hash_final_manifest_identity_payload,
 )
+from elspeth.contracts.sink_effects import AuditExportSignedManifestInput, AuditExportSigningMode
 
 PUBLIC_CONFIG = {
     "chunking_algorithm_version": "record-framing-v1",
@@ -194,3 +197,103 @@ def test_store_resolver_keeps_content_store_id_stable_and_rejects_reinterpretati
         resolver.register(_Store())
     with pytest.raises(LookupError, match="unresolvable"):
         resolver.resolve("retired-store")
+
+
+def _manifest_descriptor() -> AuditExportSignedManifestInput:
+    return AuditExportSignedManifestInput(
+        content_ref=f"sha256:{'a' * 64}",
+        content_hash="a" * 64,
+        size_bytes=512,
+        manifest_schema="elspeth.audit-export-manifest.v2",
+        derivation_version="audit-export-derivation-v1",
+        signature_algorithm=AuditExportSigningMode.UNSIGNED,
+        signature_key_id="UNSIGNED",
+        record_chain_algorithm="sha256_concat_record_sha256_v1",
+        final_hash="b" * 64,
+        signature=None,
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "content_hash",
+        "content_ref",
+        "size_bytes",
+        "derivation_version",
+        "manifest_schema",
+        "signature_algorithm",
+        "signature_key_id",
+        "record_chain_algorithm",
+        "final_hash",
+        "signature",
+    ],
+)
+def test_final_manifest_identity_component_binds_every_serialized_field(field: str) -> None:
+    baseline = final_manifest_identity_payload(_manifest_descriptor())
+    changed = dict(baseline)
+    replacements: dict[str, object] = {
+        "content_hash": "c" * 64,
+        "content_ref": f"sha256:{'c' * 64}",
+        "size_bytes": 513,
+        "derivation_version": "alternate-version",
+        "manifest_schema": "alternate-schema",
+        "signature_algorithm": "hmac_sha256",
+        "signature_key_id": "operator-key-2",
+        "record_chain_algorithm": "sha256_concat_hmac_sha256_signatures_v1",
+        "final_hash": "d" * 64,
+        "signature": "e" * 64,
+    }
+    changed[field] = replacements[field]
+    assert hash_final_manifest_identity_payload(changed, validate=False) != hash_final_manifest_identity_payload(baseline, validate=False)
+
+
+def test_literal_final_manifest_and_export_effect_identity_vectors() -> None:
+    final_payload = final_manifest_identity_payload(_manifest_descriptor())
+    final_bytes = (
+        b'{"payload":{"content_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+        b'"content_ref":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+        b'"derivation_version":"audit-export-derivation-v1",'
+        b'"final_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",'
+        b'"manifest_schema":"elspeth.audit-export-manifest.v2",'
+        b'"record_chain_algorithm":"sha256_concat_record_sha256_v1","signature":null,'
+        b'"signature_algorithm":"unsigned","signature_key_id":"UNSIGNED","size_bytes":512},'
+        b'"schema":"sink-effect-audit-export-final-manifest-v1"}'
+    )
+    assert C("sink-effect-audit-export-final-manifest-v1", final_payload) == final_bytes
+    assert H(final_bytes) == "e2df9077ce2b991cbc0c682fdfdb86e8aa353685a336e4bfcfa5da92bfb732a2"
+
+    effect_payload = {
+        "export_format": "json",
+        "final_manifest_identity_hash": "e2df9077ce2b991cbc0c682fdfdb86e8aa353685a336e4bfcfa5da92bfb732a2",
+        "input_kind": "audit_export_snapshot",
+        "manifest_hash": "1" * 64,
+        "protocol_version": "sink-effect-v1",
+        "registry_key_hash": "2" * 64,
+        "role": "primary",
+        "serialization_version": "audit-export-v2",
+        "signer_key_id": "UNSIGNED",
+        "signing_mode": "unsigned",
+        "sink_node_id": "audit-export",
+        "snapshot_hash": "3" * 64,
+        "snapshot_id": "4" * 64,
+        "source_run_id": "run-golden-001",
+        "target_config_hash": "9" * 64,
+    }
+    effect_bytes = (
+        b'{"payload":{"export_format":"json",'
+        b'"final_manifest_identity_hash":"e2df9077ce2b991cbc0c682fdfdb86e8aa353685a336e4bfcfa5da92bfb732a2",'
+        b'"input_kind":"audit_export_snapshot",'
+        b'"manifest_hash":"1111111111111111111111111111111111111111111111111111111111111111",'
+        b'"protocol_version":"sink-effect-v1",'
+        b'"registry_key_hash":"2222222222222222222222222222222222222222222222222222222222222222",'
+        b'"role":"primary","serialization_version":"audit-export-v2","signer_key_id":"UNSIGNED",'
+        b'"signing_mode":"unsigned","sink_node_id":"audit-export",'
+        b'"snapshot_hash":"3333333333333333333333333333333333333333333333333333333333333333",'
+        b'"snapshot_id":"4444444444444444444444444444444444444444444444444444444444444444",'
+        b'"source_run_id":"run-golden-001",'
+        b'"target_config_hash":"9999999999999999999999999999999999999999999999999999999999999999"},'
+        b'"schema":"sink-effect-audit-export-effect-v1"}'
+    )
+    assert C("sink-effect-audit-export-effect-v1", effect_payload) == effect_bytes
+    assert H(effect_bytes) == "d09466d2cbbb27205cf84de5a6bfddcda6c6c47f42428e1c0e3349dcf39b38bb"

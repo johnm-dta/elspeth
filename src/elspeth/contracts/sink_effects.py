@@ -34,6 +34,7 @@ _AUDIT_EXPORT_SERIALIZATION_VERSION: Final = "audit-export-v2"
 _UNSIGNED_RECORD_CHAIN: Final = "sha256_concat_record_sha256_v1"
 _HMAC_RECORD_CHAIN: Final = "sha256_concat_hmac_sha256_signatures_v1"
 _LOWER_HEX_64 = re.compile(r"[0-9a-f]{64}\Z")
+_EMPTY_IDENTITY_HASH: Final = sha256(b"{}").hexdigest()
 _UTC_MICROSECOND_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z\Z")
 _V2_MANIFEST_FIELDS: Final = frozenset(
     {
@@ -314,24 +315,112 @@ def _freeze_ordinal_sequence(ordinals_input: Sequence[int], field_name: str) -> 
 
 
 @dataclass(frozen=True, slots=True)
+class SinkEffectMemberCandidate:
+    """One exact sink-boundary row awaiting durable lineage ordering."""
+
+    token_id: str
+    row: Mapping[str, object]
+    pending_identity: Mapping[str, object] = field(default_factory=lambda: MappingProxyType({}))
+
+    def __post_init__(self) -> None:
+        _require_nonempty_string(self.token_id, "token_id")
+        frozen_row = _freeze_canonical_row_value(self.row, "row")
+        if not isinstance(frozen_row, Mapping):
+            raise TypeError("row must be a mapping")
+        object.__setattr__(self, "row", deep_freeze(frozen_row))
+        object.__setattr__(self, "pending_identity", _freeze_bounded_evidence(self.pending_identity, "pending_identity"))
+
+
+@dataclass(frozen=True, slots=True)
 class SinkEffectMember:
     ordinal: int
     token_id: str
     row_id: str
     ingest_sequence: int
-    lineage_key: str
+    lineage_json: str
+    lineage_hash: str
     payload_hash: str
     row: Mapping[str, object]
+    pending_identity_hash: str = field(default=_EMPTY_IDENTITY_HASH)
+    member_effect_id: str | None = None
 
     def __post_init__(self) -> None:
         require_int(self.ordinal, "ordinal", min_value=0)
         require_int(self.ingest_sequence, "ingest_sequence", min_value=0)
-        for field_name in ("token_id", "row_id", "lineage_key", "payload_hash"):
+        for field_name in ("token_id", "row_id", "lineage_json"):
             _require_nonempty_string(getattr(self, field_name), field_name)
+        for field_name in ("lineage_hash", "payload_hash", "pending_identity_hash"):
+            _require_lower_hex_64(getattr(self, field_name), field_name)
+        try:
+            lineage = json.loads(self.lineage_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("lineage_json must be canonical JSON") from exc
+        if type(lineage) is not list or canonical_json(lineage) != self.lineage_json:
+            raise ValueError("lineage_json must be an exact canonical ordered list")
+        if len(self.lineage_json.encode("utf-8")) > _SINK_EFFECT_EVIDENCE_MAX_BYTES:
+            raise ValueError("lineage_json exceeds the 64 KiB limit")
+        if sha256(self.lineage_json.encode("utf-8")).hexdigest() != self.lineage_hash:
+            raise ValueError("lineage_hash must bind exact lineage_json")
+        if self.member_effect_id is not None:
+            _require_lower_hex_64(self.member_effect_id, "member_effect_id")
         frozen_row = _freeze_canonical_row_value(self.row, "row")
         if not isinstance(frozen_row, Mapping):
             raise TypeError("row must be a mapping")
+        if sha256(canonical_json(deep_thaw(frozen_row)).encode("utf-8")).hexdigest() != self.payload_hash:
+            raise ValueError("payload_hash must bind the exact canonical row")
         object.__setattr__(self, "row", deep_freeze(frozen_row))
+
+
+@dataclass(frozen=True, slots=True)
+class SinkEffectIdentity:
+    """Credential-free deterministic identities computed before reservation."""
+
+    effect_id: str
+    artifact_id: str
+    artifact_idempotency_key: str
+    stream_id: str
+    config_hash: str
+    requested_target_hash: str
+    membership_or_manifest_hash: str
+    group_payload_hash: str
+    input_kind: SinkEffectInputKind
+    members: Sequence[SinkEffectMember]
+    member_ids: Sequence[str]
+    snapshot_hash: str | None = None
+    final_manifest_identity_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "effect_id",
+            "artifact_id",
+            "artifact_idempotency_key",
+            "stream_id",
+            "config_hash",
+            "requested_target_hash",
+            "membership_or_manifest_hash",
+            "group_payload_hash",
+        ):
+            _require_lower_hex_64(getattr(self, field_name), field_name)
+        for field_name in ("snapshot_hash", "final_manifest_identity_hash"):
+            value = getattr(self, field_name)
+            if value is not None:
+                _require_lower_hex_64(value, field_name)
+        _require_exact_enum(self.input_kind, SinkEffectInputKind, "input_kind")
+        members = tuple(self.members)
+        member_ids = tuple(self.member_ids)
+        if any(type(member) is not SinkEffectMember for member in members):
+            raise TypeError("members must contain exact SinkEffectMember values")
+        if any(not isinstance(member_id, str) or _LOWER_HEX_64.fullmatch(member_id) is None for member_id in member_ids):
+            raise ValueError("member_ids must contain lowercase SHA-256 digests")
+        if self.input_kind is SinkEffectInputKind.PIPELINE_MEMBERS:
+            if not members or member_ids != tuple(member.member_effect_id for member in members):
+                raise ValueError("pipeline identity requires exact non-empty member IDs")
+            if self.snapshot_hash is not None or self.final_manifest_identity_hash is not None:
+                raise ValueError("pipeline identity cannot carry audit-export hashes")
+        elif members or member_ids or self.snapshot_hash is None or self.final_manifest_identity_hash is None:
+            raise ValueError("audit-export identity requires zero members and complete snapshot hashes")
+        object.__setattr__(self, "members", members)
+        object.__setattr__(self, "member_ids", member_ids)
 
 
 @dataclass(frozen=True, slots=True)
@@ -983,11 +1072,13 @@ __all__ = [
     "SinkEffectCommitResult",
     "SinkEffectDescriptorMode",
     "SinkEffectExecutionPurpose",
+    "SinkEffectIdentity",
     "SinkEffectInputKind",
     "SinkEffectInspection",
     "SinkEffectInspectionMode",
     "SinkEffectInspectionRequest",
     "SinkEffectMember",
+    "SinkEffectMemberCandidate",
     "SinkEffectPipelineMembersInput",
     "SinkEffectPlan",
     "SinkEffectPrepareRequest",

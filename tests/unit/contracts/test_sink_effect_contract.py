@@ -28,11 +28,13 @@ from elspeth.contracts.sink_effects import (
     SinkEffectAuditExportSnapshotInput,
     SinkEffectCommitResult,
     SinkEffectDescriptorMode,
+    SinkEffectIdentity,
     SinkEffectInputKind,
     SinkEffectInspection,
     SinkEffectInspectionMode,
     SinkEffectInspectionRequest,
     SinkEffectMember,
+    SinkEffectMemberCandidate,
     SinkEffectPipelineMembersInput,
     SinkEffectPlan,
     SinkEffectPrepareRequest,
@@ -53,14 +55,16 @@ SAFE_EVIDENCE = {"content_hash": "abc123", "versions": ["v1", "v2"]}
 
 
 def _member(ordinal: int = 0) -> SinkEffectMember:
+    row = {"value": ordinal, "nested": {"safe": True}}
     return SinkEffectMember(
         ordinal=ordinal,
         token_id=f"token-{ordinal}",
         row_id=f"row-{ordinal}",
         ingest_sequence=ordinal,
-        lineage_key=f"lineage-{ordinal}",
-        payload_hash=f"payload-{ordinal}",
-        row={"value": ordinal, "nested": {"safe": True}},
+        lineage_json="[]",
+        lineage_hash=sha256(b"[]").hexdigest(),
+        payload_hash=sha256(canonical_json(row).encode("utf-8")).hexdigest(),
+        row=row,
     )
 
 
@@ -291,7 +295,37 @@ def test_sink_effect_protocol_has_independent_kind_capability_and_exact_methods(
     [
         (
             SinkEffectMember,
-            ("ordinal", "token_id", "row_id", "ingest_sequence", "lineage_key", "payload_hash", "row"),
+            (
+                "ordinal",
+                "token_id",
+                "row_id",
+                "ingest_sequence",
+                "lineage_json",
+                "lineage_hash",
+                "payload_hash",
+                "row",
+                "pending_identity_hash",
+                "member_effect_id",
+            ),
+        ),
+        (SinkEffectMemberCandidate, ("token_id", "row", "pending_identity")),
+        (
+            SinkEffectIdentity,
+            (
+                "effect_id",
+                "artifact_id",
+                "artifact_idempotency_key",
+                "stream_id",
+                "config_hash",
+                "requested_target_hash",
+                "membership_or_manifest_hash",
+                "group_payload_hash",
+                "input_kind",
+                "members",
+                "member_ids",
+                "snapshot_hash",
+                "final_manifest_identity_hash",
+            ),
         ),
         (SinkEffectInspectionRequest, ("effect_id", "target", "predecessor_descriptor")),
         (SinkEffectInspection, ("mode", "reference", "evidence")),
@@ -405,7 +439,7 @@ def test_evidence_and_member_rows_are_deeply_immutable_and_copy_isolated() -> No
 
 def test_member_row_is_a_detached_closed_canonical_value_tree() -> None:
     source = {"nested": [{"value": 1, "float": 1.25, "null": None}]}
-    member = replace(_member(), row=source)
+    member = replace(_member(), row=source, payload_hash=sha256(canonical_json(source).encode("utf-8")).hexdigest())
     source["nested"][0]["value"] = 99
     assert member.row["nested"][0]["value"] == 1
     with pytest.raises(TypeError):
@@ -1037,10 +1071,21 @@ def test_required_identifiers_reject_whitespace_only_strings() -> None:
             token_id=" \t ",
             row_id="row-0",
             ingest_sequence=0,
-            lineage_key="lineage-0",
-            payload_hash="payload-0",
+            lineage_json="[]",
+            lineage_hash=sha256(b"[]").hexdigest(),
+            payload_hash=sha256(b"{}").hexdigest(),
             row={},
         )
+
+
+def test_member_refuses_noncanonical_or_divergent_lineage_and_payload_hashes() -> None:
+    baseline = _member()
+    with pytest.raises(ValueError, match="lineage_hash"):
+        replace(baseline, lineage_hash="0" * 64)
+    with pytest.raises(ValueError, match="payload_hash"):
+        replace(baseline, payload_hash="0" * 64)
+    with pytest.raises(ValueError, match="canonical"):
+        replace(baseline, lineage_json="[ ]", lineage_hash=sha256(b"[ ]").hexdigest())
 
     with pytest.raises(ValueError, match="non-empty"):
         RestrictedSinkEffectContext(

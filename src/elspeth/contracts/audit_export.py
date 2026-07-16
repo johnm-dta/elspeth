@@ -14,9 +14,12 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Final, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Final, Literal, Protocol, runtime_checkable
 
 from elspeth.contracts.hashing import canonical_json
+
+if TYPE_CHECKING:
+    from elspeth.contracts.sink_effects import AuditExportSignedManifestInput
 
 AUDIT_EXPORT_DERIVATION_VERSION: Final = "audit-export-derivation-v1"
 AUDIT_EXPORT_SERIALIZATION_VERSION: Final = "audit-export-v2"
@@ -457,6 +460,46 @@ def derive_public_export_config_hash(payload: ClosedAuditExportJSON) -> str:
 
 def derive_registry_key_hash(payload: ClosedAuditExportJSON) -> str:
     return H(C("audit-export-registry-key-v1", payload))
+
+
+def final_manifest_identity_payload(descriptor: AuditExportSignedManifestInput) -> dict[str, ClosedAuditExportJSON]:
+    """Detach every immutable signed-manifest descriptor field for identity."""
+    try:
+        signature_algorithm = descriptor.signature_algorithm.value
+        payload: dict[str, ClosedAuditExportJSON] = {
+            "content_hash": descriptor.content_hash,
+            "content_ref": descriptor.content_ref,
+            "derivation_version": descriptor.derivation_version,
+            "final_hash": descriptor.final_hash,
+            "manifest_schema": descriptor.manifest_schema,
+            "record_chain_algorithm": descriptor.record_chain_algorithm,
+            "signature": descriptor.signature,
+            "signature_algorithm": signature_algorithm,
+            "signature_key_id": descriptor.signature_key_id,
+            "size_bytes": descriptor.size_bytes,
+        }
+    except AttributeError as exc:
+        raise TypeError("descriptor must expose the complete signed-manifest identity contract") from exc
+    validate_closed_stage_payload("sink-effect-audit-export-final-manifest-v1", payload)
+    return payload
+
+
+def hash_final_manifest_identity_payload(
+    payload: dict[str, ClosedAuditExportJSON],
+    *,
+    validate: bool = True,
+) -> str:
+    """Hash the exact complete component, optionally bypassing tuple validity.
+
+    ``validate=False`` exists for scalar binding proofs: an isolated field
+    mutation can be intentionally invalid as a whole tuple while still proving
+    that the serialized key participates in the formula.
+    """
+    if type(payload) is not dict or any(type(key) is not str for key in payload):
+        raise TypeError("final manifest identity payload must be an exact string-keyed object")
+    if validate:
+        return H(C("sink-effect-audit-export-final-manifest-v1", payload))
+    return H(canonical_json({"payload": payload, "schema": "sink-effect-audit-export-final-manifest-v1"}).encode("utf-8"))
 
 
 def validate_credential_free_identifier(value: str, field_name: str) -> str:

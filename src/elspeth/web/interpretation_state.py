@@ -1108,9 +1108,16 @@ def _validate_model_choice_review(node: NodeSpec, model: str) -> None:
     resolved = _resolved_requirement_for_kind(requirements, InterpretationKind.LLM_MODEL_CHOICE)
     if resolved is None:
         return
-    expected_hash = stable_hash(model)
+    expected_hash = model_choice_artifact_hash(model)
     if resolved["resolved_prompt_template_hash"] != expected_hash:
         raise ValueError(f"llm node {node.id!r} model-choice review hash drifted")
+
+
+def model_choice_artifact_hash(model: str) -> str:
+    """Canonical artifact hash for an operator-reviewed model identifier."""
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("model_choice_artifact_hash requires a non-empty model identifier")
+    return stable_hash(model)
 
 
 def pipeline_decision_artifact_hash(
@@ -1445,3 +1452,309 @@ def vague_term_wiring_count(options: Mapping[str, Any], *, user_term: str) -> in
     if isinstance(prompt_template, str):
         return sum(1 for term in _legacy_terms(prompt_template) if term == normalized_user_term)
     return 0
+
+
+def _pending_authoring_shell(requirement: InterpretationRequirement) -> dict[str, Any]:
+    """Return the canonical persisted pending row without resolver evidence."""
+    return {
+        "id": requirement["id"],
+        "kind": requirement["kind"],
+        "user_term": requirement["user_term"],
+        "status": "pending",
+        "draft": requirement["draft"],
+        "event_id": None,
+        "accepted_value": None,
+        "accepted_artifact_hash": None,
+        "resolved_prompt_template_hash": None,
+    }
+
+
+def serialize_authoring_review_options(options: Mapping[str, Any]) -> dict[str, Any]:
+    """Return an audit-safe composer payload with only pending review shells."""
+    serialized = dict(options)
+    serialized.pop("resolved_prompt_template_hash", None)
+    serialized.pop(SOURCE_AUTHORING_KEY, None)
+    review_index = _validated_review_index(options)
+    requirements = tuple(review_index.values()) if review_index else None
+    if requirements is not None:
+        parts = _prompt_parts(options)
+        for requirement in requirements:
+            if requirement["status"] != "resolved" or InterpretationKind(requirement["kind"]) is not InterpretationKind.VAGUE_TERM:
+                continue
+            if parts is None or not any(
+                part["kind"] == "interpretation_ref" and part["requirement_id"] == requirement["id"] for part in parts
+            ):
+                raise ValueError("resolved vague-term review cannot round-trip without reconstructible prompt_template_parts")
+        compact_shells = [
+            {
+                "id": requirement["id"],
+                "kind": requirement["kind"],
+                "user_term": requirement["user_term"],
+                "status": "pending",
+                "draft": requirement["draft"],
+            }
+            for requirement in requirements
+        ]
+        serialized[INTERPRETATION_REQUIREMENTS_KEY] = compact_shells
+        if parts is not None:
+            coerced_shells: dict[str, InterpretationRequirement] = {
+                str(shell["id"]): _coerce_requirement(shell) for shell in compact_shells
+            }
+            serialized["prompt_template"] = _render_prompt_parts(
+                parts,
+                coerced_shells,
+                unresolved_text=PENDING_INTERPRETATION_AUTHORING_TEXT,
+            )
+    return serialized
+
+
+def _review_identity(requirement: InterpretationRequirement) -> tuple[str, InterpretationKind, str]:
+    return (
+        requirement["id"],
+        InterpretationKind(requirement["kind"]),
+        requirement["user_term"].strip(),
+    )
+
+
+def _validated_review_index(options: Mapping[str, Any]) -> dict[tuple[str, InterpretationKind, str], InterpretationRequirement]:
+    requirements = _requirements(options) or ()
+    by_identity: dict[tuple[str, InterpretationKind, str], InterpretationRequirement] = {}
+    by_id: set[str] = set()
+    by_kind_term: set[tuple[InterpretationKind, str]] = set()
+    for requirement in requirements:
+        identity = _review_identity(requirement)
+        kind_term = (identity[1], identity[2])
+        if identity in by_identity or identity[0] in by_id or kind_term in by_kind_term:
+            raise ValueError(f"duplicate interpretation requirement identity {identity!r}")
+        by_identity[identity] = requirement
+        by_id.add(identity[0])
+        by_kind_term.add(kind_term)
+    return by_identity
+
+
+def _require_resolved_review_coherence(requirement: InterpretationRequirement) -> None:
+    if requirement["status"] != "resolved":
+        return
+    if not isinstance(requirement["event_id"], str) or not requirement["event_id"]:
+        raise ValueError(f"resolved interpretation requirement {requirement['id']!r} has no event_id")
+    if not isinstance(requirement["accepted_value"], str):
+        raise ValueError(f"resolved interpretation requirement {requirement['id']!r} has no accepted_value")
+
+
+def _node_review_artifact(
+    node: NodeSpec,
+    all_nodes: Sequence[NodeSpec],
+    *,
+    kind: InterpretationKind,
+    user_term: str,
+) -> str:
+    if kind is InterpretationKind.LLM_PROMPT_TEMPLATE:
+        structure_hash = prompt_structure_hash_from_options(node.options)
+        if structure_hash is not None:
+            return structure_hash
+        prompt_template = node.options.get("prompt_template")
+        if not isinstance(prompt_template, str):
+            raise ValueError(f"llm_prompt_template review on node {node.id!r} has no prompt_template")
+        return stable_hash(prompt_template)
+    if kind is InterpretationKind.LLM_MODEL_CHOICE:
+        model = node.options.get("model")
+        if not isinstance(model, str):
+            raise ValueError(f"llm_model_choice review on node {node.id!r} has no model")
+        return model_choice_artifact_hash(model)
+    if kind is InterpretationKind.PIPELINE_DECISION:
+        validate_pipeline_decision_node_semantics(
+            node=node,
+            all_nodes=all_nodes,
+            user_term=user_term,
+            draft=None,
+            context="reconcile_authoritative_reviews",
+        )
+        return pipeline_decision_artifact_hash(node, all_nodes, user_term=user_term)
+    raise ValueError(f"review kind {kind.value!r} does not have a node artifact hash")
+
+
+def _resolved_review_hash(requirement: InterpretationRequirement, kind: InterpretationKind) -> str:
+    if kind in (InterpretationKind.PIPELINE_DECISION, InterpretationKind.INVENTED_SOURCE):
+        field = "accepted_artifact_hash"
+        value = requirement["accepted_artifact_hash"]
+    else:
+        field = "resolved_prompt_template_hash"
+        value = requirement["resolved_prompt_template_hash"]
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"resolved interpretation requirement {requirement['id']!r} has no {field}")
+    return value
+
+
+def _vague_review_is_unchanged(
+    previous: NodeSpec,
+    proposed: NodeSpec,
+    requirement: InterpretationRequirement,
+) -> bool:
+    previous_parts = _prompt_parts(previous.options)
+    proposed_parts = _prompt_parts(proposed.options)
+    if previous_parts is None or proposed_parts is None:
+        raise ValueError("resolved vague-term review cannot round-trip without prompt_template_parts")
+    requirement_id = requirement["id"]
+    if not any(part["kind"] == "interpretation_ref" and part["requirement_id"] == requirement_id for part in previous_parts):
+        raise ValueError(f"resolved vague-term review {requirement_id!r} has no prompt_template_parts reference")
+    if not any(part["kind"] == "interpretation_ref" and part["requirement_id"] == requirement_id for part in proposed_parts):
+        raise ValueError(f"proposed vague-term review {requirement_id!r} has no prompt_template_parts reference")
+    previous_prompt = previous.options.get("prompt_template")
+    if not isinstance(previous_prompt, str):
+        raise ValueError(f"resolved vague-term review {requirement_id!r} has no rendered prompt_template")
+    if _resolved_review_hash(requirement, InterpretationKind.VAGUE_TERM) != stable_hash(previous_prompt):
+        raise ValueError(f"resolved vague-term review {requirement_id!r} hash drifted")
+    return prompt_structure_hash(previous_parts) == prompt_structure_hash(proposed_parts)
+
+
+def _reconcile_node_options(
+    previous: NodeSpec | None,
+    proposed: NodeSpec,
+    *,
+    previous_nodes: Sequence[NodeSpec],
+    proposed_nodes: Sequence[NodeSpec],
+    proposed_graph: _OutputStreamGraph,
+) -> Mapping[str, Any]:
+    proposed_index = _validated_review_index(proposed.options)
+    previous_index = _validated_review_index(previous.options) if previous is not None and previous.plugin == proposed.plugin else {}
+    options = dict(proposed.options)
+    options.pop("resolved_prompt_template_hash", None)
+    reconciled: list[dict[str, Any]] = []
+    carried_prompt_review = False
+
+    for identity, proposed_requirement in proposed_index.items():
+        requirement_id, kind, user_term = identity
+        shell = _pending_authoring_shell(proposed_requirement)
+        if (
+            kind is InterpretationKind.PIPELINE_DECISION
+            and user_term == PROMPT_SHIELD_USER_TERM
+            and proposed.plugin == "llm"
+            and _llm_has_authorized_shield_upstream(proposed, proposed_graph)
+        ):
+            continue
+        previous_requirement = previous_index.get(identity)
+        if previous is None or previous_requirement is None or previous_requirement["status"] != "resolved":
+            reconciled.append(shell)
+            continue
+
+        _require_resolved_review_coherence(previous_requirement)
+        if kind is InterpretationKind.VAGUE_TERM:
+            unchanged = _vague_review_is_unchanged(previous, proposed, previous_requirement)
+        elif kind is InterpretationKind.INVENTED_SOURCE:
+            raise ValueError("invented_source review cannot target a transform node")
+        else:
+            previous_artifact = _node_review_artifact(previous, previous_nodes, kind=kind, user_term=user_term)
+            stored_artifact = _resolved_review_hash(previous_requirement, kind)
+            if stored_artifact != previous_artifact:
+                raise ValueError(f"resolved interpretation requirement {requirement_id!r} hash drifted")
+            proposed_artifact = _node_review_artifact(proposed, proposed_nodes, kind=kind, user_term=user_term)
+            unchanged = proposed_artifact == previous_artifact
+        if unchanged:
+            reconciled.append(dict(previous_requirement))
+            carried_prompt_review = carried_prompt_review or kind in (
+                InterpretationKind.VAGUE_TERM,
+                InterpretationKind.LLM_PROMPT_TEMPLATE,
+            )
+        else:
+            reconciled.append(shell)
+
+    if reconciled:
+        options[INTERPRETATION_REQUIREMENTS_KEY] = reconciled
+    else:
+        options.pop(INTERPRETATION_REQUIREMENTS_KEY, None)
+
+    parts = _prompt_parts(options)
+    if parts is not None:
+        requirements_by_id = _requirements_by_id(options)
+        rendered = _render_prompt_parts(
+            parts,
+            requirements_by_id,
+            unresolved_text=PENDING_INTERPRETATION_AUTHORING_TEXT,
+        )
+        options["prompt_template"] = rendered
+        if carried_prompt_review:
+            options["resolved_prompt_template_hash"] = stable_hash(rendered)
+    return options
+
+
+def _reconcile_source_options(
+    previous: SourceSpec | None,
+    proposed: SourceSpec,
+    *,
+    component_id: str,
+) -> Mapping[str, Any]:
+    proposed_index = _validated_review_index(proposed.options)
+    previous_index = _validated_review_index(previous.options) if previous is not None and previous.plugin == proposed.plugin else {}
+    options = dict(proposed.options)
+    reconciled: list[dict[str, Any]] = []
+    for identity, proposed_requirement in proposed_index.items():
+        requirement_id, kind, _user_term = identity
+        shell = _pending_authoring_shell(proposed_requirement)
+        previous_requirement = previous_index.get(identity)
+        if kind is not InterpretationKind.INVENTED_SOURCE:
+            if previous_requirement is not None and previous_requirement["status"] == "resolved":
+                raise ValueError(f"review kind {kind.value!r} cannot target source {component_id!r}")
+            reconciled.append(shell)
+            continue
+        if previous is None or previous_requirement is None or previous_requirement["status"] != "resolved":
+            reconciled.append(shell)
+            continue
+
+        _require_resolved_review_coherence(previous_requirement)
+        previous_authoring = _source_authoring_metadata(previous.options)
+        proposed_authoring = _source_authoring_metadata(proposed.options)
+        if previous_authoring is None or proposed_authoring is None:
+            raise ValueError("invented_source review requires reconstructible source_authoring metadata")
+        stored_artifact = _resolved_review_hash(previous_requirement, kind)
+        if stored_artifact != previous_authoring["content_hash"]:
+            raise ValueError(f"resolved interpretation requirement {requirement_id!r} hash drifted")
+        if proposed_authoring["content_hash"] == previous_authoring["content_hash"]:
+            reconciled.append(dict(previous_requirement))
+            options[SOURCE_AUTHORING_KEY] = dict(previous_authoring)
+        else:
+            reconciled.append(shell)
+
+    if reconciled:
+        options[INTERPRETATION_REQUIREMENTS_KEY] = reconciled
+    else:
+        options.pop(INTERPRETATION_REQUIREMENTS_KEY, None)
+    return options
+
+
+def reconcile_authoritative_reviews(
+    previous: CompositionState,
+    proposed: CompositionState,
+) -> CompositionState:
+    """Rehydrate only coherent, still-applicable server-owned review evidence."""
+    previous_sources = previous.sources
+    reconciled_sources = {
+        source_name: replace(
+            source,
+            options=_reconcile_source_options(
+                previous_sources.get(source_name),
+                source,
+                component_id=source_name,
+            ),
+        )
+        for source_name, source in proposed.sources.items()
+    }
+    previous_nodes = {node.id: node for node in previous.nodes}
+    proposed_graph = _output_stream_graph(proposed.nodes)
+    reconciled_nodes = tuple(
+        replace(
+            node,
+            options=_reconcile_node_options(
+                previous_nodes.get(node.id),
+                node,
+                previous_nodes=previous.nodes,
+                proposed_nodes=proposed.nodes,
+                proposed_graph=proposed_graph,
+            ),
+        )
+        for node in proposed.nodes
+    )
+    return replace(
+        proposed,
+        sources=reconciled_sources,
+        nodes=reconciled_nodes,
+    )

@@ -645,37 +645,50 @@ class SinkExecutor:
         if {member.token_id for member in durable_members} != set(requested_token_ids):
             raise AuditIntegrityError("durable effect partition does not cover every requested primary token")
         caller_index_by_token = {token.token_id: index for index, token in enumerate(tokens)}
-        durable_by_ordinal = {member.ordinal: member for member in durable_members}
-        diverted_ordinals = {member.ordinal for member in durable_members if member.prepared_disposition == "diverted"}
+        # A recovered batch may span several effects whose member ordinals each
+        # restart at zero, so dispositions and attribution are keyed by
+        # (effect_id, ordinal), never by ordinal alone (elspeth-a6eba4b4e2).
+        durable_by_key = {(member.effect_id, member.ordinal): member for member in durable_members}
+        diverted_keys = {(member.effect_id, member.ordinal) for member in durable_members if member.prepared_disposition == "diverted"}
+        effect_ids = tuple(dict.fromkeys(member.effect_id for member in durable_members))
+        single_effect = len(effect_ids) == 1
         get_diversions = getattr(sink, "_get_diversions", None)
         returned_diversions = tuple(get_diversions()) if callable(get_diversions) else ()
-        returned_by_ordinal = {item.row_index: item for item in returned_diversions}
-        plan = SinkEffectCoordinator._load_plan(result.effect)
-        raw_attribution = plan.safe_evidence.get("diversion_attribution", ())
-        attribution_by_ordinal: dict[int, tuple[str, str]] = {}
-        if isinstance(raw_attribution, Sequence) and not isinstance(raw_attribution, (str, bytes, bytearray)):
-            for item in raw_attribution:
-                if not isinstance(item, Mapping):
-                    raise AuditIntegrityError("effect diversion attribution is not a mapping")
-                ordinal = item.get("ordinal")
-                reason_hash = item.get("reason_hash")
-                error_hash = item.get("error_hash")
-                if type(ordinal) is not int or not isinstance(reason_hash, str) or not isinstance(error_hash, str):
-                    raise AuditIntegrityError("effect diversion attribution is incomplete")
-                attribution_by_ordinal[ordinal] = (reason_hash, error_hash)
-        if returned_by_ordinal and set(returned_by_ordinal) != diverted_ordinals:
+        # The in-memory diversion log indexes rows within one effect's member
+        # list; across several effects those indexes are ambiguous, so a
+        # spanning batch recovers from each effect's durable attribution only.
+        returned_by_ordinal = {item.row_index: item for item in returned_diversions} if single_effect else {}
+        attribution_by_key: dict[tuple[str, int], tuple[str, str]] = {}
+        for effect_id in effect_ids:
+            effect = self._execution.sink_effects.get_effect(effect_id)
+            if effect is None:
+                raise AuditIntegrityError("durable effect partition references a missing effect")
+            plan = SinkEffectCoordinator._load_plan(effect)
+            raw_attribution = plan.safe_evidence.get("diversion_attribution", ())
+            if isinstance(raw_attribution, Sequence) and not isinstance(raw_attribution, (str, bytes, bytearray)):
+                for item in raw_attribution:
+                    if not isinstance(item, Mapping):
+                        raise AuditIntegrityError("effect diversion attribution is not a mapping")
+                    ordinal = item.get("ordinal")
+                    reason_hash = item.get("reason_hash")
+                    error_hash = item.get("error_hash")
+                    if type(ordinal) is not int or not isinstance(reason_hash, str) or not isinstance(error_hash, str):
+                        raise AuditIntegrityError("effect diversion attribution is incomplete")
+                    attribution_by_key[(effect_id, ordinal)] = (reason_hash, error_hash)
+        if returned_by_ordinal and set(returned_by_ordinal) != {ordinal for _effect_id, ordinal in diverted_keys}:
             raise AuditIntegrityError("effect result diversion evidence does not match the durable member partition")
-        if not returned_by_ordinal and set(attribution_by_ordinal) != diverted_ordinals:
+        if not returned_by_ordinal and set(attribution_by_key) != diverted_keys:
             raise AuditIntegrityError("recovered effect is missing durable diversion attribution")
         diversions: list[RowDiversion] = []
         diversion_error_hashes: dict[int, str] = {}
         diversion_reason_hashes: dict[int, str] = {}
         token_by_id = {token.token_id: token for token in tokens}
-        for durable_ordinal in sorted(diverted_ordinals):
-            durable = durable_by_ordinal[durable_ordinal]
+        for diverted_key in sorted(diverted_keys):
+            _diverted_effect_id, durable_ordinal = diverted_key
+            durable = durable_by_key[diverted_key]
             caller_index = caller_index_by_token[durable.token_id]
             returned = returned_by_ordinal.get(durable_ordinal)
-            attribution = attribution_by_ordinal.get(durable_ordinal)
+            attribution = attribution_by_key.get(diverted_key)
             reason = returned.reason if returned is not None else f"effect-diversion:{attribution[0]}"  # type: ignore[index]
             error_hash = attribution[1] if attribution is not None else compute_error_hash(reason)
             reason_hash = attribution[0] if attribution is not None else stable_hash({"diversion_reason": reason})

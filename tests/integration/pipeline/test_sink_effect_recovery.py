@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -260,6 +261,124 @@ def test_primary_finalizes_once_while_diverted_token_waits_for_linked_failsink(t
         assert len(routing_events) == 1
         assert routing_events[0].edge_id == edge.edge_id
         assert routing_events[0].mode is RoutingMode.DIVERT
+    finally:
+        db.close()
+
+
+def test_recovery_batch_spanning_effects_keys_dispositions_by_effect_and_ordinal(tmp_path: Path) -> None:
+    """A recovered batch spanning two effects whose member ordinals both start
+    at zero must attribute each diversion to the right effect member instead of
+    collapsing into ordinal-only maps (elspeth-a6eba4b4e2)."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'span.db'}")
+    try:
+        factory = make_factory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source_id = register_test_node(factory.data_flow, run.run_id, "source", node_type=NodeType.SOURCE, plugin_name="source")
+        sink_id = register_test_node(factory.data_flow, run.run_id, "primary", node_type=NodeType.SINK, plugin_name="partitioning")
+        tokens = _effect_tokens(
+            factory,
+            run_id=run.run_id,
+            source_id=source_id,
+            rows=[
+                {"value": 1, "divert": True},
+                {"value": 2},
+                {"value": 3, "divert": True},
+                {"value": 4},
+            ],
+        )
+        ctx = PluginContext(run_id=run.run_id, config={}, landscape=factory.plugin_audit_writer(), node_id=sink_id)
+        pending = PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
+
+        # Effect 1 (member ordinals 0, 1): diverts token 0, accepts token 1.
+        first_target = DuplicateObservableTarget()
+        first_sink = PartitioningObservableSink(first_target, name="primary")
+        first_sink.node_id = sink_id
+        _artifact, first_counts = SinkExecutor(
+            factory.execution,
+            factory.data_flow,
+            SpanFactory(),
+            run.run_id,
+            factory=factory,
+            worker_id="worker-a",
+        ).write(
+            first_sink,  # type: ignore[arg-type]
+            tokens[:2],
+            ctx,
+            1,
+            sink_name="output",
+            pending_outcome=pending,
+            effect_mode="write",
+        )
+        assert first_counts.discard_mode == 1
+
+        # Effect 2 (member ordinals restart at 0): diverts token 2, accepts
+        # token 3, and is interrupted before its external commit.
+        second_target = DuplicateObservableTarget()
+        second_sink = PartitioningObservableSink(second_target, name="primary")
+        second_sink.node_id = sink_id
+        calls = 0
+
+        def fail_once(observed: SinkEffectExecutionSeam) -> None:
+            nonlocal calls
+            if observed is SinkEffectExecutionSeam.BEFORE_EFFECT and calls == 0:
+                calls += 1
+                raise SinkEffectInjectedFault(observed)
+
+        with pytest.raises(SinkEffectInjectedFault):
+            SinkExecutor(
+                factory.execution,
+                factory.data_flow,
+                SpanFactory(),
+                run.run_id,
+                factory=factory,
+                worker_id="worker-a",
+                sink_effect_fault_hook=fail_once,
+            ).write(
+                second_sink,  # type: ignore[arg-type]
+                tokens[2:],
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=pending,
+                effect_mode="write",
+            )
+
+        # Recover the union batch: both effects' dispositions must be applied.
+        recovered_factory = make_factory(db)
+        recovered_sink = PartitioningObservableSink(second_target, name="primary")
+        recovered_sink.node_id = sink_id
+        artifact, counts = SinkExecutor(
+            recovered_factory.execution,
+            recovered_factory.data_flow,
+            SpanFactory(),
+            run.run_id,
+            factory=recovered_factory,
+            worker_id="worker-a",
+        ).write(
+            recovered_sink,  # type: ignore[arg-type]
+            tokens,
+            ctx,
+            1,
+            sink_name="output",
+            pending_outcome=pending,
+            effect_mode="write",
+            on_token_written=lambda token: None,
+        )
+
+        assert artifact is not None
+        assert second_target.publication_count == 1
+        assert counts.discard_mode == 2
+        expected_error_hash = sha256(b"injected diversion").hexdigest()[:16]
+        for diverted_token in (tokens[0], tokens[2]):
+            outcome = recovered_factory.data_flow.get_token_outcome(diverted_token.token_id)
+            assert outcome is not None
+            assert outcome.outcome is TerminalOutcome.FAILURE
+            assert outcome.path is TerminalPath.SINK_DISCARDED
+            assert outcome.error_hash == expected_error_hash
+        for accepted_token in (tokens[1], tokens[3]):
+            outcome = recovered_factory.data_flow.get_token_outcome(accepted_token.token_id)
+            assert outcome is not None
+            assert outcome.outcome is TerminalOutcome.SUCCESS
     finally:
         db.close()
 

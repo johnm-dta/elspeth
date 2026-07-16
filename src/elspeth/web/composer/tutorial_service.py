@@ -31,6 +31,7 @@ from elspeth.core.landscape.schema import (
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.audit_readiness.service import build_plugin_policy_readiness
 from elspeth.web.auth.models import UserIdentity
+from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.composer.tutorial_models import (
     TutorialCancelResponse,
@@ -107,6 +108,7 @@ def _tutorial_launch_blocker(
     snapshot: PluginAvailabilitySnapshot,
     tutorial_profile: str | None,
     profile_registry: OperatorProfileRegistry,
+    catalog: CatalogService,
 ) -> tuple[str, str] | None:
     """Return one sanitized launch blocker, or ``None`` when runnable."""
     try:
@@ -140,6 +142,7 @@ def _tutorial_launch_blocker(
         state,
         snapshot=snapshot,
         profile_registry=profile_registry,
+        catalog=catalog,
     )
     stage_codes: tuple[tuple[PolicyValidationStage, str], ...] = (
         ("plugin_enablement", "tutorial_plugin_unavailable"),
@@ -158,6 +161,7 @@ def _tutorial_launch_blocker(
         tutorial_profile=tutorial_profile,
         tutorial_state=state,
         profile_registry=profile_registry,
+        catalog=catalog,
     )
     if not readiness.tutorial_ready:
         failing = next(row for row in readiness.rows if row.status == "error")
@@ -188,6 +192,7 @@ async def _require_tutorial_launch_readiness(
         snapshot=snapshot,
         tutorial_profile=settings.tutorial_llm_profile,
         profile_registry=request.app.state.operator_profile_registry,
+        catalog=request.app.state.catalog_service,
     )
     if blocker is not None:
         code, detail = blocker

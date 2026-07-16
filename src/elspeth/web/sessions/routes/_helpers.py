@@ -104,7 +104,6 @@ from elspeth.web.composer.guided.steps import (
     handle_step_1_source,
     handle_step_2_sink,
     handle_step_3_chain_accept,
-    handle_step_4_wire_confirm,
 )
 from elspeth.web.composer.implicit_decisions import merge_implicit_decisions_meta
 from elspeth.web.composer.progress import (
@@ -151,7 +150,7 @@ from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter, get_rate_limiter
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
 from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
-from elspeth.web.plugin_policy.validation import PluginPolicyValidationResult, validate_plugin_policy
+from elspeth.web.plugin_policy.validation import ProfileAwareValidationResult, validate_authored_composition_state
 from elspeth.web.sessions._auto_title import maybe_auto_title_session
 from elspeth.web.sessions._guided_solve_chain import solve_chain_with_auto_drop
 from elspeth.web.sessions._guided_step_chat import (
@@ -594,12 +593,14 @@ def _state_response(
         is_valid=state.is_valid,
         validation_errors=deep_thaw(state.validation_errors),
         validation_warnings=[
-            ValidationEntryResponse(component=e.component, message=e.message, severity=e.severity) for e in live_validation.warnings
+            ValidationEntryResponse(component=e.component, message=e.message, severity=e.severity, error_code=e.error_code)
+            for e in live_validation.warnings
         ]
         if live_validation is not None
         else None,
         validation_suggestions=[
-            ValidationEntryResponse(component=e.component, message=e.message, severity=e.severity) for e in live_validation.suggestions
+            ValidationEntryResponse(component=e.component, message=e.message, severity=e.severity, error_code=e.error_code)
+            for e in live_validation.suggestions
         ]
         if live_validation is not None
         else None,
@@ -1259,6 +1260,7 @@ async def _runtime_preflight_for_state(
     session_id: str | UUID,
     plugin_snapshot: PluginAvailabilitySnapshot,
     profile_registry: OperatorProfileRegistry,
+    catalog: CatalogServiceProtocol,
 ) -> ValidationResult:
     return await asyncio.wait_for(
         run_sync_in_worker(
@@ -1271,6 +1273,7 @@ async def _runtime_preflight_for_state(
             session_id=str(session_id),
             plugin_snapshot=plugin_snapshot,
             profile_registry=profile_registry,
+            catalog=catalog,
         ),
         timeout=settings.composer_runtime_preflight_timeout_seconds,
     )
@@ -1838,6 +1841,7 @@ async def _state_data_from_composer_state(
     session_id: str | UUID,
     plugin_snapshot: PluginAvailabilitySnapshot,
     profile_registry: OperatorProfileRegistry,
+    catalog: CatalogServiceProtocol,
     runtime_preflight: _RuntimePreflightOutcome,
     preflight_exception_policy: _PreflightExceptionPolicy,
     initial_version: int | None,
@@ -1845,7 +1849,12 @@ async def _state_data_from_composer_state(
     composer_meta: Mapping[str, Any] | None = None,
 ) -> tuple[CompositionStateData, ValidationSummary]:
     try:
-        authoring = state.validate()
+        authoring = validate_authored_composition_state(
+            state,
+            snapshot=plugin_snapshot,
+            profile_registry=profile_registry,
+            catalog=catalog,
+        ).validation
     except (ValueError, TypeError, KeyError) as val_err:
         _record_composer_authoring_validation_telemetry(
             "exception",
@@ -1873,6 +1882,7 @@ async def _state_data_from_composer_state(
                 session_id=session_id,
                 plugin_snapshot=plugin_snapshot,
                 profile_registry=profile_registry,
+                catalog=catalog,
             )
         except Exception as exc:
             # Telemetry MUST fire on both policy branches. Emitting before
@@ -1989,6 +1999,7 @@ async def _handle_convergence_error(
     secret_service: Any | None,
     plugin_snapshot: PluginAvailabilitySnapshot,
     profile_registry: OperatorProfileRegistry,
+    catalog: CatalogServiceProtocol,
 ) -> dict[str, object]:
     """Build 422 response body and persist partial state for convergence errors.
 
@@ -2068,6 +2079,7 @@ async def _handle_convergence_error(
                 session_id=session_id,
                 plugin_snapshot=plugin_snapshot,
                 profile_registry=profile_registry,
+                catalog=catalog,
                 runtime_preflight=None,
                 preflight_exception_policy="persist_invalid",
                 initial_version=None,
@@ -2141,6 +2153,7 @@ async def _handle_plugin_crash(
     secret_service: Any | None,
     plugin_snapshot: PluginAvailabilitySnapshot,
     profile_registry: OperatorProfileRegistry,
+    catalog: CatalogServiceProtocol,
 ) -> dict[str, object]:
     """Build 500 response body and persist partial state for plugin crashes.
 
@@ -2216,6 +2229,7 @@ async def _handle_plugin_crash(
                 session_id=session_id,
                 plugin_snapshot=plugin_snapshot,
                 profile_registry=profile_registry,
+                catalog=catalog,
                 runtime_preflight=None,
                 preflight_exception_policy="persist_invalid",
                 initial_version=None,
@@ -2301,6 +2315,7 @@ async def _handle_runtime_preflight_failure(
     secret_service: Any | None,
     plugin_snapshot: PluginAvailabilitySnapshot,
     profile_registry: OperatorProfileRegistry,
+    catalog: CatalogServiceProtocol,
 ) -> dict[str, object]:
     """Build 500 response body and persist partial state for runtime-preflight failures.
 
@@ -2455,6 +2470,7 @@ async def _handle_runtime_preflight_failure(
                 session_id=session_id,
                 plugin_snapshot=plugin_snapshot,
                 profile_registry=profile_registry,
+                catalog=catalog,
                 runtime_preflight=None,
                 preflight_exception_policy="persist_invalid",
                 initial_version=None,
@@ -3000,23 +3016,16 @@ def _maybe_fence_advisor_findings(findings_text: str) -> str:
 def _wire_policy_validation(
     state: CompositionState,
     *,
-    plugin_snapshot: PluginAvailabilitySnapshot,
-    profile_registry: OperatorProfileRegistry | None,
-) -> PluginPolicyValidationResult:
+    catalog: PolicyCatalogView,
+) -> ProfileAwareValidationResult:
     """Lower private operator bindings only for wire-stage validation."""
-    return validate_plugin_policy(
-        state,
-        snapshot=plugin_snapshot,
-        profile_registry=profile_registry,
-    )
+    return catalog.validate_composition_state(state)
 
 
 def _build_policy_aware_wire_turn(
     state: CompositionState,
     *,
-    plugin_snapshot: PluginAvailabilitySnapshot,
-    profile_registry: OperatorProfileRegistry | None,
-    catalog: PolicyCatalogView | None = None,
+    catalog: PolicyCatalogView,
     advisor_findings: str | None = None,
     signoff_outcome: str | None = None,
     passes_remaining: int | None = None,
@@ -3024,14 +3033,14 @@ def _build_policy_aware_wire_turn(
     """Render public topology with contracts probed against executable options."""
     policy_validation = _wire_policy_validation(
         state,
-        plugin_snapshot=plugin_snapshot,
-        profile_registry=profile_registry,
+        catalog=catalog,
     )
-    validation_state = state if policy_validation.findings else policy_validation.executable_state
+    validation_state = state if policy_validation.validation.errors else policy_validation.executable_state
     return build_step_4_wire_turn(
         state,
         catalog=catalog,
         validation_state=validation_state,
+        validation_summary=policy_validation.validation,
         advisor_findings=advisor_findings,
         signoff_outcome=signoff_outcome,
         passes_remaining=passes_remaining,
@@ -3045,8 +3054,7 @@ def _emit_wire_turn(
     recorder: BufferingRecorder,
     user_id: str,
     payload_store: Any,
-    plugin_snapshot: PluginAvailabilitySnapshot,
-    profile_registry: OperatorProfileRegistry | None,
+    catalog: PolicyCatalogView,
     prev_step: GuidedStep | None = None,
     advance_reason: str | None = None,
     next_turn: Turn | None = None,
@@ -3055,8 +3063,7 @@ def _emit_wire_turn(
     if next_turn is None:
         next_turn = _build_policy_aware_wire_turn(
             state,
-            plugin_snapshot=plugin_snapshot,
-            profile_registry=profile_registry,
+            catalog=catalog,
         )
     payload_hash = stable_hash(next_turn["payload"])
     new_record = TurnRecord(
@@ -3991,8 +3998,7 @@ async def _dispatch_guided_respond(
                             recorder=recorder,
                             user_id=user_id,
                             payload_store=payload_store,
-                            plugin_snapshot=plugin_snapshot,
-                            profile_registry=profile_registry,
+                            catalog=catalog,
                             prev_step=GuidedStep.STEP_3_TRANSFORMS,
                             advance_reason="auto_advanced",
                         )
@@ -4035,8 +4041,7 @@ async def _dispatch_guided_respond(
                     recorder=recorder,
                     user_id=user_id,
                     payload_store=payload_store,
-                    plugin_snapshot=plugin_snapshot,
-                    profile_registry=profile_registry,
+                    catalog=catalog,
                     prev_step=GuidedStep.STEP_3_TRANSFORMS,
                     advance_reason="user_advanced",
                 )
@@ -4182,8 +4187,6 @@ async def _dispatch_guided_respond(
                 )
                 next_turn = _build_policy_aware_wire_turn(
                     state,
-                    plugin_snapshot=plugin_snapshot,
-                    profile_registry=profile_registry,
                     catalog=catalog,
                     advisor_findings=advisor_findings,
                     signoff_outcome=SignoffOutcome.BLOCKED_UNAVAILABLE.value,
@@ -4195,8 +4198,7 @@ async def _dispatch_guided_respond(
                     recorder=recorder,
                     user_id=user_id,
                     payload_store=payload_store,
-                    plugin_snapshot=plugin_snapshot,
-                    profile_registry=profile_registry,
+                    catalog=catalog,
                 )
                 return state, guided, next_turn
 
@@ -4234,8 +4236,6 @@ async def _dispatch_guided_respond(
                 on_demand_blocked_findings = blocked.errors[0].message if blocked.errors else decision.findings_text
             next_turn = _build_policy_aware_wire_turn(
                 state,
-                plugin_snapshot=plugin_snapshot,
-                profile_registry=profile_registry,
                 catalog=catalog,
                 advisor_findings=on_demand_blocked_findings or _maybe_fence_advisor_findings(decision.findings_text),
                 signoff_outcome=decision.outcome.value,
@@ -4251,8 +4251,7 @@ async def _dispatch_guided_respond(
                 recorder=recorder,
                 user_id=user_id,
                 payload_store=payload_store,
-                plugin_snapshot=plugin_snapshot,
-                profile_registry=profile_registry,
+                catalog=catalog,
             )
             return state, guided, next_turn
 
@@ -4295,22 +4294,19 @@ async def _dispatch_guided_respond(
         # turn (whose payload already carries the contracts + warnings).
         policy_validation = _wire_policy_validation(
             state,
-            plugin_snapshot=plugin_snapshot,
-            profile_registry=profile_registry,
+            catalog=catalog,
         )
-        if policy_validation.findings:
+        policy_entries = tuple(
+            entry
+            for entry in (*policy_validation.validation.errors, *policy_validation.validation.warnings)
+            if entry.error_code is not None
+        )
+        if policy_entries:
             raise WireConfirmRejectedError(
                 step=GuidedStep.STEP_4_WIRE.value,
-                issues=tuple(
-                    ValidationEntry(
-                        component=finding.component_id or "pipeline",
-                        message=finding.message,
-                        severity="high",
-                    ).to_dict()
-                    for finding in policy_validation.findings
-                ),
+                issues=tuple(entry.to_dict() for entry in policy_entries),
             )
-        validation = policy_validation.executable_state.validate()
+        validation = policy_validation.validation
         if not validation.is_valid:
             raise WireConfirmRejectedError(
                 step=GuidedStep.STEP_4_WIRE.value,
@@ -4338,8 +4334,6 @@ async def _dispatch_guided_respond(
             advisor_findings = blocked.errors[0].message if blocked.errors else "Advisor sign-off service or pass budget is not configured."
             next_turn = _build_policy_aware_wire_turn(
                 state,
-                plugin_snapshot=plugin_snapshot,
-                profile_registry=profile_registry,
                 catalog=catalog,
                 advisor_findings=advisor_findings,
                 signoff_outcome=SignoffOutcome.BLOCKED_UNAVAILABLE.value,
@@ -4418,8 +4412,6 @@ async def _dispatch_guided_respond(
             blocked_findings = blocked.errors[0].message if blocked.errors else decision.findings_text
         next_turn = _build_policy_aware_wire_turn(
             state,
-            plugin_snapshot=plugin_snapshot,
-            profile_registry=profile_registry,
             catalog=catalog,
             advisor_findings=blocked_findings or _maybe_fence_advisor_findings(decision.findings_text),
             signoff_outcome=decision.outcome.value,
@@ -4726,7 +4718,6 @@ __all__ = [
     "handle_step_1_source",
     "handle_step_2_sink",
     "handle_step_3_chain_accept",
-    "handle_step_4_wire_confirm",
     "insert",
     "inspect_blob_content",
     "json",

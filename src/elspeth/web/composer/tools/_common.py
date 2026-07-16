@@ -59,6 +59,7 @@ from elspeth.web.composer.state import (
     EdgeSpec,
     NodeSpec,
     OutputSpec,
+    PipelineMetadata,
     SourceSpec,
     ValidationEntry,
     ValidationSummary,
@@ -887,7 +888,7 @@ def _failure_result(
     with "No source configured." instead of the real option-shape
     error.
     """
-    validation = _prepend_rejection_entry(state.validate(), error_msg)
+    validation = _prepend_rejection_entry(state.validate(), error_msg, error_code=error_code)
     data = {_DATA_ERROR_KEY: error_msg}
     if error_code is not None:
         data["error_code"] = error_code
@@ -965,6 +966,8 @@ def build_plugin_schemas_for_failure(
 def _prepend_rejection_entry(
     base: ValidationSummary,
     error_msg: str,
+    *,
+    error_code: str | None = None,
 ) -> ValidationSummary:
     """Return a ValidationSummary with a leading rejected_mutation entry.
 
@@ -977,6 +980,7 @@ def _prepend_rejection_entry(
         component="rejected_mutation",
         message=error_msg,
         severity="high",
+        error_code=error_code,
     )
     return ValidationSummary(
         is_valid=False,
@@ -986,6 +990,29 @@ def _prepend_rejection_entry(
         edge_contracts=base.edge_contracts,
         semantic_contracts=base.semantic_contracts,
     )
+
+
+def normalize_tool_result_validation(
+    result: ToolResult,
+    catalog: PolicyCatalogView,
+) -> ToolResult:
+    """Replace a tool's raw validation with the shared profile-aware result.
+
+    Handlers remain small state-transition functions and may construct their
+    provisional envelope with ``CompositionState.validate()``.  This final
+    dispatch-boundary normalization is the sole outward authority.  A failed
+    mutation's leading rejection is retained, including its public error code,
+    while raw private-schema validation entries are discarded.
+    """
+    shared = catalog.validate_composition_state(result.updated_state).validation
+    rejections = tuple(entry for entry in result.validation.errors if entry.component == "rejected_mutation")
+    if rejections:
+        shared = replace(
+            shared,
+            is_valid=False,
+            errors=(*rejections, *shared.errors),
+        )
+    return replace(result, validation=shared)
 
 
 def _mutation_result(
@@ -1827,25 +1854,50 @@ def _prevalidate_transform_for_context(
     plugin_name: str,
     options: Mapping[str, Any],
 ) -> str | None:
-    """Validate web-authored profile options through their ordinary resolver."""
-    authored = deep_thaw(strip_authoring_options(options))
-    plugin_id = PluginId("transform", plugin_name)
-    profiled_plugins = {candidate for candidate, _aliases in context.plugin_snapshot.usable_profile_aliases}
-    if "profile" not in authored or (plugin_name != "llm" and plugin_id not in profiled_plugins):
-        return _prevalidate_transform(plugin_name, options)
-
-    alias = authored.pop("profile")
-    if not isinstance(alias, str):
-        return f"Invalid options for transform '{plugin_name}': profile_unavailable"
-    try:
-        lowered = context.catalog.lower_operator_profile_options(
-            plugin_id,
-            alias=alias,
-            safe_options=authored,
-        )
-    except ValueError as exc:
-        return f"Invalid options for transform '{plugin_name}': {exc}"
-    return _prevalidate_transform(plugin_name, lowered.executable_options)
+    """Validate one candidate transform through the shared profile adapter."""
+    candidate = CompositionState(
+        source=SourceSpec(
+            plugin="csv",
+            on_success="profile_prevalidation_in",
+            options={"schema": {"mode": "observed"}},
+            on_validation_failure="discard",
+        ),
+        nodes=(
+            NodeSpec(
+                id="profile_prevalidation",
+                node_type="transform",
+                plugin=plugin_name,
+                input="profile_prevalidation_in",
+                on_success="profile_prevalidation_out",
+                on_error="discard",
+                options=options,
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(
+            OutputSpec(
+                name="profile_prevalidation_out",
+                plugin="json",
+                options={"schema": {"mode": "observed"}},
+                on_write_failure="discard",
+            ),
+        ),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+    profile_validation = context.catalog.validate_composition_state(candidate)
+    blocking = tuple(
+        finding for finding in profile_validation.policy_findings if finding.stage in {"plugin_enablement", "operator_profile_options"}
+    )
+    if blocking:
+        return f"Invalid options for transform '{plugin_name}': {blocking[0].error_code}"
+    return _prevalidate_transform(plugin_name, profile_validation.executable_state.nodes[0].options)
 
 
 def _prevalidate_sink(plugin_name: str, options: dict[str, Any]) -> str | None:

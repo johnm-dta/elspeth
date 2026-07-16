@@ -428,6 +428,42 @@ def test_apply_pipeline_recipe_reports_profile_unavailable_when_required_profile
     assert result.updated_state.version == 1
 
 
+def test_rejected_mutation_validation_preserves_rejection_and_profile_code() -> None:
+    catalog = _mock_catalog()
+    unrestricted = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash="recipe-rejection-policy",
+        principal_scope="web:test-user",
+        available=unrestricted.available,
+        unavailable=(),
+        selected=unrestricted.selected,
+        usable_profile_aliases=(),
+        selected_profile_aliases=(),
+        binding_generation_fingerprint="recipe-rejection-generation",
+    )
+    policy_catalog = PolicyCatalogView(catalog, snapshot, MagicMock(spec=OperatorProfileRegistry))
+
+    result = execute_tool(
+        "apply_pipeline_recipe",
+        {
+            "recipe_name": "classify-rows-llm-jsonl",
+            "slots": {
+                "source_blob_id": str(uuid4()),
+                "classifier_template": "Classify this row",
+            },
+        },
+        _empty_state(),
+        policy_catalog,
+        plugin_snapshot=snapshot,
+    )
+
+    assert not result.success
+    first = result.validation.errors[0]
+    assert first.component == "rejected_mutation"
+    assert first.error_code == "profile_unavailable"
+    assert result.data["error_code"] == first.error_code
+
+
 def test_apply_pipeline_recipe_preserves_disabled_llm_plugin_reason() -> None:
     catalog = _mock_catalog()
     llm_id = PluginId("transform", "llm")

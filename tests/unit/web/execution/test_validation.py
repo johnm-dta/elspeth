@@ -36,6 +36,7 @@ from elspeth.web.composer.state import (
     SourceSpec,
 )
 from elspeth.web.config import WebSettings
+from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.protocol import YamlGenerator
 from elspeth.web.execution.schemas import CHECK_OUTCOME_SKIPPED_AFTER_FAILURE, ValidationCheck
 from elspeth.web.execution.validation import (
@@ -276,7 +277,7 @@ def test_operator_profile_lowering_preserves_authored_state() -> None:
         outputs=(_make_output(),),
     )
 
-    result = validate_plugin_policy(state, snapshot=snapshot, profile_registry=profiles)
+    result = validate_plugin_policy(state, snapshot=snapshot, profile_registry=profiles, catalog=create_catalog_service())
 
     assert result.findings == ()
     assert "profile" in state.nodes[0].options
@@ -343,7 +344,7 @@ def test_bedrock_profile_lowering_is_transient_and_keyless() -> None:
         outputs=(_make_output(),),
     )
 
-    result = validate_plugin_policy(state, snapshot=snapshot, profile_registry=profiles)
+    result = validate_plugin_policy(state, snapshot=snapshot, profile_registry=profiles, catalog=create_catalog_service())
 
     assert result.findings == ()
     authored = state.nodes[0].options
@@ -383,7 +384,7 @@ def test_bedrock_web_policy_rejects_raw_private_binding_forms(options: dict[str,
         outputs=(_make_output(),),
     )
 
-    result = validate_plugin_policy(state, snapshot=snapshot, profile_registry=profiles)
+    result = validate_plugin_policy(state, snapshot=snapshot, profile_registry=profiles, catalog=create_catalog_service())
 
     assert result.findings
     assert {finding.stage for finding in result.findings} == {"operator_profile_options"}

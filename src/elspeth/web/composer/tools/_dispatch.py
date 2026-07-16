@@ -40,6 +40,7 @@ from elspeth.web.composer.tools._common import (
     ToolResult,
     _failure_result,
     build_plugin_schemas_for_failure,
+    normalize_tool_result_validation,
 )
 from elspeth.web.composer.tools._registry import (
     _BLOB_DISCOVERY_TOOLS,
@@ -590,6 +591,8 @@ def execute_tool(
     if catalog.snapshot is not plugin_snapshot:
         raise ValueError("plugin_snapshot_catalog_mismatch")
 
+    current_validation = prior_validation or catalog.validate_composition_state(state).validation
+
     all_handlers: dict[str, ToolHandler] = {
         **_DISCOVERY_TOOLS,
         **_MUTATION_TOOLS,
@@ -600,7 +603,7 @@ def execute_tool(
     }
     handler = all_handlers.get(tool_name)
     if handler is None:
-        return _failure_result(state, f"Unknown tool: {tool_name}")
+        return normalize_tool_result_validation(_failure_result(state, f"Unknown tool: {tool_name}"), catalog)
 
     if tool_arguments_hash is not None:
         argument_error = _validate_tool_arguments(
@@ -610,10 +613,13 @@ def execute_tool(
             raise_on_error=raise_schema_argument_errors,
         )
         if argument_error is not None:
-            return argument_error
+            return normalize_tool_result_validation(argument_error, catalog)
 
     if _requires_secret_context(tool_name) and (secret_service is None or user_id is None):
-        return _failure_result(state, "Secret tools require secret service context.")
+        return normalize_tool_result_validation(
+            _failure_result(state, "Secret tools require secret service context."),
+            catalog,
+        )
 
     # ``current_validation`` carries the live state's ValidationSummary
     # into ``diff_pipeline`` so its delta against the baseline is computed
@@ -630,7 +636,7 @@ def execute_tool(
         secret_service=secret_service,
         user_id=user_id,
         baseline=baseline,
-        current_validation=prior_validation,
+        current_validation=current_validation,
         runtime_preflight=runtime_preflight,
         max_blob_storage_per_session_bytes=max_blob_storage_per_session_bytes,
         user_message_id=user_message_id,
@@ -643,7 +649,7 @@ def execute_tool(
     )
 
     if tool_name in _ALL_MUTATION_TOOL_NAMES:
-        prior = prior_validation if prior_validation is not None else state.validate()
+        prior = current_validation
         result = handler(arguments, state, context)
         result = _inject_prior_validation(result, prior)
     else:
@@ -654,7 +660,8 @@ def execute_tool(
     # validation errors so the LLM avoids a follow-up discovery round-trip.
     # No-op for non-augmentation-eligible tools or successful results
     # (gated inside ``_augment_with_plugin_schemas``).
-    return _augment_with_plugin_schemas(result, tool_name, catalog, context)
+    result = _augment_with_plugin_schemas(result, tool_name, catalog, context)
+    return normalize_tool_result_validation(result, catalog)
 
 
 # ---------------------------------------------------------------------------

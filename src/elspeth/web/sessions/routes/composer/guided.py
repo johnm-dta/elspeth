@@ -341,12 +341,13 @@ def _build_get_guided_turn(
         # idempotency machinery handle it (no TurnRecord emitted; client retries).
         return None
     if step is GuidedStep.STEP_4_WIRE:
-        policy_validation = catalog.validate_authored_state(state)
-        validation_state = state if policy_validation.findings else policy_validation.executable_state
+        policy_validation = catalog.validate_composition_state(state)
+        validation_state = state if policy_validation.validation.errors else policy_validation.executable_state
         return build_step_4_wire_turn(
             state,
             catalog=catalog,
             validation_state=validation_state,
+            validation_summary=policy_validation.validation,
         )
     return None
 
@@ -450,11 +451,7 @@ def _guided_persisted_validity(
     ``execution/service.py`` stays the hard backstop regardless of what this
     Stage-1-only check reports.
     """
-    policy_validation = catalog.validate_authored_state(state)
-    if policy_validation.findings:
-        messages = [finding.message for finding in policy_validation.findings]
-        return False, messages or None
-    summary = policy_validation.executable_state.validate()
+    summary = catalog.validate_composition_state(state).validation
     messages = [error.message for error in summary.errors]
     return summary.is_valid, messages or None
 
@@ -946,7 +943,7 @@ async def post_guided_reenter(
                     raise InvariantError("completed terminal re-entry marker composition_hash must be a string")
 
                 if composition_hash == _composition_content_hash(state):
-                    validation = state.validate()
+                    validation = catalog.validate_composition_state(state).validation
                     if not validation.is_valid:
                         raise InvariantError("unchanged completed pipeline failed validation during guided re-entry")
                     restored_terminal = TerminalState(

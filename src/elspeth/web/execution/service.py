@@ -71,6 +71,7 @@ from elspeth.web.blobs.protocol import (
     BlobServiceProtocol,
     BlobStateError,
 )
+from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.config import WebSettings
@@ -351,6 +352,7 @@ class ExecutionServiceImpl:
         plugin_snapshot_factory: Callable[[str], PluginAvailabilitySnapshot] | None,
         operator_profile_registry: OperatorProfileRegistry | None,
         web_plugin_policy: WebPluginPolicy | None,
+        catalog: CatalogService,
         _composition_root: object | None = None,
     ) -> None:
         trained_operator_mode = _composition_root is _TRAINED_OPERATOR_COMPOSITION_ROOT
@@ -371,6 +373,7 @@ class ExecutionServiceImpl:
         self._plugin_snapshot_factory = plugin_snapshot_factory
         self._operator_profile_registry = operator_profile_registry
         self._web_plugin_policy = web_plugin_policy
+        self._catalog = catalog
         self._trained_operator_mode = trained_operator_mode
         # AC #17: No run_repository — all Run CRUD delegates to SessionService
         # via create_run(), update_run_status(), get_active_run(), get_run().
@@ -399,11 +402,15 @@ class ExecutionServiceImpl:
         """Explicit non-web composition root with unrestricted local policy context."""
         from elspeth.web.dependencies import create_catalog_service
 
-        snapshot = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+        catalog = kwargs.pop("catalog", None)
+        if catalog is None:
+            catalog = create_catalog_service()
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
         return cls(
             plugin_snapshot_factory=lambda _user_id: snapshot,
             operator_profile_registry=None,
             web_plugin_policy=None,
+            catalog=catalog,
             _composition_root=_TRAINED_OPERATOR_COMPOSITION_ROOT,
             **kwargs,
         )
@@ -776,6 +783,7 @@ class ExecutionServiceImpl:
             session_id=str(session_id),
             plugin_snapshot=plugin_snapshot,
             profile_registry=self._operator_profile_registry,
+            catalog=self._catalog,
         )
         if not preflight_result.is_valid:
             raise PipelineValidationError(
@@ -787,6 +795,7 @@ class ExecutionServiceImpl:
             composition_state,
             snapshot=plugin_snapshot,
             profile_registry=self._operator_profile_registry,
+            catalog=self._catalog,
         )
         if policy_result.findings:
             raise RuntimeError("Plugin policy validation diverged between execution preflight and runtime preparation.")
@@ -1092,6 +1101,7 @@ class ExecutionServiceImpl:
                     session_id=str(session_id) if session_id is not None else None,
                     plugin_snapshot=plugin_snapshot,
                     profile_registry=self._operator_profile_registry,
+                    catalog=self._catalog,
                 ),
             ),
         )

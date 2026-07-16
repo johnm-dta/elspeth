@@ -38,6 +38,7 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import stable_hash
 from elspeth.web.async_workers import run_sync_in_worker
+from elspeth.web.catalog.protocol import CatalogService
 
 # Phase 8 cohort-emit helper (Sub-task 7e — B3 cohort b1). The opt-out
 # audit row is committed inside ``record_session_interpretation_opt_out``
@@ -1504,15 +1505,19 @@ class SessionServiceImpl:
         log: structlog.stdlib.BoundLogger,
         plugin_snapshot_factory: Callable[[str], PluginAvailabilitySnapshot] | None = None,
         operator_profile_registry: OperatorProfileRegistry | None = None,
+        catalog: CatalogService | None = None,
     ) -> None:
         if (plugin_snapshot_factory is None) != (operator_profile_registry is None):
             raise ValueError("plugin_snapshot_factory and operator_profile_registry must be configured together")
+        if plugin_snapshot_factory is not None and catalog is None:
+            raise ValueError("profile-aware session validation requires the authoritative catalog")
         self._engine = engine
         self._data_dir = data_dir
         self._telemetry = telemetry
         self._log = log
         self._plugin_snapshot_factory = plugin_snapshot_factory
         self._operator_profile_registry = operator_profile_registry
+        self._catalog = catalog
 
     def _validate_patched_composition_state(
         self,
@@ -1526,26 +1531,17 @@ class SessionServiceImpl:
         if plugin_snapshot is None:
             raise AuditIntegrityError("Profile-aware composition validation has no principal snapshot")
 
-        from elspeth.web.composer.state import ValidationEntry, ValidationSummary
-        from elspeth.web.plugin_policy.validation import validate_plugin_policy
+        from elspeth.web.plugin_policy.validation import validate_authored_composition_state
 
         assert self._operator_profile_registry is not None
-        policy_validation = validate_plugin_policy(
+        assert self._catalog is not None
+        result = validate_authored_composition_state(
             state,
             snapshot=plugin_snapshot,
             profile_registry=self._operator_profile_registry,
+            catalog=self._catalog,
         )
-        if policy_validation.findings:
-            errors = tuple(
-                ValidationEntry(
-                    component=finding.component_id or "pipeline",
-                    message=finding.message,
-                    severity="high",
-                )
-                for finding in policy_validation.findings
-            )
-            return ValidationSummary(is_valid=False, errors=errors)
-        return policy_validation.executable_state.validate()
+        return result.validation
 
     async def _plugin_snapshot_for_session(self, session_id: str) -> PluginAvailabilitySnapshot | None:
         """Build a principal snapshot before a session write transaction starts."""

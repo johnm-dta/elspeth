@@ -191,7 +191,7 @@ def build_context_string(
     """
     serialized = state.to_dict()
     serialized = redact_source_storage_path(serialized)  # B4: hide blob storage paths
-    validation = state.validate()
+    validation = catalog.validate_composition_state(state).validation
     serialized["validation"] = {
         "is_valid": validation.is_valid,
         "errors": [e.to_dict() for e in validation.errors],

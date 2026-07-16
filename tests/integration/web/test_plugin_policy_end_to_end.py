@@ -504,7 +504,15 @@ def test_policy_surface_parity_matrix(case: _MatrixCase, tmp_path: Path) -> None
     assert {capability: tuple(sorted(plugin_ids)) for capability, plugin_ids in guided_capabilities.items()} == expected_capabilities
     assert frozenset(evidence.available_plugin_ids) == expected
     assert frozenset(evidence.authorized_plugin_ids) == frozenset(map(str, _CORE_IDS | case.extra_authorized))
-    assert validate_plugin_policy(empty_state, snapshot=snapshot, profile_registry=profiles).findings == ()
+    assert (
+        validate_plugin_policy(
+            empty_state,
+            snapshot=snapshot,
+            profile_registry=profiles,
+            catalog=create_catalog_service(),
+        ).findings
+        == ()
+    )
 
     for plugin_id in _CORE_IDS | _ALL_CONTROLS:
         schema_result = _handle_get_plugin_schema(
@@ -557,11 +565,17 @@ def test_policy_surface_parity_matrix(case: _MatrixCase, tmp_path: Path) -> None
 
     for plugin_id in _ALL_CONTROLS:
         probe = _control_probe_state(plugin_id)
-        validation = validate_plugin_policy(probe, snapshot=snapshot, profile_registry=profiles)
+        validation = validate_plugin_policy(
+            probe,
+            snapshot=snapshot,
+            profile_registry=profiles,
+            catalog=create_catalog_service(),
+        )
         imported_validation = validate_plugin_policy(
             _imported_control_probe_state(plugin_id),
             snapshot=snapshot,
             profile_registry=profiles,
+            catalog=create_catalog_service(),
         )
         direct_tool = _handle_upsert_node(
             {
@@ -785,6 +799,7 @@ def test_web_services_reject_explicit_none_policy_context() -> None:
             plugin_snapshot_factory=None,
             operator_profile_registry=unused_dependency,
             web_plugin_policy=unused_dependency,
+            catalog=unused_dependency,
         )
     with pytest.raises(TypeError, match="operator_profile_registry"):
         ExecutionServiceImpl(
@@ -797,6 +812,7 @@ def test_web_services_reject_explicit_none_policy_context() -> None:
             plugin_snapshot_factory=unexpected_snapshot_request,
             operator_profile_registry=None,
             web_plugin_policy=unused_dependency,
+            catalog=unused_dependency,
         )
     with pytest.raises(TypeError, match="web_plugin_policy"):
         ExecutionServiceImpl(
@@ -809,6 +825,7 @@ def test_web_services_reject_explicit_none_policy_context() -> None:
             plugin_snapshot_factory=unexpected_snapshot_request,
             operator_profile_registry=unused_dependency,
             web_plugin_policy=None,
+            catalog=unused_dependency,
         )
 
 
@@ -1031,6 +1048,7 @@ def test_validate_pipeline_resolves_server_profile_before_plugin_construction(
         yaml_generator,
         plugin_snapshot=snapshot,
         profile_registry=profiles,
+        catalog=create_catalog_service(),
         secret_service=_RecordingResolver(),
         user_id="alice",
         session_id="session-profile-validation",

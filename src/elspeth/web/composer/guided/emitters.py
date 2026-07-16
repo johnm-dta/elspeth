@@ -53,7 +53,7 @@ if TYPE_CHECKING:
     from elspeth.web.composer.guided.resolved import SinkResolved, SourceResolved
     from elspeth.web.composer.guided.state_machine import ChainProposal, SourceIntent
     from elspeth.web.composer.source_inspection import SourceInspectionFacts
-    from elspeth.web.composer.state import CompositionState
+    from elspeth.web.composer.state import CompositionState, ValidationSummary
 
 
 def build_initial_step_1_turn(
@@ -499,6 +499,7 @@ def build_step_4_wire_turn(
     *,
     catalog: CatalogServiceProtocol | None = None,
     validation_state: CompositionState | None = None,
+    validation_summary: ValidationSummary | None = None,
     advisor_findings: str | None = None,
     signoff_outcome: str | None = None,
     passes_remaining: int | None = None,
@@ -514,7 +515,7 @@ def build_step_4_wire_turn(
     # The topology is always the public, persisted composition. Operator-profile
     # bindings exist only in a lowered in-memory state supplied by the route;
     # use that copy for executable contract probes without exposing it here.
-    validation = (validation_state or state).validate()
+    validation = validation_summary or (validation_state or state).validate()
     payload: WireStageData = {
         "topology": _build_wire_topology(state),
         "edge_contracts": [ec.to_dict() for ec in validation.edge_contracts],

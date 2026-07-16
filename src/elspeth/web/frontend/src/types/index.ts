@@ -168,6 +168,7 @@ export interface ValidationEntryDTO {
   component: string;
   message: string;
   severity: string;
+  error_code?: string | null;
 }
 
 export interface CompositionState {

@@ -24,6 +24,7 @@ from elspeth.web.composer.state import (
     PipelineMetadata,
     SourceSpec,
 )
+from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.schemas import (
     ValidationCheck,
     ValidationError,
@@ -442,6 +443,7 @@ def _policy_readiness_snapshot(*, tutorial_profile: str | None, profile_usable: 
         tutorial_profile=tutorial_profile,
         tutorial_state=tutorial_state,
         profile_registry=None,
+        catalog=create_catalog_service(),
     )
 
 

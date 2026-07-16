@@ -32,8 +32,6 @@ from elspeth.web.composer.guided.state_machine import (
     SinkOutputResolved,
     SinkResolved,
     SourceResolved,
-    TerminalKind,
-    TerminalState,
 )
 from elspeth.web.composer.source_inspection import observed_columns_from_path
 from elspeth.web.composer.state import CompositionState
@@ -47,7 +45,6 @@ from elspeth.web.composer.tools import (
     _sync_get_blob_by_id,
     _sync_get_blob_by_storage_path,
 )
-from elspeth.web.composer.yaml_generator import generate_public_yaml
 from elspeth.web.interpretation_state import AUTHORING_METADATA_OPTION_KEYS
 from elspeth.web.paths import allowed_source_directories, resolve_data_path
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
@@ -686,36 +683,3 @@ def handle_step_3_chain_accept(
         session=new_session,
         tool_result=tool_result,
     )
-
-
-def handle_step_4_wire_confirm(
-    *,
-    state: CompositionState,
-    session: GuidedSession,
-) -> StepHandlerResult:
-    """Confirm wiring and stamp COMPLETED only when validation is clean.
-
-    This is the terminal-stamp gate for guided mode. Recipe apply and chain
-    accept already commit the pipeline and move the session to STEP_4_WIRE; this
-    handler re-runs validation and either stamps the completed terminal with
-    rendered YAML or leaves the session open for another wire-stage turn.
-    """
-    validation = state.validate()
-    tool_result = ToolResult(
-        success=validation.is_valid,
-        updated_state=state,
-        validation=validation,
-        affected_nodes=(),
-        data=None,
-    )
-    if not validation.is_valid:
-        return StepHandlerResult(state=state, session=session, tool_result=tool_result)
-
-    yaml_text = generate_public_yaml(state)
-    terminal = TerminalState(
-        kind=TerminalKind.COMPLETED,
-        reason=None,
-        pipeline_yaml=yaml_text,
-    )
-    new_session = dataclasses.replace(session, terminal=terminal)
-    return StepHandlerResult(state=state, session=new_session, tool_result=tool_result)

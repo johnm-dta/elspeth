@@ -124,6 +124,7 @@ from elspeth.web.composer.tools import (
     execute_tool,
     get_tool_definitions,
 )
+from elspeth.web.composer.tools._common import normalize_tool_result_validation
 from elspeth.web.execution.preflight import runtime_preflight_settings_hash
 from elspeth.web.execution.runtime_preflight import (
     RuntimePreflightCoordinator,
@@ -1170,6 +1171,7 @@ class ComposerServiceImpl:
             session_id=session_id,
             plugin_snapshot=plugin_snapshot,
             profile_registry=self._operator_profile_registry,
+            catalog=self._catalog,
         )
 
     async def _missing_pending_interpretation_review_sites(
@@ -4014,6 +4016,7 @@ class ComposerServiceImpl:
         response: Any,
         llm_messages: list[dict[str, Any]],
         anti_anchor: AntiAnchorTracker,
+        policy_catalog: PolicyCatalogView,
     ) -> _SessionAwareDispatchOutcome:
         """Dispatch a session-aware async composer tool.
 
@@ -4197,6 +4200,8 @@ class ComposerServiceImpl:
                 error_message=error_message,
                 post_version=state.version,
             )
+
+        result = normalize_tool_result_validation(result, policy_catalog)
 
         # SUCCESS path. The handler returned a clean ToolResult; record
         # ``finish_success`` and serialise the result for the LLM. The

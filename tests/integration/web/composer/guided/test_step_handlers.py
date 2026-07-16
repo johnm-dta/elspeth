@@ -860,10 +860,7 @@ class TestTerminalStampInvariant:
     def test_chain_accept_redirects_to_wire_not_completed(self) -> None:
         from elspeth.web.composer.guided.protocol import GuidedStep
         from elspeth.web.composer.guided.state_machine import ChainProposal, TerminalKind, TerminalState
-        from elspeth.web.composer.guided.steps import (
-            handle_step_3_chain_accept,
-            handle_step_4_wire_confirm,
-        )
+        from elspeth.web.composer.guided.steps import handle_step_3_chain_accept
 
         state = _empty_state()
         session = GuidedSession.initial()
@@ -927,26 +924,6 @@ class TestTerminalStampInvariant:
         assert result.session.terminal is None
         assert result.session.step is GuidedStep.STEP_4_WIRE
         assert result.session.step_3_proposal is proposal
-
-        wire = handle_step_4_wire_confirm(state=result.state, session=result.session)
-
-        assert wire.tool_result.success is True
-        assert wire.session.terminal is not None
-        assert wire.session.terminal.kind is TerminalKind.COMPLETED
-        assert wire.session.terminal.pipeline_yaml is not None
-        assert len(wire.session.terminal.pipeline_yaml) > 0
-
-    def test_wire_confirm_invalid_pipeline_leaves_terminal_unset(self) -> None:
-        from elspeth.web.composer.guided.protocol import GuidedStep
-        from elspeth.web.composer.guided.steps import handle_step_4_wire_confirm
-
-        session = replace(GuidedSession.initial(), step=GuidedStep.STEP_4_WIRE)
-
-        result = handle_step_4_wire_confirm(state=_empty_state(), session=session)
-
-        assert result.tool_result.success is False
-        assert result.session.terminal is None
-        assert result.session.step is GuidedStep.STEP_4_WIRE
 
 
 class TestStep1ObservedColumnsDerivation:

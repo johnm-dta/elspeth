@@ -1069,6 +1069,7 @@ async def test_resolve_profiled_llm_review_revalidates_lowered_contract(engine) 
         log=structlog.get_logger("test"),
         plugin_snapshot_factory=lambda _user_id: snapshot,
         operator_profile_registry=profiles,
+        catalog=create_catalog_service(),
     )
 
     prompt_template = "Summarize {{ row.page_text }}."

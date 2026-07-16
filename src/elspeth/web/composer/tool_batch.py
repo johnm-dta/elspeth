@@ -94,6 +94,7 @@ from elspeth.web.composer.tools import (
     is_mutation_tool,
     is_session_aware_tool,
 )
+from elspeth.web.composer.tools._common import normalize_tool_result_validation
 from elspeth.web.execution.schemas import ValidationResult
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
@@ -461,6 +462,7 @@ async def run_tool_batch(
                     state,
                     discovery_cache[cache_key],
                 )
+                cached_result = normalize_tool_result_validation(cached_result, ctx.policy_catalog)
                 cached_payload = {
                     "success": cached_result.success,
                     "data": cached_result.data,
@@ -627,7 +629,9 @@ async def run_tool_batch(
                 proposal_result = ToolResult(
                     success=True,
                     updated_state=state,
-                    validation=last_validation if last_validation is not None else state.validate(),
+                    validation=(
+                        last_validation if last_validation is not None else ctx.policy_catalog.validate_composition_state(state).validation
+                    ),
                     affected_nodes=(),
                     data=proposal_payload,
                 )
@@ -995,6 +999,7 @@ async def run_tool_batch(
                 response=response,
                 llm_messages=llm_messages,
                 anti_anchor=anti_anchor,
+                policy_catalog=ctx.policy_catalog,
             )
             all_cache_hits = False
             _append_tool_outcome(

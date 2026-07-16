@@ -328,6 +328,7 @@ def register_message_routes(router: APIRouter) -> None:
                         secret_service=request.app.state.scoped_secret_resolver,
                         plugin_snapshot=plugin_snapshot,
                         profile_registry=profile_registry,
+                        catalog=request.app.state.catalog_service,
                     )
                     raise HTTPException(status_code=422, detail=response_body) from exc
                 except LiteLLMAuthError as exc:
@@ -479,6 +480,7 @@ def register_message_routes(router: APIRouter) -> None:
                         secret_service=request.app.state.scoped_secret_resolver,
                         plugin_snapshot=plugin_snapshot,
                         profile_registry=profile_registry,
+                        catalog=request.app.state.catalog_service,
                     )
                     await _publish_progress(
                         progress_registry,
@@ -549,6 +551,7 @@ def register_message_routes(router: APIRouter) -> None:
                         secret_service=request.app.state.scoped_secret_resolver,
                         plugin_snapshot=plugin_snapshot,
                         profile_registry=profile_registry,
+                        catalog=request.app.state.catalog_service,
                     )
                     raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
                 except ComposerServiceError as exc:
@@ -648,6 +651,7 @@ def register_message_routes(router: APIRouter) -> None:
                             session_id=session.id,
                             plugin_snapshot=plugin_snapshot,
                             profile_registry=profile_registry,
+                            catalog=request.app.state.catalog_service,
                             runtime_preflight=result.runtime_preflight,
                             preflight_exception_policy="raise",
                             initial_version=state.version,
@@ -689,6 +693,7 @@ def register_message_routes(router: APIRouter) -> None:
                             secret_service=request.app.state.scoped_secret_resolver,
                             plugin_snapshot=plugin_snapshot,
                             profile_registry=profile_registry,
+                            catalog=request.app.state.catalog_service,
                         )
                         raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
                     await _publish_progress(

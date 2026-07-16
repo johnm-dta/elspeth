@@ -432,6 +432,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         plugin_snapshot_factory=app.state.plugin_snapshot_factory.for_user_id,
         operator_profile_registry=app.state.operator_profile_registry,
         web_plugin_policy=app.state.web_plugin_policy,
+        catalog=app.state.catalog_service,
     )
     app.state.execution_service = execution_service
 
@@ -450,6 +451,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         web_plugin_policy=app.state.web_plugin_policy,
         plugin_snapshot_factory=app.state.plugin_snapshot_factory.for_user_id,
         operator_profile_registry=app.state.operator_profile_registry,
+        catalog=app.state.catalog_service,
         tutorial_profile=settings.tutorial_llm_profile,
     )
 
@@ -1066,6 +1068,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         log=structlog.get_logger("sessions"),
         plugin_snapshot_factory=app.state.plugin_snapshot_factory.for_user_id,
         operator_profile_registry=app.state.operator_profile_registry,
+        catalog=app.state.catalog_service,
     )
     app.state.session_service = session_service
     readiness_probe_runner = ReadinessProbeRunner()
@@ -1345,6 +1348,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         plugin_policy_readiness = build_boot_plugin_policy_readiness(
             policy=app.state.web_plugin_policy,
             settings=app.state.runtime_web_plugin_config,
+            catalog=app.state.catalog_service,
         )
         tutorial_profile_row = next(row for row in plugin_policy_readiness.rows if row.id == "tutorial_profile")
         return {

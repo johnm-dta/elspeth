@@ -384,6 +384,16 @@ class TestSessionStrictCoercionRejected:
         with pytest.raises(ValidationError):
             ValidationEntryResponse(component=42, message="m", severity="warning")  # type: ignore[arg-type]
 
+    def test_validation_entry_response_preserves_public_error_code(self) -> None:
+        response = ValidationEntryResponse(
+            component="node:shield",
+            message="The operator profile is unavailable.",
+            severity="high",
+            error_code="profile_unavailable",
+        )
+
+        assert response.model_dump()["error_code"] == "profile_unavailable"
+
 
 class TestSessionExtraFieldsRejected:
     """Extra fields must raise, not be silently dropped."""

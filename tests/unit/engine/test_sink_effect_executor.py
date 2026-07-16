@@ -303,6 +303,37 @@ def test_replacing_successor_prepares_cumulative_predecessor_and_current_members
         db.close()
 
 
+def test_predecessor_snapshot_excludes_diverted_members() -> None:
+    """Cumulative successors must not replay members the predecessor diverted
+    away from the target (elspeth-0278416cc5)."""
+    db = make_landscape_db()
+    try:
+        payload_store = MockPayloadStore()
+        factory = make_factory(db, payload_store=payload_store)
+        run_id, sink_id, members = _pipeline_members(factory, 3)
+        # Predecessor accepts ordinal 0 and diverts ordinal 1.
+        first_sink = _ResultDerivedReconciledSink(_CumulativeTarget())
+        SinkEffectCoordinator(factory=factory, worker_id="worker-a").execute(
+            _execution_request(run_id, sink_id, members[:2]),
+            first_sink,
+        )
+
+        target = _CumulativeTarget()
+        successor_sink = _CumulativeObservableSink(target)
+        successor_factory = make_factory(db, payload_store=payload_store)
+        SinkEffectCoordinator(factory=successor_factory, worker_id="worker-b").execute(
+            _execution_request(run_id, sink_id, members[2:]),
+            successor_sink,
+        )
+
+        # The diverted row {"ordinal": 1} never reached the target, so the
+        # cumulative successor must publish only the accepted predecessor
+        # member plus its own current member.
+        assert target.published_rows == [[{"ordinal": 0}, {"ordinal": 2}]]
+    finally:
+        db.close()
+
+
 def test_mixed_overlap_recovers_open_effect_and_executes_new_partition() -> None:
     db = make_landscape_db()
     try:
@@ -324,6 +355,43 @@ def test_mixed_overlap_recovers_open_effect_and_executes_new_partition() -> None
             [{"ordinal": 0}, {"ordinal": 1}, {"ordinal": 2}],
             [{"ordinal": 0}, {"ordinal": 1}, {"ordinal": 2}, {"ordinal": 3}],
         ]
+    finally:
+        db.close()
+
+
+def test_second_preparer_refuses_while_preparation_claim_is_live() -> None:
+    """A rival worker must never run side-effecting preparation while another
+    worker's durable preparation claim is live (elspeth-3f87c0c055)."""
+    db = make_landscape_db()
+    try:
+        factory = make_factory(db)
+        run_id, sink_id, members = _pipeline_members(factory, 1)
+        target = _CumulativeTarget()
+        request = _execution_request(run_id, sink_id, members)
+        rival_factory = make_factory(db)
+        rival_sink = _CumulativeObservableSink(target)
+
+        class _RacingSink(_CumulativeObservableSink):
+            def prepare_effect(
+                self,
+                inner_request: SinkEffectPrepareRequest,
+                ctx: RestrictedSinkEffectContext,
+            ) -> SinkEffectPlan:
+                if self.prepare_calls == 0:
+                    # Simulate a concurrent worker arriving mid-preparation:
+                    # it must refuse before invoking any adapter method.
+                    with pytest.raises(SinkEffectPredecessorPending, match="preparation"):
+                        SinkEffectCoordinator(factory=rival_factory, worker_id="worker-b").execute(request, rival_sink)
+                return super().prepare_effect(inner_request, ctx)
+
+        sink = _RacingSink(target)
+        result = SinkEffectCoordinator(factory=factory, worker_id="worker-a").execute(request, sink)
+
+        assert result.effect.state.value == "finalized"
+        assert sink.prepare_calls == 1
+        # The rival never mutated staging: no inspect, prepare, or commit calls.
+        assert (rival_sink.inspect_calls, rival_sink.prepare_calls, rival_sink.commit_calls) == (0, 0, 0)
+        assert target.published_rows == [[{"ordinal": 0}]]
     finally:
         db.close()
 
@@ -435,7 +503,9 @@ def test_same_generation_retry_closes_abandoned_commit_intent_before_new_call() 
                 .where(sink_effect_attempts_table.c.action == "commit")
                 .order_by(sink_effect_attempts_table.c.started_at, sink_effect_attempts_table.c.attempt_id)
             ).fetchall()
-        assert [(row.generation, row.state) for row in commits] == [(1, "response_lost"), (1, "returned")]
+        # Generation 1 is consumed by the preparation claim; the execution
+        # lease (and thus both commit attempts) run at generation 2.
+        assert [(row.generation, row.state) for row in commits] == [(2, "response_lost"), (2, "returned")]
         assert target.published_rows == [[{"ordinal": 0}]]
     finally:
         db.close()
@@ -469,7 +539,9 @@ def test_takeover_closes_stale_abandoned_intent_before_new_generation_call() -> 
                 .where(sink_effect_attempts_table.c.action == "commit")
                 .order_by(sink_effect_attempts_table.c.generation)
             ).fetchall()
-        assert [(row.generation, row.state) for row in commits] == [(1, "response_lost"), (2, "returned")]
+        # Generation 1 is the preparation claim, 2 the abandoned execution
+        # lease, 3 the takeover under which the retry returns.
+        assert [(row.generation, row.state) for row in commits] == [(2, "response_lost"), (3, "returned")]
         assert target.published_rows == [[{"ordinal": 0}]]
     finally:
         db.close()
@@ -541,7 +613,12 @@ def test_retry_consumes_returned_reconcile_before_commit(takeover: bool) -> None
                 sink_node_id=sink_id,
             ),
         )
-        factory.execution.sink_effects.complete_plan(reserved.effect_id, plan)
+        claim = factory.execution.sink_effects.claim_preparation(
+            reserved.effect_id,
+            owner="worker-a",
+            ttl=timedelta(seconds=30),
+        )
+        factory.execution.sink_effects.complete_plan(reserved.effect_id, plan, claim=claim)
         lease = factory.execution.sink_effects.acquire_lease(
             reserved.effect_id,
             owner="worker-a",

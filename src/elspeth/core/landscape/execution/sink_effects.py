@@ -123,8 +123,11 @@ class SinkEffectRepository:
         row = self._ops.execute_fetchone(select(sink_effects_table).where(sink_effects_table.c.effect_id == effect_id))
         return None if row is None else self._effect_loader.load(row)
 
-    def complete_plan(self, effect_id: str, plan: SinkEffectPlan) -> SinkEffect:
-        return self._lifecycle.complete_plan(effect_id, plan)
+    def claim_preparation(self, effect_id: str, *, owner: str, ttl: timedelta) -> SinkEffectLease:
+        return self._lifecycle.claim_preparation(effect_id, owner=owner, ttl=ttl)
+
+    def complete_plan(self, effect_id: str, plan: SinkEffectPlan, *, claim: SinkEffectLease) -> SinkEffect:
+        return self._lifecycle.complete_plan(effect_id, plan, claim=claim)
 
     def acquire_lease(self, effect_id: str, *, owner: str, ttl: timedelta) -> SinkEffectLease:
         return self._lifecycle.acquire_lease(effect_id, owner=owner, ttl=ttl)

@@ -18,6 +18,8 @@ from elspeth.contracts.sink_effects import (
     SinkEffectInputKind,
     SinkEffectInspectionMode,
     SinkEffectPlan,
+    SinkEffectReconcileKind,
+    SinkEffectReconcileResult,
     SinkEffectRole,
     SinkEffectState,
 )
@@ -25,6 +27,7 @@ from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.core.landscape._helpers import now
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
+from elspeth.core.landscape.execution.sink_effect_attempt_results import encode_sink_effect_returned_result
 from elspeth.core.landscape.execution.sink_effect_finalization import (
     SinkEffectFinalizationMember,
     SinkEffectFinalizeRequest,
@@ -75,6 +78,11 @@ def _prepared(
     ).new_effect
     assert effect is not None
     descriptor = _descriptor()
+    claim = factory.execution.sink_effects.claim_preparation(
+        effect.effect_id,
+        owner="worker-a",
+        ttl=timedelta(seconds=30),
+    )
     factory.execution.sink_effects.complete_plan(
         effect.effect_id,
         SinkEffectPlan(
@@ -89,6 +97,7 @@ def _prepared(
             expected_descriptor=descriptor if descriptor_mode is SinkEffectDescriptorMode.PRECOMPUTED else None,
             safe_evidence={"inspection_reference": "no-inspection-required:v1"},
         ),
+        claim=claim,
     )
     lease = factory.execution.sink_effects.acquire_lease(
         effect.effect_id,
@@ -306,6 +315,82 @@ def test_result_derived_descriptor_refuses_non_authoritative_evidence(
         factory.execution.sink_effects.finalize(_request(factory, effect, members, lease))
 
 
+def test_result_derived_reconciled_retry_preserves_ordinals_and_returns_winner(
+    db_factory: tuple[LandscapeDB, RecorderFactory],
+) -> None:
+    """A repeated RESULT_DERIVED reconciled finalization must reconstruct the
+    accepted/diverted ordinal partition byte-for-byte and return the committed
+    winner instead of raising (elspeth-1ce83f7249)."""
+    _db, factory = db_factory
+    effect, _members, lease = _prepared(factory, count=2, descriptor_mode=SinkEffectDescriptorMode.RESULT_DERIVED)
+    descriptor = _descriptor()
+    evidence = {
+        "accepted_ordinals": [0],
+        "descriptor": {
+            "artifact_type": descriptor.artifact_type,
+            "content_hash": descriptor.content_hash,
+            "metadata": None,
+            "path_or_uri": descriptor.path_or_uri,
+            "size_bytes": descriptor.size_bytes,
+        },
+        "diverted_ordinals": [1],
+    }
+    reconciliation = SinkEffectReconcileResult.applied(
+        descriptor,
+        evidence=evidence,
+        accepted_ordinals=(0,),
+        diverted_ordinals=(1,),
+    )
+    attempt = factory.execution.sink_effects.begin_attempt(
+        SinkEffectAttemptRequest(
+            effect_id=effect.effect_id,
+            member_ordinal=None,
+            generation=lease.generation,
+            action=SinkEffectAttemptAction.RECONCILE,
+            request_hash="a" * 64,
+        )
+    )
+    factory.execution.sink_effects.record_attempt_result(
+        SinkEffectAttemptResult(
+            attempt_id=attempt.attempt_id,
+            evidence=encode_sink_effect_returned_result(reconciliation),
+            latency_ms=1.0,
+        )
+    )
+    request = SinkEffectFinalizeRequest(
+        effect_id=effect.effect_id,
+        lease_owner=lease.owner,
+        generation=lease.generation,
+        descriptor=descriptor,
+        publication_performed=True,
+        publication_evidence_kind="reconciled",
+        accepted_ordinals=(0,),
+        diverted_ordinals=(1,),
+        evidence=evidence,
+        members=(
+            SinkEffectFinalizationMember(
+                ordinal=0,
+                output_data={"row": {"ordinal": 0}},
+                duration_ms=1.0,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="sink",
+            ),
+        ),
+        attempt_id=attempt.attempt_id,
+        reconcile_kind=SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR,
+    )
+
+    first = factory.execution.sink_effects.finalize(request)
+    second = factory.execution.sink_effects.finalize(request)
+
+    assert first.effect.state is SinkEffectState.FINALIZED
+    assert second.effect == first.effect
+    assert second.artifact == first.artifact
+    assert second.state_ids == first.state_ids
+    assert second.outcome_ids == first.outcome_ids
+
+
 def test_no_publication_finalization_registers_virtual_artifact_without_lease(
     db_factory: tuple[LandscapeDB, RecorderFactory],
 ) -> None:
@@ -493,6 +578,11 @@ def test_failsink_finalization_requires_and_uses_exact_primary_linkage(
         content_hash="e" * 64,
         size_bytes=9,
     )
+    failsink_claim = factory.execution.sink_effects.claim_preparation(
+        failsink.effect_id,
+        owner="worker-a",
+        ttl=timedelta(seconds=30),
+    )
     factory.execution.sink_effects.complete_plan(
         failsink.effect_id,
         SinkEffectPlan(
@@ -507,6 +597,7 @@ def test_failsink_finalization_requires_and_uses_exact_primary_linkage(
             expected_descriptor=descriptor,
             safe_evidence={"inspection_reference": "no-inspection-required:v1"},
         ),
+        claim=failsink_claim,
     )
     lease = factory.execution.sink_effects.acquire_lease(failsink.effect_id, owner="worker-f", ttl=timedelta(seconds=30))
     attempt = factory.execution.sink_effects.begin_attempt(

@@ -112,12 +112,60 @@ class SinkEffectLifecycle:
         self._effect_loader = effect_loader
         self._attempt_loader = SinkEffectAttemptLoader()
 
-    def complete_plan(self, effect_id: str, plan: SinkEffectPlan) -> SinkEffect:
+    def claim_preparation(self, effect_id: str, *, owner: str, ttl: timedelta) -> SinkEffectLease:
+        """Durably claim exclusive preparation ownership of a reserved effect.
+
+        Preparation runs side-effecting adapter code (it may replace or bind
+        the deterministic staging path), so it must be fenced exactly like
+        commit/reconcile: one live owner, generation-bumping takeover only
+        after expiry.
+        """
+        self._validate_owner(owner)
+        _require_positive_ttl(ttl)
+        with self._db.write_connection() as conn:
+            row = self._lock_effect(conn, effect_id, include_stream=True)
+            if row.state != SinkEffectState.RESERVED.value:
+                raise LandscapeRecordError("sink effect preparation claim requires a reserved effect")
+            timestamp = now()
+            if (
+                row.lease_owner is not None
+                and row.lease_owner != owner
+                and row.lease_expires_at is not None
+                and _utc(row.lease_expires_at) >= timestamp
+            ):
+                raise LandscapeRecordError("sink effect preparation has a live claim owned by another worker")
+            self._require_predecessor_finalized(conn, row)
+            generation = int(row.generation) + 1
+            expires_at = timestamp + ttl
+            claimed = conn.execute(
+                sink_effects_table.update()
+                .where(
+                    sink_effects_table.c.effect_id == effect_id,
+                    sink_effects_table.c.state == SinkEffectState.RESERVED.value,
+                    sink_effects_table.c.generation == row.generation,
+                )
+                .values(
+                    lease_owner=owner,
+                    generation=generation,
+                    lease_heartbeat_at=timestamp,
+                    lease_expires_at=expires_at,
+                    updated_at=timestamp,
+                )
+            )
+            if claimed.rowcount != 1:
+                raise LandscapeRecordError("sink effect preparation claim CAS lost unexpectedly")
+            return SinkEffectLease(effect_id, owner, generation, expires_at)
+
+    def complete_plan(self, effect_id: str, plan: SinkEffectPlan, *, claim: SinkEffectLease) -> SinkEffect:
         _require_hash(effect_id, "effect_id")
         if type(plan) is not SinkEffectPlan:
             raise TypeError("plan must be exact SinkEffectPlan")
         if plan.effect_id != effect_id:
             raise ValueError("plan effect_id does not match the requested effect")
+        if type(claim) is not SinkEffectLease:
+            raise TypeError("claim must be exact SinkEffectLease")
+        if claim.effect_id != effect_id:
+            raise ValueError("claim effect_id does not match the requested effect")
         encoded_plan = _plan_json(plan)
         expected_descriptor_hash = None if plan.expected_descriptor is None else stable_hash(_descriptor_payload(plan))
 
@@ -129,6 +177,11 @@ class SinkEffectLifecycle:
                 if row.plan_json == encoded_plan and row.plan_hash == plan.plan_hash:
                     return self._effect_loader.load(row)
                 raise LandscapeRecordError("sink effect has a divergent plan")
+            # The bind fence is ownership identity, not expiry: any rival
+            # takeover bumps the generation, so an expired-but-unstolen claim
+            # is still the unique preparer and may bind its plan safely.
+            if row.lease_owner != claim.owner or int(row.generation) != claim.generation:
+                raise LandscapeRecordError("sink effect plan bind requires the owning preparation claim")
             self._require_predecessor_finalized(conn, row)
 
             inspection_attempt_id: str
@@ -158,6 +211,8 @@ class SinkEffectLifecycle:
                     sink_effects_table.c.effect_id == effect_id,
                     sink_effects_table.c.state == SinkEffectState.RESERVED.value,
                     sink_effects_table.c.plan_hash.is_(None),
+                    sink_effects_table.c.lease_owner == claim.owner,
+                    sink_effects_table.c.generation == claim.generation,
                 )
                 .values(
                     state=SinkEffectState.PREPARED.value,
@@ -172,6 +227,9 @@ class SinkEffectLifecycle:
                         {"inspection_attempt_id": inspection_attempt_id, "safe_evidence": deep_thaw(plan.safe_evidence)}
                     ),
                     prepared_at=timestamp,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    lease_heartbeat_at=None,
                     updated_at=timestamp,
                 )
             )

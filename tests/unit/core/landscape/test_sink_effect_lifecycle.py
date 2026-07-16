@@ -18,6 +18,7 @@ from elspeth.contracts.sink_effects import (
     SinkEffectDescriptorMode,
     SinkEffectInputKind,
     SinkEffectInspectionMode,
+    SinkEffectLease,
     SinkEffectPlan,
     SinkEffectReconcileKind,
     SinkEffectState,
@@ -48,6 +49,10 @@ def _reserved(factory: RecorderFactory):
     effect = factory.execution.sink_effects.reserve(_pipeline_request(run_id, sink_id, members)).new_effect
     assert effect is not None
     return effect
+
+
+def _claim(factory: RecorderFactory, effect_id: str, *, owner: str = "worker-a"):
+    return factory.execution.sink_effects.claim_preparation(effect_id, owner=owner, ttl=timedelta(seconds=30))
 
 
 def _plan(effect_id: str, *, plan_hash: str = "a" * 64) -> SinkEffectPlan:
@@ -122,7 +127,7 @@ def test_in_flight_effect_rejects_result_fields_before_finalization(
     db, factory = db_factory
     effect = _reserved(factory)
     repo = factory.execution.sink_effects
-    repo.complete_plan(effect.effect_id, _plan(effect.effect_id))
+    repo.complete_plan(effect.effect_id, _plan(effect.effect_id), claim=_claim(factory, effect.effect_id))
     repo.acquire_lease(effect.effect_id, owner="worker-a", ttl=timedelta(seconds=30))
 
     with pytest.raises(IntegrityError), db.engine.begin() as conn:
@@ -136,13 +141,14 @@ def test_concurrent_plan_cas_accepts_equal_and_rejects_divergent(db_factory: tup
     effect = _reserved(factory)
     repo = factory.execution.sink_effects
 
-    first = repo.complete_plan(effect.effect_id, _plan(effect.effect_id))
-    second = repo.complete_plan(effect.effect_id, _plan(effect.effect_id))
+    claim = _claim(factory, effect.effect_id)
+    first = repo.complete_plan(effect.effect_id, _plan(effect.effect_id), claim=claim)
+    second = repo.complete_plan(effect.effect_id, _plan(effect.effect_id), claim=claim)
 
     assert first == second
     assert first.state is SinkEffectState.PREPARED
     with pytest.raises(AuditIntegrityError, match="divergent plan"):
-        repo.complete_plan(effect.effect_id, _plan(effect.effect_id, plan_hash="c" * 64))
+        repo.complete_plan(effect.effect_id, _plan(effect.effect_id, plan_hash="c" * 64), claim=claim)
 
 
 def test_inspected_plan_requires_returned_inspection_attempt(db_factory: tuple[LandscapeDB, RecorderFactory]) -> None:
@@ -151,14 +157,60 @@ def test_inspected_plan_requires_returned_inspection_attempt(db_factory: tuple[L
     inspected = replace(_plan(effect.effect_id), inspection_mode=SinkEffectInspectionMode.INSPECTED)
 
     with pytest.raises(LandscapeRecordError, match="returned inspect"):
-        factory.execution.sink_effects.complete_plan(effect.effect_id, inspected)
+        factory.execution.sink_effects.complete_plan(effect.effect_id, inspected, claim=_claim(factory, effect.effect_id))
+
+
+def test_preparation_claim_is_exclusive_and_fences_plan_bind(db_factory: tuple[LandscapeDB, RecorderFactory]) -> None:
+    """Only the live preparation-claim owner may bind the plan (elspeth-3f87c0c055)."""
+    _db, factory = db_factory
+    effect = _reserved(factory)
+    repo = factory.execution.sink_effects
+
+    claim = repo.claim_preparation(effect.effect_id, owner="worker-a", ttl=timedelta(seconds=30))
+    assert claim.generation == 1
+    claimed = repo.get_effect(effect.effect_id)
+    assert claimed is not None
+    assert claimed.state is SinkEffectState.RESERVED
+    assert (claimed.lease_owner, claimed.generation) == ("worker-a", 1)
+
+    with pytest.raises(LandscapeRecordError, match="live claim"):
+        repo.claim_preparation(effect.effect_id, owner="worker-b", ttl=timedelta(seconds=30))
+
+    forged = SinkEffectLease(effect.effect_id, "worker-b", claim.generation, claim.expires_at)
+    with pytest.raises(LandscapeRecordError, match="preparation claim"):
+        repo.complete_plan(effect.effect_id, _plan(effect.effect_id), claim=forged)
+
+    prepared = repo.complete_plan(effect.effect_id, _plan(effect.effect_id), claim=claim)
+    assert prepared.state is SinkEffectState.PREPARED
+    assert prepared.generation == claim.generation
+    assert prepared.lease_owner is None
+
+    with pytest.raises(LandscapeRecordError, match="reserved effect"):
+        repo.claim_preparation(effect.effect_id, owner="worker-b", ttl=timedelta(seconds=30))
+
+
+def test_expired_preparation_claim_takeover_fences_stale_binder(db_factory: tuple[LandscapeDB, RecorderFactory]) -> None:
+    """A takeover bumps the generation so the stale preparer cannot bind (elspeth-3f87c0c055)."""
+    _db, factory = db_factory
+    effect = _reserved(factory)
+    repo = factory.execution.sink_effects
+
+    stale = repo.claim_preparation(effect.effect_id, owner="worker-a", ttl=timedelta(microseconds=1))
+    takeover = repo.claim_preparation(effect.effect_id, owner="worker-b", ttl=timedelta(seconds=30))
+    assert takeover.generation == stale.generation + 1
+
+    with pytest.raises(LandscapeRecordError, match="preparation claim"):
+        repo.complete_plan(effect.effect_id, _plan(effect.effect_id), claim=stale)
+    prepared = repo.complete_plan(effect.effect_id, _plan(effect.effect_id), claim=takeover)
+    assert prepared.state is SinkEffectState.PREPARED
+    assert prepared.generation == takeover.generation
 
 
 def test_lease_takeover_increments_generation_and_fences_stale_results(db_factory: tuple[LandscapeDB, RecorderFactory]) -> None:
     _db, factory = db_factory
     effect = _reserved(factory)
     repo = factory.execution.sink_effects
-    repo.complete_plan(effect.effect_id, _plan(effect.effect_id))
+    repo.complete_plan(effect.effect_id, _plan(effect.effect_id), claim=_claim(factory, effect.effect_id))
     first = repo.acquire_lease(effect.effect_id, owner="worker-a", ttl=timedelta(microseconds=1))
     abandoned = repo.begin_attempt(
         SinkEffectAttemptRequest(
@@ -195,7 +247,7 @@ def test_abandoned_commit_intent_becomes_response_lost_with_stable_call_index(
     db, factory = db_factory
     effect = _reserved(factory)
     repo = factory.execution.sink_effects
-    repo.complete_plan(effect.effect_id, _plan(effect.effect_id))
+    repo.complete_plan(effect.effect_id, _plan(effect.effect_id), claim=_claim(factory, effect.effect_id))
     lease = repo.acquire_lease(effect.effect_id, owner="worker-a", ttl=timedelta(seconds=30))
     attempt = repo.begin_attempt(
         SinkEffectAttemptRequest(
@@ -225,7 +277,7 @@ def test_attempt_return_records_one_success_call_and_is_idempotent(db_factory: t
     db, factory = db_factory
     effect = _reserved(factory)
     repo = factory.execution.sink_effects
-    repo.complete_plan(effect.effect_id, _plan(effect.effect_id))
+    repo.complete_plan(effect.effect_id, _plan(effect.effect_id), claim=_claim(factory, effect.effect_id))
     lease = repo.acquire_lease(effect.effect_id, owner="worker-a", ttl=timedelta(seconds=30))
     attempt = repo.begin_attempt(
         SinkEffectAttemptRequest(

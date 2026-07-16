@@ -605,6 +605,16 @@ class SinkEffectCoordinator:
         snapshot: list[SinkEffectMember] = []
         for predecessor in chain:
             for durable in self._effects.get_members(predecessor.effect_id):
+                # Diverted members never reached the target: replaying them in
+                # a cumulative successor would republish rejected rows as if
+                # they were immutable predecessor content.
+                if durable.prepared_disposition == "diverted":
+                    continue
+                if durable.prepared_disposition != "accepted":
+                    raise LandscapeRecordError(
+                        f"finalized sink effect predecessor {predecessor.effect_id} member ordinal "
+                        f"{durable.ordinal} is missing its accepted/diverted disposition"
+                    )
                 known = known_members.get(durable.token_id)
                 member = replace(known, member_effect_id=durable.member_effect_id) if known is not None else self._hydrate_member(durable)
                 snapshot.append(replace(member, ordinal=len(snapshot)))
@@ -660,6 +670,23 @@ class SinkEffectCoordinator:
     ) -> SinkEffectPlan:
         if effect.state is not SinkEffectState.RESERVED:
             return self._load_plan(effect)
+        # Preparation runs side-effecting adapter code, so ownership must be
+        # durably claimed before any staging mutation. Refuse politely while
+        # another worker's claim is live; close abandoned inspect intents
+        # while their generation still matches the row; then claim (which
+        # bumps the generation and fences the eventual plan bind).
+        if (
+            effect.lease_owner is not None
+            and effect.lease_owner != self._worker_id
+            and effect.lease_expires_at is not None
+            and self._utc(effect.lease_expires_at) >= datetime.now(UTC)
+        ):
+            raise SinkEffectPredecessorPending(f"sink effect {effect.effect_id} preparation is claimed by another worker")
+        self._close_abandoned_attempts(effect.effect_id, actions=(SinkEffectAttemptAction.INSPECT,))
+        claim = self._effects.claim_preparation(effect.effect_id, owner=self._worker_id, ttl=self._lease_ttl)
+        effect = self._require_effect(effect.effect_id)
+        if effect.state is not SinkEffectState.RESERVED:  # pragma: no cover - claim holds the effect reserved
+            return self._load_plan(effect)
         predecessor = self._predecessor_descriptor(effect)
         inspection_request = SinkEffectInspectionRequest(
             effect_id=effect.effect_id,
@@ -675,7 +702,6 @@ class SinkEffectCoordinator:
                 "target": effect.target_json,
             }
         )
-        self._close_abandoned_attempts(effect.effect_id, actions=(SinkEffectAttemptAction.INSPECT,))
         returned_inspection = self._returned_attempt(
             effect.effect_id,
             action=SinkEffectAttemptAction.INSPECT,
@@ -716,7 +742,7 @@ class SinkEffectCoordinator:
         )
         plan = sink.prepare_effect(prepare_request, ctx)
         prepare_request.validate_plan(plan)
-        self._effects.complete_plan(effect.effect_id, plan)
+        self._effects.complete_plan(effect.effect_id, plan, claim=claim)
         return plan
 
     @staticmethod

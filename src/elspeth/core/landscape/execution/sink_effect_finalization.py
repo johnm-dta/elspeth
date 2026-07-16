@@ -677,10 +677,19 @@ class SinkEffectFinalization:
         ).fetchone()
         if request.publication_evidence_kind == "reconciled":
             assert request.reconcile_kind is not None
+            # Result-derived winners carry their accepted/diverted ordinal
+            # partition inside the durable returned result, so the retry
+            # reconstruction must preserve it byte-for-byte.
             returned_result: SinkEffectReconcileResult | SinkEffectCommitResult = SinkEffectReconcileResult(
                 kind=request.reconcile_kind,
                 descriptor=request.descriptor,
                 evidence=request.evidence,
+                accepted_ordinals=(
+                    request.accepted_ordinals if effect.descriptor_mode == SinkEffectDescriptorMode.RESULT_DERIVED.value else None
+                ),
+                diverted_ordinals=(
+                    request.diverted_ordinals if effect.descriptor_mode == SinkEffectDescriptorMode.RESULT_DERIVED.value else None
+                ),
             )
         else:
             returned_result = SinkEffectCommitResult(

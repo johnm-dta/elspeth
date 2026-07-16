@@ -503,10 +503,35 @@ class SinkExecutor:
                     ctx=ctx,
                 )
             ]
-        if {member.token_id for member in durable_members} != set(token_ids):
-            raise AuditIntegrityError("interrupted sink effect has a partial durable member witness set")
+        # A retry batch may mix interrupted members (durable membership or an
+        # open state) with genuinely fresh members; reservation partitions the
+        # union into recovered and new effects, so recovery must not demand
+        # full durable coverage of the batch (elspeth-d1a1399381). Fresh
+        # members get newly opened states; interrupted members must still
+        # produce their exact durable witness or fail closed.
+        durable_token_ids = {member.token_id for member in durable_members}
+        fresh_tokens: list[TokenInfo] = []
+        fresh_rows: list[dict[str, object]] = []
+        for token, row in zip(tokens, rows, strict=True):
+            if token.token_id not in durable_token_ids and token.token_id not in open_ids:
+                fresh_tokens.append(token)
+                fresh_rows.append(row)
+        fresh_state_by_token: dict[str, NodeState] = {}
+        if fresh_tokens:
+            for token, opened in self._open_primary_states(
+                tokens=fresh_tokens,
+                rows=fresh_rows,
+                sink_node_id=sink_node_id,
+                step_in_pipeline=step_in_pipeline,
+                ctx=ctx,
+            ):
+                fresh_state_by_token[token.token_id] = opened
         states: list[tuple[TokenInfo, NodeState]] = []
         for token in tokens:
+            fresh_state = fresh_state_by_token.get(token.token_id)
+            if fresh_state is not None:
+                states.append((token, fresh_state))
+                continue
             open_state_id = open_ids.get(token.token_id)
             if open_state_id is not None:
                 state = self._execution.get_node_state(open_state_id)
@@ -645,37 +670,50 @@ class SinkExecutor:
         if {member.token_id for member in durable_members} != set(requested_token_ids):
             raise AuditIntegrityError("durable effect partition does not cover every requested primary token")
         caller_index_by_token = {token.token_id: index for index, token in enumerate(tokens)}
-        durable_by_ordinal = {member.ordinal: member for member in durable_members}
-        diverted_ordinals = {member.ordinal for member in durable_members if member.prepared_disposition == "diverted"}
+        # A recovered batch may span several effects whose member ordinals each
+        # restart at zero, so dispositions and attribution are keyed by
+        # (effect_id, ordinal), never by ordinal alone (elspeth-a6eba4b4e2).
+        durable_by_key = {(member.effect_id, member.ordinal): member for member in durable_members}
+        diverted_keys = {(member.effect_id, member.ordinal) for member in durable_members if member.prepared_disposition == "diverted"}
+        effect_ids = tuple(dict.fromkeys(member.effect_id for member in durable_members))
+        single_effect = len(effect_ids) == 1
         get_diversions = getattr(sink, "_get_diversions", None)
         returned_diversions = tuple(get_diversions()) if callable(get_diversions) else ()
-        returned_by_ordinal = {item.row_index: item for item in returned_diversions}
-        plan = SinkEffectCoordinator._load_plan(result.effect)
-        raw_attribution = plan.safe_evidence.get("diversion_attribution", ())
-        attribution_by_ordinal: dict[int, tuple[str, str]] = {}
-        if isinstance(raw_attribution, Sequence) and not isinstance(raw_attribution, (str, bytes, bytearray)):
-            for item in raw_attribution:
-                if not isinstance(item, Mapping):
-                    raise AuditIntegrityError("effect diversion attribution is not a mapping")
-                ordinal = item.get("ordinal")
-                reason_hash = item.get("reason_hash")
-                error_hash = item.get("error_hash")
-                if type(ordinal) is not int or not isinstance(reason_hash, str) or not isinstance(error_hash, str):
-                    raise AuditIntegrityError("effect diversion attribution is incomplete")
-                attribution_by_ordinal[ordinal] = (reason_hash, error_hash)
-        if returned_by_ordinal and set(returned_by_ordinal) != diverted_ordinals:
+        # The in-memory diversion log indexes rows within one effect's member
+        # list; across several effects those indexes are ambiguous, so a
+        # spanning batch recovers from each effect's durable attribution only.
+        returned_by_ordinal = {item.row_index: item for item in returned_diversions} if single_effect else {}
+        attribution_by_key: dict[tuple[str, int], tuple[str, str]] = {}
+        for effect_id in effect_ids:
+            effect = self._execution.sink_effects.get_effect(effect_id)
+            if effect is None:
+                raise AuditIntegrityError("durable effect partition references a missing effect")
+            plan = SinkEffectCoordinator._load_plan(effect)
+            raw_attribution = plan.safe_evidence.get("diversion_attribution", ())
+            if isinstance(raw_attribution, Sequence) and not isinstance(raw_attribution, (str, bytes, bytearray)):
+                for item in raw_attribution:
+                    if not isinstance(item, Mapping):
+                        raise AuditIntegrityError("effect diversion attribution is not a mapping")
+                    ordinal = item.get("ordinal")
+                    reason_hash = item.get("reason_hash")
+                    error_hash = item.get("error_hash")
+                    if type(ordinal) is not int or not isinstance(reason_hash, str) or not isinstance(error_hash, str):
+                        raise AuditIntegrityError("effect diversion attribution is incomplete")
+                    attribution_by_key[(effect_id, ordinal)] = (reason_hash, error_hash)
+        if returned_by_ordinal and set(returned_by_ordinal) != {ordinal for _effect_id, ordinal in diverted_keys}:
             raise AuditIntegrityError("effect result diversion evidence does not match the durable member partition")
-        if not returned_by_ordinal and set(attribution_by_ordinal) != diverted_ordinals:
+        if not returned_by_ordinal and set(attribution_by_key) != diverted_keys:
             raise AuditIntegrityError("recovered effect is missing durable diversion attribution")
         diversions: list[RowDiversion] = []
         diversion_error_hashes: dict[int, str] = {}
         diversion_reason_hashes: dict[int, str] = {}
         token_by_id = {token.token_id: token for token in tokens}
-        for durable_ordinal in sorted(diverted_ordinals):
-            durable = durable_by_ordinal[durable_ordinal]
+        for diverted_key in sorted(diverted_keys):
+            _diverted_effect_id, durable_ordinal = diverted_key
+            durable = durable_by_key[diverted_key]
             caller_index = caller_index_by_token[durable.token_id]
             returned = returned_by_ordinal.get(durable_ordinal)
-            attribution = attribution_by_ordinal.get(durable_ordinal)
+            attribution = attribution_by_key.get(diverted_key)
             reason = returned.reason if returned is not None else f"effect-diversion:{attribution[0]}"  # type: ignore[index]
             error_hash = attribution[1] if attribution is not None else compute_error_hash(reason)
             reason_hash = attribution[0] if attribution is not None else stable_hash({"diversion_reason": reason})
@@ -739,7 +777,7 @@ class SinkExecutor:
             enriched_by_token[token.token_id] = row
             diverted_tokens.append(token)
 
-        self._open_or_reuse_effect_states(
+        failsink_states = self._open_or_reuse_effect_states(
             tokens=diverted_tokens,
             rows=enriched_rows,
             sink_node_id=failsink_node_id,
@@ -747,15 +785,40 @@ class SinkExecutor:
             ctx=ctx,
             role=SinkEffectRole.FAILSINK,
         )
-        self._run_sink_boundary_checks(
-            sink=failsink,
-            rows=enriched_rows,
-            tokens=diverted_tokens,
-            run_id=self._run_id,
-            node_id=failsink_node_id,
-            row_contracts=None,
-        )
-        self._validate_sink_input(failsink, enriched_rows, skip_schema=True)
+        try:
+            self._run_sink_boundary_checks(
+                sink=failsink,
+                rows=enriched_rows,
+                tokens=diverted_tokens,
+                run_id=self._run_id,
+                node_id=failsink_node_id,
+                row_contracts=None,
+            )
+            self._validate_sink_input(failsink, enriched_rows, skip_schema=True)
+        except (DeclarationContractViolation, AggregateDeclarationContractViolation, SinkTransactionalInvariantError) as violation:
+            # Mirror the primary path's boundary-failure terminalization
+            # (elspeth-2a75af7f8f): the enriched row never reached the
+            # failsink, so terminalize both the quarantine states just opened
+            # and the still-open primary divert anchors, then record failure
+            # outcomes so no diverted token is left in progress.
+            boundary_error = self._build_boundary_error(exc=violation, phase="failsink_write")
+            self._complete_states_failed(
+                states=[(token, state) for token, state in failsink_states if isinstance(state, NodeStateOpen)],
+                duration_ms=0.0,
+                error=boundary_error,
+            )
+            self._complete_states_failed(
+                states=[(token, state) for token, _index, state in primary_divert_states if isinstance(state, NodeStateOpen)],
+                duration_ms=0.0,
+                error=boundary_error,
+            )
+            self._record_boundary_failure_outcomes(
+                tokens=diverted_tokens,
+                sink_name=failsink_name,
+                phase="failsink_write",
+                violation=violation,
+            )
+            raise
         candidates = tuple(
             SinkEffectMemberCandidate(
                 token_id=token.token_id,

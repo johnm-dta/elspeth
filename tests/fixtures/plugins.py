@@ -7,12 +7,34 @@ Eliminates the 3 duplicate ListSource/CollectSink definitions from v1.
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+from hashlib import sha256
 from typing import Any, ClassVar
 
 from pydantic import ConfigDict
 
-from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema, SourceRow
+from elspeth.contracts import (
+    SINK_EFFECT_PROTOCOL_VERSION,
+    ArtifactDescriptor,
+    Determinism,
+    PluginSchema,
+    ResolvedSinkEffectMode,
+    RestrictedSinkEffectContext,
+    SinkEffectCommitResult,
+    SinkEffectDescriptorMode,
+    SinkEffectExecutionPurpose,
+    SinkEffectInputKind,
+    SinkEffectInspection,
+    SinkEffectInspectionMode,
+    SinkEffectInspectionRequest,
+    SinkEffectPipelineMembersInput,
+    SinkEffectPlan,
+    SinkEffectPrepareRequest,
+    SinkEffectReconcileResult,
+    SourceRow,
+)
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
+from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.hashing import canonical_json, stable_hash
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.results import TransformResult
 from tests.fixtures.base_classes import _TestSchema, _TestSinkBase, _TestSourceBase
@@ -60,12 +82,30 @@ class CollectSink(_TestSinkBase):
         sink = CollectSink("output", node_id="sink_node_123")
     """
 
+    effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    supported_effect_modes = frozenset({"write"})
+    supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
+
     def __init__(self, name: str = "collect", *, node_id: str | None = None) -> None:
         super().__init__()
         self.name = name
         self.node_id = node_id
         self.results: list[dict[str, Any]] = []
         self._artifact_counter = 0
+        self._effect_plans: dict[str, SinkEffectPlan] = {}
+        self._effect_rows: dict[str, tuple[dict[str, Any], ...]] = {}
+        self._effect_ordinals: dict[str, tuple[int, ...]] = {}
+        self._effect_commits: dict[str, SinkEffectCommitResult] = {}
+
+    @classmethod
+    def _resolve_sink_effect_mode(
+        cls,
+        config: Mapping[str, object],
+        *,
+        purpose: SinkEffectExecutionPurpose,
+    ) -> ResolvedSinkEffectMode:
+        del cls, config, purpose
+        return ResolvedSinkEffectMode("write")
 
     @property
     def rows_written(self) -> list[dict[str, Any]]:
@@ -87,6 +127,113 @@ class CollectSink(_TestSinkBase):
                 size_bytes=len(str(rows)),
                 content_hash=f"{self._artifact_counter:064x}",
             )
+        )
+
+    def inspect_effect(
+        self,
+        request: SinkEffectInspectionRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectInspection:
+        del ctx
+        committed = self._effect_commits.get(request.effect_id)
+        evidence: dict[str, object] = {"state": "not_applied"}
+        if committed is not None:
+            evidence = {"state": "committed", "content_hash": committed.descriptor.content_hash}
+        return SinkEffectInspection(
+            mode=SinkEffectInspectionMode.INSPECTED,
+            reference=request.target,
+            evidence=evidence,
+        )
+
+    def prepare_effect(
+        self,
+        request: SinkEffectPrepareRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectPlan:
+        del ctx
+        if not isinstance(request.effect_input, SinkEffectPipelineMembersInput):
+            raise TypeError("CollectSink only supports pipeline member effects")
+
+        rows = tuple(deep_thaw(member.row) for member in request.effect_input.members)
+        if any(not isinstance(row, dict) for row in rows):  # pragma: no cover - contract guarantees mappings
+            raise TypeError("CollectSink effect rows must thaw to dictionaries")
+        payload = canonical_json(rows).encode("utf-8")
+        payload_hash = sha256(payload).hexdigest()
+        descriptor = ArtifactDescriptor.for_file(
+            path=request.inspection.reference,
+            size_bytes=len(payload),
+            content_hash=payload_hash,
+        )
+        plan = SinkEffectPlan(
+            effect_id=request.effect_id,
+            protocol_version=SINK_EFFECT_PROTOCOL_VERSION,
+            input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            descriptor_mode=SinkEffectDescriptorMode.PRECOMPUTED,
+            inspection_mode=request.inspection.mode,
+            target=request.inspection.reference,
+            plan_hash=stable_hash(
+                {
+                    "effect_id": request.effect_id,
+                    "input_kind": SinkEffectInputKind.PIPELINE_MEMBERS.value,
+                    "payload_hash": payload_hash,
+                    "target": request.inspection.reference,
+                }
+            ),
+            payload_hash=payload_hash,
+            expected_descriptor=descriptor,
+            safe_evidence={"sink_kind": "collect"},
+        )
+        request.validate_plan(plan)
+
+        existing = self._effect_plans.get(request.effect_id)
+        if existing is not None and existing != plan:
+            raise ValueError("CollectSink effect_id was prepared with a different plan")
+        self._effect_plans[request.effect_id] = plan
+        self._effect_rows[request.effect_id] = rows
+        self._effect_ordinals[request.effect_id] = tuple(member.ordinal for member in request.effect_input.members)
+        return plan
+
+    def commit_effect(
+        self,
+        plan: SinkEffectPlan,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectCommitResult:
+        del ctx
+        prepared = self._effect_plans.get(plan.effect_id)
+        if prepared is None or prepared != plan:
+            raise ValueError("CollectSink can only commit the exact prepared plan")
+        committed = self._effect_commits.get(plan.effect_id)
+        if committed is not None:
+            return committed
+        if plan.expected_descriptor is None:  # pragma: no cover - PRECOMPUTED contract guarantees this
+            raise ValueError("CollectSink prepared plan is missing its descriptor")
+
+        self.results.extend(self._effect_rows[plan.effect_id])
+        self._artifact_counter += 1
+        result = SinkEffectCommitResult(
+            descriptor=plan.expected_descriptor,
+            evidence={"state": "committed"},
+            accepted_ordinals=self._effect_ordinals[plan.effect_id],
+            diverted_ordinals=(),
+        )
+        self._effect_commits[plan.effect_id] = result
+        return result
+
+    def reconcile_effect(
+        self,
+        plan: SinkEffectPlan,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectReconcileResult:
+        del ctx
+        prepared = self._effect_plans.get(plan.effect_id)
+        if prepared is not None and prepared != plan:
+            raise ValueError("CollectSink can only reconcile the exact prepared plan")
+        committed = self._effect_commits.get(plan.effect_id)
+        if committed is None:
+            return SinkEffectReconcileResult.not_applied(evidence={"state": "not_applied"})
+        return SinkEffectReconcileResult.applied(
+            committed.descriptor,
+            evidence={"state": "committed"},
         )
 
     def close(self) -> None:

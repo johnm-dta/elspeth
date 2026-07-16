@@ -73,6 +73,7 @@ def _run_linear_on_db(
         sources={"primary": as_source(source)},
         transforms=[as_transform(t) for t in tx_list],
         sinks={"default": as_sink(sinks["default"])},
+        sink_effect_modes={"default": "write"},
     )
 
     result = Orchestrator(db).run(config, graph=graph, payload_store=payload_store)
@@ -119,6 +120,7 @@ def _run_fork_on_db(
         transforms=[as_transform(t) for t in tx_list],
         sinks={name: as_sink(s) for name, s in all_sinks.items()},
         gates=[gate],
+        sink_effect_modes=dict.fromkeys(all_sinks, "write"),
     )
 
     result = Orchestrator(db).run(config, graph=graph, payload_store=payload_store)
@@ -254,12 +256,12 @@ def _seed_exporter_isolation_records(db: LandscapeDB, run_id: str, label: str) -
 
     artifact = factory.execution.register_artifact(
         run_id,
-        sink_state.state_id,
         sink_node_id,
         artifact_type="test",
         path=f"file:///tmp/elspeth-exporter-isolation-{label}.json",
         content_hash="0" * 64,
         size_bytes=0,
+        state_id=sink_state.state_id,
         artifact_id=f"audit-extra-artifact-{label}",
         idempotency_key=f"audit-extra-artifact-{label}",
     )

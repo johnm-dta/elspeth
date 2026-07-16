@@ -71,6 +71,7 @@ class SinkEffectCapabilityError(ValueError):
 
 
 _SINK_EFFECT_METHODS = ("inspect_effect", "prepare_effect", "commit_effect", "reconcile_effect")
+_MEMBER_SINK_EFFECT_METHODS = ("commit_member_effect", "reconcile_member_effect")
 
 
 @final
@@ -137,8 +138,10 @@ def validate_sink_effect_capability(
     if not isinstance(mode, str) or not mode.strip():
         raise SinkEffectCapabilityError(f"Sink {sink_name!r} requires a non-empty configured effect mode")
     if mode not in supported_modes:
+        remediation = inspect.getattr_static(sink_type, "effect_mode_remediation", None)
+        guidance = f"; remediation: {remediation}" if isinstance(remediation, str) and remediation.strip() else ""
         raise SinkEffectCapabilityError(
-            f"Sink {sink_name!r} does not support configured effect mode {mode!r}; declared modes: {sorted(supported_modes)!r}"
+            f"Sink {sink_name!r} does not support configured effect mode {mode!r}; declared modes: {sorted(supported_modes)!r}{guidance}"
         )
 
     supported_input_kinds = inspect.getattr_static(sink_type, "supported_effect_input_kinds", None)
@@ -160,6 +163,13 @@ def validate_sink_effect_capability(
             raise SinkEffectCapabilityError(
                 f"Sink {sink_name!r} declares effect protocol {SINK_EFFECT_PROTOCOL_VERSION!r} but {method_name} is not callable"
             )
+    supports_member_effects = inspect.getattr_static(sink_type, "supports_member_effects", False)
+    if type(supports_member_effects) is not bool:
+        raise SinkEffectCapabilityError(f"Sink {sink_name!r} supports_member_effects must be an exact bool declaration")
+    if supports_member_effects:
+        for method_name in _MEMBER_SINK_EFFECT_METHODS:
+            if not callable(inspect.getattr_static(sink, method_name, None)):
+                raise SinkEffectCapabilityError(f"Sink {sink_name!r} declares durable member effects but {method_name} is not callable")
 
 
 def validate_sink_effect_type_capability(
@@ -185,8 +195,10 @@ def validate_sink_effect_type_capability(
     if not isinstance(mode, str) or not mode.strip():
         raise SinkEffectCapabilityError(f"Sink {sink_name!r} requires a non-empty configured effect mode")
     if mode not in supported_modes:
+        remediation = inspect.getattr_static(sink_type, "effect_mode_remediation", None)
+        guidance = f"; remediation: {remediation}" if isinstance(remediation, str) and remediation.strip() else ""
         raise SinkEffectCapabilityError(
-            f"Sink {sink_name!r} does not support configured effect mode {mode!r}; declared modes: {sorted(supported_modes)!r}"
+            f"Sink {sink_name!r} does not support configured effect mode {mode!r}; declared modes: {sorted(supported_modes)!r}{guidance}"
         )
     supported_input_kinds = inspect.getattr_static(sink_type, "supported_effect_input_kinds", None)
     if not isinstance(supported_input_kinds, frozenset):
@@ -205,6 +217,13 @@ def validate_sink_effect_type_capability(
             raise SinkEffectCapabilityError(
                 f"Sink {sink_name!r} declares effect protocol {SINK_EFFECT_PROTOCOL_VERSION!r} but {method_name} is not callable"
             )
+    supports_member_effects = inspect.getattr_static(sink_type, "supports_member_effects", False)
+    if type(supports_member_effects) is not bool:
+        raise SinkEffectCapabilityError(f"Sink {sink_name!r} supports_member_effects must be an exact bool declaration")
+    if supports_member_effects:
+        for method_name in _MEMBER_SINK_EFFECT_METHODS:
+            if not callable(inspect.getattr_static(sink_type, method_name, None)):
+                raise SinkEffectCapabilityError(f"Sink {sink_name!r} declares durable member effects but {method_name} is not callable")
 
 
 def sink_effect_modes_from_runtime_bindings(
@@ -255,7 +274,10 @@ def _capability_fingerprint(sink: object) -> tuple[object, ...]:
         inspect.getattr_static(sink_type, "effect_protocol_version", None),
         inspect.getattr_static(sink_type, "supported_effect_modes", None),
         inspect.getattr_static(sink_type, "supported_effect_input_kinds", None),
+        inspect.getattr_static(sink_type, "effect_mode_remediation", None),
+        inspect.getattr_static(sink_type, "supports_member_effects", False),
         *(inspect.getattr_static(sink, method_name, None) for method_name in _SINK_EFFECT_METHODS),
+        *(inspect.getattr_static(sink, method_name, None) for method_name in _MEMBER_SINK_EFFECT_METHODS),
     )
 
 

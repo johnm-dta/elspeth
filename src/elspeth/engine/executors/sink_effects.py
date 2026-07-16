@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Literal, Protocol, cast
 
-from elspeth.contracts.audit import SinkEffect, SinkEffectAttempt
+from elspeth.contracts.audit import SinkEffect, SinkEffectAttempt, SinkEffectMemberRecord
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import canonical_json, stable_hash
 from elspeth.contracts.results import ArtifactDescriptor
@@ -99,6 +99,24 @@ class _SinkEffectAdapter(Protocol):
     def commit_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectCommitResult: ...
 
     def reconcile_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectReconcileResult: ...
+
+
+class _MemberSinkEffectAdapter(_SinkEffectAdapter, Protocol):
+    def commit_member_effect(
+        self,
+        plan: SinkEffectPlan,
+        member: SinkEffectMember,
+        effect_input: SinkEffectPipelineMembersInput,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectCommitResult: ...
+
+    def reconcile_member_effect(
+        self,
+        plan: SinkEffectPlan,
+        member: SinkEffectMember,
+        effect_input: SinkEffectPipelineMembersInput,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectReconcileResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +223,14 @@ class SinkEffectCoordinator:
             actions=(SinkEffectAttemptAction.COMMIT, SinkEffectAttemptAction.RECONCILE),
             recovery_lease=lease,
         )
+        if self._is_member_effect_adapter(sink, request.effect_input):
+            return self._execute_member_effects(
+                plan,
+                request,
+                cast("_MemberSinkEffectAdapter", sink),
+                ctx,
+                lease,
+            )
         returned_commit = self._returned_attempt(
             effect.effect_id,
             action=SinkEffectAttemptAction.COMMIT,
@@ -264,6 +290,237 @@ class SinkEffectCoordinator:
         )
         self._fault(SinkEffectExecutionSeam.AFTER_FINALIZE_BEFORE_RESPONSE)
         return result
+
+    @staticmethod
+    def _is_member_effect_adapter(sink: object, effect_input: object) -> bool:
+        return (
+            isinstance(effect_input, SinkEffectPipelineMembersInput)
+            and getattr(type(sink), "supports_member_effects", False) is True
+            and callable(getattr(sink, "commit_member_effect", None))
+            and callable(getattr(sink, "reconcile_member_effect", None))
+        )
+
+    def _execute_member_effects(
+        self,
+        plan: SinkEffectPlan,
+        request: SinkEffectExecutionRequest,
+        sink: _MemberSinkEffectAdapter,
+        ctx: RestrictedSinkEffectContext,
+        lease: SinkEffectLease,
+    ) -> SinkEffectFinalizationResult:
+        if not isinstance(request.effect_input, SinkEffectPipelineMembersInput):  # pragma: no cover - guarded by caller
+            raise TypeError("member effect execution requires pipeline members")
+        effect_input = request.effect_input
+        last_exact: tuple[SinkEffectCommitResult | SinkEffectReconcileResult, SinkEffectAttempt] | None = None
+        for member in effect_input.members:
+            durable = self._member_record(plan.effect_id, member.ordinal)
+            if durable.member_state is SinkEffectState.FINALIZED:
+                continue
+
+            returned_commit = self._returned_attempt(
+                plan.effect_id,
+                action=SinkEffectAttemptAction.COMMIT,
+                request_hash=self._member_commit_request_hash(plan, member),
+                member_ordinal=member.ordinal,
+            )
+            if returned_commit is not None:
+                commit_result, attempt = returned_commit
+                if not isinstance(commit_result, SinkEffectCommitResult):
+                    raise LandscapeRecordError("durable member commit decoded to the wrong result type")
+                self._effects.complete_member_result(attempt.attempt_id, commit_result, lease=lease)
+                last_exact = (commit_result, attempt)
+                continue
+
+            latest_lost_commit = self._latest_attempt(
+                plan.effect_id,
+                action=SinkEffectAttemptAction.COMMIT,
+                state=SinkEffectAttemptState.RESPONSE_LOST,
+                member_ordinal=member.ordinal,
+            )
+            returned_reconcile = self._returned_attempt(
+                plan.effect_id,
+                action=SinkEffectAttemptAction.RECONCILE,
+                request_hash=self._member_reconcile_request_hash(plan, member),
+                started_after=None if latest_lost_commit is None else latest_lost_commit.started_at,
+                member_ordinal=member.ordinal,
+            )
+            if returned_reconcile is None:
+                reconciliation, reconcile_attempt = self._reconcile_member(plan, member, effect_input, sink, ctx, lease)
+            else:
+                returned_result, reconcile_attempt = returned_reconcile
+                if not isinstance(returned_result, SinkEffectReconcileResult):
+                    raise LandscapeRecordError("durable member reconcile decoded to the wrong result type")
+                reconciliation = returned_result
+            self._effects.complete_member_result(reconcile_attempt.attempt_id, reconciliation, lease=lease)
+            if reconciliation.kind is SinkEffectReconcileKind.UNKNOWN:
+                raise SinkEffectUnknownError(plan.effect_id)
+            if reconciliation.kind is SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR:
+                last_exact = (reconciliation, reconcile_attempt)
+                continue
+
+            commit_result, commit_attempt = self._commit_member(plan, member, effect_input, sink, ctx, lease)
+            self._effects.complete_member_result(commit_attempt.attempt_id, commit_result, lease=lease)
+            last_exact = (commit_result, commit_attempt)
+
+        if any(record.member_state is not SinkEffectState.FINALIZED for record in self._effects.get_members(plan.effect_id)):
+            raise LandscapeRecordError("sink effect group cannot finalize before every member is exact")
+        if last_exact is None:
+            last_exact = self._latest_exact_member_result(plan.effect_id)
+        result, attempt = last_exact
+        self._fault(SinkEffectExecutionSeam.AFTER_RETURN_BEFORE_FINALIZE)
+        if isinstance(result, SinkEffectCommitResult):
+            finalized = self._finalize(
+                effect_id=plan.effect_id,
+                request=request,
+                lease=lease,
+                descriptor=result.descriptor,
+                evidence=result.evidence,
+                accepted_ordinals=tuple(result.accepted_ordinals),
+                diverted_ordinals=tuple(result.diverted_ordinals),
+                attempt_id=attempt.attempt_id,
+                evidence_kind="returned",
+                reconcile_kind=None,
+            )
+        else:
+            if result.kind is not SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR or result.descriptor is None:
+                raise LandscapeRecordError("latest durable member result is not exact")
+            finalized = self._finalize(
+                effect_id=plan.effect_id,
+                request=request,
+                lease=lease,
+                descriptor=result.descriptor,
+                evidence=result.evidence,
+                accepted_ordinals=tuple(member.ordinal for member in request.finalization_members),
+                diverted_ordinals=(),
+                attempt_id=attempt.attempt_id,
+                evidence_kind="reconciled",
+                reconcile_kind=result.kind,
+            )
+        self._fault(SinkEffectExecutionSeam.AFTER_FINALIZE_BEFORE_RESPONSE)
+        return finalized
+
+    def _member_record(self, effect_id: str, ordinal: int) -> SinkEffectMemberRecord:
+        record = next((item for item in self._effects.get_members(effect_id) if item.ordinal == ordinal), None)
+        if not isinstance(record, SinkEffectMemberRecord):
+            raise LandscapeRecordError(f"sink effect {effect_id} is missing member ordinal {ordinal}")
+        return record
+
+    def _reconcile_member(
+        self,
+        plan: SinkEffectPlan,
+        member: SinkEffectMember,
+        effect_input: SinkEffectPipelineMembersInput,
+        sink: _MemberSinkEffectAdapter,
+        ctx: RestrictedSinkEffectContext,
+        lease: SinkEffectLease,
+    ) -> tuple[SinkEffectReconcileResult, SinkEffectAttempt]:
+        attempt = self._effects.begin_attempt(
+            SinkEffectAttemptRequest(
+                effect_id=plan.effect_id,
+                member_ordinal=member.ordinal,
+                generation=lease.generation,
+                action=SinkEffectAttemptAction.RECONCILE,
+                request_hash=self._member_reconcile_request_hash(plan, member),
+            )
+        )
+        started = time.monotonic()
+        try:
+            result = sink.reconcile_member_effect(plan, member, effect_input, ctx)
+        except BaseException:
+            self._effects.mark_response_lost(attempt.attempt_id)
+            raise
+        self._effects.record_attempt_result(
+            SinkEffectAttemptResult(
+                attempt_id=attempt.attempt_id,
+                evidence=encode_sink_effect_returned_result(result),
+                latency_ms=(time.monotonic() - started) * 1_000,
+            )
+        )
+        return result, self._attempt_by_id(plan.effect_id, attempt.attempt_id)
+
+    def _commit_member(
+        self,
+        plan: SinkEffectPlan,
+        member: SinkEffectMember,
+        effect_input: SinkEffectPipelineMembersInput,
+        sink: _MemberSinkEffectAdapter,
+        ctx: RestrictedSinkEffectContext,
+        lease: SinkEffectLease,
+    ) -> tuple[SinkEffectCommitResult, SinkEffectAttempt]:
+        attempt = self._effects.begin_attempt(
+            SinkEffectAttemptRequest(
+                effect_id=plan.effect_id,
+                member_ordinal=member.ordinal,
+                generation=lease.generation,
+                action=SinkEffectAttemptAction.COMMIT,
+                request_hash=self._member_commit_request_hash(plan, member),
+            )
+        )
+        self._fault(SinkEffectExecutionSeam.BEFORE_EFFECT)
+        started = time.monotonic()
+        try:
+            result = sink.commit_member_effect(plan, member, effect_input, ctx)
+            self._fault(SinkEffectExecutionSeam.AFTER_EFFECT_BEFORE_RETURN)
+        except BaseException:
+            self._effects.mark_response_lost(attempt.attempt_id)
+            raise
+        self._effects.record_attempt_result(
+            SinkEffectAttemptResult(
+                attempt_id=attempt.attempt_id,
+                evidence=encode_sink_effect_returned_result(result),
+                latency_ms=(time.monotonic() - started) * 1_000,
+            )
+        )
+        return result, self._attempt_by_id(plan.effect_id, attempt.attempt_id)
+
+    def _attempt_by_id(self, effect_id: str, attempt_id: str) -> SinkEffectAttempt:
+        attempt = next((item for item in self._effects.get_attempts(effect_id) if item.attempt_id == attempt_id), None)
+        if attempt is None:
+            raise LandscapeRecordError(f"sink effect attempt {attempt_id} disappeared")
+        return attempt
+
+    def _latest_exact_member_result(
+        self,
+        effect_id: str,
+    ) -> tuple[SinkEffectCommitResult | SinkEffectReconcileResult, SinkEffectAttempt]:
+        for attempt in reversed(self._effects.get_attempts(effect_id)):
+            if (
+                attempt.member_ordinal is None
+                or attempt.state is not SinkEffectAttemptState.RETURNED
+                or attempt.action not in {SinkEffectAttemptAction.COMMIT, SinkEffectAttemptAction.RECONCILE}
+                or attempt.evidence_json is None
+            ):
+                continue
+            result = decode_sink_effect_returned_result(attempt.action, attempt.evidence_json)
+            if isinstance(result, SinkEffectCommitResult) or (
+                isinstance(result, SinkEffectReconcileResult) and result.kind is SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR
+            ):
+                return result, attempt
+        raise LandscapeRecordError("finalized member set is missing an exact returned attempt")
+
+    @staticmethod
+    def _member_reconcile_request_hash(plan: SinkEffectPlan, member: SinkEffectMember) -> str:
+        return stable_hash(
+            {
+                "effect_id": plan.effect_id,
+                "member_effect_id": member.member_effect_id,
+                "member_ordinal": member.ordinal,
+                "plan_hash": plan.plan_hash,
+                "schema": "sink-member-effect-reconcile-request-v1",
+            }
+        )
+
+    @staticmethod
+    def _member_commit_request_hash(plan: SinkEffectPlan, member: SinkEffectMember) -> str:
+        return stable_hash(
+            {
+                "effect_id": plan.effect_id,
+                "member_effect_id": member.member_effect_id,
+                "member_ordinal": member.ordinal,
+                "plan_hash": plan.plan_hash,
+                "schema": "sink-member-effect-commit-request-v1",
+            }
+        )
 
     def _request_for_effect(
         self,
@@ -608,11 +865,13 @@ class SinkEffectCoordinator:
         action: SinkEffectAttemptAction,
         request_hash: str,
         started_after: datetime | None = None,
+        member_ordinal: int | None = None,
     ) -> tuple[SinkEffectReturnedResult, SinkEffectAttempt] | None:
         winners = [
             attempt
             for attempt in self._effects.get_attempts(effect_id)
             if attempt.action is action
+            and attempt.member_ordinal == member_ordinal
             and attempt.request_hash == request_hash
             and attempt.state is SinkEffectAttemptState.RETURNED
             and (started_after is None or self._utc(attempt.started_at) > self._utc(started_after))
@@ -634,8 +893,13 @@ class SinkEffectCoordinator:
         *,
         action: SinkEffectAttemptAction,
         state: SinkEffectAttemptState,
+        member_ordinal: int | None = None,
     ) -> SinkEffectAttempt | None:
-        attempts = [attempt for attempt in self._effects.get_attempts(effect_id) if attempt.action is action and attempt.state is state]
+        attempts = [
+            attempt
+            for attempt in self._effects.get_attempts(effect_id)
+            if attempt.action is action and attempt.state is state and attempt.member_ordinal == member_ordinal
+        ]
         return attempts[-1] if attempts else None
 
     @staticmethod

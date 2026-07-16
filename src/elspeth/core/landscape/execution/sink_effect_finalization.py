@@ -292,7 +292,11 @@ class SinkEffectFinalization:
         for ordinal in request.accepted_ordinals:
             conn.execute(
                 sink_effect_members_table.update()
-                .where(sink_effect_members_table.c.effect_id == request.effect_id, sink_effect_members_table.c.ordinal == ordinal)
+                .where(
+                    sink_effect_members_table.c.effect_id == request.effect_id,
+                    sink_effect_members_table.c.ordinal == ordinal,
+                    sink_effect_members_table.c.member_state != SinkEffectState.FINALIZED.value,
+                )
                 .values(
                     prepared_disposition="accepted",
                     member_state=SinkEffectState.FINALIZED.value,
@@ -303,7 +307,11 @@ class SinkEffectFinalization:
         for ordinal in request.diverted_ordinals:
             conn.execute(
                 sink_effect_members_table.update()
-                .where(sink_effect_members_table.c.effect_id == request.effect_id, sink_effect_members_table.c.ordinal == ordinal)
+                .where(
+                    sink_effect_members_table.c.effect_id == request.effect_id,
+                    sink_effect_members_table.c.ordinal == ordinal,
+                    sink_effect_members_table.c.member_state != SinkEffectState.FINALIZED.value,
+                )
                 .values(
                     prepared_disposition="diverted",
                     member_state=SinkEffectState.FINALIZED.value,

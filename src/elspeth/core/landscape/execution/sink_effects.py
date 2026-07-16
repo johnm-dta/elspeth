@@ -11,12 +11,14 @@ from elspeth.contracts.audit import SinkEffect, SinkEffectAttempt, SinkEffectMem
 from elspeth.contracts.sink_effects import (
     SinkEffectAttemptRequest,
     SinkEffectAttemptResult,
+    SinkEffectCommitResult,
     SinkEffectFinalizationResult,
     SinkEffectFinalizeRequest,
     SinkEffectInputKind,
     SinkEffectLease,
     SinkEffectMember,
     SinkEffectPlan,
+    SinkEffectReconcileResult,
     SinkEffectReservationRequest,
     SinkEffectRole,
 )
@@ -148,6 +150,15 @@ class SinkEffectRepository:
 
     def record_attempt_result(self, result: SinkEffectAttemptResult) -> SinkEffectAttempt:
         return self._lifecycle.record_attempt_result(result)
+
+    def complete_member_result(
+        self,
+        attempt_id: str,
+        result: SinkEffectCommitResult | SinkEffectReconcileResult,
+        *,
+        lease: SinkEffectLease,
+    ) -> None:
+        self._lifecycle.complete_member_result(attempt_id, result, lease=lease)
 
     def mark_response_lost(
         self,

@@ -9,7 +9,8 @@ from __future__ import annotations
 import hashlib
 import math
 import time
-from collections.abc import Callable
+import urllib.parse
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import chromadb
@@ -27,8 +28,27 @@ from elspeth.contracts.errors import (
     DuplicateDocumentError,
     FrameworkBugError,
 )
+from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.results import ArtifactDescriptor
+from elspeth.contracts.sink_effects import (
+    SINK_EFFECT_PROTOCOL_VERSION,
+    ResolvedSinkEffectMode,
+    RestrictedSinkEffectContext,
+    SinkEffectCommitResult,
+    SinkEffectDescriptorMode,
+    SinkEffectExecutionPurpose,
+    SinkEffectInputKind,
+    SinkEffectInspection,
+    SinkEffectInspectionMode,
+    SinkEffectInspectionRequest,
+    SinkEffectMember,
+    SinkEffectPipelineMembersInput,
+    SinkEffectPlan,
+    SinkEffectPrepareRequest,
+    SinkEffectReconcileResult,
+)
 from elspeth.contracts.url import SanitizedDatabaseUrl
 from elspeth.core.canonical import canonical_json
 from elspeth.plugins.infrastructure.base import BaseSink
@@ -176,9 +196,27 @@ class ChromaSink(BaseSink):
     name = "chroma_sink"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6520cfa82797f8e6"
+    source_file_hash: str | None = "sha256:1df0fbc8b38a4b6c"
     config_model = ChromaSinkConfig
     supports_resume = False
+    effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    supported_effect_modes = frozenset({"overwrite"})
+    supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
+    supports_member_effects = True
+    effect_mode_remediation = "set on_duplicate=overwrite or choose a sink with a target-side effect marker"
+
+    @classmethod
+    def _resolve_sink_effect_mode(
+        cls,
+        config: Mapping[str, object],
+        *,
+        purpose: SinkEffectExecutionPurpose,
+    ) -> ResolvedSinkEffectMode | None:
+        del cls
+        if purpose is SinkEffectExecutionPurpose.AUDIT_EXPORT:
+            return None
+        mode = config.get("on_duplicate", "overwrite")
+        return ResolvedSinkEffectMode(mode) if isinstance(mode, str) else None
 
     @classmethod
     def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
@@ -256,6 +294,251 @@ class ChromaSink(BaseSink):
         payload = canonical_json({"ids": ids, "documents": documents, "metadatas": metadatas})
         payload_bytes = payload.encode("utf-8")
         return hashlib.sha256(payload_bytes).hexdigest(), len(payload_bytes)
+
+    def _extract_effect_member(self, member: SinkEffectMember) -> tuple[str, str, dict[str, object] | None]:
+        row = deep_thaw(member.row)
+        if not isinstance(row, dict):  # pragma: no cover - member contract guarantees a mapping
+            raise FrameworkBugError("Chroma effect member row is not an object")
+        fm = self._config.field_mapping
+        try:
+            raw_id = row[fm.id_field]
+            raw_document = row[fm.document_field]
+        except KeyError as exc:
+            raise ValueError(f"Chroma effect member is missing required field {exc.args[0]!r}") from exc
+        if not isinstance(raw_id, str) or not isinstance(raw_document, str):
+            raise ValueError("Chroma effect member id and document fields must be strings")
+        metadata: dict[str, object] = {}
+        for field_name in fm.metadata_fields:
+            if field_name not in row:
+                continue
+            value = row[field_name]
+            if value is not None and not isinstance(value, (str, int, float, bool)):
+                raise ValueError(f"Chroma effect member metadata field {field_name!r} is not a supported scalar")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError(f"Chroma effect member metadata field {field_name!r} must be finite")
+            metadata[field_name] = value
+        return raw_id, raw_document, metadata or None
+
+    @property
+    def _effect_target(self) -> str:
+        if self._config.mode == "persistent":
+            target_binding: dict[str, object] = {
+                "mode": "persistent",
+                "persist_directory": self._config.persist_directory,
+            }
+        else:
+            target_binding = {
+                "host": self._config.host,
+                "mode": "client",
+                "port": self._config.port,
+                "ssl": self._config.ssl,
+            }
+        binding_hash = stable_hash(target_binding)
+        collection = urllib.parse.quote(self._config.collection, safe="")
+        return f"chromadb://target/{collection}?binding={binding_hash}"
+
+    def _member_effect_material(
+        self,
+        effect_id: str,
+        effect_input: SinkEffectPipelineMembersInput,
+    ) -> tuple[ArtifactDescriptor, str, str, tuple[tuple[str, str, dict[str, object] | None], ...]]:
+        extracted = tuple(self._extract_effect_member(member) for member in effect_input.members)
+        ids = [item[0] for item in extracted]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Chroma effect members require unique stable document IDs")
+        documents = [item[1] for item in extracted]
+        aligned_metadata = [item[2] for item in extracted]
+        hash_metadata = aligned_metadata if any(item is not None for item in aligned_metadata) else None
+        payload_hash, payload_size = self._compute_payload_hash(ids, documents, hash_metadata)
+        descriptor = ArtifactDescriptor.for_database(
+            url=SanitizedDatabaseUrl.from_raw_url(self._effect_target),
+            table=self._config.collection,
+            content_hash=payload_hash,
+            payload_size=payload_size,
+            row_count=len(extracted),
+        )
+        bindings = [
+            {
+                "document_id_hash": stable_hash(document_id),
+                "member_effect_id": member.member_effect_id,
+                "ordinal": member.ordinal,
+                "payload_hash": stable_hash({"document": document, "document_id": document_id, "metadata": metadata}),
+            }
+            for member, (document_id, document, metadata) in zip(effect_input.members, extracted, strict=True)
+        ]
+        plan_hash = stable_hash(
+            {
+                "bindings": bindings,
+                "collection": self._config.collection,
+                "descriptor_hash": stable_hash(
+                    {
+                        "artifact_type": descriptor.artifact_type,
+                        "content_hash": descriptor.content_hash,
+                        "metadata": deep_thaw(descriptor.metadata),
+                        "path_or_uri": descriptor.path_or_uri,
+                        "size_bytes": descriptor.size_bytes,
+                    }
+                ),
+                "effect_id": effect_id,
+                "schema": "chroma-member-effect-plan-v1",
+            }
+        )
+        return descriptor, payload_hash, plan_hash, extracted
+
+    def inspect_effect(
+        self,
+        request: SinkEffectInspectionRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectInspection:
+        del request, ctx
+        return SinkEffectInspection(
+            mode=SinkEffectInspectionMode.NO_INSPECTION_REQUIRED,
+            reference="no-inspection-required:v1",
+            evidence={},
+        )
+
+    def prepare_effect(
+        self,
+        request: SinkEffectPrepareRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectPlan:
+        del ctx
+        if self._config.on_duplicate != "overwrite":
+            raise ValueError(
+                "Recoverable Chroma publication requires on_duplicate=overwrite; "
+                "use overwrite or choose a sink with a target-side effect marker"
+            )
+        if type(request.effect_input) is not SinkEffectPipelineMembersInput:
+            raise TypeError("Chroma effects require pipeline member input")
+        descriptor, payload_hash, plan_hash, extracted = self._member_effect_material(request.effect_id, request.effect_input)
+        return SinkEffectPlan(
+            effect_id=request.effect_id,
+            protocol_version=SINK_EFFECT_PROTOCOL_VERSION,
+            input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            descriptor_mode=SinkEffectDescriptorMode.PRECOMPUTED,
+            inspection_mode=request.inspection.mode,
+            target=self._effect_target,
+            plan_hash=plan_hash,
+            payload_hash=payload_hash,
+            expected_descriptor=descriptor,
+            safe_evidence={
+                "member_count": len(extracted),
+                "member_plans_hash": stable_hash(
+                    [
+                        {
+                            "document_id_hash": stable_hash(item[0]),
+                            "member_effect_id": member.member_effect_id,
+                            "ordinal": member.ordinal,
+                            "payload_hash": stable_hash({"document": item[1], "document_id": item[0], "metadata": item[2]}),
+                        }
+                        for member, item in zip(request.effect_input.members, extracted, strict=True)
+                    ]
+                ),
+                "schema": "chroma-member-effect-plan-v1",
+            },
+        )
+
+    def _validate_member_effect(
+        self,
+        plan: SinkEffectPlan,
+        member: SinkEffectMember,
+        effect_input: SinkEffectPipelineMembersInput,
+    ) -> tuple[str, str, dict[str, object] | None, ArtifactDescriptor]:
+        descriptor, payload_hash, plan_hash, extracted = self._member_effect_material(plan.effect_id, effect_input)
+        if (
+            plan.protocol_version != SINK_EFFECT_PROTOCOL_VERSION
+            or plan.input_kind is not SinkEffectInputKind.PIPELINE_MEMBERS
+            or plan.descriptor_mode is not SinkEffectDescriptorMode.PRECOMPUTED
+            or plan.target != self._effect_target
+            or plan.payload_hash != payload_hash
+            or plan.plan_hash != plan_hash
+            or plan.expected_descriptor != descriptor
+        ):
+            raise ValueError("Chroma member effect plan is divergent from the bound input and target")
+        if member.ordinal >= len(effect_input.members) or effect_input.members[member.ordinal] != member:
+            raise ValueError("Chroma member does not match its exact stored ordinal")
+        if member.member_effect_id is None:
+            raise ValueError("Chroma member effect requires a durable member_effect_id")
+        document_id, document, metadata = extracted[member.ordinal]
+        return document_id, document, metadata, descriptor
+
+    @staticmethod
+    def _member_group_evidence(plan: SinkEffectPlan, classification: str) -> dict[str, object]:
+        return {
+            "classification": classification,
+            "effect_id": plan.effect_id,
+            "plan_hash": plan.plan_hash,
+            "schema": "chroma-member-effect-result-v1",
+        }
+
+    def commit_member_effect(
+        self,
+        plan: SinkEffectPlan,
+        member: SinkEffectMember,
+        effect_input: SinkEffectPipelineMembersInput,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectCommitResult:
+        del ctx
+        if self._collection is None:
+            raise FrameworkBugError("Chroma collection is unavailable — on_start() was not called")
+        document_id, document, metadata, descriptor = self._validate_member_effect(plan, member, effect_input)
+        try:
+            self._collection.upsert(
+                ids=[document_id],
+                documents=[document],
+                metadatas=None if metadata is None else [metadata],  # type: ignore[list-item]
+            )
+        except ValueError as exc:
+            raise _ChromaPayloadRejection(str(exc)) from exc
+        return SinkEffectCommitResult(
+            descriptor=descriptor,
+            evidence=self._member_group_evidence(plan, "committed"),
+            accepted_ordinals=tuple(item.ordinal for item in effect_input.members),
+            diverted_ordinals=(),
+        )
+
+    def reconcile_member_effect(
+        self,
+        plan: SinkEffectPlan,
+        member: SinkEffectMember,
+        effect_input: SinkEffectPipelineMembersInput,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectReconcileResult:
+        del ctx
+        if self._collection is None:
+            raise FrameworkBugError("Chroma collection is unavailable — on_start() was not called")
+        document_id, document, metadata, descriptor = self._validate_member_effect(plan, member, effect_input)
+        try:
+            result = self._collection.get(ids=[document_id], include=["documents", "metadatas"])
+        except (chromadb.errors.ChromaError, ValueError):
+            return SinkEffectReconcileResult.unknown(evidence=self._member_group_evidence(plan, "unverifiable"))
+        ids = result.get("ids")
+        documents = result.get("documents")
+        metadatas = result.get("metadatas")
+        if ids == []:
+            return SinkEffectReconcileResult.not_applied(evidence=self._member_group_evidence(plan, "missing"))
+        if (
+            ids != [document_id]
+            or not isinstance(documents, list)
+            or len(documents) != 1
+            or not isinstance(metadatas, list)
+            or len(metadatas) != 1
+        ):
+            return SinkEffectReconcileResult.unknown(evidence=self._member_group_evidence(plan, "ambiguous"))
+        if documents[0] != document or metadatas[0] != metadata:
+            return SinkEffectReconcileResult.unknown(evidence=self._member_group_evidence(plan, "divergent"))
+        return SinkEffectReconcileResult.applied(
+            descriptor,
+            evidence=self._member_group_evidence(plan, "exact"),
+        )
+
+    def commit_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectCommitResult:
+        del plan, ctx
+        raise FrameworkBugError("Chroma publication requires durable member-effect coordination")
+
+    def reconcile_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectReconcileResult:
+        del plan, ctx
+        raise FrameworkBugError("Chroma reconciliation requires durable member-effect coordination")
 
     def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
         if self._collection is None:

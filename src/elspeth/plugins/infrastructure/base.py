@@ -957,6 +957,8 @@ class BaseSink(ABC):
     effect_protocol_version: ClassVar[str | None] = None
     supported_effect_modes: ClassVar[frozenset[str]] = frozenset()
     supported_effect_input_kinds: ClassVar[frozenset[SinkEffectInputKind]] = frozenset()
+    effect_mode_remediation: ClassVar[str | None] = None
+    supports_member_effects: ClassVar[bool] = False
 
     @classmethod
     def _resolve_sink_effect_mode(

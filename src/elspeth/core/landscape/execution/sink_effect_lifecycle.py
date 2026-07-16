@@ -19,16 +19,20 @@ from elspeth.contracts.sink_effects import (
     SinkEffectAttemptRequest,
     SinkEffectAttemptResult,
     SinkEffectAttemptState,
+    SinkEffectCommitResult,
     SinkEffectDescriptorMode,
     SinkEffectInputKind,
     SinkEffectInspectionMode,
     SinkEffectLease,
     SinkEffectPlan,
+    SinkEffectReconcileKind,
+    SinkEffectReconcileResult,
     SinkEffectState,
 )
 from elspeth.core.landscape._helpers import now
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
+from elspeth.core.landscape.execution.sink_effect_attempt_results import encode_sink_effect_returned_result
 from elspeth.core.landscape.model_loaders import SinkEffectAttemptLoader, SinkEffectLoader
 from elspeth.core.landscape.schema import (
     calls_table,
@@ -332,6 +336,19 @@ class SinkEffectLifecycle:
                     latency_ms=None,
                 )
             )
+            if request.member_ordinal is not None and request.action in {
+                SinkEffectAttemptAction.COMMIT,
+                SinkEffectAttemptAction.RECONCILE,
+            }:
+                conn.execute(
+                    sink_effect_members_table.update()
+                    .where(
+                        sink_effect_members_table.c.effect_id == request.effect_id,
+                        sink_effect_members_table.c.ordinal == request.member_ordinal,
+                        sink_effect_members_table.c.member_state != SinkEffectState.FINALIZED.value,
+                    )
+                    .values(member_state=SinkEffectState.IN_FLIGHT.value)
+                )
             row = conn.execute(select(sink_effect_attempts_table).where(sink_effect_attempts_table.c.attempt_id == attempt_id)).one()
             assert operation is not None
             return self._attempt_loader.load(row)
@@ -401,6 +418,101 @@ class SinkEffectLifecycle:
                 select(sink_effect_attempts_table).where(sink_effect_attempts_table.c.attempt_id == result.attempt_id)
             ).one()
             return self._attempt_loader.load(winner)
+
+    def complete_member_result(
+        self,
+        attempt_id: str,
+        result: SinkEffectCommitResult | SinkEffectReconcileResult,
+        *,
+        lease: SinkEffectLease,
+    ) -> None:
+        """Persist one returned member result under its effect generation fence."""
+        _require_hash(attempt_id, "attempt_id")
+        if type(result) not in {SinkEffectCommitResult, SinkEffectReconcileResult}:
+            raise TypeError("member result must be an exact commit or reconcile result")
+        if type(lease) is not SinkEffectLease:
+            raise TypeError("lease must be an exact SinkEffectLease")
+        encoded_result = canonical_json(deep_thaw(encode_sink_effect_returned_result(result)))
+        evidence_hash = sha256(canonical_json(deep_thaw(result.evidence)).encode("utf-8")).hexdigest()
+        descriptor = result.descriptor
+        descriptor_hash = (
+            None
+            if descriptor is None
+            else sha256(
+                canonical_json(
+                    {
+                        "artifact_type": descriptor.artifact_type,
+                        "content_hash": descriptor.content_hash,
+                        "metadata": None if descriptor.metadata is None else deep_thaw(descriptor.metadata),
+                        "path_or_uri": descriptor.path_or_uri,
+                        "size_bytes": descriptor.size_bytes,
+                    }
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        if isinstance(result, SinkEffectCommitResult) or result.kind is SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR:
+            next_state = SinkEffectState.FINALIZED
+        elif result.kind is SinkEffectReconcileKind.NOT_APPLIED:
+            next_state = SinkEffectState.PREPARED
+        else:
+            next_state = SinkEffectState.IN_FLIGHT
+
+        with self._db.write_connection() as conn:
+            optimistic = conn.execute(
+                select(sink_effect_attempts_table).where(sink_effect_attempts_table.c.attempt_id == attempt_id)
+            ).fetchone()
+            if optimistic is None:
+                raise LandscapeRecordError(f"sink effect attempt {attempt_id!r} does not exist")
+            effect = self._lock_effect(conn, optimistic.effect_id, include_stream=True)
+            attempt = self._lock_attempt(conn, attempt_id)
+            timestamp = now()
+            if (
+                lease.effect_id != effect.effect_id
+                or effect.state != SinkEffectState.IN_FLIGHT.value
+                or effect.lease_owner != lease.owner
+                or effect.generation != lease.generation
+                or _utc(effect.lease_expires_at) < timestamp
+            ):
+                raise LandscapeRecordError("member result has stale lease authority")
+            if attempt.member_ordinal is None:
+                raise LandscapeRecordError("member result requires a member-scoped attempt")
+            expected_action = (
+                SinkEffectAttemptAction.COMMIT.value if type(result) is SinkEffectCommitResult else SinkEffectAttemptAction.RECONCILE.value
+            )
+            if attempt.action != expected_action or attempt.state != SinkEffectAttemptState.RETURNED.value:
+                raise LandscapeRecordError("member result does not match a returned member attempt")
+            if attempt.generation > lease.generation:
+                raise LandscapeRecordError("member result has impossible future generation")
+            if attempt.evidence_json != encoded_result:
+                raise LandscapeRecordError("member result differs from the durable returned attempt")
+            member = conn.execute(
+                select(sink_effect_members_table)
+                .where(
+                    sink_effect_members_table.c.effect_id == effect.effect_id,
+                    sink_effect_members_table.c.ordinal == attempt.member_ordinal,
+                )
+                .with_for_update()
+            ).fetchone()
+            if member is None:
+                raise LandscapeRecordError("member result references a missing member")
+            if member.member_state == SinkEffectState.FINALIZED.value:
+                if descriptor_hash is not None and member.descriptor_hash != descriptor_hash:
+                    raise LandscapeRecordError("finalized member result descriptor is divergent")
+                return
+            conn.execute(
+                sink_effect_members_table.update()
+                .where(
+                    sink_effect_members_table.c.effect_id == effect.effect_id,
+                    sink_effect_members_table.c.ordinal == attempt.member_ordinal,
+                    sink_effect_members_table.c.member_state != SinkEffectState.FINALIZED.value,
+                )
+                .values(
+                    prepared_disposition="accepted",
+                    member_state=next_state.value,
+                    descriptor_hash=descriptor_hash,
+                    evidence_hash=evidence_hash,
+                )
+            )
 
     def mark_response_lost(
         self,

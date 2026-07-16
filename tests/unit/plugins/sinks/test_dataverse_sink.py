@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import urllib.parse
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, create_autospec, patch
@@ -12,6 +14,18 @@ import pytest
 from elspeth.contracts import PluginSchema
 from elspeth.contracts.contexts import LifecycleContext, SinkContext
 from elspeth.contracts.errors import SinkTransactionalInvariantError
+from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.hashing import canonical_json as contract_canonical_json
+from elspeth.contracts.hashing import stable_hash
+from elspeth.contracts.sink_effects import (
+    RestrictedSinkEffectContext,
+    SinkEffectInspectionMode,
+    SinkEffectInspectionRequest,
+    SinkEffectMember,
+    SinkEffectPipelineMembersInput,
+    SinkEffectPrepareRequest,
+    SinkEffectReconcileKind,
+)
 from elspeth.core.canonical import canonical_json
 from elspeth.engine.executors.sink import SinkExecutor
 from elspeth.plugins.infrastructure.clients.dataverse import (
@@ -1276,3 +1290,121 @@ class TestRequestDataRecordsJsonPayload:
         expected_payload = {"emailaddress1": "alice@example.com", "fullname": "Alice"}
         assert request_data["json"] == expected_payload
         assert "field_names" not in request_data
+
+
+def _effect_member(ordinal: int, row: dict[str, object]) -> SinkEffectMember:
+    row_json = contract_canonical_json(row)
+    lineage_json = "[]"
+    return SinkEffectMember(
+        ordinal=ordinal,
+        token_id=f"token-{ordinal}",
+        row_id=f"row-{ordinal}",
+        ingest_sequence=ordinal,
+        lineage_json=lineage_json,
+        lineage_hash=hashlib.sha256(lineage_json.encode()).hexdigest(),
+        payload_hash=hashlib.sha256(row_json.encode()).hexdigest(),
+        row=row,
+        member_effect_id=stable_hash({"effect": "a" * 64, "ordinal": ordinal}),
+    )
+
+
+def _restricted_effect_context() -> RestrictedSinkEffectContext:
+    return RestrictedSinkEffectContext(
+        run_id="run-1",
+        run_started_at=datetime(2026, 7, 16, tzinfo=UTC),
+        operation_id="operation-1",
+        sink_node_id="sink-1",
+    )
+
+
+class _RecoverableDataverseClient:
+    def __init__(self) -> None:
+        self.records: dict[str, dict[str, object]] = {}
+        self.patch_count_by_key: dict[str, int] = {}
+
+    @staticmethod
+    def _key(url: str) -> str:
+        return urllib.parse.unquote(url.rsplit("='", 1)[1].split("')", 1)[0])
+
+    def upsert(self, url: str, body: dict[str, object]) -> DataversePageResponse:
+        key = self._key(url)
+        self.patch_count_by_key[key] = self.patch_count_by_key.get(key, 0) + 1
+        self.records[key] = dict(body)
+        return _make_204_response()
+
+    def get_page(self, url: str) -> DataversePageResponse:
+        key = self._key(url)
+        if key not in self.records:
+            raise DataverseClientError(
+                "missing",
+                retryable=False,
+                status_code=404,
+                error_category="row_data_error",
+            )
+        return DataversePageResponse(
+            status_code=200,
+            rows=[dict(self.records[key])],
+            latency_ms=1.0,
+            headers={},
+            request_headers={},
+            request_url=url,
+            next_link=None,
+            paging_cookie=None,
+            more_records=None,
+        )
+
+
+class TestDataverseMemberEffects:
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
+    def test_partial_batch_recovery_reconciles_exact_and_commits_only_missing(self, _mock_schema: MagicMock) -> None:
+        client = _RecoverableDataverseClient()
+        sink = inject_write_failure(DataverseSink(_config()))
+        sink._client = client  # type: ignore[assignment]
+        members = tuple(
+            _effect_member(index, {"email": key, "name": name})
+            for index, (key, name) in enumerate((("a", "Alice"), ("b", "Bob"), ("c", "Carol")))
+        )
+        effect_input = SinkEffectPipelineMembersInput(members, members)
+        ctx = _restricted_effect_context()
+        inspection = sink.inspect_effect(
+            SinkEffectInspectionRequest(effect_id="a" * 64, target="{}", predecessor_descriptor=None),
+            ctx,
+        )
+        assert inspection.mode is SinkEffectInspectionMode.NO_INSPECTION_REQUIRED
+        plan = sink.prepare_effect(
+            SinkEffectPrepareRequest(effect_id="a" * 64, effect_input=effect_input, inspection=inspection),
+            ctx,
+        )
+
+        sink.commit_member_effect(plan, members[0], effect_input, ctx)
+
+        recovered = inject_write_failure(DataverseSink(_config()))
+        recovered._client = client  # type: ignore[assignment]
+        states = [recovered.reconcile_member_effect(plan, member, effect_input, ctx).kind for member in members]
+        assert states == [
+            SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR,
+            SinkEffectReconcileKind.NOT_APPLIED,
+            SinkEffectReconcileKind.NOT_APPLIED,
+        ]
+        for member, state in zip(members, states, strict=True):
+            if state is SinkEffectReconcileKind.NOT_APPLIED:
+                recovered.commit_member_effect(plan, member, effect_input, ctx)
+
+        assert client.patch_count_by_key == {"a": 1, "b": 1, "c": 1}
+
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=FakeDataverseRowSchema)
+    def test_reconcile_returns_unknown_for_divergent_mapped_field(self, _mock_schema: MagicMock) -> None:
+        client = _RecoverableDataverseClient()
+        sink = inject_write_failure(DataverseSink(_config()))
+        sink._client = client  # type: ignore[assignment]
+        member = _effect_member(0, {"email": "a", "name": "Alice"})
+        effect_input = SinkEffectPipelineMembersInput((member,), (member,))
+        ctx = _restricted_effect_context()
+        inspection = sink.inspect_effect(SinkEffectInspectionRequest(effect_id="a" * 64, target="{}", predecessor_descriptor=None), ctx)
+        plan = sink.prepare_effect(SinkEffectPrepareRequest(effect_id="a" * 64, effect_input=effect_input, inspection=inspection), ctx)
+        client.records["a"] = {"emailaddress1": "a", "fullname": "Mallory"}
+
+        result = sink.reconcile_member_effect(plan, member, effect_input, ctx)
+
+        assert result.kind is SinkEffectReconcileKind.UNKNOWN
+        assert deep_thaw(result.evidence)["classification"] == "divergent"

@@ -11,6 +11,7 @@ import hashlib
 import re
 import time
 import urllib.parse
+from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any, ClassVar, Literal, Self
 
@@ -19,9 +20,28 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from elspeth.contracts import CallStatus, CallType, Determinism, PluginSchema
 from elspeth.contracts.contexts import LifecycleContext, SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
-from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
+from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.results import ArtifactDescriptor
+from elspeth.contracts.sink_effects import (
+    SINK_EFFECT_PROTOCOL_VERSION,
+    ResolvedSinkEffectMode,
+    RestrictedSinkEffectContext,
+    SinkEffectCommitResult,
+    SinkEffectDescriptorMode,
+    SinkEffectExecutionPurpose,
+    SinkEffectInputKind,
+    SinkEffectInspection,
+    SinkEffectInspectionMode,
+    SinkEffectInspectionRequest,
+    SinkEffectMember,
+    SinkEffectPipelineMembersInput,
+    SinkEffectPlan,
+    SinkEffectPrepareRequest,
+    SinkEffectReconcileResult,
+)
 from elspeth.contracts.wire_visible_identity import reject_operator_required_placeholder_value
 from elspeth.core.canonical import canonical_json
 from elspeth.plugins.infrastructure.base import BaseSink
@@ -251,11 +271,28 @@ class DataverseSink(BaseSink):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:bdc1c7cebb586b86"
+    source_file_hash: str | None = "sha256:6825771f32e7f381"
     determinism = Determinism.EXTERNAL_CALL
     config_model = DataverseSinkConfig
     idempotent = True  # PATCH upsert is idempotent — safe for retries and crash recovery (engine does not yet read this flag)
     supports_resume = False  # Dataverse writes are not locally staged
+    effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    supported_effect_modes = frozenset({"upsert"})
+    supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
+    supports_member_effects = True
+
+    @classmethod
+    def _resolve_sink_effect_mode(
+        cls,
+        config: Mapping[str, object],
+        *,
+        purpose: SinkEffectExecutionPurpose,
+    ) -> ResolvedSinkEffectMode | None:
+        del cls
+        if purpose is SinkEffectExecutionPurpose.AUDIT_EXPORT:
+            return None
+        mode = config.get("mode", "upsert")
+        return ResolvedSinkEffectMode(mode) if isinstance(mode, str) else None
 
     @classmethod
     def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
@@ -388,6 +425,218 @@ class DataverseSink(BaseSink):
                 payload[dataverse_column] = value
 
         return payload
+
+    @property
+    def _effect_target(self) -> str:
+        environment = urllib.parse.urlsplit(self._environment_url)
+        assert environment.hostname is not None
+        encoded_entity = urllib.parse.quote(self._entity, safe="")
+        encoded_api_version = urllib.parse.quote(self._api_version, safe="")
+        return f"dataverse://{environment.hostname}/{encoded_entity}?api_version={encoded_api_version}"
+
+    def _member_effect_material(
+        self,
+        effect_id: str,
+        effect_input: SinkEffectPipelineMembersInput,
+    ) -> tuple[ArtifactDescriptor, str, str, tuple[dict[str, object], ...]]:
+        payloads: list[dict[str, object]] = []
+        member_bindings: list[dict[str, object]] = []
+        seen_keys: set[str] = set()
+        if self._alternate_key_pipeline_field is None:  # pragma: no cover - config validator establishes it
+            raise FrameworkBugError("Dataverse alternate-key pipeline field was not resolved")
+        for member in effect_input.members:
+            row = deep_thaw(member.row)
+            if not isinstance(row, dict):  # pragma: no cover - member contract guarantees a mapping
+                raise FrameworkBugError("Dataverse effect member row is not an object")
+            key_value = row[self._alternate_key_pipeline_field]
+            if not isinstance(key_value, str) or not key_value.strip():
+                raise ValueError(
+                    f"alternate_key field '{self._alternate_key_pipeline_field}' has empty or non-string value "
+                    f"{key_value!r} — cannot construct PATCH URL for entity '{self._entity}'"
+                )
+            if key_value in seen_keys:
+                raise ValueError(f"Dataverse effect members require unique alternate-key values; duplicate {key_value!r}")
+            seen_keys.add(key_value)
+            payload = self._map_row(row)
+            payloads.append(payload)
+            member_bindings.append(
+                {
+                    "member_effect_id": member.member_effect_id,
+                    "ordinal": member.ordinal,
+                    "payload_hash": stable_hash(payload),
+                    "target_hash": stable_hash(self._build_upsert_url(key_value)),
+                }
+            )
+        canonical_payload = canonical_json(payloads).encode("utf-8")
+        payload_hash = hashlib.sha256(canonical_payload).hexdigest()
+        descriptor = ArtifactDescriptor(
+            artifact_type="webhook",
+            path_or_uri=self._effect_target,
+            content_hash=payload_hash,
+            size_bytes=len(canonical_payload),
+            metadata=MappingProxyType({"row_count": len(payloads), "entity": self._entity, "mode": self._mode}),
+        )
+        bindings_hash = stable_hash(member_bindings)
+        plan_hash = stable_hash(
+            {
+                "bindings_hash": bindings_hash,
+                "descriptor_hash": stable_hash(
+                    {
+                        "artifact_type": descriptor.artifact_type,
+                        "content_hash": descriptor.content_hash,
+                        "metadata": deep_thaw(descriptor.metadata),
+                        "path_or_uri": descriptor.path_or_uri,
+                        "size_bytes": descriptor.size_bytes,
+                    }
+                ),
+                "effect_id": effect_id,
+                "schema": "dataverse-member-effect-plan-v1",
+            }
+        )
+        return descriptor, payload_hash, plan_hash, tuple(payloads)
+
+    def inspect_effect(
+        self,
+        request: SinkEffectInspectionRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectInspection:
+        del request, ctx
+        return SinkEffectInspection(
+            mode=SinkEffectInspectionMode.NO_INSPECTION_REQUIRED,
+            reference="no-inspection-required:v1",
+            evidence={},
+        )
+
+    def prepare_effect(
+        self,
+        request: SinkEffectPrepareRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectPlan:
+        del ctx
+        if type(request.effect_input) is not SinkEffectPipelineMembersInput:
+            raise TypeError("Dataverse effects require pipeline member input")
+        descriptor, payload_hash, plan_hash, payloads = self._member_effect_material(request.effect_id, request.effect_input)
+        return SinkEffectPlan(
+            effect_id=request.effect_id,
+            protocol_version=SINK_EFFECT_PROTOCOL_VERSION,
+            input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            descriptor_mode=SinkEffectDescriptorMode.PRECOMPUTED,
+            inspection_mode=request.inspection.mode,
+            target=self._effect_target,
+            plan_hash=plan_hash,
+            payload_hash=payload_hash,
+            expected_descriptor=descriptor,
+            safe_evidence={
+                "member_count": len(payloads),
+                "member_plans_hash": stable_hash(
+                    [
+                        {
+                            "member_effect_id": member.member_effect_id,
+                            "ordinal": member.ordinal,
+                            "payload_hash": stable_hash(payload),
+                        }
+                        for member, payload in zip(request.effect_input.members, payloads, strict=True)
+                    ]
+                ),
+                "schema": "dataverse-member-effect-plan-v1",
+            },
+        )
+
+    def _validate_member_effect(
+        self,
+        plan: SinkEffectPlan,
+        member: SinkEffectMember,
+        effect_input: SinkEffectPipelineMembersInput,
+    ) -> tuple[str, dict[str, object], ArtifactDescriptor]:
+        descriptor, payload_hash, plan_hash, payloads = self._member_effect_material(plan.effect_id, effect_input)
+        if (
+            plan.protocol_version != SINK_EFFECT_PROTOCOL_VERSION
+            or plan.input_kind is not SinkEffectInputKind.PIPELINE_MEMBERS
+            or plan.descriptor_mode is not SinkEffectDescriptorMode.PRECOMPUTED
+            or plan.target != self._effect_target
+            or plan.payload_hash != payload_hash
+            or plan.plan_hash != plan_hash
+            or plan.expected_descriptor != descriptor
+        ):
+            raise ValueError("Dataverse member effect plan is divergent from the bound input and target")
+        if member.ordinal >= len(effect_input.members) or effect_input.members[member.ordinal] != member:
+            raise ValueError("Dataverse member does not match its exact stored ordinal")
+        if member.member_effect_id is None:
+            raise ValueError("Dataverse member effect requires a durable member_effect_id")
+        row = deep_thaw(member.row)
+        assert isinstance(row, dict)
+        key_field = self._alternate_key_pipeline_field
+        if key_field is None:  # pragma: no cover - config validator establishes it
+            raise FrameworkBugError("Dataverse alternate-key pipeline field was not resolved")
+        key_value = row[key_field]
+        assert isinstance(key_value, str)
+        return self._build_upsert_url(key_value), payloads[member.ordinal], descriptor
+
+    @staticmethod
+    def _member_group_evidence(plan: SinkEffectPlan, classification: str) -> dict[str, object]:
+        return {
+            "classification": classification,
+            "effect_id": plan.effect_id,
+            "plan_hash": plan.plan_hash,
+            "schema": "dataverse-member-effect-result-v1",
+        }
+
+    def commit_member_effect(
+        self,
+        plan: SinkEffectPlan,
+        member: SinkEffectMember,
+        effect_input: SinkEffectPipelineMembersInput,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectCommitResult:
+        del ctx
+        if self._client is None:
+            raise FrameworkBugError("Dataverse client is unavailable — on_start() was not called")
+        url, payload, descriptor = self._validate_member_effect(plan, member, effect_input)
+        self._client.upsert(url, payload)
+        return SinkEffectCommitResult(
+            descriptor=descriptor,
+            evidence=self._member_group_evidence(plan, "committed"),
+            accepted_ordinals=tuple(item.ordinal for item in effect_input.members),
+            diverted_ordinals=(),
+        )
+
+    def reconcile_member_effect(
+        self,
+        plan: SinkEffectPlan,
+        member: SinkEffectMember,
+        effect_input: SinkEffectPipelineMembersInput,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectReconcileResult:
+        del ctx
+        if self._client is None:
+            raise FrameworkBugError("Dataverse client is unavailable — on_start() was not called")
+        url, expected, descriptor = self._validate_member_effect(plan, member, effect_input)
+        try:
+            response = self._client.get_page(url)
+        except DataverseClientError as exc:
+            if exc.status_code == 404:
+                return SinkEffectReconcileResult.not_applied(evidence=self._member_group_evidence(plan, "missing"))
+            return SinkEffectReconcileResult.unknown(evidence=self._member_group_evidence(plan, "unverifiable"))
+        if len(response.rows) == 0:
+            return SinkEffectReconcileResult.not_applied(evidence=self._member_group_evidence(plan, "missing"))
+        if len(response.rows) != 1:
+            return SinkEffectReconcileResult.unknown(evidence=self._member_group_evidence(plan, "ambiguous"))
+        actual = response.rows[0]
+        exact = all(key in actual and actual[key] == value for key, value in expected.items())
+        if not exact:
+            return SinkEffectReconcileResult.unknown(evidence=self._member_group_evidence(plan, "divergent"))
+        return SinkEffectReconcileResult.applied(
+            descriptor,
+            evidence=self._member_group_evidence(plan, "exact"),
+        )
+
+    def commit_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectCommitResult:
+        del plan, ctx
+        raise FrameworkBugError("Dataverse publication requires durable member-effect coordination")
+
+    def reconcile_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectReconcileResult:
+        del plan, ctx
+        raise FrameworkBugError("Dataverse reconciliation requires durable member-effect coordination")
 
     def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
         """Write batch of rows to Dataverse via individual PATCH requests.

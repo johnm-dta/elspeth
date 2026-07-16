@@ -362,8 +362,11 @@ class LandscapeExporter:
             completed_at = run.completed_at
             if completed_at is None or run.status.value not in {"completed", "completed_with_failures", "empty"}:
                 raise ValueError("Audit export requires an immutable export-terminal run")
+            # SQLite drops timezone metadata when round-tripping SQLAlchemy
+            # DateTime values. Landscape timestamps are UTC by contract, so
+            # restore that storage-boundary metadata before canonicalization.
             if completed_at.tzinfo is None or completed_at.utcoffset() is None:
-                raise ValueError("Audit export terminal completed_at must be timezone-aware")
+                completed_at = completed_at.replace(tzinfo=UTC)
             completed_text = completed_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             if sign:
                 if self._signer_key_id is None:

@@ -10,16 +10,14 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[3]
 _SOURCE_ROOT = _ROOT / "src" / "elspeth"
 
-# Only the coupled executor/export boundaries remain temporarily. Task 10 owns
-# executor migration; Task 15 owns removal of the export compatibility lane.
+# Only the explicit executor compatibility lane remains. Audit export has no
+# direct publication path; effect-capable execution owns it exclusively.
 _EXPECTED_CALLS = Counter(
     {
-        ("engine/executors/sink.py", "_write_primary", "sink", "write", "Task 10"): 1,
-        ("engine/executors/sink.py", "_write_primary", "sink", "flush", "Task 10"): 1,
-        ("engine/executors/sink.py", "_handle_failsink_diversions", "failsink", "write", "Task 10"): 1,
-        ("engine/executors/sink.py", "_handle_failsink_diversions", "failsink", "flush", "Task 10"): 1,
-        ("engine/orchestrator/export.py", "_write_json_export_batches", "sink", "write", "Task 15"): 3,
-        ("engine/orchestrator/export.py", "export_landscape", "sink", "flush", "Task 15"): 2,
+        ("engine/executors/sink.py", "_write_primary", "legacy_sink", "write", "Task 15"): 1,
+        ("engine/executors/sink.py", "_write_primary", "legacy_sink", "flush", "Task 15"): 1,
+        ("engine/executors/sink.py", "_handle_failsink_diversions", "legacy_failsink", "write", "Task 15"): 1,
+        ("engine/executors/sink.py", "_handle_failsink_diversions", "legacy_failsink", "flush", "Task 15"): 1,
     }
 )
 
@@ -34,7 +32,7 @@ def _terminal_name(expression: ast.expr) -> str | None:
 
 def _is_sink_receiver(expression: ast.expr) -> bool:
     terminal = _terminal_name(expression)
-    return terminal is not None and (terminal in {"sink", "failsink"} or terminal.endswith("_sink"))
+    return terminal is not None and terminal.endswith("sink")
 
 
 class _SinkCallVisitor(ast.NodeVisitor):
@@ -56,7 +54,7 @@ class _SinkCallVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         if isinstance(node.func, ast.Attribute) and node.func.attr in {"write", "flush"} and _is_sink_receiver(node.func.value):
             receiver = ast.unparse(node.func.value)
-            owner = "Task 10" if self._relative == "engine/executors/sink.py" else "Task 15"
+            owner = "Task 15"
             function = self._functions[-1] if self._functions else "<module>"
             self._calls[(self._relative, function, receiver, node.func.attr, owner)] += 1
         self.generic_visit(node)

@@ -20,11 +20,10 @@ from __future__ import annotations
 
 import csv
 import os
-from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from tempfile import TemporaryFile
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol
@@ -35,8 +34,6 @@ if TYPE_CHECKING:
     from elspeth.core.landscape import LandscapeDB
 
 from elspeth.contracts import Determinism
-from elspeth.contracts.plugin_context import PluginContext
-from elspeth.core.operations import track_operation
 from elspeth.engine.orchestrator.schema_reconstruction import (
     _create_schema_model as _create_schema_model,
 )
@@ -52,23 +49,6 @@ from elspeth.engine.orchestrator.schema_reconstruction import (
 
 _CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
 _CSV_FORMULA_ESCAPE_PREFIX = "'"
-_JSON_EXPORT_BATCH_SIZE = 1000
-_PATH_TYPE = type(Path())
-
-
-class _FlushableFile(Protocol):
-    def flush(self) -> None: ...
-
-    def fileno(self) -> int: ...
-
-    def close(self) -> None: ...
-
-
-class _FilesystemJsonlExportSink(Protocol):
-    _path: Path
-    _file: _FlushableFile | None
-
-    def _claim_write_target(self) -> None: ...
 
 
 def _neutralize_csv_formula_cell(value: Any) -> Any:
@@ -143,143 +123,6 @@ class _FileSystemCsvAuditExportWriter:
             artifact_path=self._artifact_path,
             sign=sign,
         )
-
-
-def _write_json_export_batches(
-    *,
-    sink: SinkProtocol,
-    ctx: PluginContext,
-    records: Iterable[dict[str, Any]],
-    batch_size: int = _JSON_EXPORT_BATCH_SIZE,
-) -> tuple[int, int]:
-    """Write JSON export records, batching only for sinks that publish incrementally."""
-    if batch_size < 1:
-        raise ValueError("JSON export batch size must be at least 1")
-
-    if not _sink_supports_incremental_json_export_writes(sink):
-        all_records = list(records)
-        if not all_records:
-            return 0, 0
-        sink.write(all_records, ctx)
-        return len(all_records), 1
-
-    record_count = 0
-    batches_written = 0
-    batch: list[dict[str, Any]] = []
-
-    with _jsonl_export_staging_target(sink):
-        for record in records:
-            batch.append(record)
-            record_count += 1
-            if len(batch) < batch_size:
-                continue
-            sink.write(batch, ctx)
-            batches_written += 1
-            batch = []
-
-        if batch:
-            sink.write(batch, ctx)
-            batches_written += 1
-
-    return record_count, batches_written
-
-
-@contextmanager
-def _jsonl_export_staging_target(sink: SinkProtocol) -> Iterator[None]:
-    """Stage write-mode filesystem JSONL exports and publish only after full success."""
-    final_path = _jsonl_filesystem_sink_path(sink)
-    if final_path is None:
-        yield
-        return
-
-    filesystem_sink = cast("_FilesystemJsonlExportSink", sink)
-    filesystem_sink._claim_write_target()
-    final_path = _jsonl_filesystem_sink_path(sink)
-    if final_path is None:
-        yield
-        return
-
-    temp_path = final_path.with_suffix(final_path.suffix + ".tmp")
-    if temp_path.exists():
-        temp_path.unlink()
-
-    filesystem_sink._path = temp_path
-    try:
-        yield
-        _close_sink_file_if_open(sink)
-        if temp_path.exists():
-            os.replace(temp_path, final_path)
-            _fsync_parent_directory(final_path)
-    except BaseException:
-        _close_sink_file_if_open(sink)
-        if temp_path.exists():
-            temp_path.unlink()
-        raise
-    finally:
-        filesystem_sink._path = final_path
-
-
-def _jsonl_filesystem_sink_path(sink: SinkProtocol) -> Path | None:
-    if not _sink_supports_incremental_json_export_writes(sink):
-        return None
-    sink_attrs = vars(sink)
-    if "_mode" in sink_attrs and sink_attrs["_mode"] == "append":
-        return None
-    if "_path" not in sink_attrs:
-        return None
-    path = sink_attrs["_path"]
-    if type(path) is not _PATH_TYPE:
-        return None
-    return path
-
-
-def _close_sink_file_if_open(sink: SinkProtocol) -> None:
-    sink_attrs = vars(sink)
-    if "_file" not in sink_attrs:
-        return
-    file_obj = sink_attrs["_file"]
-    if file_obj is None:
-        return
-    open_file = cast("_FlushableFile", file_obj)
-    open_file.flush()
-    os.fsync(open_file.fileno())
-    open_file.close()
-    cast("_FilesystemJsonlExportSink", sink)._file = None
-
-
-def _fsync_parent_directory(path: Path) -> None:
-    dir_fd = os.open(str(path.parent), os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
-
-
-def _sink_supports_incremental_json_export_writes(sink: SinkProtocol) -> bool:
-    """Return whether a JSON export sink can publish incrementally without rewriting cumulative content."""
-    sink_attrs = vars(sink)
-    if "_format" in sink_attrs:
-        sink_format = sink_attrs["_format"]
-        if type(sink_format) is not str:
-            return False
-        return sink_format == "jsonl"
-
-    config = sink.config
-    if type(config) is not dict:
-        return False
-
-    if "format" in config:
-        configured_format = config["format"]
-        if type(configured_format) is not str:
-            return False
-        return configured_format == "jsonl"
-
-    if "path" not in config:
-        return False
-    path = config["path"]
-    if type(path) is not str:
-        return False
-    return Path(path).suffix == ".jsonl"
 
 
 def prepare_audit_export_binding(
@@ -361,8 +204,8 @@ def export_landscape(
                    or if sink_factory raises for the configured sink name
     """
     from elspeth.contracts.audit_export import AuditExportContentStore
-    from elspeth.core.landscape.exporter import LandscapeExporter, RecorderFactoryExportReadModel
     from elspeth.core.landscape.factory import RecorderFactory
+    from elspeth.engine.orchestrator.audit_export_effects import execute_audit_export_effect, prepare_audit_export_snapshot
 
     export_config = settings.landscape.export
 
@@ -405,15 +248,12 @@ def export_landscape(
             raise ValueError(f"{signing_secret_ref} environment variable required for signed export")
         signing_key = key_str.encode("utf-8")
 
-    # Construct the one explicit repository graph with the run's exact
-    # PayloadStore.  Passing its read adapter prevents LandscapeExporter from
-    # constructing a hidden RecorderFactory(db) without payload authority.
-    factory = RecorderFactory(db, payload_store=payload_store)
-    exporter = LandscapeExporter(
+    snapshot = prepare_audit_export_snapshot(
         db,
+        run_id=run_id,
+        config=export_config,
         signing_key=signing_key,
-        include_raw_error_rows=export_config.include_raw_error_rows,
-        read_model=RecorderFactoryExportReadModel(factory),
+        content_store=audit_export_content_store,
     )
 
     sink.node_id = f"export:{sink_name}"
@@ -421,13 +261,8 @@ def export_landscape(
     from elspeth.contracts import NodeType
     from elspeth.contracts.schema import SchemaConfig
 
-    ctx = PluginContext(
-        run_id=run_id, config={}, landscape=factory.plugin_audit_writer(), payload_store=payload_store, node_id=sink.node_id
-    )
-
-    # Register the export sink as a node so the FK constraint in `operations` is satisfied.
-    # The export sink writes post-run audit data and is not part of the execution graph,
-    # so it must be registered here before begin_operation() is called.
+    # Snapshot first: export audit rows can never recurse into their own bytes.
+    factory = RecorderFactory(db, payload_store=payload_store)
     factory.data_flow.register_node(
         run_id=run_id,
         node_id=sink.node_id,
@@ -439,45 +274,17 @@ def export_landscape(
         determinism=Determinism.IO_WRITE,
         source_file_hash=sink.source_file_hash,
     )
-
-    if export_config.format == "csv":
-        csv_writer = _FileSystemCsvAuditExportWriter.from_sink(sink_name=sink_name, sink=sink)
-        sink.on_start(ctx)
-        try:
-            with track_operation(
-                factory.execution,
-                run_id,
-                sink.node_id,
-                "sink_write",
-                ctx,
-                input_data={"export_format": "csv"},
-            ):
-                csv_writer.write(exporter=exporter, run_id=run_id, sign=export_config.sign)
-                sink.flush()
-        finally:
-            sink.on_complete(ctx)
-            sink.close()
-    else:
-        sink.on_start(ctx)
-        try:
-            with track_operation(
-                factory.execution,
-                run_id,
-                sink.node_id,
-                "sink_write",
-                ctx,
-                input_data={"export_format": "json"},
-            ) as operation:
-                record_count, batches_written = _write_json_export_batches(
-                    sink=sink,
-                    ctx=ctx,
-                    records=exporter.export_run(run_id, sign=export_config.sign),
-                )
-                operation.output_data = {"record_count": record_count, "batches_written": batches_written}
-                sink.flush()
-        finally:
-            sink.on_complete(ctx)
-            sink.close()
+    try:
+        execute_audit_export_effect(
+            factory=factory,
+            snapshot=snapshot,
+            sink=sink,
+            sink_node_id=sink.node_id,
+            target_config=dict(settings.sinks[sink_name].options),
+            worker_id=f"audit-export:{run_id}",
+        )
+    finally:
+        sink.close()
 
 
 def _export_csv_multifile(

@@ -753,7 +753,6 @@ class SinkEffectReservation:
             "group_payload_hash": identity.group_payload_hash,
             "artifact_id": identity.artifact_id,
             "artifact_idempotency_key": identity.artifact_idempotency_key,
-            "target_json": _EMPTY_TARGET_JSON,
             "primary_effect_id": request.primary_effect_id,
             "stream_id": stream_id,
             "stream_sequence": stream_sequence,
@@ -761,6 +760,8 @@ class SinkEffectReservation:
         }
         if any(getattr(row, field_name) != value for field_name, value in immutable.items()):
             raise ValueError("sink effect identity winner is divergent")
+        if inserted and row.target_json != _EMPTY_TARGET_JSON:
+            raise ValueError("new sink effect did not preserve its empty target sentinel")
         return inserted, self._effect_loader.load(row)
 
     @staticmethod

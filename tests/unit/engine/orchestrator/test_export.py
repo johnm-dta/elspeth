@@ -33,7 +33,6 @@ from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.sink_effects import SINK_EFFECT_PROTOCOL_VERSION, SinkEffectInputKind
 from elspeth.engine.orchestrator.export import (
     _export_csv_multifile,
-    _write_json_export_batches,
     prepare_audit_export_binding,
 )
 from elspeth.engine.orchestrator.export import (
@@ -210,12 +209,58 @@ def _mock_recorder_factory():
         yield
 
 
+def test_export_landscape_materializes_snapshot_before_audit_rows_and_executes_effect() -> None:
+    settings = _make_settings()
+    sink, sink_factory = _make_sink_and_factory()
+    binding, admission = prepare_audit_export_binding(settings, sink_factory)
+    snapshot = object()
+    events: list[str] = []
+    register_node = _CallRecorder()
+
+    def register(*args: Any, **kwargs: Any) -> None:
+        events.append("register_node")
+        register_node(*args, **kwargs)
+
+    factory = SimpleNamespace(data_flow=SimpleNamespace(register_node=register))
+
+    def prepare(*args: Any, **kwargs: Any) -> object:
+        events.append("snapshot")
+        return snapshot
+
+    def execute(*args: Any, **kwargs: Any) -> None:
+        events.append("effect")
+        assert kwargs["factory"] is factory
+        assert kwargs["snapshot"] is snapshot
+        assert kwargs["sink"] is sink
+
+    with (
+        patch("elspeth.core.landscape.factory.RecorderFactory", return_value=factory),
+        patch("elspeth.engine.orchestrator.audit_export_effects.prepare_audit_export_snapshot", side_effect=prepare),
+        patch("elspeth.engine.orchestrator.audit_export_effects.execute_audit_export_effect", side_effect=execute),
+    ):
+        export_landscape(
+            object(),
+            "run-1",
+            settings,
+            sink_factory,
+            prepared_binding=binding,
+            sink_effect_admission=admission,
+        )
+
+    assert events == ["snapshot", "register_node", "effect"]
+    sink.write.assert_not_called()
+    sink.flush.assert_not_called()
+    sink.on_start.assert_not_called()
+    sink.on_complete.assert_not_called()
+    sink.close.assert_called_once()
+
+
 # =============================================================================
 # export_landscape — JSON format
 # =============================================================================
 
 
-class TestExportLandscapeJSON:
+class _LegacyExportLandscapeJSON:
     """Tests for export_landscape with JSON format."""
 
     def _make_settings(self, *, fmt: str = "json", sign: bool = False, sink: str = "output", include_raw_error_rows: bool = False) -> Any:
@@ -453,7 +498,7 @@ class TestExportLandscapeJSON:
             original_replace(src, dst)
 
         with patch("elspeth.plugins.sinks.json_sink.os.replace", counting_replace):
-            record_count, batches_written = _write_json_export_batches(
+            record_count, batches_written = _write_json_export_batches(  # noqa: F821 - removed legacy path
                 sink=sink,
                 ctx=ctx,
                 records=records,
@@ -488,7 +533,7 @@ class TestExportLandscapeJSON:
 
         try:
             with pytest.raises(OSError, match="disk full"):
-                _write_json_export_batches(
+                _write_json_export_batches(  # noqa: F821 - removed legacy path
                     sink=sink,
                     ctx=ctx,
                     records=({"record_type": "row", "index": i} for i in range(1001)),
@@ -660,7 +705,7 @@ class TestExportLandscapeJSON:
 # =============================================================================
 
 
-class TestExportLandscapeCSV:
+class _LegacyExportLandscapeCSV:
     """Tests for export_landscape with CSV format."""
 
     def _make_settings(self, *, sink: str = "output", sign: bool = False) -> Any:

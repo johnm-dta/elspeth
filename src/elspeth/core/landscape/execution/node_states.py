@@ -714,6 +714,8 @@ class NodeStateRepository:
             edge_id=edge_id,
             owner="record_routing_event",
         )
+        event_id_was_supplied = event_id is not None
+        routing_group_id_was_supplied = routing_group_id is not None
         routing_group_id = routing_group_id or self._default_routing_group_id(state_id)
         event_id = event_id or self._default_routing_event_id(routing_group_id, ordinal)
         reason_hash = stable_hash(reason) if reason is not None else None
@@ -736,11 +738,13 @@ class NodeStateRepository:
             created_at=timestamp,
         )
 
-        return self._insert_or_load_routing_event(
-            event,
-            run_id=run_id,
+        return self._insert_or_load_routing_decision(
+            [event],
+            run_ids=[run_id],
             owner="record_routing_event",
-        )
+            enforce_event_ids=event_id_was_supplied,
+            enforce_group_id=routing_group_id_was_supplied,
+        )[0]
 
     def record_routing_events(
         self,
@@ -793,7 +797,13 @@ class NodeStateRepository:
             )
             for ordinal, route in enumerate(routes)
         ]
-        return self._insert_or_load_routing_group(events, run_ids=route_run_ids, state_id=state_id)
+        return self._insert_or_load_routing_decision(
+            events,
+            run_ids=route_run_ids,
+            owner="record_routing_events",
+            enforce_event_ids=False,
+            enforce_group_id=False,
+        )
 
     def _routing_event_run_id(
         self,
@@ -860,10 +870,19 @@ class NodeStateRepository:
     def _routing_insert_statement(conn: Connection, values: dict[str, object]) -> Insert:
         """Build a dialect-safe insert for the routing natural key."""
         if conn.dialect.name == "postgresql":
-            # The deterministic retry row conflicts on both the primary key
-            # and (routing_group_id, ordinal). Suppress either uniqueness
-            # collision, then validate the natural-key row exactly below.
-            return postgresql_insert(routing_events_table).values(**values).on_conflict_do_nothing()
+            # Suppress only the idempotency key. An unrelated event_id or FK
+            # collision is database corruption/programmer error and must keep
+            # the ordinary LandscapeRecordError surface.
+            return (
+                postgresql_insert(routing_events_table)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        routing_events_table.c.routing_group_id,
+                        routing_events_table.c.ordinal,
+                    ]
+                )
+            )
         if conn.dialect.name == "sqlite":
             # BEGIN IMMEDIATE serializes the pre-read and INSERT. A plain
             # INSERT preserves the zero-row fail-closed invariant on SQLite.
@@ -887,102 +906,174 @@ class NodeStateRepository:
             "created_at": event.created_at,
         }
 
-    def _load_matching_routing_event(self, row: Any, expected: RoutingEvent, *, run_id: str) -> RoutingEvent:
-        """Load an idempotent retry row or fail closed on divergent content."""
-        durable = self._routing_event_loader.load(row)
-        if (
-            durable.event_id != expected.event_id
-            or durable.state_id != expected.state_id
-            or durable.edge_id != expected.edge_id
-            or str(row.run_id) != run_id
-            or durable.routing_group_id != expected.routing_group_id
-            or durable.ordinal != expected.ordinal
-            or durable.mode != expected.mode
-            or durable.reason_hash != expected.reason_hash
-            or durable.reason_ref != expected.reason_ref
-        ):
-            raise AuditIntegrityError(
-                f"Routing decision conflict for group={expected.routing_group_id!r} ordinal={expected.ordinal}: "
-                "the durable event differs from the retried decision"
+    @staticmethod
+    def _routing_state_decision_query(state_id: str) -> Any:
+        """Return the complete durable decision for one state in stable order."""
+        return (
+            select(routing_events_table)
+            .where(routing_events_table.c.state_id == state_id)
+            .order_by(
+                routing_events_table.c.routing_group_id,
+                routing_events_table.c.ordinal,
+                routing_events_table.c.event_id,
             )
-        return durable
-
-    def _insert_or_load_routing_event(self, event: RoutingEvent, *, run_id: str, owner: str) -> RoutingEvent:
-        """Insert one event, or return the exact durable row on retry."""
-        key_query = select(routing_events_table).where(
-            routing_events_table.c.routing_group_id == event.routing_group_id,
-            routing_events_table.c.ordinal == event.ordinal,
         )
-        try:
-            with self._db.write_connection() as conn:
-                existing = conn.execute(key_query).fetchone()
-                if existing is not None:
-                    return self._load_matching_routing_event(existing, event, run_id=run_id)
 
-                result = conn.execute(self._routing_insert_statement(conn, self._routing_event_values(event, run_id=run_id)))
-                if result.rowcount == 1:
-                    inserted = conn.execute(key_query).fetchone()
-                    if inserted is None:
-                        raise AuditIntegrityError(f"Routing event {event.event_id} became unreadable immediately after insert")
-                    return self._load_matching_routing_event(inserted, event, run_id=run_id)
-                if conn.dialect.name != "postgresql":
-                    raise AuditIntegrityError(
-                        f"Failed to insert routing event {event.event_id} for state {event.state_id} - zero rows affected"
-                    )
-                existing = conn.execute(key_query).fetchone()
-                if existing is None:
-                    raise AuditIntegrityError(
-                        f"Failed to insert routing event {event.event_id} for state {event.state_id} - zero rows affected"
-                    )
-                return self._load_matching_routing_event(existing, event, run_id=run_id)
-        except SQLAlchemyError as exc:
-            raise LandscapeRecordError(
-                f"{owner} failed for state_id={event.state_id} — database rejected audit write: {type(exc).__name__}"
-            ) from exc
+    @staticmethod
+    def _lock_routing_state(conn: Connection, *, state_id: str, owner: str) -> str:
+        """Take state-wide decision authority and return the state's run ID."""
+        query = select(node_states_table.c.state_id, node_states_table.c.run_id).where(node_states_table.c.state_id == state_id)
+        if conn.dialect.name == "postgresql":
+            query = query.with_for_update(of=node_states_table)
+        row = conn.execute(query).fetchone()
+        if row is None:
+            raise LandscapeRecordError(f"{owner} requires existing state_id={state_id!r}")
+        return str(row.run_id)
 
-    def _insert_or_load_routing_group(
+    def _load_matching_routing_decision(
+        self,
+        rows: list[Any],
+        expected_events: list[RoutingEvent],
+        *,
+        run_ids: list[str],
+        enforce_event_ids: bool,
+        enforce_group_id: bool,
+    ) -> list[RoutingEvent]:
+        """Return one complete retry, including compatible pre-stable-ID rows."""
+        expected_group_id = expected_events[0].routing_group_id
+        durable_group_ids = {str(row.routing_group_id) for row in rows}
+        if len(durable_group_ids) != 1:
+            raise AuditIntegrityError(
+                f"Routing decision conflict for state={expected_events[0].state_id!r}: multiple durable routing groups exist"
+            )
+        durable_group_id = next(iter(durable_group_ids))
+        if len(rows) != len(expected_events):
+            raise AuditIntegrityError(
+                f"Routing decision conflict for state={expected_events[0].state_id!r}: "
+                f"complete routing decision has {len(rows)} durable route(s), retry has {len(expected_events)}"
+            )
+
+        # Before stable IDs, callers received random event/group IDs. A default
+        # retry must match those rows by complete semantic content and return
+        # their durable identities. Explicit caller identities remain strict.
+        legacy_group_identity = durable_group_id != expected_group_id
+        loaded: list[RoutingEvent] = []
+        for row, expected, run_id in zip(rows, expected_events, run_ids, strict=True):
+            durable = self._routing_event_loader.load(row)
+            identity_differs = (enforce_group_id and durable.routing_group_id != expected.routing_group_id) or (
+                (enforce_event_ids or not legacy_group_identity) and durable.event_id != expected.event_id
+            )
+            content_differs = (
+                durable.state_id != expected.state_id
+                or durable.edge_id != expected.edge_id
+                or str(row.run_id) != run_id
+                or durable.ordinal != expected.ordinal
+                or durable.mode != expected.mode
+                or durable.reason_hash != expected.reason_hash
+                or durable.reason_ref != expected.reason_ref
+            )
+            if identity_differs or content_differs:
+                raise AuditIntegrityError(
+                    f"Routing decision conflict for state={expected.state_id!r} ordinal={expected.ordinal}: "
+                    "the durable event differs from the retried decision"
+                )
+            loaded.append(durable)
+        return loaded
+
+    @staticmethod
+    def _assert_group_is_state_owned(
+        conn: Connection,
+        *,
+        routing_group_id: str,
+        state_id: str,
+        expected_count: int,
+    ) -> None:
+        """Reject a routing group whose rows cross state-decision boundaries."""
+        owners = list(
+            conn.execute(
+                select(routing_events_table.c.state_id).where(routing_events_table.c.routing_group_id == routing_group_id)
+            ).fetchall()
+        )
+        if len(owners) != expected_count or any(str(row.state_id) != state_id for row in owners):
+            raise AuditIntegrityError(f"Routing decision conflict for group={routing_group_id!r}: durable group has mixed state ownership")
+
+    def _insert_or_load_routing_decision(
         self,
         events: list[RoutingEvent],
         *,
         run_ids: list[str],
-        state_id: str,
+        owner: str,
+        enforce_event_ids: bool,
+        enforce_group_id: bool,
     ) -> list[RoutingEvent]:
-        """Atomically insert a fork, or return its exact durable event set."""
+        """Atomically establish or retry one complete state routing decision."""
+        state_id = events[0].state_id
         routing_group_id = events[0].routing_group_id
-        group_query = (
-            select(routing_events_table)
-            .where(routing_events_table.c.routing_group_id == routing_group_id)
-            .order_by(routing_events_table.c.ordinal)
-        )
         try:
             with self._db.write_connection() as conn:
-                existing = list(conn.execute(group_query).fetchall())
-                if existing:
-                    if len(existing) != len(events):
-                        raise AuditIntegrityError(
-                            f"Routing decision conflict for group={routing_group_id!r}: durable route count differs from retry"
+                locked_run_id = self._lock_routing_state(conn, state_id=state_id, owner=owner)
+                for event, expected_run_id in zip(events, run_ids, strict=True):
+                    if event.state_id != state_id or event.routing_group_id != routing_group_id:
+                        raise AuditIntegrityError(f"{owner} attempted to write a mixed routing decision")
+                    durable_run_id = self._routing_event_run_id(
+                        state_id=state_id,
+                        edge_id=event.edge_id,
+                        owner=owner,
+                        conn=conn,
+                    )
+                    if durable_run_id != locked_run_id or durable_run_id != expected_run_id:
+                        raise LandscapeRecordError(
+                            f"{owner} requires state_id={state_id!r} and edge_id={event.edge_id!r} to remain in the same run"
                         )
-                    return [
-                        self._load_matching_routing_event(row, event, run_id=run_ids[index])
-                        for index, (row, event) in enumerate(zip(existing, events, strict=True))
-                    ]
 
+                existing = list(conn.execute(self._routing_state_decision_query(state_id)).fetchall())
+                if existing:
+                    loaded = self._load_matching_routing_decision(
+                        existing,
+                        events,
+                        run_ids=run_ids,
+                        enforce_event_ids=enforce_event_ids,
+                        enforce_group_id=enforce_group_id,
+                    )
+                    durable_group_id = str(existing[0].routing_group_id)
+                    self._assert_group_is_state_owned(
+                        conn,
+                        routing_group_id=durable_group_id,
+                        state_id=state_id,
+                        expected_count=len(existing),
+                    )
+                    return loaded
+
+                # A legacy/corrupt row may already own this group under a
+                # different state. Never grow it into a mixed decision.
+                self._assert_group_is_state_owned(
+                    conn,
+                    routing_group_id=routing_group_id,
+                    state_id=state_id,
+                    expected_count=0,
+                )
                 for event, run_id in zip(events, run_ids, strict=True):
                     result = conn.execute(self._routing_insert_statement(conn, self._routing_event_values(event, run_id=run_id)))
-                    if result.rowcount == 0 and conn.dialect.name != "postgresql":
+                    if result.rowcount != 1 and conn.dialect.name != "postgresql":
                         raise AuditIntegrityError(
                             f"Failed to insert routing event {event.event_id} for state {state_id} - zero rows affected"
                         )
-                durable_rows = list(conn.execute(group_query).fetchall())
-                if len(durable_rows) != len(events):
-                    raise AuditIntegrityError(
-                        f"Routing decision conflict for group={routing_group_id!r}: durable route count differs from write"
-                    )
-                return [
-                    self._load_matching_routing_event(row, event, run_id=run_ids[index])
-                    for index, (row, event) in enumerate(zip(durable_rows, events, strict=True))
-                ]
+
+                durable_rows = list(conn.execute(self._routing_state_decision_query(state_id)).fetchall())
+                self._assert_group_is_state_owned(
+                    conn,
+                    routing_group_id=routing_group_id,
+                    state_id=state_id,
+                    expected_count=len(events),
+                )
+                return self._load_matching_routing_decision(
+                    durable_rows,
+                    events,
+                    run_ids=run_ids,
+                    enforce_event_ids=True,
+                    enforce_group_id=True,
+                )
         except SQLAlchemyError as exc:
             raise LandscapeRecordError(
-                f"record_routing_events failed for state_id={state_id} — database rejected audit write: {type(exc).__name__}"
+                f"{owner} failed for state_id={state_id} — database rejected audit write: {type(exc).__name__}"
             ) from exc

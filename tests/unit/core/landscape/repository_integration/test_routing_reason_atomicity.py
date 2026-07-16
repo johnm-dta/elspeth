@@ -7,13 +7,16 @@ import multiprocessing
 import os
 import shutil
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
+from sqlalchemy import event as sqlalchemy_event
 from sqlalchemy import select
 
-from elspeth.contracts import NodeType, RoutingMode
-from elspeth.contracts.errors import ConfigGateReason
+from elspeth.contracts import NodeType, RoutingMode, RoutingSpec
+from elspeth.contracts.errors import AuditIntegrityError, ConfigGateReason
 from elspeth.contracts.payload_store import PayloadStore
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.canonical import stable_hash
@@ -31,6 +34,7 @@ ROW_ID = "row-0"
 TOKEN_ID = "token-0"
 STATE_ID = "state-0"
 EDGE_ID = "edge-0"
+EDGE_B_ID = "edge-1"
 REASON: ConfigGateReason = {"condition": "row['route'] == 'accepted'", "result": "true"}
 SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
@@ -73,6 +77,14 @@ def _seed_routing_state(db_url: str) -> None:
             label="accepted",
             mode=RoutingMode.MOVE,
             edge_id=EDGE_ID,
+        )
+        factory.data_flow.register_edge(
+            run_id=RUN_ID,
+            from_node_id=GATE_ID,
+            to_node_id=SINK_ID,
+            label="rejected",
+            mode=RoutingMode.MOVE,
+            edge_id=EDGE_B_ID,
         )
         factory.data_flow.create_row(
             RUN_ID,
@@ -140,6 +152,77 @@ def _record_concurrently(db_url: str, payload_dir: str, barrier: Any, results: A
     except BaseException as exc:
         results.put(("error", type(exc).__name__, str(exc)))
         raise
+
+
+def _record_decision_with_sqlite_lock_pause(
+    db_url: str,
+    payload_dir: str,
+    decision_kind: str,
+    pause_after_lock: bool,
+    lock_acquired: Any,
+    release_lock: Any,
+    call_started: Any,
+    results: Any,
+) -> None:
+    """Record one single/group decision, optionally pausing with write authority."""
+    with LandscapeDB.from_url(db_url, create_tables=False) as db:
+        if pause_after_lock:
+
+            def pause_on_begin(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:  # type: ignore[no-untyped-def]
+                if statement.strip().upper() == "BEGIN IMMEDIATE" and not lock_acquired.is_set():
+                    lock_acquired.set()
+                    if not release_lock.wait(timeout=30):
+                        raise TimeoutError("test did not release SQLite routing authority")
+
+            sqlalchemy_event.listen(db.engine, "after_cursor_execute", pause_on_begin)
+
+        store = FilesystemPayloadStore(Path(payload_dir))
+        factory = RecorderFactory(db, payload_store=store)
+        call_started.set()
+        try:
+            if decision_kind == "single":
+                recorded = [factory.execution.record_routing_event(STATE_ID, EDGE_ID, RoutingMode.MOVE, reason=REASON)]
+            else:
+                recorded = factory.execution.record_routing_events(
+                    STATE_ID,
+                    [
+                        RoutingSpec(edge_id=EDGE_ID, mode=RoutingMode.MOVE),
+                        RoutingSpec(edge_id=EDGE_B_ID, mode=RoutingMode.MOVE),
+                    ],
+                    reason=REASON,
+                )
+        except BaseException as exc:
+            results.put((decision_kind, "error", type(exc).__name__, str(exc)))
+        else:
+            results.put((decision_kind, "ok", len(recorded), tuple(event.event_id for event in recorded)))
+
+
+def _insert_legacy_routing_group(
+    db_url: str,
+    *,
+    group_id: str,
+    event_prefix: str,
+    edge_ids: tuple[str, ...],
+    reason_hash: str,
+    reason_ref: str | None,
+) -> None:
+    """Insert the pre-change random-ID row shape directly."""
+    with LandscapeDB.from_url(db_url, create_tables=False) as db, db.write_connection() as conn:
+        for ordinal, edge_id in enumerate(edge_ids):
+            conn.execute(
+                routing_events_table.insert().values(
+                    event_id=f"{event_prefix}-{ordinal}",
+                    state_id=STATE_ID,
+                    edge_id=edge_id,
+                    run_id=RUN_ID,
+                    routing_group_id=group_id,
+                    ordinal=ordinal,
+                    mode=RoutingMode.MOVE,
+                    reason_hash=reason_hash,
+                    reason_ref=reason_ref,
+                    created_at=datetime(2026, 7, 1, tzinfo=UTC),
+                )
+            )
 
 
 def test_crash_after_reason_store_restarts_to_exact_event(tmp_path: Path) -> None:
@@ -216,6 +299,212 @@ def test_spawned_identical_writers_converge_and_export_exact_reason(tmp_path: Pa
         assert routing_exports[0]["event_id"] == rows[0].event_id
         assert routing_exports[0]["reason_hash"] == expected_ref
         assert routing_exports[0]["reason_ref"] == expected_ref
+
+
+def test_multi_then_single_is_refused_without_shrinking_decision(tmp_path: Path) -> None:
+    """A complete two-route decision cannot be retried as one route."""
+    db_url = f"sqlite:///{tmp_path / 'audit.db'}"
+    payload_dir = tmp_path / "payloads"
+    _seed_routing_state(db_url)
+    with LandscapeDB.from_url(db_url, create_tables=False) as db:
+        factory = RecorderFactory(db, payload_store=FilesystemPayloadStore(payload_dir))
+        routes = [
+            RoutingSpec(edge_id=EDGE_ID, mode=RoutingMode.MOVE),
+            RoutingSpec(edge_id=EDGE_B_ID, mode=RoutingMode.MOVE),
+        ]
+        original = factory.execution.record_routing_events(STATE_ID, routes, reason=REASON)
+
+        with pytest.raises(AuditIntegrityError, match="complete routing decision"):
+            factory.execution.record_routing_event(STATE_ID, EDGE_ID, RoutingMode.MOVE, reason=REASON)
+
+        assert factory.query.get_routing_events(STATE_ID) == original
+
+
+def test_single_then_multi_is_refused_without_extending_decision(tmp_path: Path) -> None:
+    """A complete one-route decision cannot be extended by a fork retry."""
+    db_url = f"sqlite:///{tmp_path / 'audit.db'}"
+    payload_dir = tmp_path / "payloads"
+    _seed_routing_state(db_url)
+    with LandscapeDB.from_url(db_url, create_tables=False) as db:
+        factory = RecorderFactory(db, payload_store=FilesystemPayloadStore(payload_dir))
+        original = factory.execution.record_routing_event(STATE_ID, EDGE_ID, RoutingMode.MOVE, reason=REASON)
+
+        with pytest.raises(AuditIntegrityError, match="complete routing decision"):
+            factory.execution.record_routing_events(
+                STATE_ID,
+                [
+                    RoutingSpec(edge_id=EDGE_ID, mode=RoutingMode.MOVE),
+                    RoutingSpec(edge_id=EDGE_B_ID, mode=RoutingMode.MOVE),
+                ],
+                reason=REASON,
+            )
+
+        assert factory.query.get_routing_events(STATE_ID) == [original]
+
+
+@pytest.mark.parametrize("winner_kind", ["single", "group"])
+def test_spawned_single_group_race_has_one_complete_winner(tmp_path: Path, winner_kind: str) -> None:
+    """SQLite write authority makes either preselected decision win wholly."""
+    db_url = f"sqlite:///{tmp_path / 'audit.db'}"
+    payload_dir = tmp_path / "payloads"
+    _seed_routing_state(db_url)
+    loser_kind = "group" if winner_kind == "single" else "single"
+    context = multiprocessing.get_context("spawn")
+    winner_lock_acquired = context.Event()
+    release_winner = context.Event()
+    loser_lock_acquired = context.Event()
+    release_loser = context.Event()
+    winner_started = context.Event()
+    loser_started = context.Event()
+    results = context.Queue()
+    winner = context.Process(
+        target=_record_decision_with_sqlite_lock_pause,
+        args=(
+            db_url,
+            str(payload_dir),
+            winner_kind,
+            True,
+            winner_lock_acquired,
+            release_winner,
+            winner_started,
+            results,
+        ),
+    )
+    loser = context.Process(
+        target=_record_decision_with_sqlite_lock_pause,
+        args=(
+            db_url,
+            str(payload_dir),
+            loser_kind,
+            False,
+            loser_lock_acquired,
+            release_loser,
+            loser_started,
+            results,
+        ),
+    )
+    winner.start()
+    assert winner_started.wait(timeout=15)
+    assert winner_lock_acquired.wait(timeout=15)
+    loser.start()
+    assert loser_started.wait(timeout=15)
+    release_winner.set()
+    for process in (winner, loser):
+        process.join(timeout=45)
+        assert not process.is_alive()
+        assert process.exitcode == 0
+
+    outcomes = {result[0]: result[1:] for result in (results.get(timeout=10), results.get(timeout=10))}
+    assert outcomes[winner_kind][0] == "ok"
+    assert outcomes[loser_kind][0:2] == ("error", "AuditIntegrityError")
+    with LandscapeDB.from_url(db_url, create_tables=False) as db:
+        durable = RecorderFactory(db).query.get_routing_events(STATE_ID)
+    assert len(durable) == (1 if winner_kind == "single" else 2)
+    assert len({event.routing_group_id for event in durable}) == 1
+
+
+def test_legacy_single_default_retry_returns_random_id_row(tmp_path: Path) -> None:
+    """A pre-change single decision is retried without appending new IDs."""
+    db_url = f"sqlite:///{tmp_path / 'audit.db'}"
+    payload_dir = tmp_path / "payloads"
+    _seed_routing_state(db_url)
+    store = FilesystemPayloadStore(payload_dir)
+    reason_ref = store.store(b'{"condition":"row[\'route\'] == \'accepted\'","result":"true"}')
+    _insert_legacy_routing_group(
+        db_url,
+        group_id="legacy-random-single-group",
+        event_prefix="legacy-random-single-event",
+        edge_ids=(EDGE_ID,),
+        reason_hash=stable_hash(REASON),
+        reason_ref=reason_ref,
+    )
+
+    with LandscapeDB.from_url(db_url, create_tables=False) as reopened:
+        factory = RecorderFactory(reopened, payload_store=store)
+        retried = factory.execution.record_routing_event(STATE_ID, EDGE_ID, RoutingMode.MOVE, reason=REASON)
+        assert retried.event_id == "legacy-random-single-event-0"
+        assert retried.routing_group_id == "legacy-random-single-group"
+        assert factory.query.get_routing_events(STATE_ID) == [retried]
+
+
+def test_legacy_multi_default_retry_returns_random_id_group(tmp_path: Path) -> None:
+    """A pre-change fork is retried without appending deterministic IDs."""
+    db_url = f"sqlite:///{tmp_path / 'audit.db'}"
+    payload_dir = tmp_path / "payloads"
+    _seed_routing_state(db_url)
+    store = FilesystemPayloadStore(payload_dir)
+    reason_ref = store.store(b'{"condition":"row[\'route\'] == \'accepted\'","result":"true"}')
+    _insert_legacy_routing_group(
+        db_url,
+        group_id="legacy-random-multi-group",
+        event_prefix="legacy-random-multi-event",
+        edge_ids=(EDGE_ID, EDGE_B_ID),
+        reason_hash=stable_hash(REASON),
+        reason_ref=reason_ref,
+    )
+
+    with LandscapeDB.from_url(db_url, create_tables=False) as reopened:
+        factory = RecorderFactory(reopened, payload_store=store)
+        retried = factory.execution.record_routing_events(
+            STATE_ID,
+            [
+                RoutingSpec(edge_id=EDGE_ID, mode=RoutingMode.MOVE),
+                RoutingSpec(edge_id=EDGE_B_ID, mode=RoutingMode.MOVE),
+            ],
+            reason=REASON,
+        )
+        assert [event.event_id for event in retried] == ["legacy-random-multi-event-0", "legacy-random-multi-event-1"]
+        assert {event.routing_group_id for event in retried} == {"legacy-random-multi-group"}
+        assert factory.query.get_routing_events(STATE_ID) == retried
+
+
+def test_multiple_legacy_groups_fail_closed_without_append(tmp_path: Path) -> None:
+    """Ambiguous pre-change decision groups cannot be guessed or merged."""
+    db_url = f"sqlite:///{tmp_path / 'audit.db'}"
+    payload_dir = tmp_path / "payloads"
+    _seed_routing_state(db_url)
+    store = FilesystemPayloadStore(payload_dir)
+    reason_ref = store.store(b'{"condition":"row[\'route\'] == \'accepted\'","result":"true"}')
+    for index, edge_id in enumerate((EDGE_ID, EDGE_B_ID)):
+        _insert_legacy_routing_group(
+            db_url,
+            group_id=f"legacy-ambiguous-group-{index}",
+            event_prefix=f"legacy-ambiguous-event-{index}",
+            edge_ids=(edge_id,),
+            reason_hash=stable_hash(REASON),
+            reason_ref=reason_ref,
+        )
+
+    with LandscapeDB.from_url(db_url, create_tables=False) as reopened:
+        factory = RecorderFactory(reopened, payload_store=store)
+        with pytest.raises(AuditIntegrityError, match="multiple durable routing groups"):
+            factory.execution.record_routing_event(STATE_ID, EDGE_ID, RoutingMode.MOVE, reason=REASON)
+        assert len(factory.query.get_routing_events(STATE_ID)) == 2
+
+
+def test_mismatched_legacy_reason_ref_is_rejected_without_append(tmp_path: Path) -> None:
+    """Store-first retry never bypasses a dangling legacy explanation ref."""
+    db_url = f"sqlite:///{tmp_path / 'audit.db'}"
+    payload_dir = tmp_path / "payloads"
+    _seed_routing_state(db_url)
+    store = FilesystemPayloadStore(payload_dir)
+    _insert_legacy_routing_group(
+        db_url,
+        group_id="legacy-dangling-group",
+        event_prefix="legacy-dangling-event",
+        edge_ids=(EDGE_ID,),
+        reason_hash=stable_hash(REASON),
+        reason_ref="f" * 64,
+    )
+
+    with LandscapeDB.from_url(db_url, create_tables=False) as reopened:
+        factory = RecorderFactory(reopened, payload_store=store)
+        with pytest.raises(AuditIntegrityError, match="durable event differs"):
+            factory.execution.record_routing_event(STATE_ID, EDGE_ID, RoutingMode.MOVE, reason=REASON)
+        durable = factory.query.get_routing_events(STATE_ID)
+        assert len(durable) == 1
+        assert durable[0].event_id == "legacy-dangling-event-0"
+        assert durable[0].reason_ref == "f" * 64
 
 
 def test_journal_captures_final_reason_ref_on_insert_without_update(tmp_path: Path) -> None:

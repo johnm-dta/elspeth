@@ -1649,8 +1649,25 @@ class TestRecordRoutingEvent:
             mode=RoutingMode.MOVE,
             edge_id="edge-1",
         )
+        fac.data_flow.create_row(
+            "run-1",
+            "source-0",
+            1,
+            {"name": "occupied"},
+            row_id="row-occupied",
+            source_row_index=1,
+            ingest_sequence=1,
+        )
+        fac.data_flow.create_token("row-occupied", token_id="tok-occupied")
+        occupied_state = repo.begin_node_state(
+            "tok-occupied",
+            "transform-1",
+            "run-1",
+            1,
+            {"name": "occupied"},
+        )
         repo.record_routing_event(
-            state.state_id,
+            occupied_state.state_id,
             "edge-1",
             RoutingMode.MOVE,
             event_id="occupied-event-id",

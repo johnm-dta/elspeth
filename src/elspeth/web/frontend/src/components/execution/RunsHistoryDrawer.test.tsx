@@ -60,6 +60,9 @@ function makeDiagnostics(overrides: Partial<RunDiagnostics> = {}): RunDiagnostic
         operation_id: "op-1",
         node_id: "rate_colours",
         operation_type: "runtime_preflight",
+        // Only sink_write operations may carry a sink_effect_id
+        // (ck_operations_sink_effect_type); preflight ops are null.
+        sink_effect_id: null,
         status: "failed",
         duration_ms: 12,
         started_at: "2026-05-17T00:00:00Z",

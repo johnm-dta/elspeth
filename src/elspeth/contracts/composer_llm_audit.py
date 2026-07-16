@@ -13,7 +13,6 @@ Layer: L0 (contracts). Imports nothing above contracts.
 from __future__ import annotations
 
 import math
-import re
 from dataclasses import dataclass, fields
 from datetime import datetime
 from enum import StrEnum
@@ -156,7 +155,9 @@ class ComposerLLMCall:
         for name in self.declared_tool_names:
             if type(name) is not str or not name:
                 raise ValueError("declared_tool_names entries must be non-empty strings")
-            if re.fullmatch(r"[a-z][a-z0-9_]*", name) is None:
+            if not ("a" <= name[0] <= "z") or any(
+                not (("a" <= character <= "z") or ("0" <= character <= "9") or character == "_") for character in name
+            ):
                 raise ValueError("declared_tool_names entries must be tool names containing lowercase letters, digits, and underscores")
         if len(set(self.declared_tool_names)) != len(self.declared_tool_names):
             raise ValueError("declared_tool_names entries must be unique")

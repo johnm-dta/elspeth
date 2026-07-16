@@ -123,8 +123,8 @@ from elspeth.web.composer.tools import (
     compute_proof_diagnostics,
     execute_tool,
     get_tool_definitions,
+    normalize_tool_result_validation,
 )
-from elspeth.web.composer.tools._common import normalize_tool_result_validation
 from elspeth.web.execution.preflight import runtime_preflight_settings_hash
 from elspeth.web.execution.runtime_preflight import (
     RuntimePreflightCoordinator,

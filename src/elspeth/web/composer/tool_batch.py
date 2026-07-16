@@ -93,8 +93,8 @@ from elspeth.web.composer.tools import (
     is_discovery_tool,
     is_mutation_tool,
     is_session_aware_tool,
+    normalize_tool_result_validation,
 )
-from elspeth.web.composer.tools._common import normalize_tool_result_validation
 from elspeth.web.execution.schemas import ValidationResult
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
@@ -107,13 +107,6 @@ if TYPE_CHECKING:
 
 
 _MAX_PENDING_PROPOSALS_PER_TURN: Final[int] = 10
-_MIN_USEFUL_ADVISOR_SECONDS: Final[float] = 5.0
-
-
-def _remaining_compose_seconds(deadline: float) -> float:
-    """Return the compose budget available at the advisor boundary."""
-
-    return deadline - asyncio.get_event_loop().time()
 
 
 @dataclass(frozen=True, slots=True)
@@ -799,7 +792,7 @@ async def run_tool_batch(
                     llm_calls=recorder.llm_calls,
                 )
 
-            if remaining < _MIN_USEFUL_ADVISOR_SECONDS:
+            elif remaining < _MIN_USEFUL_ADVISOR_SECONDS:
                 deadline_payload = {
                     "status": "DEADLINE_TOO_CLOSE",
                     "outbound_call_made": False,
@@ -1463,3 +1456,12 @@ async def run_tool_batch(
         pre_state_id=pre_state_id,
     )
     return dispatch, advisor_calls_used
+
+
+_MIN_USEFUL_ADVISOR_SECONDS: Final[float] = 5.0
+
+
+def _remaining_compose_seconds(deadline: float) -> float:
+    """Return the compose budget available at the advisor boundary."""
+
+    return deadline - asyncio.get_event_loop().time()

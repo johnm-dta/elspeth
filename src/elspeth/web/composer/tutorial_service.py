@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException, Request
 from sqlalchemy import func, select, update
@@ -31,7 +31,6 @@ from elspeth.core.landscape.schema import (
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.audit_readiness.service import build_plugin_policy_readiness
 from elspeth.web.auth.models import UserIdentity
-from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.composer.tutorial_models import (
     TutorialCancelResponse,
@@ -650,3 +649,7 @@ async def cleanup_tutorial_orphans(
             break
         offset += limit
     return TutorialOrphanCleanupResponse(deleted_count=deleted_count)
+
+
+if TYPE_CHECKING:
+    from elspeth.web.catalog.protocol import CatalogService

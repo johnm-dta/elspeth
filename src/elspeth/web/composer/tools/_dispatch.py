@@ -591,8 +591,6 @@ def execute_tool(
     if catalog.snapshot is not plugin_snapshot:
         raise ValueError("plugin_snapshot_catalog_mismatch")
 
-    current_validation = prior_validation or catalog.validate_composition_state(state).validation
-
     all_handlers: dict[str, ToolHandler] = {
         **_DISCOVERY_TOOLS,
         **_MUTATION_TOOLS,
@@ -604,6 +602,7 @@ def execute_tool(
     handler = all_handlers.get(tool_name)
     if handler is None:
         return normalize_tool_result_validation(_failure_result(state, f"Unknown tool: {tool_name}"), catalog)
+    current_validation = prior_validation or catalog.validate_composition_state(state).validation
 
     if tool_arguments_hash is not None:
         argument_error = _validate_tool_arguments(

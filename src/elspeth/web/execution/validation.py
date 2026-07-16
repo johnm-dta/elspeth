@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 import yaml
@@ -58,7 +58,6 @@ from elspeth.engine.orchestrator.types import (
 from elspeth.engine.orchestrator.value_source_validation import ValueSourceValidationError
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.infrastructure.manager import PluginNotFoundError
-from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts
 from elspeth.web.composer.state import (
     CompositionState,
@@ -2382,27 +2381,8 @@ def validate_pipeline_for_trained_operator(
     """Explicit non-web validation root preserving CLI and local-tool neutrality."""
     from elspeth.web.dependencies import create_catalog_service
 
-    catalog = kwargs.pop("catalog", None)
-    if catalog is None:
-        catalog = create_catalog_service()
     plugin_snapshot = kwargs.pop("plugin_snapshot", None)
-    if plugin_snapshot is None:
-        plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
-    elif plugin_snapshot.principal_scope != "local:trained-operator":
-        # This wrapper is the explicit local trust boundary.  Preserve a
-        # caller-supplied availability/control matrix while making the raw
-        # full-schema posture unambiguous to the shared policy validator.
-        plugin_snapshot = PluginAvailabilitySnapshot.create(
-            policy_hash=plugin_snapshot.policy_hash,
-            principal_scope="local:trained-operator",
-            available=plugin_snapshot.available,
-            unavailable=plugin_snapshot.unavailable,
-            selected=plugin_snapshot.selected,
-            usable_profile_aliases=plugin_snapshot.usable_profile_aliases,
-            selected_profile_aliases=plugin_snapshot.selected_profile_aliases,
-            control_modes=plugin_snapshot.control_modes,
-            binding_generation_fingerprint=plugin_snapshot.binding_generation_fingerprint,
-        )
+    catalog, plugin_snapshot = _trained_operator_validation_context(kwargs, plugin_snapshot, create_catalog_service)
     profile_registry = kwargs.pop("profile_registry", None)
     return validate_pipeline(
         state,
@@ -2412,4 +2392,32 @@ def validate_pipeline_for_trained_operator(
         profile_registry=profile_registry,
         catalog=catalog,
         **kwargs,
+    )
+
+
+if TYPE_CHECKING:
+    from elspeth.web.catalog.protocol import CatalogService
+
+
+def _trained_operator_validation_context(
+    kwargs: dict[str, Any],
+    plugin_snapshot: PluginAvailabilitySnapshot | None,
+    catalog_factory: Callable[[], CatalogService],
+) -> tuple[CatalogService, PluginAvailabilitySnapshot]:
+    """Consume the local catalog and normalize a caller-supplied snapshot."""
+    catalog = kwargs.pop("catalog") if "catalog" in kwargs else catalog_factory()
+    if plugin_snapshot is None:
+        return catalog, PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    if plugin_snapshot.principal_scope == "local:trained-operator":
+        return catalog, plugin_snapshot
+    return catalog, PluginAvailabilitySnapshot.create(
+        policy_hash=plugin_snapshot.policy_hash,
+        principal_scope="local:trained-operator",
+        available=plugin_snapshot.available,
+        unavailable=plugin_snapshot.unavailable,
+        selected=plugin_snapshot.selected,
+        usable_profile_aliases=plugin_snapshot.usable_profile_aliases,
+        selected_profile_aliases=plugin_snapshot.selected_profile_aliases,
+        control_modes=plugin_snapshot.control_modes,
+        binding_generation_fingerprint=plugin_snapshot.binding_generation_fingerprint,
     )

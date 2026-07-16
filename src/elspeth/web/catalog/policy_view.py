@@ -9,7 +9,7 @@ from elspeth.contracts.plugin_capabilities import PluginCapability
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginKind, PluginSchemaInfo, PluginSummary
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId, PluginUnavailableReason
-from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
+from elspeth.web.plugin_policy.profiles import LoweredPluginConfig, OperatorProfileRegistry
 
 if TYPE_CHECKING:
     from elspeth.web.composer.state import CompositionState
@@ -98,6 +98,25 @@ class PolicyCatalogView:
             self._full.get_schema(plugin_type, name),
             available_aliases=aliases,
         )
+
+    def lower_operator_profile_options(
+        self,
+        plugin_id: PluginId,
+        *,
+        alias: str,
+        safe_options: dict[str, object],
+    ) -> LoweredPluginConfig:
+        """Lower authored profile options without exposing the binding.
+
+        Persisted state retains the opaque alias and safe options; this
+        compatibility boundary only returns an in-memory executable view.
+        """
+        if self._profiles is None:
+            raise ValueError("plugin_has_no_operator_profile")
+        available_aliases = dict(self.snapshot.usable_profile_aliases).get(plugin_id, ())
+        if alias not in available_aliases:
+            raise ValueError("profile_unavailable")
+        return self._profiles.lower_options(plugin_id, alias=alias, safe_options=safe_options)
 
     def validate_authored_state(self, state: CompositionState) -> PluginPolicyValidationResult:
         """Validate policy and lower private bindings without mutating authored state."""

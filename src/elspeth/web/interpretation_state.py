@@ -1113,13 +1113,6 @@ def _validate_model_choice_review(node: NodeSpec, model: str) -> None:
         raise ValueError(f"llm node {node.id!r} model-choice review hash drifted")
 
 
-def model_choice_artifact_hash(model: str) -> str:
-    """Canonical artifact hash for an operator-reviewed model identifier."""
-    if not isinstance(model, str) or not model.strip():
-        raise ValueError("model_choice_artifact_hash requires a non-empty model identifier")
-    return stable_hash(model)
-
-
 def pipeline_decision_artifact_hash(
     node: NodeSpec,
     all_nodes: Sequence[NodeSpec],
@@ -1472,8 +1465,10 @@ def _pending_authoring_shell(requirement: InterpretationRequirement) -> dict[str
 def serialize_authoring_review_options(options: Mapping[str, Any]) -> dict[str, Any]:
     """Return an audit-safe composer payload with only pending review shells."""
     serialized = dict(options)
-    serialized.pop("resolved_prompt_template_hash", None)
-    serialized.pop(SOURCE_AUTHORING_KEY, None)
+    if "resolved_prompt_template_hash" in serialized:
+        del serialized["resolved_prompt_template_hash"]
+    if SOURCE_AUTHORING_KEY in serialized:
+        del serialized[SOURCE_AUTHORING_KEY]
     review_index = _validated_review_index(options)
     requirements = tuple(review_index.values()) if review_index else None
     if requirements is not None:
@@ -1535,9 +1530,9 @@ def _validated_review_index(options: Mapping[str, Any]) -> dict[tuple[str, Inter
 def _require_resolved_review_coherence(requirement: InterpretationRequirement) -> None:
     if requirement["status"] != "resolved":
         return
-    if not isinstance(requirement["event_id"], str) or not requirement["event_id"]:
+    if type(requirement["event_id"]) is not str or not requirement["event_id"]:
         raise ValueError(f"resolved interpretation requirement {requirement['id']!r} has no event_id")
-    if not isinstance(requirement["accepted_value"], str):
+    if type(requirement["accepted_value"]) is not str:
         raise ValueError(f"resolved interpretation requirement {requirement['id']!r} has no accepted_value")
 
 
@@ -1552,13 +1547,13 @@ def _node_review_artifact(
         structure_hash = prompt_structure_hash_from_options(node.options)
         if structure_hash is not None:
             return structure_hash
-        prompt_template = node.options.get("prompt_template")
-        if not isinstance(prompt_template, str):
+        prompt_template = node.options["prompt_template"] if "prompt_template" in node.options else None
+        if type(prompt_template) is not str:
             raise ValueError(f"llm_prompt_template review on node {node.id!r} has no prompt_template")
         return stable_hash(prompt_template)
     if kind is InterpretationKind.LLM_MODEL_CHOICE:
-        model = node.options.get("model")
-        if not isinstance(model, str):
+        model = node.options["model"] if "model" in node.options else None
+        if type(model) is not str:
             raise ValueError(f"llm_model_choice review on node {node.id!r} has no model")
         return model_choice_artifact_hash(model)
     if kind is InterpretationKind.PIPELINE_DECISION:
@@ -1580,7 +1575,7 @@ def _resolved_review_hash(requirement: InterpretationRequirement, kind: Interpre
     else:
         field = "resolved_prompt_template_hash"
         value = requirement["resolved_prompt_template_hash"]
-    if not isinstance(value, str) or not value:
+    if type(value) is not str or not value:
         raise ValueError(f"resolved interpretation requirement {requirement['id']!r} has no {field}")
     return value
 
@@ -1599,8 +1594,8 @@ def _vague_review_is_unchanged(
         raise ValueError(f"resolved vague-term review {requirement_id!r} has no prompt_template_parts reference")
     if not any(part["kind"] == "interpretation_ref" and part["requirement_id"] == requirement_id for part in proposed_parts):
         raise ValueError(f"proposed vague-term review {requirement_id!r} has no prompt_template_parts reference")
-    previous_prompt = previous.options.get("prompt_template")
-    if not isinstance(previous_prompt, str):
+    previous_prompt = previous.options["prompt_template"] if "prompt_template" in previous.options else None
+    if type(previous_prompt) is not str:
         raise ValueError(f"resolved vague-term review {requirement_id!r} has no rendered prompt_template")
     if _resolved_review_hash(requirement, InterpretationKind.VAGUE_TERM) != stable_hash(previous_prompt):
         raise ValueError(f"resolved vague-term review {requirement_id!r} hash drifted")
@@ -1618,7 +1613,8 @@ def _reconcile_node_options(
     proposed_index = _validated_review_index(proposed.options)
     previous_index = _validated_review_index(previous.options) if previous is not None and previous.plugin == proposed.plugin else {}
     options = dict(proposed.options)
-    options.pop("resolved_prompt_template_hash", None)
+    if "resolved_prompt_template_hash" in options:
+        del options["resolved_prompt_template_hash"]
     reconciled: list[dict[str, Any]] = []
     carried_prompt_review = False
 
@@ -1632,7 +1628,7 @@ def _reconcile_node_options(
             and _llm_has_authorized_shield_upstream(proposed, proposed_graph)
         ):
             continue
-        previous_requirement = previous_index.get(identity)
+        previous_requirement = previous_index[identity] if identity in previous_index else None
         if previous is None or previous_requirement is None or previous_requirement["status"] != "resolved":
             reconciled.append(shell)
             continue
@@ -1660,8 +1656,8 @@ def _reconcile_node_options(
 
     if reconciled:
         options[INTERPRETATION_REQUIREMENTS_KEY] = reconciled
-    else:
-        options.pop(INTERPRETATION_REQUIREMENTS_KEY, None)
+    elif INTERPRETATION_REQUIREMENTS_KEY in options:
+        del options[INTERPRETATION_REQUIREMENTS_KEY]
 
     parts = _prompt_parts(options)
     if parts is not None:
@@ -1690,7 +1686,7 @@ def _reconcile_source_options(
     for identity, proposed_requirement in proposed_index.items():
         requirement_id, kind, _user_term = identity
         shell = _pending_authoring_shell(proposed_requirement)
-        previous_requirement = previous_index.get(identity)
+        previous_requirement = previous_index[identity] if identity in previous_index else None
         if kind is not InterpretationKind.INVENTED_SOURCE:
             if previous_requirement is not None and previous_requirement["status"] == "resolved":
                 raise ValueError(f"review kind {kind.value!r} cannot target source {component_id!r}")
@@ -1716,8 +1712,8 @@ def _reconcile_source_options(
 
     if reconciled:
         options[INTERPRETATION_REQUIREMENTS_KEY] = reconciled
-    else:
-        options.pop(INTERPRETATION_REQUIREMENTS_KEY, None)
+    elif INTERPRETATION_REQUIREMENTS_KEY in options:
+        del options[INTERPRETATION_REQUIREMENTS_KEY]
     return options
 
 
@@ -1731,7 +1727,7 @@ def reconcile_authoritative_reviews(
         source_name: replace(
             source,
             options=_reconcile_source_options(
-                previous_sources.get(source_name),
+                previous_sources[source_name] if source_name in previous_sources else None,
                 source,
                 component_id=source_name,
             ),
@@ -1744,7 +1740,7 @@ def reconcile_authoritative_reviews(
         replace(
             node,
             options=_reconcile_node_options(
-                previous_nodes.get(node.id),
+                previous_nodes[node.id] if node.id in previous_nodes else None,
                 node,
                 previous_nodes=previous.nodes,
                 proposed_nodes=proposed.nodes,
@@ -1758,3 +1754,10 @@ def reconcile_authoritative_reviews(
         sources=reconciled_sources,
         nodes=reconciled_nodes,
     )
+
+
+def model_choice_artifact_hash(model: str) -> str:
+    """Canonical artifact hash for an operator-reviewed model identifier."""
+    if type(model) is not str or not model.strip():
+        raise ValueError("model_choice_artifact_hash requires a non-empty model identifier")
+    return stable_hash(model)

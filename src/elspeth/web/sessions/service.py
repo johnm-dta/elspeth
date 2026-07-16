@@ -38,7 +38,6 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import stable_hash
 from elspeth.web.async_workers import run_sync_in_worker
-from elspeth.web.catalog.protocol import CatalogService
 
 # Phase 8 cohort-emit helper (Sub-task 7e — B3 cohort b1). The opt-out
 # audit row is committed inside ``record_session_interpretation_opt_out``
@@ -113,6 +112,7 @@ from elspeth.web.sessions.telemetry import _SessionsTelemetry
 from elspeth.web.validation import INTERPRETATION_PLACEHOLDER_RE, _validate_accepted_value_content
 
 if TYPE_CHECKING:
+    from elspeth.web.catalog.protocol import CatalogService
     from elspeth.web.composer.state import CompositionState, ValidationSummary
     from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
     from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry

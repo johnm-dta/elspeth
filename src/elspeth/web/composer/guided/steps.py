@@ -45,6 +45,7 @@ from elspeth.web.composer.tools import (
     _sync_get_blob_by_id,
     _sync_get_blob_by_storage_path,
 )
+from elspeth.web.composer.yaml_generator import generate_public_yaml  # noqa: F401 -- preserve signed AST addresses
 from elspeth.web.interpretation_state import AUTHORING_METADATA_OPTION_KEYS
 from elspeth.web.paths import allowed_source_directories, resolve_data_path
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId

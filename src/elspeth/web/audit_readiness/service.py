@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from functools import lru_cache
-from typing import Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import UUID
 
 from elspeth.contracts.composer_interpretation import (
@@ -31,7 +31,6 @@ from elspeth.web.audit_readiness.models import (
     SinkEffectAttemptDiagnostic,
     SinkEffectRecoveryDiagnostic,
 )
-from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginKind
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.execution.schemas import (
@@ -1069,3 +1068,7 @@ def _build_secrets_row(validation: ValidationResult, inventory: list[SecretInven
         detail=(f"{len(inventory)} secret(s) in your inventory" if inventory else "Composition references no secrets"),
         component_ids=(),
     )
+
+
+if TYPE_CHECKING:
+    from elspeth.web.catalog.protocol import CatalogService

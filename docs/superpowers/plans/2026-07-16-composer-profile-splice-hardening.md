@@ -518,7 +518,7 @@ This integration test proves the combined mechanics. The later live model run pr
 ```bash
 uv run pytest tests/unit/web/composer/test_splice_transform_tool.py -q && \
 uv run pytest tests/integration/web/composer/test_profile_splice_flow.py -q && \
-uv run pytest tests/testcontainer/web/test_composer_splice_concurrency.py -q && \
+uv run pytest -m 'testcontainer or not testcontainer' tests/testcontainer/web/test_composer_splice_concurrency.py -q && \
 uv run pytest tests/unit/web/composer/test_adequacy_guard.py \
   tests/unit/web/composer/test_redact_tool_call_arguments.py \
   tests/unit/web/composer/test_redact_tool_call_response.py \
@@ -700,7 +700,7 @@ Unit tests pin the closed plan, redacted JSON, precondition classifier, and abse
 Run the unit and PostgreSQL testcontainer files once RED after the tests are written and once GREEN after the command/DDL authority is implemented:
 
 ```bash
-env -u VIRTUAL_ENV uv run --frozen pytest -n0 -q -p no:cacheprovider \
+env -u VIRTUAL_ENV uv run --frozen pytest -n0 -q -p no:cacheprovider -m 'testcontainer or not testcontainer' \
   tests/unit/scripts/test_migrate_release_0_7_1_aws_ecs_schema.py \
   tests/testcontainer/web/test_release_0_7_1_schema_migration.py
 ```
@@ -736,7 +736,7 @@ Fix every substantive finding before testing. Do not repeat this review after ea
 **Step 2: Run the complete focused package after review corrections**
 
 ```bash
-env -u VIRTUAL_ENV uv run --frozen pytest -n0 -q -p no:cacheprovider \
+env -u VIRTUAL_ENV uv run --frozen pytest -n0 -q -p no:cacheprovider -m 'testcontainer or not testcontainer' \
   tests/integration/web/composer/test_profile_splice_flow.py \
   tests/testcontainer/web/test_composer_splice_concurrency.py && \
 env -u VIRTUAL_ENV uv run --frozen pytest -n0 -q -p no:cacheprovider \
@@ -772,7 +772,7 @@ env -u VIRTUAL_ENV uv run --frozen pytest -n0 -q -p no:cacheprovider \
   tests/unit/web/composer/test_anti_anchor.py \
   tests/unit/web/composer/test_compose_loop_anti_anchor.py \
   tests/unit/web/composer/test_advisor_tool.py && \
-env -u VIRTUAL_ENV uv run --frozen pytest -n0 -q -p no:cacheprovider \
+env -u VIRTUAL_ENV uv run --frozen pytest -n0 -q -p no:cacheprovider -m 'testcontainer or not testcontainer' \
   tests/unit/scripts/test_migrate_release_0_7_1_aws_ecs_schema.py \
   tests/testcontainer/web/test_release_0_7_1_schema_migration.py && \
 env -u VIRTUAL_ENV uv run --frozen python scripts/cicd/generate_skill_inventory.py --check && \
@@ -805,7 +805,7 @@ ns = runpy.run_path("tests/unit/elspeth_lints/test_allowlist_loader_unification.
 baseline = json.loads(Path(ns["BASELINE"]).read_text(encoding="utf-8"))
 rule = "trust_tier.tier_model"
 with tempfile.TemporaryDirectory() as empty:
-    raw = ns["_run_rule"](rule, ".", allowlist_dir=Path(empty))
+    raw = ns["_run_rule"](rule, "src/elspeth", allowlist_dir=Path(empty))
 fresh = sorted(
     ({"file_path": str(row["file_path"]), "fingerprint": str(row["fingerprint"])} for row in raw),
     key=lambda row: (row["file_path"], row["fingerprint"]),

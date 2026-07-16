@@ -71,7 +71,6 @@ from elspeth.web.blobs.protocol import (
     BlobServiceProtocol,
     BlobStateError,
 )
-from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.config import WebSettings
@@ -134,6 +133,7 @@ from elspeth.web.sessions.telemetry import _SessionsTelemetry
 
 if TYPE_CHECKING:
     from elspeth.core.landscape.database import LandscapeDB
+    from elspeth.web.catalog.protocol import CatalogService
 
 slog = structlog.get_logger()
 _meter = metrics.get_meter(__name__)
@@ -402,10 +402,7 @@ class ExecutionServiceImpl:
         """Explicit non-web composition root with unrestricted local policy context."""
         from elspeth.web.dependencies import create_catalog_service
 
-        catalog = kwargs.pop("catalog", None)
-        if catalog is None:
-            catalog = create_catalog_service()
-        snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+        catalog, snapshot = _trained_operator_catalog_and_snapshot(kwargs, create_catalog_service)
         return cls(
             plugin_snapshot_factory=lambda _user_id: snapshot,
             operator_profile_registry=None,
@@ -2307,3 +2304,12 @@ _RUN_PIPELINE_GRACEFUL_SHUTDOWN_HANDLED: Literal["graceful_shutdown_handled"] = 
 # structurally satisfies ExecutionService at this assignment. Without this,
 # drift between protocol and impl is only caught at cast() call sites.
 _: type[ExecutionService] = ExecutionServiceImpl
+
+
+def _trained_operator_catalog_and_snapshot(
+    kwargs: dict[str, Any],
+    catalog_factory: Callable[[], CatalogService],
+) -> tuple[CatalogService, PluginAvailabilitySnapshot]:
+    """Consume an optional catalog and build the local trust snapshot."""
+    catalog = kwargs.pop("catalog") if "catalog" in kwargs else catalog_factory()
+    return catalog, PluginAvailabilitySnapshot.for_trained_operator(catalog)

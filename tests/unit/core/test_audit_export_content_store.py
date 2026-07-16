@@ -105,6 +105,107 @@ def test_production_factory_registers_the_explicit_store(tmp_path: Path, monkeyp
     assert store.is_durable()
 
 
+def test_candidate_gc_reads_the_complete_orphan_marker_beyond_64_kib(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Collection must parse the complete valid marker, not a 64 KiB prefix (elspeth-4ae79708c2)."""
+    monkeypatch.chdir(tmp_path)
+    root = Path(".elspeth/audit-export-content-store/test")
+    settings = _store_settings(root).model_copy(update={"orphan_grace_period_seconds": 1})
+    store = FilesystemAuditExportContentStore(settings)
+    content = b'{"record_type":"run"}\n'
+    digest = sha256(content).hexdigest()
+    descriptor = AuditExportContentDescriptor(
+        store.put_immutable(content, candidate_id="candidate-large", object_kind="data_chunk"),
+        digest,
+        len(content),
+        "data_chunk",
+    )
+    filler = tuple(AuditExportContentDescriptor(f"sha256:{index:064x}", f"{index:064x}", 1, "data_chunk") for index in range(1, 1201))
+    store.mark_candidate_orphans("candidate-large", (descriptor, *filler))
+    marker_path = root / "audit" / "export" / "candidates" / "candidate-large" / "orphan.json"
+    assert marker_path.stat().st_size > 64 * 1024
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["marked_at"] = "2026-01-01T00:00:00.000000Z"
+    marker_path.write_text(json.dumps(marker, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+
+    request = AuditExportOrphanCollectionRequest(
+        candidate_id="candidate-large",
+        namespace=store.namespace,
+        descriptors=(descriptor,),
+        marked_at=datetime.now(UTC) - timedelta(seconds=2),
+        grace_period_seconds=1,
+        fresh_winner_reference_check=lambda _ref: False,
+    )
+
+    assert store.garbage_collect_candidate(request) is True
+    assert not (root / "audit" / "export" / "objects" / digest[:2] / digest).exists()
+
+
+def test_candidate_gc_refuses_marker_beyond_the_explicit_safe_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A marker larger than any legitimate writer output must not be parsed
+    or collected, and must not crash collection (elspeth-4ae79708c2)."""
+    import elspeth.core.audit_export_content_store as content_store_module
+
+    monkeypatch.chdir(tmp_path)
+    root = Path(".elspeth/audit-export-content-store/test")
+    settings = _store_settings(root).model_copy(update={"orphan_grace_period_seconds": 1})
+    store = FilesystemAuditExportContentStore(settings)
+    content = b'{"record_type":"run"}\n'
+    digest = sha256(content).hexdigest()
+    descriptor = AuditExportContentDescriptor(
+        store.put_immutable(content, candidate_id="candidate-huge", object_kind="data_chunk"),
+        digest,
+        len(content),
+        "data_chunk",
+    )
+    store.mark_candidate_orphans("candidate-huge", (descriptor,))
+    marker_path = root / "audit" / "export" / "candidates" / "candidate-huge" / "orphan.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["marked_at"] = "2026-01-01T00:00:00.000000Z"
+    marker_path.write_text(json.dumps(marker, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+    monkeypatch.setattr(content_store_module, "MAX_AUDIT_EXPORT_ORPHAN_MARKER_BYTES", marker_path.stat().st_size - 1)
+
+    request = AuditExportOrphanCollectionRequest(
+        candidate_id="candidate-huge",
+        namespace=store.namespace,
+        descriptors=(descriptor,),
+        marked_at=datetime.now(UTC) - timedelta(seconds=2),
+        grace_period_seconds=1,
+        fresh_winner_reference_check=lambda _ref: False,
+    )
+
+    assert store.garbage_collect_candidate(request) is False
+    assert (root / "audit" / "export" / "objects" / digest[:2] / digest).exists()
+
+
+def test_orphan_marker_writer_enforces_the_reader_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The writer must never produce a marker the collector would refuse (elspeth-4ae79708c2)."""
+    import elspeth.core.audit_export_content_store as content_store_module
+
+    monkeypatch.chdir(tmp_path)
+    store = FilesystemAuditExportContentStore(_store_settings(Path(".elspeth/audit-export-content-store/test")))
+    content = b'{"record_type":"run"}\n'
+    digest = sha256(content).hexdigest()
+    descriptor = AuditExportContentDescriptor(
+        store.put_immutable(content, candidate_id="candidate-bound", object_kind="data_chunk"),
+        digest,
+        len(content),
+        "data_chunk",
+    )
+    monkeypatch.setattr(content_store_module, "MAX_AUDIT_EXPORT_ORPHAN_MARKER_BYTES", 16)
+
+    with pytest.raises(ValueError, match="orphan marker"):
+        store.mark_candidate_orphans("candidate-bound", (descriptor,))
+
+
 def test_candidate_gc_requires_fresh_unreferenced_proof_and_deletes_only_owned_content(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

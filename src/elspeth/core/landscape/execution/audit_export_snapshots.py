@@ -7,7 +7,7 @@ import json
 import re
 from dataclasses import dataclass, fields
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.engine import Connection
@@ -340,6 +340,29 @@ class AuditExportSnapshotRegistration:
             raise TypeError("inserted must be exact bool")
 
 
+_VERIFICATION_PROOF: Final = object()
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedAuditExportCandidate:
+    """Proof-carrying candidate produced only by ``verify_candidate``.
+
+    Registration accepts exactly this carrier, so the expensive content
+    reread/hash/parse verification can run outside the short write/CAS
+    transaction without ever letting an unverified candidate reach the
+    registry (fail-closed).
+    """
+
+    candidate: AuditExportSnapshotCandidate
+    _proof: object = None
+
+    def __post_init__(self) -> None:
+        if type(self.candidate) is not AuditExportSnapshotCandidate:
+            raise TypeError("candidate must be exact AuditExportSnapshotCandidate")
+        if self._proof is not _VERIFICATION_PROOF:
+            raise TypeError("VerifiedAuditExportCandidate is only produced by AuditExportSnapshotRepository.verify_candidate")
+
+
 def _snapshot_values(snapshot: AuditExportSnapshot) -> dict[str, object]:
     return {field.name: getattr(snapshot, field.name) for field in fields(AuditExportSnapshot)} | {
         "source_status": snapshot.source_status.value,
@@ -476,16 +499,22 @@ class AuditExportSnapshotRepository:
         ):
             raise AuditIntegrityError("same audit-export registry key produced a divergent snapshot candidate")
 
-    def register_candidate(
+    def verify_candidate(
         self,
-        connection: Connection,
         candidate: AuditExportSnapshotCandidate,
         *,
         content_store_resolver: AuditExportContentStoreResolver,
         limits: AuditExportSnapshotReadLimits,
         signed_manifest_verifier: Callable[[bytes, AuditExportSignedManifestInput], None],
         record_signature_verifier: Callable[[bytes, str], None] | None = None,
-    ) -> AuditExportSnapshotRegistration:
+    ) -> VerifiedAuditExportCandidate:
+        """Recompute the candidate's cryptographic graph from registered bytes.
+
+        Connection-free by design: callers run this expensive content
+        reread/hash/parse pass *before* opening the short write/CAS
+        transaction, then hand the returned proof carrier to
+        :meth:`register_verified_candidate`.
+        """
         if type(candidate) is not AuditExportSnapshotCandidate:
             raise TypeError("candidate must be exact AuditExportSnapshotCandidate")
         if type(content_store_resolver) is not AuditExportContentStoreResolver:
@@ -503,6 +532,43 @@ class AuditExportSnapshotRepository:
             signed_manifest_verifier=signed_manifest_verifier,
             record_signature_verifier=record_signature_verifier,
         )
+        return VerifiedAuditExportCandidate(candidate=candidate, _proof=_VERIFICATION_PROOF)
+
+    def register_candidate(
+        self,
+        connection: Connection,
+        candidate: AuditExportSnapshotCandidate,
+        *,
+        content_store_resolver: AuditExportContentStoreResolver,
+        limits: AuditExportSnapshotReadLimits,
+        signed_manifest_verifier: Callable[[bytes, AuditExportSignedManifestInput], None],
+        record_signature_verifier: Callable[[bytes, str], None] | None = None,
+    ) -> AuditExportSnapshotRegistration:
+        """Verify then register in one call.
+
+        Prefer :meth:`verify_candidate` + :meth:`register_verified_candidate`
+        when the caller holds a write transaction or lineage lock: this
+        combined form runs content verification while ``connection``'s
+        transaction stays open.
+        """
+        verified = self.verify_candidate(
+            candidate,
+            content_store_resolver=content_store_resolver,
+            limits=limits,
+            signed_manifest_verifier=signed_manifest_verifier,
+            record_signature_verifier=record_signature_verifier,
+        )
+        return self.register_verified_candidate(connection, verified)
+
+    def register_verified_candidate(
+        self,
+        connection: Connection,
+        verified: VerifiedAuditExportCandidate,
+    ) -> AuditExportSnapshotRegistration:
+        """Short write/CAS registration of a verification-proven candidate."""
+        if type(verified) is not VerifiedAuditExportCandidate:
+            raise TypeError("verified must be exact VerifiedAuditExportCandidate from verify_candidate")
+        candidate = verified.candidate
         key = AuditExportSnapshotRegistryKey.from_snapshot(candidate.snapshot)
         existing = self.find_winner(connection, key)
         if existing is not None:
@@ -634,4 +700,5 @@ __all__ = [
     "AuditExportSnapshotRegistryKey",
     "AuditExportSnapshotRepository",
     "AuditExportSnapshotWinner",
+    "VerifiedAuditExportCandidate",
 ]

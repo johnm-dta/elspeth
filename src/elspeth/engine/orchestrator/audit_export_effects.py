@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import stat
 from collections.abc import Callable, Mapping
@@ -57,6 +58,22 @@ from elspeth.engine.executors.sink_effects import (
     SinkEffectExecutionRequest,
     SinkEffectExecutionSeam,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _contain_cleanup_failure(action: Callable[[], object], description: str) -> None:
+    """Run a cleanup step, recording (never propagating) its failure.
+
+    Cleanup runs while a primary export, cancellation, or process-control
+    exception may already be propagating; replacing that exception would
+    obscure the recovery state. Process-control exceptions raised *by* the
+    cleanup itself (KeyboardInterrupt, SystemExit) still propagate.
+    """
+    try:
+        action()
+    except Exception:
+        logger.exception("audit-export cleanup failed: %s", description)
 
 
 def _acquire_signer_lineage_authority(connection: Any, key: AuditExportSnapshotRegistryKey) -> None:
@@ -333,7 +350,7 @@ def prepare_audit_export_snapshot(
                 spool.flush()
                 os.fsync(spool.fileno())
             except BaseException:
-                spool.close()
+                _contain_cleanup_failure(spool.close, "spool close after derivation failure")
                 spool = None
                 raise
 
@@ -376,26 +393,34 @@ def prepare_audit_export_snapshot(
             config=config,
             content_store_id=content_store.content_store_id,
         )
+        # Content reread, hashing, parsing, and signature verification run
+        # before the write transaction so the registry write lock and the
+        # signer-lineage lock cover only the short CAS insert.
+        verified = snapshots.verify_candidate(
+            candidate,
+            content_store_resolver=resolver,
+            limits=_read_limits(config),
+            signed_manifest_verifier=verifier,
+            record_signature_verifier=record_verifier,
+        )
         with db.write_connection() as connection:
             _acquire_signer_lineage_authority(connection, key)
             for existing_signer_key_id in snapshots.find_lineage_signer_key_ids(connection, key):
                 config.assert_signer_rotation_allowed(existing_signer_key_id=existing_signer_key_id)
-            registration = snapshots.register_candidate(
-                connection,
-                candidate,
-                content_store_resolver=resolver,
-                limits=_read_limits(config),
-                signed_manifest_verifier=verifier,
-                record_signature_verifier=record_verifier,
-            )
+            registration = snapshots.register_verified_candidate(connection, verified)
         if not registration.inserted:
             content_store.mark_candidate_orphans(candidate_id, descriptors)
         winner = registration.winner
     except BaseException:
-        content_store.mark_candidate_orphans(candidate_id, descriptors)
+        # The primary export, cancellation, or process-control exception is
+        # propagating; a cleanup failure is recorded, never substituted.
+        _contain_cleanup_failure(
+            lambda: content_store.mark_candidate_orphans(candidate_id, descriptors),
+            f"orphan marking for candidate {candidate_id}",
+        )
         raise
     finally:
-        spool.close()
+        _contain_cleanup_failure(spool.close, "spool close after candidate registration")
 
     return snapshots.bind_winner(
         winner,

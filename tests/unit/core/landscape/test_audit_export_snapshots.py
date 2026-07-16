@@ -32,6 +32,7 @@ from elspeth.core.landscape.execution.audit_export_snapshots import (
     AuditExportSnapshotReadLimits,
     AuditExportSnapshotRegistryKey,
     AuditExportSnapshotRepository,
+    VerifiedAuditExportCandidate,
 )
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import audit_export_snapshot_chunks_table, audit_export_snapshots_table, runs_table
@@ -420,6 +421,43 @@ def test_bound_winner_rejects_chunk_seal_not_derived_from_registered_bytes() -> 
                 limits=AuditExportSnapshotReadLimits(),
                 signed_manifest_verifier=lambda _content, _descriptor: None,
             )
+    finally:
+        db.close()
+
+
+def test_verified_candidate_carrier_cannot_be_hand_built() -> None:
+    store = _MemoryContentStore()
+    candidate = _candidate(store)
+    with pytest.raises(TypeError, match="verify_candidate"):
+        VerifiedAuditExportCandidate(candidate=candidate)
+    with pytest.raises(TypeError, match="verify_candidate"):
+        VerifiedAuditExportCandidate(candidate=candidate, _proof=object())
+
+
+def test_register_verified_candidate_registers_without_content_store_reads() -> None:
+    db = LandscapeDB.in_memory()
+    store = _MemoryContentStore()
+    resolver = AuditExportContentStoreResolver()
+    resolver.register(store)
+    candidate = _candidate(store)
+    repository = _repository()
+    try:
+        _insert_terminal_run(db)
+        verified = repository.verify_candidate(
+            candidate,
+            content_store_resolver=resolver,
+            limits=AuditExportSnapshotReadLimits(),
+            signed_manifest_verifier=lambda _content, _descriptor: None,
+        )
+        reads_after_verification = len(store.opened)
+
+        with db.engine.begin() as connection:
+            registration = repository.register_verified_candidate(connection, verified)
+
+        assert registration.inserted is True
+        assert len(store.opened) == reads_after_verification
+        with pytest.raises(TypeError, match="VerifiedAuditExportCandidate"), db.engine.begin() as connection:
+            repository.register_verified_candidate(connection, candidate)  # type: ignore[arg-type]
     finally:
         db.close()
 

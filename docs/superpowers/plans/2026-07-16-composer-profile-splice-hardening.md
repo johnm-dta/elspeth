@@ -16,7 +16,7 @@
 - `aws_bedrock_prompt_shield` accepts public profile options, but raw `CompositionState.validate()` probes those public options without the existing runtime profile lowering and loses the shield's pass-through guarantees.
 - `get_pipeline_state` exposes inspection and server-owned data that cannot be copied into the extra-forbid `SetPipelineArgumentsModel`.
 - The final advisor call began with less than one second remaining. It could not produce useful guidance.
-- The current live image already expects `run_sources.schema_contract_hash VARCHAR(32)` and readiness proves the live landscape is at that width, but the target also adds cross-dialect landscape/session identity epochs and six PostgreSQL session audit triggers. The failed target-image rollout stopped at `session_schema`. A versioned migration must preflight width 16 or 32, never narrow it, and install the exact identity/trigger cohort before target startup. The current image cannot be restarted after the first session-epoch DDL.
+- The current live image already expects `run_sources.schema_contract_hash VARCHAR(32)` and readiness proves the live landscape is at that width, but the rebased target also adds cross-dialect landscape/session identity epochs, six PostgreSQL session audit triggers, the Landscape 23→26 ownership/idempotency/sink-effect chain, and new/rebuilt-table ACL obligations. The failed target-image rollout stopped at `session_schema`. A versioned migration must preflight width 16 or 32, never narrow it, preserve Tier-1 rows and runtime grants, and install the exact target cohort before startup. The current image cannot be restarted after the first session-epoch DDL.
 - The checked-out acceptance Terraform package is materially dirty. Its changes include database-shape, listener, secret, and service changes outside this task, so it cannot be used as an apply source.
 
 ## Prerequisites and boundaries
@@ -30,7 +30,7 @@
 - Use `AWS_PROFILE=elspeth-acceptance` and `AWS_REGION=ap-southeast-1` only in Task 6. If `aws sts get-caller-identity` reports an expired session, pause for the operator to run `aws login --profile elspeth-acceptance --region ap-southeast-1`.
 - Before any AWS mutation, re-query the ECS deployment and readiness state. A read-only review observed another actor changing the service from `web:24` toward `web:25`; never overlap a live rollout.
 - Do not edit, reset, clean, or apply the dirty acceptance Terraform package. Do not destroy or replace RDS/Aurora, ALB, EFS, Cognito, secrets, session storage, or audit storage.
-- Do not regenerate the release trust-tier baseline. The exact pre-Task-1 drift signature is captured at `/home/john/.local/state/elspeth/composer-splice-hardening/fingerprint-drift-pre-task1.json` with SHA-256 `e6eb0311ffff63534dff1430a51f5a1900b888ca07a7eeb57918f385e5f41485`.
+- Do not regenerate the release trust-tier baseline. The original pre-Task-1 drift signature remains historical evidence at `/home/john/.local/state/elspeth/composer-splice-hardening/fingerprint-drift-pre-task1.json` with SHA-256 `e6eb0311ffff63534dff1430a51f5a1900b888ca07a7eeb57918f385e5f41485`. After the required rebase, the release branch itself carries later fingerprint rotation, so the final gate is an exact raw-finding pair comparison against the fetched `origin/release/0.7.1`, not a comparison to that stale pre-rebase artifact.
 
 ## Load-bearing implementation order
 
@@ -56,9 +56,9 @@ The adjacent review remains the immutable input artifact. This plan supersedes i
 
 | Review item | Disposition | Plan correction |
 |---|---|---|
-| B1 schema widening and rollback incompatibility | Accepted and expanded from live evidence | Task 4B adds a versioned/tested one-shot migration for the exact landscape/session identity and audit-trigger cohort, with idempotent 16-or-32 width preflight. Task 6 runs it with the schema role before candidate startup, requires the candidate doctor to report `CURRENT`, never narrows, and uses forward recovery rather than an old-image restart. |
+| B1 schema widening and rollback incompatibility | Accepted and expanded from live evidence | Task 4B adds a versioned/tested one-shot migration for the exact session identity/audit-trigger cohort and Landscape 23→26 chain, with idempotent 16-or-32 width preflight, atomic row-preserving table replacement, and ACL preservation. Task 6 runs it with the schema role before candidate startup, requires the candidate doctor to report `CURRENT`, never narrows, and uses forward recovery rather than an old-image restart. |
 | B2 dirty/destructive Terraform and false idle-timeout proof | Accepted | Task 6 never applies the dirty package, reconstructs a detached state-aligned root, machine-rejects deletes/replacements/out-of-allowlist changes, and verifies the live ALB attribute directly. |
-| B3 baseline drift test cannot distinguish plan drift | Accepted | The pre-task canonical drift artifact above is fixed; Task 5 recomputes the same canonical artifact and requires byte-for-byte equality. No baseline regeneration or rotation is allowed. |
+| B3 baseline drift test cannot distinguish plan drift | Accepted | Before rebase, the fixed pre-task artifact proved byte equality. After rebase, Task 5 scans the final branch and the exact fetched release tree with the same linter/empty allowlist and requires identical `(file_path, fingerprint)` sets. No baseline regeneration or rotation is allowed. |
 | M1 `profile_unavailable` is unreachable | Accepted | Task 1 adds a closed public `error_code`, maps operator-profile failures to `profile_unavailable`, preserves enablement reasons, and carries the code through safe audit serialization. |
 | M2 existing recipe expectations contradict the mapper | Accepted | Task 1 keeps the three exact recipe regressions and makes the generic mapper satisfy them. |
 | M3 incomplete raw-validation inventory | Accepted | Task 1 covers prompts, emitters/generation, state summaries, routes, sessions, discovery, dispatcher, and batch bypasses; the intentional local trained-operator boundary is explicit. |
@@ -672,27 +672,30 @@ This is an operational prerequisite discovered during plan review, not a new run
 The command accepts the session and landscape schema-owner URLs only through environment variables, requires an explicit `--apply`, never prints URLs, and emits a closed JSON summary. It supports only this exact cohort:
 
 - session pre-state: the release-0.7.0 table shape, no `elspeth_schema_identity`, and none of the six target PostgreSQL audit triggers; post-state: identity epoch 28 plus the six functions/triggers declared in `sessions/models.py`;
-- landscape pre-state: release epoch 23 with `run_sources.schema_contract_hash` exactly `VARCHAR(16)` or `VARCHAR(32)` and no identity row; post-state: identity epoch 24 and width exactly 32;
+- landscape pre-state: release epoch 23 with `run_sources.schema_contract_hash` exactly `VARCHAR(16)` or `VARCHAR(32)` and no identity row; post-state: identity epoch 26, the row-authoritative token FK, artifact-idempotency index, recoverable sink-effect/audit-export tables and triggers, and width exactly 32;
 - already-current target state: verify and return `already_applied=true` without DDL;
 - the one resumable cross-database partial produced by this command's fixed order (session already target, landscape still recognized pre-state): resume the landscape transaction; reject the reverse or any other mixture.
 
-Any unrecognized mixed/foreign table set, unexpected identity, duplicate/disabled trigger, unexpected hash width, or shape mismatch fails before writes with a closed code. The command never drops, truncates, narrows, replaces, deletes, or logs row data.
+Any unrecognized mixed/foreign table set, unexpected identity, duplicate/disabled trigger, unexpected hash width, shape mismatch, forged token/run ownership row, or duplicate artifact idempotency key fails before writes with a closed code. The command never truncates, narrows, deletes, or logs row data. PostgreSQL cannot position an added column, while the runtime schema validator treats physical column order as part of the exact contract, so the Landscape transaction creates exact epoch-26 replacements for `operations` and `artifacts`, copies and compares every legacy row projection, rebinds the dependent `calls.operation_id` FK, and drops the two predecessor tables only after those checks. Any failure rolls the entire Landscape transaction back to the byte-stable epoch-23 predecessor.
 
 Open both schema-owner connections, acquire and hold the existing session-level `ELSPETH_SCHEMA_INIT_LOCK_CLASSID` lock on both database-scoped connections in deterministic session-then-landscape order, then preflight both databases. Hold both locks through the session transaction, landscape transaction, and post-verification; release them in reverse order and verify every unlock, using the existing invalidation/closed cleanup semantics on uncertainty. This prevents a preflight-to-DDL race. PostgreSQL cannot atomically span the two databases; after the first commit, failure recovery is explicitly fix-forward and the recognized partial is retryable.
 
-The exact DDL comes from target metadata definitions, not handwritten approximations or SQLAlchemy listener introspection. Refactor the six PostgreSQL function/trigger bodies in `sessions/models.py` into one immutable exported cohort and have both the existing table-scoped `event.listen(..., "after_create", DDL(...))` registrations and the migration consume it. This is required because `metadata.create_all(checkfirst=True)` does not fire those listeners for existing tables. Create the shared identity table with all checks, insert the one checked row, install the shared cohort, and conditionally widen 16 to 32. Do not call `doctor --init-schema`; it deliberately refuses stale existing databases.
+The exact DDL comes from target metadata definitions, not handwritten approximations or SQLAlchemy listener introspection. Refactor the six PostgreSQL function/trigger bodies in `sessions/models.py` into one immutable exported cohort and have both the existing table-scoped `event.listen(..., "after_create", DDL(...))` registrations and the migration consume it. This is required because `metadata.create_all(checkfirst=True)` does not fire those listeners for existing tables. Create the shared identity table with all checks, insert the one checked row, install the shared session cohort, migrate the exact Landscape 23→24→25→26 chain in one transaction, and conditionally widen 16 to 32. Preserve each rebuilt table's exact non-owner ACL; propagate only the DML grants common to every predecessor table onto the new ledger tables, and only common `SELECT` onto each schema-identity table. Do not call `doctor --init-schema`; it deliberately refuses stale existing databases.
 
 **Step 2: Prove data preservation and refusal behavior**
 
-Unit tests pin the closed plan, redacted JSON, precondition classifier, and absence of destructive statements. PostgreSQL testcontainer coverage builds the exact pre-target shapes, inserts representative session/audit/landscape rows, records counts and stable content hashes, runs the command, and asserts:
+Unit tests pin the closed plan, redacted JSON, precondition classifier, and exact bounded table-replacement vocabulary. PostgreSQL testcontainer coverage builds the genuine epoch-23 pre-target shape rather than deriving a false predecessor from current metadata, inserts representative session/audit/landscape rows, records counts and stable content hashes, runs the command, and asserts:
 
-- every pre-existing row count/content hash is unchanged;
+- every unaffected pre-existing row count/content hash is unchanged, and every rebuilt operation/artifact legacy projection is identical with only the required epoch-26 evidence columns added;
 - session and landscape candidate probes are `CURRENT`;
 - all six triggers are enabled and reject the protected update/delete operations;
 - 16 widens to 32, while an already-32 column is a no-op;
 - a second run is byte-stable and reports `already_applied=true`;
 - an unrecognized partial, unexpected-width, foreign, or mixed state fails before any DDL;
+- forged token ownership and duplicate artifact idempotency records fail before either database changes;
 - the recognized session-new/landscape-old partial resumes, while the reverse partial fails closed;
+- an injected Landscape replacement failure rolls the complete Landscape transaction back and the exact recognized partial resumes cleanly;
+- an owner-run migration preserves runtime-role DML access to rebuilt/new tables and SELECT-only access to schema identity, while the runtime role remains unable to execute migration DDL;
 - runtime-role credentials cannot execute any migration DDL.
 
 **Step 3: Commit independently**
@@ -791,52 +794,57 @@ Run the redaction snapshot writer twice during Task 3; `test_adequacy_guard.py` 
 
 **Step 3: Prove this plan introduced no additional trust-tier fingerprint drift**
 
-Re-run the exact canonical capture used before Task 1 against an empty allowlist and write `/home/john/.local/state/elspeth/composer-splice-hardening/fingerprint-drift-post-task4b.json` with the same schema, sorted `added`/`removed` pairs, and counts:
+The branch was rebased onto a release tip whose own raw trust-tier findings no longer match the committed baseline. Do not rotate that baseline. Export the exact fetched release tree, scan it and the final worktree with the same installed linter and one empty allowlist, and write the release-relative comparison to `/home/john/.local/state/elspeth/composer-splice-hardening/fingerprint-release-comparison-final.json`:
 
 ```bash
+RELEASE_TREE="$(mktemp -d)" && \
+EMPTY_ALLOWLIST="$(mktemp -d)" && \
+git archive origin/release/0.7.1 | tar -xf - -C "$RELEASE_TREE" && \
+RELEASE_ROOT="$RELEASE_TREE/src/elspeth" \
+BRANCH_ROOT="$PWD/src/elspeth" \
+EMPTY_ALLOWLIST="$EMPTY_ALLOWLIST" \
+ELSPETH_LINTS_SRC="$PWD/elspeth-lints/src" \
 env -u VIRTUAL_ENV uv run --frozen python - <<'PY' \
-  > /home/john/.local/state/elspeth/composer-splice-hardening/fingerprint-drift-post-task4b.json
+  > /home/john/.local/state/elspeth/composer-splice-hardening/fingerprint-release-comparison-final.json
 import json
-import runpy
-import tempfile
-from pathlib import Path
+import os
+import subprocess
+import sys
 
-ns = runpy.run_path("tests/unit/elspeth_lints/test_allowlist_loader_unification.py")
-baseline = json.loads(Path(ns["BASELINE"]).read_text(encoding="utf-8"))
-rule = "trust_tier.tier_model"
-with tempfile.TemporaryDirectory() as empty:
-    raw = ns["_run_rule"](rule, "src/elspeth", allowlist_dir=Path(empty))
-fresh = sorted(
-    ({"file_path": str(row["file_path"]), "fingerprint": str(row["fingerprint"])} for row in raw),
-    key=lambda row: (row["file_path"], row["fingerprint"]),
-)
-old = baseline[rule]
-old_set = {(row["file_path"], row["fingerprint"]) for row in old}
-new_set = {(row["file_path"], row["fingerprint"]) for row in fresh}
+env = {**os.environ, "PYTHONPATH": os.environ["ELSPETH_LINTS_SRC"]}
+def capture(root: str) -> set[tuple[str, str]]:
+    result = subprocess.run(
+        [sys.executable, "-m", "elspeth_lints.core.cli", "check",
+         "--rules", "trust_tier.tier_model", "--format", "json",
+         "--root", root, "--allowlist-dir", os.environ["EMPTY_ALLOWLIST"]],
+        capture_output=True, text=True, check=False, env=env,
+    )
+    if result.returncode not in (0, 1):
+        raise SystemExit(result.stderr or result.stdout)
+    return {(str(row["file_path"]), str(row["fingerprint"])) for row in json.loads(result.stdout)}
+
+release = capture(os.environ["RELEASE_ROOT"])
+branch = capture(os.environ["BRANCH_ROOT"])
+added = sorted(branch - release)
+removed = sorted(release - branch)
 payload = {
-    "schema": "elspeth.composer-splice.fingerprint-drift.v1",
-    "rule": rule,
-    "baseline_count": len(old),
-    "fresh_count": len(fresh),
-    "added": [{"file_path": path, "fingerprint": fp} for path, fp in sorted(new_set - old_set)],
-    "removed": [{"file_path": path, "fingerprint": fp} for path, fp in sorted(old_set - new_set)],
+    "schema": "elspeth.composer-splice.release-fingerprint-comparison.v1",
+    "release_sha": subprocess.run(["git", "rev-parse", "origin/release/0.7.1"], capture_output=True, text=True, check=True).stdout.strip(),
+    "branch_sha": subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip(),
+    "release_count": len(release),
+    "branch_count": len(branch),
+    "added": [{"file_path": path, "fingerprint": fp} for path, fp in added],
+    "removed": [{"file_path": path, "fingerprint": fp} for path, fp in removed],
 }
 print(json.dumps(payload, indent=2, sort_keys=True))
+raise SystemExit(0 if not added and not removed else 1)
 PY
+STATUS=$?
+rm -rf "$RELEASE_TREE" "$EMPTY_ALLOWLIST"
+exit "$STATUS"
 ```
 
-Compare it byte-for-byte:
-
-```bash
-cmp \
-  /home/john/.local/state/elspeth/composer-splice-hardening/fingerprint-drift-pre-task1.json \
-  /home/john/.local/state/elspeth/composer-splice-hardening/fingerprint-drift-post-task4b.json && \
-sha256sum \
-  /home/john/.local/state/elspeth/composer-splice-hardening/fingerprint-drift-pre-task1.json \
-  /home/john/.local/state/elspeth/composer-splice-hardening/fingerprint-drift-post-task4b.json
-```
-
-Both hashes must be `e6eb0311ffff63534dff1430a51f5a1900b888ca07a7eeb57918f385e5f41485`. A difference is plan-created drift and must be resolved before proceeding. Do not regenerate `tests/unit/elspeth_lints/fixtures/fingerprint_baseline.json`, rotate signed entries, or treat a changed count as the pre-existing failure.
+Require `added=[]`, `removed=[]`, and equal counts. A difference is plan-created drift and must be resolved before proceeding. The known baseline self-consistency failure is acceptable only when this exact release-relative proof passes; do not regenerate `tests/unit/elspeth_lints/fixtures/fingerprint_baseline.json` or rotate signed entries.
 
 **Step 4: Commit review corrections if needed**
 
@@ -931,7 +939,7 @@ Use deterministic snapshot ID `composer-splice-pre-ddl-<first-12-reviewed-SHA>`.
 
 Set maintenance mode in the detached Terraform configuration, plan an exact in-place update of only `module.scenario.aws_lb_listener_rule.traffic` from forward to fixed maintenance, machine-gate/apply it, and verify live action JSON. Then explicitly scale the ECS service to zero; desired count remains intentionally ignored by Terraform, so later refreshes do not create plan drift. Require no running web task before DDL.
 
-Run the Terraform-owned schema-migration Fargate task with the reviewed candidate digest. Require task exit 0 and a sanitized closed JSON result showing session epoch 28, landscape epoch 24, six enabled triggers, and landscape width 32. Width 32 is an expected no-op on the current live database; width 16 may only widen. Then run the candidate doctor task and require exit 0, every check ok, and both schema details current.
+Run the Terraform-owned schema-migration Fargate task with the reviewed candidate digest. Require task exit 0 and its sanitized closed JSON result to report `session_state=current`, `landscape_state=current`, and `already_applied=false` (or the exact idempotent-current result on a proven retry). Width 32 is an expected no-op on the current live database; width 16 may only widen. Then run the candidate doctor task and require exit 0, every check ok, session epoch 28, Landscape epoch 26, six enabled session audit triggers, the epoch-26 Landscape trigger/index/constraint manifest, and Landscape width 32.
 
 From the first migration DDL onward, the old task definition is forbidden because it cannot validate the new identity table and epochs. Failure handling is maintenance response plus service zero plus bounded sanitized logs plus fix-forward and another candidate doctor. A configuration/task-definition-only repair may reuse the same reviewed digest. Any code repair changes the SHA/digest and must return to Task 5 for whole-diff review, focused/fingerprint verification, and new operator full-suite evidence before cutover; keep the Terraform maintenance variable enabled and desired count zero meanwhile, then append a new create-only candidate-map entry. This is the pre-authorized registration path while maintenance is active and does not require a false zero-drift baseline. Never narrow, delete, replace, or automatically restore either database. The RDS snapshot is emergency preservation evidence; restoration is a separate destructive operator decision.
 

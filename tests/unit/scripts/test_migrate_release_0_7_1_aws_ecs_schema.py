@@ -180,6 +180,8 @@ def test_target_table_sets_pin_only_the_versioned_identity_delta() -> None:
     assert SCHEMA_IDENTITY_TABLE_NAME not in landscape_pre
     assert "sessions" in session_pre
     assert "run_sources" in landscape_pre
+    assert "sink_effects" not in landscape_pre
+    assert "audit_export_snapshots" not in landscape_pre
 
 
 def test_shared_postgresql_audit_ddl_is_immutable_complete_and_non_destructive() -> None:
@@ -195,13 +197,24 @@ def test_shared_postgresql_audit_ddl_is_immutable_complete_and_non_destructive()
     )
     normalized = "\n".join(all_statements).upper()
     for forbidden in (
-        r"\bDROP\s+",
+        r"\bDROP\s+(?:COLUMN|INDEX|SCHEMA|FUNCTION)\b",
         r"\bTRUNCATE\s+",
         r"\bDELETE\s+FROM\b",
         r"\bCREATE\s+OR\s+REPLACE\b",
-        r"\bVARCHAR\(16\)",
+        r"ALTER\s+TABLE\s+RUN_SOURCES\s+ALTER\s+COLUMN\s+SCHEMA_CONTRACT_HASH\s+TYPE\s+VARCHAR\(16\)",
     ):
         assert re.search(forbidden, normalized) is None
+    destructive_ddl = {
+        line.strip()
+        for statement in migration_statements
+        for line in statement.upper().splitlines()
+        if re.search(r"\bDROP\s+(?:TABLE|CONSTRAINT)\b", line)
+    }
+    assert destructive_ddl == {
+        'ALTER TABLE "CALLS" DROP CONSTRAINT "CALLS_OPERATION_ID_FKEY"',
+        'DROP TABLE "ARTIFACTS"',
+        'DROP TABLE "OPERATIONS"',
+    }
     assert "VARCHAR(32)" in normalized
 
 

@@ -18,8 +18,18 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import DBAPIError
 from testcontainers.postgres import PostgresContainer  # type: ignore[import-untyped]
 
-from elspeth.core.landscape.schema import metadata as landscape_metadata
-from elspeth.core.landscape.schema import nodes_table, run_sources_table, runs_table
+from elspeth.core.landscape.database import _sqlite_epoch_23_shape_metadata
+from elspeth.core.landscape.schema import (
+    artifacts_table,
+    calls_table,
+    node_states_table,
+    nodes_table,
+    operations_table,
+    rows_table,
+    run_sources_table,
+    runs_table,
+    tokens_table,
+)
 from elspeth.core.schema_identity import SCHEMA_IDENTITY_TABLE_NAME
 from elspeth.web.schema_probe import SchemaState, init_landscape_schema, init_session_schema, probe_landscape_schema, probe_session_schema
 from elspeth.web.sessions.engine import create_session_engine
@@ -110,11 +120,18 @@ def _create_release_session_shape(engine: Engine) -> None:
 
 def _create_release_landscape_shape(engine: Engine, *, hash_width: int) -> None:
     assert hash_width in {16, 32}
-    landscape_metadata.create_all(engine)
+    # Build the genuine release predecessor. Deriving this fixture from current
+    # metadata and merely dropping the identity table masked every later epoch
+    # as soon as release/0.7.1 advanced beyond epoch 24.
+    predecessor = _sqlite_epoch_23_shape_metadata()
+    predecessor.create_all(engine)
     with engine.begin() as conn:
-        conn.execute(text(f'DROP TABLE "{SCHEMA_IDENTITY_TABLE_NAME}"'))
         if hash_width == 16:
             conn.execute(text("ALTER TABLE run_sources ALTER COLUMN schema_contract_hash TYPE VARCHAR(16)"))
+        tables = set(inspect(conn).get_table_names())
+        assert SCHEMA_IDENTITY_TABLE_NAME not in tables
+        assert "sink_effects" not in tables
+        assert "audit_export_snapshots" not in tables
 
 
 def _create_release_0_7_0_shapes(pair: _DatabasePair, *, hash_width: int) -> tuple[Engine, Engine]:
@@ -242,6 +259,85 @@ def _seed_representative_rows(session: Engine, landscape: Engine, *, hash_width:
                 schema_contract_hash=contract_hash,
                 field_resolution_json="{}",
                 recorded_at=now,
+            )
+        )
+        conn.execute(
+            rows_table.insert().values(
+                row_id="migration-row",
+                run_id="migration-run",
+                source_node_id="migration-source",
+                row_index=0,
+                source_row_index=0,
+                ingest_sequence=0,
+                source_data_hash="e" * 64,
+                source_data_ref="sha256:migration-row",
+                created_at=now,
+            )
+        )
+        conn.execute(
+            tokens_table.insert().values(
+                token_id="migration-token",
+                row_id="migration-row",
+                run_id="migration-run",
+                created_at=now,
+            )
+        )
+        conn.execute(
+            node_states_table.insert().values(
+                state_id="migration-node-state",
+                token_id="migration-token",
+                run_id="migration-run",
+                node_id="migration-source",
+                step_index=0,
+                attempt=0,
+                status="completed",
+                input_hash="f" * 64,
+                output_hash="0" * 64,
+                started_at=now,
+                completed_at=now,
+            )
+        )
+        conn.execute(
+            operations_table.insert().values(
+                operation_id="migration-operation",
+                run_id="migration-run",
+                node_id="migration-source",
+                operation_type="sink_write",
+                started_at=now,
+                completed_at=now,
+                status="completed",
+                input_data_ref="sha256:migration-input",
+                input_data_hash="1" * 64,
+                output_data_ref="sha256:migration-output",
+                output_data_hash="2" * 64,
+                duration_ms=12.5,
+            )
+        )
+        conn.execute(
+            calls_table.insert().values(
+                call_id="migration-call",
+                operation_id="migration-operation",
+                call_index=0,
+                call_type="http",
+                status="success",
+                request_hash="3" * 64,
+                response_hash="4" * 64,
+                latency_ms=10.0,
+                created_at=now,
+            )
+        )
+        conn.execute(
+            artifacts_table.insert().values(
+                artifact_id="migration-artifact",
+                run_id="migration-run",
+                produced_by_state_id="migration-node-state",
+                sink_node_id="migration-source",
+                artifact_type="csv",
+                path_or_uri="s3://migration-bucket/preserved.csv",
+                content_hash="5" * 64,
+                size_bytes=128,
+                idempotency_key="migration-run:migration-artifact",
+                created_at=now,
             )
         )
 
@@ -382,7 +478,9 @@ def test_exact_pre_state_migrates_without_changing_rows_and_rerun_is_stable(
         after_session = {name: (count, digest) for name, count, digest in _row_fingerprints(session)}
         after_landscape = {name: (count, digest) for name, count, digest in _row_fingerprints(landscape)}
         assert all(after_session[name] == (count, digest) for name, count, digest in before_session)
-        assert all(after_landscape[name] == (count, digest) for name, count, digest in before_landscape)
+        assert all(
+            after_landscape[name] == (count, digest) for name, count, digest in before_landscape if name not in {"artifacts", "operations"}
+        )
         assert probe_session_schema(session) is SchemaState.CURRENT
         assert probe_landscape_schema(landscape) is SchemaState.CURRENT
         with landscape.connect() as conn:
@@ -399,6 +497,44 @@ def test_exact_pre_state_migrates_without_changing_rows_and_rerun_is_stable(
             ).scalar_one()
             assert width == 32
             assert conn.execute(text("SELECT schema_contract_hash FROM run_sources")).scalar_one() == "c" * hash_width
+            operation = conn.execute(
+                text(
+                    """
+                    SELECT operation_id, sink_effect_id, input_data_ref,
+                           output_data_ref, duration_ms
+                    FROM operations WHERE operation_id = 'migration-operation'
+                    """
+                )
+            ).one()
+            assert tuple(operation) == (
+                "migration-operation",
+                None,
+                "sha256:migration-input",
+                "sha256:migration-output",
+                12.5,
+            )
+            artifact = conn.execute(
+                text(
+                    """
+                    SELECT artifact_id, produced_by_state_id, sink_effect_id,
+                           publication_performed, publication_evidence_kind,
+                           path_or_uri, size_bytes
+                    FROM artifacts WHERE artifact_id = 'migration-artifact'
+                    """
+                )
+            ).one()
+            assert tuple(artifact) == (
+                "migration-artifact",
+                "migration-node-state",
+                None,
+                True,
+                "legacy_returned",
+                "s3://migration-bucket/preserved.csv",
+                128,
+            )
+            assert (
+                conn.execute(text("SELECT operation_id FROM calls WHERE call_id = 'migration-call'")).scalar_one() == "migration-operation"
+            )
         _assert_triggers_enforced(session)
 
         environment = {
@@ -469,6 +605,73 @@ def test_unrecognized_pre_state_fails_before_any_ddl(
         landscape.dispose()
 
 
+@pytest.mark.parametrize("invalid_rows", ["token_run_mismatch", "duplicate_artifact_key"])
+def test_invalid_tier1_rows_fail_before_either_database_changes(
+    database_pair: _DatabasePair,
+    invalid_rows: str,
+) -> None:
+    session, landscape = _create_release_0_7_0_shapes(database_pair, hash_width=16)
+    try:
+        _seed_representative_rows(session, landscape, hash_width=16)
+        with landscape.begin() as conn:
+            if invalid_rows == "token_run_mismatch":
+                conn.execute(
+                    runs_table.insert().values(
+                        run_id="migration-other-run",
+                        started_at=datetime.now(UTC),
+                        config_hash="6" * 64,
+                        settings_json="{}",
+                        canonical_version="sha256-rfc8785-v1",
+                        status="running",
+                        openrouter_catalog_sha256="7" * 64,
+                        openrouter_catalog_source="bundled",
+                    )
+                )
+                conn.execute(
+                    tokens_table.insert().values(
+                        token_id="migration-forged-token",
+                        row_id="migration-row",
+                        run_id="migration-other-run",
+                        created_at=datetime.now(UTC),
+                    )
+                )
+            else:
+                conn.execute(
+                    artifacts_table.insert().values(
+                        artifact_id="migration-duplicate-artifact",
+                        run_id="migration-run",
+                        produced_by_state_id="migration-node-state",
+                        sink_node_id="migration-source",
+                        artifact_type="csv",
+                        path_or_uri="s3://migration-bucket/duplicate.csv",
+                        content_hash="8" * 64,
+                        size_bytes=64,
+                        idempotency_key="migration-run:migration-artifact",
+                        created_at=datetime.now(UTC),
+                    )
+                )
+
+        before = (
+            _catalog_fingerprint(session),
+            _catalog_fingerprint(landscape),
+            _row_fingerprints(session),
+            _row_fingerprints(landscape),
+        )
+        with pytest.raises(migration.MigrationFailure) as exc_info:
+            migration.run_migration(database_pair.session_url, database_pair.landscape_url)
+
+        assert exc_info.value.code is migration.ResultCode.PRECONDITION_FAILED
+        assert (
+            _catalog_fingerprint(session),
+            _catalog_fingerprint(landscape),
+            _row_fingerprints(session),
+            _row_fingerprints(landscape),
+        ) == before
+    finally:
+        session.dispose()
+        landscape.dispose()
+
+
 def test_only_session_current_landscape_old_partial_resumes(database_pair: _DatabasePair) -> None:
     session = create_session_engine(database_pair.session_url)
     landscape = create_engine(database_pair.landscape_url)
@@ -480,6 +683,38 @@ def test_only_session_current_landscape_old_partial_resumes(database_pair: _Data
 
         assert result.code is migration.ResultCode.MIGRATION_APPLIED
         assert probe_session_schema(session) is SchemaState.CURRENT
+        assert probe_landscape_schema(landscape) is SchemaState.CURRENT
+    finally:
+        session.dispose()
+        landscape.dispose()
+
+
+def test_landscape_rebuild_failure_rolls_back_then_exact_partial_resumes(
+    database_pair: _DatabasePair,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, landscape = _create_release_0_7_0_shapes(database_pair, hash_width=16)
+    try:
+        _seed_representative_rows(session, landscape, hash_width=16)
+        before_landscape = (_catalog_fingerprint(landscape), _row_fingerprints(landscape))
+        monkeypatch.setattr(
+            migration,
+            "_ARTIFACTS_COPY_SQL",
+            "INSERT INTO artifacts_epoch_26 (artifact_id) SELECT NULL FROM artifacts",
+        )
+
+        with pytest.raises(migration.MigrationFailure) as exc_info:
+            migration.run_migration(database_pair.session_url, database_pair.landscape_url)
+
+        assert exc_info.value.code is migration.ResultCode.DATABASE_ERROR
+        assert probe_session_schema(session) is SchemaState.CURRENT
+        with landscape.connect() as conn:
+            assert migration.classify_landscape_state(conn) is migration.LandscapeState.RELEASE_0_7_0_WIDTH_16
+        assert (_catalog_fingerprint(landscape), _row_fingerprints(landscape)) == before_landscape
+
+        monkeypatch.undo()
+        result = migration.run_migration(database_pair.session_url, database_pair.landscape_url)
+        assert result.code is migration.ResultCode.MIGRATION_APPLIED
         assert probe_landscape_schema(landscape) is SchemaState.CURRENT
     finally:
         session.dispose()
@@ -532,6 +767,67 @@ def test_runtime_role_cannot_execute_migration_ddl(database_pair: _DatabasePair)
 
         assert exc_info.value.code is migration.ResultCode.PERMISSION_DENIED
         assert (_catalog_fingerprint(session), _catalog_fingerprint(landscape)) == before
+    finally:
+        session.dispose()
+        landscape.dispose()
+        for owner_url in (database_pair.session_url, database_pair.landscape_url):
+            with _psycopg_connect(owner_url) as owner:
+                owner.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
+        with _psycopg_connect(database_pair.postgres_url) as admin:
+            admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
+
+
+def test_owner_migration_preserves_runtime_dml_grants(database_pair: _DatabasePair) -> None:
+    session, landscape = _create_release_0_7_0_shapes(database_pair, hash_width=16)
+    role = _identifier("migrated_runtime")
+    password = f"runtime-{uuid.uuid4().hex}"
+    try:
+        with _psycopg_connect(database_pair.postgres_url) as admin:
+            admin.execute(sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(sql.Identifier(role), sql.Literal(password)))
+            for database in (database_pair.session_database, database_pair.landscape_database):
+                admin.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(sql.Identifier(database), sql.Identifier(role)))
+        for owner_url in (database_pair.session_url, database_pair.landscape_url):
+            with _psycopg_connect(owner_url) as owner:
+                owner.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
+                owner.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(role)))
+                owner.execute(
+                    sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {}").format(sql.Identifier(role))
+                )
+
+        result = migration.run_migration(database_pair.session_url, database_pair.landscape_url)
+        assert result.code is migration.ResultCode.MIGRATION_APPLIED
+
+        session_runtime = create_session_engine(
+            _render_url(database_pair.postgres_url, database=database_pair.session_database, username=role, password=password)
+        )
+        landscape_runtime = create_engine(
+            _render_url(database_pair.postgres_url, database=database_pair.landscape_database, username=role, password=password)
+        )
+        try:
+            assert probe_session_schema(session_runtime) is SchemaState.CURRENT
+            assert probe_landscape_schema(landscape_runtime) is SchemaState.CURRENT
+        finally:
+            session_runtime.dispose()
+            landscape_runtime.dispose()
+
+        with landscape.connect() as conn:
+            grants = {
+                (str(table_name), str(privilege))
+                for table_name, privilege in conn.execute(
+                    text(
+                        """
+                        SELECT table_name, privilege_type
+                        FROM information_schema.role_table_grants
+                        WHERE table_schema = current_schema() AND grantee = :role
+                        """
+                    ),
+                    {"role": role},
+                )
+            }
+        for table_name in ("operations", "artifacts", *migration._LANDSCAPE_NEW_TABLE_NAMES):
+            assert {(table_name, privilege) for privilege in {"SELECT", "INSERT", "UPDATE", "DELETE"}} <= grants
+        assert (SCHEMA_IDENTITY_TABLE_NAME, "SELECT") in grants
+        assert (SCHEMA_IDENTITY_TABLE_NAME, "UPDATE") not in grants
     finally:
         session.dispose()
         landscape.dispose()

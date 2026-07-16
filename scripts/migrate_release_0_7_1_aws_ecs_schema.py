@@ -19,12 +19,14 @@ from enum import StrEnum
 from pathlib import Path
 from typing import IO, NoReturn
 
-from sqlalchemy import Connection, Engine, MetaData, create_engine, inspect, text
+from sqlalchemy import Connection, Engine, Index, MetaData, create_engine, inspect, text
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.engine import Dialect
 from sqlalchemy.exc import DBAPIError, OperationalError, SQLAlchemyError
-from sqlalchemy.schema import CreateTable
+from sqlalchemy.schema import AddConstraint, Constraint, CreateIndex, CreateTable
 
 from elspeth.contracts.advisory_locks import ELSPETH_SCHEMA_INIT_LOCK_CLASSID
+from elspeth.core.landscape.database import _sqlite_epoch_23_shape_metadata
 from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH
 from elspeth.core.landscape.schema import metadata as landscape_metadata
 from elspeth.core.landscape.schema import schema_identity_table as landscape_schema_identity_table
@@ -51,6 +53,45 @@ LANDSCAPE_OWNER_URL_ENV = "ELSPETH_RELEASE_0_7_1_LANDSCAPE_SCHEMA_OWNER_URL"
 _LOCK_TARGET = "elspeth_schema_init"
 _LOCK_TIMEOUT = "5s"
 _WIDEN_HASH_SQL = "ALTER TABLE run_sources ALTER COLUMN schema_contract_hash TYPE VARCHAR(32)"
+_LANDSCAPE_NEW_TABLE_NAMES = (
+    "sink_effect_streams",
+    "audit_export_snapshots",
+    "audit_export_snapshot_chunks",
+    "sink_effects",
+    "sink_effect_members",
+    "sink_effect_export_snapshots",
+    "sink_effect_attempts",
+)
+_LANDSCAPE_EXISTING_INDEXES = (
+    ("tokens", "uq_tokens_identity_row_run"),
+    ("artifacts", "uq_artifacts_run_idempotency_key"),
+    ("runs", "uq_runs_export_witness"),
+    ("operations", "uq_operations_sink_effect_id"),
+)
+_OPERATIONS_LEGACY_COLUMNS = (
+    "operation_id, run_id, node_id, operation_type, started_at, completed_at, status, "
+    "input_data_ref, input_data_hash, output_data_ref, output_data_hash, error_message, duration_ms"
+)
+_ARTIFACTS_LEGACY_COLUMNS = (
+    "artifact_id, run_id, produced_by_state_id, sink_node_id, artifact_type, path_or_uri, "
+    "content_hash, size_bytes, idempotency_key, created_at"
+)
+_OPERATIONS_COPY_SQL = (
+    "INSERT INTO operations_epoch_26 ("
+    "operation_id, run_id, node_id, operation_type, sink_effect_id, started_at, completed_at, status, "
+    "input_data_ref, input_data_hash, output_data_ref, output_data_hash, error_message, duration_ms"
+    ") SELECT operation_id, run_id, node_id, operation_type, NULL, started_at, completed_at, status, "
+    "input_data_ref, input_data_hash, output_data_ref, output_data_hash, error_message, duration_ms FROM operations"
+)
+_ARTIFACTS_COPY_SQL = (
+    "INSERT INTO artifacts_epoch_26 ("
+    "artifact_id, run_id, produced_by_state_id, sink_effect_id, sink_node_id, artifact_type, path_or_uri, "
+    "content_hash, size_bytes, idempotency_key, publication_performed, publication_evidence_kind, created_at"
+    ") SELECT artifact_id, run_id, produced_by_state_id, NULL, sink_node_id, artifact_type, path_or_uri, "
+    "content_hash, size_bytes, idempotency_key, TRUE, 'legacy_returned', created_at FROM artifacts"
+)
+_RUNTIME_DML_PRIVILEGES = frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"})
+_POSTGRES_TABLE_PRIVILEGES = _RUNTIME_DML_PRIVILEGES | {"TRUNCATE", "REFERENCES", "TRIGGER"}
 
 
 class SessionState(StrEnum):
@@ -114,6 +155,13 @@ class MigrationSummary:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class _TableGrant:
+    grantee: str
+    privilege: str
+    with_grant_option: bool
+
+
 class MigrationFailure(RuntimeError):
     """A closed-code failure that never carries database or row material."""
 
@@ -137,7 +185,120 @@ def release_0_7_0_session_table_names() -> frozenset[str]:
 
 def release_0_7_0_landscape_table_names() -> frozenset[str]:
     """Return the exact recognized pre-identity Landscape table set."""
-    return frozenset(landscape_metadata.tables) - {SCHEMA_IDENTITY_TABLE_NAME}
+    return frozenset(_sqlite_epoch_23_shape_metadata().tables)
+
+
+def _named_index(table_name: str, index_name: str) -> Index:
+    table = landscape_metadata.tables[table_name]
+    return next(index for index in table.indexes if index.name == index_name)
+
+
+def _named_or_structural_constraint(
+    table_name: str,
+    constraint_name: str | None,
+    local_columns: tuple[str, ...],
+    target_table: str | None,
+    target_columns: tuple[str, ...],
+    *,
+    metadata: MetaData = landscape_metadata,
+) -> Constraint:
+    table = metadata.tables[table_name]
+    if constraint_name is not None:
+        return next(constraint for constraint in table.constraints if constraint.name == constraint_name)
+    return next(
+        constraint
+        for constraint in table.foreign_key_constraints
+        if tuple(element.parent.name for element in constraint.elements) == local_columns
+        and all(element.column.table.name == target_table for element in constraint.elements)
+        and tuple(element.column.name for element in constraint.elements) == target_columns
+    )
+
+
+def _compile_add_constraint(
+    table_name: str,
+    constraint_name: str | None,
+    local_columns: tuple[str, ...],
+    target_table: str | None,
+    target_columns: tuple[str, ...],
+    *,
+    dialect: Dialect,
+) -> str:
+    # AddConstraint marks its Constraint object as out-of-line. Compile from a
+    # disposable metadata clone so the long-lived runtime metadata remains
+    # pristine for later create_all()/schema probes in this process.
+    cloned = MetaData()
+    for table in landscape_metadata.tables.values():
+        table.to_metadata(cloned)
+    constraint = _named_or_structural_constraint(
+        table_name,
+        constraint_name,
+        local_columns,
+        target_table,
+        target_columns,
+        metadata=cloned,
+    )
+    return str(AddConstraint(constraint).compile(dialect=dialect))
+
+
+def _compile_replacement_table(table_name: str, *, dialect: Dialect) -> str:
+    table = landscape_metadata.tables[table_name]
+    statement = str(CreateTable(table).compile(dialect=dialect))
+    prefix = f"CREATE TABLE {dialect.identifier_preparer.format_table(table)}"
+    replacement = f'CREATE TABLE "{table_name}_epoch_26"'
+    if statement.count(prefix) != 1:
+        raise AssertionError(f"Could not locate the exact CREATE TABLE prefix for {table_name}")
+    return statement.replace(prefix, replacement, 1)
+
+
+def _landscape_epoch_23_to_26_statements(*, hash_width: int) -> tuple[str, ...]:
+    """Compile the bounded PostgreSQL DDL/DML vocabulary for the exact upgrade."""
+    if hash_width not in {16, 32}:
+        raise ValueError("hash_width must be 16 or 32")
+    dialect = postgresql.dialect()  # type: ignore[no-untyped-call]
+    statements: list[str] = []
+    if hash_width == 16:
+        statements.append(_WIDEN_HASH_SQL)
+    statements.extend(
+        str(CreateIndex(_named_index(table_name, index_name)).compile(dialect=dialect))
+        for table_name, index_name in (_LANDSCAPE_EXISTING_INDEXES[0], _LANDSCAPE_EXISTING_INDEXES[2])
+    )
+    statements.append(
+        _compile_add_constraint(
+            "tokens",
+            None,
+            ("row_id", "run_id"),
+            "rows",
+            ("row_id", "run_id"),
+            dialect=dialect,
+        )
+    )
+    statements.extend(
+        str(CreateTable(landscape_metadata.tables[table_name]).compile(dialect=dialect)) for table_name in _LANDSCAPE_NEW_TABLE_NAMES
+    )
+    statements.extend(
+        (
+            _compile_replacement_table("operations", dialect=dialect),
+            _OPERATIONS_COPY_SQL,
+            'ALTER TABLE "calls" DROP CONSTRAINT "calls_operation_id_fkey"',
+            'DROP TABLE "operations"',
+            'ALTER TABLE "operations_epoch_26" RENAME TO "operations"',
+            _compile_add_constraint(
+                "calls",
+                None,
+                ("operation_id",),
+                "operations",
+                ("operation_id",),
+                dialect=dialect,
+            ),
+            _compile_replacement_table("artifacts", dialect=dialect),
+            _ARTIFACTS_COPY_SQL,
+            'DROP TABLE "artifacts"',
+            'ALTER TABLE "artifacts_epoch_26" RENAME TO "artifacts"',
+            str(CreateIndex(_named_index("artifacts", "uq_artifacts_run_idempotency_key")).compile(dialect=dialect)),
+            str(CreateIndex(_named_index("operations", "uq_operations_sink_effect_id")).compile(dialect=dialect)),
+        )
+    )
+    return tuple(statements)
 
 
 def release_0_7_1_ddl_statements(*, hash_width: int) -> tuple[str, ...]:
@@ -149,9 +310,7 @@ def release_0_7_1_ddl_statements(*, hash_width: int) -> tuple[str, ...]:
         str(CreateTable(session_schema_identity_table).compile(dialect=dialect)),
         str(CreateTable(landscape_schema_identity_table).compile(dialect=dialect)),
     )
-    if hash_width == 16:
-        return (*statements, _WIDEN_HASH_SQL)
-    return statements
+    return (*statements, *_landscape_epoch_23_to_26_statements(hash_width=hash_width))
 
 
 def select_migration_plan(session_state: SessionState, landscape_state: LandscapeState) -> MigrationPlan:
@@ -302,7 +461,7 @@ def _landscape_hash_width(connection: Connection) -> int | None:
 
 
 def classify_landscape_state(connection: Connection) -> LandscapeState:
-    """Classify only epoch 23 at width 16/32 or the exact epoch-24 target."""
+    """Classify only epoch 23 at width 16/32 or the exact epoch-26 target."""
     if connection.dialect.name != "postgresql":
         return LandscapeState.INVALID
     if probe_landscape_schema(connection) is SchemaState.CURRENT:
@@ -310,7 +469,7 @@ def classify_landscape_state(connection: Connection) -> LandscapeState:
     width = _landscape_hash_width(connection)
     if width not in {16, 32}:
         return LandscapeState.INVALID
-    issues = _pre_identity_shape_issues(connection, landscape_metadata)
+    issues = _pre_identity_shape_issues(connection, _sqlite_epoch_23_shape_metadata())
     if issues is None:
         return LandscapeState.INVALID
     if width == 16:
@@ -398,8 +557,65 @@ def _both_schema_locks(session: Connection, landscape: Connection) -> Iterator[N
             raise MigrationFailure(ResultCode.LOCK_CLEANUP_UNVERIFIED)
 
 
+def _capture_table_grants(connection: Connection, table_names: frozenset[str]) -> dict[str, frozenset[_TableGrant]]:
+    captured: dict[str, set[_TableGrant]] = {table_name: set() for table_name in table_names}
+    rows = connection.execute(
+        text(
+            """
+            SELECT relation.relname,
+                   CASE WHEN acl.grantee = 0 THEN 'PUBLIC'
+                        ELSE pg_catalog.pg_get_userbyid(acl.grantee)
+                   END AS grantee,
+                   acl.privilege_type,
+                   acl.is_grantable
+            FROM pg_catalog.pg_class AS relation
+            JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+            CROSS JOIN LATERAL pg_catalog.aclexplode(
+                COALESCE(relation.relacl, pg_catalog.acldefault('r', relation.relowner))
+            ) AS acl
+            WHERE namespace.nspname = current_schema()
+              AND relation.relkind IN ('r', 'p')
+              AND relation.relname = ANY(:table_names)
+              AND acl.grantee <> relation.relowner
+            ORDER BY relation.relname, grantee, acl.privilege_type, acl.is_grantable
+            """
+        ),
+        {"table_names": sorted(table_names)},
+    )
+    for table_name, grantee, privilege, with_grant_option in rows:
+        normalized_privilege = str(privilege).upper()
+        if normalized_privilege not in _POSTGRES_TABLE_PRIVILEGES:
+            raise MigrationFailure(ResultCode.PRECONDITION_FAILED)
+        captured[str(table_name)].add(
+            _TableGrant(
+                grantee=str(grantee),
+                privilege=normalized_privilege,
+                with_grant_option=bool(with_grant_option),
+            )
+        )
+    return {table_name: frozenset(grants) for table_name, grants in captured.items()}
+
+
+def _common_runtime_grants(grants_by_table: Mapping[str, frozenset[_TableGrant]]) -> frozenset[_TableGrant]:
+    if not grants_by_table:
+        return frozenset()
+    common = set.intersection(*(set(grants) for grants in grants_by_table.values()))
+    return frozenset(grant for grant in common if grant.privilege in _RUNTIME_DML_PRIVILEGES)
+
+
+def _apply_table_grants(connection: Connection, table_name: str, grants: frozenset[_TableGrant]) -> None:
+    quoted_table = connection.dialect.identifier_preparer.quote_identifier(table_name)
+    for grant in sorted(grants, key=lambda item: (item.grantee, item.privilege, item.with_grant_option)):
+        if grant.privilege not in _POSTGRES_TABLE_PRIVILEGES:
+            raise MigrationFailure(ResultCode.PRECONDITION_FAILED)
+        grantee = "PUBLIC" if grant.grantee == "PUBLIC" else connection.dialect.identifier_preparer.quote_identifier(grant.grantee)
+        grant_option = " WITH GRANT OPTION" if grant.with_grant_option else ""
+        connection.execute(text(f"GRANT {grant.privilege} ON TABLE {quoted_table} TO {grantee}{grant_option}"))
+
+
 def _apply_session(connection: Connection) -> None:
     with connection.begin():
+        grants_by_table = _capture_table_grants(connection, release_0_7_0_session_table_names())
         session_schema_identity_table.create(bind=connection, checkfirst=False)
         insert_schema_identity(
             connection,
@@ -410,12 +626,149 @@ def _apply_session(connection: Connection) -> None:
         for entry in POSTGRESQL_AUDIT_DDL_COHORT:
             connection.execute(text(entry.function_sql))
             connection.execute(text(entry.trigger_sql))
+        identity_grants = frozenset(grant for grant in _common_runtime_grants(grants_by_table) if grant.privilege == "SELECT")
+        _apply_table_grants(connection, SCHEMA_IDENTITY_TABLE_NAME, identity_grants)
+
+
+def _require_landscape_data_preconditions(connection: Connection) -> None:
+    ownership_mismatch = connection.execute(
+        text(
+            """
+            SELECT tokens.token_id
+            FROM tokens
+            LEFT JOIN rows ON rows.row_id = tokens.row_id
+            WHERE rows.row_id IS NULL OR rows.run_id <> tokens.run_id
+            ORDER BY tokens.token_id
+            LIMIT 1
+            """
+        )
+    ).first()
+    if ownership_mismatch is not None:
+        raise MigrationFailure(ResultCode.PRECONDITION_FAILED)
+
+    duplicate_artifact = connection.execute(
+        text(
+            """
+            SELECT run_id, idempotency_key
+            FROM artifacts
+            WHERE idempotency_key IS NOT NULL
+            GROUP BY run_id, idempotency_key
+            HAVING COUNT(*) > 1
+            ORDER BY run_id, idempotency_key
+            LIMIT 1
+            """
+        )
+    ).first()
+    if duplicate_artifact is not None:
+        raise MigrationFailure(ResultCode.PRECONDITION_FAILED)
+
+
+def _create_landscape_epoch_26_tables(connection: Connection) -> None:
+    landscape_metadata.create_all(
+        bind=connection,
+        tables=[landscape_metadata.tables[table_name] for table_name in _LANDSCAPE_NEW_TABLE_NAMES],
+        checkfirst=False,
+    )
+
+
+def _foreign_key_name(connection: Connection, table_name: str, local_columns: tuple[str, ...]) -> str:
+    matches = [
+        foreign_key
+        for foreign_key in inspect(connection).get_foreign_keys(table_name)
+        if tuple(str(column) for column in foreign_key.get("constrained_columns") or ()) == local_columns
+    ]
+    if len(matches) != 1 or not isinstance(matches[0].get("name"), str):
+        raise MigrationFailure(ResultCode.PRECONDITION_FAILED)
+    return str(matches[0]["name"])
+
+
+def _replace_landscape_audit_table(
+    connection: Connection,
+    table_name: str,
+    copy_sql: str,
+    grants: frozenset[_TableGrant],
+) -> None:
+    dialect = connection.dialect
+    connection.execute(text(_compile_replacement_table(table_name, dialect=dialect)))
+    connection.execute(text(copy_sql))
+
+    copied = connection.execute(text(f'SELECT COUNT(*) FROM "{table_name}_epoch_26"')).scalar_one()
+    original = connection.execute(text(f'SELECT COUNT(*) FROM "{table_name}"')).scalar_one()
+    if copied != original:
+        raise MigrationFailure(ResultCode.POST_VERIFY_FAILED)
+
+    legacy_columns = _OPERATIONS_LEGACY_COLUMNS if table_name == "operations" else _ARTIFACTS_LEGACY_COLUMNS
+    changed = connection.execute(
+        text(f'SELECT {legacy_columns} FROM "{table_name}" EXCEPT SELECT {legacy_columns} FROM "{table_name}_epoch_26" LIMIT 1')
+    ).first()
+    if changed is not None:
+        raise MigrationFailure(ResultCode.POST_VERIFY_FAILED)
+
+    if table_name == "operations":
+        foreign_key_name = _foreign_key_name(connection, "calls", ("operation_id",))
+        quoted_name = dialect.identifier_preparer.quote_identifier(foreign_key_name)
+        connection.execute(text(f'ALTER TABLE "calls" DROP CONSTRAINT {quoted_name}'))
+
+    connection.execute(text(f'DROP TABLE "{table_name}"'))
+    connection.execute(text(f'ALTER TABLE "{table_name}_epoch_26" RENAME TO "{table_name}"'))
+
+    if table_name == "operations":
+        connection.execute(
+            text(
+                _compile_add_constraint(
+                    "calls",
+                    None,
+                    ("operation_id",),
+                    "operations",
+                    ("operation_id",),
+                    dialect=dialect,
+                )
+            )
+        )
+    for index in sorted(landscape_metadata.tables[table_name].indexes, key=lambda candidate: candidate.name or ""):
+        connection.execute(CreateIndex(index))
+    _apply_table_grants(connection, table_name, grants)
+
+
+def _apply_landscape_epoch_23_to_26(
+    connection: Connection,
+    *,
+    hash_width: int,
+    grants_by_table: Mapping[str, frozenset[_TableGrant]],
+) -> None:
+    _require_landscape_data_preconditions(connection)
+
+    if hash_width == 16:
+        connection.execute(text(_WIDEN_HASH_SQL))
+
+    for table_name, index_name in (_LANDSCAPE_EXISTING_INDEXES[0], _LANDSCAPE_EXISTING_INDEXES[2]):
+        connection.execute(CreateIndex(_named_index(table_name, index_name)))
+    connection.execute(
+        text(
+            _compile_add_constraint(
+                "tokens",
+                None,
+                ("row_id", "run_id"),
+                "rows",
+                ("row_id", "run_id"),
+                dialect=connection.dialect,
+            )
+        )
+    )
+
+    _create_landscape_epoch_26_tables(connection)
+    common_grants = _common_runtime_grants(grants_by_table)
+    for table_name in _LANDSCAPE_NEW_TABLE_NAMES:
+        _apply_table_grants(connection, table_name, common_grants)
+    _replace_landscape_audit_table(connection, "operations", _OPERATIONS_COPY_SQL, grants_by_table["operations"])
+    _replace_landscape_audit_table(connection, "artifacts", _ARTIFACTS_COPY_SQL, grants_by_table["artifacts"])
 
 
 def _apply_landscape(connection: Connection, state: LandscapeState) -> None:
     with connection.begin():
-        if state is LandscapeState.RELEASE_0_7_0_WIDTH_16:
-            connection.execute(text(_WIDEN_HASH_SQL))
+        grants_by_table = _capture_table_grants(connection, release_0_7_0_landscape_table_names())
+        hash_width = 16 if state is LandscapeState.RELEASE_0_7_0_WIDTH_16 else 32
+        _apply_landscape_epoch_23_to_26(connection, hash_width=hash_width, grants_by_table=grants_by_table)
         landscape_schema_identity_table.create(bind=connection, checkfirst=False)
         insert_schema_identity(
             connection,
@@ -423,6 +776,8 @@ def _apply_landscape(connection: Connection, state: LandscapeState) -> None:
             store_kind="landscape",
             schema_epoch=SQLITE_SCHEMA_EPOCH,
         )
+        identity_grants = frozenset(grant for grant in _common_runtime_grants(grants_by_table) if grant.privilege == "SELECT")
+        _apply_table_grants(connection, SCHEMA_IDENTITY_TABLE_NAME, identity_grants)
 
 
 def _raise_database_failure(exc: SQLAlchemyError) -> NoReturn:
@@ -449,6 +804,12 @@ def _run_locked_migration(session: Connection, landscape: Connection) -> Migrati
                 session_state=SessionState.CURRENT,
                 landscape_state=LandscapeState.CURRENT,
             )
+
+        # Cross-database atomicity is impossible, so reject bad Tier-1 rows
+        # before the session transaction can commit its half of the upgrade.
+        _require_landscape_data_preconditions(landscape)
+        if landscape.in_transaction():
+            landscape.rollback()
 
         if plan is MigrationPlan.APPLY_BOTH:
             _apply_session(session)

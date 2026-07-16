@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import timedelta
 
 from sqlalchemy import select
 
-from elspeth.contracts.audit import SinkEffect, SinkEffectMemberRecord, SinkEffectStream
-from elspeth.contracts.sink_effects import SinkEffectInputKind, SinkEffectMember, SinkEffectRole
+from elspeth.contracts.audit import SinkEffect, SinkEffectAttempt, SinkEffectMemberRecord, SinkEffectStream
+from elspeth.contracts.sink_effects import SinkEffectInputKind, SinkEffectMember, SinkEffectPlan, SinkEffectRole
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.execution.sink_effect_lifecycle import (
+    SinkEffectAttemptRequest,
+    SinkEffectAttemptResult,
+    SinkEffectLease,
+    SinkEffectLifecycle,
+)
 from elspeth.core.landscape.execution.sink_effect_reservation import (
     SinkEffectReservation,
     SinkEffectReservationRequest,
@@ -36,6 +43,7 @@ class SinkEffectRepository:
         self._member_loader = member_loader
         self._stream_loader = stream_loader
         self._reservation = SinkEffectReservation(db, effect_loader=effect_loader)
+        self._lifecycle = SinkEffectLifecycle(db, effect_loader=effect_loader)
 
     def reserve(
         self,
@@ -90,6 +98,34 @@ class SinkEffectRepository:
     def get_effect(self, effect_id: str) -> SinkEffect | None:
         row = self._ops.execute_fetchone(select(sink_effects_table).where(sink_effects_table.c.effect_id == effect_id))
         return None if row is None else self._effect_loader.load(row)
+
+    def complete_plan(self, effect_id: str, plan: SinkEffectPlan) -> SinkEffect:
+        return self._lifecycle.complete_plan(effect_id, plan)
+
+    def acquire_lease(self, effect_id: str, *, owner: str, ttl: timedelta) -> SinkEffectLease:
+        return self._lifecycle.acquire_lease(effect_id, owner=owner, ttl=ttl)
+
+    def heartbeat_lease(
+        self,
+        effect_id: str,
+        *,
+        owner: str,
+        generation: int,
+        ttl: timedelta,
+    ) -> SinkEffectLease:
+        return self._lifecycle.heartbeat_lease(effect_id, owner=owner, generation=generation, ttl=ttl)
+
+    def takeover_expired(self, effect_id: str, *, owner: str, ttl: timedelta) -> SinkEffectLease:
+        return self._lifecycle.takeover_expired(effect_id, owner=owner, ttl=ttl)
+
+    def begin_attempt(self, request: SinkEffectAttemptRequest) -> SinkEffectAttempt:
+        return self._lifecycle.begin_attempt(request)
+
+    def record_attempt_result(self, result: SinkEffectAttemptResult) -> SinkEffectAttempt:
+        return self._lifecycle.record_attempt_result(result)
+
+    def mark_response_lost(self, attempt_id: str) -> SinkEffectAttempt:
+        return self._lifecycle.mark_response_lost(attempt_id)
 
     def get_members(self, effect_id: str) -> tuple[SinkEffectMemberRecord, ...]:
         rows = self._ops.execute_fetchall(

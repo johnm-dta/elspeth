@@ -503,10 +503,35 @@ class SinkExecutor:
                     ctx=ctx,
                 )
             ]
-        if {member.token_id for member in durable_members} != set(token_ids):
-            raise AuditIntegrityError("interrupted sink effect has a partial durable member witness set")
+        # A retry batch may mix interrupted members (durable membership or an
+        # open state) with genuinely fresh members; reservation partitions the
+        # union into recovered and new effects, so recovery must not demand
+        # full durable coverage of the batch (elspeth-d1a1399381). Fresh
+        # members get newly opened states; interrupted members must still
+        # produce their exact durable witness or fail closed.
+        durable_token_ids = {member.token_id for member in durable_members}
+        fresh_tokens: list[TokenInfo] = []
+        fresh_rows: list[dict[str, object]] = []
+        for token, row in zip(tokens, rows, strict=True):
+            if token.token_id not in durable_token_ids and token.token_id not in open_ids:
+                fresh_tokens.append(token)
+                fresh_rows.append(row)
+        fresh_state_by_token: dict[str, NodeState] = {}
+        if fresh_tokens:
+            for token, opened in self._open_primary_states(
+                tokens=fresh_tokens,
+                rows=fresh_rows,
+                sink_node_id=sink_node_id,
+                step_in_pipeline=step_in_pipeline,
+                ctx=ctx,
+            ):
+                fresh_state_by_token[token.token_id] = opened
         states: list[tuple[TokenInfo, NodeState]] = []
         for token in tokens:
+            fresh_state = fresh_state_by_token.get(token.token_id)
+            if fresh_state is not None:
+                states.append((token, fresh_state))
+                continue
             open_state_id = open_ids.get(token.token_id)
             if open_state_id is not None:
                 state = self._execution.get_node_state(open_state_id)

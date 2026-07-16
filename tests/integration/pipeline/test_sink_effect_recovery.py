@@ -10,6 +10,7 @@ import pytest
 from elspeth.contracts import NodeType, PendingOutcome, RoutingMode, TerminalOutcome, TerminalPath, TokenInfo
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema_contract import PipelineRow
+from elspeth.contracts.sink_effects import SinkEffectReconcileResult
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.engine.executors.sink import SinkExecutor
 from elspeth.engine.executors.sink_effects import SinkEffectExecutionSeam, SinkEffectInjectedFault
@@ -261,6 +262,108 @@ def test_primary_finalizes_once_while_diverted_token_waits_for_linked_failsink(t
         assert len(routing_events) == 1
         assert routing_events[0].edge_id == edge.edge_id
         assert routing_events[0].mode is RoutingMode.DIVERT
+    finally:
+        db.close()
+
+
+class _StreamingObservableSink(PartitioningObservableSink):
+    """Partitioning double whose target accepts successive stream effects."""
+
+    def reconcile_effect(self, plan: object, ctx: object) -> SinkEffectReconcileResult:
+        del ctx
+        if self.external_target.effect_id == plan.effect_id and self.external_target.descriptor == plan.expected_descriptor:  # type: ignore[attr-defined]
+            assert self.external_target.descriptor is not None
+            return SinkEffectReconcileResult.applied(
+                self.external_target.descriptor,
+                evidence={"effect_id": plan.effect_id},  # type: ignore[attr-defined]
+            )
+        return SinkEffectReconcileResult.not_applied(evidence={"target": "not_applied"})
+
+
+def test_retry_with_mixed_interrupted_and_fresh_members_progresses(tmp_path: Path) -> None:
+    """A retry batch mixing one interrupted durable member with one fresh
+    member must partition and publish instead of wedging on the durable
+    witness-set guard (elspeth-d1a1399381)."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'mixed.db'}")
+    try:
+        factory = make_factory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source_id = register_test_node(factory.data_flow, run.run_id, "source", node_type=NodeType.SOURCE, plugin_name="source")
+        sink_id = register_test_node(factory.data_flow, run.run_id, "primary", node_type=NodeType.SINK, plugin_name="streaming")
+        tokens = _effect_tokens(
+            factory,
+            run_id=run.run_id,
+            source_id=source_id,
+            rows=[{"value": 1}, {"value": 2}],
+        )
+        ctx = PluginContext(run_id=run.run_id, config={}, landscape=factory.plugin_audit_writer(), node_id=sink_id)
+        pending = PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
+        target = DuplicateObservableTarget()
+        calls = 0
+
+        def fail_once(observed: SinkEffectExecutionSeam) -> None:
+            nonlocal calls
+            if observed is SinkEffectExecutionSeam.BEFORE_EFFECT and calls == 0:
+                calls += 1
+                raise SinkEffectInjectedFault(observed)
+
+        first_sink = _StreamingObservableSink(target, name="primary")
+        first_sink.node_id = sink_id
+        with pytest.raises(SinkEffectInjectedFault):
+            SinkExecutor(
+                factory.execution,
+                factory.data_flow,
+                SpanFactory(),
+                run.run_id,
+                factory=factory,
+                worker_id="worker-a",
+                sink_effect_fault_hook=fail_once,
+            ).write(
+                first_sink,  # type: ignore[arg-type]
+                tokens[:1],
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=pending,
+                effect_mode="write",
+            )
+
+        recovered_factory = make_factory(db)
+        recovered_sink = _StreamingObservableSink(target, name="primary")
+        recovered_sink.node_id = sink_id
+        artifact, counts = SinkExecutor(
+            recovered_factory.execution,
+            recovered_factory.data_flow,
+            SpanFactory(),
+            run.run_id,
+            factory=recovered_factory,
+            worker_id="worker-a",
+        ).write(
+            recovered_sink,  # type: ignore[arg-type]
+            tokens,
+            ctx,
+            1,
+            sink_name="output",
+            pending_outcome=pending,
+            effect_mode="write",
+        )
+
+        assert artifact is not None
+        assert counts.total == 0
+        # The interrupted member and the fresh member each publish exactly
+        # once, through the recovered effect and a newly reserved successor.
+        assert target.publication_count == 2
+        effects = recovered_factory.execution.sink_effects.get_effects_for_run(run.run_id)
+        assert [effect.state.value for effect in effects] == ["finalized", "finalized"]
+        for token in tokens:
+            outcome = recovered_factory.data_flow.get_token_outcome(token.token_id)
+            assert outcome is not None
+            assert outcome.outcome is TerminalOutcome.SUCCESS
+        # The interrupted member reused its open state; the fresh member got
+        # exactly one new state at the sink node.
+        for token in tokens:
+            states = [state for state in recovered_factory.query.get_node_states_for_token(token.token_id) if state.node_id == sink_id]
+            assert len(states) == 1
     finally:
         db.close()
 

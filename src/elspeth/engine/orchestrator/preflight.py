@@ -32,6 +32,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NoReturn, cast, final
 
+from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.sink_effects import (
     SINK_EFFECT_PROTOCOL_VERSION,
     ResolvedSinkEffectMode,
@@ -211,29 +212,40 @@ def sink_effect_modes_from_runtime_bindings(
     bindings: Mapping[str, SinkEffectRuntimeBinding],
     *,
     purpose: SinkEffectExecutionPurpose,
-    expected_config_fingerprints: Mapping[str, str],
+    configured_options: Mapping[str, Mapping[str, object]],
 ) -> Mapping[str, str]:
     """Derive modes only from bindings owned by the real runtime factory."""
-    if set(bindings) != set(sinks) or set(expected_config_fingerprints) != set(sinks):
-        raise SinkEffectCapabilityError(
-            "Sink effect runtime bindings and expected config fingerprints must exactly match runtime sink names"
-        )
+    if set(bindings) != set(sinks) or set(configured_options) != set(sinks):
+        raise SinkEffectCapabilityError("Sink effect runtime bindings and configured options must exactly match runtime sink names")
     modes: dict[str, str] = {}
     for sink_name, sink in sinks.items():
         binding = bindings[sink_name]
+        options = dict(configured_options[sink_name])
         if (
             type(binding) is not SinkEffectRuntimeBinding
             or binding.sink_name != sink_name
             or binding.sink is not sink
             or binding.sink_type is not type(sink)
             or binding.purpose is not purpose
-            or binding.config_fingerprint != expected_config_fingerprints[sink_name]
+            or binding.config_fingerprint != stable_hash(options)
         ):
             raise SinkEffectCapabilityError(
                 f"Sink effect runtime binding for {sink_name!r} does not bind the exact sink, type, name, config, and execution purpose"
             )
-        if binding.effect_mode is not None:
-            modes[sink_name] = binding.effect_mode.value
+        resolver = inspect.getattr_static(type(sink), "_resolve_sink_effect_mode", None)
+        if type(resolver) is not classmethod:
+            if binding.effect_mode is None:
+                continue
+            raise SinkEffectCapabilityError(f"Sink effect runtime binding for {sink_name!r} cannot re-resolve its configured effect mode")
+        resolved_mode = resolver.__func__(type(sink), options, purpose=purpose)
+        if resolved_mode is not None and type(resolved_mode) is not ResolvedSinkEffectMode:
+            raise SinkEffectCapabilityError(f"Sink effect mode resolver for {sink_name!r} must return ResolvedSinkEffectMode or None")
+        if binding.effect_mode != resolved_mode:
+            raise SinkEffectCapabilityError(
+                f"Sink effect runtime binding for {sink_name!r} claimed effect mode does not match adapter-resolved config authority"
+            )
+        if resolved_mode is not None:
+            modes[sink_name] = resolved_mode.value
     return modes
 
 

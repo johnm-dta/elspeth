@@ -525,7 +525,6 @@ def _preflight_execution_sinks(
     purpose: object | None = None,
 ) -> tuple[Mapping[str, SinkProtocol], Mapping[str, str], object]:
     """Validate the one executable pipeline sink lane and return its receipt."""
-    from elspeth.contracts.hashing import stable_hash
     from elspeth.contracts.sink_effects import SinkEffectInputKind
     from elspeth.engine.orchestrator.preflight import (
         SinkEffectExecutionPurpose,
@@ -544,7 +543,7 @@ def _preflight_execution_sinks(
         sinks,
         bindings,
         purpose=resolved_purpose,
-        expected_config_fingerprints={name: stable_hash(dict(config.sinks[name].options)) for name in sinks},
+        configured_options={name: config.sinks[name].options for name in sinks},
     )
     admission = validate_pipeline_sink_effect_capabilities(
         sinks,

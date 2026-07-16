@@ -89,6 +89,16 @@ class _SinkDouble:
     supported_effect_modes = frozenset({"write"})
     supported_effect_input_kinds = frozenset({SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT})
 
+    @classmethod
+    def _resolve_sink_effect_mode(
+        cls,
+        config: dict[str, object],
+        *,
+        purpose: SinkEffectExecutionPurpose,
+    ) -> ResolvedSinkEffectMode:
+        del cls, config, purpose
+        return ResolvedSinkEffectMode("write")
+
     def __init__(self, *, config: dict[str, Any] | None = None, **overrides: Any) -> None:
         self.config = config or {}
         self._resolved_effect_mode = "write"

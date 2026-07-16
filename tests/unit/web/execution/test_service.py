@@ -37,7 +37,12 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.run_result import RunResult
-from elspeth.contracts.sink_effects import SINK_EFFECT_PROTOCOL_VERSION, SinkEffectInputKind
+from elspeth.contracts.sink_effects import (
+    SINK_EFFECT_PROTOCOL_VERSION,
+    ResolvedSinkEffectMode,
+    SinkEffectExecutionPurpose,
+    SinkEffectInputKind,
+)
 from elspeth.core.config import (
     CheckpointSettings,
     ConcurrencySettings,
@@ -199,6 +204,16 @@ class _EffectCapableSinkStub:
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"write"})
     supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
+
+    @classmethod
+    def _resolve_sink_effect_mode(
+        cls,
+        config: dict[str, object],
+        *,
+        purpose: SinkEffectExecutionPurpose,
+    ) -> ResolvedSinkEffectMode:
+        del cls, config, purpose
+        return ResolvedSinkEffectMode("write")
 
     def inspect_effect(self, _request: object, _ctx: object) -> None: ...
 

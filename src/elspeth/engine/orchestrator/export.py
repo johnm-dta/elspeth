@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from elspeth.core.landscape import LandscapeDB
 
 from elspeth.contracts import Determinism
-from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.core.operations import track_operation
 from elspeth.engine.orchestrator.schema_reconstruction import (
@@ -323,7 +322,7 @@ def _validate_audit_export_binding_provenance(
         {sink_name: sink},
         {sink_name: binding},
         purpose=SinkEffectExecutionPurpose.AUDIT_EXPORT,
-        expected_config_fingerprints={sink_name: stable_hash(dict(settings.sinks[sink_name].options))},
+        configured_options={sink_name: settings.sinks[sink_name].options},
     )
     return sink_name, sink, modes
 

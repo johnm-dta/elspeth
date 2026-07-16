@@ -227,9 +227,7 @@ def validate_sink_effect_eligibility_from_raw_config(
         plugin_name = component.get("plugin")
         if not isinstance(plugin_name, str) or not plugin_name:
             raise ValueError(f"Sink {sink_name!r} plugin must be a non-empty string")
-        if "options" not in component:
-            raise ValueError(f"Sink {sink_name!r} options must be present for sink effect eligibility")
-        raw_options = component["options"]
+        raw_options = component.get("options", {})
         if not isinstance(raw_options, Mapping):
             raise ValueError(f"Sink {sink_name!r} options must be a mapping/object")
         options = dict(raw_options)

@@ -21,7 +21,12 @@ from elspeth.cli import (
     _preflight_follower_sink_effects,
     _start_follower_plugin_lifecycle,
 )
-from elspeth.contracts.sink_effects import SINK_EFFECT_PROTOCOL_VERSION, SinkEffectInputKind
+from elspeth.contracts.sink_effects import (
+    SINK_EFFECT_PROTOCOL_VERSION,
+    ResolvedSinkEffectMode,
+    SinkEffectExecutionPurpose,
+    SinkEffectInputKind,
+)
 from elspeth.engine.orchestrator.core import Orchestrator
 from elspeth.engine.orchestrator.export import export_landscape
 from elspeth.engine.orchestrator.preflight import (
@@ -56,6 +61,16 @@ class EffectCapableSink(LegacyObservableSink):
 
     def __init__(self) -> None:
         super().__init__()
+
+    @classmethod
+    def _resolve_sink_effect_mode(
+        cls,
+        config: dict[str, object],
+        *,
+        purpose: SinkEffectExecutionPurpose,
+    ) -> ResolvedSinkEffectMode:
+        del cls, config, purpose
+        return ResolvedSinkEffectMode("write")
 
     def inspect_effect(self, _request: object, _ctx: object) -> None:
         return None
@@ -923,7 +938,13 @@ def test_real_runtime_factory_carries_adapter_resolved_mode_with_exact_sink(
     assert web_modes == {"output": "write"}
     assert export_binding.effect_mode is not None
     assert export_binding.effect_mode.value == "write"
-    assert resolved_purposes == [SinkEffectExecutionPurpose.FRESH, SinkEffectExecutionPurpose.AUDIT_EXPORT]
+    assert resolved_purposes == [
+        SinkEffectExecutionPurpose.FRESH,
+        SinkEffectExecutionPurpose.FRESH,
+        SinkEffectExecutionPurpose.FRESH,
+        SinkEffectExecutionPurpose.AUDIT_EXPORT,
+        SinkEffectExecutionPurpose.AUDIT_EXPORT,
+    ]
 
 
 def test_raw_sink_eligibility_rejects_legacy_adapter_without_constructing_it(
@@ -967,17 +988,77 @@ def test_raw_sink_eligibility_rejects_legacy_adapter_without_constructing_it(
     assert constructor_calls == 0
 
 
-@pytest.mark.parametrize(
-    ("component", "message"),
-    [
-        ({"options": {}}, "plugin"),
-        ({"plugin": "capable"}, "options"),
-    ],
-)
-def test_raw_sink_eligibility_rejects_missing_plugin_or_options_before_manager_lookup(
+def test_raw_sink_eligibility_rejects_missing_plugin_before_manager_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
+    from elspeth.plugins.infrastructure.runtime_factory import validate_sink_effect_eligibility_from_raw_config
+
+    monkeypatch.setattr(
+        "elspeth.plugins.infrastructure.manager.get_shared_plugin_manager",
+        lambda: pytest.fail("malformed raw sink must fail before plugin-manager lookup"),
+    )
+
+    with pytest.raises(ValueError, match="plugin"):
+        validate_sink_effect_eligibility_from_raw_config(
+            {"sinks": {"output": {"options": {}}}},
+            purpose=SinkEffectExecutionPurpose.FRESH,
+        )
+
+
+def test_raw_sink_eligibility_defaults_omitted_options_before_mode_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    from collections.abc import Mapping
+
+    from elspeth.contracts import Determinism
+    from elspeth.engine.orchestrator.preflight import ResolvedSinkEffectMode, SinkEffectExecutionPurpose
+    from elspeth.plugins.infrastructure.base import BaseSink
+    from elspeth.plugins.infrastructure.runtime_factory import validate_sink_effect_eligibility_from_raw_config
+
+    class DefaultOptionsSink(BaseSink):
+        name = "capable"
+        determinism = Determinism.IO_WRITE
+        effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+        supported_effect_modes = frozenset({"write"})
+        supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
+
+        @classmethod
+        def _resolve_sink_effect_mode(
+            cls,
+            config: Mapping[str, object],
+            *,
+            purpose: SinkEffectExecutionPurpose,
+        ) -> ResolvedSinkEffectMode:
+            assert config == {}
+            assert purpose is SinkEffectExecutionPurpose.FRESH
+            return ResolvedSinkEffectMode("write")
+
+        def inspect_effect(self, _request: object, _ctx: object) -> None: ...
+
+        def prepare_effect(self, _request: object, _ctx: object) -> None: ...
+
+        def commit_effect(self, _plan: object, _ctx: object) -> None: ...
+
+        def reconcile_effect(self, _plan: object, _ctx: object) -> None: ...
+
+    class PluginManager:
+        def get_sink_by_name(self, _name: str) -> type[DefaultOptionsSink]:
+            return DefaultOptionsSink
+
+    monkeypatch.setattr(
+        "elspeth.plugins.infrastructure.manager.get_shared_plugin_manager",
+        lambda: PluginManager(),
+    )
+
+    modes = validate_sink_effect_eligibility_from_raw_config(
+        {"sinks": {"output": {"plugin": "capable"}}},
+        purpose=SinkEffectExecutionPurpose.FRESH,
+    )
+
+    assert modes == {"output": ResolvedSinkEffectMode("write")}
+
+
+@pytest.mark.parametrize("options", [None, [], "write", 1])
+def test_raw_sink_eligibility_rejects_present_non_mapping_options_before_manager_lookup(
     monkeypatch: pytest.MonkeyPatch,
-    component: dict[str, object],
-    message: str,
+    options: object,
 ) -> None:
     from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
     from elspeth.plugins.infrastructure.runtime_factory import validate_sink_effect_eligibility_from_raw_config
@@ -987,9 +1068,9 @@ def test_raw_sink_eligibility_rejects_missing_plugin_or_options_before_manager_l
         lambda: pytest.fail("malformed raw sink must fail before plugin-manager lookup"),
     )
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="options must be a mapping/object"):
         validate_sink_effect_eligibility_from_raw_config(
-            {"sinks": {"output": component}},
+            {"sinks": {"output": {"plugin": "capable", "options": options}}},
             purpose=SinkEffectExecutionPurpose.FRESH,
         )
 
@@ -1030,7 +1111,7 @@ def test_runtime_binding_rejects_name_instance_config_and_purpose_tampering(tamp
             {"output": sink},  # type: ignore[dict-item]
             {"output": binding},
             purpose=SinkEffectExecutionPurpose.FRESH,
-            expected_config_fingerprints={"output": stable_hash({"path": "safe"})},
+            configured_options={"output": {"path": "safe"}},
         )
 
 
@@ -1178,6 +1259,77 @@ def test_prepared_export_binding_provenance_precedes_pending_status(monkeypatch:
     )
 
     with pytest.raises(SinkEffectCapabilityError):
+        coordinator.execute_export_phase(
+            factory,  # type: ignore[arg-type]
+            "run-1",
+            settings,  # type: ignore[arg-type]
+            lambda _name: pytest.fail("prepared path must not reconstruct the sink"),  # type: ignore[arg-type]
+        )
+
+    factory.run_lifecycle.set_export_status.assert_not_called()
+    coordinator._events.emit.assert_not_called()
+    coordinator._ceremony.emit_telemetry.assert_not_called()
+    coordinator._ceremony.emit_phase_error.assert_not_called()
+
+
+def test_prepared_export_binding_rejects_claimed_mode_before_pending_or_receipt(monkeypatch: pytest.MonkeyPatch) -> None:
+    from dataclasses import replace
+
+    from elspeth.contracts.hashing import stable_hash
+    from elspeth.engine.orchestrator.preflight import ResolvedSinkEffectMode, SinkEffectExecutionPurpose
+    from elspeth.engine.orchestrator.run_lifecycle import RunLifecycleCoordinator
+
+    class ConfigModeSink(EffectCapableSink):
+        supported_effect_modes = frozenset({"write", "append"})
+
+        @classmethod
+        def _resolve_sink_effect_mode(
+            cls,
+            config: dict[str, object],
+            *,
+            purpose: SinkEffectExecutionPurpose,
+        ) -> ResolvedSinkEffectMode:
+            assert config == {"mode": "write"}
+            assert purpose is SinkEffectExecutionPurpose.AUDIT_EXPORT
+            return ResolvedSinkEffectMode("write")
+
+    sink = ConfigModeSink()
+    binding = replace(
+        _audit_export_binding("audit-output", sink, "append"),  # type: ignore[type-var]
+        config_fingerprint=stable_hash({"mode": "write"}),
+    )
+    admission = validate_pipeline_sink_effect_capabilities(
+        {"audit-output": sink},  # type: ignore[arg-type]
+        configured_modes={"audit-output": "append"},
+        required_input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
+    )
+    coordinator = object.__new__(RunLifecycleCoordinator)
+    coordinator._db = object()
+    coordinator._events = MagicMock(spec=["emit"])
+    coordinator._ceremony = MagicMock(spec=["emit_telemetry", "emit_phase_error"])
+    factory = SimpleNamespace(run_lifecycle=MagicMock(spec=["set_export_status"]))
+    settings = SimpleNamespace(
+        sinks={"audit-output": SimpleNamespace(options={"mode": "write"})},
+        landscape=SimpleNamespace(
+            export=SimpleNamespace(
+                enabled=True,
+                sign=True,
+                include_raw_error_rows=False,
+                sink="audit-output",
+                format="json",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "elspeth.engine.orchestrator.run_lifecycle.prepare_audit_export_binding",
+        lambda _settings, _factory: (binding, admission),
+    )
+    monkeypatch.setattr(
+        "elspeth.engine.orchestrator.run_lifecycle.export_landscape",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(SinkEffectCapabilityError("receipt/export path reached")),
+    )
+
+    with pytest.raises(SinkEffectCapabilityError, match="claimed effect mode"):
         coordinator.execute_export_phase(
             factory,  # type: ignore[arg-type]
             "run-1",

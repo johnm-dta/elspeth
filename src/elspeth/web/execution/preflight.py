@@ -244,7 +244,6 @@ def preflight_runtime_sink_effects(
     bundle: PluginBundle,
 ) -> tuple[Mapping[str, SinkProtocol], Mapping[str, str], object]:
     """Admit web execution sinks from exact factory-owned bindings."""
-    from elspeth.contracts.hashing import stable_hash
     from elspeth.contracts.sink_effects import SinkEffectInputKind
     from elspeth.engine.orchestrator.preflight import (
         SinkEffectExecutionPurpose,
@@ -260,7 +259,7 @@ def preflight_runtime_sink_effects(
         sinks,
         bindings,
         purpose=SinkEffectExecutionPurpose.FRESH,
-        expected_config_fingerprints={name: stable_hash(dict(settings.sinks[name].options)) for name in sinks},
+        configured_options={name: settings.sinks[name].options for name in sinks},
     )
     admission = validate_pipeline_sink_effect_capabilities(
         sinks,

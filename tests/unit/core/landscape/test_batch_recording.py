@@ -1711,3 +1711,96 @@ class TestGetArtifacts:
         ids_second = [a.artifact_id for a in artifacts_second]
         assert ids_first == ids_second
         assert len(ids_first) == 3
+
+
+class TestAddBatchMemberGuardedPostgresLockOrder:
+    """PostgreSQL parent-lock acquisition order for batch membership (elspeth-a580f44add).
+
+    Outcome recording (``TokenOutcomeRepository.lock_token_outcome_dependencies``)
+    locks ``tokens`` FOR UPDATE first and then takes an implicit FK ``KEY SHARE``
+    on ``batches`` when it writes a batch-scoped outcome row.  Membership must
+    acquire its parent locks in the same token-first order; locking the batch
+    row first while the membership INSERT waits on the token FK lock deadlocks
+    against a concurrent outcome write and aborts one audit transaction.
+    """
+
+    @staticmethod
+    def _run_guarded_add(statements: list[str]):
+        """Drive add_batch_member_guarded against a statement-recording fake."""
+        from types import SimpleNamespace
+        from typing import cast
+
+        from sqlalchemy.dialects import postgresql
+
+        from elspeth.core.landscape.execution.batches import add_batch_member_guarded
+
+        token_row = SimpleNamespace(token_id="tok-1")
+        batch_row = SimpleNamespace(run_id="run-1", status="draft")
+        inserted_row = SimpleNamespace(batch_id="batch-1", run_id="run-1", token_id="tok-1", ordinal=0)
+
+        class _RecordedResult:
+            def __init__(self, rows: list[object]) -> None:
+                self._rows = rows
+
+            def fetchone(self) -> object | None:
+                return self._rows[0] if self._rows else None
+
+            def fetchall(self) -> list[object]:
+                return list(self._rows)
+
+        class _RecordingPostgresConnection:
+            dialect = type("_Dialect", (), {"name": "postgresql"})()
+
+            def execute(self, statement: object) -> _RecordedResult:
+                compiled = statement.compile(dialect=postgresql.dialect())  # type: ignore[attr-defined]
+                sql = " ".join(str(compiled).upper().split())
+                statements.append(sql)
+                if sql.startswith("INSERT INTO BATCH_MEMBERS"):
+                    return _RecordedResult([inserted_row])
+                if sql.startswith("SELECT") and "FROM TOKENS" in sql:
+                    return _RecordedResult([token_row])
+                if sql.startswith("SELECT") and "FROM BATCHES" in sql:
+                    return _RecordedResult([batch_row])
+                raise AssertionError(f"unexpected statement: {sql}")
+
+        return add_batch_member_guarded(
+            cast(Connection, _RecordingPostgresConnection()),
+            batch_id="batch-1",
+            token_id="tok-1",
+            ordinal=0,
+        )
+
+    def test_postgres_membership_locks_token_before_batch(self):
+        """The token row lock must be acquired before the batch FOR UPDATE."""
+        statements: list[str] = []
+        member = self._run_guarded_add(statements)
+
+        assert member.batch_id == "batch-1"
+        assert member.token_id == "tok-1"
+
+        token_locks = [i for i, sql in enumerate(statements) if sql.startswith("SELECT") and "FROM TOKENS" in sql and "FOR UPDATE" in sql]
+        batch_locks = [i for i, sql in enumerate(statements) if sql.startswith("SELECT") and "FROM BATCHES" in sql and "FOR UPDATE" in sql]
+
+        assert token_locks, (
+            "PostgreSQL membership path must lock the token row FOR UPDATE before "
+            "anything else (token-first order shared with outcome recording); "
+            f"observed statements: {statements}"
+        )
+        assert batch_locks, f"PostgreSQL membership path must keep its batch FOR UPDATE guard; observed statements: {statements}"
+        assert token_locks[0] < batch_locks[0], (
+            "PostgreSQL membership path must acquire the token lock BEFORE the batch "
+            "FOR UPDATE — batch-first order deadlocks against token-first outcome "
+            f"recording; observed statements: {statements}"
+        )
+
+    def test_postgres_membership_keeps_draft_guard_and_insert_last(self):
+        """Reordering the locks must not drop the DRAFT guard or reorder the INSERT."""
+        statements: list[str] = []
+        self._run_guarded_add(statements)
+
+        insert_indexes = [i for i, sql in enumerate(statements) if sql.startswith("INSERT INTO BATCH_MEMBERS")]
+        batch_locks = [i for i, sql in enumerate(statements) if sql.startswith("SELECT") and "FROM BATCHES" in sql and "FOR UPDATE" in sql]
+        assert len(insert_indexes) == 1
+        assert batch_locks and batch_locks[0] < insert_indexes[0], (
+            f"batch FOR UPDATE status guard must still precede the membership INSERT; observed statements: {statements}"
+        )

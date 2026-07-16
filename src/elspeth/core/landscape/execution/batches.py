@@ -42,14 +42,25 @@ def add_batch_member_guarded(
     snapshot-establishing statement.  That lets a caller-owned DEFERRED
     transaction acquire write intent before any predicate read, eliminating
     the read/peer-write/write ``SQLITE_BUSY_SNAPSHOT`` window.  PostgreSQL
-    keeps the batch-row ``FOR UPDATE`` lock first so status transitions and
-    membership additions retain their established lock ordering.
+    acquires its parent locks in token-first order — the token row before the
+    batch-row ``FOR UPDATE`` guard — matching
+    ``TokenOutcomeRepository.lock_token_outcome_dependencies``, whose global
+    order is ``tokens`` before every dependent aggregate.  Outcome recording
+    holds a token ``FOR UPDATE`` and then takes an implicit FK ``KEY SHARE``
+    on ``batches`` when it writes a batch-scoped outcome row; a batch-first
+    membership lock deadlocks against it (batch held / token wanted vs token
+    held / batch wanted) and PostgreSQL aborts one audit write.  Status
+    transitions only ever lock the batch row, so token-first membership stays
+    consistent with them.
 
     ``expected_run_id`` binds scheduler callers to their already-fenced run;
     ordinary batch repository callers rely on the batch/token run join.
     """
     batch_row = None
     if conn.dialect.name != "sqlite":
+        # Token-first parent lock. A missing token locks nothing — the
+        # conditional INSERT and its post-mortem below still own that error.
+        conn.execute(select(tokens_table.c.token_id).where(tokens_table.c.token_id == token_id).with_for_update(of=tokens_table)).fetchall()
         batch_row = conn.execute(
             select(batches_table.c.run_id, batches_table.c.status).where(batches_table.c.batch_id == batch_id).with_for_update()
         ).fetchone()

@@ -40,6 +40,41 @@ from elspeth.core.landscape.schema import (
 )
 
 
+def lock_worker_membership_row(conn: Connection, *, worker_id: str, run_id: str) -> None:
+    """Serialize membership fencing with worker eviction (elspeth-6903f82511).
+
+    The membership fence rides the claim/heartbeat CAS UPDATE as an EXISTS
+    predicate over ``run_workers``.  MVCC predicate reads take no row locks,
+    so a fence evaluated while an eviction transaction holds the worker's
+    ``run_workers`` row uncommitted-updated passes on the pre-eviction
+    snapshot and hands an evicted worker a new (or renewed) lease.  Taking a
+    shared row lock first blocks behind the eviction UPDATE and observes the
+    committed status once it clears, so the CAS fence (and its re-probe
+    classification) sees the eviction and fails closed.
+
+    ``FOR SHARE`` (not ``FOR UPDATE``) so fenced verbs of live workers do not
+    serialize against each other — only against eviction, whose row UPDATE
+    conflicts with any shared lock.  ``evict_worker`` mirrors this seam from
+    the other side: it locks the target's row FOR UPDATE *before* its
+    no-unexpired-leases precondition, so every in-flight fenced lease write is
+    committed-and-visible or blocked when eviction reads the lease table.
+
+    An absent row locks nothing — absence semantics stay owned by the fence
+    clause on the CAS UPDATE (strict: refused; lenient: N=0 arm).  SQLite
+    ignores ``FOR SHARE``: ``BEGIN IMMEDIATE`` already owns the whole write
+    slot for the transaction, which is the same serialization this lock buys
+    on PostgreSQL.
+    """
+    conn.execute(
+        select(run_workers_table.c.worker_id)
+        .where(
+            run_workers_table.c.worker_id == worker_id,
+            run_workers_table.c.run_id == run_id,
+        )
+        .with_for_update(read=True, of=run_workers_table)
+    ).fetchall()
+
+
 def _incomplete_pending_sink_bundle_error(*, run_id: str, work_item_id: str) -> AuditIntegrityError:
     return AuditIntegrityError(
         f"Scheduler claim_pending_sink refused run_id={run_id!r} work_item_id={work_item_id!r}: "
@@ -136,6 +171,13 @@ class SchedulerLeaseRepository:
         broader leader-fenced transaction.
         """
         lease_expires_at = now + timedelta(seconds=lease_seconds)
+        if strict_membership_fenced or membership_fenced:
+            # Serialize the fence with worker eviction BEFORE the CAS UPDATE:
+            # the EXISTS predicate below is an unlocked MVCC read and would
+            # otherwise pass on still-active membership while an eviction that
+            # already observed no live lease sits uncommitted
+            # (elspeth-6903f82511).
+            lock_worker_membership_row(conn, worker_id=lease_owner, run_id=run_id)
         where_clauses = and_(
             token_work_items_table.c.work_item_id == row["work_item_id"],
             token_work_items_table.c.run_id == run_id,
@@ -279,6 +321,9 @@ class SchedulerLeaseRepository:
                 return None
             if not row["_pending_sink_bundle_complete"]:
                 raise _incomplete_pending_sink_bundle_error(run_id=run_id, work_item_id=row["work_item_id"])
+            # Serialize the membership fence with worker eviction before the
+            # CAS UPDATE (elspeth-6903f82511) — same seam as claim_ready_row.
+            lock_worker_membership_row(conn, worker_id=lease_owner, run_id=run_id)
             result = conn.execute(
                 update(token_work_items_table)
                 .where(
@@ -708,6 +753,12 @@ class SchedulerLeaseRepository:
                     token_work_items_table.c.lease_owner == lease_owner,
                 )
                 if membership_fenced:
+                    # Serialize the fence with worker eviction before the CAS
+                    # UPDATE (elspeth-6903f82511): without the shared row lock
+                    # an eviction that already observed this lease as expired
+                    # could commit around the unlocked EXISTS below, leaving an
+                    # evicted worker with a renewed lease.
+                    lock_worker_membership_row(conn, worker_id=lease_owner, run_id=run_id)
                     # The strict membership predicate rides the same UPDATE as
                     # the lease predicates.  A separate pre-check would leave
                     # an entry-to-CAS window for eviction or row deletion.

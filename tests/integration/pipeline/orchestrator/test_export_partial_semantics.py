@@ -261,6 +261,10 @@ class TestExportFailurePartialRunSemantics:
         graph = build_production_graph(config)
         settings = _make_export_enabled_settings()
         orchestrator = Orchestrator(db, event_bus=event_bus)
+        # Export-enabled runs validate their export resources up front
+        # (elspeth-749e75a59b), so the durable store binding must be supplied
+        # even though this run fails before the export phase is reached.
+        audit_store, audit_store_resolver = _audit_store_binding()
 
         export_status_calls: list[tuple[str, ExportStatus]] = []
         original_set_export_status = RunLifecycleRepository.set_export_status
@@ -295,6 +299,8 @@ class TestExportFailurePartialRunSemantics:
                 settings=settings,
                 payload_store=payload_store,
                 sink_factory=_audit_sink_factory,
+                audit_export_content_store=audit_store,
+                audit_export_content_store_resolver=audit_store_resolver,
             )
 
         mock_export.assert_not_called()

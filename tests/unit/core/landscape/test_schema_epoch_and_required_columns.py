@@ -1,4 +1,4 @@
-"""Schema epoch + required-columns + provenance-write guards (epoch 23)."""
+"""Schema epoch + required-columns + provenance-write guards (epoch 24)."""
 
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ from elspeth.core.landscape.schema import (
 from tests.fixtures.landscape import make_recorder_with_run
 
 
-def test_epoch_is_twenty_three() -> None:
-    assert SQLITE_SCHEMA_EPOCH == 23
+def test_epoch_is_twenty_four() -> None:
+    assert SQLITE_SCHEMA_EPOCH == 24
 
 
 def test_epoch_23_web_plugin_policy_table_is_one_to_one_with_runs() -> None:

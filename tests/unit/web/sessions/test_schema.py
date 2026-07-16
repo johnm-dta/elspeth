@@ -11,9 +11,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import QueuePool
 
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import blobs_table, metadata, sessions_table
+from elspeth.web.sessions.models import SESSION_SCHEMA_EPOCH, blobs_table, metadata, sessions_table
 from elspeth.web.sessions.schema import (
     SessionSchemaError,
+    _stamp_schema_sentinels,
     _validate_current_schema,
     initialize_session_schema,
     probe_current_schema,
@@ -238,25 +239,17 @@ def test_initialize_session_schema_rejects_partial_stale_schema() -> None:
         initialize_session_schema(eng)
 
 
-def test_initialize_session_schema_rejects_epoch_23_database() -> None:
-    """A VALID full-schema DB stamped at the PRIOR epoch fail-closes at boot.
+def test_initialize_session_schema_rejects_prior_epoch_database() -> None:
+    """A valid full-schema DB stamped at the prior epoch fail-closes at boot.
 
-    Genuine TDD red->green guard for the 23->24 bump (D15), isolated from any
-    table-set mismatch. Seed a COMPLETE current-schema DB
-    (``initialize_session_schema`` runs ``metadata.create_all`` + stamps the
-    CURRENT epoch), then re-stamp ``user_version`` to the prior epoch. Because the
-    schema is otherwise valid, the ONLY thing that can fail-close is the epoch
-    sentinel (``_assert_schema_sentinels``):
-      - pre-bump  (epoch still 23): stamped 23 == current 23 -> accepted, NO raise -> RED
-      - post-bump (epoch 24):       stamped 23 != current 24 -> raises -> GREEN
-
-    Do NOT use a partial-table fixture: that would fail for table-set mismatch
-    at both epochs and would make the red phase hollow.
+    Seed a complete current-schema DB, then re-stamp only the SQLite epoch.
+    Because the SQL shape and cross-dialect identity row remain current, the
+    PRAGMA guard is the only possible failure source.
     """
     eng = create_session_engine("sqlite:///:memory:")
     initialize_session_schema(eng)  # full schema + stamps the CURRENT epoch
     with eng.begin() as conn:
-        conn.execute(text("PRAGMA user_version = 23"))  # re-stamp to the prior epoch
+        conn.execute(text(f"PRAGMA user_version = {SESSION_SCHEMA_EPOCH - 1}"))
     with pytest.raises(SessionSchemaError, match="SESSION_SCHEMA_EPOCH"):
         initialize_session_schema(eng)
 
@@ -430,6 +423,7 @@ def test_validator_accepts_index_unique_true_as_unique_constraint() -> None:
 
     eng = create_session_engine("sqlite:///:memory:")
     metadata.create_all(eng)
+    _stamp_schema_sentinels(eng)
     inspector = sa_inspect(eng)
 
     expected_unique_chat = {

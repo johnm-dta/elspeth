@@ -12,7 +12,6 @@ from sqlalchemy.exc import OperationalError
 from structlog.testing import capture_logs
 
 from elspeth.core.landscape.database import SchemaCompatibilityError
-from elspeth.core.landscape.schema import metadata as landscape_metadata
 from elspeth.web import schema_probe as schema_probe_module
 from elspeth.web.schema_probe import (
     AWS_ECS_POOL_KWARGS,
@@ -249,7 +248,7 @@ def test_session_foreign_partial_and_current_states() -> None:
 
 def test_landscape_additive_gap_is_partial_and_initializer_repairs_it() -> None:
     engine = create_engine("sqlite:///:memory:")
-    landscape_metadata.create_all(engine)
+    init_landscape_schema(engine)
     with engine.begin() as conn:
         conn.exec_driver_sql("DROP INDEX ix_tokens_run_id")
     assert probe_landscape_schema(engine) is SchemaState.PARTIAL
@@ -259,7 +258,7 @@ def test_landscape_additive_gap_is_partial_and_initializer_repairs_it() -> None:
 
 def test_populated_landscape_missing_epoch_23_policy_table_is_stale_and_not_repaired() -> None:
     engine = create_engine("sqlite:///:memory:")
-    landscape_metadata.create_all(engine)
+    init_landscape_schema(engine)
     with engine.begin() as conn:
         conn.exec_driver_sql("DROP TABLE run_web_plugin_policy")
         conn.exec_driver_sql("PRAGMA user_version = 22")

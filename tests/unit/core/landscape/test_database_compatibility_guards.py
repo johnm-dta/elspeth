@@ -10,11 +10,13 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.engine import Engine
 from sqlalchemy.schema import CreateIndex
 
 import elspeth.core.landscape.database as database_module
 from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
-from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata, runs_table, token_work_items_table
+from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata, runs_table, schema_identity_table, token_work_items_table
+from elspeth.core.schema_identity import insert_schema_identity
 
 
 def _make_instance(url: str) -> LandscapeDB:
@@ -26,6 +28,16 @@ def _make_instance(url: str) -> LandscapeDB:
     instance._engine = create_engine(url, echo=False)
     instance._require_existing_schema = False
     return instance
+
+
+def _stamp_current_landscape_identity(engine: Engine) -> None:
+    with engine.begin() as connection:
+        insert_schema_identity(
+            connection,
+            schema_identity_table,
+            store_kind="landscape",
+            schema_epoch=SQLITE_SCHEMA_EPOCH,
+        )
 
 
 class _InspectorFake:
@@ -116,6 +128,7 @@ class TestExplicitEngineKwargs:
         monkeypatch.setattr(LandscapeDB, "_validate_schema", lambda self: None)
         monkeypatch.setattr(LandscapeDB, "_create_tables", lambda self: None)
         monkeypatch.setattr(LandscapeDB, "_create_additive_indexes", lambda self: None)
+        monkeypatch.setattr(LandscapeDB, "_sync_schema_identity", lambda self: None)
         monkeypatch.setattr(LandscapeDB, "_sync_sqlite_schema_epoch", lambda self: None)
 
         LandscapeDB(
@@ -223,6 +236,7 @@ class TestSyncSchemaEpochDirectionalGuard:
         db_path = tmp_path / "current_epoch.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
         engine.dispose()
@@ -259,6 +273,7 @@ class TestSchemaCompatibilityGuards:
         db_path = tmp_path / "stale_openrouter_catalog_check.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql("DROP TABLE runs")
             conn.execute(
@@ -468,6 +483,7 @@ class TestSchemaCompatibilityGuards:
         db_path = tmp_path / f"missing_scheduler_{column_name}.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
             conn.execute(text("DROP TABLE token_work_items"))
@@ -517,6 +533,7 @@ class TestSchemaCompatibilityGuards:
         db_path = tmp_path / "missing_terminal_scheduler_identity_index.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
             conn.execute(text("DROP INDEX uq_token_work_items_terminal_identity"))
@@ -537,6 +554,7 @@ class TestSchemaCompatibilityGuards:
         db_path = tmp_path / "missing_scheduler_recovery_index.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
             conn.execute(text("DROP INDEX ix_token_work_items_recovery"))
@@ -587,6 +605,7 @@ class TestSchemaCompatibilityGuards:
         db_path = tmp_path / "missing_barrier_adopted_epoch.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
             conn.exec_driver_sql("ALTER TABLE token_work_items DROP COLUMN barrier_adopted_epoch")
@@ -1223,6 +1242,7 @@ class TestSchemaCompatibilityGuards:
         db_path = tmp_path / "missing_check.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         engine.dispose()
 
         instance = _make_instance(f"sqlite:///{db_path}")
@@ -1431,6 +1451,7 @@ class TestJournalPathGuards:
         db_path = tmp_path / "missing_tokens_run_id_index.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql("DROP INDEX ix_tokens_run_id")
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
@@ -1453,6 +1474,7 @@ class TestJournalPathGuards:
         db_path = tmp_path / "readonly_missing_tokens_run_id_index.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql("DROP INDEX ix_tokens_run_id")
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
@@ -1475,6 +1497,7 @@ class TestJournalPathGuards:
         db_path = tmp_path / "missing_auth_events_table.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql("DROP TABLE auth_events")
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
@@ -1497,6 +1520,7 @@ class TestJournalPathGuards:
         db_path = tmp_path / "readonly_missing_auth_events_table.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql("DROP TABLE auth_events")
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
@@ -1519,6 +1543,7 @@ class TestJournalPathGuards:
         db_path = tmp_path / "missing_run_attributions_table.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql("DROP TABLE run_attributions")
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
@@ -1541,6 +1566,7 @@ class TestJournalPathGuards:
         db_path = tmp_path / "readonly_missing_run_attributions_table.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql("DROP TABLE run_attributions")
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
@@ -1577,6 +1603,7 @@ class TestJournalPathGuards:
         db_path = tmp_path / "readonly_epoch.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         engine.dispose()
 
         db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)

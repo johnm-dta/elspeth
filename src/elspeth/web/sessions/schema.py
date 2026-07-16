@@ -14,11 +14,18 @@ from typing import Any, NoReturn
 from sqlalchemy import Connection, Engine, inspect, text
 from sqlalchemy.engine.reflection import Inspector
 
+from elspeth.core.schema_identity import (
+    SCHEMA_IDENTITY_TABLE_NAME,
+    insert_schema_identity,
+    read_schema_identities,
+    schema_identity_mismatch,
+)
 from elspeth.core.schema_shape import collect_metadata_shape_issues
 from elspeth.web.sessions.models import (
     SESSION_DB_APPLICATION_ID,
     SESSION_SCHEMA_EPOCH,
     metadata,
+    schema_identity_table,
 )
 
 _SQLITE_INTERNAL_TABLES: frozenset[str] = frozenset({"sqlite_sequence"})
@@ -161,24 +168,26 @@ def probe_current_schema(bind: Engine | Connection) -> bool:
 
 
 def _stamp_schema_sentinels(bind: Engine | Connection) -> None:
-    """Write SESSION_DB_APPLICATION_ID and SESSION_SCHEMA_EPOCH onto a
-    freshly-created session DB.
+    """Write the SQLite PRAGMAs and cross-dialect identity row after creation.
 
-    Both PRAGMAs are persistent attributes of the SQLite file (stored in
-    the header), not per-connection settings, so they only need to be
-    written once at create time. The startup validator reads them back
-    on every subsequent open.
+    The identity insert is intentionally not an upsert: this function is for a
+    freshly-created schema, and any pre-existing row is evidence that creation
+    ordering or target selection is wrong.
     """
-    if bind.dialect.name != "sqlite":
-        return
     if isinstance(bind, Connection):
-        bind.execute(text(f"PRAGMA application_id = {SESSION_DB_APPLICATION_ID}"))
-        bind.execute(text(f"PRAGMA user_version = {SESSION_SCHEMA_EPOCH}"))
+        _stamp_schema_sentinels_on_connection(bind)
     else:
-        with bind.connect() as conn:
-            conn.execute(text(f"PRAGMA application_id = {SESSION_DB_APPLICATION_ID}"))
-            conn.execute(text(f"PRAGMA user_version = {SESSION_SCHEMA_EPOCH}"))
-            conn.commit()
+        with bind.begin() as connection:
+            _stamp_schema_sentinels_on_connection(connection)
+
+
+def _stamp_schema_sentinels_on_connection(connection: Connection) -> None:
+    if SCHEMA_IDENTITY_TABLE_NAME not in _user_tables(inspect(connection)):
+        raise SessionSchemaError("Session database initialization did not produce the current schema.")
+    if connection.dialect.name == "sqlite":
+        connection.execute(text(f"PRAGMA application_id = {SESSION_DB_APPLICATION_ID}"))
+        connection.execute(text(f"PRAGMA user_version = {SESSION_SCHEMA_EPOCH}"))
+    insert_schema_identity(connection, schema_identity_table, store_kind="session", schema_epoch=SESSION_SCHEMA_EPOCH)
 
 
 def _assert_schema_sentinels(bind: Engine | Connection) -> None:
@@ -191,42 +200,70 @@ def _assert_schema_sentinels(bind: Engine | Connection) -> None:
     exist. With it, the operator gets a precise instruction to delete
     the DB file and restart.
 
-    Two failure modes are distinguished:
+    SQLite keeps its header-level ``application_id`` / ``user_version`` proof.
+    Both SQLite and PostgreSQL additionally require exactly one
+    ``elspeth_schema_identity`` row with the expected application, store kind,
+    and epoch. This catches semantic-only schema bumps on PostgreSQL, where no
+    PRAGMA equivalent exists.
 
-    - Wrong ``application_id`` (non-zero, non-ELSP): the configured DB
+    - Wrong SQLite ``application_id`` (non-zero, non-ELSP): the configured DB
       file belongs to some other application entirely. We refuse to
       touch it.
-    - Wrong ``user_version`` (non-zero, not the current epoch): the
+    - Wrong SQLite ``user_version`` (non-zero, not the current epoch): the
       file is ours but predates this release's schema. The operator
       must delete it (pre-release ELSPETH has no migration pathway).
+    - Missing, malformed, or mismatched identity rows fail closed on either
+      dialect.
 
     The zero values are accepted in both cases because a brand-new
     SQLite file starts with ``application_id=0`` and ``user_version=0``;
     that state is indistinguishable from "empty DB about to be
     initialised" and is handled by the fresh-DB branch upstream.
     """
-    if bind.dialect.name != "sqlite":
-        return
     if isinstance(bind, Connection):
-        app_id = bind.execute(text("PRAGMA application_id")).scalar_one()
-        user_ver = bind.execute(text("PRAGMA user_version")).scalar_one()
+        _assert_schema_sentinels_on_connection(bind)
     else:
         with bind.connect() as connection:
-            app_id = connection.execute(text("PRAGMA application_id")).scalar_one()
-            user_ver = connection.execute(text("PRAGMA user_version")).scalar_one()
-    if app_id != 0 and app_id != SESSION_DB_APPLICATION_ID:
+            _assert_schema_sentinels_on_connection(connection)
+
+
+def _assert_schema_sentinels_on_connection(connection: Connection) -> None:
+    tables = _user_tables(inspect(connection))
+
+    if connection.dialect.name == "sqlite":
+        app_id = connection.execute(text("PRAGMA application_id")).scalar_one()
+        user_ver = connection.execute(text("PRAGMA user_version")).scalar_one()
+        if app_id not in {0, SESSION_DB_APPLICATION_ID}:
+            raise SessionSchemaError(
+                f"Session DB has unexpected application_id={app_id:#010x}. "
+                f"Expected {SESSION_DB_APPLICATION_ID:#010x} (ELSP) or 0 (new database). "
+                f"This SQLite file does not belong to ELSPETH. "
+                f"Delete the session DB file and restart."
+            )
+        if user_ver not in {0, SESSION_SCHEMA_EPOCH}:
+            raise SessionSchemaError(
+                f"Session DB schema version {user_ver} does not match "
+                f"SESSION_SCHEMA_EPOCH={SESSION_SCHEMA_EPOCH}. Pre-release ELSPETH "
+                f"does not migrate session databases. "
+                f"Delete the session DB file and restart."
+            )
+
+    if SCHEMA_IDENTITY_TABLE_NAME not in tables:
+        if tables:
+            raise SessionSchemaError(
+                f"Session DB is missing {SCHEMA_IDENTITY_TABLE_NAME} for "
+                f"SESSION_SCHEMA_EPOCH={SESSION_SCHEMA_EPOCH}. Pre-release ELSPETH "
+                "does not migrate session databases. Delete the session DB file and restart."
+            )
+        return
+
+    rows = read_schema_identities(connection, schema_identity_table)
+    mismatch = schema_identity_mismatch(rows, store_kind="session", schema_epoch=SESSION_SCHEMA_EPOCH)
+    if mismatch is not None:
         raise SessionSchemaError(
-            f"Session DB has unexpected application_id={app_id:#010x}. "
-            f"Expected {SESSION_DB_APPLICATION_ID:#010x} (ELSP) or 0 (new database). "
-            f"This SQLite file does not belong to ELSPETH. "
-            f"Delete the session DB file and restart."
-        )
-    if user_ver != 0 and user_ver != SESSION_SCHEMA_EPOCH:
-        raise SessionSchemaError(
-            f"Session DB schema version {user_ver} does not match "
+            f"Session DB schema identity mismatch ({mismatch}) for "
             f"SESSION_SCHEMA_EPOCH={SESSION_SCHEMA_EPOCH}. Pre-release ELSPETH "
-            f"does not migrate session databases. "
-            f"Delete the session DB file and restart."
+            "does not migrate session databases. Delete the session DB file and restart."
         )
 
 

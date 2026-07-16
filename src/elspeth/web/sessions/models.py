@@ -37,6 +37,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.types import JSON
 
+from elspeth.core.schema_identity import create_schema_identity_table
+
 # ``SESSION_SCHEMA_EPOCH`` — schema version sentinel. Bump this constant
 # whenever a table is added, removed, or otherwise altered in a way that
 # requires the operator to delete the existing session DB. The startup
@@ -137,7 +139,9 @@ from sqlalchemy.types import JSON
 #   27 -> ``user_preferences`` gains ``freeform_intro_dismissed_at`` so the
 #        freeform empty-state introduction can be dismissed account-wide.
 #        Pre-release delete-and-recreate policy; see runbook above.
-SESSION_SCHEMA_EPOCH = 27
+#   28 -> ``elspeth_schema_identity`` gives SQLite and PostgreSQL the same
+#        application/store/epoch proof, including semantic-only schema bumps.
+SESSION_SCHEMA_EPOCH = 28
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 _POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"
@@ -196,6 +200,7 @@ def _blobs_creating_llm_provenance_check(*, dialect: Literal["sqlite", "postgres
 SESSION_DB_APPLICATION_ID = 0x454C5350
 
 metadata = MetaData()
+schema_identity_table = create_schema_identity_table(metadata)
 
 sessions_table = Table(
     "sessions",

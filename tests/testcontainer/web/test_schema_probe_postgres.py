@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 import structlog
-from sqlalchemy import Connection, Engine, create_engine, inspect, select, text
+from sqlalchemy import Connection, Engine, create_engine, inspect, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, OperationalError, SQLAlchemyError
 from sqlalchemy.pool import NullPool
@@ -21,7 +21,10 @@ from testcontainers.postgres import PostgresContainer
 from tests.unit.core.test_schema_shape import _static_check_issues
 
 from elspeth.contracts.schema_contract import SchemaContract
-from elspeth.core.landscape.database import SchemaCompatibilityError
+from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
+from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH
+from elspeth.core.landscape.schema import schema_identity_table as landscape_schema_identity_table
+from elspeth.core.schema_identity import SCHEMA_IDENTITY_APPLICATION_ID
 from elspeth.core.schema_shape import _text_builtin_identity_rows_on_connection
 from elspeth.web import schema_probe as schema_probe_module
 from elspeth.web.preferences.models import UpdateComposerPreferencesRequest
@@ -35,8 +38,9 @@ from elspeth.web.schema_probe import (
     probe_landscape_schema,
     probe_session_schema,
 )
+from elspeth.web.sessions.models import SESSION_SCHEMA_EPOCH, skill_markdown_history_table
 from elspeth.web.sessions.models import metadata as session_metadata
-from elspeth.web.sessions.models import skill_markdown_history_table
+from elspeth.web.sessions.models import schema_identity_table as session_schema_identity_table
 from elspeth.web.sessions.schema import SessionSchemaError, initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
@@ -77,6 +81,79 @@ def test_fresh_create_reaches_current(postgres_engine: Engine, kind: str) -> Non
         assert probe_landscape_schema(postgres_engine) is SchemaState.MISSING
         init_landscape_schema(postgres_engine)
         assert probe_landscape_schema(postgres_engine) is SchemaState.CURRENT
+
+
+@pytest.mark.parametrize("kind", ["session", "landscape"])
+def test_postgres_fresh_schema_stamps_cross_dialect_identity(postgres_engine: Engine, kind: str) -> None:
+    if kind == "session":
+        init_session_schema(postgres_engine)
+        identity_table = session_schema_identity_table
+        expected_epoch = SESSION_SCHEMA_EPOCH
+    else:
+        init_landscape_schema(postgres_engine)
+        identity_table = landscape_schema_identity_table
+        expected_epoch = SQLITE_SCHEMA_EPOCH
+
+    with postgres_engine.connect() as conn:
+        row = conn.execute(select(identity_table)).one()
+
+    assert row.singleton_id == 1
+    assert row.application_id == SCHEMA_IDENTITY_APPLICATION_ID
+    assert row.store_kind == kind
+    assert row.schema_epoch == expected_epoch
+
+
+@pytest.mark.parametrize("construction", ["constructor", "from_url"])
+def test_landscape_database_construction_stamps_postgres_identity(postgres_engine: Engine, construction: str) -> None:
+    url = postgres_engine.url.render_as_string(hide_password=False)
+    database = LandscapeDB(url) if construction == "constructor" else LandscapeDB.from_url(url)
+    try:
+        with database.engine.connect() as conn:
+            row = conn.execute(select(landscape_schema_identity_table)).one()
+    finally:
+        database.close()
+
+    assert row.application_id == SCHEMA_IDENTITY_APPLICATION_ID
+    assert row.store_kind == "landscape"
+    assert row.schema_epoch == SQLITE_SCHEMA_EPOCH
+
+
+@pytest.mark.parametrize(
+    ("kind", "column_name", "wrong_value"),
+    [
+        ("session", "application_id", "another-application"),
+        ("session", "schema_epoch", SESSION_SCHEMA_EPOCH - 1),
+        ("landscape", "store_kind", "session"),
+        ("landscape", "schema_epoch", SQLITE_SCHEMA_EPOCH - 1),
+    ],
+)
+def test_postgres_schema_identity_drift_is_stale_and_not_repaired(
+    postgres_engine: Engine,
+    kind: str,
+    column_name: str,
+    wrong_value: str | int,
+) -> None:
+    if kind == "session":
+        init_session_schema(postgres_engine)
+        identity_table = session_schema_identity_table
+        probe = probe_session_schema
+        initialize = init_session_schema
+        error_type = SessionSchemaError
+    else:
+        init_landscape_schema(postgres_engine)
+        identity_table = landscape_schema_identity_table
+        probe = probe_landscape_schema
+        initialize = init_landscape_schema
+        error_type = SchemaCompatibilityError
+
+    with postgres_engine.begin() as conn:
+        conn.execute(update(identity_table).values({column_name: wrong_value}))
+
+    assert probe(postgres_engine) is SchemaState.STALE
+    with pytest.raises(error_type):
+        initialize(postgres_engine)
+    with postgres_engine.connect() as conn:
+        assert conn.execute(select(identity_table.c[column_name])).scalar_one() == wrong_value
 
 
 def test_postgres_session_init_does_not_poison_later_sqlite_schema(postgres_engine: Engine) -> None:

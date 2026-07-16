@@ -32,6 +32,7 @@ from sqlalchemy import (
 
 from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
 from elspeth.contracts.types import NODE_ID_MAX_LENGTH
+from elspeth.core.schema_identity import create_schema_identity_table
 
 # Shared metadata for all tables
 metadata = MetaData()
@@ -55,9 +56,11 @@ def _optional_enum_in_check(column_name: str, enum_type: type[StrEnum]) -> str:
     return f"{column_name} IS NULL OR {_enum_in_check(column_name, enum_type)}"
 
 
-# Explicit SQLite schema epoch for pre-1.0 compatibility policy.
-# Stored in PRAGMA user_version so future releases can distinguish
-# "intentionally old schema, needs migration" from "runtime-required field".
+# Explicit Landscape schema epoch for pre-1.0 compatibility policy.
+# Stored in the cross-dialect identity row and, on SQLite, PRAGMA user_version
+# so future releases can distinguish "intentionally old schema, needs
+# migration" from "runtime-required field". The constant retains its
+# historical name for compatibility.
 #
 # Epoch history (pre-1.0 policy — bumps require DB recreation):
 #   1 → initial
@@ -137,7 +140,11 @@ def _optional_enum_in_check(column_name: str, enum_type: type[StrEnum]) -> str:
 #   23 → Web plugin-policy audit evidence: run_web_plugin_policy stores one
 #        optional, sanitized policy/snapshot decision row per web run. This is
 #        a deliberate pre-1.0 drop/recreate boundary, not an in-place migration.
-SQLITE_SCHEMA_EPOCH = 23
+#   24 → elspeth_schema_identity gives SQLite and PostgreSQL the same explicit
+#        application/store/epoch proof, including semantic-only schema bumps.
+SQLITE_SCHEMA_EPOCH = 24
+
+schema_identity_table = create_schema_identity_table(metadata)
 
 # Column width for node_id across all tables. The cross-layer identifier limit
 # lives in contracts.types; changing this value requires an Alembic migration.

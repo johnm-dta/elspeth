@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, NewType, Self, cast
+from typing import Any, Literal, NewType, Self, cast
 from urllib.parse import quote
 from weakref import WeakKeyDictionary
 
@@ -26,7 +26,14 @@ from sqlalchemy.pool import StaticPool
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.url import SENSITIVE_PARAMS, _scrub_odbc_connect_value
 from elspeth.core.landscape.journal import LandscapeJournal
-from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata
+from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata, schema_identity_table
+from elspeth.core.schema_identity import (
+    SCHEMA_IDENTITY_TABLE_NAME,
+    SchemaIdentityMismatch,
+    insert_schema_identity,
+    read_schema_identities,
+    schema_identity_mismatch,
+)
 from elspeth.core.schema_shape import collect_metadata_shape_issues
 
 # Tier-1 branded Engine type.
@@ -572,6 +579,28 @@ def _sqlite_epoch_is_incompatible(bind: Engine | Connection) -> bool:
     return epoch not in (0, SQLITE_SCHEMA_EPOCH)
 
 
+def _landscape_identity_issue(
+    bind: Engine | Connection,
+    inspector: Inspector,
+    existing_tables: set[str],
+) -> SchemaIdentityMismatch | Literal["identity_table", "identity_shape"] | None:
+    """Return a static issue code for cross-dialect Landscape identity drift."""
+    if SCHEMA_IDENTITY_TABLE_NAME not in existing_tables:
+        other_landscape_tables = existing_tables.intersection(set(metadata.tables) - {SCHEMA_IDENTITY_TABLE_NAME})
+        return "identity_table" if other_landscape_tables else None
+
+    columns = {str(column["name"]) for column in inspector.get_columns(SCHEMA_IDENTITY_TABLE_NAME)}
+    if columns != {"singleton_id", "application_id", "store_kind", "schema_epoch"}:
+        return "identity_shape"
+
+    if isinstance(bind, Connection):
+        rows = read_schema_identities(bind, schema_identity_table)
+    else:
+        with bind.connect() as connection:
+            rows = read_schema_identities(connection, schema_identity_table)
+    return schema_identity_mismatch(rows, store_kind="landscape", schema_epoch=SQLITE_SCHEMA_EPOCH)
+
+
 def _missing_additive_indexes(inspector: Inspector, present_tables: set[str]) -> frozenset[str]:
     missing: set[str] = set()
     for index_name, table_name in _ADDITIVE_INDEX_OWNERS.items():
@@ -596,6 +625,8 @@ def probe_schema_shape(bind: Engine | Connection) -> LandscapeSchemaShape:
         return LandscapeSchemaShape.DIVERGENT
     if not existing:
         return LandscapeSchemaShape.EMPTY
+    if _landscape_identity_issue(bind, inspector, existing) is not None:
+        return LandscapeSchemaShape.DIVERGENT
     if existing - expected:
         return LandscapeSchemaShape.FOREIGN
 
@@ -728,6 +759,7 @@ class LandscapeDB:
         self._sync_sqlite_schema_epoch()
         self._create_tables()
         self._create_additive_indexes()
+        self._sync_schema_identity()
         self._sync_sqlite_schema_epoch()
 
     def _setup_engine(self, **engine_kwargs: Any) -> None:
@@ -1017,6 +1049,38 @@ class LandscapeDB:
         """Create non-gating performance indexes for existing schemas."""
         create_additive_indexes(self.engine)
 
+    def _sync_schema_identity(self) -> None:
+        """Stamp a freshly created store or verify its existing identity row."""
+        with self.engine.connect() as connection:
+            rows = read_schema_identities(connection, schema_identity_table)
+        mismatch = schema_identity_mismatch(rows, store_kind="landscape", schema_epoch=SQLITE_SCHEMA_EPOCH)
+        if rows and mismatch is None:
+            return
+        if rows:
+            raise SchemaCompatibilityError(
+                f"Landscape database schema identity mismatch ({mismatch}); "
+                "delete/recreate the Landscape database or run the supported migration."
+            )
+
+        # Re-read under write intent so concurrent fresh initializers cannot
+        # both conclude that the singleton row is absent.
+        with begin_write(self.engine) as conn:
+            rows = read_schema_identities(conn, schema_identity_table)
+            if not rows:
+                insert_schema_identity(
+                    conn,
+                    schema_identity_table,
+                    store_kind="landscape",
+                    schema_epoch=SQLITE_SCHEMA_EPOCH,
+                )
+                return
+            mismatch = schema_identity_mismatch(rows, store_kind="landscape", schema_epoch=SQLITE_SCHEMA_EPOCH)
+        if mismatch is not None:
+            raise SchemaCompatibilityError(
+                f"Landscape database schema identity mismatch ({mismatch}); "
+                "delete/recreate the Landscape database or run the supported migration."
+            )
+
     def _get_sqlite_schema_epoch(self) -> int:
         """Return SQLite schema epoch from PRAGMA user_version.
 
@@ -1132,6 +1196,7 @@ class LandscapeDB:
         expected_tables = set(metadata.tables.keys())
         present_landscape_tables = existing_tables & expected_tables
         schema_epoch = self._get_sqlite_schema_epoch() if self.connection_string.startswith("sqlite") else 0
+        identity_issue = _landscape_identity_issue(self.engine, inspector, existing_tables) if existing_tables else None
 
         epoch_incompatible = schema_epoch not in (0, SQLITE_SCHEMA_EPOCH)
         if epoch_incompatible and not present_landscape_tables:
@@ -1279,11 +1344,18 @@ class LandscapeDB:
             or missing_indexes
             or shape_issues
             or epoch_incompatible
+            or identity_issue
         ):
             error_parts = []
 
             if epoch_incompatible:
                 error_parts.append(f"schema epoch is incompatible:\nDatabase epoch: {schema_epoch}\nCurrent epoch: {SQLITE_SCHEMA_EPOCH}")
+
+            if identity_issue:
+                error_parts.append(
+                    f"schema identity is incompatible ({identity_issue}); expected application elspeth, "
+                    f"store landscape, epoch {SQLITE_SCHEMA_EPOCH}"
+                )
 
             if missing_tables:
                 missing_tables_str = ", ".join(missing_tables)
@@ -1427,6 +1499,7 @@ class LandscapeDB:
         cls._verify_sqlite_pragmas(engine, "sqlite:///:memory:")
         metadata.create_all(engine)
         instance = cls._from_parts("sqlite:///:memory:", engine)
+        instance._sync_schema_identity()
         instance._sync_sqlite_schema_epoch()
         return instance
 
@@ -1558,6 +1631,7 @@ class LandscapeDB:
             instance._sync_sqlite_schema_epoch()
             metadata.create_all(engine)
             instance._create_additive_indexes()
+            instance._sync_schema_identity()
             instance._sync_sqlite_schema_epoch()
         return instance
 

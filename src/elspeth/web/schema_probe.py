@@ -21,7 +21,10 @@ from elspeth.core.landscape.database import (
     create_additive_indexes,
     probe_schema_shape,
 )
+from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH
 from elspeth.core.landscape.schema import metadata as landscape_metadata
+from elspeth.core.landscape.schema import schema_identity_table as landscape_schema_identity_table
+from elspeth.core.schema_identity import insert_schema_identity
 from elspeth.web.sessions.models import metadata as session_metadata
 from elspeth.web.sessions.schema import (
     SessionSchemaError,
@@ -308,6 +311,13 @@ def init_landscape_schema(engine: Engine) -> None:
         if state in (SchemaState.MISSING, SchemaState.PARTIAL):
             landscape_metadata.create_all(bind=conn, checkfirst=True)
             create_additive_indexes(conn)
+            if state is SchemaState.MISSING:
+                insert_schema_identity(
+                    conn,
+                    landscape_schema_identity_table,
+                    store_kind="landscape",
+                    schema_epoch=SQLITE_SCHEMA_EPOCH,
+                )
             return
         raise SchemaCompatibilityError("Landscape database schema is stale or foreign; delete/recreate it or run the supported migration.")
 

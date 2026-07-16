@@ -7,7 +7,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from elspeth.core.landscape.database import LandscapeSchemaShape, probe_schema_shape
-from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata
+from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata, schema_identity_table
+from elspeth.core.schema_identity import insert_schema_identity
 
 
 @pytest.fixture
@@ -19,6 +20,13 @@ def engine() -> Engine:
 
 def _create_full(engine: Engine) -> None:
     metadata.create_all(engine)
+    with engine.begin() as connection:
+        insert_schema_identity(
+            connection,
+            schema_identity_table,
+            store_kind="landscape",
+            schema_epoch=SQLITE_SCHEMA_EPOCH,
+        )
 
 
 def test_zero_user_tables_are_empty(engine: Engine) -> None:

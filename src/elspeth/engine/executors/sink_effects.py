@@ -333,6 +333,11 @@ class SinkEffectCoordinator:
             durable = self._member_record(plan.effect_id, member.ordinal)
             if durable.member_state is SinkEffectState.FINALIZED:
                 continue
+            if durable.prepared_disposition == "diverted":
+                # Plan-diverted member: its fate was durably decided when the
+                # plan bound (with attribution), so no external commit or
+                # reconcile call may ever be attempted for it.
+                continue
 
             returned_commit = self._returned_attempt(
                 plan.effect_id,
@@ -379,7 +384,10 @@ class SinkEffectCoordinator:
             self._effects.complete_member_result(commit_attempt.attempt_id, commit_result, lease=lease)
             last_exact = (commit_result, commit_attempt)
 
-        if any(record.member_state is not SinkEffectState.FINALIZED for record in self._effects.get_members(plan.effect_id)):
+        if any(
+            record.member_state is not SinkEffectState.FINALIZED and record.prepared_disposition != "diverted"
+            for record in self._effects.get_members(plan.effect_id)
+        ):
             raise LandscapeRecordError("sink effect group cannot finalize before every member is exact")
         if last_exact is None:
             last_exact = self._latest_exact_member_result(plan.effect_id)

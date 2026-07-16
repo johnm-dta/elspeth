@@ -702,15 +702,16 @@ class SinkEffect:
             self.publication_evidence_kind,
         )
         if self.state is SinkEffectState.RESERVED:
-            if self.generation != 0 or any(
-                value is not None for value in (*prepared_fields, *lease_fields, *result_fields, self.finalized_at)
-            ):
-                raise ValueError("reserved effect contains prepared, lease, result, or finalized fields")
+            if any(value is not None for value in (*prepared_fields, *result_fields, self.finalized_at)):
+                raise ValueError("reserved effect contains prepared, result, or finalized fields")
+            if self.generation == 0:
+                if any(value is not None for value in lease_fields):
+                    raise ValueError("unclaimed reserved effect contains lease fields")
+            elif any(value is None for value in lease_fields):
+                raise ValueError("claimed reserved effect requires a complete preparation-claim lease")
         elif self.state is SinkEffectState.PREPARED:
-            if (
-                self.generation != 0
-                or any(value is None for value in prepared_fields)
-                or any(value is not None for value in (*lease_fields, *result_fields, self.finalized_at))
+            if any(value is None for value in prepared_fields) or any(
+                value is not None for value in (*lease_fields, *result_fields, self.finalized_at)
             ):
                 raise ValueError("prepared effect lifecycle fields are incomplete")
         elif self.state is SinkEffectState.IN_FLIGHT:

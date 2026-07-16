@@ -187,6 +187,11 @@ def test_finalization_vs_outcome_mutation_uses_distinct_backends_and_token_first
         content_hash="d" * 64,
         size_bytes=12,
     )
+    claim = finalizer_factory.execution.sink_effects.claim_preparation(
+        effect.effect_id,
+        owner="worker-a",
+        ttl=timedelta(seconds=30),
+    )
     finalizer_factory.execution.sink_effects.complete_plan(
         effect.effect_id,
         SinkEffectPlan(
@@ -201,6 +206,7 @@ def test_finalization_vs_outcome_mutation_uses_distinct_backends_and_token_first
             expected_descriptor=descriptor,
             safe_evidence={"inspection_reference": "no-inspection-required:v1"},
         ),
+        claim=claim,
     )
     lease = finalizer_factory.execution.sink_effects.acquire_lease(
         effect.effect_id,

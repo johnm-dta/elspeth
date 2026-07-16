@@ -75,6 +75,11 @@ def _prepared(
     ).new_effect
     assert effect is not None
     descriptor = _descriptor()
+    claim = factory.execution.sink_effects.claim_preparation(
+        effect.effect_id,
+        owner="worker-a",
+        ttl=timedelta(seconds=30),
+    )
     factory.execution.sink_effects.complete_plan(
         effect.effect_id,
         SinkEffectPlan(
@@ -89,6 +94,7 @@ def _prepared(
             expected_descriptor=descriptor if descriptor_mode is SinkEffectDescriptorMode.PRECOMPUTED else None,
             safe_evidence={"inspection_reference": "no-inspection-required:v1"},
         ),
+        claim=claim,
     )
     lease = factory.execution.sink_effects.acquire_lease(
         effect.effect_id,
@@ -493,6 +499,11 @@ def test_failsink_finalization_requires_and_uses_exact_primary_linkage(
         content_hash="e" * 64,
         size_bytes=9,
     )
+    failsink_claim = factory.execution.sink_effects.claim_preparation(
+        failsink.effect_id,
+        owner="worker-a",
+        ttl=timedelta(seconds=30),
+    )
     factory.execution.sink_effects.complete_plan(
         failsink.effect_id,
         SinkEffectPlan(
@@ -507,6 +518,7 @@ def test_failsink_finalization_requires_and_uses_exact_primary_linkage(
             expected_descriptor=descriptor,
             safe_evidence={"inspection_reference": "no-inspection-required:v1"},
         ),
+        claim=failsink_claim,
     )
     lease = factory.execution.sink_effects.acquire_lease(failsink.effect_id, owner="worker-f", ttl=timedelta(seconds=30))
     attempt = factory.execution.sink_effects.begin_attempt(

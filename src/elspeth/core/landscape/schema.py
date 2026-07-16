@@ -1291,13 +1291,15 @@ sink_effects_table = Table(
         name="ck_sink_effects_input_kind_xor",
     ),
     CheckConstraint(
-        "(state = 'reserved' AND generation = 0 AND inspection_mode IS NULL AND inspection_attempt_id IS NULL "
+        "(state = 'reserved' AND inspection_mode IS NULL AND inspection_attempt_id IS NULL "
         "AND plan_json IS NULL AND plan_hash IS NULL AND descriptor_mode IS NULL AND expected_descriptor_hash IS NULL "
-        "AND precondition_hash IS NULL AND prepared_at IS NULL AND lease_owner IS NULL AND lease_expires_at IS NULL "
-        "AND lease_heartbeat_at IS NULL AND reconcile_kind IS NULL AND reconcile_evidence_hash IS NULL "
+        "AND precondition_hash IS NULL AND prepared_at IS NULL "
+        "AND ((generation = 0 AND lease_owner IS NULL AND lease_expires_at IS NULL AND lease_heartbeat_at IS NULL) OR "
+        "(generation > 0 AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL AND lease_heartbeat_at IS NOT NULL)) "
+        "AND reconcile_kind IS NULL AND reconcile_evidence_hash IS NULL "
         "AND result_descriptor_hash IS NULL AND publication_performed IS NULL AND publication_evidence_kind IS NULL "
         "AND finalized_at IS NULL) OR "
-        "(state = 'prepared' AND generation = 0 AND plan_hash IS NOT NULL AND plan_json IS NOT NULL "
+        "(state = 'prepared' AND plan_hash IS NOT NULL AND plan_json IS NOT NULL "
         "AND inspection_mode IS NOT NULL AND inspection_attempt_id IS NOT NULL AND descriptor_mode IS NOT NULL "
         "AND precondition_hash IS NOT NULL AND prepared_at IS NOT NULL AND lease_owner IS NULL "
         "AND lease_expires_at IS NULL AND lease_heartbeat_at IS NULL AND reconcile_kind IS NULL "

@@ -9,9 +9,11 @@ import time
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
-from sqlalchemy import Connection, Engine, create_engine, inspect, text
+import structlog
+from sqlalchemy import Connection, Engine, create_engine, inspect, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.pool import NullPool
@@ -34,7 +36,10 @@ from elspeth.web.schema_probe import (
     probe_session_schema,
 )
 from elspeth.web.sessions.models import metadata as session_metadata
+from elspeth.web.sessions.models import skill_markdown_history_table
 from elspeth.web.sessions.schema import SessionSchemaError, initialize_session_schema
+from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 pytestmark = pytest.mark.testcontainer
 
@@ -99,6 +104,38 @@ def test_preferences_upsert_round_trips_on_postgres(postgres_engine: Engine) -> 
     assert transition.current.default_mode == "guided"
     assert transition.current.tutorial_completed_at is None
     assert asyncio.run(service.get_composer_preferences("postgres-preferences-user")) == transition.current
+
+
+def test_skill_markdown_history_upsert_round_trips_on_postgres(postgres_engine: Engine, tmp_path: Path) -> None:
+    """Composer startup history writes must use PostgreSQL's upsert builder."""
+    init_session_schema(postgres_engine)
+    service = SessionServiceImpl(
+        postgres_engine,
+        data_dir=tmp_path,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test"),
+    )
+
+    first_inserted = asyncio.run(
+        service.upsert_skill_markdown_history(
+            skill_hash="a" * 64,
+            filename="pipeline_composer.md",
+            content="# Composer skill",
+        )
+    )
+    duplicate_inserted = asyncio.run(
+        service.upsert_skill_markdown_history(
+            skill_hash="a" * 64,
+            filename="pipeline_composer.md",
+            content="# Composer skill",
+        )
+    )
+
+    with postgres_engine.connect() as conn:
+        rows = conn.execute(select(skill_markdown_history_table)).fetchall()
+    assert first_inserted is True
+    assert duplicate_inserted is False
+    assert len(rows) == 1
 
 
 def test_landscape_server_default_is_false(postgres_engine: Engine) -> None:

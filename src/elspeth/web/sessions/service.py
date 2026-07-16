@@ -20,6 +20,7 @@ from uuid import UUID
 
 import structlog
 from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, event, func, insert, select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 
@@ -3814,23 +3815,32 @@ class SessionServiceImpl:
         now = self._ensure_utc(first_seen_at) if first_seen_at is not None else self._now()
 
         def _sync() -> bool:
-            stmt = (
-                sqlite_insert(skill_markdown_history_table)
-                .values(
-                    hash=skill_hash,
-                    filename=filename,
-                    content=content,
-                    first_seen_at=now,
-                )
-                .on_conflict_do_nothing(index_elements=[skill_markdown_history_table.c.hash])
-            )
+            values = {
+                "hash": skill_hash,
+                "filename": filename,
+                "content": content,
+                "first_seen_at": now,
+            }
             with self._engine.begin() as conn:
+                dialect = conn.dialect.name
+                stmt: Any
+                if dialect == "sqlite":
+                    stmt = sqlite_insert(skill_markdown_history_table).values(**values)
+                elif dialect == "postgresql":
+                    stmt = postgresql_insert(skill_markdown_history_table).values(**values)
+                else:
+                    raise NotImplementedError(
+                        "skill_markdown_history requires an atomic insert-or-ignore for session database "
+                        f"dialect {dialect!r}; supported dialects: sqlite, postgresql"
+                    )
+                stmt = stmt.on_conflict_do_nothing(index_elements=[skill_markdown_history_table.c.hash]).returning(
+                    skill_markdown_history_table.c.hash
+                )
                 result = conn.execute(stmt)
-                # ``rowcount`` is 1 on INSERT, 0 on conflict-ignored. The
-                # SQLite driver returns the actual statement rowcount here
-                # — no synthetic value substitution, so this is a
-                # truthful insert-vs-ignored signal.
-                return int(result.rowcount) == 1
+                # ``RETURNING`` yields the hash only when an INSERT occurred;
+                # conflict-ignored writes yield no row. This remains truthful
+                # across both supported drivers without relying on rowcount.
+                return result.scalar_one_or_none() is not None
 
         return cast(bool, await self._run_sync(_sync))
 

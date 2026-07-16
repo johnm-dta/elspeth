@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from elspeth.contracts.hashing import canonical_json
+from elspeth.contracts.hashing import canonical_json, stable_hash
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.contracts.sink_effects import (
     RestrictedSinkEffectContext,
@@ -22,12 +22,14 @@ from elspeth.contracts.sink_effects import (
     SinkEffectPrepareRequest,
     SinkEffectReconcileKind,
 )
+from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.orchestrator.preflight import validate_sink_effect_capability
 from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode
 from elspeth.plugins.sinks import _local_file_effects as local_effects
 from elspeth.plugins.sinks.csv_sink import CSVSink
 from elspeth.plugins.sinks.json_sink import JSONSink
 from elspeth.plugins.sinks.text_sink import TextSink
+from tests.fixtures.base_classes import inject_write_failure
 
 _SCHEMA = {"mode": "observed"}
 _CTX = RestrictedSinkEffectContext(
@@ -81,6 +83,83 @@ def _prepare(
 
 def _stage_path(plan) -> Path:
     return Path(str(plan.safe_evidence["staging_path"]))
+
+
+def _expected_diversion_attribution(sink: CSVSink | JSONSink | TextSink) -> tuple[dict[str, object], ...]:
+    return tuple(
+        {
+            "ordinal": diversion.row_index,
+            "reason_hash": stable_hash({"diversion_reason": diversion.reason}),
+            "error_hash": compute_error_hash(diversion.reason),
+        }
+        for diversion in sink._get_diversions()
+    )
+
+
+@pytest.mark.parametrize(
+    ("sink", "rows"),
+    [
+        (
+            lambda path: CSVSink({"path": str(path), "schema": _SCHEMA}),
+            [{"id": 1}, {"id": 2, "extra": "divert"}],
+        ),
+        (
+            lambda path: TextSink({"path": str(path), "field": "message", "schema": _SCHEMA}),
+            [{"message": "accepted"}, {"message": 42}],
+        ),
+    ],
+)
+def test_local_effect_plans_persist_exact_diversion_attribution(tmp_path: Path, sink, rows) -> None:
+    configured = inject_write_failure(sink(tmp_path / "out"))
+    plan = _prepare(configured, effect_id="ae" * 32, rows=rows)
+
+    assert plan.safe_evidence["accepted_ordinals"] == (0,)
+    assert plan.safe_evidence["diverted_ordinals"] == (1,)
+    assert plan.safe_evidence["diversion_attribution"] == _expected_diversion_attribution(configured)
+
+    configured.commit_effect(plan, _CTX)
+    recovered = configured.reconcile_effect(plan, _CTX)
+    assert recovered.kind is SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR
+    assert recovered.accepted_ordinals == (0,)
+    assert recovered.diverted_ordinals == (1,)
+
+
+def test_json_effect_plan_persists_exact_diversion_attribution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sink = inject_write_failure(JSONSink({"path": str(tmp_path / "out.jsonl"), "format": "jsonl", "schema": _SCHEMA}))
+    real_dumps = json.dumps
+
+    def reject_selected_row(value, *args, **kwargs):
+        if isinstance(value, dict) and value.get("divert") is True:
+            raise ValueError("injected canonical-row serialization failure")
+        return real_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(json, "dumps", reject_selected_row)
+    plan = _prepare(
+        sink,
+        effect_id="af" * 32,
+        rows=[{"id": 1}, {"id": 2, "divert": True}],
+    )
+
+    assert plan.safe_evidence["accepted_ordinals"] == (0,)
+    assert plan.safe_evidence["diverted_ordinals"] == (1,)
+    assert plan.safe_evidence["diversion_attribution"] == _expected_diversion_attribution(sink)
+
+
+def test_local_effect_evidence_rejects_missing_or_unmatched_diversion_attribution(tmp_path: Path) -> None:
+    sink = inject_write_failure(TextSink({"path": str(tmp_path / "out.txt"), "field": "message", "schema": _SCHEMA}))
+    plan = _prepare(sink, effect_id="ad" * 32, rows=[{"message": "accepted"}, {"message": 42}])
+    evidence = dict(plan.safe_evidence)
+    evidence.pop("diversion_attribution")
+    with pytest.raises(local_effects.LocalFilePreconditionError, match="diversion attribution"):
+        local_effects.LocalFileEffectPlanEvidence.from_mapping(evidence)
+
+    evidence = dict(plan.safe_evidence)
+    evidence["diversion_attribution"] = ()
+    with pytest.raises(local_effects.LocalFilePreconditionError, match="diversion attribution"):
+        local_effects.LocalFileEffectPlanEvidence.from_mapping(evidence)
 
 
 def test_abandoned_atomic_replace_reconciles_by_staged_file_identity(

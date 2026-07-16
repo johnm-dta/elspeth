@@ -13,7 +13,7 @@ from typing import Any, ClassVar
 
 import pytest
 
-from elspeth.contracts.hashing import canonical_json
+from elspeth.contracts.hashing import canonical_json, stable_hash
 from elspeth.contracts.sink_effects import (
     RestrictedSinkEffectContext,
     SinkEffectDescriptorMode,
@@ -24,7 +24,9 @@ from elspeth.contracts.sink_effects import (
     SinkEffectPrepareRequest,
     SinkEffectReconcileKind,
 )
+from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.orchestrator.preflight import validate_sink_effect_capability
+from elspeth.plugins.sinks import _remote_object_effects as remote_effects
 from elspeth.plugins.sinks.aws_s3_sink import AWSS3Sink
 from elspeth.plugins.sinks.azure_blob_sink import AzureBlobSink
 from tests.fixtures.base_classes import inject_write_failure
@@ -232,6 +234,17 @@ def _azure(store: _AzureStore, **overrides: object) -> AzureBlobSink:
     return sink
 
 
+def _expected_diversion_attribution(sink: AWSS3Sink | AzureBlobSink) -> tuple[dict[str, object], ...]:
+    return tuple(
+        {
+            "ordinal": diversion.row_index,
+            "reason_hash": stable_hash({"diversion_reason": diversion.reason}),
+            "error_hash": compute_error_hash(diversion.reason),
+        }
+        for diversion in sink._get_diversions()
+    )
+
+
 @pytest.mark.parametrize("factory", [_s3, _azure])
 def test_remote_sinks_declare_recoverable_pipeline_effects(factory: Any) -> None:
     store = _S3Store() if factory is _s3 else _AzureStore()
@@ -331,6 +344,7 @@ def test_diverted_successor_preserves_prior_snapshot_without_publication() -> No
     assert plan.expected_descriptor == first_result.descriptor
     assert plan.safe_evidence["accepted_ordinals"] == ()
     assert plan.safe_evidence["diverted_ordinals"] == (0,)
+    assert plan.safe_evidence["diversion_attribution"] == _expected_diversion_attribution(successor)
 
 
 def test_azure_fresh_process_successor_and_response_loss_reconcile() -> None:
@@ -398,8 +412,36 @@ def test_azure_effect_diverts_fixed_schema_extra_and_publishes_good_rows() -> No
 
     assert result.accepted_ordinals == (0,)
     assert result.diverted_ordinals == (1,)
+    assert plan.safe_evidence["diversion_attribution"] == _expected_diversion_attribution(sink)
     assert store.value is not None
     assert store.value.body.decode() == "id,name\r\n1,Ada\r\n"
+
+    reconciled = _azure(
+        store,
+        format="csv",
+        blob_path="out.csv",
+        schema={"mode": "fixed", "fields": ["id: int", "name: str"]},
+    ).reconcile_effect(plan, _CTX)
+    assert reconciled.kind is SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR
+    assert reconciled.accepted_ordinals == (0,)
+    assert reconciled.diverted_ordinals == (1,)
+
+
+def test_remote_effect_evidence_rejects_missing_or_invalid_diversion_attribution() -> None:
+    store = _S3Store()
+    member = _member(0, {"id": "x" * 100})
+    sink = _s3(store, max_record_chars=10)
+    plan = _prepare(sink, effect_id="8" * 64, current=(member,), target_snapshot=(member,))
+
+    evidence = dict(plan.safe_evidence)
+    evidence.pop("diversion_attribution")
+    with pytest.raises(remote_effects.RemoteObjectPreconditionError, match="diversion attribution"):
+        remote_effects.RemoteObjectPlanEvidence.from_mapping(evidence)
+
+    evidence = dict(plan.safe_evidence)
+    evidence["diversion_attribution"] = ({"ordinal": 0, "reason_hash": "0" * 64, "error_hash": "not-hex"},)
+    with pytest.raises(remote_effects.RemoteObjectPreconditionError, match="diversion attribution"):
+        remote_effects.RemoteObjectPlanEvidence.from_mapping(evidence)
 
 
 @pytest.mark.parametrize("factory", [_s3, _azure])

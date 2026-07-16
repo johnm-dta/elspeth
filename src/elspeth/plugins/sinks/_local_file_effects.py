@@ -33,6 +33,7 @@ from elspeth.contracts.sink_effects import (
     SinkEffectPlan,
     SinkEffectReconcileResult,
 )
+from elspeth.plugins.sinks._diversion_attribution import DiversionAttribution, parse_diversion_attribution
 
 DEFAULT_MAX_BYTES: Final = 1024 * 1024 * 1024
 DEFAULT_MAX_ROWS: Final = 10_000_000
@@ -90,10 +91,12 @@ class LocalFileEffectPlanEvidence:
     publication_kind: str
     accepted_ordinals: tuple[int, ...]
     diverted_ordinals: tuple[int, ...]
+    diversion_attribution: tuple[DiversionAttribution, ...]
 
     def as_mapping(self) -> dict[str, object]:
         return {
             "accepted_ordinals": list(self.accepted_ordinals),
+            "diversion_attribution": [item.as_mapping() for item in self.diversion_attribution],
             "diverted_ordinals": list(self.diverted_ordinals),
             "encoding": self.encoding,
             "format_name": self.format_name,
@@ -121,6 +124,13 @@ class LocalFileEffectPlanEvidence:
         diverted = _exact_ordinals(value.get("diverted_ordinals"), "diverted_ordinals")
         if set(accepted) & set(diverted):
             raise LocalFilePreconditionError("accepted and diverted ordinals overlap")
+        try:
+            diversion_attribution = parse_diversion_attribution(
+                value.get("diversion_attribution"),
+                diverted_ordinals=diverted,
+            )
+        except ValueError as exc:
+            raise LocalFilePreconditionError(str(exc)) from exc
         return cls(
             target_path=_exact_string(value.get("target_path"), "target_path"),
             staging_path=_exact_string(value.get("staging_path"), "staging_path"),
@@ -139,6 +149,7 @@ class LocalFileEffectPlanEvidence:
             publication_kind=_exact_string(value.get("publication_kind"), "publication_kind"),
             accepted_ordinals=accepted,
             diverted_ordinals=diverted,
+            diversion_attribution=diversion_attribution,
         )
 
 
@@ -350,6 +361,7 @@ def prepare_local_effect(
     encoding: str,
     format_name: str,
     stream_sequence: int,
+    diversion_attribution: Sequence[DiversionAttribution] | Callable[[], Sequence[DiversionAttribution]] = (),
     max_bytes: int = DEFAULT_MAX_BYTES,
     max_rows: int = DEFAULT_MAX_ROWS,
 ) -> SinkEffectPlan:
@@ -411,6 +423,7 @@ def prepare_local_effect(
     try:
         accepted = tuple(accepted_ordinals() if callable(accepted_ordinals) else accepted_ordinals)
         diverted = tuple(diverted_ordinals() if callable(diverted_ordinals) else diverted_ordinals)
+        attribution_value = tuple(diversion_attribution() if callable(diversion_attribution) else diversion_attribution)
     except BaseException:
         _remove_exact_staging(staging, staged)
         raise
@@ -422,6 +435,11 @@ def prepare_local_effect(
     elif accepted or diverted:
         _remove_exact_staging(staging, staged)
         raise LocalFilePreconditionError("audit-export effects cannot carry pipeline member dispositions")
+    try:
+        attribution = parse_diversion_attribution(attribution_value, diverted_ordinals=diverted)
+    except ValueError as exc:
+        _remove_exact_staging(staging, staged)
+        raise LocalFilePreconditionError(str(exc)) from exc
     if (
         not diverted
         and predecessor.exists
@@ -455,6 +473,7 @@ def prepare_local_effect(
         publication_kind=publication_kind,
         accepted_ordinals=accepted,
         diverted_ordinals=diverted,
+        diversion_attribution=attribution,
     )
     evidence = evidence_value.as_mapping()
     descriptor = ArtifactDescriptor.for_file(path=str(target), content_hash=staged.content_hash, size_bytes=staged.size_bytes)
@@ -625,6 +644,8 @@ def reconcile_local_effect(plan: SinkEffectPlan) -> SinkEffectReconcileResult:
         return SinkEffectReconcileResult.applied(
             expected,
             evidence={"file_id": evidence.staged_file_id, "publication": "atomic_replace"},
+            accepted_ordinals=evidence.accepted_ordinals,
+            diverted_ordinals=evidence.diverted_ordinals,
         )
 
     candidate_exact = _matches(

@@ -58,6 +58,7 @@ from elspeth.plugins.infrastructure.output_paths import (
 )
 from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode_enabled
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sinks._diversion_attribution import DiversionAttribution, build_diversion_attribution
 from elspeth.plugins.sinks._local_file_effects import (
     commit_local_effect,
     inspect_local_effect,
@@ -380,6 +381,7 @@ class JSONSink(BaseSink):
         include_baseline = predecessor_declared or self._mode == "append"
         accepted: list[int] = []
         diverted: list[int] = []
+        diversion_attribution: list[DiversionAttribution] = []
 
         def serialized_rows() -> Iterator[tuple[int, str]]:
             source_rows = [dict(member.row) for member in members]
@@ -388,8 +390,10 @@ class JSONSink(BaseSink):
                 try:
                     serialized = json.dumps(output, indent=self._indent if self._format == "json" else None, allow_nan=False)
                 except (ValueError, TypeError) as exc:
-                    self._divert_row(original, row_index=member.ordinal, reason=f"JSON serialization failed: {exc}")
+                    reason = f"JSON serialization failed: {exc}"
+                    self._divert_row(original, row_index=member.ordinal, reason=reason)
                     diverted.append(member.ordinal)
+                    diversion_attribution.append(build_diversion_attribution(ordinal=member.ordinal, reason=reason))
                     continue
                 accepted.append(member.ordinal)
                 serialized.encode(self._encoding)
@@ -462,6 +466,7 @@ class JSONSink(BaseSink):
             encoding=self._encoding,
             format_name=self._format,
             stream_sequence=1 if predecessor_declared else 0,
+            diversion_attribution=lambda: diversion_attribution,
         )
 
     def commit_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectCommitResult:

@@ -50,6 +50,7 @@ from elspeth.plugins.infrastructure.display_headers import (
     set_resume_field_resolution,
 )
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sinks._diversion_attribution import DiversionAttribution, build_diversion_attribution
 from elspeth.plugins.sinks._remote_object_effects import (
     RemoteObjectObservation,
     RemoteObjectPreconditionError,
@@ -812,9 +813,10 @@ class AWSS3Sink(BaseSink):
     def _preflight_effect_members(
         self,
         effect_input: SinkEffectPipelineMembersInput,
-    ) -> tuple[list[dict[str, Any]], tuple[int, ...], tuple[int, ...]]:
+    ) -> tuple[list[dict[str, Any]], tuple[int, ...], tuple[int, ...], tuple[DiversionAttribution, ...]]:
         accepted: list[int] = []
         diverted: list[int] = []
+        diversion_attribution: list[DiversionAttribution] = []
         diverted_keys: set[tuple[str, str]] = set()
         for member in effect_input.members:
             row = dict(member.row)
@@ -830,13 +832,16 @@ class AWSS3Sink(BaseSink):
                     max_record_chars=self._max_record_chars,
                 )
             except S3RecordSizeLimitError:
-                self._divert_row(row, row_index=member.ordinal, reason="record exceeds configured character limit")
+                reason = "record exceeds configured character limit"
+                self._divert_row(row, row_index=member.ordinal, reason=reason)
                 diverted.append(member.ordinal)
+                diversion_attribution.append(build_diversion_attribution(ordinal=member.ordinal, reason=reason))
                 diverted_keys.add((member.token_id, member.row_id))
             except S3RecordSerializationError:
                 reason = "CSV record could not be encoded safely" if self._format == "csv" else "JSON record could not be serialized safely"
                 self._divert_row(row, row_index=member.ordinal, reason=reason)
                 diverted.append(member.ordinal)
+                diversion_attribution.append(build_diversion_attribution(ordinal=member.ordinal, reason=reason))
                 diverted_keys.add((member.token_id, member.row_id))
             else:
                 serialized.close()
@@ -844,7 +849,7 @@ class AWSS3Sink(BaseSink):
         rows = [
             dict(member.row) for member in effect_input.target_snapshot_members if (member.token_id, member.row_id) not in diverted_keys
         ]
-        return rows, tuple(accepted), tuple(diverted)
+        return rows, tuple(accepted), tuple(diverted), tuple(diversion_attribution)
 
     def prepare_effect(
         self,
@@ -854,7 +859,7 @@ class AWSS3Sink(BaseSink):
         del ctx
         if type(request.effect_input) is not SinkEffectPipelineMembersInput:
             raise TypeError("AWSS3Sink effects require pipeline member input")
-        rows, accepted, diverted = self._preflight_effect_members(request.effect_input)
+        rows, accepted, diverted, diversion_attribution = self._preflight_effect_members(request.effect_input)
         data_fields = self._get_fieldnames_from_schema_or_rows(rows)
         display_fields = self._display_fieldnames(data_fields)
         displayed_rows = apply_display_headers(self, rows) if self._format in {"json", "jsonl"} else rows
@@ -898,6 +903,7 @@ class AWSS3Sink(BaseSink):
                 diverted_ordinals=diverted,
                 predecessor_descriptor=predecessor,
                 checksum_algorithm="sha256",
+                diversion_attribution=diversion_attribution,
             )
         finally:
             serialized.close()

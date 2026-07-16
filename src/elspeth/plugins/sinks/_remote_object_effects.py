@@ -24,6 +24,7 @@ from elspeth.contracts.sink_effects import (
     SinkEffectPlan,
     SinkEffectReconcileResult,
 )
+from elspeth.plugins.sinks._diversion_attribution import DiversionAttribution, parse_diversion_attribution
 
 _EVIDENCE_SCHEMA: Final = "remote-object-effect-plan-v1"
 _INSPECTION_SCHEMA: Final = "remote-object-effect-inspection-v1"
@@ -69,11 +70,13 @@ class RemoteObjectPlanEvidence:
     format_name: str
     accepted_ordinals: tuple[int, ...]
     diverted_ordinals: tuple[int, ...]
+    diversion_attribution: tuple[DiversionAttribution, ...]
     publication_kind: str
 
     def as_mapping(self) -> dict[str, object]:
         return {
             "accepted_ordinals": list(self.accepted_ordinals),
+            "diversion_attribution": [item.as_mapping() for item in self.diversion_attribution],
             "diverted_ordinals": list(self.diverted_ordinals),
             "checksum_algorithm": self.checksum_algorithm,
             "checksum_b64": self.checksum_b64,
@@ -97,6 +100,13 @@ class RemoteObjectPlanEvidence:
         diverted = _ordinals(value.get("diverted_ordinals"), "diverted_ordinals")
         if set(accepted) & set(diverted):
             raise RemoteObjectPreconditionError("accepted and diverted ordinals overlap")
+        try:
+            diversion_attribution = parse_diversion_attribution(
+                value.get("diversion_attribution"),
+                diverted_ordinals=diverted,
+            )
+        except ValueError as exc:
+            raise RemoteObjectPreconditionError(str(exc)) from exc
         precondition = _string(value.get("precondition"), "precondition")
         if precondition not in {"if_none_match", "if_match"}:
             raise RemoteObjectPreconditionError("remote object precondition is not closed")
@@ -120,6 +130,7 @@ class RemoteObjectPlanEvidence:
             format_name=_string(value.get("format_name"), "format_name"),
             accepted_ordinals=accepted,
             diverted_ordinals=diverted,
+            diversion_attribution=diversion_attribution,
             publication_kind=publication_kind,
         )
 
@@ -347,6 +358,7 @@ def prepare_remote_object(
     diverted_ordinals: Sequence[int],
     predecessor_descriptor: ArtifactDescriptor | None,
     checksum_algorithm: str,
+    diversion_attribution: Sequence[DiversionAttribution] = (),
 ) -> SinkEffectPlan:
     """Persist an effect-addressed body and return a fresh-process-safe plan."""
     _lower_hex(effect_id, "effect_id")
@@ -375,6 +387,14 @@ def prepare_remote_object(
     else:
         publication_kind = "conditional_replace" if exists else "conditional_create"
         descriptor_mode = SinkEffectDescriptorMode.PRECOMPUTED
+    try:
+        attribution = parse_diversion_attribution(
+            diversion_attribution,
+            diverted_ordinals=diverted_ordinals,
+        )
+    except ValueError as exc:
+        path.unlink(missing_ok=True)
+        raise RemoteObjectPreconditionError(str(exc)) from exc
     value = RemoteObjectPlanEvidence(
         provider=provider,
         target=target,
@@ -388,6 +408,7 @@ def prepare_remote_object(
         format_name=format_name,
         accepted_ordinals=tuple(accepted_ordinals),
         diverted_ordinals=tuple(diverted_ordinals),
+        diversion_attribution=attribution,
         publication_kind=publication_kind,
     )
     evidence = value.as_mapping()
@@ -490,6 +511,8 @@ def reconcile_remote_observation(
         return SinkEffectReconcileResult.applied(
             plan.expected_descriptor,
             evidence={"effect_id": plan.effect_id, "provider": evidence.provider, "reconciled": "exact_metadata"},
+            accepted_ordinals=evidence.accepted_ordinals,
+            diverted_ordinals=evidence.diverted_ordinals,
         )
     if not observation.exists and evidence.precondition == "if_none_match":
         return SinkEffectReconcileResult.not_applied(

@@ -57,6 +57,7 @@ from elspeth.plugins.infrastructure.output_paths import (
 )
 from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode_enabled
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sinks._diversion_attribution import DiversionAttribution, build_diversion_attribution
 from elspeth.plugins.sinks._local_file_effects import (
     commit_local_effect,
     inspect_local_effect,
@@ -357,6 +358,7 @@ class CSVSink(BaseSink):
 
         accepted: list[int] = []
         diverted: list[int] = []
+        diversion_attribution: list[DiversionAttribution] = []
 
         def header_text() -> str:
             buffer = io.StringIO(newline="")
@@ -379,6 +381,7 @@ class CSVSink(BaseSink):
                     )
                     self._divert_row(row, row_index=member.ordinal, reason=reason)
                     diverted.append(member.ordinal)
+                    diversion_attribution.append(build_diversion_attribution(ordinal=member.ordinal, reason=reason))
                     continue
                 row_buffer = io.StringIO(newline="")
                 writer = csv.DictWriter(row_buffer, fieldnames=data_fields, delimiter=self._delimiter)
@@ -387,16 +390,20 @@ class CSVSink(BaseSink):
                     row_text = row_buffer.getvalue()
                     row_text.encode(self._encoding)
                 except UnicodeEncodeError as exc:
+                    reason = f"CSV encoding ({self._encoding}) failed: {exc}"
                     self._divert_row(
                         row,
                         row_index=member.ordinal,
-                        reason=f"CSV encoding ({self._encoding}) failed: {exc}",
+                        reason=reason,
                     )
                     diverted.append(member.ordinal)
+                    diversion_attribution.append(build_diversion_attribution(ordinal=member.ordinal, reason=reason))
                     continue
                 except csv.Error as exc:
-                    self._divert_row(row, row_index=member.ordinal, reason=f"CSV serialization failed: {exc}")
+                    reason = f"CSV serialization failed: {exc}"
+                    self._divert_row(row, row_index=member.ordinal, reason=reason)
                     diverted.append(member.ordinal)
+                    diversion_attribution.append(build_diversion_attribution(ordinal=member.ordinal, reason=reason))
                     continue
                 accepted.append(member.ordinal)
                 yield encoder.encode(row_text)
@@ -415,6 +422,7 @@ class CSVSink(BaseSink):
             encoding=self._encoding,
             format_name="csv",
             stream_sequence=1 if predecessor_declared else 0,
+            diversion_attribution=lambda: diversion_attribution,
         )
 
     def commit_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectCommitResult:

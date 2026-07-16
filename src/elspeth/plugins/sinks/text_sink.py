@@ -37,6 +37,7 @@ from elspeth.plugins.infrastructure.base import BaseSink
 from elspeth.plugins.infrastructure.config_base import LocalFileSinkConfig, OutputCollisionPolicy
 from elspeth.plugins.infrastructure.output_paths import resolve_output_collision_path, validate_output_collision_policy_mode
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sinks._diversion_attribution import DiversionAttribution, build_diversion_attribution
 from elspeth.plugins.sinks._local_file_effects import (
     commit_local_effect,
     inspect_local_effect,
@@ -188,6 +189,7 @@ class TextSink(BaseSink):
         include_baseline = predecessor_declared or self._mode == "append"
         accepted: list[int] = []
         diverted: list[int] = []
+        diversion_attribution: list[DiversionAttribution] = []
 
         def chunks() -> Iterator[bytes]:
             if include_baseline and target.exists():
@@ -213,6 +215,7 @@ class TextSink(BaseSink):
                 if reason is not None:
                     self._divert_row(row, row_index=member.ordinal, reason=reason)
                     diverted.append(member.ordinal)
+                    diversion_attribution.append(build_diversion_attribution(ordinal=member.ordinal, reason=reason))
                     continue
                 assert encoded is not None
                 accepted.append(member.ordinal)
@@ -229,6 +232,7 @@ class TextSink(BaseSink):
             encoding=self._encoding,
             format_name="text",
             stream_sequence=1 if predecessor_declared else 0,
+            diversion_attribution=lambda: diversion_attribution,
         )
 
     def commit_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectCommitResult:

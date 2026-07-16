@@ -44,6 +44,8 @@ from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.contracts.sink_effects import (
+    SinkEffectAttemptAction,
+    SinkEffectAttemptState,
     SinkEffectFinalizationMember,
     SinkEffectInputKind,
     SinkEffectMemberCandidate,
@@ -54,6 +56,7 @@ from elspeth.contracts.sink_effects import (
 from elspeth.core.canonical import canonical_json as pipeline_canonical_json
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.errors import LandscapeRecordError
+from elspeth.core.landscape.execution.sink_effect_attempt_results import decode_sink_effect_returned_result
 from elspeth.core.landscape.execution.sink_effect_identity import compute_pipeline_effect_identity, resolve_sink_effect_members
 from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.engine._error_hash import compute_error_hash
@@ -684,22 +687,44 @@ class SinkExecutor:
         # spanning batch recovers from each effect's durable attribution only.
         returned_by_ordinal = {item.row_index: item for item in returned_diversions} if single_effect else {}
         attribution_by_key: dict[tuple[str, int], tuple[str, str]] = {}
+
+        def merge_attribution(effect_id: str, raw_attribution: object) -> None:
+            if not isinstance(raw_attribution, Sequence) or isinstance(raw_attribution, (str, bytes, bytearray)):
+                return
+            for item in raw_attribution:
+                if not isinstance(item, Mapping):
+                    raise AuditIntegrityError("effect diversion attribution is not a mapping")
+                ordinal = item.get("ordinal")
+                reason_hash = item.get("reason_hash")
+                error_hash = item.get("error_hash")
+                if type(ordinal) is not int or not isinstance(reason_hash, str) or not isinstance(error_hash, str):
+                    raise AuditIntegrityError("effect diversion attribution is incomplete")
+                key = (effect_id, ordinal)
+                value = (reason_hash, error_hash)
+                if attribution_by_key.setdefault(key, value) != value:
+                    raise AuditIntegrityError("effect diversion attribution sources diverge for one durable member")
+
         for effect_id in effect_ids:
             effect = self._execution.sink_effects.get_effect(effect_id)
             if effect is None:
                 raise AuditIntegrityError("durable effect partition references a missing effect")
             plan = SinkEffectCoordinator._load_plan(effect)
-            raw_attribution = plan.safe_evidence.get("diversion_attribution", ())
-            if isinstance(raw_attribution, Sequence) and not isinstance(raw_attribution, (str, bytes, bytearray)):
-                for item in raw_attribution:
-                    if not isinstance(item, Mapping):
-                        raise AuditIntegrityError("effect diversion attribution is not a mapping")
-                    ordinal = item.get("ordinal")
-                    reason_hash = item.get("reason_hash")
-                    error_hash = item.get("error_hash")
-                    if type(ordinal) is not int or not isinstance(reason_hash, str) or not isinstance(error_hash, str):
-                        raise AuditIntegrityError("effect diversion attribution is incomplete")
-                    attribution_by_key[(effect_id, ordinal)] = (reason_hash, error_hash)
+            merge_attribution(effect_id, plan.safe_evidence.get("diversion_attribution", ()))
+            if not diverted_keys:
+                continue
+            # Commit-time diversions (e.g. database constraints) cannot exist in
+            # the plan, which is durably bound before commit. Their attribution
+            # lives in the durable returned commit/reconcile attempt evidence,
+            # recorded before finalization — recover it from there.
+            for attempt in self._execution.sink_effects.get_attempts(effect_id):
+                if (
+                    attempt.state is not SinkEffectAttemptState.RETURNED
+                    or attempt.action not in (SinkEffectAttemptAction.COMMIT, SinkEffectAttemptAction.RECONCILE)
+                    or attempt.evidence_json is None
+                ):
+                    continue
+                decoded = decode_sink_effect_returned_result(attempt.action, attempt.evidence_json)
+                merge_attribution(effect_id, decoded.evidence.get("diversion_attribution", ()))
         if returned_by_ordinal and set(returned_by_ordinal) != {ordinal for _effect_id, ordinal in diverted_keys}:
             raise AuditIntegrityError("effect result diversion evidence does not match the durable member partition")
         if not returned_by_ordinal and set(attribution_by_key) != diverted_keys:

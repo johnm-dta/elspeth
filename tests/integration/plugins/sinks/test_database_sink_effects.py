@@ -142,6 +142,17 @@ def test_marker_and_accepted_rows_commit_once_with_constraint_diversion(tmp_path
     assert json.loads(marker["diverted_ordinals_json"]) == [1]
     assert marker["accepted_payload_hash"] == first.descriptor.content_hash
     assert "duplicate" not in marker["diversion_hashes_json"]
+    # Full attribution is durable in the marker and bound into the evidence
+    # before finalization (elspeth-e0342d547f).
+    marker_attribution = json.loads(marker["diversion_hashes_json"])
+    assert [set(item) for item in marker_attribution] == [{"error_hash", "ordinal", "reason_hash"}]
+    assert marker_attribution[0]["ordinal"] == 1
+    assert json.loads(marker["evidence_json"])["diversion_attribution"] == marker_attribution
+    # The live diversion log carries the real constraint reason for routing.
+    live = sink._get_diversions()
+    assert [item.row_index for item in live] == [1]
+    assert live[0].reason.startswith("Constraint violation:")
+    assert [dict(item) for item in first.evidence["diversion_attribution"]] == marker_attribution
     engine.dispose()
 
 

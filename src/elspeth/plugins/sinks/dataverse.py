@@ -54,6 +54,7 @@ from elspeth.plugins.infrastructure.clients.dataverse import (
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
+from elspeth.plugins.sinks._diversion_attribution import build_diversion_attribution
 
 # HTTP status codes that may be single-row-attributable when Dataverse also
 # provides a structured row-data classification. These statuses alone are not
@@ -271,7 +272,7 @@ class DataverseSink(BaseSink):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6825771f32e7f381"
+    source_file_hash: str | None = "sha256:5a66501c68b516d3"
     determinism = Determinism.EXTERNAL_CALL
     config_model = DataverseSinkConfig
     idempotent = True  # PATCH upsert is idempotent — safe for retries and crash recovery (engine does not yet read this flag)
@@ -592,7 +593,30 @@ class DataverseSink(BaseSink):
         if self._client is None:
             raise FrameworkBugError("Dataverse client is unavailable — on_start() was not called")
         url, payload, descriptor = self._validate_member_effect(plan, member, effect_input)
-        self._client.upsert(url, payload)
+        try:
+            self._client.upsert(url, payload)
+        except DataverseClientError as exc:
+            # Mirror write(): only explicitly row-attributable, non-retryable
+            # responses divert; batch-integrity/unknown failures still raise so
+            # the engine retries or crashes instead of silently dropping rows.
+            if not _is_row_attributable_write_error(exc):
+                raise
+            reason = f"Dataverse PATCH failed with non-retryable HTTP {exc.status_code}: {exc}"
+            row = deep_thaw(member.row)
+            assert isinstance(row, dict)
+            # Live diversion log BEFORE the durable result: fails closed with
+            # FrameworkBugError when no on_write_failure policy is configured.
+            self._divert_row(row, row_index=member.ordinal, reason=reason)
+            attribution = build_diversion_attribution(ordinal=member.ordinal, reason=reason)
+            return SinkEffectCommitResult(
+                descriptor=descriptor,
+                evidence={
+                    **self._member_group_evidence(plan, "diverted"),
+                    "diversion_attribution": [attribution.as_mapping()],
+                },
+                accepted_ordinals=tuple(item.ordinal for item in effect_input.members if item.ordinal != member.ordinal),
+                diverted_ordinals=(member.ordinal,),
+            )
         return SinkEffectCommitResult(
             descriptor=descriptor,
             evidence=self._member_group_evidence(plan, "committed"),

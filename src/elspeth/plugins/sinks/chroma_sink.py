@@ -57,6 +57,7 @@ from elspeth.plugins.infrastructure.clients.retrieval.connection import (
 )
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sinks._diversion_attribution import build_diversion_attribution
 
 slog = structlog.get_logger(__name__)
 
@@ -196,7 +197,7 @@ class ChromaSink(BaseSink):
     name = "chroma_sink"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:1df0fbc8b38a4b6c"
+    source_file_hash: str | None = "sha256:88c105388601c42d"
     config_model = ChromaSinkConfig
     supports_resume = False
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
@@ -341,13 +342,28 @@ class ChromaSink(BaseSink):
         self,
         effect_id: str,
         effect_input: SinkEffectPipelineMembersInput,
-    ) -> tuple[ArtifactDescriptor, str, str, tuple[tuple[str, str, dict[str, object] | None], ...]]:
-        extracted = tuple(self._extract_effect_member(member) for member in effect_input.members)
-        ids = [item[0] for item in extracted]
+    ) -> tuple[ArtifactDescriptor, str, str, dict[int, tuple[str, str, dict[str, object] | None]], tuple[tuple[int, str], ...]]:
+        """Deterministically partition members into extractable payloads and diversions.
+
+        An invalid member (missing/non-string ID or document, unsupported or
+        non-finite metadata) diverts individually with its exact reason instead
+        of aborting the plan and blocking valid siblings (elspeth-32bf1a9b63).
+        The descriptor and payload hash cover only the members that will be
+        published. Recomputation over the same members is exact, so plan
+        validation on commit/reconcile still binds.
+        """
+        extracted_by_ordinal: dict[int, tuple[str, str, dict[str, object] | None]] = {}
+        diversions: list[tuple[int, str]] = []
+        for member in effect_input.members:
+            try:
+                extracted_by_ordinal[member.ordinal] = self._extract_effect_member(member)
+            except ValueError as exc:
+                diversions.append((member.ordinal, str(exc)))
+        ids = [item[0] for item in extracted_by_ordinal.values()]
         if len(ids) != len(set(ids)):
             raise ValueError("Chroma effect members require unique stable document IDs")
-        documents = [item[1] for item in extracted]
-        aligned_metadata = [item[2] for item in extracted]
+        documents = [item[1] for item in extracted_by_ordinal.values()]
+        aligned_metadata = [item[2] for item in extracted_by_ordinal.values()]
         hash_metadata = aligned_metadata if any(item is not None for item in aligned_metadata) else None
         payload_hash, payload_size = self._compute_payload_hash(ids, documents, hash_metadata)
         descriptor = ArtifactDescriptor.for_database(
@@ -355,16 +371,23 @@ class ChromaSink(BaseSink):
             table=self._config.collection,
             content_hash=payload_hash,
             payload_size=payload_size,
-            row_count=len(extracted),
+            row_count=len(extracted_by_ordinal),
         )
         bindings = [
             {
-                "document_id_hash": stable_hash(document_id),
+                "document_id_hash": stable_hash(extracted_by_ordinal[member.ordinal][0]),
                 "member_effect_id": member.member_effect_id,
                 "ordinal": member.ordinal,
-                "payload_hash": stable_hash({"document": document, "document_id": document_id, "metadata": metadata}),
+                "payload_hash": stable_hash(
+                    {
+                        "document": extracted_by_ordinal[member.ordinal][1],
+                        "document_id": extracted_by_ordinal[member.ordinal][0],
+                        "metadata": extracted_by_ordinal[member.ordinal][2],
+                    }
+                ),
             }
-            for member, (document_id, document, metadata) in zip(effect_input.members, extracted, strict=True)
+            for member in effect_input.members
+            if member.ordinal in extracted_by_ordinal
         ]
         plan_hash = stable_hash(
             {
@@ -379,11 +402,12 @@ class ChromaSink(BaseSink):
                         "size_bytes": descriptor.size_bytes,
                     }
                 ),
+                "diverted": [build_diversion_attribution(ordinal=ordinal, reason=reason).as_mapping() for ordinal, reason in diversions],
                 "effect_id": effect_id,
                 "schema": "chroma-member-effect-plan-v1",
             }
         )
-        return descriptor, payload_hash, plan_hash, extracted
+        return descriptor, payload_hash, plan_hash, extracted_by_ordinal, tuple(diversions)
 
     def inspect_effect(
         self,
@@ -410,32 +434,56 @@ class ChromaSink(BaseSink):
             )
         if type(request.effect_input) is not SinkEffectPipelineMembersInput:
             raise TypeError("Chroma effects require pipeline member input")
-        descriptor, payload_hash, plan_hash, extracted = self._member_effect_material(request.effect_id, request.effect_input)
+        descriptor, payload_hash, plan_hash, extracted_by_ordinal, diversions = self._member_effect_material(
+            request.effect_id, request.effect_input
+        )
+        member_by_ordinal = {member.ordinal: member for member in request.effect_input.members}
+        diversion_attribution = []
+        for ordinal, reason in diversions:
+            row = deep_thaw(member_by_ordinal[ordinal].row)
+            assert isinstance(row, dict)
+            # Live diversion log BEFORE the plan binds: fails closed with
+            # FrameworkBugError when no on_write_failure policy is configured.
+            self._divert_row(row, row_index=ordinal, reason=reason)
+            diversion_attribution.append(build_diversion_attribution(ordinal=ordinal, reason=reason).as_mapping())
+        diversion_attribution.sort(key=lambda item: item["ordinal"])  # type: ignore[arg-type,return-value]
+        safe_evidence: dict[str, object] = {
+            "accepted_ordinals": sorted(extracted_by_ordinal),
+            "diversion_attribution": diversion_attribution,
+            "diverted_ordinals": sorted(ordinal for ordinal, _reason in diversions),
+            "member_count": len(request.effect_input.members),
+            "member_plans_hash": stable_hash(
+                [
+                    {
+                        "document_id_hash": stable_hash(item[0]),
+                        "member_effect_id": member_by_ordinal[ordinal].member_effect_id,
+                        "ordinal": ordinal,
+                        "payload_hash": stable_hash({"document": item[1], "document_id": item[0], "metadata": item[2]}),
+                    }
+                    for ordinal, item in sorted(extracted_by_ordinal.items())
+                ]
+            ),
+            "schema": "chroma-member-effect-plan-v1",
+        }
+        # A group with no publishable member performs no external I/O at all:
+        # finalize it as a no-publication effect so the diverted members do
+        # not wedge the batch waiting for an external attempt that can never
+        # exist.
+        descriptor_mode = SinkEffectDescriptorMode.PRECOMPUTED
+        if not extracted_by_ordinal:
+            descriptor_mode = SinkEffectDescriptorMode.NO_PUBLICATION
+            safe_evidence["publication_kind"] = "virtual"
         return SinkEffectPlan(
             effect_id=request.effect_id,
             protocol_version=SINK_EFFECT_PROTOCOL_VERSION,
             input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
-            descriptor_mode=SinkEffectDescriptorMode.PRECOMPUTED,
+            descriptor_mode=descriptor_mode,
             inspection_mode=request.inspection.mode,
             target=self._effect_target,
             plan_hash=plan_hash,
             payload_hash=payload_hash,
             expected_descriptor=descriptor,
-            safe_evidence={
-                "member_count": len(extracted),
-                "member_plans_hash": stable_hash(
-                    [
-                        {
-                            "document_id_hash": stable_hash(item[0]),
-                            "member_effect_id": member.member_effect_id,
-                            "ordinal": member.ordinal,
-                            "payload_hash": stable_hash({"document": item[1], "document_id": item[0], "metadata": item[2]}),
-                        }
-                        for member, item in zip(request.effect_input.members, extracted, strict=True)
-                    ]
-                ),
-                "schema": "chroma-member-effect-plan-v1",
-            },
+            safe_evidence=safe_evidence,
         )
 
     def _validate_member_effect(
@@ -444,7 +492,7 @@ class ChromaSink(BaseSink):
         member: SinkEffectMember,
         effect_input: SinkEffectPipelineMembersInput,
     ) -> tuple[str, str, dict[str, object] | None, ArtifactDescriptor]:
-        descriptor, payload_hash, plan_hash, extracted = self._member_effect_material(plan.effect_id, effect_input)
+        descriptor, payload_hash, plan_hash, extracted_by_ordinal, _diversions = self._member_effect_material(plan.effect_id, effect_input)
         if (
             plan.protocol_version != SINK_EFFECT_PROTOCOL_VERSION
             or plan.input_kind is not SinkEffectInputKind.PIPELINE_MEMBERS
@@ -459,7 +507,9 @@ class ChromaSink(BaseSink):
             raise ValueError("Chroma member does not match its exact stored ordinal")
         if member.member_effect_id is None:
             raise ValueError("Chroma member effect requires a durable member_effect_id")
-        document_id, document, metadata = extracted[member.ordinal]
+        if member.ordinal not in extracted_by_ordinal:
+            raise ValueError("Chroma member was diverted during preparation and must not reach external I/O")
+        document_id, document, metadata = extracted_by_ordinal[member.ordinal]
         return document_id, document, metadata, descriptor
 
     @staticmethod

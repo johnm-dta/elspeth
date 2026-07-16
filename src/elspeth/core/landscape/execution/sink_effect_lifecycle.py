@@ -633,6 +633,15 @@ class SinkEffectLifecycle:
                 if descriptor_hash is not None and member.descriptor_hash != descriptor_hash:
                     raise LandscapeRecordError("finalized member result descriptor is divergent")
                 return
+            disposition, reason_hash = self._member_result_disposition(result, member_ordinal=int(attempt.member_ordinal))
+            values: dict[str, object] = {
+                "prepared_disposition": disposition,
+                "member_state": next_state.value,
+                "descriptor_hash": descriptor_hash,
+                "evidence_hash": evidence_hash,
+            }
+            if reason_hash is not None:
+                values["reason_hash"] = reason_hash
             conn.execute(
                 sink_effect_members_table.update()
                 .where(
@@ -640,13 +649,39 @@ class SinkEffectLifecycle:
                     sink_effect_members_table.c.ordinal == attempt.member_ordinal,
                     sink_effect_members_table.c.member_state != SinkEffectState.FINALIZED.value,
                 )
-                .values(
-                    prepared_disposition="accepted",
-                    member_state=next_state.value,
-                    descriptor_hash=descriptor_hash,
-                    evidence_hash=evidence_hash,
-                )
+                .values(**values)
             )
+
+    @staticmethod
+    def _member_result_disposition(
+        result: SinkEffectCommitResult | SinkEffectReconcileResult,
+        *,
+        member_ordinal: int,
+    ) -> tuple[str, str | None]:
+        """Classify one member result as accepted or diverted-with-attribution.
+
+        A member commit that diverted its own ordinal must carry exact durable
+        attribution in its result evidence; anything else fails closed rather
+        than recording an unattributed diversion.
+        """
+        if not isinstance(result, SinkEffectCommitResult) or member_ordinal not in set(result.diverted_ordinals):
+            return "accepted", None
+        raw_attribution = deep_thaw(result.evidence).get("diversion_attribution")
+        if type(raw_attribution) is not list:
+            raise LandscapeRecordError("diverted member result requires diversion attribution evidence")
+        for item in raw_attribution:
+            if (
+                type(item) is not dict
+                or set(item) != {"error_hash", "ordinal", "reason_hash"}
+                or not isinstance(item["reason_hash"], str)
+                or _LOWER_HEX_64.fullmatch(item["reason_hash"]) is None
+                or not isinstance(item["error_hash"], str)
+                or re.fullmatch(r"[0-9a-f]{16}", item["error_hash"]) is None
+            ):
+                raise LandscapeRecordError("diverted member result attribution is invalid")
+            if item["ordinal"] == member_ordinal:
+                return "diverted", item["reason_hash"]
+        raise LandscapeRecordError("diverted member result attribution does not cover the member ordinal")
 
     def mark_response_lost(
         self,

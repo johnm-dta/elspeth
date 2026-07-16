@@ -1073,27 +1073,42 @@ class SinkEffectCoordinator:
     def _predecessor_descriptor(self, effect: SinkEffect) -> ArtifactDescriptor | None:
         if effect.predecessor_effect_id is None:
             return None
-        predecessor = self._effects.get_effect(effect.predecessor_effect_id)
-        if predecessor is None:
-            raise LandscapeRecordError("sink effect predecessor disappeared")
-        artifact = next(
-            (
-                item
-                for item in self._factory.execution.get_artifacts(effect.run_id, sink_node_id=effect.sink_node_id)
-                if item.sink_effect_id == predecessor.effect_id
-            ),
-            None,
-        )
-        if artifact is None:
-            raise LandscapeRecordError("finalized sink effect predecessor is missing its artifact")
-        if artifact.artifact_type not in {"file", "database", "webhook"}:
-            raise LandscapeRecordError("finalized sink effect predecessor has an invalid artifact type")
-        return ArtifactDescriptor(
-            artifact_type=cast(Literal["file", "database", "webhook"], artifact.artifact_type),
-            path_or_uri=artifact.path_or_uri,
-            content_hash=artifact.content_hash,
-            size_bytes=artifact.size_bytes,
-        )
+        artifacts_by_effect = {
+            item.sink_effect_id: item
+            for item in self._factory.execution.get_artifacts(effect.run_id, sink_node_id=effect.sink_node_id)
+            if item.sink_effect_id is not None
+        }
+        predecessor_id: str | None = effect.predecessor_effect_id
+        seen = {effect.effect_id}
+        while predecessor_id is not None:
+            if predecessor_id in seen or len(seen) > 256:
+                raise LandscapeRecordError("sink effect predecessor chain is cyclic or exceeds 256 effects")
+            seen.add(predecessor_id)
+            predecessor = self._effects.get_effect(predecessor_id)
+            if predecessor is None:
+                raise LandscapeRecordError("sink effect predecessor disappeared")
+            if predecessor.state is not SinkEffectState.FINALIZED:
+                raise SinkEffectPredecessorPending(f"sink effect {effect.effect_id} is waiting for predecessor {predecessor.effect_id}")
+            artifact = artifacts_by_effect.get(predecessor.effect_id)
+            if artifact is None:
+                raise LandscapeRecordError("finalized sink effect predecessor is missing its artifact")
+            if not artifact.publication_performed:
+                # A no-publication (virtual or inherited) predecessor never
+                # touched the remote target, so its artifact is not remote
+                # evidence: declaring it would wedge the successor's
+                # precondition forever. Walk back to the most recent real
+                # publication in the stream (elspeth-fac5260c6a).
+                predecessor_id = predecessor.predecessor_effect_id
+                continue
+            if artifact.artifact_type not in {"file", "database", "webhook"}:
+                raise LandscapeRecordError("finalized sink effect predecessor has an invalid artifact type")
+            return ArtifactDescriptor(
+                artifact_type=cast(Literal["file", "database", "webhook"], artifact.artifact_type),
+                path_or_uri=artifact.path_or_uri,
+                content_hash=artifact.content_hash,
+                size_bytes=artifact.size_bytes,
+            )
+        return None
 
     def _load_finalized(self, effect_id: str) -> SinkEffectFinalizationResult:
         effect = self._require_effect(effect_id)

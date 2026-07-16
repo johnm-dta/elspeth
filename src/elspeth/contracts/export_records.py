@@ -324,6 +324,104 @@ class ArtifactExportRecord(TypedDict):
     created_at: str
 
 
+class SinkEffectStreamExportRecord(TypedDict):
+    """Credential-free ordering authority for a replacing sink target."""
+
+    record_type: Literal["sink_effect_stream"]
+    run_id: str
+    stream_id: str
+    sink_node_id: str
+    role: str
+    requested_target_hash: str
+    next_sequence: int
+    tail_effect_id: str | None
+    head_effect_id: str | None
+    head_descriptor_hash: str | None
+
+
+class SinkEffectExportRecord(TypedDict):
+    """Durable effect lifecycle without raw target or provider payloads."""
+
+    record_type: Literal["sink_effect"]
+    run_id: str
+    effect_id: str
+    sink_node_id: str
+    role: str
+    state: str
+    protocol_version: str
+    input_kind: str
+    config_hash: str
+    membership_or_manifest_hash: str
+    group_payload_hash: str
+    artifact_id: str
+    artifact_idempotency_key: str
+    inspection_mode: str | None
+    inspection_attempt_id: str | None
+    plan_hash: str | None
+    descriptor_mode: str | None
+    expected_descriptor_hash: str | None
+    precondition_hash: str | None
+    prepared_at: str | None
+    lease_owner: str | None
+    generation: int
+    lease_expires_at: str | None
+    lease_heartbeat_at: str | None
+    reconcile_kind: str | None
+    reconcile_evidence_hash: str | None
+    result_descriptor_hash: str | None
+    publication_performed: bool | None
+    publication_evidence_kind: str | None
+    primary_effect_id: str | None
+    stream_id: str | None
+    stream_sequence: int | None
+    predecessor_effect_id: str | None
+    created_at: str
+    updated_at: str
+    finalized_at: str | None
+
+
+class SinkEffectMemberExportRecord(TypedDict):
+    """Hash-only member identity and durable member progress."""
+
+    record_type: Literal["sink_effect_member"]
+    run_id: str
+    effect_id: str
+    ordinal: int
+    sink_node_id: str
+    role: str
+    token_id: str
+    row_id: str
+    ingest_sequence: int
+    lineage_hash: str
+    payload_hash: str
+    prepared_disposition: str | None
+    reason_hash: str | None
+    member_effect_id: str | None
+    member_state: str | None
+    descriptor_hash: str | None
+    evidence_hash: str | None
+
+
+class SinkEffectAttemptExportRecord(TypedDict):
+    """One ordered external-call intent/result without provider bodies."""
+
+    record_type: Literal["sink_effect_attempt"]
+    run_id: str
+    attempt_id: str
+    effect_id: str
+    attempt_index: int
+    member_ordinal: int | None
+    generation: int
+    action: str
+    call_kind: str
+    request_hash: str
+    state: str
+    evidence_hash: str | None
+    started_at: str
+    completed_at: str | None
+    latency_ms: float | None
+
+
 ExportRecord = (
     RunExportRecord
     | WebPluginPolicyExportRecord
@@ -344,4 +442,8 @@ ExportRecord = (
     | BatchExportRecord
     | BatchMemberExportRecord
     | ArtifactExportRecord
+    | SinkEffectStreamExportRecord
+    | SinkEffectExportRecord
+    | SinkEffectMemberExportRecord
+    | SinkEffectAttemptExportRecord
 )

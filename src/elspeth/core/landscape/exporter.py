@@ -57,7 +57,14 @@ from elspeth.contracts.export_records import (
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.export_mappers import artifact_to_export_record, node_state_to_export_record
+from elspeth.core.landscape.export_mappers import (
+    artifact_to_export_record,
+    node_state_to_export_record,
+    sink_effect_attempt_to_export_record,
+    sink_effect_member_to_export_record,
+    sink_effect_stream_to_export_record,
+    sink_effect_to_export_record,
+)
 from elspeth.core.landscape.factory import RecorderFactory
 
 
@@ -105,6 +112,14 @@ class ExportReadModel(Protocol):
     def get_all_batch_members_for_run(self, run_id: str) -> list[Any]: ...
 
     def get_artifacts(self, run_id: str) -> list[Any]: ...
+
+    def get_sink_effect_streams_for_run(self, run_id: str) -> list[Any] | tuple[Any, ...]: ...
+
+    def get_sink_effects_for_run(self, run_id: str) -> list[Any] | tuple[Any, ...]: ...
+
+    def get_sink_effect_members_for_run(self, run_id: str) -> list[Any] | tuple[Any, ...]: ...
+
+    def get_sink_effect_attempts_for_run(self, run_id: str) -> list[Any] | tuple[Any, ...]: ...
 
 
 class RecorderFactoryExportReadModel:
@@ -175,6 +190,18 @@ class RecorderFactoryExportReadModel:
 
     def get_artifacts(self, run_id: str) -> list[Any]:
         return self._factory.execution.get_artifacts(run_id)
+
+    def get_sink_effect_streams_for_run(self, run_id: str) -> tuple[Any, ...]:
+        return self._factory.execution.sink_effects.get_streams_for_run(run_id)
+
+    def get_sink_effects_for_run(self, run_id: str) -> tuple[Any, ...]:
+        return self._factory.execution.sink_effects.get_effects_for_run(run_id)
+
+    def get_sink_effect_members_for_run(self, run_id: str) -> tuple[Any, ...]:
+        return self._factory.execution.sink_effects.get_members_for_run(run_id)
+
+    def get_sink_effect_attempts_for_run(self, run_id: str) -> tuple[Any, ...]:
+        return self._factory.execution.sink_effects.get_attempts_for_run(run_id)
 
 
 class LandscapeExporter:
@@ -583,6 +610,8 @@ class LandscapeExporter:
                 }
                 yield op_call_record
 
+        yield from self._iter_sink_effect_records(run_id)
+
         # Source validation and transform error audit evidence.
         # Repository getters provide deterministic created_at ordering.
         # Raw-row minimization (elspeth-384184c6ab): row_data_json is
@@ -636,6 +665,33 @@ class LandscapeExporter:
             yield from self._iter_row_batch_records(run_id, row_batch)
 
         yield from self._iter_batch_and_artifact_records(run_id)
+
+    def _iter_sink_effect_records(self, run_id: str) -> Iterator[ExportRecord]:
+        """Yield complete safe recovery history in deterministic family order."""
+        # Preserve compatibility for narrow test/custom read models that
+        # predate epoch 26 and therefore cannot contain sink-effect rows.
+        stream_getter = getattr(self._read_model, "get_sink_effect_streams_for_run", None)
+        effect_getter = getattr(self._read_model, "get_sink_effects_for_run", None)
+        member_getter = getattr(self._read_model, "get_sink_effect_members_for_run", None)
+        attempt_getter = getattr(self._read_model, "get_sink_effect_attempts_for_run", None)
+        if stream_getter is None or effect_getter is None or member_getter is None or attempt_getter is None:
+            return
+
+        for stream in stream_getter(run_id):
+            yield sink_effect_stream_to_export_record(stream)
+        for effect in effect_getter(run_id):
+            yield sink_effect_to_export_record(effect)
+        for member in member_getter(run_id):
+            yield sink_effect_member_to_export_record(member)
+
+        current_effect_id: str | None = None
+        attempt_index = 0
+        for attempt in attempt_getter(run_id):
+            if attempt.effect_id != current_effect_id:
+                current_effect_id = attempt.effect_id
+                attempt_index = 0
+            yield sink_effect_attempt_to_export_record(run_id, attempt, attempt_index=attempt_index)
+            attempt_index += 1
 
     def _iter_row_batch_records(self, run_id: str, row_batch: list[Row]) -> Iterator[ExportRecord]:
         """Yield row-family records for one bounded batch of rows.

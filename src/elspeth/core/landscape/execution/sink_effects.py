@@ -32,8 +32,18 @@ from elspeth.core.landscape.execution.sink_effect_reservation import (
     SinkEffectReservation,
     SinkEffectReservationResult,
 )
-from elspeth.core.landscape.model_loaders import SinkEffectLoader, SinkEffectMemberLoader, SinkEffectStreamLoader
-from elspeth.core.landscape.schema import sink_effect_members_table, sink_effect_streams_table, sink_effects_table
+from elspeth.core.landscape.model_loaders import (
+    SinkEffectAttemptLoader,
+    SinkEffectLoader,
+    SinkEffectMemberLoader,
+    SinkEffectStreamLoader,
+)
+from elspeth.core.landscape.schema import (
+    sink_effect_attempts_table,
+    sink_effect_members_table,
+    sink_effect_streams_table,
+    sink_effects_table,
+)
 
 
 class SinkEffectRepository:
@@ -52,6 +62,7 @@ class SinkEffectRepository:
         self._effect_loader = effect_loader
         self._member_loader = member_loader
         self._stream_loader = stream_loader
+        self._attempt_loader = SinkEffectAttemptLoader()
         self._reservation = SinkEffectReservation(db, effect_loader=effect_loader)
         self._lifecycle = SinkEffectLifecycle(db, effect_loader=effect_loader)
         self._finalization = SinkEffectFinalization(db, ops, effect_loader=effect_loader)
@@ -188,6 +199,51 @@ class SinkEffectRepository:
             return None
         row = self._ops.execute_fetchone(select(sink_effect_streams_table).where(sink_effect_streams_table.c.stream_id == stream_id))
         return None if row is None else self._stream_loader.load(row)
+
+    def get_streams_for_run(self, run_id: str) -> tuple[SinkEffectStream, ...]:
+        """Return target streams in stable stream-ID order."""
+        rows = self._ops.execute_fetchall(
+            select(sink_effect_streams_table)
+            .where(sink_effect_streams_table.c.run_id == run_id)
+            .order_by(sink_effect_streams_table.c.stream_id)
+        )
+        return tuple(self._stream_loader.load(row) for row in rows)
+
+    def get_effects_for_run(self, run_id: str) -> tuple[SinkEffect, ...]:
+        """Return effects in stable stream/sequence/effect-ID order."""
+        rows = self._ops.execute_fetchall(
+            select(sink_effects_table)
+            .where(sink_effects_table.c.run_id == run_id)
+            .order_by(
+                sink_effects_table.c.stream_id,
+                sink_effects_table.c.stream_sequence,
+                sink_effects_table.c.effect_id,
+            )
+        )
+        return tuple(self._effect_loader.load(row) for row in rows)
+
+    def get_members_for_run(self, run_id: str) -> tuple[SinkEffectMemberRecord, ...]:
+        """Return all pipeline members in stable effect/ordinal order."""
+        rows = self._ops.execute_fetchall(
+            select(sink_effect_members_table)
+            .where(sink_effect_members_table.c.run_id == run_id)
+            .order_by(sink_effect_members_table.c.effect_id, sink_effect_members_table.c.ordinal)
+        )
+        return tuple(self._member_loader.load(row) for row in rows)
+
+    def get_attempts_for_run(self, run_id: str) -> tuple[SinkEffectAttempt, ...]:
+        """Return every call witness in stable per-effect call order."""
+        rows = self._ops.execute_fetchall(
+            select(sink_effect_attempts_table)
+            .join(sink_effects_table, sink_effect_attempts_table.c.effect_id == sink_effects_table.c.effect_id)
+            .where(sink_effects_table.c.run_id == run_id)
+            .order_by(
+                sink_effect_attempts_table.c.effect_id,
+                sink_effect_attempts_table.c.started_at,
+                sink_effect_attempts_table.c.attempt_id,
+            )
+        )
+        return tuple(self._attempt_loader.load(row) for row in rows)
 
 
 __all__ = ["SinkEffectRepository"]

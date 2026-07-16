@@ -38,6 +38,7 @@ from elspeth.contracts import (
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.call_data import RawCallPayload
 from elspeth.contracts.errors import AuditIntegrityError, ExecutionError, TransformErrorReason
+from elspeth.contracts.sink_effects import SinkEffectAttemptAction, SinkEffectAttemptRequest
 from elspeth.core.landscape.lineage import explain
 from elspeth.mcp.analyzer import LandscapeAnalyzer
 from elspeth.mcp.analyzers.diagnostics import get_failure_context
@@ -45,6 +46,7 @@ from elspeth.mcp.analyzers.queries import (
     explain_token,
     get_calls,
     get_operation_calls,
+    get_sink_effect_history,
     list_artifacts,
     list_operations,
     list_rows,
@@ -53,9 +55,12 @@ from elspeth.mcp.analyzers.queries import (
 from elspeth.mcp.analyzers.reports import get_error_analysis, get_run_summary
 from elspeth.mcp.types import ErrorResult
 from tests.fixtures.landscape import (
+    make_factory,
+    make_landscape_db,
     make_recorder_with_run,
     register_test_node,
 )
+from tests.unit.core.landscape.test_sink_effect_finalization import _prepared
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -231,6 +236,40 @@ def test_list_artifacts_maps_explicit_producer_and_publication_evidence() -> Non
             "created_at": artifact.created_at.isoformat(),
         }
     ]
+
+
+def test_get_sink_effect_history_exposes_recovery_state_without_provider_bodies() -> None:
+    db = make_landscape_db()
+    try:
+        factory = make_factory(db)
+        effect, _members, lease = _prepared(factory, count=1, replacing_target=True)
+        attempt = factory.execution.sink_effects.begin_attempt(
+            SinkEffectAttemptRequest(
+                effect_id=effect.effect_id,
+                member_ordinal=None,
+                generation=lease.generation,
+                action=SinkEffectAttemptAction.COMMIT,
+                request_hash="f" * 64,
+            )
+        )
+        lost = factory.execution.sink_effects.mark_response_lost(attempt.attempt_id)
+
+        history = get_sink_effect_history(db, factory, effect.effect_id)
+
+        assert history is not None
+        assert history["effect"]["state"] == "in_flight"
+        assert history["effect"]["lease_owner"] == lease.owner
+        assert history["effect"]["predecessor_effect_id"] is None
+        assert history["member_progress"] == {"prepared": 1}
+        assert history["response_lost_attempts"] == 1
+        assert history["operator_guidance"].startswith("Do not retry publication speculatively")
+        assert history["attempts"][0]["state"] == "response_lost"
+        assert history["attempts"][0]["evidence_hash"] == lost.evidence_hash
+        assert "evidence_json" not in history["attempts"][0]
+        assert "target_json" not in history["effect"]
+        assert "plan_json" not in history["effect"]
+    finally:
+        db.close()
 
 
 # ===========================================================================

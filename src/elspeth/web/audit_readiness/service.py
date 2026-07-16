@@ -19,6 +19,8 @@ from elspeth.contracts.enums import Determinism
 from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
 from elspeth.contracts.plugin_protocols import SinkProtocol, SourceProtocol, TransformProtocol
 from elspeth.contracts.secrets import SecretInventoryItem
+from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.sink_effect_diagnostics import load_sink_effect_recovery_history
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.audit_readiness.models import (
     AuditReadinessSnapshot,
@@ -26,6 +28,8 @@ from elspeth.web.audit_readiness.models import (
     PluginPolicyReadinessSnapshot,
     ReadinessRow,
     ReadinessStatus,
+    SinkEffectAttemptDiagnostic,
+    SinkEffectRecoveryDiagnostic,
 )
 from elspeth.web.catalog.schemas import PluginKind
 from elspeth.web.composer.state import CompositionState
@@ -55,6 +59,56 @@ from elspeth.web.sessions.converters import (
 # not on validation's internal naming).
 _CHECK_IDENTITY_NODE_ADVISORY = "identity_node_advisory"
 _TUTORIAL_TRANSFORM_NAMES = frozenset({"web_scrape", "llm", "field_mapper"})
+
+
+def load_sink_effect_diagnostic(db: LandscapeDB, effect_id: str) -> SinkEffectRecoveryDiagnostic | None:
+    """Project one durable effect into the strict web recovery schema."""
+    history = load_sink_effect_recovery_history(db, effect_id)
+    if history is None:
+        return None
+    effect = history.effect
+
+    def timestamp(value: str | None) -> datetime | None:
+        return None if value is None else datetime.fromisoformat(value)
+
+    attempts = tuple(
+        SinkEffectAttemptDiagnostic(
+            attempt_id=attempt["attempt_id"],
+            attempt_index=attempt["attempt_index"],
+            member_ordinal=attempt["member_ordinal"],
+            generation=attempt["generation"],
+            action=cast(Literal["inspect", "commit", "reconcile"], attempt["action"]),
+            call_kind=attempt["call_kind"],
+            request_hash=attempt["request_hash"],
+            state=cast(Literal["intent", "returned", "response_lost", "error"], attempt["state"]),
+            evidence_hash=attempt["evidence_hash"],
+            started_at=cast(datetime, timestamp(attempt["started_at"])),
+            completed_at=timestamp(attempt["completed_at"]),
+            latency_ms=attempt["latency_ms"],
+        )
+        for attempt in history.attempts
+    )
+    return SinkEffectRecoveryDiagnostic(
+        effect_id=effect["effect_id"],
+        run_id=effect["run_id"],
+        sink_node_id=effect["sink_node_id"],
+        state=cast(Literal["reserved", "prepared", "in_flight", "finalized"], effect["state"]),
+        predecessor_effect_id=effect["predecessor_effect_id"],
+        lease_owner=effect["lease_owner"],
+        lease_generation=effect["generation"],
+        lease_expires_at=timestamp(effect["lease_expires_at"]),
+        reconcile_kind=cast(
+            Literal["not_applied", "applied_with_exact_descriptor", "unknown"] | None,
+            effect["reconcile_kind"],
+        ),
+        result_descriptor_hash=effect["result_descriptor_hash"],
+        publication_performed=effect["publication_performed"],
+        publication_evidence_kind=effect["publication_evidence_kind"],
+        member_progress=dict(history.member_progress),
+        response_lost_attempts=history.response_lost_attempts,
+        attempts=attempts,
+        operator_guidance=history.operator_guidance,
+    )
 
 
 def _tutorial_candidate(state: CompositionState) -> CompositionState | None:

@@ -111,3 +111,41 @@ class AuditReadinessExplain(_StrictResponse):
     session_id: str = Field(min_length=1)
     composition_version: int = Field(ge=1)
     narrative: str = Field(min_length=1)
+
+
+class SinkEffectAttemptDiagnostic(_StrictResponse):
+    """One bounded, credential-free external-call witness."""
+
+    attempt_id: str = Field(min_length=1)
+    attempt_index: int = Field(ge=0)
+    member_ordinal: int | None = Field(default=None, ge=0)
+    generation: int = Field(ge=0)
+    action: Literal["inspect", "commit", "reconcile"]
+    call_kind: str = Field(min_length=1)
+    request_hash: str = Field(min_length=64, max_length=64)
+    state: Literal["intent", "returned", "response_lost", "error"]
+    evidence_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    started_at: datetime
+    completed_at: datetime | None
+    latency_ms: float | None = Field(default=None, ge=0)
+
+
+class SinkEffectRecoveryDiagnostic(_StrictResponse):
+    """Web-safe operator view of a recoverable publication effect."""
+
+    effect_id: str = Field(min_length=64, max_length=64)
+    run_id: str = Field(min_length=1)
+    sink_node_id: str = Field(min_length=1)
+    state: Literal["reserved", "prepared", "in_flight", "finalized"]
+    predecessor_effect_id: str | None
+    lease_owner: str | None
+    lease_generation: int = Field(ge=0)
+    lease_expires_at: datetime | None
+    reconcile_kind: Literal["not_applied", "applied_with_exact_descriptor", "unknown"] | None
+    result_descriptor_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    publication_performed: bool | None
+    publication_evidence_kind: str | None
+    member_progress: dict[str, int]
+    response_lost_attempts: int = Field(ge=0)
+    attempts: tuple[SinkEffectAttemptDiagnostic, ...]
+    operator_guidance: str = Field(min_length=1)

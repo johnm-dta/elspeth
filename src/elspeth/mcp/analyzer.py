@@ -41,6 +41,7 @@ from elspeth.mcp.types import (
     RunRecord,
     RunSummaryReport,
     SchemaDescription,
+    SinkEffectHistoryReport,
     TokenChildRecord,
     TokenRecord,
 )
@@ -99,6 +100,9 @@ class LandscapeAnalyzer:
 
     def list_artifacts(self, run_id: str, limit: int = 100) -> list[ArtifactRecord]:
         return queries.list_artifacts(self._db, self._factory, run_id, limit=limit)
+
+    def get_sink_effect_history(self, effect_id: str) -> SinkEffectHistoryReport | None:
+        return queries.get_sink_effect_history(self._db, self._factory, effect_id)
 
     def get_operation_calls(self, operation_id: str) -> list[OperationCallRecord]:
         return queries.get_operation_calls(self._db, self._factory, operation_id)

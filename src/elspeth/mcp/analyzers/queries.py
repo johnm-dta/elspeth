@@ -19,6 +19,7 @@ from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import LandscapeReadRepositories, RecorderFactory
 from elspeth.core.landscape.serialization import dataclass_to_dict, serialize_datetime
+from elspeth.core.landscape.sink_effect_diagnostics import load_sink_effect_recovery_history
 from elspeth.mcp.limits import MCP_QUERY_DEFAULT_LIMIT, MCP_RESULT_LIMIT_MAX
 from elspeth.mcp.types import (
     OPERATION_STATUS_VALUES,
@@ -35,6 +36,7 @@ from elspeth.mcp.types import (
     RowRecord,
     RunDetail,
     RunRecord,
+    SinkEffectHistoryReport,
     TokenChildRecord,
     TokenRecord,
 )
@@ -353,6 +355,26 @@ def list_artifacts(
         }
         for artifact in artifacts[:limit]
     ]
+
+
+def get_sink_effect_history(
+    db: LandscapeDB,
+    factory: AnalyzerRepositories,
+    effect_id: str,
+) -> SinkEffectHistoryReport | None:
+    """Return safe recovery diagnostics for one durable sink effect."""
+    del factory
+    history = load_sink_effect_recovery_history(db, effect_id)
+    if history is None:
+        return None
+    return {
+        "effect": history.effect,
+        "members": list(history.members),
+        "attempts": list(history.attempts),
+        "member_progress": dict(history.member_progress),
+        "response_lost_attempts": history.response_lost_attempts,
+        "operator_guidance": history.operator_guidance,
+    }
 
 
 def get_operation_calls(db: LandscapeDB, factory: AnalyzerRepositories, operation_id: str) -> list[OperationCallRecord]:

@@ -21,6 +21,11 @@ from typing import Any, Literal, Required, TypedDict
 
 from elspeth.contracts import OPERATION_TYPE_VALUES as OPERATION_TYPE_VALUES
 from elspeth.contracts import OperationType
+from elspeth.contracts.export_records import (
+    SinkEffectAttemptExportRecord,
+    SinkEffectExportRecord,
+    SinkEffectMemberExportRecord,
+)
 
 RunStatusValue = Literal["running", "completed", "completed_with_failures", "failed", "empty", "interrupted"]
 ExportStatusValue = Literal["pending", "completed", "failed"]
@@ -130,6 +135,17 @@ class ArtifactRecord(TypedDict):
     publication_performed: bool
     publication_evidence_kind: Literal["returned", "reconciled", "inherited", "virtual", "legacy_returned"]
     created_at: str
+
+
+class SinkEffectHistoryReport(TypedDict):
+    """Operator-safe lifecycle, member progress, and call history."""
+
+    effect: SinkEffectExportRecord
+    members: list[SinkEffectMemberExportRecord]
+    attempts: list[SinkEffectAttemptExportRecord]
+    member_progress: dict[str, int]
+    response_lost_attempts: int
+    operator_guidance: str
 
 
 class OperationCallRecord(TypedDict):

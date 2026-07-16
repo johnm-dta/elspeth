@@ -274,8 +274,7 @@ class SinkEffectCoordinator:
             else:
                 if reconciliation.accepted_ordinals is not None or reconciliation.diverted_ordinals is not None:
                     raise LandscapeRecordError("precomputed reconciliation must not carry result-derived ordinals")
-                accepted_ordinals = tuple(member.ordinal for member in request.finalization_members)
-                diverted_ordinals = ()
+                accepted_ordinals, diverted_ordinals = self._prepared_partition(effect.effect_id, request)
             result = self._finalize(
                 effect_id=effect.effect_id,
                 request=request,
@@ -974,7 +973,8 @@ class SinkEffectCoordinator:
             evidence_kind = "virtual"
         else:
             raise LandscapeRecordError("no-publication effect requires inherited or virtual publication evidence")
-        accepted = tuple(member.ordinal for member in request.finalization_members)
+        accepted, diverted = self._prepared_partition(effect.effect_id, request)
+        by_ordinal = {member.ordinal: member for member in request.finalization_members}
         return self._effects.finalize(
             SinkEffectFinalizeRequest(
                 effect_id=effect.effect_id,
@@ -984,11 +984,26 @@ class SinkEffectCoordinator:
                 publication_performed=False,
                 publication_evidence_kind=evidence_kind,
                 accepted_ordinals=accepted,
-                diverted_ordinals=(),
+                diverted_ordinals=diverted,
                 evidence=plan.safe_evidence,
-                members=request.finalization_members,
+                members=tuple(by_ordinal[ordinal] for ordinal in accepted),
             )
         )
+
+    def _prepared_partition(
+        self,
+        effect_id: str,
+        request: SinkEffectExecutionRequest,
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        durable = self._effects.get_members(effect_id)
+        requested = {member.ordinal for member in request.finalization_members}
+        if {member.ordinal for member in durable} != requested:
+            raise LandscapeRecordError("prepared sink effect partition does not cover the requested members")
+        accepted = tuple(member.ordinal for member in durable if member.prepared_disposition == "accepted")
+        diverted = tuple(member.ordinal for member in durable if member.prepared_disposition == "diverted")
+        if tuple(sorted((*accepted, *diverted))) != tuple(sorted(requested)):
+            raise LandscapeRecordError("prepared sink effect members do not carry a complete disposition partition")
+        return accepted, diverted
 
     def _context(self, effect: SinkEffect) -> RestrictedSinkEffectContext:
         run = self._factory.run_lifecycle.get_run(effect.run_id)

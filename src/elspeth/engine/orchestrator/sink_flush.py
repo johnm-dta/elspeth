@@ -264,6 +264,7 @@ class SinkFlushCoordinator:
                     effect_mode=effect_modes.get(sink_name),
                     failsink=failsink,
                     failsink_name=failsink_config_name,
+                    failsink_effect_mode=None if failsink_config_name is None else effect_modes.get(failsink_config_name),
                     failsink_edge_id=failsink_edge_id,
                     on_token_written=on_token_written,
                 )

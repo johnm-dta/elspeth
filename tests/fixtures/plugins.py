@@ -86,15 +86,23 @@ class CollectSink(_TestSinkBase):
     supported_effect_modes = frozenset({"write"})
     supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
 
-    def __init__(self, name: str = "collect", *, node_id: str | None = None) -> None:
+    def __init__(
+        self,
+        name: str = "collect",
+        *,
+        node_id: str | None = None,
+        divert_ordinals: frozenset[int] = frozenset(),
+    ) -> None:
         super().__init__()
         self.name = name
         self.node_id = node_id
         self.results: list[dict[str, Any]] = []
         self._artifact_counter = 0
+        self._configured_divert_ordinals = divert_ordinals
         self._effect_plans: dict[str, SinkEffectPlan] = {}
         self._effect_rows: dict[str, tuple[dict[str, Any], ...]] = {}
         self._effect_ordinals: dict[str, tuple[int, ...]] = {}
+        self._effect_diverted_ordinals: dict[str, tuple[int, ...]] = {}
         self._effect_commits: dict[str, SinkEffectCommitResult] = {}
 
     @classmethod
@@ -157,7 +165,18 @@ class CollectSink(_TestSinkBase):
         rows = tuple(deep_thaw(member.row) for member in request.effect_input.members)
         if any(not isinstance(row, dict) for row in rows):  # pragma: no cover - contract guarantees mappings
             raise TypeError("CollectSink effect rows must thaw to dictionaries")
-        payload = canonical_json(rows).encode("utf-8")
+        ordinals = tuple(member.ordinal for member in request.effect_input.members)
+        diverted = tuple(ordinal for ordinal in ordinals if ordinal in self._configured_divert_ordinals)
+        if not self._configured_divert_ordinals.issubset(ordinals):
+            raise ValueError("CollectSink configured diversion ordinal is outside the effect batch")
+        accepted = tuple(ordinal for ordinal in ordinals if ordinal not in self._configured_divert_ordinals)
+        row_by_ordinal = dict(zip(ordinals, rows, strict=True))
+        accepted_rows = tuple(row_by_ordinal[ordinal] for ordinal in accepted)
+        diversion_reason = "collect sink rejected configured row"
+        self._diversion_log = [
+            RowDiversion(row_index=ordinal, reason=diversion_reason, row_data=dict(row_by_ordinal[ordinal])) for ordinal in diverted
+        ]
+        payload = canonical_json(accepted_rows).encode("utf-8")
         payload_hash = sha256(payload).hexdigest()
         descriptor = ArtifactDescriptor.for_file(
             path=request.inspection.reference,
@@ -181,7 +200,19 @@ class CollectSink(_TestSinkBase):
             ),
             payload_hash=payload_hash,
             expected_descriptor=descriptor,
-            safe_evidence={"sink_kind": "collect"},
+            safe_evidence={
+                "accepted_ordinals": list(accepted),
+                "diversion_attribution": [
+                    {
+                        "error_hash": sha256(diversion_reason.encode("utf-8")).hexdigest()[:16],
+                        "ordinal": ordinal,
+                        "reason_hash": stable_hash({"diversion_reason": diversion_reason}),
+                    }
+                    for ordinal in diverted
+                ],
+                "diverted_ordinals": list(diverted),
+                "sink_kind": "collect",
+            },
         )
         request.validate_plan(plan)
 
@@ -189,9 +220,13 @@ class CollectSink(_TestSinkBase):
         if existing is not None and existing != plan:
             raise ValueError("CollectSink effect_id was prepared with a different plan")
         self._effect_plans[request.effect_id] = plan
-        self._effect_rows[request.effect_id] = rows
-        self._effect_ordinals[request.effect_id] = tuple(member.ordinal for member in request.effect_input.members)
+        self._effect_rows[request.effect_id] = accepted_rows
+        self._effect_ordinals[request.effect_id] = accepted
+        self._effect_diverted_ordinals[request.effect_id] = diverted
         return plan
+
+    def _get_diversions(self) -> tuple[RowDiversion, ...]:
+        return tuple(self._diversion_log)
 
     def commit_effect(
         self,
@@ -214,7 +249,7 @@ class CollectSink(_TestSinkBase):
             descriptor=plan.expected_descriptor,
             evidence={"state": "committed"},
             accepted_ordinals=self._effect_ordinals[plan.effect_id],
-            diverted_ordinals=(),
+            diverted_ordinals=self._effect_diverted_ordinals[plan.effect_id],
         )
         self._effect_commits[plan.effect_id] = result
         return result

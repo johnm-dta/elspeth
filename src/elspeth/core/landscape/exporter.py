@@ -15,7 +15,7 @@ import json
 from collections import defaultdict
 from collections.abc import Iterator
 from datetime import UTC
-from typing import Any, Protocol
+from typing import Any, BinaryIO, Protocol, cast
 
 from elspeth.contracts import (
     BatchMember,
@@ -28,10 +28,14 @@ from elspeth.contracts import (
     TokenParent,
 )
 from elspeth.contracts.audit_export import (
+    AUDIT_EXPORT_MAX_CHUNKS,
+    AUDIT_EXPORT_MAX_TOTAL_BYTES,
+    AUDIT_EXPORT_MAX_TOTAL_RECORDS,
     AUDIT_EXPORT_SERIALIZATION_VERSION,
     AuditExportDerivationConfig,
     AuditExportDerivedBundle,
     derive_audit_export_bundle,
+    stream_audit_export_bundle_to_spool,
 )
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.export_records import (
@@ -204,6 +208,30 @@ class RecorderFactoryExportReadModel:
         return self._factory.execution.sink_effects.get_attempts_for_run(run_id)
 
 
+class _DiscardSpool:
+    """Position-tracking byte sink for streaming exports (elspeth-4087266b7d).
+
+    The public ``export_run`` iterator reuses the bounded spooled derivation
+    but never reads the spooled bytes back — only the emitted records and the
+    final manifest matter. This sink satisfies the derivation's write/tell
+    surface while discarding content, keeping the public path free of both
+    full-bundle accumulation and temp-file I/O.
+    """
+
+    __slots__ = ("_position",)
+
+    def __init__(self) -> None:
+        self._position = 0
+
+    def tell(self) -> int:
+        return self._position
+
+    def write(self, data: bytes | bytearray | memoryview) -> int:
+        count = len(data)
+        self._position += count
+        return count
+
+
 class LandscapeExporter:
     """Export Landscape audit data for a run.
 
@@ -353,6 +381,12 @@ class LandscapeExporter:
         Yields flat dict records with 'record_type' field.
         Order: run -> nodes -> edges -> rows -> tokens -> states -> batches -> artifacts
 
+        Streaming contract (elspeth-4087266b7d): records are yielded on the
+        bounded-memory path — the row family streams in O(row_batch_size)
+        batches and at most one derivation chunk is retained in RAM — while
+        the emitted record sequence, per-record signatures, and the final
+        manifest remain hash-identical to :meth:`derive_run_bundle` output.
+
         Args:
             run_id: The run ID to export
             sign: If True, add HMAC signature to each record and emit
@@ -365,8 +399,21 @@ class LandscapeExporter:
         Raises:
             ValueError: If run_id is not found, or sign=True without signing_key
         """
-        bundle = self.derive_run_bundle(run_id, sign=sign)
-        for record in bundle.record_objects:
+        derivation_config = self._resolve_derivation_config(run_id, sign=sign)
+        stream = stream_audit_export_bundle_to_spool(
+            self._iter_records(run_id),
+            derivation_config,
+            cast(BinaryIO, _DiscardSpool()),
+            max_total_records=AUDIT_EXPORT_MAX_TOTAL_RECORDS,
+            max_total_bytes=AUDIT_EXPORT_MAX_TOTAL_BYTES,
+            max_chunks=AUDIT_EXPORT_MAX_CHUNKS,
+        )
+        while True:
+            try:
+                record = next(stream)
+            except StopIteration as stop:
+                bundle = stop.value
+                break
             yield deep_thaw(record)
         yield deep_thaw(bundle.final_manifest)
 
@@ -378,6 +425,17 @@ class LandscapeExporter:
         derivation_config: AuditExportDerivationConfig | None = None,
     ) -> AuditExportDerivedBundle:
         """Return the exact v2 byte graph for one immutable terminal run."""
+        derivation_config = self._resolve_derivation_config(run_id, sign=sign, derivation_config=derivation_config)
+        return derive_audit_export_bundle(self._iter_records(run_id), derivation_config)
+
+    def _resolve_derivation_config(
+        self,
+        run_id: str,
+        *,
+        sign: bool,
+        derivation_config: AuditExportDerivationConfig | None = None,
+    ) -> AuditExportDerivationConfig:
+        """Resolve and validate the derivation authority for one export request."""
         if sign and self._signing_key is None:
             raise ValueError("Signing requested but no signing_key provided")
         if derivation_config is None:
@@ -422,7 +480,7 @@ class LandscapeExporter:
             )
         elif derivation_config.source_run_id != run_id:
             raise ValueError("derivation config source_run_id does not match requested run")
-        return derive_audit_export_bundle(self._iter_records(run_id), derivation_config)
+        return derivation_config
 
     def iter_unsigned_run_records(self, run_id: str) -> Iterator[ExportRecord]:
         """Yield the deterministic unsigned record stream for bounded derivation."""

@@ -12,7 +12,7 @@ import hashlib
 import hmac
 import json
 import re
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -1348,11 +1348,69 @@ def derive_audit_export_bundle_to_spool(
 ) -> AuditExportSpooledBundle:
     """Derive one exact graph while retaining only one bounded chunk in RAM."""
 
+    stream = stream_audit_export_bundle_to_spool(
+        records,
+        config,
+        spool,
+        max_total_records=max_total_records,
+        max_total_bytes=max_total_bytes,
+        max_chunks=max_chunks,
+    )
+    while True:
+        try:
+            next(stream)
+        except StopIteration as stop:
+            bundle = stop.value
+            if type(bundle) is not AuditExportSpooledBundle:
+                raise AuditIntegrityError("audit export stream terminated without a spooled bundle") from None
+            return bundle
+
+
+def stream_audit_export_bundle_to_spool(
+    records: Iterable[Mapping[str, object]],
+    config: AuditExportDerivationConfig,
+    spool: BinaryIO,
+    *,
+    max_total_records: int,
+    max_total_bytes: int,
+    max_chunks: int,
+) -> Generator[dict[str, ClosedAuditExportJSON], None, AuditExportSpooledBundle]:
+    """Stream emitted export records while deriving the exact spooled graph.
+
+    Yields each emitted record (carrying its per-record signature when the
+    config signs) as soon as its frame is sealed into the running chunk, so
+    a consumer observes records on a bounded-memory path: only one chunk is
+    retained in RAM at a time, exactly as in
+    :func:`derive_audit_export_bundle_to_spool`. The complete
+    ``AuditExportSpooledBundle`` — including the final manifest — is the
+    generator's return value (``StopIteration.value``); the emitted byte
+    graph is identical to the non-streaming derivation.
+    """
     if type(config) is not AuditExportDerivationConfig:
         raise TypeError("config must be exact AuditExportDerivationConfig")
     _integer(max_total_records, "max_total_records", minimum=1, maximum=AUDIT_EXPORT_MAX_TOTAL_RECORDS)
     _integer(max_total_bytes, "max_total_bytes", minimum=1, maximum=AUDIT_EXPORT_MAX_TOTAL_BYTES)
     _integer(max_chunks, "max_chunks", minimum=1, maximum=AUDIT_EXPORT_MAX_CHUNKS)
+    return _stream_audit_export_bundle_to_spool(
+        records,
+        config,
+        spool,
+        max_total_records=max_total_records,
+        max_total_bytes=max_total_bytes,
+        max_chunks=max_chunks,
+    )
+
+
+def _stream_audit_export_bundle_to_spool(
+    records: Iterable[Mapping[str, object]],
+    config: AuditExportDerivationConfig,
+    spool: BinaryIO,
+    *,
+    max_total_records: int,
+    max_total_bytes: int,
+    max_chunks: int,
+) -> Generator[dict[str, ClosedAuditExportJSON], None, AuditExportSpooledBundle]:
+    """Generator body for :func:`stream_audit_export_bundle_to_spool`."""
     from elspeth.contracts.sink_effects import AuditExportSignedManifestInput, AuditExportSigningMode
 
     public_config: dict[str, ClosedAuditExportJSON] = {
@@ -1436,6 +1494,7 @@ def derive_audit_export_bundle_to_spool(
         total_bytes += len(frame)
         if current_records == config.per_chunk_record_limit or len(current) == config.per_chunk_byte_limit:
             finish_chunk()
+        yield emitted
     finish_chunk()
     if not snapshot_chunks:
         raise ValueError("audit export requires at least the run record")

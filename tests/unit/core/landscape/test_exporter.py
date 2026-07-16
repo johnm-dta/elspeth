@@ -988,6 +988,119 @@ class TestExportRunSigned:
 
 
 # ===========================================================================
+# export_run — bounded streaming (elspeth-4087266b7d)
+# ===========================================================================
+
+
+class _SpyReadModel:
+    """Delegating read-model proxy that records every query-family call."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.calls: list[str] = []
+
+    def __getattr__(self, name: str) -> Any:
+        original = getattr(self._inner, name)
+        if not callable(original):
+            return original
+
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            self.calls.append(name)
+            return original(*args, **kwargs)
+
+        return wrapper
+
+
+def _make_row(index: int) -> Row:
+    return Row(
+        row_id=f"row-{index}",
+        run_id="run-1",
+        source_node_id="node-1",
+        row_index=index,
+        source_row_index=index,
+        ingest_sequence=index,
+        source_data_hash=f"data-hash-{index}",
+        created_at=_DT,
+    )
+
+
+class TestExportRunStreaming:
+    """export_run must stay on a bounded streaming path (elspeth-4087266b7d).
+
+    Regression lineage: elspeth-05980fe1bb fixed the orchestrator streaming
+    path; the exporter later regressed by routing export_run() through
+    derive_run_bundle(), which accumulates records, frames, chunks, and the
+    manifest before yielding anything.
+    """
+
+    def test_first_record_yields_before_later_query_families(self) -> None:
+        """Pulling the first record must not touch nodes/edges/rows/batches/artifacts."""
+        read_model = _SpyReadModel(_make_export_read_model(nodes=[_NODE], edges=[_EDGE], rows=[_make_row(0)]))
+        exporter = LandscapeExporter(_fake_landscape_db(), read_model=read_model)
+
+        iterator = exporter.export_run("run-1")
+        first = next(iterator)
+
+        assert first["record_type"] == "run"
+        touched = set(read_model.calls)
+        # Only run-level metadata may be resolved before the first yield.
+        allowed = {"get_run", "get_run_attribution"}
+        assert touched <= allowed, (
+            f"export_run touched {sorted(touched - allowed)} before yielding "
+            "its first record — the full bundle is being accumulated up front"
+        )
+
+    def test_row_batches_stream_lazily(self) -> None:
+        """Consuming the first row record must not drain later row batches."""
+        rows = [_make_row(i) for i in range(6)]
+        read_model = _make_export_read_model(rows=rows)
+        batches_pulled = 0
+        original_iter = read_model.iter_rows_for_run
+
+        def counting_iter(run_id: str, *, batch_size: int) -> Iterator[list[Any]]:
+            nonlocal batches_pulled
+            for batch in original_iter(run_id, batch_size=batch_size):
+                batches_pulled += 1
+                yield batch
+
+        read_model = _SpyReadModel(read_model)
+        read_model.iter_rows_for_run = counting_iter  # type: ignore[attr-defined]
+        exporter = LandscapeExporter(_fake_landscape_db(), read_model=read_model, row_batch_size=1)
+
+        iterator = exporter.export_run("run-1")
+        first_row = next(record for record in iterator if record["record_type"] == "row")
+
+        assert first_row["row_id"] == "row-0"
+        assert batches_pulled <= 2, (
+            f"{batches_pulled} of 6 single-row batches were pulled before the "
+            "first row record was consumed — memory is O(run), not O(row_batch_size)"
+        )
+
+    def test_streamed_output_matches_derived_bundle_unsigned(self) -> None:
+        """The streamed public export must stay hash-identical to the bundle."""
+        from elspeth.contracts.freeze import deep_thaw
+
+        exporter = _make_exporter(nodes=[_NODE], edges=[_EDGE], rows=[_make_row(0)])
+        streamed = list(exporter.export_run("run-1"))
+        bundle = exporter.derive_run_bundle("run-1")
+
+        expected = [deep_thaw(record) for record in bundle.record_objects]
+        expected.append(deep_thaw(bundle.final_manifest))
+        assert streamed == expected
+
+    def test_streamed_output_matches_derived_bundle_signed(self) -> None:
+        from elspeth.contracts.freeze import deep_thaw
+
+        exporter = _make_exporter(signing_key=b"stream-key", nodes=[_NODE], edges=[_EDGE], rows=[_make_row(0)])
+        streamed = list(exporter.export_run("run-1", sign=True))
+        bundle = exporter.derive_run_bundle("run-1", sign=True)
+
+        expected = [deep_thaw(record) for record in bundle.record_objects]
+        expected.append(deep_thaw(bundle.final_manifest))
+        assert streamed == expected
+
+
+# ===========================================================================
 # Record types — field mapping
 # ===========================================================================
 

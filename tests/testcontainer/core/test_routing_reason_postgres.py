@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Iterator
-from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -132,9 +131,10 @@ def _install_group_authority_pause(
     db: LandscapeDB,
     *,
     winner_thread: str,
-) -> tuple[threading.Event, threading.Event, threading.Event, dict[str, tuple[int, int]], Any]:
+) -> tuple[threading.Event, threading.Event, threading.Event, threading.Event, dict[str, tuple[int, int]], Any]:
     winner_has_authority = threading.Event()
     loser_reached_lock = threading.Event()
+    loser_has_authority = threading.Event()
     release_winner = threading.Event()
     physical: dict[str, tuple[int, int]] = {}
     lock = threading.Lock()
@@ -150,57 +150,26 @@ def _install_group_authority_pause(
 
     def pause_winner(conn, _cursor, statement, _parameters, _context, _executemany) -> None:  # type: ignore[no-untyped-def]
         normalized = " ".join(statement.upper().split())
-        if threading.current_thread().name == winner_thread and "PG_ADVISORY_XACT_LOCK" in normalized and not winner_has_authority.is_set():
+        thread_name = threading.current_thread().name
+        if "PG_ADVISORY_XACT_LOCK" not in normalized:
+            return
+        if thread_name != winner_thread:
+            loser_has_authority.set()
+        elif not winner_has_authority.is_set():
             winner_has_authority.set()
             if not release_winner.wait(timeout=30):
                 raise TimeoutError("test did not release PostgreSQL routing authority")
 
     event.listen(db.engine, "before_cursor_execute", synchronize)
     event.listen(db.engine, "after_cursor_execute", pause_winner)
-    return winner_has_authority, loser_reached_lock, release_winner, physical, (synchronize, pause_winner)
-
-
-def _install_cross_state_group_check_barrier(
-    db: LandscapeDB,
-) -> tuple[dict[str, tuple[int, int]], Any]:
-    """Hold post-insert ownership reads so disjoint ordinals can both commit."""
-    post_insert_checks = threading.Barrier(2)
-    physical: dict[str, tuple[int, int]] = {}
-    inserted_threads: set[str] = set()
-    synchronized_threads: set[str] = set()
-    lock = threading.Lock()
-
-    def capture_backend(conn, _cursor, statement, _parameters, _context, _executemany) -> None:  # type: ignore[no-untyped-def]
-        normalized = " ".join(statement.upper().split())
-        if "PG_ADVISORY_XACT_LOCK" in normalized or (
-            normalized.startswith("SELECT") and "FROM NODE_STATES" in normalized and "FOR UPDATE" in normalized
-        ):
-            with lock:
-                physical.setdefault(threading.current_thread().name, _physical_connection(conn))
-
-    def synchronize_post_insert_check(conn, _cursor, statement, _parameters, _context, _executemany) -> None:  # type: ignore[no-untyped-def]
-        del conn
-        normalized = " ".join(statement.upper().split())
-        thread_name = threading.current_thread().name
-        if normalized.startswith("INSERT INTO ROUTING_EVENTS"):
-            with lock:
-                inserted_threads.add(thread_name)
-            return
-        is_group_owner_read = normalized.startswith("SELECT ROUTING_EVENTS.STATE_ID") and "ROUTING_EVENTS.ROUTING_GROUP_ID" in normalized
-        with lock:
-            should_synchronize = is_group_owner_read and thread_name in inserted_threads and thread_name not in synchronized_threads
-            if should_synchronize:
-                synchronized_threads.add(thread_name)
-        if should_synchronize:
-            # Once group advisory authority exists, only the winner can
-            # reach this read before commit; timeout lets it commit and
-            # release the transaction-scoped lock for the loser.
-            with suppress(threading.BrokenBarrierError):
-                post_insert_checks.wait(timeout=2)
-
-    event.listen(db.engine, "before_cursor_execute", capture_backend)
-    event.listen(db.engine, "after_cursor_execute", synchronize_post_insert_check)
-    return physical, (capture_backend, synchronize_post_insert_check)
+    return (
+        winner_has_authority,
+        loser_reached_lock,
+        loser_has_authority,
+        release_winner,
+        physical,
+        (synchronize, pause_winner),
+    )
 
 
 @pytest.mark.timeout(120)
@@ -213,7 +182,7 @@ def test_postgres_identical_writers_return_one_exact_event(postgres_url: str, tm
     second = RecorderFactory(db, payload_store=store_b)
     state_id, edge_id, _ = _seed_routing_state(first, suffix="identical")
     reason: ConfigGateReason = {"condition": "route == accepted", "result": "true"}
-    winner_has_authority, loser_reached_lock, release_winner, physical, hooks = _install_group_authority_pause(
+    winner_has_authority, loser_reached_lock, _loser_has_authority, release_winner, physical, hooks = _install_group_authority_pause(
         db,
         winner_thread="routing-first",
     )
@@ -285,7 +254,7 @@ def test_postgres_divergent_contender_fails_closed_without_mixed_group(postgres_
     state_id, accepted_edge, rejected_edge = _seed_routing_state(first, suffix="divergent")
     accepted_reason: ConfigGateReason = {"condition": "route == accepted", "result": "true"}
     rejected_reason: ConfigGateReason = {"condition": "route == rejected", "result": "true"}
-    winner_has_authority, loser_reached_lock, release_winner, physical, hooks = _install_group_authority_pause(
+    winner_has_authority, loser_reached_lock, _loser_has_authority, release_winner, physical, hooks = _install_group_authority_pause(
         db,
         winner_thread="routing-accepted",
     )
@@ -372,7 +341,7 @@ def test_postgres_single_group_race_has_one_complete_winner(
     state_id, accepted_edge, rejected_edge = _seed_routing_state(first, suffix=suffix)
     loser_kind = "group" if winner_kind == "single" else "single"
     winner_thread_name = f"routing-{winner_kind}"
-    winner_has_authority, loser_reached_lock, release_winner, physical, hooks = _install_group_authority_pause(
+    winner_has_authority, loser_reached_lock, _loser_has_authority, release_winner, physical, hooks = _install_group_authority_pause(
         db,
         winner_thread=winner_thread_name,
     )
@@ -450,7 +419,10 @@ def test_postgres_cross_state_shared_group_has_one_durable_owner(
     first_state, edge_id, _ = _seed_routing_state(first, suffix="cross-state-group")
     second_state = _seed_additional_state(first, suffix="cross-state-group")
     routing_group_id = "caller-shared-cross-state-group"
-    physical, hooks = _install_cross_state_group_check_barrier(db)
+    winner_has_authority, loser_reached_lock, loser_has_authority, release_winner, physical, hooks = _install_group_authority_pause(
+        db,
+        winner_thread="routing-state-first",
+    )
     outcomes: dict[str, RoutingEvent | BaseException] = {}
     outcomes_lock = threading.Lock()
 
@@ -475,21 +447,28 @@ def test_postgres_cross_state_shared_group_has_one_durable_owner(
         threading.Thread(target=worker, name="routing-state-second", args=("second", second, second_state, 1)),
     ]
     try:
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(timeout=30)
-            assert not thread.is_alive()
-
-        winners = [result for result in outcomes.values() if isinstance(result, RoutingEvent)]
-        losers = [result for result in outcomes.values() if isinstance(result, AuditIntegrityError)]
-        assert len(winners) == 1
-        assert len(losers) == 1
-        assert "mixed state ownership" in str(losers[0])
+        threads[0].start()
+        assert winner_has_authority.wait(timeout=10)
+        threads[1].start()
+        assert loser_reached_lock.wait(timeout=10)
+        with outcomes_lock:
+            assert "second" not in outcomes
+        assert threads[1].is_alive()
+        assert not loser_has_authority.is_set()
         assert set(physical) == {"routing-state-first", "routing-state-second"}
         connection_a, connection_b = physical.values()
         assert connection_a[0] != connection_b[0]
         assert connection_a[1] != connection_b[1]
+
+        release_winner.set()
+        for thread in threads:
+            thread.join(timeout=30)
+            assert not thread.is_alive()
+
+        assert isinstance(outcomes["first"], RoutingEvent)
+        assert isinstance(outcomes["second"], AuditIntegrityError)
+        assert "mixed state ownership" in str(outcomes["second"])
+        assert loser_has_authority.is_set()
 
         with db.connection() as conn:
             durable = list(
@@ -503,8 +482,9 @@ def test_postgres_cross_state_shared_group_has_one_durable_owner(
             )
         assert len(durable) == 1
         assert len({str(row.state_id) for row in durable}) == 1
-        assert durable[0].event_id == winners[0].event_id
+        assert durable[0].event_id == outcomes["first"].event_id
     finally:
+        release_winner.set()
         for thread in threads:
             if thread.ident is not None:
                 thread.join(timeout=30)

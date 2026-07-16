@@ -3349,6 +3349,8 @@ sinks:
     on_write_failure: discard
     options:
       path: output.jsonl
+      schema:
+        mode: observed
 """
 
     @staticmethod

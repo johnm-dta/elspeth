@@ -197,24 +197,45 @@ def _freeze_runtime_val_registries_before_begin_run(monkeypatch: pytest.MonkeyPa
     def with_test_sink_effect_modes(config):  # type: ignore[no-untyped-def]
         """Mirror RuntimePluginFactory mode resolution for test-only sinks."""
         from dataclasses import replace
+        from unittest.mock import Mock
 
-        from elspeth.contracts import ResolvedSinkEffectMode, SinkEffectExecutionPurpose
+        from elspeth.contracts import (
+            ResolvedSinkEffectMode,
+            SinkEffectExecutionPurpose,
+            SinkEffectInputKind,
+        )
         from elspeth.engine.orchestrator import PipelineConfig
+        from elspeth.engine.orchestrator.preflight import validate_pipeline_sink_effect_capabilities
 
-        if not isinstance(config, PipelineConfig) or config.sink_effect_modes:
+        if isinstance(config, Mock):
+            # Resume unit tests use a spec-bound PipelineConfig mock for fields
+            # unrelated to sink execution. Give the new admission boundary an
+            # exact empty surface instead of letting auto-created Mock fields
+            # masquerade as a forged admission receipt.
+            config.sinks = {}
+            config.sink_effect_modes = {}
+            config.sink_effect_admission = None
             return config
-        modes: dict[str, str] = {}
-        for sink_name, sink in config.sinks.items():
-            resolver = getattr(type(sink), "_resolve_sink_effect_mode", None)
-            if resolver is None:
-                continue
-            resolved = resolver(dict(sink.config), purpose=SinkEffectExecutionPurpose.FRESH)
-            if resolved is None:
-                continue
-            if not isinstance(resolved, ResolvedSinkEffectMode):
-                raise TypeError("test sink effect resolver must return ResolvedSinkEffectMode")
-            modes[sink_name] = resolved.value
-        return replace(config, sink_effect_modes=modes) if modes else config
+        if type(config) is not PipelineConfig:
+            return config
+        modes: dict[str, str] = dict(config.sink_effect_modes)
+        if not modes:
+            for sink_name, sink in config.sinks.items():
+                resolver = getattr(type(sink), "_resolve_sink_effect_mode", None)
+                if resolver is None:
+                    continue
+                resolved = resolver(dict(sink.config), purpose=SinkEffectExecutionPurpose.FRESH)
+                if resolved is None:
+                    continue
+                if not isinstance(resolved, ResolvedSinkEffectMode):
+                    raise TypeError("test sink effect resolver must return ResolvedSinkEffectMode")
+                modes[sink_name] = resolved.value
+        admission = validate_pipeline_sink_effect_capabilities(
+            config.sinks,
+            configured_modes=modes,
+            required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+        )
+        return replace(config, sink_effect_modes=modes, sink_effect_admission=admission)
 
     @functools.wraps(original_orch_run)
     def wrapped_orch_run(self, *args, **kwargs):  # type: ignore[no-untyped-def]
@@ -223,7 +244,9 @@ def _freeze_runtime_val_registries_before_begin_run(monkeypatch: pytest.MonkeyPa
         # test-only sink fixtures honest under the same effect-only runtime by
         # resolving their declared mode before the call. Production sink types
         # and tests that provide an explicit mode map are left untouched.
-        if args:
+        if "config" in kwargs:
+            kwargs["config"] = with_test_sink_effect_modes(kwargs["config"])
+        elif args:
             args = (with_test_sink_effect_modes(args[0]), *args[1:])
         kwargs.setdefault("openrouter_catalog_sha256", "0" * 64)
         kwargs.setdefault("openrouter_catalog_source", "bundled")

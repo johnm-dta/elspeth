@@ -101,6 +101,7 @@ class TestCSVSinkExecutorAuditChain:
             data_flow=setup.data_flow,
             span_factory=SpanFactory(),
             run_id=setup.run_id,
+            factory=setup.factory,
         )
 
         # ── Drive the production path ──
@@ -115,6 +116,7 @@ class TestCSVSinkExecutorAuditChain:
                     outcome=TerminalOutcome.SUCCESS,
                     path=TerminalPath.DEFAULT_FLOW,
                 ),
+                effect_mode="write",
             )
         finally:
             sink.close()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -48,6 +49,7 @@ from elspeth.contracts.sink_effects import (
     SinkEffectReservationRequest,
     SinkEffectRole,
 )
+from elspeth.core.canonical import canonical_json as pipeline_canonical_json
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.execution.sink_effect_identity import compute_pipeline_effect_identity, resolve_sink_effect_members
@@ -558,9 +560,15 @@ class SinkExecutor:
             "path": pending_outcome.path.value,
             "scheduler_pending_sink": pending_outcome.scheduler_pending_sink,
         }
+        canonical_rows: list[dict[str, object]] = []
+        for row in rows:
+            normalized = json.loads(pipeline_canonical_json(row))
+            if type(normalized) is not dict:  # pragma: no cover - rows are dictionaries by construction
+                raise OrchestrationInvariantError("sink-effect row canonicalization did not produce a mapping")
+            canonical_rows.append(normalized)
         candidates = tuple(
             SinkEffectMemberCandidate(token_id=token.token_id, row=row, pending_identity=pending_identity)
-            for token, row in zip(tokens, rows, strict=True)
+            for token, row in zip(tokens, canonical_rows, strict=True)
         )
         members = resolve_sink_effect_members(self._factory, candidates)  # type: ignore[arg-type]
         target_config = dict(sink.config)

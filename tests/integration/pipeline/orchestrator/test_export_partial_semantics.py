@@ -16,7 +16,14 @@ from unittest.mock import patch
 
 import pytest
 
-from elspeth.contracts import ExportStatus, RunStatus
+from elspeth.contracts import (
+    ExportStatus,
+    ResolvedSinkEffectMode,
+    RunStatus,
+    SinkEffectExecutionPurpose,
+    SinkEffectRuntimeBinding,
+)
+from elspeth.contracts.audit_export import AuditExportContentStoreResolver
 from elspeth.contracts.events import (
     PhaseCompleted,
     PhaseError,
@@ -25,22 +32,101 @@ from elspeth.contracts.events import (
     RunCompletionStatus,
     RunSummary,
 )
+from elspeth.contracts.hashing import stable_hash
 from elspeth.core.config import ElspethSettings, SinkSettings, SourceSettings
 from elspeth.core.events import EventBus
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+from elspeth.plugins.sinks.json_sink import JSONSink
 from tests.fixtures.base_classes import as_sink, as_source
 from tests.fixtures.landscape import make_factory, make_landscape_db
 from tests.fixtures.pipeline import build_production_graph
 from tests.fixtures.plugins import CollectSink, FailingSource, ListSource
+
+_AUDIT_SINK_OPTIONS: dict[str, object] = {
+    "path": "unused-audit-export.json",
+    "format": "json",
+    "schema": {"mode": "observed"},
+}
+
+
+class _UnusedDurableAuditStore:
+    content_store_id = "audit-store-v1"
+    namespace = "audit/export"
+
+    def is_durable(self) -> bool:
+        return True
+
+    def put_immutable(self, content: bytes, *, candidate_id: str, object_kind: object) -> str:
+        del content, candidate_id, object_kind
+        raise AssertionError("patched export failure must occur before content publication")
+
+    def open_registered(self, registration: object) -> object:
+        del registration
+        raise AssertionError("patched export failure must not read content")
+
+    def mark_candidate_orphans(self, candidate_id: str, descriptors: tuple[object, ...]) -> None:
+        del candidate_id, descriptors
+
+    def garbage_collect_candidate(self, request: object) -> bool:
+        del request
+        return False
+
+
+def _audit_store_binding() -> tuple[_UnusedDurableAuditStore, AuditExportContentStoreResolver]:
+    store = _UnusedDurableAuditStore()
+    resolver = AuditExportContentStoreResolver()
+    resolver.register(store)  # type: ignore[arg-type]
+    return store, resolver
+
+
+def _audit_sink_factory(_name: str) -> SinkEffectRuntimeBinding:
+    sink = JSONSink(dict(_AUDIT_SINK_OPTIONS))
+    return SinkEffectRuntimeBinding(
+        sink_name="default",
+        sink=sink,
+        sink_type=type(sink),
+        config_fingerprint=stable_hash(_AUDIT_SINK_OPTIONS),
+        purpose=SinkEffectExecutionPurpose.AUDIT_EXPORT,
+        effect_mode=ResolvedSinkEffectMode("write"),
+    )
 
 
 def _make_export_enabled_settings() -> ElspethSettings:
     """Create minimal settings with export enabled to the default sink."""
     return ElspethSettings(
         sources={"primary": SourceSettings(plugin="list_source", on_success="default", options={})},
-        sinks={"default": SinkSettings(plugin="collect", on_write_failure="discard", options={})},
-        landscape={"export": {"enabled": True, "sink": "default", "format": "json"}},
+        sinks={
+            "default": SinkSettings(
+                plugin="json",
+                on_write_failure="discard",
+                options=_AUDIT_SINK_OPTIONS,
+            )
+        },
+        landscape={
+            "export": {
+                "enabled": True,
+                "sink": "default",
+                "format": "json",
+                "total_record_limit": 10_000,
+                "total_byte_limit": 10 * 1024 * 1024,
+                "chunk_limit": 100,
+                "per_chunk_record_limit": 100,
+                "per_chunk_byte_limit": 1024 * 1024,
+                "spool_root": ".elspeth/audit-export-spool/partial-semantics",
+                "spool_cleanup_age_seconds": 3600,
+                "spool_cleanup_byte_budget": 10 * 1024 * 1024,
+                "spool_cleanup_count_budget": 100,
+                "content_store": {
+                    "content_store_id": "audit-store-v1",
+                    "namespace": "audit/export",
+                    "policy_version": "v1",
+                    "retention_days": 30,
+                    "durability": "fsync",
+                    "orphan_grace_period_seconds": 3600,
+                },
+            }
+        },
     )
 
 
@@ -79,6 +165,7 @@ class TestExportFailurePartialRunSemantics:
         graph = build_production_graph(config)
         settings = _make_export_enabled_settings()
         orchestrator = Orchestrator(db, event_bus=event_bus)
+        audit_store, audit_store_resolver = _audit_store_binding()
 
         export_status_calls: list[tuple[str, ExportStatus]] = []
         original_set_export_status = RunLifecycleRepository.set_export_status
@@ -115,7 +202,9 @@ class TestExportFailurePartialRunSemantics:
                 graph=graph,
                 settings=settings,
                 payload_store=payload_store,
-                sink_factory=lambda name: sink,
+                sink_factory=_audit_sink_factory,
+                audit_export_content_store=audit_store,
+                audit_export_content_store_resolver=audit_store_resolver,
             )
 
         assert [status for _, status in export_status_calls] == [
@@ -204,7 +293,7 @@ class TestExportFailurePartialRunSemantics:
                 graph=graph,
                 settings=settings,
                 payload_store=payload_store,
-                sink_factory=lambda name: sink,
+                sink_factory=_audit_sink_factory,
             )
 
         mock_export.assert_not_called()

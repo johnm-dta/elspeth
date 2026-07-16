@@ -152,7 +152,7 @@ def _rewrite_tokens_as_epoch_23(engine: Engine) -> None:
             "audit_export_snapshot_chunks",
             "audit_export_snapshots",
         ):
-            cursor.execute(f"DROP TABLE {table_name}")
+            cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
         cursor.execute("DROP INDEX IF EXISTS uq_artifacts_run_idempotency_key")
         cursor.execute("PRAGMA user_version = 23")
         raw.commit()

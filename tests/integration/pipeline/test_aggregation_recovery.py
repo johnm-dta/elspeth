@@ -30,7 +30,14 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
-from elspeth.contracts import Determinism, PipelineRow, RunStatus
+from elspeth.contracts import (
+    Determinism,
+    PipelineRow,
+    RestrictedSinkEffectContext,
+    RunStatus,
+    SinkEffectCommitResult,
+    SinkEffectPlan,
+)
 from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
 from elspeth.contracts.enums import BatchStatus, NodeType
 from elspeth.contracts.errors import AuditIntegrityError
@@ -136,7 +143,7 @@ class _SumBatchTransform(BaseTransform):
 
 
 class _FailOnceSink(CollectSink):
-    """Sink whose FIRST write crashes — the post-flush, pre-durability window.
+    """Sink whose first effect commit crashes in the post-flush window.
 
     The crash is injected in the SINK (not a repository mock): the aggregation
     flush has fully completed and consumed its inputs by the time write() runs,
@@ -153,6 +160,16 @@ class _FailOnceSink(CollectSink):
             self._fail_next_write = False
             raise RuntimeError("injected sink write crash")
         return super().write(rows, ctx)
+
+    def commit_effect(
+        self,
+        plan: SinkEffectPlan,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectCommitResult:
+        if self._fail_next_write:
+            self._fail_next_write = False
+            raise RuntimeError("injected sink write crash")
+        return super().commit_effect(plan, ctx)
 
 
 def _build_eof_aggregation_pipeline(

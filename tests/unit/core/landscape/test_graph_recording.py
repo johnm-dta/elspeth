@@ -5,7 +5,7 @@ from typing import Literal
 
 import pytest
 
-from elspeth.contracts import Determinism, NodeType, RoutingMode
+from elspeth.contracts import Determinism, NodeType, RoutingMode, RunStatus
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
@@ -137,6 +137,7 @@ class TestRegisterNodeDsnSanitization:
 
         self._register_database_node(factory, {"url": self._DSN})
 
+        factory.run_lifecycle.complete_run("run-1", RunStatus.COMPLETED)
         records = list(LandscapeExporter(db).export_run("run-1"))
         node_records = [r for r in records if r["record_type"] == "node"]
         assert node_records, "expected the registered node in the export"

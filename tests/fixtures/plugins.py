@@ -275,8 +275,8 @@ class CollectSink(_TestSinkBase):
         pass
 
 
-class FailingSink(_TestSinkBase):
-    """Sink whose write() always raises RuntimeError.
+class FailingSink(CollectSink):
+    """Effect-capable sink whose publication always raises RuntimeError.
 
     For testing error handling in orchestrator, executors, and outcome recording.
 
@@ -293,9 +293,7 @@ class FailingSink(_TestSinkBase):
         node_id: str | None = None,
         error_message: str = "Sink write failed",
     ) -> None:
-        super().__init__()
-        self.name = name
-        self.node_id = node_id
+        super().__init__(name, node_id=node_id)
         self._error_message = error_message
 
     def on_start(self, ctx: Any) -> None:
@@ -305,6 +303,14 @@ class FailingSink(_TestSinkBase):
         pass
 
     def write(self, rows: Any, ctx: Any) -> SinkWriteResult:
+        raise RuntimeError(self._error_message)
+
+    def commit_effect(
+        self,
+        plan: SinkEffectPlan,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectCommitResult:
+        del plan, ctx
         raise RuntimeError(self._error_message)
 
     def close(self) -> None:

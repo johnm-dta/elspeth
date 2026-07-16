@@ -564,6 +564,30 @@ def _preflight_execution_sinks(
     return sinks, modes, admission
 
 
+def _configure_execution_sinks_for_resume(execution_sinks: Mapping[str, SinkProtocol]) -> None:
+    """Switch live execution sinks to their resume (append) mode.
+
+    Must run BEFORE sink-effect admission is issued so the admission receipt
+    and the durable effect identity bind the mode resume actually executes
+    (elspeth-fc9906e398). Uses the polymorphic resume capability: each sink
+    self-configures via configure_for_resume().
+    """
+    for sink_name, sink in execution_sinks.items():
+        if not sink.supports_resume:
+            typer.echo(
+                f"Error: Cannot resume with sink '{sink_name}' (plugin: {sink.name}). "
+                f"This sink does not support resume/append mode.\n"
+                f"Hint: Use a different sink type or start a new run.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        try:
+            sink.configure_for_resume()
+        except NotImplementedError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1) from None
+
+
 def _preflight_raw_settings_sink_effects(settings_path: Path, *, purpose: object) -> None:
     """Run adapter-class eligibility before secrets or other startup work."""
     from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
@@ -2354,17 +2378,29 @@ def resume(
             settings_config,
             purpose=SinkEffectExecutionPurpose.RESUME,
         )
-        if execute:
-            execution_sinks, execution_sink_modes, sink_effect_admission = _preflight_execution_sinks(
-                settings_config,
-                plugins,
-                purpose=SinkEffectExecutionPurpose.RESUME,
-            )
     except contract_errors.TIER_1_ERRORS:
         raise
     except Exception as e:
         typer.echo(f"Sink effect preflight failed: {e}", err=True)
         raise typer.Exit(1) from None
+
+    if execute:
+        # Resume executes sinks in their post-resume live mode. Switch the
+        # live instances BEFORE admission is issued so the admission receipt
+        # and the durable effect identity bind the mode resume actually uses
+        # (elspeth-fc9906e398).
+        _configure_execution_sinks_for_resume(_execution_sinks_for_graph(settings_config, plugins.sinks))
+        try:
+            execution_sinks, execution_sink_modes, sink_effect_admission = _preflight_execution_sinks(
+                settings_config,
+                plugins,
+                purpose=SinkEffectExecutionPurpose.RESUME,
+            )
+        except contract_errors.TIER_1_ERRORS:
+            raise
+        except Exception as e:
+            typer.echo(f"Sink effect preflight failed: {e}", err=True)
+            raise typer.Exit(1) from None
 
     # Resolve database URL
     if database:
@@ -2518,30 +2554,16 @@ def resume(
 
         payload_store = FilesystemPayloadStore(payload_path)
 
-        # CRITICAL: Validate and configure sinks for resume mode
-        # Uses the already-instantiated sinks from plugins dict
+        # CRITICAL: Validate sink output targets for resume mode.
+        # The sinks were already switched to their resume (append) mode by
+        # _configure_execution_sinks_for_resume BEFORE admission was issued,
+        # so the admission receipt binds the live post-resume mode
+        # (elspeth-fc9906e398).
         from elspeth.plugins.sources.null_source import NullSource
 
         resume_sinks = {}
 
         for sink_name, sink in execution_sinks.items():
-            # Check if sink supports resume
-            if not sink.supports_resume:
-                typer.echo(
-                    f"Error: Cannot resume with sink '{sink_name}' (plugin: {sink.name}). "
-                    f"This sink does not support resume/append mode.\n"
-                    f"Hint: Use a different sink type or start a new run.",
-                    err=True,
-                )
-                raise typer.Exit(1)
-
-            # Configure sink for resume (switches to append mode)
-            try:
-                sink.configure_for_resume()
-            except NotImplementedError as e:
-                typer.echo(f"Error: {e}", err=True)
-                raise typer.Exit(1) from None
-
             # For sinks with headers: original, provide field resolution
             # mapping BEFORE validation so they can correctly compare display names
             if sink.needs_resume_field_resolution:

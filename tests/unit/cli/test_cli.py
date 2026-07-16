@@ -1007,7 +1007,10 @@ sinks:
     plugin: json
     on_write_failure: discard
     options:
-      path: {tmp_path / "output.json"}
+      # JSONL: resume-capable, so the resume-mode switch (which now precedes
+      # payload-store checks, elspeth-fc9906e398) passes and each test still
+      # reaches the error path it targets.
+      path: {tmp_path / "output.jsonl"}
       schema:
         mode: observed
 landscape:
@@ -1195,7 +1198,6 @@ sinks:
         from elspeth.contracts.errors import IncompleteSourceResumeError
 
         settings_file, _db_path = self._make_settings_with_landscape_db(tmp_path)
-        settings_file.write_text(settings_file.read_text().replace("output.json", "output.jsonl"))
         (tmp_path / "payloads").mkdir(mode=0o700)
 
         run_id = "run-source-not-exhausted-50cec0a02a"
@@ -1291,7 +1293,10 @@ sinks:
     plugin: json
     on_write_failure: discard
     options:
-      path: output.json
+      # JSONL: resume-capable, so the resume-mode switch (which now precedes
+      # payload-store checks, elspeth-fc9906e398) passes and the unsupported
+      # backend error path is still reached.
+      path: output.jsonl
       schema:
         mode: observed
 landscape:

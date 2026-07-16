@@ -515,3 +515,26 @@ def test_text_sink_assistance_pins_strict_line_and_resume_contract() -> None:
     assert "CR or LF" in hints
     assert "append" in hints
     assert "resume" in hints
+
+
+class TestTextSinkResumeModeResolution:
+    """elspeth-fc9906e398: resolved effect mode must claim what resume executes."""
+
+    def test_resume_purpose_resolves_post_resume_append_mode(self) -> None:
+        """A write-configured text sink resumes in append mode; the resolver must say so."""
+        from elspeth.contracts.sink_effects import ResolvedSinkEffectMode, SinkEffectExecutionPurpose
+
+        config = {"path": "/tmp/out.txt", "field": "line_text", "schema": {"mode": "observed"}, "mode": "write"}
+
+        resolved = TextSink._resolve_sink_effect_mode(config, purpose=SinkEffectExecutionPurpose.RESUME)
+
+        assert resolved == ResolvedSinkEffectMode("append")
+
+    def test_fresh_purpose_keeps_configured_mode(self) -> None:
+        from elspeth.contracts.sink_effects import ResolvedSinkEffectMode, SinkEffectExecutionPurpose
+
+        config = {"path": "/tmp/out.txt", "field": "line_text", "schema": {"mode": "observed"}, "mode": "write"}
+
+        resolved = TextSink._resolve_sink_effect_mode(config, purpose=SinkEffectExecutionPurpose.FRESH)
+
+        assert resolved == ResolvedSinkEffectMode("write")

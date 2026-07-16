@@ -152,7 +152,7 @@ class JSONSink(BaseSink):
     name = "json"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:085aa589992e378e"
+    source_file_hash: str | None = "sha256:a81a3d321f946234"
     config_model = JSONSinkConfig
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"append", "write"})
@@ -169,6 +169,13 @@ class JSONSink(BaseSink):
         cfg = JSONSinkConfig.from_dict(dict(config), plugin_name=cls.name)
         if purpose is SinkEffectExecutionPurpose.AUDIT_EXPORT:
             cls._validate_audit_export_config(cfg)
+        if purpose is SinkEffectExecutionPurpose.RESUME:
+            # configure_for_resume() switches the live sink to canonical
+            # append before admission is issued; the resolved mode must claim
+            # the mode resume actually executes (elspeth-fc9906e398). A JSON
+            # array target never reaches admission under resume: its
+            # configure_for_resume() refusal aborts the flow first.
+            return ResolvedSinkEffectMode("append")
         return ResolvedSinkEffectMode(cfg.mode)
 
     @classmethod

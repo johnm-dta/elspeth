@@ -96,7 +96,7 @@ class TextSink(BaseSink):
     name = "text"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:14909a7e18eaa4e1"
+    source_file_hash: str | None = "sha256:343ad49d29c46b92"
     config_model = TextSinkConfig
     supports_resume = True
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
@@ -110,8 +110,12 @@ class TextSink(BaseSink):
         *,
         purpose: SinkEffectExecutionPurpose,
     ) -> ResolvedSinkEffectMode | None:
-        del purpose
         cfg = TextSinkConfig.from_dict(dict(config), plugin_name=cls.name)
+        if purpose is SinkEffectExecutionPurpose.RESUME:
+            # configure_for_resume() switches the live sink to canonical
+            # append before admission is issued; the resolved mode must claim
+            # the mode resume actually executes (elspeth-fc9906e398).
+            return ResolvedSinkEffectMode("append")
         return ResolvedSinkEffectMode(cfg.mode)
 
     def __init__(self, config: dict[str, Any]) -> None:

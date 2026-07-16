@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -66,6 +67,7 @@ class _EffectCapableSink:
 
 class _LegacyResumeSink:
     name = "legacy"
+    supports_resume = False
 
     def __init__(self) -> None:
         self.configure_for_resume = MagicMock(spec=[])
@@ -584,11 +586,68 @@ def test_cli_resume_rejects_legacy_sink_before_resume_mutation_or_payload_access
         result = runner.invoke(app, ["resume", "run-1", "-s", str(settings_path), "--execute"])
 
     assert result.exit_code == 1
-    assert "sink effect preflight failed" in result.output.lower()
+    # The resume-mode switch precedes admission (elspeth-fc9906e398), so a
+    # sink without resume support is rejected by the supports_resume gate —
+    # still before any live-instance mutation, passphrase, or database access.
+    assert "does not support resume/append mode" in result.output.lower()
     sink.configure_for_resume.assert_not_called()
     resolve_passphrase.assert_not_called()
     open_database.assert_not_called()
     assert not (tmp_path / "payloads").exists()
+
+
+def test_cli_resume_reissues_admission_for_post_resume_live_mode(tmp_path: Path) -> None:
+    """elspeth-fc9906e398: modes and admission handed to execution must bind the
+    post-resume live sink mode (append), not the pre-mutation configured mode."""
+    from elspeth.contracts.checkpoint import ResumeCheck
+    from elspeth.contracts.sink_effects import SinkEffectInputKind
+    from elspeth.engine.orchestrator.preflight import require_sink_effect_admission
+
+    settings_path, _db_path = _make_resume_config_and_database(tmp_path)
+    (tmp_path / "payloads").mkdir(mode=0o700)
+    resume_point = SimpleNamespace(sequence_number=0, barrier_scalars=None)
+    captured: dict[str, Any] = {}
+
+    def capture_execute(**kwargs: Any) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            rows_processed=0,
+            rows_succeeded=0,
+            rows_failed=0,
+            status=SimpleNamespace(value="completed"),
+        )
+
+    with (
+        patch("elspeth.cli.ExecutionGraph") as graph_cls,
+        patch("elspeth.core.checkpoint.RecoveryManager") as recovery_cls,
+        patch("elspeth.cli._execute_resume_with_instances", side_effect=capture_execute),
+    ):
+        graph_cls.from_plugin_instances.return_value = _FakeGraph()
+        recovery = recovery_cls.return_value
+        recovery.can_resume.return_value = ResumeCheck(can_resume=True)
+        recovery.get_resume_point.return_value = resume_point
+        recovery.get_unprocessed_rows.return_value = []
+        recovery.count_blocked_barrier_items.return_value = 0
+        result = runner.invoke(app, ["resume", "run-1", "-s", str(settings_path), "--execute"])
+
+    assert result.exit_code == 0, result.output
+
+    # Durable effect identity derives from these modes (sink_flush passes them
+    # into SinkExecutor.write); they must record what resume actually executes.
+    modes = captured["sink_effect_modes"]
+    assert modes == {"output": "append"}
+
+    resume_plugins = captured["plugins"]
+    live_sink = resume_plugins.sinks["output"]
+    assert live_sink._mode == "append"
+
+    # The admission receipt must bind the exact live sinks and live modes.
+    require_sink_effect_admission(
+        {"output": live_sink},
+        configured_modes=dict(modes),
+        required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+        admission=captured["sink_effect_admission"],
+    )
 
 
 def test_cli_join_rejects_legacy_sink_before_join_admission(tmp_path: Path) -> None:

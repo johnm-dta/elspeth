@@ -26,6 +26,9 @@ from elspeth.core.landscape.model_loaders import (
     RowLoader,
     RunLoader,
     SchedulerEventLoader,
+    SinkEffectLoader,
+    SinkEffectMemberLoader,
+    SinkEffectStreamLoader,
     TokenLoader,
     TokenOutcomeLoader,
     TokenParentLoader,
@@ -321,6 +324,9 @@ class RecorderFactory:
         scheduler_event_loader = SchedulerEventLoader()
         artifact_loader = ArtifactLoader()
         batch_member_loader = BatchMemberLoader()
+        sink_effect_loader = SinkEffectLoader()
+        sink_effect_member_loader = SinkEffectMemberLoader()
+        sink_effect_stream_loader = SinkEffectStreamLoader()
 
         run_lifecycle = RunLifecycleRepository(db, read_ops_as_common, run_loader)
         data_flow = DataFlowRepository(
@@ -343,6 +349,9 @@ class RecorderFactory:
             batch_loader=batch_loader,
             batch_member_loader=batch_member_loader,
             artifact_loader=artifact_loader,
+            sink_effect_loader=sink_effect_loader,
+            sink_effect_member_loader=sink_effect_member_loader,
+            sink_effect_stream_loader=sink_effect_stream_loader,
             payload_store=payload_store,
         )
         barrier_restore = BarrierRestoreReadModel(
@@ -399,6 +408,9 @@ class RecorderFactory:
         scheduler_event_loader = SchedulerEventLoader()
         artifact_loader = ArtifactLoader()
         batch_member_loader = BatchMemberLoader()
+        sink_effect_loader = SinkEffectLoader()
+        sink_effect_member_loader = SinkEffectMemberLoader()
+        sink_effect_stream_loader = SinkEffectStreamLoader()
 
         # Composed repository for run lifecycle
         self._run_lifecycle = RunLifecycleRepository(db, ops, run_loader)
@@ -415,6 +427,9 @@ class RecorderFactory:
             batch_loader=batch_loader,
             batch_member_loader=batch_member_loader,
             artifact_loader=artifact_loader,
+            sink_effect_loader=sink_effect_loader,
+            sink_effect_member_loader=sink_effect_member_loader,
+            sink_effect_stream_loader=sink_effect_stream_loader,
             payload_store=payload_store,
         )
 

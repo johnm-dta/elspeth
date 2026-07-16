@@ -55,6 +55,7 @@ from elspeth.core.landscape.execution import (
     CallAuditRepository,
     NodeStateRepository,
     OperationRepository,
+    SinkEffectRepository,
 )
 from elspeth.core.landscape.model_loaders import (
     ArtifactLoader,
@@ -64,6 +65,9 @@ from elspeth.core.landscape.model_loaders import (
     NodeStateLoader,
     OperationLoader,
     RoutingEventLoader,
+    SinkEffectLoader,
+    SinkEffectMemberLoader,
+    SinkEffectStreamLoader,
 )
 from elspeth.core.landscape.row_data import CallDataResult
 
@@ -96,6 +100,9 @@ class ExecutionRepository:
         batch_loader: BatchLoader,
         batch_member_loader: BatchMemberLoader,
         artifact_loader: ArtifactLoader,
+        sink_effect_loader: SinkEffectLoader,
+        sink_effect_member_loader: SinkEffectMemberLoader,
+        sink_effect_stream_loader: SinkEffectStreamLoader,
         payload_store: PayloadStore | None = None,
     ) -> None:
         self._db = db
@@ -111,6 +118,13 @@ class ExecutionRepository:
         self.operations = OperationRepository(db, ops, operation_loader=operation_loader, payload_store=payload_store)
         self.batches = BatchRepository(db, ops, batch_loader=batch_loader, batch_member_loader=batch_member_loader)
         self.artifacts = ArtifactRepository(ops, artifact_loader=artifact_loader)
+        self.sink_effects = SinkEffectRepository(
+            db,
+            ops,
+            effect_loader=sink_effect_loader,
+            member_loader=sink_effect_member_loader,
+            stream_loader=sink_effect_stream_loader,
+        )
 
     # ── Node state recording (NodeStateRepository) ─────────────────────
 

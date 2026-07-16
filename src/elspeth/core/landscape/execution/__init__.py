@@ -13,6 +13,7 @@ from elspeth.core.landscape.execution.batches import BatchRepository
 from elspeth.core.landscape.execution.calls import CallAuditRepository
 from elspeth.core.landscape.execution.node_states import NodeStateRepository
 from elspeth.core.landscape.execution.operations import OperationRepository
+from elspeth.core.landscape.execution.sink_effects import SinkEffectRepository
 
 __all__ = [
     "ArtifactRepository",
@@ -20,4 +21,5 @@ __all__ = [
     "CallAuditRepository",
     "NodeStateRepository",
     "OperationRepository",
+    "SinkEffectRepository",
 ]

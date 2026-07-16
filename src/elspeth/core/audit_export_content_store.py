@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from elspeth.contracts.audit_export import (
     AUDIT_EXPORT_MAX_CHUNK_BYTES,
+    AUDIT_EXPORT_MAX_CHUNKS,
     MAX_AUDIT_EXPORT_SIGNED_MANIFEST_BYTES,
     AuditExportContentDescriptor,
     AuditExportContentStoreResolver,
@@ -31,6 +32,12 @@ _DIRECTORY_FLAGS: Final = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(
 _FILE_READ_FLAGS: Final = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
 _FILE_CREATE_FLAGS: Final = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
 _COPY_BYTES: Final = 64 * 1024
+# Explicit safe bound shared by the orphan-marker writer and collector. A
+# marker lists one canonical "sha256:<64 hex>" reference per content object —
+# at most AUDIT_EXPORT_MAX_CHUNKS data chunks plus one final manifest — plus a
+# fixed envelope; 128 bytes per reference over-covers JSON quoting, commas,
+# and the envelope with wide margin.
+MAX_AUDIT_EXPORT_ORPHAN_MARKER_BYTES: Final = (AUDIT_EXPORT_MAX_CHUNKS + 1) * 128
 
 
 def _write_all(descriptor: int, content: bytes) -> None:
@@ -305,6 +312,8 @@ class FilesystemAuditExportContentStore:
                 "schema": "elspeth.audit-export-orphan-candidate.v1",
             }
         ).encode("utf-8")
+        if len(marker) > MAX_AUDIT_EXPORT_ORPHAN_MARKER_BYTES:
+            raise ValueError("audit-export orphan marker exceeds the code-owned collection bound")
         root_fd, candidates_fd = self._open_area("candidates", create=True)
         try:
             candidate_fd = self._candidate_dir(candidates_fd, candidate_id, create=True)
@@ -344,7 +353,18 @@ class FilesystemAuditExportContentStore:
                 except FileNotFoundError:
                     return False
                 try:
-                    marker = json.loads(os.read(orphan_fd, MAX_AUDIT_EXPORT_SIGNED_MANIFEST_BYTES))
+                    marker_stat = os.fstat(orphan_fd)
+                    if not stat.S_ISREG(marker_stat.st_mode) or marker_stat.st_size > MAX_AUDIT_EXPORT_ORPHAN_MARKER_BYTES:
+                        return False
+                    pieces: list[bytes] = []
+                    remaining = marker_stat.st_size
+                    while remaining:
+                        piece = os.read(orphan_fd, min(_COPY_BYTES, remaining))
+                        if not piece:
+                            return False
+                        pieces.append(piece)
+                        remaining -= len(piece)
+                    marker = json.loads(b"".join(pieces))
                 finally:
                     os.close(orphan_fd)
                 if type(marker) is not dict or marker.get("candidate_id") != request.candidate_id:

@@ -28,6 +28,10 @@ from elspeth.core.landscape.model_loaders import (
     RowLoader,
     RunLoader,
     SchedulerEventLoader,
+    SinkEffectAttemptLoader,
+    SinkEffectLoader,
+    SinkEffectMemberLoader,
+    SinkEffectStreamLoader,
     TokenLoader,
     TokenOutcomeLoader,
     TokenParentLoader,
@@ -50,6 +54,10 @@ from elspeth.core.landscape.schema import (
     runs_table,
     scheduler_events_table,
     secret_resolutions_table,
+    sink_effect_attempts_table,
+    sink_effect_members_table,
+    sink_effect_streams_table,
+    sink_effects_table,
     token_outcomes_table,
     token_parents_table,
     tokens_table,
@@ -90,6 +98,10 @@ class ConnectionBoundExportReadModel:
         self._batch_loader = BatchLoader()
         self._batch_member_loader = BatchMemberLoader()
         self._artifact_loader = ArtifactLoader()
+        self._sink_effect_stream_loader = SinkEffectStreamLoader()
+        self._sink_effect_loader = SinkEffectLoader()
+        self._sink_effect_member_loader = SinkEffectMemberLoader()
+        self._sink_effect_attempt_loader = SinkEffectAttemptLoader()
 
     @property
     def connection(self) -> Connection:
@@ -354,6 +366,43 @@ class ConnectionBoundExportReadModel:
             .order_by(artifacts_table.c.created_at, artifacts_table.c.artifact_id)
         ).fetchall()
         return [self._artifact_loader.load(row) for row in rows]
+
+    def get_sink_effect_streams_for_run(self, run_id: str) -> list[Any]:
+        rows = self._connection.execute(
+            select(sink_effect_streams_table)
+            .where(sink_effect_streams_table.c.run_id == run_id)
+            .order_by(sink_effect_streams_table.c.stream_id)
+        ).fetchall()
+        return [self._sink_effect_stream_loader.load(row) for row in rows]
+
+    def get_sink_effects_for_run(self, run_id: str) -> list[Any]:
+        rows = self._connection.execute(
+            select(sink_effects_table)
+            .where(sink_effects_table.c.run_id == run_id)
+            .order_by(sink_effects_table.c.stream_id, sink_effects_table.c.stream_sequence, sink_effects_table.c.effect_id)
+        ).fetchall()
+        return [self._sink_effect_loader.load(row) for row in rows]
+
+    def get_sink_effect_members_for_run(self, run_id: str) -> list[Any]:
+        rows = self._connection.execute(
+            select(sink_effect_members_table)
+            .where(sink_effect_members_table.c.run_id == run_id)
+            .order_by(sink_effect_members_table.c.effect_id, sink_effect_members_table.c.ordinal)
+        ).fetchall()
+        return [self._sink_effect_member_loader.load(row) for row in rows]
+
+    def get_sink_effect_attempts_for_run(self, run_id: str) -> list[Any]:
+        rows = self._connection.execute(
+            select(sink_effect_attempts_table)
+            .join(sink_effects_table, sink_effect_attempts_table.c.effect_id == sink_effects_table.c.effect_id)
+            .where(sink_effects_table.c.run_id == run_id)
+            .order_by(
+                sink_effect_attempts_table.c.effect_id,
+                sink_effect_attempts_table.c.started_at,
+                sink_effect_attempts_table.c.attempt_id,
+            )
+        ).fetchall()
+        return [self._sink_effect_attempt_loader.load(row) for row in rows]
 
 
 @contextmanager

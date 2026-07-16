@@ -70,7 +70,7 @@ if TYPE_CHECKING:
     import threading
     from collections.abc import Callable
 
-    from elspeth.contracts.audit_export import AuditExportContentStore
+    from elspeth.contracts.audit_export import AuditExportContentStore, AuditExportContentStoreResolver
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
     from elspeth.contracts.preflight import PreflightResult
@@ -252,6 +252,7 @@ class RunLifecycleCoordinator:
         *,
         payload_store: PayloadStore,
         audit_export_content_store: AuditExportContentStore,
+        audit_export_content_store_resolver: AuditExportContentStoreResolver,
     ) -> None:
         """Execute the EXPORT phase: export Landscape data to configured sink.
 
@@ -298,6 +299,7 @@ class RunLifecycleCoordinator:
                 sink_effect_admission=sink_effect_admission,
                 payload_store=payload_store,
                 audit_export_content_store=audit_export_content_store,
+                audit_export_content_store_resolver=audit_export_content_store_resolver,
             )
 
             factory.run_lifecycle.set_export_status(run_id, status=ExportStatus.COMPLETED)
@@ -326,6 +328,7 @@ class RunLifecycleCoordinator:
         *,
         payload_store: PayloadStore,
         audit_export_content_store: AuditExportContentStore | None = None,
+        audit_export_content_store_resolver: AuditExportContentStoreResolver | None = None,
         secret_resolutions: list[SecretResolutionInput] | None = None,
         preflight_results: PreflightResult | None = None,
         shutdown_event: threading.Event | None = None,
@@ -505,6 +508,11 @@ class RunLifecycleCoordinator:
                         "Export is enabled but no audit_export_content_store was provided; "
                         "the durable winning store must be resolved explicitly."
                     )
+                if audit_export_content_store_resolver is None:
+                    raise ValueError(
+                        "Export is enabled but no audit_export_content_store_resolver was provided; "
+                        "prior immutable winning store IDs must remain resolvable."
+                    )
                 self.execute_export_phase(
                     factory,
                     run.run_id,
@@ -512,6 +520,7 @@ class RunLifecycleCoordinator:
                     sink_factory,
                     payload_store=payload_store,
                     audit_export_content_store=audit_export_content_store,
+                    audit_export_content_store_resolver=audit_export_content_store_resolver,
                 )
 
             # Emit RunSummary event with final metrics.  Map the new

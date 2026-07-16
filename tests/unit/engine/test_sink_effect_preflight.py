@@ -21,6 +21,7 @@ from elspeth.cli import (
     _preflight_follower_sink_effects,
     _start_follower_plugin_lifecycle,
 )
+from elspeth.contracts.audit_export import AuditExportContentStoreResolver
 from elspeth.contracts.sink_effects import (
     SINK_EFFECT_PROTOCOL_VERSION,
     ResolvedSinkEffectMode,
@@ -126,6 +127,8 @@ class _DurableAuditContentStore:
 
 
 _AUDIT_CONTENT_STORE = _DurableAuditContentStore()
+_AUDIT_CONTENT_STORE_RESOLVER = AuditExportContentStoreResolver()
+_AUDIT_CONTENT_STORE_RESOLVER.register(_AUDIT_CONTENT_STORE)
 _AUDIT_STORE_POLICY = SimpleNamespace(content_store_id="archive-primary-v1", namespace="audit-export")
 
 
@@ -1206,6 +1209,7 @@ def test_audit_export_preflights_fresh_sink_before_node_or_lifecycle_or_io() -> 
             sink_factory=lambda _name: _audit_export_binding("audit-output", sink, None),  # type: ignore[arg-type,return-value]
             payload_store=object(),  # type: ignore[arg-type]
             audit_export_content_store=_AUDIT_CONTENT_STORE,  # type: ignore[arg-type]
+            audit_export_content_store_resolver=_AUDIT_CONTENT_STORE_RESOLVER,
         )
 
     assert "node_id" not in vars(sink)
@@ -1251,6 +1255,7 @@ def test_export_admission_precedes_pending_events_telemetry_and_signing_key_read
             lambda _name: _audit_export_binding("audit-output", sink, None),  # type: ignore[arg-type,return-value]
             payload_store=object(),  # type: ignore[arg-type]
             audit_export_content_store=_AUDIT_CONTENT_STORE,  # type: ignore[arg-type]
+            audit_export_content_store_resolver=_AUDIT_CONTENT_STORE_RESOLVER,
         )
 
     factory.run_lifecycle.set_export_status.assert_not_called()
@@ -1299,6 +1304,7 @@ def test_prepared_export_binding_provenance_precedes_pending_status(monkeypatch:
             lambda _name: pytest.fail("prepared path must not reconstruct the sink"),  # type: ignore[arg-type]
             payload_store=object(),  # type: ignore[arg-type]
             audit_export_content_store=_AUDIT_CONTENT_STORE,  # type: ignore[arg-type]
+            audit_export_content_store_resolver=_AUDIT_CONTENT_STORE_RESOLVER,
         )
 
     factory.run_lifecycle.set_export_status.assert_not_called()
@@ -1373,6 +1379,7 @@ def test_prepared_export_binding_rejects_claimed_mode_before_pending_or_receipt(
             lambda _name: pytest.fail("prepared path must not reconstruct the sink"),  # type: ignore[arg-type]
             payload_store=object(),  # type: ignore[arg-type]
             audit_export_content_store=_AUDIT_CONTENT_STORE,  # type: ignore[arg-type]
+            audit_export_content_store_resolver=_AUDIT_CONTENT_STORE_RESOLVER,
         )
 
     factory.run_lifecycle.set_export_status.assert_not_called()
@@ -1408,6 +1415,7 @@ def test_audit_export_requires_export_input_kind_and_rejects_pipeline_only_sink(
             sink_factory=lambda _name: _audit_export_binding("audit-output", sink, "write"),  # type: ignore[arg-type,return-value]
             payload_store=object(),  # type: ignore[arg-type]
             audit_export_content_store=_AUDIT_CONTENT_STORE,  # type: ignore[arg-type]
+            audit_export_content_store_resolver=_AUDIT_CONTENT_STORE_RESOLVER,
         )
     assert "node_id" not in vars(sink)
     assert sink.on_start_calls == 0

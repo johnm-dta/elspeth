@@ -21,14 +21,15 @@ from elspeth.contracts.audit_export import (
     AuditExportContentStore,
     AuditExportContentStoreResolver,
     AuditExportDerivationConfig,
-    AuditExportDerivedBundle,
     AuditExportSnapshotCandidate,
     AuditExportSnapshotReadLimits,
     AuditExportSnapshotRegistryKey,
     AuditExportSnapshotWinner,
+    AuditExportSpooledBundle,
     AuditExportTerminalWitness,
     C,
     ClosedAuditExportJSON,
+    derive_audit_export_bundle_to_spool,
     derive_public_export_config_hash,
     derive_registry_key_hash,
 )
@@ -131,17 +132,6 @@ def _private_spool_root(config: LandscapeExportSettings) -> Path:
     return root
 
 
-def _fsync_bundle(bundle: AuditExportDerivedBundle, spool: BinaryIO) -> tuple[tuple[int, int], ...]:
-    offsets: list[tuple[int, int]] = []
-    for content in (*bundle.chunk_bytes, bundle.signed_manifest_bytes):
-        offset = spool.tell()
-        spool.write(content)
-        offsets.append((offset, len(content)))
-    spool.flush()
-    os.fsync(spool.fileno())
-    return tuple(offsets)
-
-
 def _read_spooled(spool: BinaryIO, offset: int, size: int) -> bytes:
     spool.seek(offset)
     content = spool.read(size)
@@ -152,7 +142,7 @@ def _read_spooled(spool: BinaryIO, offset: int, size: int) -> bytes:
 
 def _candidate(
     *,
-    bundle: AuditExportDerivedBundle,
+    bundle: AuditExportSpooledBundle,
     witness: AuditExportTerminalWitness,
     config: LandscapeExportSettings,
     content_store_id: str,
@@ -174,8 +164,8 @@ def _candidate(
         chunking_algorithm_version=config.chunking_algorithm_version,
         per_chunk_record_limit=_required_limit(config.per_chunk_record_limit, "per_chunk_record_limit"),
         per_chunk_byte_limit=_required_limit(config.per_chunk_byte_limit, "per_chunk_byte_limit"),
-        record_count=len(bundle.record_frames),
-        total_bytes=sum(chunk.descriptor.size_bytes for chunk in bundle.chunks),
+        record_count=bundle.record_count,
+        total_bytes=bundle.total_bytes,
         chunk_count=len(bundle.chunks),
         terminal_chunk_ordinal=bundle.chunks[-1].ordinal,
         content_store_id=content_store_id,
@@ -238,6 +228,23 @@ def _manifest_verifier(
     return verify
 
 
+def _record_signature_verifier(
+    signing_mode: AuditExportSigningMode,
+    signing_key: bytes | None,
+) -> Callable[[bytes, str], None] | None:
+    if signing_mode is AuditExportSigningMode.UNSIGNED:
+        return None
+    if type(signing_key) is not bytes or not signing_key:
+        raise ValueError("HMAC audit export records cannot be verified without signing-key bytes")
+
+    def verify(unsigned_bytes: bytes, signature: str) -> None:
+        expected = hmac.new(signing_key, unsigned_bytes, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            raise ValueError("audit export record HMAC verification failed")
+
+    return verify
+
+
 def _read_limits(config: LandscapeExportSettings) -> AuditExportSnapshotReadLimits:
     return AuditExportSnapshotReadLimits(
         max_total_bytes=_required_limit(config.total_byte_limit, "total_byte_limit"),
@@ -271,10 +278,9 @@ def prepare_audit_export_snapshot(
     key = _registry_key(run_id, config)
 
     winner: AuditExportSnapshotWinner | None = None
-    bundle: AuditExportDerivedBundle | None = None
+    bundle: AuditExportSpooledBundle | None = None
     witness: AuditExportTerminalWitness | None = None
     spool: BinaryIO | None = None
-    offsets: tuple[tuple[int, int], ...] = ()
     with open_export_read_transaction(db.engine) as read_model:
         winner = snapshots.find_winner(read_model.connection, key)
         if winner is None:
@@ -294,20 +300,36 @@ def prepare_audit_export_snapshot(
                 per_chunk_record_limit=_required_limit(config.per_chunk_record_limit, "per_chunk_record_limit"),
                 derivation_config=derivation,
             )
-            bundle = exporter.derive_run_bundle(run_id, sign=config.sign)
             spool = TemporaryFile(  # noqa: SIM115 - lifetime deliberately crosses the read transaction
                 mode="w+b",
                 dir=_private_spool_root(config),
             )
-            offsets = _fsync_bundle(bundle, spool)
+            try:
+                bundle = derive_audit_export_bundle_to_spool(
+                    exporter.iter_unsigned_run_records(run_id),
+                    derivation,
+                    spool,
+                    max_total_records=_required_limit(config.total_record_limit, "total_record_limit"),
+                    max_total_bytes=_required_limit(config.total_byte_limit, "total_byte_limit"),
+                    max_chunks=_required_limit(config.chunk_limit, "chunk_limit"),
+                )
+                spool.flush()
+                os.fsync(spool.fileno())
+            except BaseException:
+                spool.close()
+                spool = None
+                raise
 
-    verifier = _manifest_verifier(AuditExportSigningMode(config.signing_mode), signing_key)
+    signing_mode = AuditExportSigningMode(config.signing_mode)
+    verifier = _manifest_verifier(signing_mode, signing_key)
+    record_verifier = _record_signature_verifier(signing_mode, signing_key)
     if winner is not None:
         return snapshots.bind_winner(
             winner,
             content_store_resolver=resolver,
             limits=_read_limits(config),
             signed_manifest_verifier=verifier,
+            record_signature_verifier=record_verifier,
         )
 
     assert bundle is not None and witness is not None and spool is not None
@@ -321,6 +343,7 @@ def prepare_audit_export_snapshot(
             object_kind="final_manifest",
         ),
     )
+    offsets = (*bundle.chunk_offsets, bundle.signed_manifest_offset)
     try:
         for descriptor, (offset, size) in zip(descriptors, offsets, strict=True):
             observed_ref = content_store.put_immutable(
@@ -337,7 +360,14 @@ def prepare_audit_export_snapshot(
             content_store_id=content_store.content_store_id,
         )
         with db.engine.begin() as connection:
-            registration = snapshots.register_candidate(connection, candidate)
+            registration = snapshots.register_candidate(
+                connection,
+                candidate,
+                content_store_resolver=resolver,
+                limits=_read_limits(config),
+                signed_manifest_verifier=verifier,
+                record_signature_verifier=record_verifier,
+            )
         if not registration.inserted:
             content_store.mark_candidate_orphans(candidate_id, descriptors)
         winner = registration.winner
@@ -352,6 +382,7 @@ def prepare_audit_export_snapshot(
         content_store_resolver=resolver,
         limits=_read_limits(config),
         signed_manifest_verifier=verifier,
+        record_signature_verifier=record_verifier,
     )
 
 

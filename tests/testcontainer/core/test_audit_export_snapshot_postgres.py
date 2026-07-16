@@ -13,12 +13,20 @@ from sqlalchemy import func, select
 from testcontainers.postgres import PostgresContainer  # type: ignore[import-untyped]
 
 from elspeth.contracts.audit import AuditExportSnapshot, AuditExportSnapshotChunk
+from elspeth.contracts.audit_export import (
+    AuditExportContentDescriptor,
+    AuditExportContentStoreResolver,
+    AuditExportDerivationConfig,
+    IterableBoundAuditExportContentReader,
+    RegisteredAuditExportContent,
+    derive_audit_export_bundle,
+)
 from elspeth.contracts.enums import RunStatus
-from elspeth.contracts.hashing import canonical_json
 from elspeth.contracts.sink_effects import AuditExportFormat, AuditExportSigningMode
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.execution.audit_export_snapshots import (
     AuditExportSnapshotCandidate,
+    AuditExportSnapshotReadLimits,
     AuditExportSnapshotRepository,
 )
 from elspeth.core.landscape.export_read_model import open_export_read_transaction
@@ -61,94 +69,131 @@ def _seed_run(db: LandscapeDB) -> None:
         )
 
 
-def _candidate() -> AuditExportSnapshotCandidate:
-    snapshot_id = "2" * 64
-    chunk_bytes = b'{"record_type":"run"}\n'
-    chunk_hash = sha256(chunk_bytes).hexdigest()
-    manifest_hash = "7" * 64
-    snapshot_hash = "8" * 64
-    snapshot_seal_hash = "9" * 64
-    chunk_seal_hash = "4" * 64
-    registry_key_hash = "5" * 64
-    final_hash = "a" * 64
-    manifest = {
-        "chunk_count": 1,
-        "derivation_version": "audit-export-derivation-v1",
-        "export_format": "json",
-        "exported_at": COMPLETED_AT_TEXT,
-        "final_hash": final_hash,
-        "hash_algorithm": "sha256",
-        "last_chunk_seal_hash": chunk_seal_hash,
-        "manifest_hash": manifest_hash,
-        "record_chain_algorithm": "sha256_concat_record_sha256_v1",
-        "record_count": 1,
-        "record_type": "manifest",
-        "registry_key_hash": registry_key_hash,
-        "run_id": "pg-export",
-        "schema": "elspeth.audit-export-manifest.v2",
-        "signature": None,
-        "signature_algorithm": "unsigned",
-        "signature_key_id": "UNSIGNED",
-        "snapshot_hash": snapshot_hash,
-        "snapshot_id": snapshot_id,
-        "snapshot_seal_hash": snapshot_seal_hash,
-        "source_completed_at": COMPLETED_AT_TEXT,
-        "source_status": "completed",
-        "total_bytes": len(chunk_bytes),
-    }
-    manifest_bytes = canonical_json(manifest).encode()
+class _MemoryContentStore:
+    content_store_id = "durable-store"
+    namespace = "audit/export"
+
+    def __init__(self) -> None:
+        self.content: dict[str, bytes] = {}
+
+    def is_durable(self) -> bool:
+        return True
+
+    def put_immutable(self, content: bytes, *, candidate_id: str, object_kind: str) -> str:
+        del candidate_id, object_kind
+        content_ref = f"sha256:{sha256(content).hexdigest()}"
+        self.content.setdefault(content_ref, content)
+        return content_ref
+
+    def open_registered(self, registration: RegisteredAuditExportContent) -> IterableBoundAuditExportContentReader:
+        return IterableBoundAuditExportContentReader(self.content[registration.descriptor.content_ref])
+
+    def mark_candidate_orphans(
+        self,
+        candidate_id: str,
+        descriptors: tuple[AuditExportContentDescriptor, ...],
+    ) -> None:
+        del candidate_id, descriptors
+
+    def garbage_collect_candidate(self, request: object) -> bool:
+        del request
+        return False
+
+
+def _candidate(store: _MemoryContentStore) -> AuditExportSnapshotCandidate:
+    bundle = derive_audit_export_bundle(
+        [{"record_type": "run"}],
+        AuditExportDerivationConfig(
+            source_run_id="pg-export",
+            source_status="completed",
+            source_completed_at=COMPLETED_AT_TEXT,
+            export_format="json",
+            exporter_version="landscape-exporter-v2",
+            serialization_version="audit-export-v2",
+            chunking_algorithm_version="complete-frame-v1",
+            include_raw_error_rows=False,
+            per_chunk_record_limit=100,
+            per_chunk_byte_limit=1024,
+            signing_mode="unsigned",
+            signer_key_id="UNSIGNED",
+            signing_key=None,
+        ),
+    )
+    for chunk in bundle.chunks:
+        assert (
+            store.put_immutable(
+                chunk.content,
+                candidate_id=bundle.snapshot_id,
+                object_kind="data_chunk",
+            )
+            == chunk.descriptor.content_ref
+        )
+    assert (
+        store.put_immutable(
+            bundle.signed_manifest_bytes,
+            candidate_id=bundle.snapshot_id,
+            object_kind="final_manifest",
+        )
+        == bundle.signed_manifest.content_ref
+    )
     snapshot = AuditExportSnapshot(
-        snapshot_id=snapshot_id,
+        snapshot_id=bundle.snapshot_id,
         source_run_id="pg-export",
         source_status=RunStatus.COMPLETED,
         source_completed_at=COMPLETED_AT,
         exported_at=COMPLETED_AT,
-        registry_key_hash=registry_key_hash,
+        registry_key_hash=bundle.registry_key_hash,
         exporter_version="landscape-exporter-v2",
         serialization_version="audit-export-v2",
         export_format=AuditExportFormat.JSON,
         signing_mode=AuditExportSigningMode.UNSIGNED,
         signer_key_id="UNSIGNED",
         derivation_version="audit-export-derivation-v1",
-        public_export_config_hash="6" * 64,
+        public_export_config_hash=bundle.public_export_config_hash,
         chunking_algorithm_version="complete-frame-v1",
         per_chunk_record_limit=100,
         per_chunk_byte_limit=1024,
         record_count=1,
-        total_bytes=len(chunk_bytes),
+        total_bytes=sum(chunk.descriptor.size_bytes for chunk in bundle.chunks),
         chunk_count=1,
         terminal_chunk_ordinal=0,
         content_store_id="durable-store",
-        manifest_hash=manifest_hash,
-        last_chunk_seal_hash=chunk_seal_hash,
-        snapshot_hash=snapshot_hash,
-        snapshot_seal_hash=snapshot_seal_hash,
+        manifest_hash=bundle.manifest_hash,
+        last_chunk_seal_hash=bundle.last_chunk_seal_hash,
+        snapshot_hash=bundle.snapshot_hash,
+        snapshot_seal_hash=bundle.snapshot_seal_hash,
         signature_hex=None,
         record_chain_algorithm="sha256_concat_record_sha256_v1",
-        final_hash=final_hash,
+        final_hash=bundle.final_hash,
         signed_manifest_schema="elspeth.audit-export-manifest.v2",
-        signed_manifest_hash=sha256(manifest_bytes).hexdigest(),
-        signed_manifest_ref=f"sha256:{sha256(manifest_bytes).hexdigest()}",
-        signed_manifest_size_bytes=len(manifest_bytes),
+        signed_manifest_hash=bundle.signed_manifest.content_hash,
+        signed_manifest_ref=bundle.signed_manifest.content_ref,
+        signed_manifest_size_bytes=bundle.signed_manifest.size_bytes,
     )
-    chunk = AuditExportSnapshotChunk(
-        snapshot_id=snapshot_id,
-        ordinal=0,
-        content_ref=f"sha256:{chunk_hash}",
-        content_hash=chunk_hash,
-        size_bytes=len(chunk_bytes),
-        record_count=1,
-        predecessor_seal_hash=None,
-        cumulative_records=1,
-        cumulative_bytes=len(chunk_bytes),
-        chunk_seal_hash=chunk_seal_hash,
+    chunks = tuple(
+        AuditExportSnapshotChunk(
+            snapshot_id=bundle.snapshot_id,
+            ordinal=chunk.ordinal,
+            content_ref=chunk.descriptor.content_ref,
+            content_hash=chunk.descriptor.content_hash,
+            size_bytes=chunk.descriptor.size_bytes,
+            record_count=chunk.record_count,
+            predecessor_seal_hash=chunk.predecessor_seal_hash,
+            cumulative_records=chunk.cumulative_records,
+            cumulative_bytes=chunk.cumulative_bytes,
+            chunk_seal_hash=chunk.chunk_seal_hash,
+        )
+        for chunk in bundle.chunks
     )
-    return AuditExportSnapshotCandidate(snapshot=snapshot, chunks=(chunk,))
+    return AuditExportSnapshotCandidate(snapshot=snapshot, chunks=chunks)
 
 
 def test_postgres_concurrent_registry_cas_uses_distinct_backends_and_one_winner(postgres_db: LandscapeDB) -> None:
     _seed_run(postgres_db)
-    candidate = _candidate()
+    store = _MemoryContentStore()
+    resolver = AuditExportContentStoreResolver()
+    resolver.register(store)
+    candidate = _candidate(store)
     barrier = threading.Barrier(2)
     pids: list[int] = []
 
@@ -156,7 +201,13 @@ def test_postgres_concurrent_registry_cas_uses_distinct_backends_and_one_winner(
         with postgres_db.engine.begin() as connection:
             pids.append(int(connection.exec_driver_sql("SELECT pg_backend_pid()").scalar_one()))
             barrier.wait(timeout=20)
-            registration = AuditExportSnapshotRepository().register_candidate(connection, candidate)
+            registration = AuditExportSnapshotRepository().register_candidate(
+                connection,
+                candidate,
+                content_store_resolver=resolver,
+                limits=AuditExportSnapshotReadLimits(),
+                signed_manifest_verifier=lambda _content, _descriptor: None,
+            )
             return registration.inserted, registration.winner.snapshot.snapshot_id
 
     with ThreadPoolExecutor(max_workers=2) as pool:

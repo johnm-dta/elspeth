@@ -59,6 +59,7 @@ if TYPE_CHECKING:
         ResumePoint,
         SecretResolutionInput,
     )
+    from elspeth.contracts.audit_export import AuditExportContentStore, AuditExportContentStoreResolver
     from elspeth.contracts.config.runtime import RuntimeCheckpointConfig, RuntimeConcurrencyConfig
     from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.payload_store import PayloadStore
@@ -207,6 +208,8 @@ class Orchestrator:
         settings: ElspethSettings | None = None,
         *,
         payload_store: PayloadStore,
+        audit_export_content_store: AuditExportContentStore | None = None,
+        audit_export_content_store_resolver: AuditExportContentStoreResolver | None = None,
         secret_resolutions: list[SecretResolutionInput] | None = None,
         preflight_results: PreflightResult | None = None,
         shutdown_event: threading.Event | None = None,
@@ -259,6 +262,8 @@ class Orchestrator:
             graph,
             settings,
             payload_store=payload_store,
+            audit_export_content_store=audit_export_content_store,
+            audit_export_content_store_resolver=audit_export_content_store_resolver,
             secret_resolutions=secret_resolutions,
             preflight_results=preflight_results,
             shutdown_event=shutdown_event,

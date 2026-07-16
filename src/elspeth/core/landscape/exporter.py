@@ -424,6 +424,11 @@ class LandscapeExporter:
             raise ValueError("derivation config source_run_id does not match requested run")
         return derive_audit_export_bundle(self._iter_records(run_id), derivation_config)
 
+    def iter_unsigned_run_records(self, run_id: str) -> Iterator[ExportRecord]:
+        """Yield the deterministic unsigned record stream for bounded derivation."""
+
+        yield from self._iter_records(run_id)
+
     def iter_run_records_by_type(
         self,
         run_id: str,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from io import BytesIO
 
 import pytest
 
@@ -16,6 +17,7 @@ from elspeth.contracts.audit_export import (
     C,
     H,
     derive_audit_export_bundle,
+    derive_audit_export_bundle_to_spool,
     derive_public_export_config_hash,
     derive_registry_key_hash,
     final_manifest_identity_payload,
@@ -306,6 +308,7 @@ def _golden_config(
     signing_mode: str = "unsigned",
     signer_key_id: str = "UNSIGNED",
     signing_key: bytes | None = None,
+    per_chunk_record_limit: int = 1_000,
 ) -> AuditExportDerivationConfig:
     return AuditExportDerivationConfig(
         source_run_id="run-golden-001",
@@ -317,7 +320,7 @@ def _golden_config(
         chunking_algorithm_version="record-framing-v1",
         include_raw_error_rows=False,
         per_chunk_byte_limit=1_048_576,
-        per_chunk_record_limit=1_000,
+        per_chunk_record_limit=per_chunk_record_limit,
         signing_mode=signing_mode,  # type: ignore[arg-type]
         signer_key_id=signer_key_id,
         signing_key=signing_key,
@@ -500,3 +503,47 @@ def test_hmac_end_to_end_literal_derivation_vector() -> None:
     assert bundle.signed_manifest.content_hash == "cd9ed845731e32330b38b45ccd387d85aed5fcddf0ca9b800c32253ebb8eaa89"
     assert bundle.signed_manifest.content_ref == ("sha256:cd9ed845731e32330b38b45ccd387d85aed5fcddf0ca9b800c32253ebb8eaa89")
     assert bundle.signed_manifest.size_bytes == 1181
+
+
+@pytest.mark.parametrize("signed", [False, True])
+def test_spooled_derivation_writes_completed_chunks_before_consuming_all_records(signed: bool) -> None:
+    spool = BytesIO()
+    config = (
+        _golden_config(
+            signing_mode="hmac_sha256",
+            signer_key_id="audit-key-v1",
+            signing_key=b"golden-test-key",
+            per_chunk_record_limit=1,
+        )
+        if signed
+        else _golden_config(per_chunk_record_limit=1)
+    )
+    second = {**_golden_record(), "run_id": "run-golden-002"}
+
+    def records():
+        yield _golden_record()
+        assert spool.tell() > 0
+        yield second
+
+    spooled = derive_audit_export_bundle_to_spool(
+        records(),
+        config,
+        spool,
+        max_total_records=2,
+        max_total_bytes=4096,
+        max_chunks=2,
+    )
+    materialized = derive_audit_export_bundle((_golden_record(), second), config)
+
+    assert spooled.snapshot_id == materialized.snapshot_id
+    assert spooled.snapshot_hash == materialized.snapshot_hash
+    assert spooled.manifest_hash == materialized.manifest_hash
+    assert spooled.snapshot_seal_hash == materialized.snapshot_seal_hash
+    assert spooled.final_hash == materialized.final_hash
+    assert spooled.record_chain_algorithm == materialized.record_chain_algorithm
+    assert spooled.signing_body == materialized.signing_body
+    assert spooled.signed_manifest_bytes == materialized.signed_manifest_bytes
+    assert tuple(spool.getvalue()[offset : offset + size] for offset, size in spooled.chunk_offsets) == materialized.chunk_bytes
+    assert [chunk.chunk_seal_hash for chunk in spooled.chunks] == [chunk.chunk_seal_hash for chunk in materialized.chunks]
+    assert "record_frames" not in type(spooled).__dataclass_fields__
+    assert "content" not in type(spooled.chunks[0]).__dataclass_fields__

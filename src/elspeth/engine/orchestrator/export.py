@@ -18,16 +18,13 @@ LandscapeDB is typed but imported conditionally to avoid circular imports.
 
 from __future__ import annotations
 
-import csv
 import os
-from collections.abc import Callable, Iterator, Mapping
-from pathlib import Path
-from tempfile import TemporaryFile
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol
-    from elspeth.contracts.audit_export import AuditExportContentStore
+    from elspeth.contracts.audit_export import AuditExportContentStore, AuditExportContentStoreResolver
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.sink_effects import SinkEffectRuntimeBinding
     from elspeth.core.config import ElspethSettings
@@ -46,83 +43,6 @@ from elspeth.engine.orchestrator.schema_reconstruction import (
 from elspeth.engine.orchestrator.schema_reconstruction import (
     reconstruct_schema_from_json as reconstruct_schema_from_json,
 )
-
-_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
-_CSV_FORMULA_ESCAPE_PREFIX = "'"
-
-
-def _neutralize_csv_formula_cell(value: Any) -> Any:
-    """Prefix spreadsheet-formula-looking string cells for CSV audit exports."""
-    if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
-        return f"{_CSV_FORMULA_ESCAPE_PREFIX}{value}"
-    return value
-
-
-def _neutralize_csv_formula_record(record: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a copy with spreadsheet-executable string cells neutralized."""
-    return {key: _neutralize_csv_formula_cell(value) for key, value in record.items()}
-
-
-class _CsvRecordTypeSpool:
-    """Bounded-memory spool for one CSV record type."""
-
-    def __init__(self) -> None:
-        self._file = TemporaryFile("w+", newline="", encoding="utf-8")  # noqa: SIM115 - spool owns and closes this file
-        self._writer = csv.writer(self._file)
-        self.fieldnames: set[str] = set()
-        self.count = 0
-
-    def append(self, record: dict[str, Any]) -> None:
-        self.fieldnames.update(record.keys())
-        self._writer.writerow([len(record)])
-        for key, value in record.items():
-            self._writer.writerow([key, value])
-        self.count += 1
-
-    def iter_records(self) -> Iterator[dict[str, Any]]:
-        self._file.seek(0)
-        reader = csv.reader(self._file)
-        while True:
-            try:
-                size_row = next(reader)
-            except StopIteration:
-                return
-            if len(size_row) != 1:
-                raise ValueError("CSV export spool is corrupt: record size row must have one column")
-            field_count = int(size_row[0])
-            record: dict[str, Any] = {}
-            for _ in range(field_count):
-                try:
-                    key, value = next(reader)
-                except StopIteration as exc:
-                    raise ValueError("CSV export spool is corrupt: record ended early") from exc
-                record[key] = value
-            yield record
-
-    def close(self) -> None:
-        self._file.close()
-
-
-class _FileSystemCsvAuditExportWriter:
-    """Filesystem-backed writer for the multi-file CSV audit export capability."""
-
-    def __init__(self, artifact_path: str) -> None:
-        self._artifact_path = artifact_path
-
-    @classmethod
-    def from_sink(cls, *, sink_name: str, sink: SinkProtocol) -> _FileSystemCsvAuditExportWriter:
-        artifact_path = sink.config.get("path")
-        if not isinstance(artifact_path, str) or not artifact_path:
-            raise ValueError(f"CSV export requires file-based sink with 'path' in config, but sink '{sink_name}' has no path configured")
-        return cls(artifact_path)
-
-    def write(self, *, exporter: Any, run_id: str, sign: bool) -> None:
-        _export_csv_multifile(
-            exporter=exporter,
-            run_id=run_id,
-            artifact_path=self._artifact_path,
-            sign=sign,
-        )
 
 
 def prepare_audit_export_binding(
@@ -180,6 +100,7 @@ def export_landscape(
     *,
     payload_store: PayloadStore,
     audit_export_content_store: AuditExportContentStore,
+    audit_export_content_store_resolver: AuditExportContentStoreResolver,
     prepared_binding: SinkEffectRuntimeBinding | None = None,
     sink_effect_admission: object | None = None,
 ) -> None:
@@ -203,7 +124,7 @@ def export_landscape(
         ValueError: If signing requested but ELSPETH_SIGNING_KEY not set,
                    or if sink_factory raises for the configured sink name
     """
-    from elspeth.contracts.audit_export import AuditExportContentStore
+    from elspeth.contracts.audit_export import AuditExportContentStore, AuditExportContentStoreResolver
     from elspeth.core.landscape.factory import RecorderFactory
     from elspeth.engine.orchestrator.audit_export_effects import execute_audit_export_effect, prepare_audit_export_snapshot
 
@@ -213,6 +134,9 @@ def export_landscape(
         raise TypeError("audit_export_content_store must implement AuditExportContentStore")
     if not audit_export_content_store.is_durable():
         raise ValueError("audit_export_content_store must prove durability")
+    if type(audit_export_content_store_resolver) is not AuditExportContentStoreResolver:
+        raise TypeError("audit_export_content_store_resolver must be exact AuditExportContentStoreResolver")
+    audit_export_content_store_resolver.register(audit_export_content_store)
     configured_store = export_config.content_store
     if configured_store is None:
         raise ValueError("audit export requires an explicit durable content_store policy")
@@ -254,6 +178,7 @@ def export_landscape(
         config=export_config,
         signing_key=signing_key,
         content_store=audit_export_content_store,
+        content_store_resolver=audit_export_content_store_resolver,
     )
 
     sink.node_id = f"export:{sink_name}"
@@ -285,58 +210,3 @@ def export_landscape(
         )
     finally:
         sink.close()
-
-
-def _export_csv_multifile(
-    exporter: Any,  # LandscapeExporter (avoid circular import in type hint)
-    run_id: str,
-    artifact_path: str,
-    sign: bool,
-) -> None:
-    """Export audit trail as multiple CSV files (one per record type).
-
-    Creates a directory at the artifact path, then writes
-    separate CSV files for each record type (run.csv, nodes.csv, etc.).
-
-    Args:
-        exporter: LandscapeExporter instance
-        run_id: The completed run ID
-        artifact_path: Path from sink config (validated by caller)
-        sign: Whether to sign records
-    """
-    from elspeth.core.landscape.formatters import CSVFormatter
-
-    export_dir = Path(artifact_path)
-    if export_dir.suffix:
-        # Remove file extension if present, treat as directory
-        export_dir = export_dir.with_suffix("")
-
-    export_dir.mkdir(parents=True, exist_ok=True)
-
-    formatter = CSVFormatter()
-    spools: dict[str, _CsvRecordTypeSpool] = {}
-
-    try:
-        for record_type, record in exporter.iter_run_records_by_type(run_id, sign=sign):
-            spool = spools.get(record_type)
-            if spool is None:
-                spool = _CsvRecordTypeSpool()
-                spools[record_type] = spool
-            spool.append(_neutralize_csv_formula_record(formatter.format(record)))
-
-        # Write each record type to its own CSV file.
-        for record_type, spool in spools.items():
-            if spool.count == 0:
-                continue
-
-            csv_path = export_dir / f"{record_type}.csv"
-            fieldnames = sorted(spool.fieldnames)  # Sorted for determinism
-
-            with open(csv_path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                for rec in spool.iter_records():
-                    writer.writerow(rec)
-    finally:
-        for spool in spools.values():
-            spool.close()

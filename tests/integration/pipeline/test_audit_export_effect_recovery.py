@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from types import MappingProxyType
+from typing import cast
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import func, select
 
 from elspeth.contracts import NodeType
 from elspeth.contracts.audit_export import (
     AuditExportContentDescriptor,
+    AuditExportContentStoreResolver,
     IterableBoundAuditExportContentReader,
     RegisteredAuditExportContent,
 )
@@ -22,6 +26,7 @@ from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.contracts.sink_effects import (
     SINK_EFFECT_PROTOCOL_VERSION,
     RestrictedSinkEffectContext,
+    SinkEffectAuditExportSnapshotInput,
     SinkEffectCommitResult,
     SinkEffectDescriptorMode,
     SinkEffectInspection,
@@ -34,7 +39,7 @@ from elspeth.contracts.sink_effects import (
 from elspeth.core.config import AuditExportContentStoreSettings, LandscapeExportSettings
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.core.landscape.schema import runs_table
+from elspeth.core.landscape.schema import audit_export_snapshots_table, runs_table
 from elspeth.engine.executors.sink_effects import SinkEffectExecutionSeam, SinkEffectInjectedFault
 from elspeth.engine.orchestrator.audit_export_effects import execute_audit_export_effect, prepare_audit_export_snapshot
 from tests.fixtures.landscape import register_test_node
@@ -43,10 +48,9 @@ _COMPLETED_AT = datetime(2026, 7, 16, 7, 8, 9, 123456, tzinfo=UTC)
 
 
 class _MemoryContentStore:
-    content_store_id = "audit-store-v1"
-    namespace = "audit/export"
-
-    def __init__(self) -> None:
+    def __init__(self, content_store_id: str = "audit-store-v1") -> None:
+        self.content_store_id = content_store_id
+        self.namespace = "audit/export"
         self.content: dict[str, bytes] = {}
         self.put_count = 0
         self.orphans: list[tuple[str, tuple[AuditExportContentDescriptor, ...]]] = []
@@ -107,8 +111,7 @@ class _AuditExportSink:
         ctx: RestrictedSinkEffectContext,
     ) -> SinkEffectPlan:
         del ctx
-        snapshot = request.effect_input
-        assert hasattr(snapshot, "reader")
+        snapshot = cast(SinkEffectAuditExportSnapshotInput, request.effect_input)
         content = b"".join(snapshot.reader.iter_verified_chunks()) + snapshot.reader.read_verified_signed_manifest()
         descriptor = ArtifactDescriptor(
             artifact_type="file",
@@ -175,8 +178,8 @@ def _insert_terminal_run(db: LandscapeDB, run_id: str = "run-export") -> None:
         )
 
 
-def _config() -> LandscapeExportSettings:
-    return LandscapeExportSettings(
+def _config(**overrides: object) -> LandscapeExportSettings:
+    config = LandscapeExportSettings(
         enabled=True,
         sink="output",
         format="json",
@@ -203,6 +206,44 @@ def _config() -> LandscapeExportSettings:
             orphan_grace_period_seconds=3600,
         ),
     )
+    return config.model_copy(update=overrides)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    (
+        ({"total_record_limit": 1, "per_chunk_record_limit": 1}, "max_total_records"),
+        ({"total_byte_limit": 700, "per_chunk_byte_limit": 700}, "max_total_bytes"),
+        ({"chunk_limit": 1, "per_chunk_record_limit": 1}, "max_chunks"),
+    ),
+)
+def test_configured_total_limits_fail_before_content_store_or_registry_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: dict[str, int],
+    error: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'bounded.db'}")
+    store = _MemoryContentStore()
+    try:
+        _insert_terminal_run(db)
+        register_test_node(RecorderFactory(db).data_flow, "run-export", "one-record-is-already-too-many")
+
+        with pytest.raises(ValueError, match=error):
+            prepare_audit_export_snapshot(
+                db,
+                run_id="run-export",
+                config=_config(**overrides),
+                signing_key=None,
+                content_store=store,
+            )
+
+        assert store.put_count == 0
+        with db.engine.connect() as connection:
+            assert connection.scalar(select(func.count()).select_from(audit_export_snapshots_table)) == 0
+    finally:
+        db.close()
 
 
 def test_registry_hit_reuses_verified_winner_without_rewriting_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -235,6 +276,80 @@ def test_registry_hit_reuses_verified_winner_without_rewriting_content(tmp_path:
         assert store.put_count == put_count
         assert b"".join(second.reader.iter_verified_chunks()).endswith(b"\n")
         assert second.reader.read_verified_signed_manifest().endswith(b"}")
+    finally:
+        db.close()
+
+
+def test_hmac_snapshot_streaming_derivation_and_production_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'hmac.db'}")
+    store = _MemoryContentStore()
+    try:
+        _insert_terminal_run(db)
+        snapshot = prepare_audit_export_snapshot(
+            db,
+            run_id="run-export",
+            config=_config(
+                signing_mode="hmac_sha256",
+                signer_key_id="audit-key-v1",
+                signing_secret_ref="AUDIT_EXPORT_TEST_KEY",
+            ),
+            signing_key=b"integration-signing-key",
+            content_store=store,
+        )
+
+        record = json.loads(next(snapshot.reader.iter_verified_chunks()))
+        manifest = json.loads(snapshot.reader.read_verified_signed_manifest())
+        assert isinstance(record["signature"], str) and len(record["signature"]) == 64
+        assert isinstance(manifest["signature"], str) and len(manifest["signature"]) == 64
+    finally:
+        db.close()
+
+
+def test_rotated_store_reuses_prior_winner_only_through_persistent_resolver(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'rotation.db'}")
+    old_store = _MemoryContentStore("audit-store-v1")
+    new_store = _MemoryContentStore("audit-store-v2")
+    resolver = AuditExportContentStoreResolver()
+    try:
+        _insert_terminal_run(db)
+        first = prepare_audit_export_snapshot(
+            db,
+            run_id="run-export",
+            config=_config(),
+            signing_key=None,
+            content_store=old_store,
+            content_store_resolver=resolver,
+        )
+        second = prepare_audit_export_snapshot(
+            db,
+            run_id="run-export",
+            config=_config(),
+            signing_key=None,
+            content_store=new_store,
+            content_store_resolver=resolver,
+        )
+
+        assert second.snapshot_id == first.snapshot_id
+        assert new_store.put_count == 0
+        assert b"".join(second.reader.iter_verified_chunks()).endswith(b"\n")
+
+        with pytest.raises(LookupError, match=r"audit-store-v1.*unresolvable"):
+            prepare_audit_export_snapshot(
+                db,
+                run_id="run-export",
+                config=_config(),
+                signing_key=None,
+                content_store=new_store,
+                content_store_resolver=AuditExportContentStoreResolver(),
+            )
     finally:
         db.close()
 

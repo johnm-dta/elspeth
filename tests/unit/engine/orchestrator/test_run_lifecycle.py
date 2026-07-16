@@ -5,12 +5,14 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from elspeth.contracts.audit_export import AuditExportContentStoreResolver
 from elspeth.engine.orchestrator.run_lifecycle import RunLifecycleCoordinator
 
 
 def test_execute_export_phase_forwards_explicit_payload_and_content_stores() -> None:
     payload_store = object()
     content_store = object()
+    content_store_resolver = AuditExportContentStoreResolver()
     settings = SimpleNamespace(
         landscape=SimpleNamespace(export=SimpleNamespace(sink="archive", format="json")),
     )
@@ -37,7 +39,9 @@ def test_execute_export_phase_forwards_explicit_payload_and_content_stores() -> 
             Mock(),
             payload_store=payload_store,
             audit_export_content_store=content_store,
+            audit_export_content_store_resolver=content_store_resolver,
         )
 
     assert export.call_args.kwargs["payload_store"] is payload_store
     assert export.call_args.kwargs["audit_export_content_store"] is content_store
+    assert export.call_args.kwargs["audit_export_content_store_resolver"] is content_store_resolver

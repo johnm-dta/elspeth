@@ -12,7 +12,6 @@ The schema reconstruction functions are pure logic — no mocks needed.
 from __future__ import annotations
 
 import ast
-import csv
 import json
 from contextlib import contextmanager
 from dataclasses import replace
@@ -27,17 +26,15 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
+from elspeth.contracts.audit_export import AuditExportContentStoreResolver
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.sink_effects import SINK_EFFECT_PROTOCOL_VERSION, SinkEffectInputKind
 from elspeth.engine.orchestrator.export import (
-    _export_csv_multifile,
-    prepare_audit_export_binding,
-)
-from elspeth.engine.orchestrator.export import (
     export_landscape as _production_export_landscape,
 )
+from elspeth.engine.orchestrator.export import prepare_audit_export_binding
 from elspeth.engine.orchestrator.preflight import (
     ResolvedSinkEffectMode,
     SinkEffectCapabilityError,
@@ -149,25 +146,16 @@ class _AuditContentStoreDouble:
 
 _TEST_PAYLOAD_STORE = object()
 _TEST_AUDIT_CONTENT_STORE = _AuditContentStoreDouble()
+_TEST_AUDIT_CONTENT_STORE_RESOLVER = AuditExportContentStoreResolver()
+_TEST_AUDIT_CONTENT_STORE_RESOLVER.register(_TEST_AUDIT_CONTENT_STORE)
 
 
 def export_landscape(*args: Any, **kwargs: Any) -> None:
     """Keep existing unit scenarios explicit without repeating resource doubles."""
     kwargs.setdefault("payload_store", _TEST_PAYLOAD_STORE)
     kwargs.setdefault("audit_export_content_store", _TEST_AUDIT_CONTENT_STORE)
+    kwargs.setdefault("audit_export_content_store_resolver", _TEST_AUDIT_CONTENT_STORE_RESOLVER)
     _production_export_landscape(*args, **kwargs)
-
-
-class _ExporterDouble:
-    def __init__(self, grouped: dict[str, list[dict[str, Any]]]) -> None:
-        self.export_run_grouped = _CallRecorder(return_value=grouped)
-        self.iter_run_records_by_type = _CallRecorder(return_value=self._iter_run_records_by_type(grouped))
-
-    @staticmethod
-    def _iter_run_records_by_type(grouped: dict[str, list[dict[str, Any]]]) -> Any:
-        for record_type, records in grouped.items():
-            for record in records:
-                yield record_type, record
 
 
 def _make_settings(*, fmt: str = "json", sign: bool = False, sink: str = "output", include_raw_error_rows: bool = False) -> Any:
@@ -270,6 +258,8 @@ class _LegacyExportLandscapeJSON:
         sink, factory = _make_sink_and_factory()
         payload_store = object()
         audit_content_store = _AuditContentStoreDouble()
+        audit_content_store_resolver = AuditExportContentStoreResolver()
+        audit_content_store_resolver.register(audit_content_store)
 
         class StopAfterExporterConstruction(Exception):
             pass
@@ -289,6 +279,7 @@ class _LegacyExportLandscapeJSON:
                 factory,
                 payload_store=payload_store,
                 audit_export_content_store=audit_content_store,
+                audit_export_content_store_resolver=audit_content_store_resolver,
             )
 
         recorder_factory.assert_called_once_with(exporter.call_args.args[0], payload_store=payload_store)
@@ -700,294 +691,15 @@ class _LegacyExportLandscapeJSON:
         sink.close.assert_called_once()
 
 
-# =============================================================================
-# export_landscape — CSV format
-# =============================================================================
+def test_export_module_has_no_direct_filesystem_csv_path() -> None:
+    repo_root = Path(__file__).parents[4]
+    path = repo_root / "src/elspeth/engine/orchestrator/export.py"
+    tree = ast.parse(path.read_text(), filename=str(path))
+    obsolete_names = {"_FileSystemCsvAuditExportWriter", "_CsvRecordTypeSpool", "_export_csv_multifile"}
 
+    defined_names = {node.name for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef))}
 
-class _LegacyExportLandscapeCSV:
-    """Tests for export_landscape with CSV format."""
-
-    def _make_settings(self, *, sink: str = "output", sign: bool = False) -> Any:
-        return _make_settings(fmt="csv", sign=sign, sink=sink)
-
-    def test_csv_export_requires_path_in_sink_config(self) -> None:
-        """CSV export needs file-based sink with 'path' config."""
-        db = object()
-        settings = self._make_settings()
-        _sink, factory = _make_sink_and_factory()
-
-        with (
-            patch("elspeth.core.landscape.exporter.LandscapeExporter"),
-            pytest.raises(ValueError, match="CSV export requires file-based sink"),
-        ):
-            export_landscape(db, "run-1", settings, factory)
-
-    def test_csv_export_calls_multifile(self, tmp_path: Path) -> None:
-        """CSV format delegates to _export_csv_multifile."""
-        db = object()
-        settings = self._make_settings()
-        _sink, factory = _make_sink_and_factory(config={"path": str(tmp_path / "export.csv")})
-
-        with (
-            patch("elspeth.core.landscape.exporter.LandscapeExporter"),
-            patch("elspeth.engine.orchestrator.export._export_csv_multifile") as mock_csv,
-        ):
-            export_landscape(db, "run-1", settings, factory)
-
-        mock_csv.assert_called_once()
-        call_kwargs = mock_csv.call_args
-        assert call_kwargs.kwargs["run_id"] == "run-1"
-
-    def test_csv_export_uses_sink_lifecycle_around_multifile_writer(self, tmp_path: Path) -> None:
-        """CSV export keeps sink lifecycle even when the writer owns multi-file output."""
-        db = object()
-        settings = self._make_settings()
-        sink, factory = _make_sink_and_factory(config={"path": str(tmp_path / "export.csv")})
-
-        with (
-            patch("elspeth.core.landscape.exporter.LandscapeExporter"),
-            patch("elspeth.engine.orchestrator.export.track_operation", _noop_track_operation),
-            patch("elspeth.engine.orchestrator.export._export_csv_multifile"),
-        ):
-            export_landscape(db, "run-1", settings, factory)
-
-        sink.on_start.assert_called_once()
-        sink.flush.assert_called_once()
-        sink.on_complete.assert_called_once()
-        sink.close.assert_called_once()
-
-    def test_export_landscape_does_not_read_csv_sink_path_directly(self) -> None:
-        """Path extraction belongs behind the CSV audit-export writer boundary."""
-        repo_root = Path(__file__).parents[4]
-        path = repo_root / "src/elspeth/engine/orchestrator/export.py"
-        tree = ast.parse(path.read_text(), filename=str(path))
-        export_func = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "export_landscape")
-
-        offenders: list[str] = []
-        for node in ast.walk(export_func):
-            if (
-                isinstance(node, ast.Subscript)
-                and isinstance(node.value, ast.Attribute)
-                and isinstance(node.value.value, ast.Name)
-                and node.value.value.id == "sink"
-                and node.value.attr == "config"
-            ):
-                offenders.append(f"{path.relative_to(repo_root)}:{node.lineno}:sink.config[...]")
-
-        assert offenders == []
-
-
-# =============================================================================
-# _export_csv_multifile
-# =============================================================================
-
-
-class TestExportCSVMultifile:
-    """Tests for the CSV multi-file export helper."""
-
-    def test_creates_export_directory(self, tmp_path: Path) -> None:
-        """Export creates the target directory."""
-        export_dir = tmp_path / "audit_export"
-        exporter = _ExporterDouble({})
-        _export_csv_multifile(
-            exporter=exporter,
-            run_id="run-1",
-            artifact_path=str(export_dir),
-            sign=False,
-        )
-
-        assert export_dir.exists()
-
-    def test_strips_file_extension_from_path(self, tmp_path: Path) -> None:
-        """If path has an extension, it's stripped (treated as directory name)."""
-        export_path = tmp_path / "output.csv"
-        exporter = _ExporterDouble({})
-        _export_csv_multifile(
-            exporter=exporter,
-            run_id="run-1",
-            artifact_path=str(export_path),
-            sign=False,
-        )
-
-        # Directory should be "output" (no .csv extension)
-        expected_dir = tmp_path / "output"
-        assert expected_dir.exists()
-        assert expected_dir.is_dir()
-
-    def test_writes_grouped_records_to_separate_files(self, tmp_path: Path) -> None:
-        """Each record type gets its own CSV file."""
-        export_dir = tmp_path / "export"
-
-        exporter = _ExporterDouble(
-            {
-                "runs": [{"run_id": "r1", "status": "completed"}],
-                "nodes": [
-                    {"node_id": "n1", "type": "source"},
-                    {"node_id": "n2", "type": "sink"},
-                ],
-            }
-        )
-        _export_csv_multifile(
-            exporter=exporter,
-            run_id="run-1",
-            artifact_path=str(export_dir),
-            sign=False,
-        )
-
-        # Check files exist
-        assert (export_dir / "runs.csv").exists()
-        assert (export_dir / "nodes.csv").exists()
-
-        # Verify runs.csv content
-        with open(export_dir / "runs.csv") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-        assert len(rows) == 1
-        assert rows[0]["run_id"] == "r1"
-
-        # Verify nodes.csv content
-        with open(export_dir / "nodes.csv") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-        assert len(rows) == 2
-
-    def test_streams_csv_records_without_grouped_materializer(self, tmp_path: Path) -> None:
-        """CSV export consumes typed records instead of whole-run grouped lists."""
-        export_dir = tmp_path / "export"
-        exporter = _ExporterDouble(
-            {
-                "rows": [
-                    {"row_id": "r1", "source_data_hash": "h1"},
-                    {"row_id": "r2", "source_data_hash": "h2"},
-                ]
-            }
-        )
-        exporter.export_run_grouped.side_effect = AssertionError("export_run_grouped materializes the full run")
-
-        _export_csv_multifile(
-            exporter=exporter,
-            run_id="run-1",
-            artifact_path=str(export_dir),
-            sign=False,
-        )
-
-        exporter.iter_run_records_by_type.assert_called_once_with("run-1", sign=False)
-        with open(export_dir / "rows.csv") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-
-        assert rows == [
-            {"row_id": "r1", "source_data_hash": "h1"},
-            {"row_id": "r2", "source_data_hash": "h2"},
-        ]
-
-    def test_empty_record_types_skipped(self, tmp_path: Path) -> None:
-        """Record types with empty lists don't produce files."""
-        export_dir = tmp_path / "export"
-
-        exporter = _ExporterDouble(
-            {
-                "runs": [{"run_id": "r1"}],
-                "empty_type": [],
-            }
-        )
-        _export_csv_multifile(
-            exporter=exporter,
-            run_id="run-1",
-            artifact_path=str(export_dir),
-            sign=False,
-        )
-
-        assert (export_dir / "runs.csv").exists()
-        assert not (export_dir / "empty_type.csv").exists()
-
-    def test_csv_fieldnames_sorted_for_determinism(self, tmp_path: Path) -> None:
-        """CSV headers are sorted alphabetically for deterministic output."""
-        export_dir = tmp_path / "export"
-
-        exporter = _ExporterDouble(
-            {
-                "data": [{"zebra": "z", "alpha": "a", "mid": "m"}],
-            }
-        )
-        _export_csv_multifile(
-            exporter=exporter,
-            run_id="run-1",
-            artifact_path=str(export_dir),
-            sign=False,
-        )
-
-        with open(export_dir / "data.csv") as f:
-            reader = csv.reader(f)
-            headers = next(reader)
-        assert headers == ["alpha", "mid", "zebra"]
-
-    def test_union_of_all_keys_used_as_fieldnames(self, tmp_path: Path) -> None:
-        """Records with different keys produce union of all keys as headers."""
-        export_dir = tmp_path / "export"
-
-        exporter = _ExporterDouble(
-            {
-                "mixed": [
-                    {"common": "c1", "only_a": "a1"},
-                    {"common": "c2", "only_b": "b1"},
-                ],
-            }
-        )
-        _export_csv_multifile(
-            exporter=exporter,
-            run_id="run-1",
-            artifact_path=str(export_dir),
-            sign=False,
-        )
-
-        with open(export_dir / "mixed.csv") as f:
-            reader = csv.reader(f)
-            headers = next(reader)
-        assert sorted(headers) == ["common", "only_a", "only_b"]
-
-    def test_csv_cells_neutralize_spreadsheet_formula_prefixes(self, tmp_path: Path) -> None:
-        """CSV audit export neutralizes untrusted strings that spreadsheets execute."""
-        export_dir = tmp_path / "export"
-        dangerous_values = {
-            "row_data_json": '=HYPERLINK("https://example.test","click")',
-            "error_details_json": "+SUM(1,2)",
-            "negative": "-10+2",
-            "mention": "@cmd",
-            "tabbed": "\t=SUM(1,1)",
-            "carriage_return": "\r=SUM(1,1)",
-            "line_feed": "\n=SUM(1,1)",
-        }
-
-        exporter = _ExporterDouble(
-            {
-                "validation_errors": [
-                    {
-                        **dangerous_values,
-                        "nested": {"message": '=cmd|"/C calc"!A0'},
-                        "safe": "ordinary audit text",
-                        "count": 3,
-                    }
-                ],
-            }
-        )
-        _export_csv_multifile(
-            exporter=exporter,
-            run_id="run-1",
-            artifact_path=str(export_dir),
-            sign=False,
-        )
-
-        with open(export_dir / "validation_errors.csv", newline="") as f:
-            reader = csv.DictReader(f)
-            row = next(reader)
-
-        for field, value in dangerous_values.items():
-            assert row[field] == f"'{value}"
-        assert row["nested.message"] == '\'=cmd|"/C calc"!A0'
-        assert row["safe"] == "ordinary audit text"
-        assert row["count"] == "3"
+    assert defined_names.isdisjoint(obsolete_names)
 
 
 def test_export_module_does_not_define_resume_schema_reconstruction_helpers() -> None:

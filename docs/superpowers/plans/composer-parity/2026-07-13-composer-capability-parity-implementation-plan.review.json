@@ -1,14 +1,15 @@
 {
-  "verdict": "APPROVED",
-  "summary": "0 blocking issues, 0 warnings after three correction rounds",
+  "verdict": "STALE",
+  "historical_verdict": "APPROVED",
+  "summary": "Historical review passed, but the package is not executable against the current release baseline.",
+  "superseded_at": "2026-07-17",
+  "superseded_by": "docs/superpowers/plans/composer-parity/2026-07-17-current-plan-disposition.md",
   "plan_file": "docs/superpowers/plans/composer-parity/2026-07-13-composer-capability-parity-implementation-plan.md",
   "reviewed_at": "2026-07-13T05:25:48Z",
   "blocking_issues": [],
   "warnings": [],
   "recommendations": [
-    "Execute the seven slices in order and keep every slice green before starting its successor.",
-    "Treat schema epoch 28 as a forward-only pre-release state recreation boundary.",
-    "Close the controlling Filigree issue only after all three live surface proofs pass on one deployed revision."
+    "Do not execute this package; re-plan from the live release using the superseding disposition."
   ],
   "reviewer_summaries": {
     "reality": {

@@ -1,5 +1,10 @@
 # Composer Capability Parity — Implementation Prompt
 
+> **RETIRED EXECUTION PACKAGE (2026-07-17): DO NOT COPY OR EXECUTE.** This
+> prompt was reviewed against an obsolete release baseline and contains stale
+> schema, recovery, and deployment mechanics. See
+> [the current disposition](2026-07-17-current-plan-disposition.md).
+
 Copy the prompt below into a fresh implementation agent.
 
 ---

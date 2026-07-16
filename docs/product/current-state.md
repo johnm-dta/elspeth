@@ -22,7 +22,7 @@ coordinator completes Plan 12 and performs the planned final fast-forward.
   documentation indexes identify the 0.7.1 line.
 - `CHANGELOG.md` contains the release branch's Composer notes and the integrated
   schema-cutover correction; Plan 12 still owns the final AWS programme entry.
-- `SESSION_SCHEMA_EPOCH` is 27 and `SQLITE_SCHEMA_EPOCH` is 27. The integrated
+- `SESSION_SCHEMA_EPOCH` is 28 and `SQLITE_SCHEMA_EPOCH` is 27. The integrated
   candidate requires a two-database cutover from older schemas. Because ELSPETH
   is pre-1.0, neither database is migrated in place: archive/export when
   required, uninstall, recreate both stale stores, and reinstall.

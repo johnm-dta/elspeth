@@ -1491,7 +1491,7 @@ Scenario A uses the same field set with `scenario_id: "A"`; empty strings for
 
 The controller binds the record to the manifest, image digest, exact task
 and doctor definitions, candidate and previous package/image identities,
-session epoch 27, Landscape epoch 27 and `run_web_plugin_policy` presence,
+session epoch 28, Landscape epoch 27 and `run_web_plugin_policy` presence,
 change/reset facts, decision, two distinct approvals, and expiry. It
 stores only a sanitized receipt and document hash. Reopen and revalidate the
 raw record before init-capable doctor, ordinary doctor, candidate deploy, and
@@ -2553,31 +2553,22 @@ directly to `sanitize-evidence`; raw logs are never printed or persisted.
 
 ### 3. Apply the schema compatibility gate
 
-`--init-schema` may initialize the session schema only when it is MISSING; a
-partially present session schema is STALE. It may initialize a missing
-Landscape schema, but it is not a general structural migration tool. Exact
-epoch-23 and epoch-24 SQLite Landscapes are the sole current exceptions.
-Writable schema-managing startup validates each complete predecessor before
-checking out the raw migration connection. It uses `BEGIN IMMEDIATE` first to
-serialize the epoch-24 `tokens` rebuild and composite ownership FK, then to add
-the epoch-25 partial unique artifact-idempotency index. Each schema change and
-its fixed epoch target commit atomically; duplicate non-null artifact keys are
-refused without choosing or deleting audit data. Read-only and
-`create_tables=False` inspection opens never migrate. PostgreSQL has no runtime
-auto-migration: the schema owner must apply the approved epoch-24 FK and
-epoch-25 partial-index DDL or recreate/initialize before the candidate starts.
-Aurora detection is structural-only: a semantics-only schema-epoch change can
-still appear CURRENT.
+`--init-schema` may initialize a session or Landscape schema only when it is
+MISSING; a partially present or predecessor schema is STALE. Before 1.0 there
+are no SQLite or PostgreSQL in-place exceptions. Read-only and
+`create_tables=False` inspection opens report incompatibility without mutation.
+The database owner archives/exports required evidence, drops and recreates the
+store, then initializes the current release. Aurora detection is
+structural-only: a semantics-only schema-epoch change can still appear CURRENT.
 
 Attach the approved release/schema compatibility record before deployment.
 AWS ECS validate-only startup must fail closed before uvicorn binds for
 missing, partial, stale, or incompatible state. Code rollback cannot undo an
 incompatible database schema. STALE/incompatible state requires the
 database-operator-owned archive decision and drop/recreate procedure followed
-by `--init-schema`; never automate it. Archive before the SQLite 23→24→25
-forward migration. Once epoch 24 or 25 commits, rollback to the 0.7.0 epoch-23 image is
-forbidden; restore the matched epoch-23 archive with the old image or deploy a
-newer schema-compatible image instead.
+by `--init-schema`; never automate it. Predecessor archives are evidence, not
+recovery inputs for the current release. If the fresh candidate fails, fix it
+forward and repeat the uninstall/recreate/reinstall procedure.
 
 ### 4. Deploy exactly one candidate task
 

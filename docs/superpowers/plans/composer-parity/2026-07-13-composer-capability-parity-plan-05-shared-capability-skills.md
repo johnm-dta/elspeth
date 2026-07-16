@@ -1,5 +1,8 @@
 # Composer Capability Parity Plan 05: Shared Capability Skills Implementation Plan
 
+> **RETIRED (2026-07-17): DO NOT EXECUTE.** See
+> [the current disposition](2026-07-17-current-plan-disposition.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give freeform, guided-full, guided-staged, and tutorial-profile the same accurate capability knowledge, including typed multi-query LLM configuration and stage-aware guidance.

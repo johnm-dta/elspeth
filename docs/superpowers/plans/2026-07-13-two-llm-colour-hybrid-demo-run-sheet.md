@@ -1,5 +1,9 @@
 # Two-LLM Colour Hybrid Demonstration Implementation Plan
 
+> **HISTORICAL RUN SHEET (2026-07-17): DO NOT EXECUTE UNCHANGED.** Refresh it
+> from the live release when Composer parity is replanned; see
+> [the current disposition](composer-parity/2026-07-17-current-plan-disposition.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Run a live, auditable example in which ten colour rows split across two independently routed LLMs, merge into ten flat typed hybrid rows, and write clean JSON suitable for later statistical aggregation.

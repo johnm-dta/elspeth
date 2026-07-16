@@ -1,5 +1,9 @@
 # Composer Guided/Freeform Capability Parity Implementation Plan Set
 
+> **RETIRED EXECUTION PACKAGE (2026-07-17): DO NOT EXECUTE.** Preserve this as
+> historical design input only; re-plan from the live release as directed by
+> [the current disposition](2026-07-17-current-plan-disposition.md).
+
 > **For implementers:** Use `superpowers:subagent-driven-development` or
 > `superpowers:executing-plans`. Use `superpowers:test-driven-development` for
 > behavior changes and `superpowers:verification-before-completion` before each

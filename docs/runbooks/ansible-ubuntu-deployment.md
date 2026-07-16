@@ -2926,8 +2926,8 @@ and crashes the service with an actionable error if it diverges from the
 constant the running code expects:
 
 ```text
-SessionSchemaError: Session DB schema version 26 does not match
-SESSION_SCHEMA_EPOCH=27. Pre-release ELSPETH does not migrate session
+SessionSchemaError: Session DB schema version 27 does not match
+SESSION_SCHEMA_EPOCH=28. Pre-release ELSPETH does not migrate session
 databases. Delete the session DB file and restart.
 ```
 

@@ -2,11 +2,13 @@
 
 Use this runbook when a pre-1.0 schema change requires deleting or archiving stale `sessions.db` and Landscape databases. Any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must coordinate both databases in one service-stop window. Before 1.0, the supported upgrade is uninstall, archive/export when required, recreate, and reinstall; ELSPETH does not migrate either database in place. Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
 
-## Current Cutover: 0.7.1 (session epoch 27 and Landscape epoch 27)
+## Current Cutover: 0.7.1 (session epoch 28 and Landscape epoch 27)
 
 0.7.1 advances `SESSION_SCHEMA_EPOCH` from 26 to 27 so
 `user_preferences.freeform_intro_dismissed_at` can persist the account-wide
-freeform-primer preference. The universal web plugin-policy work also advances
+freeform-primer preference, then to 28 so SQLite and PostgreSQL session stores
+carry the same application/store/epoch identity proof. The universal web
+plugin-policy work also advances
 `SQLITE_SCHEMA_EPOCH` from 22 to 23 and adds `run_web_plugin_policy`. This
 table is optional per run but required in the schema: web runs receive one
 policy-evidence row atomically with the run, attribution, and leader records;
@@ -33,9 +35,10 @@ and semantics-only changes; archive/export decision and approver; destructive
 reset requirement and database-operator approval; previous release identity
 and epochs; forward and backward compatibility decisions; and an explicit
 `rollback_permitted` decision with evidence. Older code is not compatible with
-a freshly recreated epoch-27 database. Rollback is therefore
+the freshly recreated current databases. Rollback is therefore
 `no` unless a later approved record proves otherwise. Plans 10 and 12 must cite
-the epoch-27 record when binding candidate and rollback decisions.
+the session-epoch-28/Landscape-epoch-27 record when binding candidate and
+rollback decisions.
 
 Deployments crossing the 0.7.0 boundary from an older release must also account
 for the historical epoch-21 to epoch-22 Landscape reset described below.
@@ -206,19 +209,13 @@ Never print secret values from `deploy/elspeth-web.env`. It is acceptable to pri
 
 ## Phase 5b: Two-DB Reset
 
-This destructive procedure applies only when the declared Landscape cutover
-policy requires a reset; a simultaneous session/Landscape epoch change does not
-by itself authorize deleting both databases. Historical Phase 4 and Phase 5b
-cutovers required the reset because no supported Landscape migration crossed
-those boundaries. For the current 0.7.1 cutover, reset the session database,
-but let an exact epoch-23 SQLite Landscape migrate automatically through epoch
-24 to epoch 25 on writable schema-managing startup; an exact epoch-24 database
-takes only the epoch-25 artifact-index step. Read-only and
-`create_tables=False` inspection opens report incompatibility without mutation.
-Pre-23 SQLite still follows this archive/delete/recreate procedure. PostgreSQL
-is never auto-migrated by runtime startup: the schema owner must apply the
-approved epoch-24 composite-FK and epoch-25 partial-index DDL or recreate and
-initialize the Landscape schema.
+This destructive procedure applies whenever the configured Landscape store is
+older than the running pre-1.0 release. There is no supported in-place path for
+SQLite or PostgreSQL predecessor schemas. Archive or export required evidence,
+delete/recreate the store, and reinstall/initialize the current release.
+Read-only and `create_tables=False` inspection opens report incompatibility
+without mutation. PostgreSQL recreation is performed by the schema owner; the
+runtime role remains DML-only.
 
 Historical rationale remains unchanged: Phase 4 changed both epochs for
 tutorial completion and run/audit-story replay. Phase 5b also required deleting
@@ -239,8 +236,7 @@ Authority: current source epoch constants and schema tests:
 2. The approved cutover record explicitly requires destructive Landscape
    recreation. Historical examples include the Phase 4 tutorial dual-schema
    cutover, Phase 5b schema changes, and the 0.7.0 epoch-26 / epoch-22 release
-   cutover. The exact SQLite epoch-23→24→25 and epoch-24→25 paths do not satisfy
-   this precondition.
+   cutover.
 3. The operator has resolved the active Landscape DB path per "Resolve Database Paths" above:
    - If `ELSPETH_WEB__LANDSCAPE_URL` is set, that is the Landscape URL.
    - Otherwise the default is `${ELSPETH_WEB__DATA_DIR}/runs/audit.db`, or `data/runs/audit.db` if `ELSPETH_WEB__DATA_DIR` is unset.
@@ -253,13 +249,9 @@ Authority: current source epoch constants and schema tests:
 When the destructive preconditions apply, run after
 `sudo systemctl stop "$SERVICE"` and before
 `sudo systemctl start "$SERVICE"` in the staging procedure. Both DBs are reset
-under the same service-stop window. For an exact SQLite epoch-23 database,
-archive the matched Landscape artifact set in that window but do not delete it;
-writable startup performs the independently atomic 23→24 and 24→25 migrations.
-An exact epoch-24 database takes only the atomic 24→25 artifact-index step after
-the same archive decision. The migrated epoch-25 database cannot be reopened by
-epoch-24 or older code, so rollback requires restoring the matched archive with
-the old image.
+under the same service-stop window. Archive the matched Landscape artifact set
+when evidence retention requires it, then delete every predecessor artifact.
+The archive is evidence only, not an input to the current release.
 
 ```bash
 # Continuing from the staging procedure: $PROJECT_ROOT, $ENV_FILE, $SERVICE,
@@ -272,7 +264,7 @@ if [ -n "$LANDSCAPE_URL" ]; then
     case "$LANDSCAPE_URL" in
         sqlite:///*) LANDSCAPE_PATH="${LANDSCAPE_URL#sqlite:///}" ;;
         sqlite:////*) LANDSCAPE_PATH="/${LANDSCAPE_URL#sqlite:////}" ;;
-        *) echo "REFUSING: non-sqlite Landscape URL requires a migration plan." >&2; exit 1 ;;
+        *) echo "REFUSING: this SQLite reset procedure cannot recreate a non-sqlite Landscape store." >&2; exit 1 ;;
     esac
 elif [ -n "$DATA_DIR" ]; then
     LANDSCAPE_PATH="$DATA_DIR/runs/audit.db"
@@ -361,9 +353,9 @@ After restart, verify by composing a new session and confirming the new guidance
 
 The staging site is a source-checkout systemd/Caddy deployment from `/home/john/elspeth`, not the generic VM/Docker flow. When a pre-release plan changes the session DB schema (e.g. composer-progress-persistence Phase 1A and later schema-changing phases), the schema validator at startup will refuse a stale DB; the only accepted cutover path is archive + delete + recreate. Row-level `DELETE FROM chat_messages` / `DELETE FROM composition_states` is incorrect: it leaves the old table shape behind and startup rejects the stale DB.
 
-This procedure destroys staging session rows, chat history, composition states, audit access log rows, runs, run events, blob/blob-link database records, and encrypted `user_secrets` stored in the web session DB. It does not delete blob payload files under the data directory, payload storage, Filigree state, or source files. **If the deploy changes only the session DB schema, do not touch the Landscape audit DB. If both epochs change, follow the release's declared Landscape policy instead of assuming a reset: exact SQLite epoch 23→24→25 and epoch 24→25 migrations run automatically after archival, PostgreSQL uses the schema-owner migration/recreation path, and only older boundaries explicitly marked destructive use the additional [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) procedure.** **Do not run any of this outside staging.**
+This procedure destroys staging session rows, chat history, composition states, audit access log rows, runs, run events, blob/blob-link database records, and encrypted `user_secrets` stored in the web session DB. It does not delete blob payload files under the data directory, payload storage, Filigree state, or source files. **If the deploy changes only the session DB schema, do not touch a current Landscape audit DB. If the Landscape schema is stale, archive/export required evidence and recreate it with the current release; no predecessor schema is transformed in place.** **Do not run any of this outside staging.**
 
-For SQLite, `sessions.db`, `sessions.db-wal`, `sessions.db-shm`, and `sessions.db-journal` are handled as one matched artifact set for archive, deletion, and rollback.
+For SQLite, `sessions.db`, `sessions.db-wal`, `sessions.db-shm`, and `sessions.db-journal` are handled as one matched artifact set for archive, deletion, and recreation.
 
 ### Preconditions
 
@@ -372,9 +364,16 @@ For SQLite, `sessions.db`, `sessions.db-wal`, `sessions.db-shm`, and `sessions.d
 3. The source checkout at `/home/john/elspeth` is on the commit being deployed.
 4. `deploy/elspeth-web.env` has been inspected directly for session DB settings without printing secret values.
 5. The Stop/Go Gates above have been run: Landscape code/schema must not reference web-session identifiers.
-6. The pre-cutover source ref compatible with the archived DB has been recorded. If rollback is needed, restore that ref and the archived DB together; never run the old DB under the new schema code.
+6. The candidate source ref has been recorded. Archived predecessor databases
+   are evidence only and are never opened by the current release.
 7. The live SQLite deployment is single-worker: `deploy/elspeth-web.service` has no `--workers` flag, `WEB_CONCURRENCY` is unset or `1`, and the startup multi-worker guard in `src/elspeth/web/app.py` remains enabled.
-8. The operator has explicitly signed off on the `user_secrets` blast radius. Either the archived DB is the accepted recovery point, or staging secrets have a documented re-entry/reseed procedure before users resume composer work. **The archive is a long-lived copy of live encrypted secret material.** The `user_secrets` rows are encrypted with `settings.secret_key` (the same key the running app uses — `UserSecretStore` is constructed on the session engine with `settings.secret_key`). The archive is only inert if `settings.secret_key` is **rotated** as part of the deploy; if the key is reused, the archive remains decryptable with the running app's key. Decide the secret_key-rotation outcome up front and record it in the deploy plan.
+8. The operator has explicitly signed off on the `user_secrets` blast radius and
+   has a documented re-entry/reseed procedure before users resume Composer work.
+   **Any archive is a long-lived copy of live encrypted secret material and is
+   retained as evidence, not as a recovery database.** The `user_secrets` rows
+   are encrypted with `settings.secret_key`; if the key is reused, the archive
+   remains decryptable. Decide the key-rotation and archive-retention outcomes
+   up front and record them in the deploy plan.
 9. No other host-side process is writing the SQLite DB. The procedure stops `elspeth-web.service` and checks open handles before copying; if another process still has the main DB or a sidecar open, stop and identify it before continuing.
 
 ### Procedure
@@ -411,7 +410,7 @@ if [ -n "$SESSION_DB_URL" ]; then
     case "$SESSION_DB_URL" in
         sqlite:///*) DB_PATH="${SESSION_DB_URL#sqlite:///}" ;;
         sqlite:////*) DB_PATH="/${SESSION_DB_URL#sqlite:////}" ;;
-        *) echo "REFUSING: non-sqlite session DB URL requires a migration plan." >&2; exit 1 ;;
+        *) echo "REFUSING: this SQLite reset procedure cannot recreate a non-sqlite session store." >&2; exit 1 ;;
     esac
 elif [ -n "$DATA_DIR" ]; then
     DB_PATH="$DATA_DIR/sessions.db"
@@ -536,85 +535,20 @@ B1 interpretation-surfacing fix is in the deployed build). Any of these in
 the journal means the deploy is not clean — stop and inspect before
 handing staging back to users.
 
-Before handing staging back to users, verify the `user_secrets` outcome the operator chose in the preconditions. If secrets were intentionally cleared, confirm the affected composer/provider flow reports the expected missing-secret state and that the operator has re-entered or reseeded any required staging secrets. If rollback depends on the archive, confirm the archived DB is retained because it contains the pre-reset encrypted secret rows as well as chat/session data.
+Before handing staging back to users, verify the `user_secrets` outcome the operator chose in the preconditions. Confirm the affected composer/provider flow reports the expected missing-secret state and that the operator has re-entered or reseeded any required staging secrets. Never reopen the predecessor archive in the current release.
 
-At the **end of the deploy window**, destroy or secure the archive directories created above (`$SNAPSHOT_DIR` and any `*.failed-phase1.*` from a rollback). Each is a long-lived copy of live encrypted secret material. It is only inert if `settings.secret_key` was **rotated** during this deploy; if the key was reused, the archive is decryptable with the running app's key, so an unattended snapshot directory is equivalent to leaving a readable copy of every staging secret on disk. If you must retain an archive past the deploy window as a recovery point, rotate `settings.secret_key` (which invalidates the archived ciphertext under the new key) or move the archive to access-controlled storage.
+At the **end of the deploy window**, destroy or secure the archive directories created above. Each is a long-lived copy of live encrypted secret material. It is only inert if `settings.secret_key` was **rotated** during this deploy; if the key was reused, the archive is decryptable with the running app's key, so an unattended snapshot directory is equivalent to leaving a readable copy of every staging secret on disk. If evidence retention requires keeping an archive, rotate `settings.secret_key` or move the archive to access-controlled storage.
 
-### Rollback
+### Failed Cutover
 
-Rollback is allowed only before users resume work on the recreated DB, or after explicitly preserving both the failed new DB and the archived old DB for operator review. If the new service has accepted user traffic, do not overwrite the new DB with the archive without a data-preservation decision.
-
-Rollback must restore source and data as a compatible pair. Because the session DB also stores encrypted `user_secrets`, restoring the archive also restores the pre-cutover staging secrets; never mix a new-source checkout with the old secret/schema archive.
-
-```bash
-set -euo pipefail
-
-PROJECT_ROOT="/home/john/elspeth"
-SERVICE="elspeth-web.service"
-DB_PATH="/absolute/path/resolved/by/the/procedure"
-SNAPSHOT_DIR="/absolute/path/to/sessions.db.pre-phase1.YYYYMMDDTHHMMSSZ"
-PRE_CUTOVER_REF="<recorded commit/ref compatible with SNAPSHOT_DIR>"
-DB_ARTIFACTS=(
-    "$DB_PATH"
-    "$DB_PATH-wal"
-    "$DB_PATH-shm"
-    "$DB_PATH-journal"
-)
-
-sudo systemctl stop "$SERVICE"
-
-FOUND_NEW_ARTIFACT=0
-for artifact in "${DB_ARTIFACTS[@]}"; do
-    if [ -e "$artifact" ]; then
-        FOUND_NEW_ARTIFACT=1
-    fi
-done
-
-if [ "$FOUND_NEW_ARTIFACT" -eq 1 ]; then
-    FAILED_NEW_DB_DIR="$DB_PATH.failed-phase1.$(date -u +%Y%m%dT%H%M%SZ)"
-    sudo mkdir -p "$FAILED_NEW_DB_DIR"
-    for artifact in "${DB_ARTIFACTS[@]}"; do
-        if [ -e "$artifact" ]; then
-            sudo cp -a "$artifact" "$FAILED_NEW_DB_DIR/$(basename "$artifact")"
-        fi
-    done
-    echo "Preserved failed new DB artifact set at $FAILED_NEW_DB_DIR"
-fi
-
-if [ -n "$(git -C "$PROJECT_ROOT" status --porcelain)" ]; then
-    echo "REFUSING: $PROJECT_ROOT has uncommitted changes; preserve or commit them before rollback." >&2
-    git -C "$PROJECT_ROOT" status --short >&2
-    exit 1
-fi
-
-# Use the approved source-checkout rollback mechanism for staging. The
-# important invariant is compatibility: the restored process must run the
-# pre-cutover code that understands SNAPSHOT_DIR's schema. Do not use
-# `git reset --hard` from automation; the dirty-tree guard above makes
-# this fail closed before switching refs.
-git -C "$PROJECT_ROOT" switch --detach "$PRE_CUTOVER_REF"
-
-for artifact in "${DB_ARTIFACTS[@]}"; do
-    sudo rm -f "$artifact"
-done
-for artifact in "${DB_ARTIFACTS[@]}"; do
-    archived="$SNAPSHOT_DIR/$(basename "$artifact")"
-    if [ -e "$archived" ]; then
-        sudo cp -a "$archived" "$artifact"
-    fi
-done
-sudo systemctl start "$SERVICE"
-
-curl --unix-socket /run/elspeth/uvicorn.sock -fsS http://localhost/api/health
-curl -fsS https://elspeth.foundryside.dev/api/health
-sudo journalctl -u "$SERVICE" --no-pager -n 80
-```
-
-If rollback still fails, keep the service stopped, preserve both DB files, and inspect the journal before trying another reset. Retrying the new schema is appropriate when the failure was operational (wrong path, permission, stale process). Rolling back is appropriate when the new code or metadata is defective and the old DB snapshot must be served again.
+If the fresh current release fails, keep the service stopped, preserve the
+failed fresh stores and logs for diagnosis, fix the current release, then repeat
+the uninstall/recreate/reinstall procedure. Do not restore predecessor source or
+databases as the repair path.
 
 ### Why DELETE Is Forbidden For Schema-Changing Phases
 
-Row deletion does not add columns, CHECK constraints, FKs, or indexes. For schema-changing Phase plans (Phase 1A introduces NOT NULL `chat_messages.sequence_no`, NOT NULL `chat_messages.writer_principal`, NOT NULL `composition_states.provenance`, and the new `audit_access_log` table), row deletion leaves a stale DB shape that the startup schema validator correctly rejects. The validator is primarily a name/shape guard for expected tables, columns, CHECK names, and index names; it is not a compatibility migration engine and must not be treated as proof that stale CHECK expressions, partial-index predicates, or old table layouts are safe. Archive/delete/recreate is the only accepted cutover path for schema-changing phases. Archive, delete, and rollback must handle the SQLite main DB plus `-wal`, `-shm`, and `-journal` sidecars as a single artifact set; mixing a new main file with stale sidecars, or restoring a main file without its sidecars, is not a valid reset.
+Row deletion does not add columns, CHECK constraints, FKs, or indexes. For schema-changing Phase plans (Phase 1A introduces NOT NULL `chat_messages.sequence_no`, NOT NULL `chat_messages.writer_principal`, NOT NULL `composition_states.provenance`, and the new `audit_access_log` table), row deletion leaves a stale DB shape that the startup schema validator correctly rejects. The validator is primarily a name/shape guard for expected tables, columns, CHECK names, and index names; it is not a compatibility migration engine and must not be treated as proof that stale CHECK expressions, partial-index predicates, or old table layouts are safe. Archive/delete/recreate is the only accepted cutover path for schema-changing phases. Archive and deletion must handle the SQLite main DB plus `-wal`, `-shm`, and `-journal` sidecars as a single artifact set; mixing a new main file with stale sidecars is not a valid reset.
 
 ## Failure Handling
 

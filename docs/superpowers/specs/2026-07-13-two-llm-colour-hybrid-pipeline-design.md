@@ -1,5 +1,9 @@
 # Two-LLM Colour Hybrid Pipeline Design
 
+> **HISTORICAL ACCEPTANCE FIXTURE (2026-07-17).** Refresh schema and deployment
+> assumptions before reuse; see
+> [the Composer plan disposition](../plans/composer-parity/2026-07-17-current-plan-disposition.md).
+
 ## Purpose
 
 Demonstrate that ELSPETH's composer can turn an outcome-oriented request into a pipeline that sends every source row through two independent LLM branches, waits for both results, and produces one flat hybrid row. The output must already expose typed numeric fields suitable for a later statistical-aggregation demonstration.

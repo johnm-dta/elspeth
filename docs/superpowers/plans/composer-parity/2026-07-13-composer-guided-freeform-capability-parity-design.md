@@ -1,6 +1,10 @@
 # Composer Guided/Freeform Capability Parity
 
-**Status:** Approved design; implementation pending
+> **REVALIDATION REQUIRED (2026-07-17).** The product invariants remain useful,
+> but the implementation mechanics are no longer approved. See
+> [the current disposition](2026-07-17-current-plan-disposition.md).
+
+**Status:** Design input retained; implementation package retired
 **Date:** 2026-07-13
 **Priority:** High
 **Scope:** Composer authoring architecture, freeform and guided skill packs, guided session replacement, validation feedback, and cross-surface evaluation

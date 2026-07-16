@@ -1,5 +1,8 @@
 # Composer Capability Parity Plan 07: Deploy and Live Acceptance
 
+> **RETIRED (2026-07-17): DO NOT EXECUTE.** See
+> [the current disposition](2026-07-17-current-plan-disposition.md).
+
 > **For implementers:** Use `superpowers:executing-plans`, `playwright`,
 > `superpowers:systematic-debugging` for every error or unexpected result, and
 > `superpowers:verification-before-completion` before reporting success.

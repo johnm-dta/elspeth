@@ -257,14 +257,11 @@ def _optional_enum_in_check(column_name: str, enum_type: type[StrEnum]) -> str:
 #   24 → elspeth_schema_identity gives SQLite and PostgreSQL the same explicit
 #        application/store/epoch proof, including semantic-only schema bumps;
 #        token ownership is also mechanically row-authoritative: tokens(row_id,
-#        run_id) references rows(row_id, run_id). Populated epoch-23 SQLite
-#        databases receive a narrow, transactional tokens-table rebuild after
-#        a mismatch preflight; all older epochs retain the recreate boundary.
+#        run_id) references rows(row_id, run_id). This is a pre-1.0
+#        delete-and-recreate boundary; predecessor stores are not transformed.
 #   25 → Artifact logical-effect idempotency: non-null artifact keys are unique
 #        within a run, so retries converge on one immutable audit identity.
-#        Populated exact epoch-24 SQLite databases receive a narrow,
-#        transactional partial-index migration after a duplicate preflight;
-#        exact epoch-23 databases take the ordered 23→24→25 chain.
+#        This is also a pre-1.0 delete-and-recreate boundary.
 #   26 → Recoverable sink-effect ledger and immutable audit-export snapshot
 #        registry; artifacts/operations gain exclusive effect linkage.
 #   27 → Durable coalesce-effect receipts with normalized parent/state evidence;

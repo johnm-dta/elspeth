@@ -882,6 +882,27 @@ class RunCoordinationRepository:
         from elspeth.core.landscape.schema import token_work_items_table
 
         with fenced_leader_transaction(self._engine, token=token, now=now, window_seconds=window_seconds, verb="evict_worker") as conn:
+            # Serialize with membership-fenced claim/heartbeat verbs
+            # (elspeth-6903f82511): lock the target's registry row BEFORE the
+            # no-unexpired-leases precondition read.  Fenced lease verbs take
+            # a shared lock on this row before granting/renewing a lease, so
+            # once this exclusive lock is held every in-flight fenced lease
+            # write has committed (its lease is visible to the precondition
+            # below) and every later one blocks until this transaction commits
+            # and then observes the evicted status.  Without the lock, a
+            # fenced renewal could commit around the unlocked reads here and
+            # the eviction would land on a worker holding a live lease.
+            # An absent registry row is a benign skip — nothing to evict.
+            target_registered = conn.execute(
+                select(run_workers_table.c.worker_id)
+                .where(
+                    run_workers_table.c.worker_id == target_worker_id,
+                    run_workers_table.c.run_id == token.run_id,
+                )
+                .with_for_update(of=run_workers_table)
+            ).one_or_none()
+            if target_registered is None:
+                return False
             live_lease = conn.execute(
                 select(token_work_items_table.c.work_item_id)
                 .where(

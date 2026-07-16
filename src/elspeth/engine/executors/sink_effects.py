@@ -605,6 +605,16 @@ class SinkEffectCoordinator:
         snapshot: list[SinkEffectMember] = []
         for predecessor in chain:
             for durable in self._effects.get_members(predecessor.effect_id):
+                # Diverted members never reached the target: replaying them in
+                # a cumulative successor would republish rejected rows as if
+                # they were immutable predecessor content.
+                if durable.prepared_disposition == "diverted":
+                    continue
+                if durable.prepared_disposition != "accepted":
+                    raise LandscapeRecordError(
+                        f"finalized sink effect predecessor {predecessor.effect_id} member ordinal "
+                        f"{durable.ordinal} is missing its accepted/diverted disposition"
+                    )
                 known = known_members.get(durable.token_id)
                 member = replace(known, member_effect_id=durable.member_effect_id) if known is not None else self._hydrate_member(durable)
                 snapshot.append(replace(member, ordinal=len(snapshot)))

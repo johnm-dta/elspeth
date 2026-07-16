@@ -303,6 +303,37 @@ def test_replacing_successor_prepares_cumulative_predecessor_and_current_members
         db.close()
 
 
+def test_predecessor_snapshot_excludes_diverted_members() -> None:
+    """Cumulative successors must not replay members the predecessor diverted
+    away from the target (elspeth-0278416cc5)."""
+    db = make_landscape_db()
+    try:
+        payload_store = MockPayloadStore()
+        factory = make_factory(db, payload_store=payload_store)
+        run_id, sink_id, members = _pipeline_members(factory, 3)
+        # Predecessor accepts ordinal 0 and diverts ordinal 1.
+        first_sink = _ResultDerivedReconciledSink(_CumulativeTarget())
+        SinkEffectCoordinator(factory=factory, worker_id="worker-a").execute(
+            _execution_request(run_id, sink_id, members[:2]),
+            first_sink,
+        )
+
+        target = _CumulativeTarget()
+        successor_sink = _CumulativeObservableSink(target)
+        successor_factory = make_factory(db, payload_store=payload_store)
+        SinkEffectCoordinator(factory=successor_factory, worker_id="worker-b").execute(
+            _execution_request(run_id, sink_id, members[2:]),
+            successor_sink,
+        )
+
+        # The diverted row {"ordinal": 1} never reached the target, so the
+        # cumulative successor must publish only the accepted predecessor
+        # member plus its own current member.
+        assert target.published_rows == [[{"ordinal": 0}, {"ordinal": 2}]]
+    finally:
+        db.close()
+
+
 def test_mixed_overlap_recovers_open_effect_and_executes_new_partition() -> None:
     db = make_landscape_db()
     try:

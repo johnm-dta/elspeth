@@ -13,6 +13,7 @@ Layer: L0 (contracts). Imports nothing above contracts.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, fields
 from datetime import datetime
 from enum import StrEnum
@@ -85,6 +86,10 @@ class ComposerLLMCall:
     specification sent to LiteLLM, or ``None`` when the call did not carry
     tools (for example diagnostics text generation).
 
+    ``declared_tool_names`` is the ordered, public-safe projection of the
+    exact transmitted tool list. It proves declaration, not selection;
+    ``tools_spec_hash`` remains the integrity proof over the complete specs.
+
     Cache-token fields (``cached_prompt_tokens``,
     ``cache_creation_input_tokens``, ``cache_read_input_tokens``) capture
     provider-reported prompt-cache statistics. They default to ``None``
@@ -121,6 +126,7 @@ class ComposerLLMCall:
     provider_request_id: str | None
     messages_hash: str
     tools_spec_hash: str | None
+    declared_tool_names: tuple[str, ...]
     started_at: datetime
     finished_at: datetime
     error_class: str | None
@@ -145,6 +151,17 @@ class ComposerLLMCall:
         _require_non_empty_str(self.provider_request_id, "provider_request_id", optional=True)
         _require_non_empty_str(self.messages_hash, "messages_hash")
         _require_non_empty_str(self.tools_spec_hash, "tools_spec_hash", optional=True)
+        if type(self.declared_tool_names) is not tuple:
+            raise TypeError(f"declared_tool_names must be tuple, got {type(self.declared_tool_names).__name__}")
+        for name in self.declared_tool_names:
+            if type(name) is not str or not name:
+                raise ValueError("declared_tool_names entries must be non-empty strings")
+            if re.fullmatch(r"[a-z][a-z0-9_]*", name) is None:
+                raise ValueError("declared_tool_names entries must be tool names containing lowercase letters, digits, and underscores")
+        if len(set(self.declared_tool_names)) != len(self.declared_tool_names):
+            raise ValueError("declared_tool_names entries must be unique")
+        if self.declared_tool_names and self.tools_spec_hash is None:
+            raise ValueError("declared_tool_names require tools_spec_hash")
         _require_datetime(self.started_at, "started_at")
         _require_datetime(self.finished_at, "finished_at")
         if self.finished_at < self.started_at:
@@ -169,7 +186,7 @@ class ComposerLLMCall:
             raise ValueError("non-success calls must include error_class and error_message")
         if self.reasoning_content is not None and type(self.reasoning_content) is not str:
             raise TypeError(f"reasoning_content must be str or None, got {type(self.reasoning_content).__name__}")
-        freeze_fields(self, "reasoning_details", "thinking_blocks")
+        freeze_fields(self, "declared_tool_names", "reasoning_details", "thinking_blocks")
         if self.provider_cost_source not in _VALID_PROVIDER_COST_SOURCES:
             raise ValueError(
                 f"provider_cost_source must be one of {sorted(_VALID_PROVIDER_COST_SOURCES)}, got {self.provider_cost_source!r}"

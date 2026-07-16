@@ -15,6 +15,8 @@ shape (so a future refactor cannot silently re-author the LLM-facing schema).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from elspeth.web.composer.tools._dispatch import get_tool_definitions
@@ -737,6 +739,28 @@ class TestStep3MutationTierMigration:
         params = defn["parameters"]
         assert isinstance(params, dict)
         assert params["required"] == ["nodes", "edges", "outputs"]
+
+    def test_narrow_edit_tool_descriptions_are_explicit(self) -> None:
+        set_pipeline = self._get("set_pipeline")
+        splice = self._get("splice_transform")
+        patch_node = self._get("patch_node_options")
+
+        assert "create or fully rebuild" in str(set_pipeline["description"])
+        assert "narrow edit" in str(set_pipeline["description"])
+        assert "splice_transform" in str(set_pipeline["description"])
+        for intent_word in ("insert", "between", "before", "after", "direct linear"):
+            assert intent_word in str(splice["description"])
+        assert "option-only" in str(patch_node["description"])
+
+    def test_core_skill_routes_each_edit_shape_to_one_supported_tool(self) -> None:
+        skill = (Path(__file__).parents[4] / "src/elspeth/web/composer/skills/pipeline_composer.md").read_text(encoding="utf-8")
+
+        assert "one-transform insertion" in skill
+        assert "`splice_transform`" in skill
+        assert "option-only edit" in skill
+        assert "`patch_node_options`" in skill
+        assert "intentional full rebuild" in skill
+        assert "`set_pipeline`" in skill
 
     def test_upsert_node_required(self) -> None:
         defn = self._get("upsert_node")

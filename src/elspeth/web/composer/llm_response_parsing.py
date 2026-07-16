@@ -434,6 +434,7 @@ def build_llm_call_record(
         provider_request_id=_safe_provider_request_id(response),
         messages_hash=stable_hash(messages),
         tools_spec_hash=stable_hash(tools) if tools is not None else None,
+        declared_tool_names=tuple(tool["function"]["name"] for tool in tools) if tools is not None else (),
         started_at=started_at,
         finished_at=datetime.now(UTC),
         error_class=error_class,

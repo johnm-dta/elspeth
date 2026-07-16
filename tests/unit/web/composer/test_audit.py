@@ -125,6 +125,7 @@ def test_llm_call_audit_envelope_omits_provider_reasoning_artifacts() -> None:
         provider_request_id="chatcmpl-reasoning",
         messages_hash="m" * 64,
         tools_spec_hash="t" * 64,
+        declared_tool_names=("set_source", "splice_transform"),
         started_at=t,
         finished_at=t,
         error_class=None,
@@ -145,6 +146,7 @@ def test_llm_call_audit_envelope_omits_provider_reasoning_artifacts() -> None:
     payload = env["call"]
     assert isinstance(payload, dict)
     assert payload["provider_request_id"] == "chatcmpl-reasoning"
+    assert payload["declared_tool_names"] == ["set_source", "splice_transform"]
     assert payload["reasoning_tokens"] == 5
     assert payload["provider_cost"] == 0.0037
     assert "reasoning_content" not in payload

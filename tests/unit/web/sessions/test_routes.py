@@ -207,6 +207,7 @@ def _llm_call(**overrides: Any) -> ComposerLLMCall:
         "provider_request_id": "chatcmpl-route",
         "messages_hash": "m" * 64,
         "tools_spec_hash": "t" * 64,
+        "declared_tool_names": ("set_pipeline",),
         "started_at": datetime.now(UTC),
         "finished_at": datetime.now(UTC),
         "error_class": None,

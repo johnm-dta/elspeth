@@ -1339,7 +1339,7 @@ _PATCH_NODE_OPTIONS_DECLARATION = ToolDeclaration(
     name="patch_node_options",
     handler=_handle_patch_node_options,
     kind=ToolKind.MUTATION,
-    description="Apply a shallow merge-patch to a node's options. "
+    description="Apply a shallow merge-patch to a node's options. Use this for option-only edits. "
     "Keys in the patch overwrite existing keys. "
     "Keys set to null are deleted. Missing keys are unchanged. "
     "Do not use this for node routing fields such as on_success/on_error/input/routes; "

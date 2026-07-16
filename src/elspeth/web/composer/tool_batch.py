@@ -107,6 +107,13 @@ if TYPE_CHECKING:
 
 
 _MAX_PENDING_PROPOSALS_PER_TURN: Final[int] = 10
+_MIN_USEFUL_ADVISOR_SECONDS: Final[float] = 5.0
+
+
+def _remaining_compose_seconds(deadline: float) -> float:
+    """Return the compose budget available at the advisor boundary."""
+
+    return deadline - asyncio.get_event_loop().time()
 
 
 @dataclass(frozen=True, slots=True)
@@ -761,7 +768,7 @@ async def run_tool_batch(
                 turn_has_discovery = True
                 continue
 
-            remaining = deadline - asyncio.get_event_loop().time()
+            remaining = _remaining_compose_seconds(deadline)
             if remaining <= 0:
                 timeout_payload: dict[str, Any] = {
                     "status": "COMPOSE_TIMEOUT",
@@ -791,6 +798,36 @@ async def run_tool_batch(
                     tool_invocations=recorder.invocations,
                     llm_calls=recorder.llm_calls,
                 )
+
+            if remaining < _MIN_USEFUL_ADVISOR_SECONDS:
+                deadline_payload = {
+                    "status": "DEADLINE_TOO_CLOSE",
+                    "outbound_call_made": False,
+                    "budget_used": advisor_calls_used,
+                    "budget_remaining": budget - advisor_calls_used,
+                }
+                recorder.record(
+                    finish_success(
+                        audit,
+                        result_payload=deadline_payload,
+                        version_after=state.version,
+                    )
+                )
+                _append_tool_outcome(
+                    response=deadline_payload,
+                    error_class=None,
+                    error_message=None,
+                    post_version=state.version,
+                )
+                llm_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(deadline_payload),
+                    }
+                )
+                turn_has_discovery = True
+                continue
 
             advisor_timeout = ctx.service._settings.composer_advisor_timeout_seconds
             effective_advisor_timeout = min(advisor_timeout, remaining)

@@ -72,8 +72,7 @@ For ordinary build/edit turns, the action path is:
    not already been loaded, and for every plugin named in
    `composer_progress.schemas_gap`. Use `get_plugin_assistance` for selected
    plugins when their usage pattern is not obvious from the schema.
-4. Build complete new pipelines with `set_pipeline`. Patch existing pipelines
-   only for narrow edits.
+4. Choose the narrowest supported mutation from the edit table below.
 5. Repair validation/preflight failures by following tool diagnostics while
    preserving any staged interpretation requirements.
 6. Surface every staged assumption with `request_interpretation_review` only
@@ -85,6 +84,12 @@ For ordinary build/edit turns, the action path is:
    every LLM node and surfaces it for you at turn finalization, so
    `request_interpretation_review(kind="llm_prompt_template")` is rejected.**
 7. End only in one of the valid terminal states below.
+
+| Edit intent | Use |
+| --- | --- |
+| Create a new pipeline or perform an intentional full rebuild | `set_pipeline` |
+| Perform a one-transform insertion between existing nodes on a direct linear path | `splice_transform` |
+| Make an option-only edit to an existing node | `patch_node_options` |
 
 ### Complex New Pipeline Batching
 

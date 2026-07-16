@@ -930,10 +930,10 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
     name="set_pipeline",
     handler=_handle_set_pipeline,
     kind=ToolKind.MUTATION,
-    description="Atomically replace the entire pipeline. Provide the "
-    "complete source, nodes, edges, outputs, and metadata in one call. "
-    "This is more efficient than calling set_source + upsert_node + "
-    "upsert_edge + set_output sequentially.",
+    description=(
+        "Atomically create or fully rebuild a pipeline. For a narrow edit to an existing pipeline, "
+        "use the dedicated patch tool; use `splice_transform` to insert one transform on a direct linear path."
+    ),
     json_schema={
         "type": "object",
         "properties": {

@@ -2,9 +2,61 @@
 
 from __future__ import annotations
 
-from elspeth.contracts import NodeStateCompleted, NodeStateFailed, NodeStateOpen, NodeStatePending
+from typing import Literal
+
+from elspeth.contracts import Artifact, NodeStateCompleted, NodeStateFailed, NodeStateOpen, NodeStatePending
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.contracts.export_records import NodeStateExportRecord
+from elspeth.contracts.export_records import ArtifactExportRecord, NodeStateExportRecord
+
+
+def artifact_producer_kind(
+    *,
+    produced_by_state_id: str | None,
+    sink_effect_id: str | None,
+) -> Literal["node_state", "sink_effect"]:
+    """Validate producer XOR and return its explicit wire discriminator."""
+    if (produced_by_state_id is None) == (sink_effect_id is None):
+        raise AuditIntegrityError("Artifact requires exactly one producer link — audit integrity violation")
+    return "node_state" if produced_by_state_id is not None else "sink_effect"
+
+
+def validate_artifact_publication_projection(
+    *,
+    producer_kind: Literal["node_state", "sink_effect"],
+    publication_performed: object,
+    publication_evidence_kind: object,
+) -> None:
+    """Reject ambiguous raw artifact publication evidence before serialization."""
+    if type(publication_performed) is not bool:
+        raise AuditIntegrityError("Artifact publication_performed must be bool — audit integrity violation")
+    expected: dict[str, bool]
+    if producer_kind == "node_state":
+        expected = {"legacy_returned": True}
+    else:
+        expected = {"returned": True, "reconciled": True, "inherited": False, "virtual": False}
+    if not isinstance(publication_evidence_kind, str) or expected.get(publication_evidence_kind) is not publication_performed:
+        raise AuditIntegrityError("Artifact publication evidence is invalid or contradictory — audit integrity violation")
+
+
+def artifact_to_export_record(run_id: str, artifact: Artifact) -> ArtifactExportRecord:
+    """Project one validated artifact to its complete epoch-26 wire shape."""
+    return {
+        "record_type": "artifact",
+        "run_id": run_id,
+        "artifact_id": artifact.artifact_id,
+        "sink_node_id": artifact.sink_node_id,
+        "producer_kind": artifact.producer_kind,
+        "produced_by_state_id": artifact.produced_by_state_id,
+        "sink_effect_id": artifact.sink_effect_id,
+        "artifact_type": artifact.artifact_type,
+        "path_or_uri": artifact.path_or_uri,
+        "content_hash": artifact.content_hash,
+        "size_bytes": artifact.size_bytes,
+        "idempotency_key": artifact.idempotency_key,
+        "publication_performed": artifact.publication_performed,
+        "publication_evidence_kind": artifact.publication_evidence_kind,
+        "created_at": artifact.created_at.isoformat(),
+    }
 
 
 def node_state_to_export_record(run_id: str, state: object) -> NodeStateExportRecord:

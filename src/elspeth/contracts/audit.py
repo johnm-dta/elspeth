@@ -69,6 +69,8 @@ _SOURCE_FILE_HASH_PATTERN = re.compile(r"sha256:[0-9a-f]{16}")
 _SHA256_HEX_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 type OperationType = Literal["source_load", "sink_write", "runtime_preflight"]
+type ArtifactProducerKind = Literal["node_state", "sink_effect"]
+type ArtifactPublicationEvidenceKind = Literal["returned", "reconciled", "inherited", "virtual", "legacy_returned"]
 
 OPERATION_TYPE_VALUES: tuple[OperationType, ...] = ("source_load", "sink_write", "runtime_preflight")
 
@@ -968,18 +970,45 @@ class Artifact:
 
     artifact_id: str
     run_id: str
-    produced_by_state_id: str
     sink_node_id: str
     artifact_type: str  # Not enum - user-defined (csv, json, webhook, etc.)
     path_or_uri: str
     content_hash: str
     size_bytes: int
     created_at: datetime
+    produced_by_state_id: str | None = None
+    sink_effect_id: str | None = None
     idempotency_key: str | None = None  # For retry deduplication
+    publication_performed: bool = True
+    publication_evidence_kind: ArtifactPublicationEvidenceKind = "returned"
 
     def __post_init__(self) -> None:
-        """Validate int fields - Tier 1 crash on invalid types."""
+        """Validate exclusive producer linkage and publication evidence."""
+        if (self.produced_by_state_id is None) == (self.sink_effect_id is None):
+            raise ValueError("Artifact requires exactly one producer link")
         require_int(self.size_bytes, "size_bytes", min_value=0)
+        if type(self.publication_performed) is not bool:
+            raise TypeError("publication_performed must be bool")
+
+        if self.produced_by_state_id is not None:
+            if not self.publication_performed or self.publication_evidence_kind != "legacy_returned":
+                raise ValueError("legacy artifact publication requires performed legacy_returned evidence")
+            return
+
+        evidence_performed = {
+            "returned": True,
+            "reconciled": True,
+            "inherited": False,
+            "virtual": False,
+        }
+        expected = evidence_performed.get(self.publication_evidence_kind)
+        if expected is None or self.publication_performed is not expected:
+            raise ValueError("effect artifact publication evidence is invalid or contradicts publication_performed")
+
+    @property
+    def producer_kind(self) -> ArtifactProducerKind:
+        """Return the explicit producer discriminator for serialization."""
+        return "node_state" if self.produced_by_state_id is not None else "sink_effect"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1526,6 +1555,7 @@ class Operation:
     operation_type: OperationType
     started_at: datetime
     status: Literal["open", "completed", "failed", "pending"]
+    sink_effect_id: str | None = None
     completed_at: datetime | None = None
     input_data_ref: str | None = None
     input_data_hash: str | None = None
@@ -1551,6 +1581,9 @@ class Operation:
 
         if self.status not in self._ALLOWED_STATUSES:
             raise ValueError(f"status must be one of {sorted(self._ALLOWED_STATUSES)}, got {self.status!r}")
+
+        if self.sink_effect_id is not None and self.operation_type != "sink_write":
+            raise ValueError("sink_effect_id is valid only for sink_write operations")
 
         # Lifecycle invariant validation — Tier 1 crash on impossible state combinations
         if self.status == "open":
@@ -1585,6 +1618,7 @@ class Operation:
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "status": self.status,
+            "sink_effect_id": self.sink_effect_id,
             "input_data_ref": self.input_data_ref,
             "input_data_hash": self.input_data_hash,
             "output_data_ref": self.output_data_ref,

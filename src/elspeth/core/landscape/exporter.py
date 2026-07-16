@@ -29,7 +29,6 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.export_records import (
-    ArtifactExportRecord,
     BatchExportRecord,
     BatchMemberExportRecord,
     CallExportRecord,
@@ -52,7 +51,7 @@ from elspeth.contracts.export_records import (
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.export_mappers import node_state_to_export_record
+from elspeth.core.landscape.export_mappers import artifact_to_export_record, node_state_to_export_record
 from elspeth.core.landscape.factory import RecorderFactory
 
 
@@ -496,6 +495,7 @@ class LandscapeExporter:
                 "operation_id": operation.operation_id,
                 "node_id": operation.node_id,
                 "operation_type": operation.operation_type,
+                "sink_effect_id": operation.sink_effect_id,
                 "status": operation.status,
                 "started_at": operation.started_at.isoformat() if operation.started_at else None,
                 "completed_at": operation.completed_at.isoformat() if operation.completed_at else None,
@@ -842,20 +842,7 @@ class LandscapeExporter:
 
         # Artifacts
         for artifact in self._read_model.get_artifacts(run_id):
-            artifact_record: ArtifactExportRecord = {
-                "record_type": "artifact",
-                "run_id": run_id,
-                "artifact_id": artifact.artifact_id,
-                "sink_node_id": artifact.sink_node_id,
-                "produced_by_state_id": artifact.produced_by_state_id,
-                "artifact_type": artifact.artifact_type,
-                "path_or_uri": artifact.path_or_uri,
-                "content_hash": artifact.content_hash,
-                "size_bytes": artifact.size_bytes,
-                "idempotency_key": artifact.idempotency_key,
-                "created_at": artifact.created_at.isoformat(),
-            }
-            yield artifact_record
+            yield artifact_to_export_record(run_id, artifact)
 
     def export_run_grouped(
         self,

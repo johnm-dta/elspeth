@@ -23,6 +23,8 @@ Import patterns:
 from elspeth.contracts.audit import (
     OPERATION_TYPE_VALUES,
     Artifact,
+    ArtifactProducerKind,
+    ArtifactPublicationEvidenceKind,
     Batch,
     BatchMember,
     BatchOutput,
@@ -342,6 +344,8 @@ from elspeth.contracts.value_source import (
 __all__ = [  # Grouped by category for readability
     # audit
     "Artifact",
+    "ArtifactProducerKind",
+    "ArtifactPublicationEvidenceKind",
     "Operation",
     "OperationType",
     "OPERATION_TYPE_VALUES",

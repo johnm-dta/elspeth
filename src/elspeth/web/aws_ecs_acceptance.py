@@ -36,6 +36,7 @@ import httpx
 import yaml
 
 from elspeth.contracts import (
+    ArtifactDescriptor,
     CallStatus,
     CallType,
     Determinism,
@@ -53,6 +54,14 @@ from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
 from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.schema import SchemaConfig
+from elspeth.contracts.sink_effects import (
+    RestrictedSinkEffectContext,
+    SinkEffectInspectionRequest,
+    SinkEffectMember,
+    SinkEffectPipelineMembersInput,
+    SinkEffectPrepareRequest,
+    SinkEffectReconcileKind,
+)
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH
@@ -61,7 +70,7 @@ from elspeth.core.secrets import is_secret_field
 from elspeth.engine.orchestrator import prepare_for_run
 from elspeth.plugins.aws_s3_common import build_s3_client
 from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
-from elspeth.plugins.sinks.aws_s3_sink import AWSS3Sink, S3ConditionalWriteRejectedError
+from elspeth.plugins.sinks.aws_s3_sink import AWSS3Sink
 from elspeth.plugins.sources.aws_s3_source import AWSS3Source
 from elspeth.plugins.transforms.aws.guardrail_profiles import BedrockGuardrailProfileSettings
 from elspeth.plugins.transforms.aws.guardrails_live_check import run_guardrail_live_check
@@ -2113,6 +2122,75 @@ def _s3_source_hash(context: _S3AcceptanceContext) -> str | None:
     return hashes[0] if len(hashes) == 1 else None
 
 
+def _s3_acceptance_effect_id(*, bucket: str, key: str, region: str, content_hash: str) -> str:
+    """Derive the stable identity used by both acceptance contenders."""
+    encoded = json.dumps(
+        {
+            "bucket": bucket,
+            "content_hash": content_hash,
+            "key": key,
+            "protocol": "sink-effect-v1",
+            "region": region,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return _sha256(encoded)
+
+
+def _drive_s3_acceptance_effect(
+    sink: object,
+    *,
+    bucket: str,
+    key: str,
+    region: str,
+    expected_hash: str,
+    require_existing: bool,
+) -> tuple[ArtifactDescriptor, bool]:
+    """Exercise only the effect protocol; never call legacy write/flush."""
+    effect_id = _s3_acceptance_effect_id(bucket=bucket, key=key, region=region, content_hash=expected_hash)
+    member = SinkEffectMember(
+        ordinal=0,
+        token_id="verify-s3-token",
+        row_id="verify-s3-row",
+        ingest_sequence=0,
+        lineage_key="verify-s3-lineage",
+        payload_hash=expected_hash,
+        row=dict(_S3_ACCEPTANCE_ROW),
+    )
+    effect_input = SinkEffectPipelineMembersInput(members=(member,), target_snapshot_members=(member,))
+    context = RestrictedSinkEffectContext(
+        run_id=_S3AcceptanceContext.run_id,
+        run_started_at=datetime(2026, 7, 16, tzinfo=UTC),
+        operation_id=f"verify-s3-{effect_id[:16]}",
+        sink_node_id=_S3AcceptanceContext.node_id,
+    )
+    target = f"s3://{bucket}/{key}"
+    inspection = sink.inspect_effect(  # type: ignore[attr-defined]
+        SinkEffectInspectionRequest(effect_id=effect_id, target=target, predecessor_descriptor=None),
+        context,
+    )
+    prepare_request = SinkEffectPrepareRequest(effect_id=effect_id, effect_input=effect_input, inspection=inspection)
+    plan = sink.prepare_effect(prepare_request, context)  # type: ignore[attr-defined]
+    prepare_request.validate_plan(plan)
+    reconciliation = sink.reconcile_effect(plan, context)  # type: ignore[attr-defined]
+
+    if reconciliation.kind is SinkEffectReconcileKind.UNKNOWN:
+        raise AcceptanceCheckError("s3_collision" if require_existing else "s3_sink_write")
+    if reconciliation.kind is SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR:
+        descriptor = reconciliation.descriptor
+        if descriptor is None:
+            raise AcceptanceCheckError("s3_collision" if require_existing else "s3_sink_write")
+        return descriptor, True
+    if require_existing:
+        raise AcceptanceCheckError("s3_collision")
+
+    result = sink.commit_effect(plan, context)  # type: ignore[attr-defined]
+    if tuple(result.accepted_ordinals) != (0,) or result.diverted_ordinals:
+        raise AcceptanceCheckError("s3_integrity")
+    return result.descriptor, False
+
+
 def verify_s3(
     env: Mapping[str, str],
     *,
@@ -2147,14 +2225,19 @@ def verify_s3(
     try:
         try:
             primary_sink = sink_factory(dict(sink_config))
-            sink_result = primary_sink.write([dict(_S3_ACCEPTANCE_ROW)], _S3AcceptanceContext())
+            primary_descriptor, _ = _drive_s3_acceptance_effect(
+                primary_sink,
+                bucket=bucket,
+                key=key,
+                region=region,
+                expected_hash=expected_hash,
+                require_existing=False,
+            )
         except Exception:
             failure_check = "s3_sink_write"
         if failure_check is None:
-            artifact = getattr(sink_result, "artifact", None)
-            sink_hash = getattr(artifact, "content_hash", None)
-            diversions = getattr(sink_result, "diversions", None)
-            if sink_hash != expected_hash or diversions:
+            sink_hash = primary_descriptor.content_hash
+            if sink_hash != expected_hash:
                 failure_check = "s3_integrity"
 
         if failure_check is None:
@@ -2177,13 +2260,19 @@ def verify_s3(
         if failure_check is None:
             try:
                 collision_sink = sink_factory(dict(sink_config))
-                collision_sink.write([dict(_S3_ACCEPTANCE_ROW)], _S3AcceptanceContext())
-            except S3ConditionalWriteRejectedError:
-                pass
+                collision_descriptor, reconciled = _drive_s3_acceptance_effect(
+                    collision_sink,
+                    bucket=bucket,
+                    key=key,
+                    region=region,
+                    expected_hash=expected_hash,
+                    require_existing=True,
+                )
             except Exception:
                 failure_check = "s3_collision"
             else:
-                failure_check = "s3_collision"
+                if not reconciled or collision_descriptor != primary_descriptor:
+                    failure_check = "s3_collision"
     finally:
         for resource in (source, collision_sink, primary_sink):
             if resource is None:

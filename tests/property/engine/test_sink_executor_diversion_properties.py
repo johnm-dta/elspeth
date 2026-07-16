@@ -131,6 +131,7 @@ def _make_executor() -> tuple[SinkExecutor, SimpleNamespace, SimpleNamespace]:
             size_bytes=kwargs["size_bytes"],
             created_at=datetime.now(UTC),
             idempotency_key=kwargs.get("idempotency_key"),
+            publication_evidence_kind="legacy_returned",
         )
 
     execution = SimpleNamespace(

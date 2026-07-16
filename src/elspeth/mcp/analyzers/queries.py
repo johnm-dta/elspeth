@@ -23,6 +23,7 @@ from elspeth.mcp.limits import MCP_QUERY_DEFAULT_LIMIT, MCP_RESULT_LIMIT_MAX
 from elspeth.mcp.types import (
     OPERATION_STATUS_VALUES,
     OPERATION_TYPE_VALUES,
+    ArtifactRecord,
     CallDetail,
     CollisionFieldRecord,
     CollisionRecord,
@@ -275,6 +276,7 @@ def list_operations(
                 operations_table.c.run_id,
                 operations_table.c.node_id,
                 operations_table.c.operation_type,
+                operations_table.c.sink_effect_id,
                 operations_table.c.started_at,
                 operations_table.c.completed_at,
                 operations_table.c.status,
@@ -312,6 +314,7 @@ def list_operations(
             "node_id": row.node_id,
             "plugin_name": row.plugin_name,
             "operation_type": row.operation_type,
+            "sink_effect_id": row.sink_effect_id,
             "status": row.status,
             "started_at": row.started_at.isoformat() if row.started_at else None,
             "completed_at": row.completed_at.isoformat() if row.completed_at else None,
@@ -319,6 +322,36 @@ def list_operations(
             "error_message": row.error_message,
         }
         for row in rows
+    ]
+
+
+def list_artifacts(
+    db: LandscapeDB,
+    factory: AnalyzerRepositories,
+    run_id: str,
+    limit: int = 100,
+) -> list[ArtifactRecord]:
+    """List artifacts with explicit epoch-25/26 producer and publication evidence."""
+    del db
+    artifacts = factory.execution.get_artifacts(run_id)
+    return [
+        {
+            "artifact_id": artifact.artifact_id,
+            "run_id": artifact.run_id,
+            "sink_node_id": artifact.sink_node_id,
+            "producer_kind": artifact.producer_kind,
+            "produced_by_state_id": artifact.produced_by_state_id,
+            "sink_effect_id": artifact.sink_effect_id,
+            "artifact_type": artifact.artifact_type,
+            "path_or_uri": artifact.path_or_uri,
+            "content_hash": artifact.content_hash,
+            "size_bytes": artifact.size_bytes,
+            "idempotency_key": artifact.idempotency_key,
+            "publication_performed": artifact.publication_performed,
+            "publication_evidence_kind": artifact.publication_evidence_kind,
+            "created_at": artifact.created_at.isoformat(),
+        }
+        for artifact in artifacts[:limit]
     ]
 
 

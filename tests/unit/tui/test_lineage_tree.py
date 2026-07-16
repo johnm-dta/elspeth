@@ -365,7 +365,11 @@ class TestLineageTreeWidget:
                             "content_hash": "sha256:abc",
                             "size_bytes": 12,
                             "sink_node_id": "sink",
+                            "producer_kind": "node_state",
                             "produced_by_state_id": "state-sink",
+                            "sink_effect_id": None,
+                            "publication_performed": True,
+                            "publication_evidence_kind": "legacy_returned",
                         },
                     },
                 )
@@ -389,6 +393,9 @@ class TestLineageTreeWidget:
             "artifact_path_or_uri": "/tmp/out.json",
             "artifact_hash": "sha256:abc",
             "artifact_size_bytes": 12,
+            "artifact_producer_kind": "node_state",
+            "artifact_publication_performed": True,
+            "artifact_publication_evidence_kind": "legacy_returned",
             "state_id": "state-sink",
         }
 
@@ -529,7 +536,7 @@ class TestLineageTreeWidget:
             ),
         )
 
-        token_info = ExplainScreen()._token_display_info(lineage_result, {})
+        token_info = ExplainScreen()._token_display_info(lineage_result, {}, {})
 
         assert token_info["parent_tokens"] == [
             {"token_id": "token-parent-a", "row_id": "row-a"},

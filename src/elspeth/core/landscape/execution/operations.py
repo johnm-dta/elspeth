@@ -53,6 +53,7 @@ class OperationRepository:
         operation_type: OperationType,
         *,
         input_data: Mapping[str, object] | None = None,
+        sink_effect_id: str | None = None,
     ) -> Operation:
         """Begin an operation for source/sink I/O.
 
@@ -64,6 +65,7 @@ class OperationRepository:
             node_id: Source or sink node performing the operation
             operation_type: Type of operation
             input_data: Optional input context (stored via payload store)
+            sink_effect_id: Stable epoch-26 effect identity for sink writes
 
         Returns:
             Operation with operation_id for call attribution
@@ -88,6 +90,7 @@ class OperationRepository:
             operation_type=operation_type,
             started_at=timestamp,
             status="open",
+            sink_effect_id=sink_effect_id,
             input_data_ref=input_ref,
             input_data_hash=input_hash,
         )

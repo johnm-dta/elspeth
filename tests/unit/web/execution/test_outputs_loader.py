@@ -79,13 +79,13 @@ def _seed_run_with_artifacts(
             state_id=f"state-{i}",
         )
         factory.execution.register_artifact(
-            run_id,
-            state.state_id,
-            sink_node_id,
-            "file",
-            path_or_uri,
-            content_hash,
-            size_bytes,
+            run_id=run_id,
+            state_id=state.state_id,
+            sink_node_id=sink_node_id,
+            artifact_type="file",
+            path=path_or_uri,
+            content_hash=content_hash,
+            size_bytes=size_bytes,
             artifact_id=artifact_id,
         )
 

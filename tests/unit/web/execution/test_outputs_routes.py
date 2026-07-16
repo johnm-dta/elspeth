@@ -164,6 +164,11 @@ class TestRunOutputsManifestEndpoint:
                 exists_now=True,
                 downloadable=True,
                 storage_kind="sink_file",
+                producer_kind="node_state",
+                produced_by_state_id="state-legacy",
+                sink_effect_id=None,
+                publication_performed=True,
+                publication_evidence_kind="legacy_returned",
             )
             for i in range(25)
         ]
@@ -259,6 +264,11 @@ class TestRunOutputContentEndpoint:
                         exists_now=True,
                         downloadable=True,
                         storage_kind="sink_file",
+                        producer_kind="node_state",
+                        produced_by_state_id="state-legacy",
+                        sink_effect_id=None,
+                        publication_performed=True,
+                        publication_evidence_kind="legacy_returned",
                     )
                 ],
             )
@@ -306,6 +316,11 @@ class TestRunOutputContentEndpoint:
                     exists_now=True,
                     downloadable=True,
                     storage_kind="sink_file",
+                    producer_kind="node_state",
+                    produced_by_state_id="state-legacy",
+                    sink_effect_id=None,
+                    publication_performed=True,
+                    publication_evidence_kind="legacy_returned",
                 )
             ],
             run_id=run_id,
@@ -349,6 +364,11 @@ class TestRunOutputContentEndpoint:
                         exists_now=True,
                         downloadable=True,
                         storage_kind="sink_file",
+                        producer_kind="node_state",
+                        produced_by_state_id="state-legacy",
+                        sink_effect_id=None,
+                        publication_performed=True,
+                        publication_evidence_kind="legacy_returned",
                     )
                 ],
             )
@@ -409,6 +429,11 @@ class TestRunOutputContentEndpoint:
                         exists_now=True,
                         downloadable=True,
                         storage_kind="sink_file",
+                        producer_kind="node_state",
+                        produced_by_state_id="state-legacy",
+                        sink_effect_id=None,
+                        publication_performed=True,
+                        publication_evidence_kind="legacy_returned",
                     )
                 ],
             )
@@ -460,6 +485,11 @@ class TestRunOutputContentEndpoint:
                         exists_now=True,
                         downloadable=True,
                         storage_kind="sink_file",
+                        producer_kind="node_state",
+                        produced_by_state_id="state-legacy",
+                        sink_effect_id=None,
+                        publication_performed=True,
+                        publication_evidence_kind="legacy_returned",
                     )
                 ],
             )
@@ -567,6 +597,11 @@ class TestRunOutputContentEndpoint:
                         exists_now=True,
                         downloadable=True,
                         storage_kind="sink_file",
+                        producer_kind="node_state",
+                        produced_by_state_id="state-legacy",
+                        sink_effect_id=None,
+                        publication_performed=True,
+                        publication_evidence_kind="legacy_returned",
                     )
                 ],
             )
@@ -620,6 +655,11 @@ class TestRunOutputContentEndpoint:
                         exists_now=True,
                         downloadable=True,
                         storage_kind="unknown",
+                        producer_kind="node_state",
+                        produced_by_state_id="state-legacy",
+                        sink_effect_id=None,
+                        publication_performed=True,
+                        publication_evidence_kind="legacy_returned",
                     )
                 ],
             )
@@ -674,6 +714,11 @@ class TestRunOutputContentEndpoint:
                         exists_now=True,
                         downloadable=True,
                         storage_kind="blob",
+                        producer_kind="node_state",
+                        produced_by_state_id="state-legacy",
+                        sink_effect_id=None,
+                        publication_performed=True,
+                        publication_evidence_kind="legacy_returned",
                     )
                 ],
             )
@@ -726,6 +771,11 @@ class TestRunOutputContentEndpoint:
                         exists_now=True,
                         downloadable=True,
                         storage_kind="blob",
+                        producer_kind="node_state",
+                        produced_by_state_id="state-legacy",
+                        sink_effect_id=None,
+                        publication_performed=True,
+                        publication_evidence_kind="legacy_returned",
                     )
                 ],
             )
@@ -800,6 +850,11 @@ class TestRunOutputContentEndpoint:
                         exists_now=False,
                         downloadable=False,
                         storage_kind="sink_file",
+                        producer_kind="node_state",
+                        produced_by_state_id="state-legacy",
+                        sink_effect_id=None,
+                        publication_performed=True,
+                        publication_evidence_kind="legacy_returned",
                     )
                 ],
             )
@@ -841,6 +896,11 @@ def _file_artifact_in_outputs(
         exists_now=True,
         downloadable=True,
         storage_kind="sink_file",
+        producer_kind="node_state",
+        produced_by_state_id="state-legacy",
+        sink_effect_id=None,
+        publication_performed=True,
+        publication_evidence_kind="legacy_returned",
     )
 
 
@@ -893,6 +953,11 @@ class TestRunOutputPreviewEndpoint:
                     exists_now=True,
                     downloadable=True,
                     storage_kind="sink_file",
+                    producer_kind="node_state",
+                    produced_by_state_id="state-legacy",
+                    sink_effect_id=None,
+                    publication_performed=True,
+                    publication_evidence_kind="legacy_returned",
                 )
             ],
             run_id=run_id,
@@ -951,6 +1016,11 @@ class TestRunOutputPreviewEndpoint:
                     exists_now=True,
                     downloadable=True,
                     storage_kind="sink_file",
+                    producer_kind="node_state",
+                    produced_by_state_id="state-legacy",
+                    sink_effect_id=None,
+                    publication_performed=True,
+                    publication_evidence_kind="legacy_returned",
                 )
             ],
             run_id=run_id,
@@ -996,6 +1066,11 @@ class TestRunOutputPreviewEndpoint:
                     exists_now=True,
                     downloadable=True,
                     storage_kind="sink_file",
+                    producer_kind="node_state",
+                    produced_by_state_id="state-legacy",
+                    sink_effect_id=None,
+                    publication_performed=True,
+                    publication_evidence_kind="legacy_returned",
                 )
             ],
             run_id=run_id,
@@ -1115,6 +1190,11 @@ class TestRunOutputPreviewEndpoint:
             exists_now=True,
             downloadable=False,
             storage_kind="unknown",
+            producer_kind="node_state",
+            produced_by_state_id="state-legacy",
+            sink_effect_id=None,
+            publication_performed=True,
+            publication_evidence_kind="legacy_returned",
         )
         _install_manifest_loader(monkeypatch, artifacts=[artifact], run_id=run_id)
 
@@ -1148,6 +1228,11 @@ class TestRunOutputPreviewEndpoint:
             exists_now=False,
             downloadable=False,
             storage_kind="sink_file",
+            producer_kind="node_state",
+            produced_by_state_id="state-legacy",
+            sink_effect_id=None,
+            publication_performed=True,
+            publication_evidence_kind="legacy_returned",
         )
         _install_manifest_loader(monkeypatch, artifacts=[artifact], run_id=run_id)
 
@@ -1175,6 +1260,11 @@ class TestRunOutputPreviewEndpoint:
             exists_now=False,
             downloadable=False,
             storage_kind="unknown",
+            producer_kind="node_state",
+            produced_by_state_id="state-legacy",
+            sink_effect_id=None,
+            publication_performed=True,
+            publication_evidence_kind="legacy_returned",
         )
         _install_manifest_loader(monkeypatch, artifacts=[artifact], run_id=run_id)
 

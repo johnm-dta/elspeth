@@ -25,6 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.engine.url import make_url
 
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.export_mappers import artifact_producer_kind, validate_artifact_publication_projection
 from elspeth.core.landscape.schema import artifacts_table
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.discard_summary import _sqlite_database_file_missing
@@ -197,10 +198,14 @@ def load_run_outputs_from_db(
         select(
             artifacts_table.c.artifact_id,
             artifacts_table.c.sink_node_id,
+            artifacts_table.c.produced_by_state_id,
+            artifacts_table.c.sink_effect_id,
             artifacts_table.c.artifact_type,
             artifacts_table.c.path_or_uri,
             artifacts_table.c.content_hash,
             artifacts_table.c.size_bytes,
+            artifacts_table.c.publication_performed,
+            artifacts_table.c.publication_evidence_kind,
             artifacts_table.c.created_at,
         )
         .where(artifacts_table.c.run_id == landscape_run_id)
@@ -209,6 +214,15 @@ def load_run_outputs_from_db(
     artifacts: list[RunOutputArtifact] = []
     with db.read_only_connection() as conn:
         for row in conn.execute(stmt):
+            producer_kind = artifact_producer_kind(
+                produced_by_state_id=row.produced_by_state_id,
+                sink_effect_id=row.sink_effect_id,
+            )
+            validate_artifact_publication_projection(
+                producer_kind=producer_kind,
+                publication_performed=row.publication_performed,
+                publication_evidence_kind=row.publication_evidence_kind,
+            )
             fs_paths = filesystem_path_candidates(row.path_or_uri)
             exists_now = any(fs_path.exists() for fs_path in fs_paths) if fs_paths is not None else False
             downloadable = (
@@ -223,10 +237,15 @@ def load_run_outputs_from_db(
                 RunOutputArtifact(
                     artifact_id=row.artifact_id,
                     sink_node_id=row.sink_node_id,
+                    producer_kind=producer_kind,
+                    produced_by_state_id=row.produced_by_state_id,
+                    sink_effect_id=row.sink_effect_id,
                     artifact_type=row.artifact_type,
                     path_or_uri=row.path_or_uri,
                     content_hash=row.content_hash,
                     size_bytes=row.size_bytes,
+                    publication_performed=row.publication_performed,
+                    publication_evidence_kind=row.publication_evidence_kind,
                     created_at=row.created_at,
                     exists_now=exists_now,
                     downloadable=downloadable,

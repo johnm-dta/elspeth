@@ -6,6 +6,7 @@ Provides read-only tools for querying the audit database:
 - get_run_summary: Statistics for a run (now includes operation counts)
 - list_rows: List rows for a run
 - list_operations: List source/sink operations for a run
+- list_artifacts: List sink artifacts with producer/publication evidence
 - explain_token: Complete lineage for a token
 - get_operation_calls: Get calls made during a source/sink operation
 - get_errors: Get validation and transform errors

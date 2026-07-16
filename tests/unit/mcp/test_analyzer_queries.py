@@ -45,6 +45,7 @@ from elspeth.mcp.analyzers.queries import (
     explain_token,
     get_calls,
     get_operation_calls,
+    list_artifacts,
     list_operations,
     list_rows,
     list_runs,
@@ -195,6 +196,41 @@ class TestListOperations:
 
         assert [row["operation_id"] for row in rows] == [operation.operation_id]
         assert rows[0]["operation_type"] == "runtime_preflight"
+        assert rows[0]["sink_effect_id"] is None
+
+
+def test_list_artifacts_maps_explicit_producer_and_publication_evidence() -> None:
+    p = _build_linear_pipeline()
+    artifact = p["factory"].execution.register_artifact(
+        run_id=p["run_id"],
+        state_id=p["node_state"].state_id,
+        sink_node_id=p["sink_node_id"],
+        artifact_type="file",
+        path="/output/result.csv",
+        content_hash="a" * 64,
+        size_bytes=1,
+    )
+
+    rows = list_artifacts(p["db"], p["factory"], p["run_id"])
+
+    assert rows == [
+        {
+            "artifact_id": artifact.artifact_id,
+            "run_id": p["run_id"],
+            "sink_node_id": p["sink_node_id"],
+            "producer_kind": "node_state",
+            "produced_by_state_id": p["node_state"].state_id,
+            "sink_effect_id": None,
+            "artifact_type": "file",
+            "path_or_uri": "/output/result.csv",
+            "content_hash": "a" * 64,
+            "size_bytes": 1,
+            "idempotency_key": None,
+            "publication_performed": True,
+            "publication_evidence_kind": "legacy_returned",
+            "created_at": artifact.created_at.isoformat(),
+        }
+    ]
 
 
 # ===========================================================================

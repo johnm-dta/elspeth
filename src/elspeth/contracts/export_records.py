@@ -88,6 +88,7 @@ class OperationExportRecord(TypedDict):
     operation_id: str
     node_id: str
     operation_type: str
+    sink_effect_id: str | None
     status: str
     started_at: str | None
     completed_at: str | None
@@ -310,12 +311,16 @@ class ArtifactExportRecord(TypedDict):
     run_id: str
     artifact_id: str
     sink_node_id: str
+    producer_kind: Literal["node_state", "sink_effect"]
     produced_by_state_id: str | None
+    sink_effect_id: str | None
     artifact_type: str
     path_or_uri: str | None
     content_hash: str | None
     size_bytes: int | None
     idempotency_key: str | None
+    publication_performed: bool
+    publication_evidence_kind: Literal["returned", "reconciled", "inherited", "virtual", "legacy_returned"]
     created_at: str
 
 

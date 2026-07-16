@@ -211,6 +211,7 @@ def _make_executor(*, bulk_repository: bool = False) -> tuple[SinkExecutor, Simp
             size_bytes=kwargs["size_bytes"],
             created_at=datetime.now(UTC),
             idempotency_key=kwargs.get("idempotency_key"),
+            publication_evidence_kind="legacy_returned",
         )
 
     execution.begin_node_state.side_effect = _begin_state

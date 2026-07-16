@@ -21,6 +21,17 @@ from typing import Any, ClassVar
 import httpx
 import pytest
 
+from elspeth.contracts import ArtifactDescriptor
+from elspeth.contracts.sink_effects import (
+    SINK_EFFECT_PROTOCOL_VERSION,
+    SinkEffectCommitResult,
+    SinkEffectDescriptorMode,
+    SinkEffectInputKind,
+    SinkEffectInspection,
+    SinkEffectInspectionMode,
+    SinkEffectPlan,
+    SinkEffectReconcileResult,
+)
 from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH
 from elspeth.web import aws_ecs_acceptance as acceptance
 
@@ -1121,21 +1132,86 @@ class _S3CleanupClient:
         self.events.append("cleanup-close")
 
 
+class _EffectS3SinkBase:
+    """Protocol-faithful shared target used by the acceptance controller tests."""
+
+    def __init__(
+        self,
+        *,
+        index: int,
+        events: list[str],
+        target: dict[str, ArtifactDescriptor],
+        failure: str | None = None,
+    ) -> None:
+        self.index = index
+        self.events = events
+        self.target = target
+        self.failure = failure
+
+    def inspect_effect(self, request: object, _ctx: object) -> SinkEffectInspection:
+        self.events.append(f"sink-{self.index}-inspect")
+        if self.failure == "sink" and self.index == 1:
+            raise RuntimeError("raw credential provider URL ARN sentinel")
+        return SinkEffectInspection(
+            mode=SinkEffectInspectionMode.INSPECTED,
+            reference=f"inspection:{self.index}",
+            evidence={"exists": bool(self.target)},
+        )
+
+    def prepare_effect(self, request: object, _ctx: object) -> SinkEffectPlan:
+        self.events.append(f"sink-{self.index}-prepare")
+        effect_id = request.effect_id  # type: ignore[attr-defined]
+        target = f"s3://acceptance-bucket/{_S3_PREFIX}/verify-s3.jsonl"
+        digest = "b" * 64 if self.failure == "integrity" and self.index == 1 else _S3_HASH
+        descriptor = ArtifactDescriptor(
+            artifact_type="file",
+            path_or_uri=target,
+            content_hash=digest,
+            size_bytes=len(acceptance._S3_ACCEPTANCE_BYTES),
+        )
+        return SinkEffectPlan(
+            effect_id=effect_id,
+            protocol_version=SINK_EFFECT_PROTOCOL_VERSION,
+            input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            descriptor_mode=SinkEffectDescriptorMode.PRECOMPUTED,
+            inspection_mode=SinkEffectInspectionMode.INSPECTED,
+            target=target,
+            plan_hash="a" * 64,
+            payload_hash=digest,
+            expected_descriptor=descriptor,
+            safe_evidence={"test": True},
+        )
+
+    def reconcile_effect(self, plan: SinkEffectPlan, _ctx: object) -> SinkEffectReconcileResult:
+        self.events.append(f"sink-{self.index}-reconcile")
+        if self.index == 2 and self.failure == "collision":
+            return SinkEffectReconcileResult.not_applied(evidence={"missing": True})
+        existing = self.target.get("descriptor")
+        if existing is None:
+            return SinkEffectReconcileResult.not_applied(evidence={"missing": True})
+        return SinkEffectReconcileResult.applied(existing, evidence={"matched": True})
+
+    def commit_effect(self, plan: SinkEffectPlan, _ctx: object) -> SinkEffectCommitResult:
+        self.events.append(f"sink-{self.index}-commit")
+        assert plan.expected_descriptor is not None
+        self.target["descriptor"] = plan.expected_descriptor
+        return SinkEffectCommitResult(
+            descriptor=plan.expected_descriptor,
+            evidence={"committed": True},
+            accepted_ordinals=(0,),
+            diverted_ordinals=(),
+        )
+
+
 def test_verify_s3_round_trips_with_bounded_default_chain_plugin_configs_and_cleans_up() -> None:
     events: list[str] = []
     sink_configs: list[dict[str, object]] = []
     source_configs: list[dict[str, object]] = []
+    target: dict[str, ArtifactDescriptor] = {}
 
-    class Sink:
+    class Sink(_EffectS3SinkBase):
         def __init__(self, index: int) -> None:
-            self.index = index
-
-        def write(self, rows: list[dict[str, object]], _ctx: object) -> object:
-            events.append(f"sink-{self.index}-write")
-            assert rows == [{"id": 1, "name": "elspeth-s3-acceptance"}]
-            if self.index == 2:
-                raise acceptance.S3ConditionalWriteRejectedError
-            return SimpleNamespace(artifact=SimpleNamespace(content_hash=_S3_HASH), diversions=[])
+            super().__init__(index=index, events=events, target=target)
 
         def close(self) -> None:
             events.append(f"sink-{self.index}-close")
@@ -1189,9 +1265,14 @@ def test_verify_s3_round_trips_with_bounded_default_chain_plugin_configs_and_cle
         "cleanup_succeeded": True,
     }
     assert events == [
-        "sink-1-write",
+        "sink-1-inspect",
+        "sink-1-prepare",
+        "sink-1-reconcile",
+        "sink-1-commit",
         "source-load",
-        "sink-2-write",
+        "sink-2-inspect",
+        "sink-2-prepare",
+        "sink-2-reconcile",
         "source-close",
         "sink-2-close",
         "sink-1-close",
@@ -1231,20 +1312,11 @@ def test_verify_s3_rejects_credential_endpoint_profile_and_role_overrides_by_pre
 def test_verify_s3_provider_and_integrity_failures_are_static_and_still_delete(failure: str) -> None:
     events: list[str] = []
     sink_count = 0
+    target: dict[str, ArtifactDescriptor] = {}
 
-    class Sink:
+    class Sink(_EffectS3SinkBase):
         def __init__(self, index: int) -> None:
-            self.index = index
-
-        def write(self, _rows: object, _ctx: object) -> object:
-            if failure == "sink" and self.index == 1:
-                raise RuntimeError("raw credential provider URL ARN sentinel")
-            if self.index == 2:
-                if failure == "collision":
-                    return SimpleNamespace(artifact=SimpleNamespace(content_hash=_S3_HASH), diversions=[])
-                raise acceptance.S3ConditionalWriteRejectedError
-            digest = "b" * 64 if failure == "integrity" else _S3_HASH
-            return SimpleNamespace(artifact=SimpleNamespace(content_hash=digest), diversions=[])
+            super().__init__(index=index, events=events, target=target, failure=failure)
 
         def close(self) -> None:
             events.append(f"sink-{self.index}-close")
@@ -1292,13 +1364,12 @@ def test_verify_s3_provider_and_integrity_failures_are_static_and_still_delete(f
 
 def test_verify_s3_cleanup_continues_after_resource_close_failure_and_fails_closed() -> None:
     events: list[str] = []
+    target: dict[str, ArtifactDescriptor] = {}
+    sink_count = 0
 
-    class Sink:
-        def write(self, _rows: object, _ctx: object) -> object:
-            if "write" in events:
-                raise acceptance.S3ConditionalWriteRejectedError
-            events.append("write")
-            return SimpleNamespace(artifact=SimpleNamespace(content_hash=_S3_HASH), diversions=[])
+    class Sink(_EffectS3SinkBase):
+        def __init__(self, index: int) -> None:
+            super().__init__(index=index, events=events, target=target)
 
         def close(self) -> None:
             events.append("sink-close")
@@ -1317,10 +1388,15 @@ def test_verify_s3_cleanup_continues_after_resource_close_failure_and_fails_clos
         def close(self) -> None:
             events.append("source-close")
 
+    def sink_factory(_config: dict[str, object]) -> Sink:
+        nonlocal sink_count
+        sink_count += 1
+        return Sink(sink_count)
+
     with pytest.raises(acceptance.AcceptanceCheckError, match="s3_resource_close") as raised:
         acceptance.verify_s3(
             _s3_env(),
-            sink_factory=lambda _config: Sink(),
+            sink_factory=sink_factory,
             source_factory=lambda _config: Source(),
             s3_client_factory=lambda _region, _endpoint: _S3CleanupClient(events),
         )
@@ -1334,13 +1410,12 @@ def test_verify_s3_cleanup_continues_after_resource_close_failure_and_fails_clos
 
 def test_verify_s3_cleanup_failure_is_no_go_and_redacted() -> None:
     events: list[str] = []
+    target: dict[str, ArtifactDescriptor] = {}
+    sink_count = 0
 
-    class Sink:
-        def write(self, _rows: object, _ctx: object) -> object:
-            if "write" in events:
-                raise acceptance.S3ConditionalWriteRejectedError
-            events.append("write")
-            return SimpleNamespace(artifact=SimpleNamespace(content_hash=_S3_HASH), diversions=[])
+    class Sink(_EffectS3SinkBase):
+        def __init__(self, index: int) -> None:
+            super().__init__(index=index, events=events, target=target)
 
         def close(self) -> None:
             pass
@@ -1358,10 +1433,15 @@ def test_verify_s3_cleanup_failure_is_no_go_and_redacted() -> None:
         def close(self) -> None:
             pass
 
+    def sink_factory(_config: dict[str, object]) -> Sink:
+        nonlocal sink_count
+        sink_count += 1
+        return Sink(sink_count)
+
     with pytest.raises(acceptance.AcceptanceCheckError, match="s3_cleanup") as raised:
         acceptance.verify_s3(
             _s3_env(),
-            sink_factory=lambda _config: Sink(),
+            sink_factory=sink_factory,
             source_factory=lambda _config: Source(),
             s3_client_factory=lambda _region, _endpoint: _S3CleanupClient(
                 events, delete_error=RuntimeError("raw bucket provider response sentinel")

@@ -364,6 +364,22 @@ _ARTIFACT = Artifact(
     content_hash="content-hash",
     size_bytes=1024,
     created_at=_DT,
+    publication_evidence_kind="legacy_returned",
+)
+
+_EFFECT_ARTIFACT = Artifact(
+    artifact_id="art-effect",
+    run_id="run-1",
+    produced_by_state_id=None,
+    sink_effect_id="effect-1",
+    sink_node_id="node-4",
+    artifact_type="csv",
+    path_or_uri="/output/effect.csv",
+    content_hash="effect-content-hash",
+    size_bytes=0,
+    created_at=_DT2,
+    publication_performed=False,
+    publication_evidence_kind="virtual",
 )
 
 _VALIDATION_ERROR = ValidationErrorRecord(
@@ -1467,6 +1483,21 @@ class TestArtifactRecords:
         assert a["created_at"] is not None
         assert isinstance(a["created_at"], str)
         assert a["created_at"] == _DT.isoformat()
+        assert a["producer_kind"] == "node_state"
+        assert a["produced_by_state_id"] == "state-completed"
+        assert a["sink_effect_id"] is None
+        assert a["publication_performed"] is True
+        assert a["publication_evidence_kind"] == "legacy_returned"
+
+    def test_effect_artifact_fields_are_explicit(self) -> None:
+        exporter = _make_exporter(artifacts=[_EFFECT_ARTIFACT])
+        record = next(r for r in exporter.export_run("run-1") if r["record_type"] == "artifact")
+
+        assert record["producer_kind"] == "sink_effect"
+        assert record["produced_by_state_id"] is None
+        assert record["sink_effect_id"] == "effect-1"
+        assert record["publication_performed"] is False
+        assert record["publication_evidence_kind"] == "virtual"
 
 
 # ===========================================================================

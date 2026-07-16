@@ -14,6 +14,7 @@ from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.mcp.analyzers import contracts, diagnostics, queries, reports
 from elspeth.mcp.limits import MCP_QUERY_DEFAULT_LIMIT
 from elspeth.mcp.types import (
+    ArtifactRecord,
     CallDetail,
     CollisionRecord,
     ContractViolationsReport,
@@ -95,6 +96,9 @@ class LandscapeAnalyzer:
         limit: int = 100,
     ) -> list[OperationRecord]:
         return queries.list_operations(self._db, self._factory, run_id, operation_type=operation_type, status=status, limit=limit)
+
+    def list_artifacts(self, run_id: str, limit: int = 100) -> list[ArtifactRecord]:
+        return queries.list_artifacts(self._db, self._factory, run_id, limit=limit)
 
     def get_operation_calls(self, operation_id: str) -> list[OperationCallRecord]:
         return queries.get_operation_calls(self._db, self._factory, operation_id)

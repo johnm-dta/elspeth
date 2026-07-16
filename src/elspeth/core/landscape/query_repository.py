@@ -40,11 +40,13 @@ from elspeth.core.landscape.model_loaders import (
 )
 from elspeth.core.landscape.row_data import RowDataResult, RowDataState
 from elspeth.core.landscape.schema import (
+    artifacts_table,
     calls_table,
     node_states_table,
     routing_events_table,
     rows_table,
     scheduler_events_table,
+    sink_effect_members_table,
     token_outcomes_table,
     token_parents_table,
     tokens_table,
@@ -339,6 +341,25 @@ class QueryRepository:
         )
         db_rows = self._ops.execute_fetchall(query)
         return [self._scheduler_event_loader.load(r) for r in db_rows]
+
+    def get_effect_artifact_members(self, run_id: str) -> dict[str, tuple[str, ...]]:
+        """Map effect-linked artifacts to their ordered pipeline member tokens."""
+        query = (
+            select(artifacts_table.c.artifact_id, sink_effect_members_table.c.token_id)
+            .select_from(
+                artifacts_table.join(
+                    sink_effect_members_table,
+                    artifacts_table.c.sink_effect_id == sink_effect_members_table.c.effect_id,
+                )
+            )
+            .where(artifacts_table.c.run_id == run_id)
+            .where(artifacts_table.c.sink_effect_id.isnot(None))
+            .order_by(artifacts_table.c.created_at, artifacts_table.c.artifact_id, sink_effect_members_table.c.ordinal)
+        )
+        members: dict[str, list[str]] = {}
+        for row in self._ops.execute_fetchall(query):
+            members.setdefault(row.artifact_id, []).append(row.token_id)
+        return {artifact_id: tuple(token_ids) for artifact_id, token_ids in members.items()}
 
     def get_token_children(self, parent_token_id: str) -> list[TokenParent]:
         """Get child relationships for a token (forward lineage).

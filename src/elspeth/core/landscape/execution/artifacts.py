@@ -15,7 +15,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.exc import SQLAlchemyError
 
-from elspeth.contracts import Artifact
+from elspeth.contracts import Artifact, ArtifactPublicationEvidenceKind
 from elspeth.contracts.results import require_no_artifact_uri_credentials
 from elspeth.core.ids import generate_id
 from elspeth.core.landscape._database_ops import DatabaseOps
@@ -40,22 +40,26 @@ class ArtifactRepository:
     def register_artifact(
         self,
         run_id: str,
-        state_id: str,
         sink_node_id: str,
         artifact_type: str,
         path: str,
         content_hash: str,
         size_bytes: int,
         *,
+        state_id: str | None = None,
+        sink_effect_id: str | None = None,
         artifact_id: str | None = None,
         idempotency_key: str | None = None,
+        publication_performed: bool = True,
+        publication_evidence_kind: ArtifactPublicationEvidenceKind | None = None,
         conn: Connection | None = None,
     ) -> Artifact:
         """Register an artifact produced by a sink.
 
         Args:
             run_id: Run that produced this artifact
-            state_id: Node state that produced this artifact
+            state_id: Legacy node state that produced this artifact
+            sink_effect_id: Epoch-26 sink effect that produced this artifact
             sink_node_id: Sink node that wrote the artifact
             artifact_type: Type of artifact (csv, json, etc.)
             path: File path or URI
@@ -71,13 +75,19 @@ class ArtifactRepository:
             The durable Artifact model. On an idempotent retry this is the
             original row, including its artifact ID and creation timestamp.
         """
+        if (state_id is None) == (sink_effect_id is None):
+            raise ValueError("register_artifact requires exactly one producer link")
         artifact_id = artifact_id or generate_id()
         require_no_artifact_uri_credentials(path)
+        evidence_kind: ArtifactPublicationEvidenceKind = (
+            ("legacy_returned" if state_id is not None else "returned") if publication_evidence_kind is None else publication_evidence_kind
+        )
 
         artifact = Artifact(
             artifact_id=artifact_id,
             run_id=run_id,
             produced_by_state_id=state_id,
+            sink_effect_id=sink_effect_id,
             sink_node_id=sink_node_id,
             artifact_type=artifact_type,
             path_or_uri=path,
@@ -85,18 +95,23 @@ class ArtifactRepository:
             size_bytes=size_bytes,
             created_at=now(),
             idempotency_key=idempotency_key,
+            publication_performed=publication_performed,
+            publication_evidence_kind=evidence_kind,
         )
 
         values = {
             "artifact_id": artifact.artifact_id,
             "run_id": artifact.run_id,
             "produced_by_state_id": artifact.produced_by_state_id,
+            "sink_effect_id": artifact.sink_effect_id,
             "sink_node_id": artifact.sink_node_id,
             "artifact_type": artifact.artifact_type,
             "path_or_uri": artifact.path_or_uri,
             "content_hash": artifact.content_hash,
             "size_bytes": artifact.size_bytes,
             "idempotency_key": artifact.idempotency_key,
+            "publication_performed": artifact.publication_performed,
+            "publication_evidence_kind": artifact.publication_evidence_kind,
             "created_at": artifact.created_at,
         }
         if conn is not None:
@@ -107,7 +122,7 @@ class ArtifactRepository:
                 return self._insert_or_fetch(owned_conn, values)
         except SQLAlchemyError as exc:
             raise LandscapeRecordError(
-                f"register_artifact failed for state_id={state_id!r} — database rejected audit write: {type(exc).__name__}"
+                f"register_artifact failed for producer={artifact.producer_kind!r} — database rejected audit write: {type(exc).__name__}"
             ) from exc
 
     def _insert_or_fetch(self, conn: Connection, values: Mapping[str, Any]) -> Artifact:
@@ -125,8 +140,7 @@ class ArtifactRepository:
                 ).scalar_one_or_none()
         except SQLAlchemyError as exc:
             raise LandscapeRecordError(
-                f"register_artifact failed for state_id={values['produced_by_state_id']!r} "
-                f"— database rejected audit write: {type(exc).__name__}"
+                f"register_artifact failed for producer linkage — database rejected audit write: {type(exc).__name__}"
             ) from exc
 
         if inserted_artifact_id is not None and inserted_artifact_id != values["artifact_id"]:
@@ -144,9 +158,7 @@ class ArtifactRepository:
             )
         rows = conn.execute(identity_query).fetchmany(2)
         if not rows:
-            raise LandscapeRecordError(
-                f"register_artifact could not read its durable row for state_id={values['produced_by_state_id']!r} after insert-or-fetch"
-            )
+            raise LandscapeRecordError("register_artifact could not read its durable row after insert-or-fetch")
         if len(rows) > 1:
             raise LandscapeRecordError(
                 "register_artifact idempotency lookup matched multiple durable rows; artifact logical-effect identity is ambiguous"
@@ -187,11 +199,14 @@ class ArtifactRepository:
         """Reject reuse of one logical-effect key for divergent evidence."""
         effect_fields = (
             "produced_by_state_id",
+            "sink_effect_id",
             "sink_node_id",
             "artifact_type",
             "path_or_uri",
             "content_hash",
             "size_bytes",
+            "publication_performed",
+            "publication_evidence_kind",
         )
         mismatches = [field for field in effect_fields if existing[field] != proposed[field]]
         if mismatches:

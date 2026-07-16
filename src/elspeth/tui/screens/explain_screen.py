@@ -203,10 +203,17 @@ class ExplainScreen:
                         error="Token or row not found, or no terminal tokens exist yet",
                     )
                 artifacts_by_state_id: dict[str, list[Artifact]] = {}
+                artifacts_by_token_id: dict[str, list[Artifact]] = {}
                 if lineage_result.outcome is not None:
+                    effect_members = factory.query.get_effect_artifact_members(run_id)
                     for artifact in factory.execution.get_artifacts(run_id):
-                        artifacts_by_state_id.setdefault(artifact.produced_by_state_id, []).append(artifact)
-                focused_tokens.append(self._token_display_info(lineage_result, artifacts_by_state_id))
+                        if artifact.producer_kind == "node_state":
+                            assert artifact.produced_by_state_id is not None
+                            artifacts_by_state_id.setdefault(artifact.produced_by_state_id, []).append(artifact)
+                        else:
+                            for token_id in effect_members.get(artifact.artifact_id, ()):
+                                artifacts_by_token_id.setdefault(token_id, []).append(artifact)
+                focused_tokens.append(self._token_display_info(lineage_result, artifacts_by_state_id, artifacts_by_token_id))
                 focused_state_by_node_id = {state.node_id: state for state in lineage_result.node_states}
             lineage_view = build_lineage_view_model(
                 run_id=run_id,
@@ -253,6 +260,7 @@ class ExplainScreen:
         self,
         lineage_result: _LineageResultLike,
         artifacts_by_state_id: Mapping[str, Sequence[Artifact]],
+        artifacts_by_token_id: Mapping[str, Sequence[Artifact]],
     ) -> TokenDisplayInfo:
         """Build the focused token display row from full lineage evidence."""
         token_info: TokenDisplayInfo = {
@@ -269,7 +277,12 @@ class ExplainScreen:
                 for parent in lineage_result.parent_tokens
             ]
         if lineage_result.outcome is not None:
-            artifact = self._artifact_for_lineage(lineage_result.node_states, artifacts_by_state_id)
+            artifact = self._artifact_for_lineage(
+                lineage_result.token.token_id,
+                lineage_result.node_states,
+                artifacts_by_state_id,
+                artifacts_by_token_id,
+            )
             token_info["outcome"] = self._outcome_display_info(lineage_result.outcome, artifact)
         return token_info
 
@@ -296,15 +309,24 @@ class ExplainScreen:
             "content_hash": artifact.content_hash,
             "size_bytes": artifact.size_bytes,
             "sink_node_id": artifact.sink_node_id,
+            "producer_kind": artifact.producer_kind,
             "produced_by_state_id": artifact.produced_by_state_id,
+            "sink_effect_id": artifact.sink_effect_id,
+            "publication_performed": artifact.publication_performed,
+            "publication_evidence_kind": artifact.publication_evidence_kind,
         }
 
     def _artifact_for_lineage(
         self,
+        token_id: str,
         node_states: Sequence[NodeState],
         artifacts_by_state_id: Mapping[str, Sequence[Artifact]],
+        artifacts_by_token_id: Mapping[str, Sequence[Artifact]],
     ) -> Artifact | None:
-        """Return artifact evidence from the latest visited state that produced one."""
+        """Return effect membership evidence first, then legacy state evidence."""
+        effect_artifacts = artifacts_by_token_id.get(token_id, ())
+        if effect_artifacts:
+            return effect_artifacts[-1]
         for state in reversed(node_states):
             artifacts = artifacts_by_state_id.get(state.state_id, ())
             if artifacts:
@@ -402,6 +424,8 @@ class ExplainScreen:
             }
             if "state_id" in selection:
                 outcome_detail["state_id"] = selection["state_id"]
+            if "sink_effect_id" in selection:
+                outcome_detail["sink_effect_id"] = selection["sink_effect_id"]
             if "token_id" in selection:
                 outcome_detail["token_id"] = selection["token_id"]
             if "row_id" in selection:
@@ -420,6 +444,12 @@ class ExplainScreen:
                 outcome_detail["artifact_hash"] = selection["artifact_hash"]
             if "artifact_size_bytes" in selection:
                 outcome_detail["artifact_size_bytes"] = selection["artifact_size_bytes"]
+            if "artifact_producer_kind" in selection:
+                outcome_detail["artifact_producer_kind"] = selection["artifact_producer_kind"]
+            if "artifact_publication_performed" in selection:
+                outcome_detail["artifact_publication_performed"] = selection["artifact_publication_performed"]
+            if "artifact_publication_evidence_kind" in selection:
+                outcome_detail["artifact_publication_evidence_kind"] = selection["artifact_publication_evidence_kind"]
             return outcome_detail
         if kind == "status":
             return {

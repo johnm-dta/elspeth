@@ -23,6 +23,7 @@ from sqlalchemy.engine import Connection
 
 from elspeth.contracts import (
     Artifact,
+    ArtifactPublicationEvidenceKind,
     Batch,
     BatchMember,
     BatchStatus,
@@ -360,9 +361,16 @@ class ExecutionRepository:
         operation_type: OperationType,
         *,
         input_data: Mapping[str, object] | None = None,
+        sink_effect_id: str | None = None,
     ) -> Operation:
         """Begin an operation for source/sink I/O."""
-        return self.operations.begin_operation(run_id, node_id, operation_type, input_data=input_data)
+        return self.operations.begin_operation(
+            run_id,
+            node_id,
+            operation_type,
+            input_data=input_data,
+            sink_effect_id=sink_effect_id,
+        )
 
     def complete_operation(
         self,
@@ -542,28 +550,34 @@ class ExecutionRepository:
     def register_artifact(
         self,
         run_id: str,
-        state_id: str,
         sink_node_id: str,
         artifact_type: str,
         path: str,
         content_hash: str,
         size_bytes: int,
         *,
+        state_id: str | None = None,
+        sink_effect_id: str | None = None,
         artifact_id: str | None = None,
         idempotency_key: str | None = None,
+        publication_performed: bool = True,
+        publication_evidence_kind: ArtifactPublicationEvidenceKind | None = None,
         conn: Connection | None = None,
     ) -> Artifact:
         """Register an artifact produced by a sink."""
         return self.artifacts.register_artifact(
             run_id,
-            state_id,
             sink_node_id,
             artifact_type,
             path,
             content_hash,
             size_bytes,
+            state_id=state_id,
+            sink_effect_id=sink_effect_id,
             artifact_id=artifact_id,
             idempotency_key=idempotency_key,
+            publication_performed=publication_performed,
+            publication_evidence_kind=publication_evidence_kind,
             conn=conn,
         )
 

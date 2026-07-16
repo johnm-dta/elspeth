@@ -819,6 +819,7 @@ class ArtifactLoader:
             artifact_id=row.artifact_id,
             run_id=row.run_id,
             produced_by_state_id=row.produced_by_state_id,
+            sink_effect_id=row.sink_effect_id,
             sink_node_id=row.sink_node_id,
             artifact_type=row.artifact_type,
             path_or_uri=row.path_or_uri,
@@ -826,6 +827,8 @@ class ArtifactLoader:
             size_bytes=row.size_bytes,
             created_at=row.created_at,
             idempotency_key=row.idempotency_key,
+            publication_performed=row.publication_performed,
+            publication_evidence_kind=row.publication_evidence_kind,
         )
 
 
@@ -915,6 +918,7 @@ class OperationLoader:
             started_at=row.started_at,
             completed_at=row.completed_at,
             status=row.status,
+            sink_effect_id=row.sink_effect_id,
             input_data_ref=row.input_data_ref,
             input_data_hash=row.input_data_hash,
             output_data_ref=row.output_data_ref,

@@ -724,6 +724,7 @@ export interface RunDiagnosticOperation {
   operation_id: string;
   node_id: string;
   operation_type: string;
+  sink_effect_id: string | null;
   status: string;
   duration_ms: number | null;
   started_at: string;
@@ -734,9 +735,19 @@ export interface RunDiagnosticOperation {
 export interface RunDiagnosticArtifact {
   artifact_id: string;
   sink_node_id: string;
+  producer_kind: "node_state" | "sink_effect";
+  produced_by_state_id: string | null;
+  sink_effect_id: string | null;
   artifact_type: string;
   path_or_uri: string;
   size_bytes: number;
+  publication_performed: boolean;
+  publication_evidence_kind:
+    | "returned"
+    | "reconciled"
+    | "inherited"
+    | "virtual"
+    | "legacy_returned";
   created_at: string;
 }
 
@@ -816,10 +827,20 @@ export type RunOutputArtifactStorageKind =
 export interface RunOutputArtifact {
   artifact_id: string;
   sink_node_id: string;
+  producer_kind: "node_state" | "sink_effect";
+  produced_by_state_id: string | null;
+  sink_effect_id: string | null;
   artifact_type: string;
   path_or_uri: string;
   content_hash: string;
   size_bytes: number;
+  publication_performed: boolean;
+  publication_evidence_kind:
+    | "returned"
+    | "reconciled"
+    | "inherited"
+    | "virtual"
+    | "legacy_returned";
   created_at: string;
   exists_now: boolean;
   downloadable: boolean;

@@ -1975,8 +1975,24 @@ class TestRegisterArtifact:
         state0 = repo.begin_node_state(tok, "sink-0", "run-1", 2, {"x": 1})
         state1 = repo.begin_node_state(tok, "sink-1", "run-1", 3, {"x": 1}, state_id="state-s1", attempt=1)
 
-        repo.register_artifact("run-1", state0.state_id, "sink-0", "csv", "/out/a.csv", "h1", 100)
-        repo.register_artifact("run-1", state1.state_id, "sink-1", "json", "/out/b.json", "h2", 200)
+        repo.register_artifact(
+            run_id="run-1",
+            state_id=state0.state_id,
+            sink_node_id="sink-0",
+            artifact_type="csv",
+            path="/out/a.csv",
+            content_hash="h1",
+            size_bytes=100,
+        )
+        repo.register_artifact(
+            run_id="run-1",
+            state_id=state1.state_id,
+            sink_node_id="sink-1",
+            artifact_type="json",
+            path="/out/b.json",
+            content_hash="h2",
+            size_bytes=200,
+        )
 
         csv_only = repo.get_artifacts("run-1", sink_node_id="sink-0")
         assert len(csv_only) == 1

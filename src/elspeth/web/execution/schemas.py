@@ -781,6 +781,7 @@ class RunDiagnosticOperation(_StrictResponse):
     operation_id: str
     node_id: str
     operation_type: RunDiagnosticOperationType
+    sink_effect_id: str | None
     status: RunDiagnosticOperationStatus
     duration_ms: RunDiagnosticDurationMs | None
     started_at: datetime
@@ -793,9 +794,14 @@ class RunDiagnosticArtifact(_StrictResponse):
 
     artifact_id: str
     sink_node_id: str
+    producer_kind: Literal["node_state", "sink_effect"]
+    produced_by_state_id: str | None
+    sink_effect_id: str | None
     artifact_type: str
     path_or_uri: str
     size_bytes: int = Field(ge=0)
+    publication_performed: bool
+    publication_evidence_kind: Literal["returned", "reconciled", "inherited", "virtual", "legacy_returned"]
     created_at: datetime
 
 
@@ -840,10 +846,15 @@ class RunOutputArtifact(_StrictResponse):
 
     artifact_id: str
     sink_node_id: str
+    producer_kind: Literal["node_state", "sink_effect"]
+    produced_by_state_id: str | None
+    sink_effect_id: str | None
     artifact_type: str
     path_or_uri: str
     content_hash: str
     size_bytes: int = Field(ge=0)
+    publication_performed: bool
+    publication_evidence_kind: Literal["returned", "reconciled", "inherited", "virtual", "legacy_returned"]
     created_at: datetime
     exists_now: bool
     downloadable: bool

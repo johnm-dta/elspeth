@@ -19,6 +19,7 @@ from elspeth.contracts.sink_effects import SinkEffectMember, SinkEffectMemberCan
 from elspeth.core.landscape.execution.sink_effect_identity import resolve_sink_effect_members
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.executors.sink_effects import SinkEffectCoordinator
+from elspeth.plugins.sinks._remote_object_effects import RemoteObjectPreconditionError
 from tests.fixtures.landscape import make_factory, make_landscape_db, register_test_node
 from tests.fixtures.stores import MockPayloadStore
 from tests.unit.core.landscape.test_sink_effect_reservation import _pipeline_members
@@ -228,5 +229,58 @@ def test_real_publication_survives_inherited_no_publication_gap() -> None:
         assert len(put_requests) == 2
         # The successor's replace is fenced on the real publication's ETag.
         assert put_requests[1]["IfMatch"] == real_etag
+    finally:
+        db.close()
+
+
+def test_foreign_overwrite_after_inherited_gap_fails_predecessor_fence() -> None:
+    """Tamper variant: the declared-predecessor byte fence must hold across an
+    inherited no-publication gap. If a foreign actor overwrites the remote
+    object after the gap, the successor must fail closed on the last real
+    publication's bytes rather than replace the tampered object fenced only
+    on its observed ETag."""
+    db = make_landscape_db()
+    try:
+        payload_store = MockPayloadStore()
+        factory = make_factory(db, payload_store=payload_store)
+        # The middle record alone exceeds the successor's size cap, so only
+        # batch 2 diverts while the snapshot rows stay serializable.
+        run_id, sink_id, members = _members_with_payloads(
+            factory,
+            [{"ordinal": 0}, {"ordinal": 1, "pad": "x" * 100}, {"ordinal": 2}],
+        )
+        store = _S3Store()
+        coordinator = SinkEffectCoordinator(factory=factory, worker_id="worker-a")
+
+        first = coordinator.execute(
+            _execution_request(run_id, sink_id, members[:1]),
+            _s3(store),
+        )
+        assert first.effect.publication_performed is True
+
+        # Batch 2 diverts everything and finalizes inherited without a write.
+        second = coordinator.execute(
+            _execution_request(run_id, sink_id, members[1:2]),
+            _s3(store, max_record_chars=60),
+        )
+        assert second.effect.publication_evidence_kind == "inherited"
+
+        # A FOREIGN actor overwrites the object between batches.
+        tampered_body = b'[{"id": "tampered"}]'
+        store.value = _Object(tampered_body, '"etag-foreign"', {})
+
+        with pytest.raises(
+            RemoteObjectPreconditionError,
+            match="declared predecessor bytes do not match remote metadata",
+        ):
+            coordinator.execute(
+                _execution_request(run_id, sink_id, members[2:]),
+                _s3(store),
+            )
+
+        # Fail-closed: the tampered object was never replaced.
+        assert store.value is not None and store.value.body == tampered_body
+        put_requests = [request for request in store.requests if request["operation"] == "put"]
+        assert len(put_requests) == 1
     finally:
         db.close()

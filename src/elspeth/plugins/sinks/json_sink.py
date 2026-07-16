@@ -6,11 +6,12 @@ IMPORTANT: Sinks use allow_coercion=False to enforce that transforms
 output correct types. Wrong types = upstream bug = crash.
 """
 
+import codecs
 import hashlib
 import io
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Literal
 
@@ -21,6 +22,20 @@ from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.header_modes import HeaderMode
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
+from elspeth.contracts.sink_effects import (
+    SINK_EFFECT_PROTOCOL_VERSION,
+    ResolvedSinkEffectMode,
+    RestrictedSinkEffectContext,
+    SinkEffectCommitResult,
+    SinkEffectExecutionPurpose,
+    SinkEffectInputKind,
+    SinkEffectInspection,
+    SinkEffectInspectionRequest,
+    SinkEffectPipelineMembersInput,
+    SinkEffectPlan,
+    SinkEffectPrepareRequest,
+    SinkEffectReconcileResult,
+)
 
 if TYPE_CHECKING:
     from elspeth.contracts.sink import OutputValidationResult
@@ -43,6 +58,34 @@ from elspeth.plugins.infrastructure.output_paths import (
 )
 from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode_enabled
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sinks._local_file_effects import (
+    commit_local_effect,
+    inspect_local_effect,
+    iter_path_chunks,
+    predecessor_local_path,
+    prepare_local_effect,
+    reconcile_local_effect,
+)
+
+
+def _iter_file_without_suffix(path: Path, suffix: bytes) -> Iterator[bytes]:
+    """Stream a file except for one exact structural suffix."""
+    pending = b""
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(64 * 1024), b""):
+            combined = pending + chunk
+            if len(combined) > len(suffix):
+                yield combined[: -len(suffix)]
+                pending = combined[-len(suffix) :]
+            else:
+                pending = combined
+    if pending != suffix:
+        raise ValueError("Existing JSON array does not have the expected terminal boundary")
+
+
+def _indent_json_value(serialized: str, indent: int) -> str:
+    prefix = " " * indent
+    return "\n".join(prefix + line for line in serialized.splitlines())
 
 
 class JSONSinkConfig(SinkPathConfig):
@@ -106,6 +149,21 @@ class JSONSink(BaseSink):
     plugin_version = "1.0.0"
     source_file_hash: str | None = "sha256:aaa586501df65381"
     config_model = JSONSinkConfig
+    effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    supported_effect_modes = frozenset({"append", "write"})
+    supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
+
+    @classmethod
+    def _resolve_sink_effect_mode(
+        cls,
+        config: Mapping[str, object],
+        *,
+        purpose: SinkEffectExecutionPurpose,
+    ) -> ResolvedSinkEffectMode | None:
+        del purpose
+        cfg = JSONSinkConfig.from_dict(dict(config), plugin_name=cls.name)
+        return ResolvedSinkEffectMode(cfg.mode)
+
     # determinism inherited from BaseSink (IO_WRITE)
 
     # Note: supports_resume is set per-instance in __init__ based on format.
@@ -291,6 +349,128 @@ class JSONSink(BaseSink):
     def _ensure_output_parent_exists(self) -> None:
         """Create the selected local output directory before opening files."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
+
+    def inspect_effect(
+        self,
+        request: SinkEffectInspectionRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectInspection:
+        del ctx
+        predecessor_path = predecessor_local_path(request)
+        if predecessor_path is not None:
+            self._path = predecessor_path
+        elif self._mode != "append":
+            self._path = resolve_output_collision_path(self._requested_path, self._collision_policy)
+        self._write_target_claimed = True
+        return inspect_local_effect(target_path=self._path, request=request)
+
+    def prepare_effect(
+        self,
+        request: SinkEffectPrepareRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectPlan:
+        del ctx
+        effect_input = request.effect_input
+        if type(effect_input) is not SinkEffectPipelineMembersInput:
+            raise TypeError("JSONSink effects require a closed supported effect input")
+
+        members = effect_input.target_snapshot_members
+        target = Path(str(request.inspection.evidence["target_path"]))
+        predecessor_declared = bool(request.inspection.evidence["predecessor_declared"])
+        include_baseline = predecessor_declared or self._mode == "append"
+        accepted: list[int] = []
+        diverted: list[int] = []
+
+        def serialized_rows() -> Iterator[tuple[int, str]]:
+            source_rows = [dict(member.row) for member in members]
+            output_rows = apply_display_headers(self, source_rows)
+            for member, original, output in zip(members, source_rows, output_rows, strict=True):
+                try:
+                    serialized = json.dumps(output, indent=self._indent if self._format == "json" else None, allow_nan=False)
+                except (ValueError, TypeError) as exc:
+                    self._divert_row(original, row_index=member.ordinal, reason=f"JSON serialization failed: {exc}")
+                    diverted.append(member.ordinal)
+                    continue
+                accepted.append(member.ordinal)
+                serialized.encode(self._encoding)
+                yield member.ordinal, serialized
+
+        def jsonl_chunks() -> Iterator[bytes]:
+            encoder = codecs.getincrementalencoder(self._encoding)()
+            if include_baseline and target.exists():
+                validation = self.validate_output_target()
+                if not validation.valid:
+                    raise ValueError(f"Existing JSONL output is incompatible: {validation.error_message}")
+                yield from iter_path_chunks(target)
+                encoder.setstate(0)
+            for _ordinal, serialized in serialized_rows():
+                yield encoder.encode(serialized + "\n")
+            final = encoder.encode("", final=True)
+            if final:
+                yield final
+
+        def json_array_chunks() -> Iterator[bytes]:
+            encoder = codecs.getincrementalencoder(self._encoding)()
+            iterator = iter(serialized_rows())
+            try:
+                _first_ordinal, first = next(iterator)
+            except StopIteration:
+                if include_baseline and target.exists():
+                    yield from iter_path_chunks(target)
+                else:
+                    yield encoder.encode("[]", final=True)
+                return
+
+            baseline_nonempty = False
+            if include_baseline and target.exists():
+                size = target.stat().st_size
+                if size > 64:
+                    baseline_nonempty = True
+                else:
+                    with target.open(encoding=self._encoding) as stream:
+                        baseline_nonempty = stream.read().strip() != "[]"
+            if baseline_nonempty:
+                suffix_encoder = codecs.getincrementalencoder(self._encoding)()
+                suffix_encoder.setstate(0)
+                suffix = suffix_encoder.encode("]" if self._indent is None else "\n]", final=True)
+                yield from _iter_file_without_suffix(target, suffix)
+                encoder.setstate(0)
+                yield encoder.encode(", " if self._indent is None else ",\n")
+            else:
+                yield encoder.encode("[" if self._indent is None else "[\n")
+
+            if self._indent is None:
+                yield encoder.encode(first)
+            else:
+                yield encoder.encode(_indent_json_value(first, self._indent))
+            for _ordinal, serialized in iterator:
+                yield encoder.encode(", " if self._indent is None else ",\n")
+                if self._indent is None:
+                    yield encoder.encode(serialized)
+                else:
+                    yield encoder.encode(_indent_json_value(serialized, self._indent))
+            yield encoder.encode("]" if self._indent is None else "\n]", final=True)
+
+        return prepare_local_effect(
+            effect_id=request.effect_id,
+            input_kind=request.input_kind,
+            inspection=request.inspection,
+            chunks=jsonl_chunks() if self._format == "jsonl" else json_array_chunks(),
+            row_count=len(members),
+            accepted_ordinals=lambda: accepted,
+            diverted_ordinals=lambda: diverted,
+            encoding=self._encoding,
+            format_name=self._format,
+            stream_sequence=1 if predecessor_declared else 0,
+        )
+
+    def commit_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectCommitResult:
+        del ctx
+        return commit_local_effect(plan)
+
+    def reconcile_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectReconcileResult:
+        del ctx
+        return reconcile_local_effect(plan)
 
     def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
         """Write a batch of rows to the JSON file.

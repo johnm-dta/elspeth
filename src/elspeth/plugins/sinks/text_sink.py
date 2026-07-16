@@ -8,6 +8,7 @@ import io
 import keyword
 import os
 import tempfile
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import IO, Any, Literal
 
@@ -18,10 +19,32 @@ from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.sink import OutputValidationResult
+from elspeth.contracts.sink_effects import (
+    SINK_EFFECT_PROTOCOL_VERSION,
+    ResolvedSinkEffectMode,
+    RestrictedSinkEffectContext,
+    SinkEffectCommitResult,
+    SinkEffectExecutionPurpose,
+    SinkEffectInputKind,
+    SinkEffectInspection,
+    SinkEffectInspectionRequest,
+    SinkEffectPipelineMembersInput,
+    SinkEffectPlan,
+    SinkEffectPrepareRequest,
+    SinkEffectReconcileResult,
+)
 from elspeth.plugins.infrastructure.base import BaseSink
 from elspeth.plugins.infrastructure.config_base import LocalFileSinkConfig, OutputCollisionPolicy
-from elspeth.plugins.infrastructure.output_paths import validate_output_collision_policy_mode
+from elspeth.plugins.infrastructure.output_paths import resolve_output_collision_path, validate_output_collision_policy_mode
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sinks._local_file_effects import (
+    commit_local_effect,
+    inspect_local_effect,
+    iter_path_chunks,
+    predecessor_local_path,
+    prepare_local_effect,
+    reconcile_local_effect,
+)
 
 
 class TextSinkConfig(LocalFileSinkConfig):
@@ -74,6 +97,20 @@ class TextSink(BaseSink):
     source_file_hash: str | None = "sha256:8d595e1faa8de040"
     config_model = TextSinkConfig
     supports_resume = True
+    effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    supported_effect_modes = frozenset({"append", "write"})
+    supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
+
+    @classmethod
+    def _resolve_sink_effect_mode(
+        cls,
+        config: Mapping[str, object],
+        *,
+        purpose: SinkEffectExecutionPurpose,
+    ) -> ResolvedSinkEffectMode | None:
+        del purpose
+        cfg = TextSinkConfig.from_dict(dict(config), plugin_name=cls.name)
+        return ResolvedSinkEffectMode(cfg.mode)
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
@@ -122,6 +159,85 @@ class TextSink(BaseSink):
         if saw_content and final_character != "\n":
             return OutputValidationResult.failure(message="Existing text output does not end at an LF record boundary")
         return OutputValidationResult.success(target_fields=[self._field])
+
+    def inspect_effect(
+        self,
+        request: SinkEffectInspectionRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectInspection:
+        del ctx
+        predecessor_path = predecessor_local_path(request)
+        if predecessor_path is not None:
+            self._path = predecessor_path
+        elif self._mode != "append":
+            self._path = resolve_output_collision_path(self._requested_path, self._collision_policy)
+        self._write_target_claimed = True
+        return inspect_local_effect(target_path=self._path, request=request)
+
+    def prepare_effect(
+        self,
+        request: SinkEffectPrepareRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectPlan:
+        del ctx
+        if type(request.effect_input) is not SinkEffectPipelineMembersInput:
+            raise TypeError("TextSink effects require pipeline member input")
+        members = request.effect_input.target_snapshot_members
+        target = Path(str(request.inspection.evidence["target_path"]))
+        predecessor_declared = bool(request.inspection.evidence["predecessor_declared"])
+        include_baseline = predecessor_declared or self._mode == "append"
+        accepted: list[int] = []
+        diverted: list[int] = []
+
+        def chunks() -> Iterator[bytes]:
+            if include_baseline and target.exists():
+                validation = self.validate_output_target()
+                if not validation.valid:
+                    raise ValueError(f"Existing text output is incompatible: {validation.error_message}")
+                yield from iter_path_chunks(target)
+            missing = object()
+            for member in members:
+                row = dict(member.row)
+                value = row.get(self._field, missing)
+                reason: str | None = None
+                encoded: bytes | None = None
+                if type(value) is not str:
+                    reason = f"Text field {self._field!r} must be a string"
+                elif "\r" in value or "\n" in value:
+                    reason = "Text values cannot contain CR or LF record separators"
+                else:
+                    try:
+                        encoded = (value + "\n").encode(self._encoding)
+                    except UnicodeEncodeError:
+                        reason = f"Text value is not representable in configured codec {self._encoding}"
+                if reason is not None:
+                    self._divert_row(row, row_index=member.ordinal, reason=reason)
+                    diverted.append(member.ordinal)
+                    continue
+                assert encoded is not None
+                accepted.append(member.ordinal)
+                yield encoded
+
+        return prepare_local_effect(
+            effect_id=request.effect_id,
+            input_kind=request.input_kind,
+            inspection=request.inspection,
+            chunks=chunks(),
+            row_count=len(members),
+            accepted_ordinals=lambda: accepted,
+            diverted_ordinals=lambda: diverted,
+            encoding=self._encoding,
+            format_name="text",
+            stream_sequence=1 if predecessor_declared else 0,
+        )
+
+    def commit_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectCommitResult:
+        del ctx
+        return commit_local_effect(plan)
+
+    def reconcile_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectReconcileResult:
+        del ctx
+        return reconcile_local_effect(plan)
 
     def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
         """Write accepted rows as encoded, LF-delimited bytes."""

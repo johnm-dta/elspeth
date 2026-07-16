@@ -8,11 +8,13 @@ output correct types. Wrong types = upstream bug = crash.
 
 from __future__ import annotations
 
+import codecs
 import csv
 import hashlib
 import io
 import os
-from collections.abc import Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Literal
 
 from pydantic import Field, field_validator, model_validator
@@ -20,6 +22,20 @@ from pydantic import Field, field_validator, model_validator
 from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.plugin_assistance import PluginAssistance
+from elspeth.contracts.sink_effects import (
+    SINK_EFFECT_PROTOCOL_VERSION,
+    ResolvedSinkEffectMode,
+    RestrictedSinkEffectContext,
+    SinkEffectCommitResult,
+    SinkEffectExecutionPurpose,
+    SinkEffectInputKind,
+    SinkEffectInspection,
+    SinkEffectInspectionRequest,
+    SinkEffectPipelineMembersInput,
+    SinkEffectPlan,
+    SinkEffectPrepareRequest,
+    SinkEffectReconcileResult,
+)
 
 if TYPE_CHECKING:
     from elspeth.contracts.sink import OutputValidationResult
@@ -41,6 +57,14 @@ from elspeth.plugins.infrastructure.output_paths import (
 )
 from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode_enabled
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sinks._local_file_effects import (
+    commit_local_effect,
+    inspect_local_effect,
+    iter_path_chunks,
+    predecessor_local_path,
+    prepare_local_effect,
+    reconcile_local_effect,
+)
 
 
 class CSVSinkConfig(SinkPathConfig):
@@ -115,6 +139,21 @@ class CSVSink(BaseSink):
     plugin_version = "1.0.0"
     source_file_hash: str | None = "sha256:29b6574378578aa6"
     config_model = CSVSinkConfig
+    effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    supported_effect_modes = frozenset({"append", "write"})
+    supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
+
+    @classmethod
+    def _resolve_sink_effect_mode(
+        cls,
+        config: Mapping[str, object],
+        *,
+        purpose: SinkEffectExecutionPurpose,
+    ) -> ResolvedSinkEffectMode | None:
+        del purpose
+        cfg = CSVSinkConfig.from_dict(dict(config), plugin_name=cls.name)
+        return ResolvedSinkEffectMode(cfg.mode)
+
     # determinism inherited from BaseSink (IO_WRITE)
 
     # Resume capability: CSV can append to existing files
@@ -270,6 +309,121 @@ class CSVSink(BaseSink):
             return
         self._path = resolve_output_collision_path(self._requested_path, self._collision_policy)
         self._write_target_claimed = True
+
+    def inspect_effect(
+        self,
+        request: SinkEffectInspectionRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectInspection:
+        del ctx
+        predecessor_path = predecessor_local_path(request)
+        if predecessor_path is not None:
+            self._path = predecessor_path
+        elif self._mode != "append":
+            self._path = resolve_output_collision_path(self._requested_path, self._collision_policy)
+        self._write_target_claimed = True
+        return inspect_local_effect(target_path=self._path, request=request)
+
+    def prepare_effect(
+        self,
+        request: SinkEffectPrepareRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectPlan:
+        del ctx
+        if type(request.effect_input) is not SinkEffectPipelineMembersInput:
+            raise TypeError("CSVSink effects require pipeline member input")
+        members = request.effect_input.target_snapshot_members
+        target = Path(str(request.inspection.evidence["target_path"]))
+        predecessor_declared = bool(request.inspection.evidence["predecessor_declared"])
+        include_baseline = predecessor_declared or self._mode == "append"
+        baseline_nonempty = include_baseline and target.exists() and target.stat().st_size > 0
+        rows = [dict(member.row) for member in members]
+
+        if baseline_nonempty:
+            validation = self.validate_output_target()
+            if not validation.valid:
+                raise ValueError(f"Existing CSV output is incompatible: {validation.error_message}")
+            with target.open(encoding=self._encoding, newline="") as stream:
+                existing_headers = list(csv.DictReader(stream, delimiter=self._delimiter).fieldnames or ())
+            display_map = get_effective_display_headers(self)
+            if display_map is not None:
+                reverse_map = {value: key for key, value in display_map.items()}
+                data_fields = [display_name_for(reverse_map, header) for header in existing_headers]
+            else:
+                data_fields = existing_headers
+            display_fields = existing_headers
+        else:
+            data_fields, display_fields = self._get_field_names_and_display(rows[0])
+
+        accepted: list[int] = []
+        diverted: list[int] = []
+
+        def header_text() -> str:
+            buffer = io.StringIO(newline="")
+            csv.writer(buffer, delimiter=self._delimiter).writerow(display_fields)
+            return buffer.getvalue()
+
+        def chunks() -> Iterator[bytes]:
+            encoder = codecs.getincrementalencoder(self._encoding)()
+            if baseline_nonempty:
+                yield from iter_path_chunks(target)
+                encoder.setstate(0)
+            else:
+                yield encoder.encode(header_text())
+            locked_fields = set(data_fields)
+            for member, row in zip(members, rows, strict=True):
+                extra_fields = set(row) - locked_fields
+                if extra_fields:
+                    reason = "CSV row contains fields outside the established columns: " + ", ".join(
+                        sorted(str(field) for field in extra_fields)
+                    )
+                    self._divert_row(row, row_index=member.ordinal, reason=reason)
+                    diverted.append(member.ordinal)
+                    continue
+                row_buffer = io.StringIO(newline="")
+                writer = csv.DictWriter(row_buffer, fieldnames=data_fields, delimiter=self._delimiter)
+                try:
+                    writer.writerow(row)
+                    row_text = row_buffer.getvalue()
+                    row_text.encode(self._encoding)
+                except UnicodeEncodeError as exc:
+                    self._divert_row(
+                        row,
+                        row_index=member.ordinal,
+                        reason=f"CSV encoding ({self._encoding}) failed: {exc}",
+                    )
+                    diverted.append(member.ordinal)
+                    continue
+                except csv.Error as exc:
+                    self._divert_row(row, row_index=member.ordinal, reason=f"CSV serialization failed: {exc}")
+                    diverted.append(member.ordinal)
+                    continue
+                accepted.append(member.ordinal)
+                yield encoder.encode(row_text)
+            final = encoder.encode("", final=True)
+            if final:
+                yield final
+
+        return prepare_local_effect(
+            effect_id=request.effect_id,
+            input_kind=request.input_kind,
+            inspection=request.inspection,
+            chunks=chunks(),
+            row_count=len(members),
+            accepted_ordinals=lambda: accepted,
+            diverted_ordinals=lambda: diverted,
+            encoding=self._encoding,
+            format_name="csv",
+            stream_sequence=1 if predecessor_declared else 0,
+        )
+
+    def commit_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectCommitResult:
+        del ctx
+        return commit_local_effect(plan)
+
+    def reconcile_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectReconcileResult:
+        del ctx
+        return reconcile_local_effect(plan)
 
     def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
         """Write a batch of rows to the CSV file.

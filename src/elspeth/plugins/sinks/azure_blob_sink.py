@@ -338,7 +338,7 @@ class AzureBlobSink(BaseSink):
     name = "azure_blob"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:bd72e72cd6798bc9"
+    source_file_hash: str | None = "sha256:13fb018294a904dc"
     config_model = AzureBlobSinkConfig
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"write"})
@@ -801,20 +801,11 @@ class AzureBlobSink(BaseSink):
         raise RuntimeError("AzureBlobSink publication requires the recoverable sink effect coordinator") from None
 
     def flush(self) -> None:
-        """Flush buffered data.
+        """No-op: ``commit_effect`` performs synchronous publication.
 
-        No-op for Azure Blob sink - durability is guaranteed by synchronous upload in write().
-
-        Azure Blob Storage uploads in write() are synchronous and complete before
-        returning. The blob is committed to Azure's redundant storage (LRS/GRS) when
-        write() returns, providing the same durability guarantee as an explicit flush().
-
-        This means data survives:
-        - Process crash (blob upload already completed)
-        - Azure datacenter failure (redundant storage)
-        - Network interruption (upload completed or failed, no partial state)
-
-        Future enhancement: Support async uploads with explicit flush() for batching.
+        Direct ``write`` publication is forbidden. The recoverable sink-effect
+        coordinator owns inspection, intent recording, synchronous commit, and
+        reconciliation, so there is no independent buffered state to flush.
         """
         pass
 

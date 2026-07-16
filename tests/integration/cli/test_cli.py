@@ -969,9 +969,8 @@ class TestRunSchemaCompatibility:
             "schema epoch is incompatible:\n"
             "Database epoch: 21\n"
             "Current epoch: 22\n\n"
-            "To fix this, either:\n"
-            "  1. Delete the database file and let ELSPETH recreate it, or\n"
-            "  2. Run: elspeth landscape migrate (when available)\n\n"
+            "Pre-1.0 schemas are not migrated in place. Uninstall the deployment,\n"
+            "delete/recreate the database, and reinstall this ELSPETH version.\n\n"
             f"Database: sqlite:///{tmp_path / 'landscape.db'}"
         )
 
@@ -982,7 +981,7 @@ class TestRunSchemaCompatibility:
         combined = result.output
         assert "Landscape database schema is outdated" in combined
         assert "schema epoch is incompatible" in combined
-        assert "Delete the database file" in combined
+        assert "delete/recreate the database" in combined
         assert "SchemaCompatibilityError" not in combined
         assert "Traceback" not in combined, f"Must not emit a traceback.\nOutput:\n{combined}"
 

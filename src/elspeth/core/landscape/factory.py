@@ -447,6 +447,7 @@ class RecorderFactory:
             validation_error_loader=validation_error_loader,
             transform_error_loader=transform_error_loader,
             payload_store=payload_store,
+            node_state_repository=self._execution.node_states,
         )
         self._barrier_restore = BarrierRestoreReadModel(
             ops,

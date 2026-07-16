@@ -469,7 +469,7 @@ class TestSchemaCompatibilityGuards:
         msg = str(exc_info.value)
         assert "token_work_items.branch_name" in msg
         assert "Landscape database schema is outdated" in msg
-        assert "To fix this, either:" in msg
+        assert "Pre-1.0 schemas are not migrated in place" in msg
         instance.close()
 
     @pytest.mark.parametrize("column_name", ["token_id", "row_id", "ingest_sequence", "attempt"])
@@ -717,7 +717,7 @@ class TestSchemaCompatibilityGuards:
         instance.close()
 
     def test_validate_schema_rejects_incompatible_schema_epoch(self, tmp_path: Path) -> None:
-        """Stamped SQLite schema epochs provide an explicit future migration seam."""
+        """Stamped SQLite schema epochs enforce the pre-1.0 recreate boundary."""
         db_path = tmp_path / "wrong_epoch.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
@@ -735,6 +735,46 @@ class TestSchemaCompatibilityGuards:
         assert f"Database epoch: {SQLITE_SCHEMA_EPOCH + 1}" in msg
         assert f"Current epoch: {SQLITE_SCHEMA_EPOCH}" in msg
         instance.close()
+
+    def test_schema_managing_open_never_invokes_in_place_migration(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Before 1.0, startup creates fresh schemas but never transforms old ones."""
+
+        def forbidden_migration(_self: LandscapeDB) -> None:
+            raise AssertionError("pre-1.0 startup invoked an in-place schema migration")
+
+        monkeypatch.setattr(LandscapeDB, "_migrate_sqlite_schema", forbidden_migration, raising=False)
+
+        db = LandscapeDB(f"sqlite:///{tmp_path / 'fresh-only.db'}")
+        db.close()
+
+    def test_older_epoch_is_rejected_without_mutation(self, tmp_path: Path) -> None:
+        """The only supported pre-1.0 upgrade is delete/recreate and reinstall."""
+        db_path = tmp_path / "recreate-boundary.db"
+        db = LandscapeDB(f"sqlite:///{db_path}")
+        db.close()
+
+        predecessor_epoch = SQLITE_SCHEMA_EPOCH - 1
+        engine = create_engine(f"sqlite:///{db_path}")
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {predecessor_epoch}")
+            conn.exec_driver_sql(
+                "UPDATE elspeth_schema_identity SET schema_epoch = :epoch WHERE singleton_id = 1",
+                {"epoch": predecessor_epoch},
+            )
+        engine.dispose()
+
+        with pytest.raises(SchemaCompatibilityError, match=r"schema epoch is incompatible|predates.*one-way schema boundary"):
+            LandscapeDB(f"sqlite:///{db_path}")
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        with engine.connect() as conn:
+            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == predecessor_epoch
+            assert conn.exec_driver_sql("SELECT schema_epoch FROM elspeth_schema_identity").scalar_one() == predecessor_epoch
+        engine.dispose()
 
     def test_validate_schema_rejects_adr018_token_outcomes_shape(self, tmp_path: Path) -> None:
         """ADR-018 token_outcomes stores must fail with ADR-019 remediation text."""
@@ -972,9 +1012,9 @@ class TestSchemaCompatibilityGuards:
         msg = str(exc_info.value)
         assert "Landscape database schema is outdated." in msg
         assert "Missing tables:" in msg
-        assert "To fix this, either:" in msg
-        assert "Delete the database file and let ELSPETH recreate it" in msg
-        assert "elspeth landscape migrate" in msg
+        assert "Pre-1.0 schemas are not migrated in place" in msg
+        assert "delete/recreate the database" in msg
+        assert "reinstall this ELSPETH version" in msg
         assert f"Database: sqlite:///{db_path}" in msg
         instance.close()
 
@@ -1070,7 +1110,7 @@ class TestSchemaCompatibilityGuards:
 
         msg = str(exc_info.value)
         assert "Missing columns: tokens.expand_group_id" in msg
-        assert "To fix this, either:" in msg
+        assert "Pre-1.0 schemas are not migrated in place" in msg
         instance.close()
 
     def test_validate_schema_reports_missing_required_foreign_keys(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1093,7 +1133,7 @@ class TestSchemaCompatibilityGuards:
         assert "Missing foreign keys:" in msg
         assert "transform_errors.token_id" in msg
         assert "tokens" in msg
-        assert "To fix this, either:" in msg
+        assert "Pre-1.0 schemas are not migrated in place" in msg
         instance.close()
 
     def test_validate_schema_rejects_stale_single_column_foreign_keys_for_run_scoped_error_tables(
@@ -1258,7 +1298,7 @@ class TestSchemaCompatibilityGuards:
         msg = str(exc_info.value)
         assert "Missing check constraints:" in msg
         assert "runs.ck_nonexistent_constraint" in msg
-        assert "To fix this, either:" in msg
+        assert "Pre-1.0 schemas are not migrated in place" in msg
         instance.close()
 
     def test_missing_index_raises_compatibility_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1281,7 +1321,7 @@ class TestSchemaCompatibilityGuards:
         msg = str(exc_info.value)
         assert "Missing indexes:" in msg
         assert "runs.ix_nonexistent_index" in msg
-        assert "To fix this, either:" in msg
+        assert "Pre-1.0 schemas are not migrated in place" in msg
         instance.close()
 
     def test_validate_schema_rejects_stale_preflight_results_shape(self, tmp_path: Path) -> None:
@@ -1585,7 +1625,7 @@ class TestJournalPathGuards:
         assert epoch == SQLITE_SCHEMA_EPOCH
 
     def test_from_url_stamps_schema_epoch_for_compatible_sqlite_db(self, tmp_path: Path) -> None:
-        """Compatible SQLite databases should be stamped for future migrations."""
+        """Compatible unstamped SQLite databases receive the current epoch."""
         db_path = tmp_path / "epoch_stamp.db"
 
         db = LandscapeDB.from_url(f"sqlite:///{db_path}")

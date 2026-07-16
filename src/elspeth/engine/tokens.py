@@ -9,6 +9,7 @@ from __future__ import annotations
 __all__ = ["TokenInfo", "TokenManager"]
 
 import copy
+from collections.abc import Sequence
 from typing import Any
 
 from elspeth.contracts import SourceRow, TokenInfo
@@ -17,6 +18,7 @@ from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID, StepResolver
+from elspeth.core.landscape.data_flow.tokens import CoalesceParentCompletion
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 
 
@@ -314,6 +316,7 @@ class TokenManager:
         merged_data: PipelineRow,
         node_id: NodeID,
         run_id: str,
+        parent_completions: Sequence[CoalesceParentCompletion] = (),
     ) -> TokenInfo:
         """Coalesce multiple tokens into one.
 
@@ -347,10 +350,17 @@ class TokenManager:
         merged = self._data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=p.token_id, run_id=run_id) for p in parents],
             row_id=row_id,
+            coalesce_node_id=str(node_id),
+            parent_state_ids=[item.state_id for item in parent_completions] or None,
             merged_payload=merged_data.to_dict(),
             merged_contract=merged_data.contract,
             step_in_pipeline=step,
         )
+        if parent_completions:
+            self._data_flow.finalize_coalesce_effect(
+                merged=merged,
+                parent_completions=parent_completions,
+            )
 
         # resume_attempt_offset and resume_checkpoint_id are intentionally NOT
         # inherited here. The merged token is a brand-new token_id with no run-1

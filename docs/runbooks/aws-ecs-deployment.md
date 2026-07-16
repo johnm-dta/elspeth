@@ -1491,14 +1491,16 @@ Scenario A uses the same field set with `scenario_id: "A"`; empty strings for
 
 The controller binds the record to the manifest, image digest, exact task
 and doctor definitions, candidate and previous package/image identities,
-session epoch 27, Landscape epoch 25 and `run_web_plugin_policy` presence,
+session epoch 27, Landscape epoch 27 and `run_web_plugin_policy` presence,
 change/reset facts, decision, two distinct approvals, and expiry. It
 stores only a sanitized receipt and document hash. Reopen and revalidate the
 raw record before init-capable doctor, ordinary doctor, candidate deploy, and
 any later deployment action. The 0.7.0 image understands Landscape epoch 23,
-not epochs 24 or 25: the candidate can migrate an exact SQLite predecessor forward,
-but the previous image cannot reopen the migrated database. Scenario B rollback
-is therefore forbidden after migration. Unknown or unapproved compatibility is NO-GO;
+not epoch 27. Pre-1.0 candidates do not migrate predecessor schemas: the old
+deployment is stopped and uninstalled, required evidence is archived/exported,
+and the databases are recreated before the candidate is installed. The previous
+image cannot reopen the recreated current database, so Scenario B rollback is
+forbidden after recreation. Unknown or unapproved compatibility is NO-GO;
 expiry or identity drift is also NO-GO.
 
 Before either schema initializer runs, create and prove the required EFS

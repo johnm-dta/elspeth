@@ -6,7 +6,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[3]
 RUNBOOK = ROOT / "docs/runbooks/sink-effect-recovery.md"
-MIGRATION = ROOT / "docs/operator/migrations/epoch-26-sink-effects.md"
 ARCHITECTURE = ROOT / "docs/architecture/token-scheduler-state-engine.md"
 PROTOCOL = ROOT / "docs/contracts/plugin-protocol.md"
 CONFIGURATION = ROOT / "docs/reference/configuration.md"
@@ -38,12 +37,10 @@ def test_sink_effect_runbook_contains_complete_recovery_contract() -> None:
         assert topic in content
 
 
-def test_sink_effect_docs_link_to_the_runbook_and_migration() -> None:
+def test_sink_effect_docs_link_to_the_runbook_and_release_index() -> None:
     assert "../runbooks/sink-effect-recovery.md" in ARCHITECTURE.read_text(encoding="utf-8")
     assert "../runbooks/sink-effect-recovery.md" in PROTOCOL.read_text(encoding="utf-8")
-    migration = MIGRATION.read_text(encoding="utf-8")
-    assert "../../runbooks/sink-effect-recovery.md" in migration
-    assert "epoch-26-sink-effects.md" in RELEASE.read_text(encoding="utf-8")
+    assert "../runbooks/sink-effect-recovery.md" in RELEASE.read_text(encoding="utf-8")
 
 
 def test_configuration_documents_bounded_effect_settings_and_key_rotation() -> None:

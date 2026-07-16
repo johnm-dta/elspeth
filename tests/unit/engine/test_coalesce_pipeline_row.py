@@ -78,7 +78,14 @@ class _BadPipelineRow:
         return {"amount": 100}
 
 
-def _coalesce_tokens_impl(parents: list[TokenInfo], merged_data: PipelineRow, node_id: NodeID, run_id: str) -> TokenInfo:
+def _coalesce_tokens_impl(
+    parents: list[TokenInfo],
+    merged_data: PipelineRow,
+    node_id: NodeID,
+    run_id: str,
+    parent_completions: list[Any],
+) -> TokenInfo:
+    assert len(parent_completions) == len(parents)
     return TokenInfo(
         row_id=parents[0].row_id,
         token_id="merged_001",

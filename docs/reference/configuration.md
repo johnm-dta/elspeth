@@ -1041,17 +1041,24 @@ landscape:
 | `dump_to_jsonl_include_payloads` | bool | `false` | Include request/response bodies in journal |
 | `dump_to_jsonl_payload_base_path` | string | (from payload_store) | Payload store path for inlining |
 
-### Landscape schema epoch 26
+### Landscape schema epoch 27
 
-Landscape epoch 26 adds durable sink-effect streams, effects, ordered members,
-attempts, and sealed audit-export snapshots. Exact epoch-25 SQLite databases
-migrate atomically during writable schema-managing initialization. PostgreSQL
-requires the approved schema-owner DDL; runtime roles remain DML-only. See the
-[epoch-26 migration guide](../operator/migrations/epoch-26-sink-effects.md) and
+Landscape epoch 26 added durable sink-effect streams, effects, ordered members,
+attempts, and sealed audit-export snapshots. Epoch 27 adds durable coalesce
+effects and normalized parent evidence so materialization and completion can be
+replayed safely after a crash. See the
 [sink-effect recovery runbook](../runbooks/sink-effect-recovery.md).
 
-Code that understands only epoch 25 must not be rolled back over an epoch-26
-database.
+ELSPETH is pre-1.0. It does not transform an older Landscape schema into epoch
+27, either automatically at startup or through an operator migration command.
+Stop and uninstall the old deployment, archive or export evidence when policy
+requires it, delete/recreate the Landscape database, then reinstall and
+initialize this ELSPETH version. PostgreSQL schema-owner and runtime/DML roles
+remain separate; recreation is an operator action. Code that understands only
+an older epoch must not be rolled back over an epoch-27 database.
+
+Data-preserving, version-to-version schema migrations become a first-class
+compatibility obligation at 1.0. They are intentionally not a pre-1.0 promise.
 
 #### Historical epoch-25 artifact identity
 
@@ -1059,19 +1066,10 @@ Landscape epoch 25 makes artifact logical-effect identity structural. Fresh
 SQLite and PostgreSQL schemas carry a partial unique index on
 `artifacts(run_id, idempotency_key)` for rows whose idempotency key is non-null.
 
-A writable SQLite Landscape database at exactly epoch 24 is upgraded in place
-on schema-managing initialization. ELSPETH validates the complete epoch-24
-shape before checking out the migration connection, takes `BEGIN IMMEDIATE`,
-and refuses to migrate if any non-null `(run_id, idempotency_key)` pair is
-duplicated. Otherwise the index and `user_version=25` commit atomically. An
-exact epoch-23 database takes the ordered 23→24 ownership migration followed by
-24→25. Read-only and inspection-only opens never migrate.
-
-PostgreSQL receives the partial unique index through the schema-owner path. An
-existing PostgreSQL schema missing it is stale and requires an approved
-operator migration or recreation; the runtime role remains DML-only. Code that
-only understands epoch 23 or 24 must not be rolled back over an epoch-25
-database.
+An older SQLite or PostgreSQL Landscape schema missing this index is stale and
+must be recreated under the pre-1.0 policy above. Read-only and inspection-only
+opens never alter schema. Code that only understands epoch 23 or 24 must not be
+rolled back over an epoch-25-or-newer database.
 
 #### Historical epoch-24 token ownership
 
@@ -1080,20 +1078,9 @@ ownership. Fresh SQLite and PostgreSQL schemas enforce
 `tokens(row_id, run_id) -> rows(row_id, run_id)` in addition to the existing
 single-column references.
 
-A writable SQLite Landscape database at exactly epoch 23 is upgraded in place
-on schema-managing initialization. ELSPETH first validates the complete
-epoch-23 shape, then checks that every token's stored run matches its row,
-rebuilds only `tokens` under `BEGIN IMMEDIATE`, runs
-`PRAGMA foreign_key_check`, and commits the table change and
-`user_version=24` atomically. Any ownership mismatch or other stale epoch-23
-shape is refused without changing the epoch or schema. Databases older than
-epoch 23 retain the documented archive-and-recreate boundary; read-only and
-inspection-only opens never migrate.
-
-PostgreSQL receives the composite constraint through the schema-owner path.
-An existing PostgreSQL schema missing it is stale and requires an approved
-operator migration or recreation; the runtime role remains DML-only. Code that
-only understands epoch 23 must not be rolled back over an epoch-24 SQLite
+An older SQLite or PostgreSQL Landscape schema missing this constraint is stale
+and must be recreated under the pre-1.0 policy above. Code that only
+understands epoch 23 must not be rolled back over an epoch-24-or-newer
 database.
 
 #### Historical epoch-23 boundary

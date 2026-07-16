@@ -54,6 +54,7 @@ from elspeth.core.landscape.data_flow.serialization import (
     canonical_or_recorded_json,
     canonical_or_recorded_repr_payload,
 )
+from elspeth.core.landscape.data_flow.tokens import CoalesceParentCompletion
 from elspeth.core.landscape.model_loaders import (
     EdgeLoader,
     NodeLoader,
@@ -68,6 +69,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.schema import SchemaConfig
     from elspeth.contracts.schema_contract import PipelineRow
+    from elspeth.core.landscape.execution.node_states import NodeStateRepository
 
 __all__ = ["DataFlowRepository"]
 
@@ -98,13 +100,21 @@ class DataFlowRepository:
         validation_error_loader: ValidationErrorLoader,
         transform_error_loader: TransformErrorLoader,
         payload_store: PayloadStore | None = None,
+        node_state_repository: NodeStateRepository | None = None,
     ) -> None:
         self._db = db
         self._ops = ops
         self._payload_store = payload_store
         self.ownership = RowTokenOwnership(ops)
-        self.tokens = RowTokenRepository(db, ops, ownership=self.ownership, payload_store=payload_store)
         self.outcomes = TokenOutcomeRepository(db, ops, token_outcome_loader=token_outcome_loader, ownership=self.ownership)
+        self.tokens = RowTokenRepository(
+            db,
+            ops,
+            ownership=self.ownership,
+            payload_store=payload_store,
+            outcomes=self.outcomes,
+            node_states=node_state_repository,
+        )
         self.graph = GraphAuditRepository(ops, node_loader=node_loader, edge_loader=edge_loader)
         self.errors = ErrorAuditRepository(
             ops,
@@ -301,6 +311,8 @@ class DataFlowRepository:
         row_id: str,
         merged_payload: Mapping[str, object],
         *,
+        coalesce_node_id: str | None = None,
+        parent_state_ids: Sequence[str] | None = None,
         merged_contract: SchemaContract,
         step_in_pipeline: int | None = None,
     ) -> Token:
@@ -309,9 +321,20 @@ class DataFlowRepository:
             parent_refs,
             row_id,
             merged_payload,
+            coalesce_node_id=coalesce_node_id,
+            parent_state_ids=parent_state_ids,
             merged_contract=merged_contract,
             step_in_pipeline=step_in_pipeline,
         )
+
+    def finalize_coalesce_effect(
+        self,
+        *,
+        merged: Token,
+        parent_completions: Sequence[CoalesceParentCompletion],
+    ) -> None:
+        """Atomically terminalize the parents of one materialized coalesce."""
+        self.tokens.finalize_coalesce_effect(merged=merged, parent_completions=parent_completions)
 
     def expand_token(
         self,

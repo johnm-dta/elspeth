@@ -319,7 +319,10 @@ def init_landscape_schema(engine: Engine) -> None:
                     schema_epoch=SQLITE_SCHEMA_EPOCH,
                 )
             return
-        raise SchemaCompatibilityError("Landscape database schema is stale or foreign; delete/recreate it or run the supported migration.")
+        raise SchemaCompatibilityError(
+            "Landscape database schema is stale or foreign; pre-1.0 schemas are not migrated in place. "
+            "Uninstall the deployment, delete/recreate the database, and reinstall."
+        )
 
     def verify(conn: Connection) -> None:
         if probe_landscape_schema(conn) is not SchemaState.CURRENT:

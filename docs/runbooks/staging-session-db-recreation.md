@@ -1,8 +1,8 @@
 # Session DB Reset Runbook
 
-Use this runbook when a web session schema-bootstrap change requires deleting or archiving a stale `sessions.db`. Historically the session database was reset in isolation from the Landscape audit database, payload storage, blobs, and Filigree tracker data. **From the Phase 4 hello-world tutorial schema cutover onward, any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must coordinate both databases in one service-stop window; follow the declared migration/reset policy for each epoch instead of assuming both are always destructive.** Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
+Use this runbook when a pre-1.0 schema change requires deleting or archiving stale `sessions.db` and Landscape databases. Any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must coordinate both databases in one service-stop window. Before 1.0, the supported upgrade is uninstall, archive/export when required, recreate, and reinstall; ELSPETH does not migrate either database in place. Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
 
-## Current Cutover: 0.7.1 (session epoch 27 and Landscape epoch 25)
+## Current Cutover: 0.7.1 (session epoch 27 and Landscape epoch 27)
 
 0.7.1 advances `SESSION_SCHEMA_EPOCH` from 26 to 27 so
 `user_preferences.freeform_intro_dismissed_at` can persist the account-wide
@@ -13,30 +13,17 @@ policy-evidence row atomically with the run, attribution, and leader records;
 CLI runs receive none. Database hardening then advances Landscape from epoch 23
 to 24 and adds `tokens(row_id, run_id) -> rows(row_id, run_id)`, then advances
 to 25 with a partial unique index over non-null
-`artifacts(run_id, idempotency_key)` pairs.
+`artifacts(run_id, idempotency_key)` pairs. Durable sink effects advance the
+Landscape to epoch 26, and durable coalesce effects advance it to epoch 27.
 
-Archive and recreate the session database and its sidecars under the
-service-stop procedure below. The Landscape action depends on its starting
-shape:
-
-- An exact epoch-23 SQLite database receives the ordered automatic epoch-24 and
-  epoch-25 migrations during writable schema-managing initialization. ELSPETH
-  validates each complete predecessor shape, verifies token/row ownership
-  before rebuilding `tokens`, then refuses duplicate non-null artifact
-  logical-effect keys before creating the partial unique index.
-- An exact epoch-24 SQLite database receives only the narrow automatic epoch-25
-  artifact-index migration. Duplicate logical-effect keys or any other shape
-  mismatch leave the schema and epoch unchanged for operator investigation.
-- Any pre-23 SQLite database remains stale and must follow the approved
-  archive/export and recreation path; the ordered migrator does not skip
-  historical boundaries.
-- PostgreSQL missing either the epoch-23 policy table or the epoch-24 composite
-  FK, or the epoch-25 artifact index, is stale. A schema owner must apply an
-  approved migration or recreate and initialize the schema. The runtime role
-  remains DML-only.
+Archive and recreate the session database, its sidecars, and every stale
+Landscape database under the service-stop procedure below. Every predecessor
+epoch is a recreate boundary, including SQLite epochs 23 through 26 and any
+stale PostgreSQL shape. PostgreSQL recreation is performed by the schema owner;
+the runtime role remains DML-only.
 
 Validate-only startup and doctor must leave stale databases unchanged. Do not
-use `create_all`, `--init-schema`, or code rollback as an improvised repair
+use `create_all`, `--init-schema`, an old migrator, or code rollback as an improvised repair
 mechanism. `auth.db` is a separate file and is not reset.
 
 The release/schema compatibility record for every candidate using this shape
@@ -45,11 +32,10 @@ session and Landscape epochs; presence of `run_web_plugin_policy`; structural
 and semantics-only changes; archive/export decision and approver; destructive
 reset requirement and database-operator approval; previous release identity
 and epochs; forward and backward compatibility decisions; and an explicit
-`rollback_permitted` decision with evidence. Epoch-22 code is not compatible
-with a freshly recreated current database, and any code that understands only
-epoch 24 or older rejects the newer epoch-25 SQLite stamp. Rollback is therefore
+`rollback_permitted` decision with evidence. Older code is not compatible with
+a freshly recreated epoch-27 database. Rollback is therefore
 `no` unless a later approved record proves otherwise. Plans 10 and 12 must cite
-the epoch-25 record when binding candidate and rollback decisions.
+the epoch-27 record when binding candidate and rollback decisions.
 
 Deployments crossing the 0.7.0 boundary from an older release must also account
 for the historical epoch-21 to epoch-22 Landscape reset described below.

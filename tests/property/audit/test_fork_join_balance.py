@@ -1599,8 +1599,8 @@ class TestForkRecoveryInvariant:
         node distinct from the coalesce node, exercising resolve_branch_first_node().
 
         Interruption: after a complete run, undo the barrier entirely by deleting:
-          - the merged token's terminal outcome, node_states, token_parents, and
-            token row itself;
+          - the merged token's terminal outcome, node_states, durable coalesce
+            receipt, token_parents, and token row itself;
           - both branch children's COALESCED outcomes (which the barrier recorded).
         This leaves the two branch child tokens with no terminal outcome — faithfully
         mirroring a pre-barrier crash (the barrier code never ran).
@@ -1724,13 +1724,23 @@ class TestForkRecoveryInvariant:
                 text("DELETE FROM node_states WHERE token_id = :tid"),
                 {"tid": merged_token_id},
             )
-            # 3. token_parents for merged token (FK: token_id → token_parents.token_id)
+            # 3. durable coalesce receipt and normalized membership. A pre-barrier
+            #    crash cannot retain the receipt for the merged token being removed.
+            conn.execute(
+                text(
+                    "DELETE FROM coalesce_effect_members WHERE effect_id IN "
+                    "(SELECT effect_id FROM coalesce_effects WHERE result_token_id = :tid)"
+                ),
+                {"tid": merged_token_id},
+            )
+            conn.execute(text("DELETE FROM coalesce_effects WHERE result_token_id = :tid"), {"tid": merged_token_id})
+            # 4. token_parents for merged token (FK: token_id → token_parents.token_id)
             conn.execute(token_parents_table.delete().where(token_parents_table.c.token_id == merged_token_id))
-            # 4. merged token row (FK deps removed above)
+            # 5. merged token row (FK deps removed above)
             conn.execute(tokens_table.delete().where(tokens_table.c.token_id == merged_token_id))
-            # 5. branch COALESCED outcomes (recorded by the barrier, path='coalesced')
+            # 6. branch COALESCED outcomes (recorded by the barrier, path='coalesced')
             conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.join_group_id == join_group_id))
-            # 6. branch tokens' COMPLETED node_states at the coalesce node.
+            # 7. branch tokens' COMPLETED node_states at the coalesce node.
             #    CoalesceExecutor._check_landscape_for_completion (called by accept())
             #    queries completed_at IS NOT NULL for the coalesce node.  If these
             #    remain, the re-driven branch tokens are treated as late arrivals
@@ -1816,8 +1826,8 @@ class TestForkRecoveryInvariant:
         targeted reversal — mirrors test_resume_fork_to_coalesce_before_barrier's
         barrier-undo, then re-creates the HELD state for ONE branch):
           - Run the pipeline to completion (both branches arrived, barrier merged).
-          - Undo the barrier: delete the merged token (outcome, node_states, token_parents,
-            row) and both branches' COALESCED outcomes — leaving both branch tokens with no
+          - Undo the barrier: delete the merged token (outcome, node_states, durable
+            coalesce receipt, token_parents, row) and both branches' COALESCED outcomes — leaving both branch tokens with no
             terminal outcome (pre-merge state).
           - HELD branch: its coalesce-node node_state is reverted to the held/open state
             (status='open', completed_at = NULL — the state CoalesceExecutor.accept's
@@ -1965,6 +1975,14 @@ class TestForkRecoveryInvariant:
             # Merged token artifacts (the barrier's output)
             conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.token_id == merged_token_id))
             conn.execute(text("DELETE FROM node_states WHERE token_id = :tid"), {"tid": merged_token_id})
+            conn.execute(
+                text(
+                    "DELETE FROM coalesce_effect_members WHERE effect_id IN "
+                    "(SELECT effect_id FROM coalesce_effects WHERE result_token_id = :tid)"
+                ),
+                {"tid": merged_token_id},
+            )
+            conn.execute(text("DELETE FROM coalesce_effects WHERE result_token_id = :tid"), {"tid": merged_token_id})
             conn.execute(token_parents_table.delete().where(token_parents_table.c.token_id == merged_token_id))
             conn.execute(tokens_table.delete().where(tokens_table.c.token_id == merged_token_id))
             # Branch COALESCED outcomes (recorded by the barrier on both branches)
@@ -2294,13 +2312,22 @@ class TestForkRecoveryInvariant:
                 text("DELETE FROM node_states WHERE token_id = :tid"),
                 {"tid": merged_token_id},
             )
-            # 3. token_parents for merged token
+            # 3. durable coalesce receipt and normalized membership
+            conn.execute(
+                text(
+                    "DELETE FROM coalesce_effect_members WHERE effect_id IN "
+                    "(SELECT effect_id FROM coalesce_effects WHERE result_token_id = :tid)"
+                ),
+                {"tid": merged_token_id},
+            )
+            conn.execute(text("DELETE FROM coalesce_effects WHERE result_token_id = :tid"), {"tid": merged_token_id})
+            # 4. token_parents for merged token
             conn.execute(token_parents_table.delete().where(token_parents_table.c.token_id == merged_token_id))
-            # 4. merged token row
+            # 5. merged token row
             conn.execute(tokens_table.delete().where(tokens_table.c.token_id == merged_token_id))
-            # 5. branch COALESCED outcomes
+            # 6. branch COALESCED outcomes
             conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.join_group_id == join_group_id))
-            # 6. branch tokens' completed coalesce node_states
+            # 7. branch tokens' completed coalesce node_states
             conn.execute(
                 text("DELETE FROM node_states WHERE node_id = :nid AND run_id = :rid"),
                 {"nid": str(coalesce_node_id), "rid": run_id},
@@ -2562,13 +2589,22 @@ class TestForkRecoveryInvariant:
                 text("DELETE FROM node_states WHERE token_id = :tid"),
                 {"tid": merged_token_id},
             )
-            # 3. token_parents for merged token
+            # 3. durable coalesce receipt and normalized membership
+            conn.execute(
+                text(
+                    "DELETE FROM coalesce_effect_members WHERE effect_id IN "
+                    "(SELECT effect_id FROM coalesce_effects WHERE result_token_id = :tid)"
+                ),
+                {"tid": merged_token_id},
+            )
+            conn.execute(text("DELETE FROM coalesce_effects WHERE result_token_id = :tid"), {"tid": merged_token_id})
+            # 4. token_parents for merged token
             conn.execute(token_parents_table.delete().where(token_parents_table.c.token_id == merged_token_id))
-            # 4. merged token row
+            # 5. merged token row
             conn.execute(tokens_table.delete().where(tokens_table.c.token_id == merged_token_id))
-            # 5. branch COALESCED outcomes (recorded by the barrier, path='coalesced')
+            # 6. branch COALESCED outcomes (recorded by the barrier, path='coalesced')
             conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.join_group_id == join_group_id))
-            # 6. branch tokens' COMPLETED node_states at the coalesce node
+            # 7. branch tokens' COMPLETED node_states at the coalesce node
             conn.execute(
                 text("DELETE FROM node_states WHERE node_id = :nid AND run_id = :rid"),
                 {"nid": str(coalesce_node_id_for_deletion), "rid": run_id},

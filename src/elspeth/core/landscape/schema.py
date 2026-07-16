@@ -267,7 +267,9 @@ def _optional_enum_in_check(column_name: str, enum_type: type[StrEnum]) -> str:
 #        exact epoch-23 databases take the ordered 23→24→25 chain.
 #   26 → Recoverable sink-effect ledger and immutable audit-export snapshot
 #        registry; artifacts/operations gain exclusive effect linkage.
-SQLITE_SCHEMA_EPOCH = 26
+#   27 → Durable coalesce-effect receipts with normalized parent/state evidence;
+#        sink-effect preparation claims become a legal RESERVED lifecycle state.
+SQLITE_SCHEMA_EPOCH = 27
 
 schema_identity_table = create_schema_identity_table(metadata)
 
@@ -549,6 +551,13 @@ tokens_table = Table(
     ForeignKeyConstraint(["row_id", "run_id"], ["rows.row_id", "rows.run_id"]),
 )
 Index("uq_tokens_identity_row_run", tokens_table.c.token_id, tokens_table.c.row_id, tokens_table.c.run_id, unique=True)
+Index(
+    "uq_tokens_coalesce_result_identity",
+    tokens_table.c.token_id,
+    tokens_table.c.run_id,
+    tokens_table.c.join_group_id,
+    unique=True,
+)
 
 # === Token Outcomes (AUD-001: Explicit terminal state recording) ===
 
@@ -1074,6 +1083,86 @@ node_states_table = Table(
     ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
     # Composite FK to nodes (node_id, run_id)
     ForeignKeyConstraint(["node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
+)
+Index(
+    "uq_node_states_coalesce_member_identity",
+    node_states_table.c.state_id,
+    node_states_table.c.run_id,
+    node_states_table.c.token_id,
+    unique=True,
+)
+
+# === Durable coalesce effects (epoch 27) ===
+
+coalesce_effects_table = Table(
+    "coalesce_effects",
+    metadata,
+    Column("effect_id", String(64), primary_key=True),
+    Column("run_id", String(64), nullable=False),
+    Column("coalesce_node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
+    Column("row_id", String(64), nullable=False),
+    Column("parent_set_hash", String(64), nullable=False),
+    Column("effect_hash", String(64), nullable=False),
+    Column("expected_token_data_ref", String(64), nullable=False),
+    Column("step_in_pipeline", Integer),
+    Column("status", String(16), nullable=False),
+    Column("result_token_id", String(64), nullable=False),
+    Column("result_join_group_id", String(64), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("completed_at", DateTime(timezone=True)),
+    UniqueConstraint("effect_id", "run_id", name="uq_coalesce_effects_run_identity"),
+    UniqueConstraint(
+        "run_id",
+        "coalesce_node_id",
+        "row_id",
+        "parent_set_hash",
+        name="uq_coalesce_effects_scope",
+    ),
+    UniqueConstraint("result_token_id", name="uq_coalesce_effects_result_token"),
+    UniqueConstraint("result_join_group_id", name="uq_coalesce_effects_result_group"),
+    CheckConstraint(
+        "(status = 'materialized' AND completed_at IS NULL) OR (status = 'completed' AND completed_at IS NOT NULL)",
+        name="ck_coalesce_effects_lifecycle",
+    ),
+    CheckConstraint(_LowerHex64Check("parent_set_hash"), name="ck_coalesce_effects_parent_set_hash_hex"),
+    CheckConstraint(_LowerHex64Check("effect_hash"), name="ck_coalesce_effects_effect_hash_hex"),
+    CheckConstraint(_LowerHex64Check("expected_token_data_ref"), name="ck_coalesce_effects_payload_ref_hex"),
+    ForeignKeyConstraint(["run_id"], ["runs.run_id"], name="fk_coalesce_effects_run"),
+    ForeignKeyConstraint(["row_id", "run_id"], ["rows.row_id", "rows.run_id"], name="fk_coalesce_effects_row"),
+    ForeignKeyConstraint(
+        ["result_token_id", "run_id", "result_join_group_id"],
+        ["tokens.token_id", "tokens.run_id", "tokens.join_group_id"],
+        name="fk_coalesce_effects_result_identity",
+    ),
+)
+
+coalesce_effect_members_table = Table(
+    "coalesce_effect_members",
+    metadata,
+    Column("effect_id", String(64), nullable=False),
+    Column("run_id", String(64), nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("parent_token_id", String(64), nullable=False),
+    Column("parent_state_id", String(64)),
+    PrimaryKeyConstraint("effect_id", "ordinal"),
+    UniqueConstraint("effect_id", "parent_token_id", name="uq_coalesce_effect_members_token"),
+    UniqueConstraint("effect_id", "parent_state_id", name="uq_coalesce_effect_members_state"),
+    CheckConstraint("ordinal >= 0", name="ck_coalesce_effect_members_ordinal"),
+    ForeignKeyConstraint(
+        ["effect_id", "run_id"],
+        ["coalesce_effects.effect_id", "coalesce_effects.run_id"],
+        name="fk_coalesce_effect_members_effect",
+    ),
+    ForeignKeyConstraint(
+        ["parent_token_id", "run_id"],
+        ["tokens.token_id", "tokens.run_id"],
+        name="fk_coalesce_effect_members_token",
+    ),
+    ForeignKeyConstraint(
+        ["parent_state_id", "run_id", "parent_token_id"],
+        ["node_states.state_id", "node_states.run_id", "node_states.token_id"],
+        name="fk_coalesce_effect_members_state_token",
+    ),
 )
 
 # === Recoverable sink effects (epoch 26) ===

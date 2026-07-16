@@ -48,7 +48,7 @@ Before diving into the documents below, know which sources they aggregate. **If 
 | [`composer-guide.md`](composer-guide.md) | What the Composer can do, how guided/freeform authoring works, what readiness checks mean, and how a user completes or recovers a composition. | **Evaluators, programme teams, operators, and technical reviewers.** Public-facing / lightly technical. |
 | [`platform-architecture.md`](platform-architecture.md) | Current runtime surfaces, trust boundaries, audit-first behaviour, configuration validation, external-system boundaries, and adopter responsibilities. | **Evaluators, technical leaders, architects, and assurance reviewers.** Public-facing / technical. |
 | [`assessment-mapping.md`](assessment-mapping.md) | How the current evidence set maps to likely public-sector evaluation questions, without claiming formal conformance. | **Assurance, risk, security, delivery governance, and agency evaluation teams.** Evidence map. |
-| [`epoch-26-sink-effects.md`](../operator/migrations/epoch-26-sink-effects.md) | The 0.7.1 Landscape epoch-26 cutover, sink compatibility boundary, target-ledger requirements, and deployment sequence. | **Operators, plugin maintainers, and database schema owners.** Migration guide. |
+| [`sink-effect-recovery.md`](../runbooks/sink-effect-recovery.md) | The durable sink-effect recovery protocol, target-ledger requirements, and operator decisions after interrupted publication. | **Operators, plugin maintainers, and database owners.** Recovery runbook. |
 
 The executive summary is the single executive-tier entry point. Engineering
 readers should use the platform architecture and root changelog for current

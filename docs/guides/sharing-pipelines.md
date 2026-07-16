@@ -69,13 +69,11 @@ accept this trade-off.
 
 For 0.7.1, shareable-review state is part of the broader web session database
 contract. The release expects `SESSION_SCHEMA_EPOCH=27` and
-`SQLITE_SCHEMA_EPOCH=25`. When upgrading from 0.7.0, stop the web service and
-follow the two-database cutover: archive and recreate the configured session DB
-and its sidecars, then apply the approved archive/export and operator-controlled
-recreation decision to the pre-23 Landscape database before restart. An exact
-epoch-23 SQLite Landscape database takes the ordered automatic epoch-24 token
-ownership and epoch-25 artifact-idempotency migrations; an exact epoch-24
-database takes only the epoch-25 step. PostgreSQL requires its schema-owner path. Deployments
+`SQLITE_SCHEMA_EPOCH=27`. When upgrading from an older pre-1.0 build, stop and
+uninstall the web service, archive/export evidence when required, recreate the
+configured session and Landscape databases, then reinstall and initialize this
+ELSPETH version. No SQLite or PostgreSQL predecessor schema is transformed in
+place; PostgreSQL recreation remains a schema-owner operation. Deployments
 crossing from an older release must account for the historical 0.7.0 boundary
 as well.
 
@@ -231,16 +229,12 @@ with `openssl rand -base64 32` and replace.
 
 ### Service refuses to start with a `SESSION_SCHEMA_EPOCH` mismatch
 
-The sessions DB predates the running code. For a direct 0.7.0→0.7.1 upgrade,
-archive and recreate the sessions DB at epoch 27. An exact SQLite Landscape
-epoch 23 is different: writable schema-managing startup validates and migrates
-it through the independently atomic epoch-24 and epoch-25 steps. An exact
-epoch-24 database takes only the artifact-index step; read-only/inspection
-opens do not mutate either predecessor.
-PostgreSQL requires the schema-owner migration or recreation path. Do not roll
-the application back to epoch-23 or epoch-24 code after the Landscape migration; restore
-the matched pre-migration archive with the old code instead. For older starting
-versions, account for the runbook's historical destructive boundaries too.
+The sessions DB predates the running code. Archive/export evidence when
+required, stop and uninstall the deployment, recreate both stale databases,
+then reinstall. Writable, read-only, and inspection opens do not migrate any
+predecessor Landscape epoch. PostgreSQL recreation requires the schema-owner
+path. Do not roll older code over a database initialized by newer code; restore
+the matched archive with the old code instead.
 
 ### `POST /mark-ready-for-review` returns 409 with "composition validation failed"
 

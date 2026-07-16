@@ -303,6 +303,7 @@ class NodeStateRepository:
         error: ExecutionError | TransformErrorReason | CoalesceFailureReason | None = None,
         success_reason: TransformSuccessReason | None = None,
         context_after: NodeStateContext | None = None,
+        conn: Connection | None = None,
     ) -> NodeStatePending | NodeStateCompleted | NodeStateFailed:
         """Complete a node state.
 
@@ -352,35 +353,43 @@ class NodeStateRepository:
         # Atomic conditional UPDATE: guard against already-terminal status in the
         # WHERE clause (same TOCTOU-safe pattern as complete_batch).
         terminal_values = [s.value for s in _TERMINAL_NODE_STATE_STATUSES]
-        try:
-            with self._db.write_connection() as conn:
-                update_result = conn.execute(
-                    node_states_table.update()
-                    .where(node_states_table.c.state_id == state_id)
-                    .where(node_states_table.c.status.notin_(terminal_values))
-                    .values(
-                        status=status,
-                        output_hash=output_hash,
-                        duration_ms=duration_ms,
-                        error_json=error_json,
-                        success_reason_json=success_reason_json,
-                        context_after_json=context_json,
-                        completed_at=timestamp,
-                    )
-                )
-                if update_result.rowcount == 0:
-                    # Distinguish "not found" from "already terminal".
-                    existing = conn.execute(select(node_states_table.c.status).where(node_states_table.c.state_id == state_id)).fetchone()
-                    if existing is not None:
-                        raise LandscapeRecordError(
-                            f"Cannot complete node state {state_id}: current status {existing.status!r} is already terminal. "
-                            f"Terminal node states are immutable."
-                        )
-                    raise LandscapeRecordError(
-                        f"complete_node_state: zero rows affected for state_id={state_id} — target row does not exist (audit data corruption)"
-                    )
 
-                row = conn.execute(select(node_states_table).where(node_states_table.c.state_id == state_id)).fetchone()
+        def _complete_on(active_conn: Connection) -> Any:
+            update_result = active_conn.execute(
+                node_states_table.update()
+                .where(node_states_table.c.state_id == state_id)
+                .where(node_states_table.c.status.notin_(terminal_values))
+                .values(
+                    status=status,
+                    output_hash=output_hash,
+                    duration_ms=duration_ms,
+                    error_json=error_json,
+                    success_reason_json=success_reason_json,
+                    context_after_json=context_json,
+                    completed_at=timestamp,
+                )
+            )
+            if update_result.rowcount == 0:
+                # Distinguish "not found" from "already terminal".
+                existing = active_conn.execute(
+                    select(node_states_table.c.status).where(node_states_table.c.state_id == state_id)
+                ).fetchone()
+                if existing is not None:
+                    raise LandscapeRecordError(
+                        f"Cannot complete node state {state_id}: current status {existing.status!r} is already terminal. "
+                        f"Terminal node states are immutable."
+                    )
+                raise LandscapeRecordError(
+                    f"complete_node_state: zero rows affected for state_id={state_id} — target row does not exist (audit data corruption)"
+                )
+            return active_conn.execute(select(node_states_table).where(node_states_table.c.state_id == state_id)).fetchone()
+
+        try:
+            if conn is None:
+                with self._db.write_connection() as active_conn:
+                    row = _complete_on(active_conn)
+            else:
+                row = _complete_on(conn)
         except SQLAlchemyError as exc:
             raise LandscapeRecordError(
                 f"complete_node_state failed for state_id={state_id} — database rejected audit update: {type(exc).__name__}: {exc}"

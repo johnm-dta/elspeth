@@ -53,6 +53,7 @@ from elspeth.core.canonical import canonical_json
 from elspeth.plugins.infrastructure.base import BaseSink
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sinks._diversion_attribution import DiversionAttribution, build_diversion_attribution
 
 # Map schema field types to SQLAlchemy column types.
 # Text (not String) is used for string columns because String() without a length
@@ -213,7 +214,7 @@ class DatabaseSink(BaseSink):
     name = "database"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:d89296f559d8e4d9"
+    source_file_hash: str | None = "sha256:2f799a90639ff7a1"
     config_model = DatabaseSinkConfig
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"append"})
@@ -660,26 +661,12 @@ class DatabaseSink(BaseSink):
         except (TypeError, ValueError) as exc:
             raise DatabaseEffectMarkerDivergence("Database effect marker descriptor is invalid") from exc
 
-    @staticmethod
-    def _constraint_reason_hash(error: IntegrityError | DataError) -> str:
-        sqlstate = getattr(error.orig, "sqlstate", None) or getattr(error.orig, "pgcode", None)
-        return hashlib.sha256(
-            canonical_json(
-                {
-                    "driver_exception": type(error.orig).__name__,
-                    "sqlalchemy_exception": type(error).__name__,
-                    "sqlstate": sqlstate,
-                }
-            ).encode("utf-8")
-        ).hexdigest()
-
-    @classmethod
     def _insert_effect_rows(
-        cls,
+        self,
         conn: Connection,
         target: Table,
         members: Sequence[tuple[int, dict[str, Any]]],
-    ) -> tuple[list[dict[str, Any]], tuple[int, ...], tuple[int, ...], tuple[dict[str, object], ...]]:
+    ) -> tuple[list[dict[str, Any]], tuple[int, ...], tuple[int, ...], tuple[DiversionAttribution, ...]]:
         rows = [row for _ordinal, row in members]
         batch_savepoint = conn.begin_nested()
         try:
@@ -693,7 +680,7 @@ class DatabaseSink(BaseSink):
         accepted_rows: list[dict[str, Any]] = []
         accepted_ordinals: list[int] = []
         diverted_ordinals: list[int] = []
-        diversion_hashes: list[dict[str, object]] = []
+        diversion_attribution: list[DiversionAttribution] = []
         for ordinal, row in members:
             row_savepoint = conn.begin_nested()
             try:
@@ -701,12 +688,19 @@ class DatabaseSink(BaseSink):
                 row_savepoint.commit()
             except (IntegrityError, DataError) as exc:
                 row_savepoint.rollback()
+                reason = f"Constraint violation: {exc.orig}"
+                # Populate the live diversion log BEFORE the marker commits, so
+                # the executor can route the diverted row with its real reason.
+                # If no on_write_failure policy is configured this raises inside
+                # the outer transaction, rolling everything back (fail closed) —
+                # exactly mirroring the streaming write path.
+                self._divert_row(row, row_index=ordinal, reason=reason)
                 diverted_ordinals.append(ordinal)
-                diversion_hashes.append({"ordinal": ordinal, "reason_hash": cls._constraint_reason_hash(exc)})
+                diversion_attribution.append(build_diversion_attribution(ordinal=ordinal, reason=reason))
             else:
                 accepted_rows.append(row)
                 accepted_ordinals.append(ordinal)
-        return accepted_rows, tuple(accepted_ordinals), tuple(diverted_ordinals), tuple(diversion_hashes)
+        return accepted_rows, tuple(accepted_ordinals), tuple(diverted_ordinals), tuple(diversion_attribution)
 
     def _result_from_marker(
         self,
@@ -750,10 +744,12 @@ class DatabaseSink(BaseSink):
         for ordinal, item in zip(diverted, diversion_hashes, strict=True):
             if (
                 type(item) is not dict
-                or set(item) != {"ordinal", "reason_hash"}
+                or set(item) != {"error_hash", "ordinal", "reason_hash"}
                 or item["ordinal"] != ordinal
                 or not isinstance(item["reason_hash"], str)
                 or re.fullmatch(r"[0-9a-f]{64}", item["reason_hash"]) is None
+                or not isinstance(item["error_hash"], str)
+                or re.fullmatch(r"[0-9a-f]{16}", item["error_hash"]) is None
             ):
                 raise DatabaseEffectMarkerDivergence("Database effect marker diversion hashes are invalid")
         descriptor = self._descriptor_from_json(marker.get("descriptor_json"))
@@ -780,6 +776,7 @@ class DatabaseSink(BaseSink):
         expected_evidence = {
             "accepted_ordinals": list(accepted),
             "descriptor": self._require_canonical_json(marker.get("descriptor_json"), field_name="descriptor_json"),
+            "diversion_attribution": list(diversion_hashes),
             "diverted_ordinals": list(diverted),
         }
         if evidence_value != expected_evidence:
@@ -845,7 +842,8 @@ class DatabaseSink(BaseSink):
                 planned_columns = set(deep_thaw(plan.safe_evidence)["target_columns"])
                 if target_columns != planned_columns:
                     raise DatabaseEffectLedgerError("Database target table columns changed after effect inspection")
-                accepted_rows, accepted, diverted, diversion_hashes = self._insert_effect_rows(conn, target, members)
+                accepted_rows, accepted, diverted, diversion_attribution = self._insert_effect_rows(conn, target, members)
+                attribution_payload = [item.as_mapping() for item in diversion_attribution]
                 canonical_payload = canonical_json(accepted_rows).encode("utf-8")
                 content_hash = hashlib.sha256(canonical_payload).hexdigest()
                 descriptor = ArtifactDescriptor.for_database(
@@ -858,6 +856,7 @@ class DatabaseSink(BaseSink):
                 evidence: dict[str, object] = {
                     "accepted_ordinals": list(accepted),
                     "descriptor": json.loads(self._descriptor_json(descriptor)),
+                    "diversion_attribution": attribution_payload,
                     "diverted_ordinals": list(diverted),
                 }
                 conn.execute(
@@ -872,7 +871,7 @@ class DatabaseSink(BaseSink):
                         accepted_ordinals_json=canonical_json(list(accepted)),
                         diverted_ordinals_json=canonical_json(list(diverted)),
                         accepted_payload_hash=content_hash,
-                        diversion_hashes_json=canonical_json(list(diversion_hashes)),
+                        diversion_hashes_json=canonical_json(attribution_payload),
                         evidence_json=canonical_json(evidence),
                     )
                 )

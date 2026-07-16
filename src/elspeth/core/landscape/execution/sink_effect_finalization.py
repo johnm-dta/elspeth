@@ -74,6 +74,27 @@ def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
+def _validate_result_diversion_attribution(attribution: object, diverted_ordinals: Sequence[int]) -> None:
+    """Require exact, ordered, one-for-one hash attribution for diverted members."""
+    if type(attribution) is not list:
+        raise LandscapeRecordError("result-derived diversion attribution must be a list")
+    if len(attribution) != len(diverted_ordinals):
+        raise LandscapeRecordError("result-derived diversion attribution must cover every diverted member")
+    for ordinal, item in zip(diverted_ordinals, attribution, strict=True):
+        if (
+            type(item) is not dict
+            or set(item) != {"error_hash", "ordinal", "reason_hash"}
+            or item["ordinal"] != ordinal
+            or not _is_lower_hex(item["reason_hash"], length=64)
+            or not _is_lower_hex(item["error_hash"], length=16)
+        ):
+            raise LandscapeRecordError("result-derived diversion attribution is invalid")
+
+
+def _is_lower_hex(value: object, *, length: int) -> bool:
+    return type(value) is str and len(value) == length and all(character in "0123456789abcdef" for character in value)
+
+
 @dataclass(frozen=True, slots=True)
 class _OptimisticWitness:
     effect_id: str
@@ -496,6 +517,13 @@ class SinkEffectFinalization:
                 "descriptor": descriptor_payload,
                 "diverted_ordinals": list(request.diverted_ordinals),
             }
+            if isinstance(evidence, dict) and "diversion_attribution" in evidence:
+                # Commit-time diverters (e.g. database constraints) bind their
+                # durable per-member attribution into the result evidence. When
+                # present it must exactly cover the diverted partition in order.
+                attribution = evidence["diversion_attribution"]
+                _validate_result_diversion_attribution(attribution, request.diverted_ordinals)
+                expected_evidence["diversion_attribution"] = attribution
             if evidence != expected_evidence:
                 raise LandscapeRecordError("result-derived evidence is not the exact authoritative descriptor and member partition")
         if mode is SinkEffectDescriptorMode.NO_PUBLICATION:

@@ -1,7 +1,7 @@
 # Sink Effect Exactly-Once Design
 
 Date: 2026-07-16
-Status: approved design
+Status: revised after independent review; pending re-review
 Branch context: `codex/safety-74a343d5ad` from `release/0.7.1`
 Filigree: `elspeth-74a343d5ad`
 
@@ -126,10 +126,33 @@ canonical payload hash, and immutable data-flow ordering evidence.
 
 ### Effect input kind
 
-Every effect declares one closed input kind. `PIPELINE_MEMBERS` uses the
-ordered token membership above. `AUDIT_EXPORT_SNAPSHOT` uses no synthetic
-token or row; it binds exactly one immutable, content-addressed post-run audit
-snapshot. The database enforces the two shapes as an XOR.
+Every prepare request carries exactly one member of a closed union, never two
+parallel optional collections and never a caller-supplied discriminator:
+
+- `SinkEffectPipelineMembersInput(members,
+  target_snapshot_members)` has non-empty current `members`; both sequences
+  are frozen to tuples in dense zero-based canonical order. Its `input_kind`
+  property is derived as `PIPELINE_MEMBERS`.
+- `SinkEffectAuditExportSnapshotInput(snapshot_id, source_run_id,
+  registry_key_hash, manifest_hash, snapshot_hash, serialization_version,
+  export_format, signing_mode, signer_key_id, record_count, total_bytes,
+  chunk_count, chunks, reader)` has no token fields. Its `input_kind` property
+  is derived as `AUDIT_EXPORT_SNAPSHOT`.
+
+`AuditExportSnapshotChunkInput(ordinal, content_ref, content_hash, size_bytes,
+record_count)` is a frozen descriptor. Ordinals are dense and non-negative;
+references are credential-free; hashes are exact; sizes and record counts are
+strictly positive and meet both code-owned hard limits and configured limits.
+The parent validates `len(chunks) == chunk_count`, exact byte/record sums, and
+tuple order before the request reaches an adapter. Export format is closed to
+`JSON`/`CSV`; signing mode is closed to `UNSIGNED`/`HMAC_SHA256`. Unsigned
+input requires the reserved `UNSIGNED` signer identity, while signed input
+requires a non-reserved, operator-visible, credential-free `signer_key_id`.
+
+`SinkEffectPrepareRequest(effect_id, effect_input, inspection)` accepts only
+that union. Its `input_kind` is derived from `effect_input` and is never
+provided by a caller. A returned `SinkEffectPlan.input_kind` must equal the
+request-derived kind and the persisted effect kind.
 
 ### Audit-export snapshot
 
@@ -139,6 +162,15 @@ bounded ordered chunk manifest plus source-run terminal witness and aggregate
 hash, not an unbounded copy of records in Landscape. Once its registry row
 exists, every retry reads the immutable manifest/chunks and never rereads the
 now-self-modified live audit tables.
+
+The input carries a bound `RestrictedAuditExportSnapshotReader`. The frozen
+capability exposes immutable `snapshot_id`, `manifest_hash`, and `chunk_count`
+and only `iter_verified_chunks() -> Iterator[bytes]`; it has no arbitrary-ref
+read method, Landscape/query access, or store credentials. Before yielding
+each registered chunk it rechecks descriptor order, content reference, exact
+hash, byte size, record count, and cumulative limits. The capability is
+excluded from dataclass comparison and representation; only its binding fields
+are compared. It is never serialized into plans, safe evidence, or Landscape.
 
 ### Plan
 
@@ -346,12 +378,34 @@ Database checks mechanically enforce lifecycle completeness:
   sequence require one; composite same-stream FKs plus the tail-allocation CAS
   prove that it is the immediately preceding stream effect.
 
-Input shape is also mechanical: a `PIPELINE_MEMBERS` effect has at least one
-ordered token member and no export-snapshot association;
-`AUDIT_EXPORT_SNAPSHOT` has zero token members and exactly one immutable
-snapshot association. Repository methods validate the XOR before SQL and the
-schema enforces the input-kind CHECK, unique association FK, and transactional
-completeness validation on both supported backends.
+Input shape is also mechanical and portable. `sink_effects` has
+`input_kind`, `required_member_ordinal`, and `required_snapshot_slot`, plus a
+unique key on `(effect_id, input_kind)`. Its row CHECK has exactly two legal
+forms:
+
+```text
+PIPELINE_MEMBERS:
+  required_member_ordinal = 0 AND required_snapshot_slot IS NULL
+AUDIT_EXPORT_SNAPSHOT:
+  required_member_ordinal IS NULL AND required_snapshot_slot = 0
+```
+
+`sink_effect_members` carries an `input_kind` discriminator constrained to
+`PIPELINE_MEMBERS`, a composite parent FK `(effect_id, input_kind)`, and a
+unique `(effect_id, input_kind, ordinal)` key. `sink_effect_export_snapshots`
+carries a discriminator constrained to `AUDIT_EXPORT_SNAPSHOT`, a required
+`slot` constrained to zero, a composite parent FK, and unique keys on both
+`(effect_id, slot)` and `(effect_id, input_kind, slot)`. The parent has
+`DEFERRABLE INITIALLY DEFERRED` composite FKs from its required-member triple
+to member ordinal zero and from its required-snapshot triple to association
+slot zero. Thus pipeline effects must have member zero and cannot have an
+export association; export effects must have association zero and cannot have
+token members. There is no trigger that merely counts children after the fact.
+
+Repository constructors reject the XOR before SQL, while raw-SQL tests on
+SQLite and PostgreSQL prove valid parent+child transactions commit, missing
+required children fail at commit, mixed children fail immediately, and
+deleting either required child before commit fails the deferred parent FK.
 
 Generation is non-negative in reserved/prepared state and positive once
 in-flight. Lease expiry cannot precede heartbeat. Role, state, descriptor mode,
@@ -392,8 +446,8 @@ same token/node/input, and only then applies the generation-fenced transition.
 The immutable registry has one winner for:
 
 ```text
-(source_run_id, exporter_version, format, signing_mode, signer_key_id,
- public_export_config_hash)
+(source_run_id, exporter_version, serialization_version, format,
+ signing_mode, signer_key_id, public_export_config_hash)
 ```
 
 `signer_key_id` is a required operator-visible, credential-free key identity /
@@ -403,24 +457,55 @@ signer must change this ID. Existing-winner lookup exact-checks it before
 reuse; the same run/config with a different signer ID selects a distinct
 snapshot winner or fails closed under explicit single-export policy.
 
-The registry stores the source-run terminal witness/cutoff, canonical serialization
-version, configured record/chunk/byte limits, record and chunk counts,
-aggregate manifest and snapshot hashes, and timestamps. It contains no
-signing key, credentials, raw provider body, or unbounded record payload.
+The registry stores explicit `snapshot_id`, `source_run_id`, terminal
+`source_status`/`source_completed_at`, stable `exported_at`, `registry_key_hash`,
+exporter and canonical serialization versions, format, signing mode,
+`signer_key_id`, `public_export_config_hash`, chunking algorithm/per-chunk
+manifest-shaping limits, `record_count`, `total_bytes`, `chunk_count`, `manifest_hash`,
+`last_chunk_seal_hash`, `snapshot_hash`, and `snapshot_seal_hash`. A unique
+`runs(run_id, status, completed_at)` witness is referenced by a composite FK;
+the snapshot CHECK allows only `completed`, `completed_with_failures`,
+`failed`, or `empty` with non-null completion; resumable `interrupted` is not
+an export terminal witness.
+`exported_at` is exactly the persisted terminal `runs.completed_at` witness,
+not retry wall clock and never `datetime.now()`, so concurrent candidates sign
+identical canonical bytes. The row contains no signing key, credentials, raw
+provider body, or unbounded record payload. The operational
+`runs.exported_at` written only after effect finalization is not this canonical
+field and is excluded from the source snapshot.
 
-Materialization begins a real repeatable-read/consistent-snapshot transaction
-that checks for an existing registry winner and, when absent, verifies the run
-is terminal and enumerates every exported record from that same snapshot.
-PostgreSQL `READ COMMITTED` is insufficient. Records are canonically serialized
-into a bounded local spool and the DB transaction closes before any chunk-store
-I/O; no DB lock/transaction spans external storage. The spool is then split
-into bounded ordered content-addressed chunks. Only after every chunk is
-durable does a short transaction CAS-insert or exact-compare the immutable
-registry candidate. Concurrent candidates reuse the existing exact winner;
-divergence for the same registry key is an integrity error. A pre-registry
-crash may leave harmless unreferenced chunks for bounded cleanup. After
-registry insertion, recovery uses only the manifest/chunks and never rereads
-live audit tables.
+An `ExportReadModel` and its query adapters are connection-bound: no method
+opens a second connection. Materialization opens PostgreSQL with isolation
+level `REPEATABLE READ` before `BEGIN`, or issues SQLite `BEGIN` on one
+dedicated connection, then performs the initial registry lookup. An exact
+winner closes the read transaction immediately with zero terminal-witness or
+source-record queries, then binds and verifies the winner through its stored
+content-store resolver. Only on a miss does that same transaction read the
+terminal witness and enumerate every export record through the connection-bound adapters.
+PostgreSQL default `READ COMMITTED` and independent repository connections are
+forbidden. A distinct-connection SQLite test proves a post-`BEGIN` insert is
+excluded just as the PostgreSQL backend-PID test does.
+
+Enumeration and canonical serialization finish into a bounded operator-owned
+local spool inside that read transaction. The spool is fsynced and the DB
+transaction/connection closes before any content-store read or write. Chunking
+then writes bounded immutable content-addressed objects. Only after every
+chunk is durable does a short transaction CAS-insert or exact-compare the
+immutable registry candidate. Concurrent candidates reuse an existing exact
+winner; any same-key difference in descriptor, seal, signer identity,
+manifest-shaping chunk policy, or canonical bytes is an audit-integrity error.
+Total record/byte/chunk limits are acceptance-only: they are not in the key or
+snapshot seal, and an existing winner is reusable whenever its actual totals
+fit the current limits. Merely raising an acceptance limit is not divergence;
+lowering one below the winner's actual total fails before effect reservation.
+
+Candidate cleanup is reference-safe. On CAS loss or rollback, the producer
+may mark only objects written by that candidate in its configured namespace;
+garbage collection observes a grace period and deletes an object only after a
+fresh transaction proves no winning manifest references it. It never deletes
+by prefix alone and never removes a winner/shared content hash. After registry
+insertion, recovery uses only the manifest/chunks and never rereads live audit
+tables.
 
 An exporter whose initial registry lookup races with another exporter keeps
 the same consistent read snapshot it opened before the other export's audit
@@ -430,12 +515,43 @@ is forbidden.
 
 ### `audit_export_snapshot_chunks`
 
-The ordered manifest stores `(snapshot_id, ordinal)` plus the
-content-addressed chunk reference, canonical chunk hash, byte size, and record
-count. Ordinals are dense and non-negative, references are credential-free,
-aggregate counts/hashes must match the registry, and configured per-chunk and
-total record/byte limits are checked before registry insertion. Raw records
-live in the bounded snapshot store, not Landscape.
+The ordered manifest stores `(snapshot_id, ordinal)`, credential-free
+`content_ref`, `content_hash`, `size_bytes`, `record_count`,
+`predecessor_seal_hash`, cumulative byte/record totals, and `chunk_seal_hash`.
+Ordinal zero requires a null predecessor; every later row requires the exact
+prior row seal. A chunk seal hashes the serialization version, snapshot ID,
+ordinal, predecessor, content reference/hash, sizes/counts, and cumulative
+totals. The manifest hash is the canonical hash of the ordered seals. The
+snapshot seal binds the registry key, terminal witness, manifest/last seal,
+actual counts, manifest-shaping chunk policy, and snapshot hash. It does not
+bind acceptance-only total limits.
+
+Chunks are inserted before the registry under a deferred chunk-to-registry FK.
+Backend-specific `BEFORE INSERT` triggers are the structural authority:
+inserting any chunk after its registry/seal row exists is rejected;
+ordinal zero must have a null predecessor and cumulative values equal its own
+counts; ordinal `n>0` must find exactly ordinal `n-1`, copy that row's
+`chunk_seal_hash` as predecessor, and set cumulative records/bytes to the prior
+values plus the new row. A registry insert/seal trigger checks positive count,
+`min(ordinal)=0`, `max(ordinal)=chunk_count-1`, exact row count/density,
+sums/final cumulative totals, and exact terminal descriptor. A deferred
+composite registry-to-terminal-chunk FK binds `(snapshot_id,
+terminal_chunk_ordinal, last_chunk_seal_hash, record_count, total_bytes)` to
+the last chunk's unique ordinal/seal/cumulative tuple. Committing a partial or
+non-dense graph is impossible.
+
+SQLite/PostgreSQL cannot portably recompute SHA-256 in a CHECK/trigger, so the
+database does not pretend to prove cryptographic content. The repository
+recomputes each canonical chunk seal plus manifest/snapshot seals against
+content bytes before registry insertion. There is no public unverified
+snapshot loader: the loading API requires the winning store resolver and
+recomputes all seals against bytes before returning the snapshot; the
+restricted reader repeats per-chunk verification before each yield. Internal
+row decoders alone are not usable snapshot capabilities. Backend mutation
+guards reject `UPDATE` or `DELETE` of any sealed registry or chunk row. Raw-SQL tests cover structural
+order/predecessor/totals/terminal and mutation guards; loader/reader adversarial
+tests separately cover forged seal/hash/content bytes. Raw records live in the
+durable bounded content store, not Landscape.
 
 ### `sink_effect_export_snapshots`
 
@@ -444,6 +560,66 @@ This association stores exactly one `(effect_id, snapshot_id)` for an
 unique effect FK prevents one effect from changing snapshots. Effect identity
 binds the registry key, aggregate manifest/snapshot hash, sink configuration,
 and credential-free target.
+
+### Audit-export configuration and stores
+
+Audit export has no implicit resource or identity defaults. Configuration
+requires total record/byte/chunk limits, per-chunk record/byte limits, a
+private spool root and cleanup age/budget, and an `AuditExportContentStore`
+policy declaring a durable namespace, retention, fsync/durability capability,
+and reference-safe orphan cleanup. Preflight rejects a missing/non-private
+spool root, internally inconsistent limits, a content store that cannot prove
+durability, or a limit above the stricter code-owned hard maximum.
+
+Content references use the global credential-free form `sha256:<hex>`, not a
+backend path or namespace. Each snapshot registry row retains the
+credential-free `content_store_id` that won the CAS. The content-store resolver
+must continue to resolve that ID (including replica-compatible migration) and
+bind the restricted reader to it; switching current configuration may not
+reinterpret the ref in a different namespace. If the winning store ID is no
+longer resolvable or any chunk is unavailable, recovery fails closed instead
+of materializing a new same-key snapshot. `content_store_id` is immutable
+operational provenance but is not part of the byte/manifest identity; a CAS
+loser on another store reuses the accessible winner and safely reclaims only
+its own unreferenced replicas.
+
+`signing_mode=HMAC_SHA256` requires both the existing secret resolver reference
+and a credential-free `signer_key_id`; `UNSIGNED` requires the typed
+`UNSIGNED` sentinel and forbids a secret. Rotation means deploying the new
+secret with a new `signer_key_id`; reuse of an ID with different key material
+is an operator error and cannot be detected by persisting a key digest because
+key-derived identity is forbidden. The configured export policy explicitly
+chooses either multi-version winners or single-export refusal when the signer
+ID changes.
+
+Canonical public export configuration is encoded with the same named-field,
+length-delimited canonical hash primitive as other durable identities:
+
+```text
+public_export_config_hash = H(
+  exporter_version, serialization_version, format, signing_mode,
+  signer_key_id, include_raw_error_rows, chunking_algorithm_version,
+  per_chunk_record_limit, per_chunk_byte_limit
+)
+
+registry_key_hash = H(
+  "audit-export-registry-v1", source_run_id, exporter_version,
+  serialization_version, format, signing_mode, signer_key_id,
+  public_export_config_hash
+)
+```
+
+The snapshot key is target-independent. Sink name, target/path/URI, sink public
+config, secrets and secret-derived values, total acceptance limits, spool
+path, content-store policy, credentials, and provider handles enter neither
+hash; target/config identity belongs only in the effect ID and plan. The
+exporter exact-compares every snapshot-shaping public field as well as the
+hash before reusing a winner. The same snapshot exported to two targets must
+therefore reuse one registry winner and reserve two target effects.
+`RunLifecycle.execute_export_phase` receives the run's
+`PayloadStore` and the resolved durable audit-export content store explicitly
+and threads them through `export_landscape`; constructing an implicit
+`RecorderFactory(db)`/default store inside the export path is forbidden.
 
 ### `sink_effect_attempts`
 
@@ -501,8 +677,12 @@ match the persisted plan/reconciliation evidence.
 This is an end-to-end contract migration, not only DDL. `Artifact`, its loader,
 repository registration APIs, execution/data-flow queries, export/import
 records, reproducibility checks, MCP/web serializers, AWS acceptance fixtures,
-and audit views all represent the producer as an XOR of state link and effect
-link. Backward reads and exports preserve epoch-25 state-linked rows exactly.
+TUI `explain_screen.py`/`lineage_view.py`/`types.py`, and audit views all
+represent the producer as an XOR of state link and effect link. The direct S3
+publication proof in `web/aws_ecs_acceptance.py` must use the effect protocol
+or be explicitly removed from the production-call inventory; it may not remain
+a write/flush exception. Backward reads and exports preserve epoch-25
+state-linked rows exactly.
 New callers cannot assume `produced_by_state_id` is non-null and cannot create
 an epoch-26 sink artifact without a valid same-run/same-node effect. Exported
 records carry both nullable fields plus an explicit producer kind so consumers
@@ -661,7 +841,10 @@ members are exact.
 Before reservation, `on_start()`, or sink I/O, runtime validation proves:
 
 - the sink declares the current effect protocol version;
-- the configured mode has an exact commit/reconcile implementation;
+- the configured mode appears in `supported_effect_modes` and has an exact
+  commit/reconcile implementation;
+- the lifecycle's required input kind independently appears in
+  `supported_effect_input_kinds`; mode support never implies input support;
 - required target-side ledger permissions/capabilities are configured;
 - path and URI policies are safe and credential-free after redaction; and
 - configured resource bounds are valid.
@@ -673,6 +856,13 @@ remediation.
 Preflight is local and declarative. It validates declared Database ledger
 configuration/permission requirements but does not connect to the target to
 prove them, HEAD an object, read a blob, or perform DDL.
+
+The collection validator receives `required_input_kind` explicitly and never
+derives it from mode or sink config. Shared fresh/resume and follower-worker
+boundaries require `PIPELINE_MEMBERS`; the fresh post-run export boundary
+requires `AUDIT_EXPORT_SNAPSHOT`. A sink may support one without the other,
+and the wrong boundary rejects it before lifecycle, reservation, credentials,
+or I/O.
 
 ### Inspect
 
@@ -696,8 +886,11 @@ mean both "not inspected yet" and "inspection is unnecessary."
 ### Prepare
 
 `prepare_effect` receives a restricted context, stable effect identity,
-stored-ordinal rows, and (where required) a deterministic logical target
-snapshot reconstructed from finalized membership plus the current effect.
+inspection, and exactly one closed effect input. For `PIPELINE_MEMBERS`, that
+input contains stored-ordinal current rows and the deterministic logical target
+snapshot reconstructed from finalized membership plus the current effect. For
+`AUDIT_EXPORT_SNAPSHOT`, it contains only the immutable registry metadata,
+bounded descriptors, and its bound restricted reader.
 
 Prepare may:
 
@@ -721,6 +914,12 @@ descriptor. `RESULT_DERIVED` Database plans store the full ordered input and
 policy but deliberately leave the result descriptor unset until the
 target-side transaction. Reprepare after process loss must reproduce the plan
 or fail closed.
+
+The adapter must copy the request-derived input kind into its plan. The
+coordinator rejects a mismatch with the persisted effect before plan CAS. An
+audit-export adapter may consume chunks only through
+`iter_verified_chunks()`; it cannot replace descriptors, request an arbitrary
+content ref, query Landscape, or serialize the capability into evidence.
 
 ### Commit
 
@@ -894,16 +1093,34 @@ JSON sink adapter; retries never enumerate live Landscape rows. CSV multifile
 export uses a dedicated create-only directory-bundle adapter: prepare
 reconstructs the complete bundle into a private effect-addressed sibling
 staging directory containing a canonical bundle manifest, and the plan binds
-every relative file hash/size plus one aggregate bundle hash. Commit atomically
-renames only when the target is absent; an exact existing bundle is a no-op /
-reconcile success and a divergent existing bundle fails closed. It never
-promises portable overwrite of a non-empty directory. Platforms/filesystems
-without a proven create-only rename primitive fail preflight; any future
-overwrite mode requires a separately proven native primitive or immutable
-generation directory plus atomically replaced pointer manifest. Parent
-durability is fsynced and reconcile returns exact only for the same bundle
-manifest/identity. The artifact descriptor names one bundle and aggregate
-hash. Direct
+every relative file hash/size plus one aggregate bundle hash. Prepare fsyncs
+each completed regular file and the staging directory before plan completion.
+Commit publishes
+on Linux only through `renameat2(AT_FDCWD, staging, AT_FDCWD, target,
+RENAME_NOREPLACE)` via a checked libc/syscall wrapper. Preflight requires
+Linux, the syscall/flag, a read-only `statfs` result in the explicit supported
+local-filesystem allowlist, same-device sibling staging/target parents, and a
+path whose existing components are non-symlinks. Before snapshot reservation,
+an engine-owned bounded private sibling probe exercises both successful
+`RENAME_NOREPLACE` and `EEXIST`, then file/directory/parent fsync and cleanup;
+stale probe names are bounded and cleaned on the next preflight. This is not a
+plugin call or target publication and is the sole exception to declarative
+capability preflight. Any probe failure refuses the export. `EEXIST`
+never falls back to replacement: it enters exact-tree
+reconciliation. Other platforms/filesystems fail before snapshot reservation;
+any future alternative needs its own immutable-generation plus atomic-pointer
+design.
+
+Exact-tree reconciliation opens relative paths beneath directory FDs without
+following symlinks and rejects every extra or missing entry, non-regular file,
+symlink, path escape, duplicate/case-colliding name, changed canonical
+manifest, hash, or size. Only an identical manifest and file identity is
+exact; a legacy/unrelated target directory is a divergent collision. After a
+successful rename the adapter fsyncs the bundle directory and parent before
+return. Fault tests cover target creation between inspect and rename,
+`EEXIST`, crash before rename, after rename/before either fsync, after bundle
+fsync, and after parent fsync. The artifact descriptor names one bundle and
+aggregate hash. Direct
 `_export_csv_multifile`, sink `write()`, and sink `flush()` publication are
 removed. Filesystems without the required directory replacement/identity
 semantics and remote sink modes without an exact bundle primitive fail
@@ -1042,6 +1259,13 @@ exact bytes/metadata, exact audit attempt history, and convergent recovery.
 - pipeline-member/export-snapshot XOR rejects every mixed or empty shape; and
 - concurrent exporters reuse one snapshot/effect winner without synthetic
   tokens, even when later export audit rows change the live database.
+- frozen prepare inputs reject mutation, dense-order/count/sum violations,
+  unsupported formats/signing modes, mismatched reader bindings, and attempts
+  to serialize the reader capability;
+- an existing registry winner performs zero source-record queries, while a
+  divergent candidate for the same registry key fails closed; and
+- signed concurrent candidates produce byte-identical output from the stable
+  terminal timestamp and exact signer/config identity.
 
 ### Reconciliation and audit
 
@@ -1081,9 +1305,15 @@ exact bytes/metadata, exact audit attempt history, and convergent recovery.
   member reconciliation; and
 - Chroma `skip/error` rejects before reservation/on_start/I/O;
 - audit JSON replays only registered manifest chunks; and
-- CSV multifile uses a create-only atomic directory bundle with exact-existing
-  convergence, divergent-existing refusal, crash recovery, and
-  unsupported-platform guards.
+- audit JSON rejects missing, corrupt, reordered, descriptor-mismatched, and
+  oversized chunks before adapter-visible bytes;
+- CSV multifile uses Linux `renameat2(RENAME_NOREPLACE)` with a forced target
+  creation race, exact-tree extra/missing/symlink/path-escape/hash checks,
+  legacy-directory collision, every fsync crash seam, exact-existing
+  convergence, and unsupported-platform/filesystem guards; and
+- an AST/caller inventory proves every production `sink.write()`/`flush()`
+  call, including follower, export, and AWS acceptance surfaces, has either
+  migrated to effects or is an explicitly non-production compatibility test.
 
 ### Schema and regressions
 
@@ -1095,6 +1325,14 @@ exact bytes/metadata, exact audit attempt history, and convergent recovery.
   lock contention, duplicate/malformed predecessor refusal, and reopen;
 - real PostgreSQL repeatable-read snapshot winner and concurrent post-snapshot
   audit-row exclusion, with no DB transaction spanning chunk-store I/O;
+- SQLite distinct-connection consistent-snapshot exclusion and a source-query
+  spy proving the existing-winner fast path performs no enumeration;
+- raw-SQL SQLite and PostgreSQL commit/delete proofs for both input XOR forms,
+  snapshot terminal/composite FKs, immutable mutation guards, dense chunk
+  predecessor-reference/cumulative-total validation, and partial-graph
+  rollback, with separate loader/reader cryptographic-forgery tests;
+- content-store candidate rollback/orphan cleanup proves shared and winner
+  chunks survive, and only unreferenced candidate-owned chunks age out;
 - full sink recovery, diversion, failsink, scheduler handoff, artifact export,
   and checkpoint suites;
 - strict mypy, Ruff, and repository pre-commit hooks.

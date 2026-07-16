@@ -11,8 +11,9 @@ from elspeth.contracts import NodeStateStatus, NodeType, PendingOutcome, Routing
 from elspeth.contracts.errors import SinkTransactionalInvariantError
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema_contract import PipelineRow
-from elspeth.contracts.sink_effects import SinkEffectReconcileResult
+from elspeth.contracts.sink_effects import SinkEffectReconcileResult, SinkEffectRole
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.execution.sink_effect_reservation import SinkEffectReservation
 from elspeth.engine.executors.sink import SinkExecutor
 from elspeth.engine.executors.sink_effects import SinkEffectExecutionSeam, SinkEffectInjectedFault
 from elspeth.engine.spans import SpanFactory
@@ -438,6 +439,132 @@ def test_retry_with_mixed_interrupted_and_fresh_members_progresses(tmp_path: Pat
         for token in tokens:
             states = [state for state in recovered_factory.query.get_node_states_for_token(token.token_id) if state.node_id == sink_id]
             assert len(states) == 1
+    finally:
+        db.close()
+
+
+def test_redrive_after_crash_before_reservation_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash after node states are opened but BEFORE reservation writes any
+    durable sink_effect/member rows must not wedge the batch: the re-drive
+    reuses the open states and publishes exactly once instead of raising
+    AuditIntegrityError from the deleted durable witness-set guard
+    (elspeth-0c38e49a74, fixed by 38c20dc52)."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'prereserve.db'}")
+    try:
+        factory = make_factory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source_id = register_test_node(factory.data_flow, run.run_id, "source", node_type=NodeType.SOURCE, plugin_name="source")
+        sink_id = register_test_node(factory.data_flow, run.run_id, "primary", node_type=NodeType.SINK, plugin_name="partitioning")
+        tokens = _effect_tokens(
+            factory,
+            run_id=run.run_id,
+            source_id=source_id,
+            rows=[{"value": 1}, {"value": 2}],
+        )
+        token_ids = tuple(token.token_id for token in tokens)
+        ctx = PluginContext(run_id=run.run_id, config={}, landscape=factory.plugin_audit_writer(), node_id=sink_id)
+        pending = PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
+        target = DuplicateObservableTarget()
+
+        # Crash the FIRST traversal of the reservation entry point. This is
+        # the narrowest durable-write seam the executor traverses:
+        # SinkExecutor._write_primary_effect -> SinkEffectCoordinator.execute
+        # -> SinkEffectRepository.reserve -> SinkEffectReservation.reserve.
+        # Raising here fails the write AFTER node states are opened but
+        # BEFORE any sink_effects/sink_effect_members rows exist.
+        original_reserve = SinkEffectReservation.reserve
+        reserve_calls = 0
+
+        def crash_once(self: SinkEffectReservation, request: object) -> object:
+            nonlocal reserve_calls
+            reserve_calls += 1
+            if reserve_calls == 1:
+                raise RuntimeError("injected crash before sink-effect reservation")
+            return original_reserve(self, request)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(SinkEffectReservation, "reserve", crash_once)
+
+        first_sink = PartitioningObservableSink(target, name="primary")
+        first_sink.node_id = sink_id
+        with pytest.raises(RuntimeError, match="injected crash before sink-effect reservation"):
+            SinkExecutor(
+                factory.execution,
+                factory.data_flow,
+                SpanFactory(),
+                run.run_id,
+                factory=factory,
+                worker_id="worker-a",
+            ).write(
+                first_sink,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=pending,
+                effect_mode="write",
+            )
+
+        # Wedge-state precondition: every token's node state is still OPEN
+        # while ZERO durable effect/member rows exist. This zero-durable
+        # window is what distinguishes the pre-reservation wedge from the
+        # mixed interrupted/fresh retry, whose interrupted member is durable.
+        open_state_ids = factory.execution.get_open_node_state_ids(
+            run.run_id,
+            node_ids=(sink_id,),
+            token_ids=token_ids,
+        )
+        assert set(open_state_ids) == set(token_ids)
+        assert (
+            factory.execution.sink_effects.get_members_for_tokens(
+                run_id=run.run_id,
+                sink_node_id=sink_id,
+                role=SinkEffectRole.PRIMARY,
+                token_ids=token_ids,
+            )
+            == ()
+        )
+        assert not factory.execution.sink_effects.get_effects_for_run(run.run_id)
+        assert target.publication_count == 0
+
+        recovered_factory = make_factory(db)
+        recovered_sink = PartitioningObservableSink(target, name="primary")
+        recovered_sink.node_id = sink_id
+        artifact, counts = SinkExecutor(
+            recovered_factory.execution,
+            recovered_factory.data_flow,
+            SpanFactory(),
+            run.run_id,
+            factory=recovered_factory,
+            worker_id="worker-a",
+        ).write(
+            recovered_sink,  # type: ignore[arg-type]
+            tokens,
+            ctx,
+            1,
+            sink_name="output",
+            pending_outcome=pending,
+            effect_mode="write",
+        )
+
+        assert artifact is not None
+        assert counts.total == 0
+        assert target.publication_count == 1
+        effects = recovered_factory.execution.sink_effects.get_effects_for_run(run.run_id)
+        assert [effect.state.value for effect in effects] == ["finalized"]
+        assert artifact.sink_effect_id == effects[0].effect_id
+        for token in tokens:
+            outcome = recovered_factory.data_flow.get_token_outcome(token.token_id)
+            assert outcome is not None
+            assert outcome.outcome is TerminalOutcome.SUCCESS
+            # The re-drive reused the exact node state the crash left OPEN —
+            # no replacement state was opened, and it is now terminal.
+            states = [state for state in recovered_factory.query.get_node_states_for_token(token.token_id) if state.node_id == sink_id]
+            assert len(states) == 1
+            assert states[0].state_id == open_state_ids[token.token_id]
+            assert states[0].status is not NodeStateStatus.OPEN
     finally:
         db.close()
 

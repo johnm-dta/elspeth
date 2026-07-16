@@ -1,13 +1,12 @@
 """Regression guard: token-carried resume offset reaches sink node_state.
 
 ADDENDUM 4 corrects the design gap introduced in a3ead6692: resume_attempt_offset
-and resume_checkpoint_id must live on TokenInfo (not WorkItem) so that SinkExecutor,
-which buffers TokenInfos from multiple WorkItems and calls begin_node_state
-per-token in a loop, can read the correct per-token offset.
+and resume_checkpoint_id must live on TokenInfo (not WorkItem) so that the sink
+pre-phase can read the correct per-token offset.
 
 This test is the minimal regression guard for that specific gap:
 - Constructs a TokenInfo with resume_attempt_offset=1, resume_checkpoint_id="ck-test"
-- Drives it through SinkExecutor.write() with a REAL LandscapeDB (no mock)
+- Drives it through the effect-only sink pre-phase with a REAL LandscapeDB (no mock)
 - Reads the resulting node_states row back and asserts attempt=1, resume_checkpoint_id="ck-test"
 
 Limitation: this test exercises the per-token read inside the SinkExecutor loop
@@ -20,43 +19,13 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from elspeth.contracts import NodeType, PendingOutcome, PluginSchema, TokenInfo
-from elspeth.contracts.diversion import SinkWriteResult
-from elspeth.contracts.enums import TerminalOutcome, TerminalPath
-from elspeth.contracts.results import ArtifactDescriptor
+from elspeth.contracts import NodeType, TokenInfo
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape.schema import node_states_table
 from elspeth.engine.executors import SinkExecutor
 from elspeth.testing import make_field, make_row
 from tests.fixtures.factories import make_context
 from tests.fixtures.landscape import make_recorder_with_run, register_test_node
-
-
-class _PermissiveSchema(PluginSchema):
-    """Accept arbitrary sink rows for executor plumbing tests."""
-
-
-class _SinkDouble:
-    def __init__(self, node_id: str = "node-sink-1") -> None:
-        self.name = "primary_sink"
-        self.node_id = node_id
-        self.input_schema = _PermissiveSchema
-        self.declared_guaranteed_fields = frozenset()
-        self.declared_required_fields = frozenset()
-        self._on_write_failure = "discard"
-
-    def write(self, rows: list[dict[str, object]], ctx: object) -> SinkWriteResult:
-        del rows, ctx
-        return SinkWriteResult(
-            artifact=ArtifactDescriptor.for_file(path="/tmp/test-sink", content_hash="a" * 64, size_bytes=10),
-            diversions=(),
-        )
-
-    def _reset_diversion_log(self) -> None:
-        return None
-
-    def flush(self) -> None:
-        return None
 
 
 class _SpanContext:
@@ -94,7 +63,7 @@ class TestTokenResumeOffsetReachesSinkNodeState:
         """Token-carried resume offset and checkpoint id are written into node_states.
 
         Constructs a TokenInfo with resume_attempt_offset=1, resume_checkpoint_id="ck-test",
-        drives it through SinkExecutor.write() with a real LandscapeDB, reads back the
+        drives it through the sink pre-phase with a real LandscapeDB, reads back the
         resulting node_states row, and asserts:
         - attempt == 1  (offset from the token, not the default 0)
         - resume_checkpoint_id == "ck-test" (provenance from the token)
@@ -157,18 +126,15 @@ class TestTokenResumeOffsetReachesSinkNodeState:
             run_id,
         )
 
-        sink = _SinkDouble(node_id=sink_node_id)
         ctx = make_context(landscape=factory.plugin_audit_writer(), run_id=run_id)
-        pending = PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
 
-        # ── Drive the token through the sink ──
-        executor.write(
-            sink=sink,
+        # ── Drive the token through the effect-only sink pre-phase ──
+        executor._open_primary_states(
             tokens=[token],
-            ctx=ctx,
+            rows=[token.row_data.to_dict()],
+            sink_node_id=sink_node_id,
             step_in_pipeline=1,
-            sink_name="primary_sink",
-            pending_outcome=pending,
+            ctx=ctx,
         )
 
         # ── Read back the node_states row and assert the resume fields were written ──
@@ -238,17 +204,14 @@ class TestTokenResumeOffsetReachesSinkNodeState:
             run_id,
         )
 
-        sink = _SinkDouble(node_id=sink_node_id)
         ctx = make_context(landscape=factory.plugin_audit_writer(), run_id=run_id)
-        pending = PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
 
-        executor.write(
-            sink=sink,
+        executor._open_primary_states(
             tokens=[token],
-            ctx=ctx,
+            rows=[token.row_data.to_dict()],
+            sink_node_id=sink_node_id,
             step_in_pipeline=1,
-            sink_name="primary_sink",
-            pending_outcome=pending,
+            ctx=ctx,
         )
 
         with db.engine.connect() as conn:

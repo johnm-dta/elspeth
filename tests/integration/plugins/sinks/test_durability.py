@@ -1,10 +1,10 @@
 # tests/integration/plugins/sinks/test_durability.py
-"""Integration tests for sink durability and checkpoint ordering (Bug #2).
+"""Integration tests for sink-effect durability and checkpoint ordering.
 
 These tests verify that:
-1. Checkpoints are only created AFTER sink writes are durable
-2. If flush() fails, no checkpoint is created
-3. If checkpoint fails after flush(), the sink artifact exists but is logged
+1. Checkpoints are only created after an effect commit is durable.
+2. If effect commit fails, no checkpoint is created.
+3. If checkpointing fails after commit, execution fails closed.
 """
 
 from pathlib import Path
@@ -22,26 +22,10 @@ from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.engine.executors import SinkExecutor
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.sinks.csv_sink import CSVSink
-from tests.fixtures.base_classes import create_observed_contract, inject_write_failure
+from tests.fixtures.base_classes import create_observed_contract
 from tests.fixtures.factories import make_context
 from tests.fixtures.landscape import make_factory
 from tests.helpers.checkpoint import create_checkpoint
-
-
-class FlushProbe:
-    """Callable test fake for monkey-patching a sink flush method."""
-
-    def __init__(self, *, side_effect: OSError | None = None, call_order: list[str] | None = None) -> None:
-        self.side_effect = side_effect
-        self.call_order = call_order
-        self.call_count = 0
-
-    def __call__(self) -> None:
-        self.call_count += 1
-        if self.call_order is not None:
-            self.call_order.append("flush")
-        if self.side_effect is not None:
-            raise self.side_effect
 
 
 class TestSinkDurability:
@@ -117,37 +101,33 @@ class TestSinkDurability:
     def real_sink(self, tmp_path: Path) -> CSVSink:
         """Create a real CSVSink targeting a temp file.
 
-        Uses a real sink instead of a Mock — write() produces actual files
-        and artifacts. Tests that need flush failure patch sink.flush directly.
+        Uses a real effect-capable sink so commit produces actual files and artifacts.
         """
         output_file = tmp_path / "output.csv"
-        sink = inject_write_failure(
-            CSVSink(
-                {
-                    "path": str(output_file),
-                    "schema": {"mode": "observed"},
-                }
-            )
+        sink = CSVSink(
+            {
+                "path": str(output_file),
+                "schema": {"mode": "observed"},
+            }
         )
         sink.node_id = "sink"
         return sink
 
-    def test_checkpoint_not_created_if_flush_fails(
+    def test_checkpoint_not_created_if_effect_commit_fails(
         self,
         test_env: dict[str, Any],
         mock_graph: ExecutionGraph,
         real_sink: CSVSink,
     ) -> None:
-        """Verify checkpoint not created if sink flush() fails.
+        """Verify checkpoint is not created if the effect cannot commit.
 
         Scenario:
-        1. Sink write() succeeds
-        2. Sink flush() raises IOError (simulated crash)
+        1. Sink effect preparation succeeds.
+        2. Effect commit raises IOError (simulated crash).
         3. No checkpoint should be created
         4. Resume should process row again
 
-        This is Bug #2: checkpoint MUST NOT be created if flush fails,
-        because the data is not durable.
+        The callback must remain downstream of durable publication.
         """
         factory = test_env["factory"]
         checkpoint_mgr = test_env["checkpoint_manager"]
@@ -163,6 +143,7 @@ class TestSinkDurability:
             data_flow=factory.data_flow,
             span_factory=SpanFactory(),
             run_id=run.run_id,
+            factory=factory,
         )
 
         # Create row and token in database
@@ -204,9 +185,10 @@ class TestSinkDurability:
             )
             checkpoint_created = True
 
-        # Patch real sink's flush to fail.
-        failing_flush = FlushProbe(side_effect=OSError("Disk full - simulated crash"))
-        real_sink.flush = failing_flush  # type: ignore[method-assign]  # intentional monkey-patch for test
+        def fail_commit(_plan: object, _ctx: object) -> object:
+            raise OSError("Disk full - simulated crash")
+
+        real_sink.commit_effect = fail_commit  # type: ignore[method-assign]
 
         # Execute sink write - should fail on flush
         tokens = [token]
@@ -218,6 +200,7 @@ class TestSinkDurability:
                 step_in_pipeline=1,
                 sink_name="output",
                 pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW),
+                effect_mode="write",
                 on_token_written=checkpoint_callback,
             )
 
@@ -226,24 +209,20 @@ class TestSinkDurability:
         checkpoint = checkpoint_mgr.get_latest_checkpoint(run.run_id)
         assert checkpoint is None
 
-        # Verify: flush() was patched and called (crashed as expected)
-        assert failing_flush.call_count == 1
-
-    def test_checkpoint_failure_raises_after_successful_flush(
+    def test_checkpoint_failure_raises_after_successful_effect_commit(
         self,
         test_env: dict[str, Any],
         mock_graph: ExecutionGraph,
         real_sink: CSVSink,
     ) -> None:
-        """Verify checkpoint failure after durable write raises AuditIntegrityError.
+        """Verify checkpoint failure after durable commit raises AuditIntegrityError.
 
         Scenario:
-        1. Sink write() succeeds
-        2. Sink flush() succeeds (data is durable)
+        1. Sink effect commits (data is durable).
         3. Checkpoint creation fails (database error)
         4. AuditIntegrityError is raised — the audit trail is inconsistent
 
-        Checkpoint failure after durable flush means the sink artifact exists
+        Checkpoint failure after durable commit means the sink artifact exists
         but no checkpoint record was created. Silently continuing would cause
         duplicate writes on resume — crashing is the correct response.
         """
@@ -260,6 +239,7 @@ class TestSinkDurability:
             data_flow=factory.data_flow,
             span_factory=SpanFactory(),
             run_id=run.run_id,
+            factory=factory,
         )
 
         # Create row and token in database
@@ -293,7 +273,7 @@ class TestSinkDurability:
 
         tokens = [token]
 
-        with pytest.raises(AuditIntegrityError, match="Checkpoint failed after durable sink write"):
+        with pytest.raises(AuditIntegrityError, match="Checkpoint failed after durable sink effect"):
             sink_executor.write(
                 sink=real_sink,
                 tokens=tokens,
@@ -301,21 +281,22 @@ class TestSinkDurability:
                 step_in_pipeline=1,
                 sink_name="output",
                 pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW),
+                effect_mode="write",
                 on_token_written=failing_checkpoint_callback,
             )
 
-    def test_flush_called_before_checkpoint_callback(
+    def test_effect_commit_called_before_checkpoint_callback(
         self,
         test_env: dict[str, Any],
         mock_graph: ExecutionGraph,
         real_sink: CSVSink,
     ) -> None:
-        """Verify flush() is called BEFORE checkpoint callback.
+        """Verify effect commit is called before the checkpoint callback.
 
         This is the core fix for Bug #2: ensure ordering is:
-        1. write()
-        2. flush() - data is now durable
-        3. checkpoint callback - safe to checkpoint
+        1. prepare the exact effect
+        2. commit the effect durably
+        3. invoke the checkpoint callback
         """
         factory = test_env["factory"]
         checkpoint_mgr = test_env["checkpoint_manager"]
@@ -331,6 +312,7 @@ class TestSinkDurability:
             data_flow=factory.data_flow,
             span_factory=SpanFactory(),
             run_id=run.run_id,
+            factory=factory,
         )
 
         # Create row and token in database
@@ -371,8 +353,14 @@ class TestSinkDurability:
                 graph=mock_graph,
             )
 
-        tracking_flush = FlushProbe(call_order=call_order)
-        real_sink.flush = tracking_flush  # type: ignore[method-assign]  # intentional monkey-patch for test
+        original_commit = real_sink.commit_effect
+
+        def tracking_commit(plan: object, effect_ctx: object) -> object:
+            result = original_commit(plan, effect_ctx)  # type: ignore[arg-type]
+            call_order.append("commit")
+            return result
+
+        real_sink.commit_effect = tracking_commit  # type: ignore[method-assign]
 
         # Execute sink write
         tokens = [token]
@@ -383,11 +371,11 @@ class TestSinkDurability:
             step_in_pipeline=1,
             sink_name="output",
             pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW),
+            effect_mode="write",
             on_token_written=tracking_checkpoint_callback,
         )
 
-        # Verify: flush() was called BEFORE checkpoint callback
-        assert call_order == ["flush", "checkpoint"]
+        assert call_order == ["commit", "checkpoint"]
 
         # Verify: Checkpoint was created successfully
         checkpoint = checkpoint_mgr.get_latest_checkpoint(run.run_id)

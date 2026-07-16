@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.contracts.run_result import RunResult
+    from elspeth.core.config import SecretsConfig
     from elspeth.core.landscape import LandscapeDB
     from elspeth.engine import Orchestrator, PipelineConfig
     from elspeth.engine.orchestrator import RowPlugin
@@ -452,6 +453,25 @@ def _load_raw_yaml(config_path: Path) -> dict[str, Any]:
     return raw_config
 
 
+def _parse_raw_secrets_config(raw_config: Mapping[str, Any]) -> SecretsConfig:
+    """Extract and validate the literal ``secrets`` block from raw (unexpanded) YAML.
+
+    Shared by the raw sink-effect preflight and the settings loader so both
+    read one authoritative interpretation of which environment variables the
+    secret-loading phase will populate.
+    """
+    from elspeth.core.config import SecretsConfig
+
+    secrets_obj = raw_config.get("secrets", {})
+    if secrets_obj is None:
+        secrets_dict: dict[str, Any] = {}
+    else:
+        if not isinstance(secrets_obj, Mapping):
+            raise ValueError(f"'secrets' must be a mapping/object, got {type(secrets_obj).__name__}")
+        secrets_dict = dict(secrets_obj)
+    return SecretsConfig(**secrets_dict)
+
+
 def _load_settings_with_secrets(
     settings_path: Path,
 ) -> tuple[ElspethSettings, list[SecretResolutionInput]]:
@@ -481,21 +501,12 @@ def _load_settings_with_secrets(
         ValidationError: Pydantic validation error (secrets config or full config)
         SecretLoadError: Key Vault secret loading failed
     """
-    from elspeth.core.config import SecretsConfig
-
     # Phase 1: Parse YAML to extract secrets config (no ${VAR} resolution yet)
     # NOTE: vault_url must be literal per design - ${VAR} not supported
     raw_config = _load_raw_yaml(settings_path)
 
     # Extract and validate secrets config
-    secrets_obj = raw_config.get("secrets", {})
-    if secrets_obj is None:
-        secrets_dict: dict[str, Any] = {}
-    else:
-        if not isinstance(secrets_obj, Mapping):
-            raise ValueError(f"'secrets' must be a mapping/object, got {type(secrets_obj).__name__}")
-        secrets_dict = dict(secrets_obj)
-    secrets_config = SecretsConfig(**secrets_dict)
+    secrets_config = _parse_raw_secrets_config(raw_config)
 
     # Phase 2: Load secrets from Key Vault if configured
     # Returns resolution records for later audit recording
@@ -564,13 +575,26 @@ def _preflight_raw_settings_sink_effects(settings_path: Path, *, purpose: object
     if not isinstance(purpose, SinkEffectExecutionPurpose):
         raise TypeError("Raw sink effect preflight purpose must be exact SinkEffectExecutionPurpose")
     raw_config = _load_raw_yaml(settings_path)
-    validate_sink_effect_eligibility_from_raw_config(raw_config, purpose=purpose)
+    # Supported ${VAR} expansion must complete before configuration-dependent
+    # mode/URL/dialect resolution (elspeth-19f2382cf4). Key Vault-mapped
+    # variables are only populated by the later secret-loading phase, so sinks
+    # referencing them are deferred to the post-expansion admission gates.
+    secrets_config = _parse_raw_secrets_config(raw_config)
+    deferrable_env_vars = frozenset(secrets_config.mapping) if secrets_config.source == "keyvault" else frozenset()
+    validate_sink_effect_eligibility_from_raw_config(
+        raw_config,
+        purpose=purpose,
+        expand_env_placeholders=True,
+        deferrable_env_vars=deferrable_env_vars,
+    )
     if purpose is SinkEffectExecutionPurpose.FRESH:
         export_settings = validate_landscape_export_settings_from_raw_config(raw_config)
         if export_settings.enabled:
             validate_sink_effect_eligibility_from_raw_config(
                 raw_config,
                 purpose=SinkEffectExecutionPurpose.AUDIT_EXPORT,
+                expand_env_placeholders=True,
+                deferrable_env_vars=deferrable_env_vars,
             )
 
 

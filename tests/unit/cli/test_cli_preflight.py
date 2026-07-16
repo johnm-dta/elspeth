@@ -201,7 +201,14 @@ def test_cli_fresh_run_screens_pipeline_and_export_lanes_before_secret_loading(t
     )
     purposes: list[SinkEffectExecutionPurpose] = []
 
-    def validate(_raw: object, *, purpose: SinkEffectExecutionPurpose) -> dict[str, object]:
+    def validate(
+        _raw: object,
+        *,
+        purpose: SinkEffectExecutionPurpose,
+        expand_env_placeholders: bool = False,
+        deferrable_env_vars: frozenset[str] = frozenset(),
+    ) -> dict[str, object]:
+        del expand_env_placeholders, deferrable_env_vars
         purposes.append(purpose)
         if purpose is SinkEffectExecutionPurpose.AUDIT_EXPORT:
             raise SinkEffectCapabilityError("export lane rejected")
@@ -260,7 +267,7 @@ def test_raw_export_lane_classification_matches_pydantic_bool_coercion(
     purposes: list[SinkEffectExecutionPurpose] = []
     with patch(
         "elspeth.plugins.infrastructure.runtime_factory.validate_sink_effect_eligibility_from_raw_config",
-        side_effect=lambda _raw, *, purpose: purposes.append(purpose) or {},
+        side_effect=lambda _raw, *, purpose, **_expansion: purposes.append(purpose) or {},
     ):
         _preflight_raw_settings_sink_effects(settings_path, purpose=SinkEffectExecutionPurpose.FRESH)
 
@@ -268,6 +275,68 @@ def test_raw_export_lane_classification_matches_pydantic_bool_coercion(
     if expected_enabled:
         expected.append(SinkEffectExecutionPurpose.AUDIT_EXPORT)
     assert purposes == expected
+
+
+def _database_sink_settings_yaml(tmp_path: Path, *, secrets: dict[str, object] | None = None) -> Path:
+    """Settings YAML using the documented ${DATABASE_URL} sink URL placeholder."""
+    import yaml
+
+    config: dict[str, object] = {
+        "sources": {"primary": {"plugin": "csv", "options": {"path": str(tmp_path / "input.csv"), "schema": {"mode": "observed"}}}},
+        "sinks": {
+            "db_out": {
+                "plugin": "database",
+                "options": {
+                    "url": "${DATABASE_URL}",
+                    "table": "results",
+                    "schema": {"mode": "observed"},
+                    "if_exists": "append",
+                    "effect_ledger": {
+                        "table": "_elspeth_results_ledger",
+                        "permissions": ["insert", "select"],
+                    },
+                },
+            }
+        },
+    }
+    if secrets is not None:
+        config["secrets"] = secrets
+    settings_path = tmp_path / "env-url.yaml"
+    settings_path.write_text(yaml.dump(config))
+    return settings_path
+
+
+def test_cli_raw_preflight_expands_env_placeholders_before_mode_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """elspeth-19f2382cf4: raw preflight must expand ${DATABASE_URL} before dialect checks."""
+    from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'results.db'}")
+    settings_path = _database_sink_settings_yaml(tmp_path)
+
+    _preflight_raw_settings_sink_effects(settings_path, purpose=SinkEffectExecutionPurpose.FRESH)
+
+
+def test_cli_raw_preflight_defers_keyvault_mapped_placeholders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A vault-mapped sink URL is unknowable before secret loading; the raw gate defers."""
+    from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    settings_path = _database_sink_settings_yaml(
+        tmp_path,
+        secrets={
+            "source": "keyvault",
+            "vault_url": "https://unit-vault.vault.azure.net",
+            "mapping": {"DATABASE_URL": "database-url"},
+        },
+    )
+
+    _preflight_raw_settings_sink_effects(settings_path, purpose=SinkEffectExecutionPurpose.FRESH)
 
 
 def test_malformed_raw_export_shape_fails_before_secret_loading(tmp_path: Path) -> None:

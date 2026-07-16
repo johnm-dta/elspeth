@@ -184,10 +184,78 @@ def instantiate_plugins_from_config(
     return bundle
 
 
+def _expand_env_placeholders_for_raw_preflight(
+    value: object,
+    *,
+    deferrable_env_vars: frozenset[str],
+) -> tuple[object, bool]:
+    """Expand ``${VAR}``/``${VAR:-default}`` for pre-secret-loading preflight checks.
+
+    Mirrors the loader's ``_expand_env_vars`` semantics (same placeholder
+    pattern, environment-first resolution, ``:-`` defaults, and unset-variable
+    failure) with one difference: a variable named in ``deferrable_env_vars``
+    (declared to be populated later by the Key Vault secret-loading phase,
+    which overrides any current process value) cannot be known yet, so its
+    placeholder is left literal and the returned ``fully_resolved`` flag is
+    False. Callers must treat a not-fully-resolved value as
+    unvalidatable-yet and defer to the post-expansion gates.
+
+    Deferral is checked before the process environment because the secret
+    loader overrides existing environment values: validating against a value
+    the loader is about to replace would validate the wrong configuration.
+
+    Returns:
+        Tuple of (expanded value, fully_resolved).
+
+    Raises:
+        ValueError: A referenced variable is unset, has no default, and is not
+            deferrable — the same failure the loader itself would raise later.
+    """
+    import os
+    import re
+
+    from elspeth.core.config import _ENV_VAR_PATTERN
+
+    fully_resolved = True
+
+    def _expand_string(text: str) -> str:
+        def replacer(match: re.Match[str]) -> str:
+            nonlocal fully_resolved
+            var_name = match.group(1)
+            default = match.group(2)  # None if no default specified
+            if var_name in deferrable_env_vars:
+                fully_resolved = False
+                return match.group(0)
+            env_value = os.environ.get(var_name)
+            if env_value is not None:
+                return env_value
+            if default is not None:
+                return default
+            raise ValueError(
+                f"Required environment variable '{var_name}' is not set. "
+                f"Either set the variable or use ${{{{var_name}}:-default}} syntax for optional values."
+            )
+
+        return _ENV_VAR_PATTERN.sub(replacer, text)
+
+    def _expand_value(item: object) -> object:
+        if isinstance(item, str):
+            return _expand_string(item)
+        if isinstance(item, Mapping):
+            return {key: _expand_value(entry) for key, entry in item.items()}
+        if isinstance(item, list):
+            return [_expand_value(entry) for entry in item]
+        return item
+
+    return _expand_value(value), fully_resolved
+
+
 def validate_sink_effect_eligibility_from_raw_config(
     raw_config: Mapping[str, object],
     *,
     purpose: SinkEffectExecutionPurpose,
+    expand_env_placeholders: bool = False,
+    deferrable_env_vars: frozenset[str] = frozenset(),
 ) -> Mapping[str, ResolvedSinkEffectMode]:
     """Reject ineligible adapter classes before credentials or constructors.
 
@@ -195,6 +263,17 @@ def validate_sink_effect_eligibility_from_raw_config(
     selection. Mode interpretation remains adapter-owned through
     ``BaseSink._resolve_sink_effect_mode``; framework code never guesses from
     generic option names.
+
+    When ``expand_env_placeholders`` is True, the loader's supported ``${VAR}``
+    / ``${VAR:-default}`` expansion is applied to each selected sink's options
+    before configuration-dependent mode, URL, or dialect resolution
+    (elspeth-19f2382cf4). Variables named in ``deferrable_env_vars`` are only
+    populated by the later secret-loading phase (which overrides any current
+    process value), so a sink whose options still reference one is skipped
+    here — the post-expansion admission gates re-run adapter mode resolution
+    against the fully loaded configuration and remain authoritative. The flag
+    defaults to False so in-memory (web-authored) configurations keep treating
+    placeholders as literal data rather than host-environment lookups.
     """
     from elspeth.contracts.sink_effects import SinkEffectInputKind
     from elspeth.plugins.infrastructure.base import BaseSink
@@ -202,6 +281,12 @@ def validate_sink_effect_eligibility_from_raw_config(
 
     if not isinstance(purpose, SinkEffectExecutionPurpose):
         raise TypeError("Sink effect eligibility purpose must be exact SinkEffectExecutionPurpose")
+    if type(expand_env_placeholders) is not bool:
+        raise TypeError("Sink effect eligibility expand_env_placeholders must be an exact bool")
+    if type(deferrable_env_vars) is not frozenset or any(type(name) is not str for name in deferrable_env_vars):
+        raise TypeError("Sink effect eligibility deferrable_env_vars must be an exact frozenset of strings")
+    if deferrable_env_vars and not expand_env_placeholders:
+        raise ValueError("Sink effect eligibility deferrable_env_vars requires expand_env_placeholders=True")
     raw_sinks = raw_config.get("sinks")
     if not isinstance(raw_sinks, Mapping):
         raise ValueError("'sinks' must be a mapping/object for sink effect eligibility")
@@ -235,6 +320,20 @@ def validate_sink_effect_eligibility_from_raw_config(
         if not isinstance(raw_options, Mapping):
             raise ValueError(f"Sink {sink_name!r} options must be a mapping/object")
         options = dict(raw_options)
+        if expand_env_placeholders:
+            expanded_options, fully_resolved = _expand_env_placeholders_for_raw_preflight(
+                options,
+                deferrable_env_vars=deferrable_env_vars,
+            )
+            if not fully_resolved:
+                # These options reference secrets that exist only after the
+                # secret-loading phase; this raw gate cannot resolve the
+                # adapter mode yet. The post-expansion admission gates re-run
+                # adapter mode resolution and remain authoritative.
+                continue
+            if not isinstance(expanded_options, dict):  # pragma: no cover - dict in, dict out
+                raise TypeError("expanded sink options must be a mapping")
+            options = expanded_options
         if manager is None:
             manager = get_shared_plugin_manager()
         sink_type = manager.get_sink_by_name(plugin_name)

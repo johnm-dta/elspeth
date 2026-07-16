@@ -2783,6 +2783,235 @@ def resume(
         _close_landscape_db(db, pending_exc=sys.exc_info()[1])
 
 
+@app.command("export-resume")
+def export_resume(
+    run_id: str = typer.Argument(..., help="Finalized run whose audit export should be resumed."),
+    database: str | None = typer.Option(
+        None,
+        "--database",
+        "-d",
+        help="Path to Landscape database file (SQLite).",
+    ),
+    settings_file: str | None = typer.Option(
+        None,
+        "--settings",
+        "-s",
+        help="Path to settings YAML file (default: settings.yaml).",
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        "-x",
+        help="Actually execute the export resume (default is dry-run).",
+    ),
+    output_format: Literal["console", "json"] = typer.Option(
+        "console",
+        "--format",
+        "-f",
+        help="Output format: 'console' (human-readable) or 'json' (structured JSON).",
+    ),
+) -> None:
+    """Resume a finalized run's unfinished audit export.
+
+    Production recovery path for the window after run finalization where a
+    crash or transient sink failure left the run's export PENDING/FAILED and
+    its durable sink effect PREPARED/IN_FLIGHT. The immutable snapshot winner
+    is reused (never re-derived) and the durable effect is reconciled, so
+    publication happens exactly once.
+
+    By default, shows eligibility (dry run). Use --execute to actually
+    resume the export.
+
+    Examples:
+
+        # Dry run - show export status and eligibility
+        elspeth export-resume run-abc123
+
+        # Actually resume the export
+        elspeth export-resume run-abc123 --execute
+    """
+    from elspeth.core.landscape import LandscapeDB
+    from elspeth.engine.orchestrator.export import audit_export_resume_refusal, resume_audit_export
+
+    settings_path = Path(settings_file).expanduser() if settings_file else Path("settings.yaml")
+    if not settings_path.exists():
+        typer.echo(f"Error: Settings file not found: {settings_path}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        settings_config, _secret_resolutions = _load_settings_with_secrets(settings_path)
+    except FileNotFoundError:
+        typer.echo(f"Error: Settings file not found: {settings_path}", err=True)
+        raise typer.Exit(1) from None
+    except yaml.YAMLError as e:
+        typer.echo(f"YAML syntax error in {settings_path}: {e}", err=True)
+        raise typer.Exit(1) from None
+    except ValidationError as e:
+        typer.echo("Configuration errors:", err=True)
+        for error in e.errors():
+            loc = ".".join(str(x) for x in error["loc"])
+            typer.echo(f"  - {loc}: {error['msg']}", err=True)
+        raise typer.Exit(1) from None
+    except ValueError as e:
+        typer.echo(f"Configuration error: {e}", err=True)
+        raise typer.Exit(1) from None
+    except SecretLoadError as e:
+        typer.echo(f"Error loading secrets: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    export_settings = settings_config.landscape.export
+    if not export_settings.enabled:
+        typer.echo(
+            "Error: landscape.export is not enabled in settings; there is no audit export to resume.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Resolve database URL (same discipline as `resume`)
+    if database:
+        db_path = Path(database).expanduser().resolve()
+        if not db_path.exists():
+            typer.echo(f"Error: Database file not found: {db_path}", err=True)
+            raise typer.Exit(1) from None
+        db_url = f"sqlite:///{db_path}"
+    else:
+        db_url = settings_config.landscape.url
+        _validate_existing_sqlite_db_url(db_url, source="settings.yaml")
+        if output_format != "json":
+            typer.echo(f"Using database from settings.yaml: {db_url}")
+
+    from elspeth.cli_helpers import resolve_audit_passphrase
+
+    try:
+        passphrase = resolve_audit_passphrase(settings_config.landscape)
+    except RuntimeError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    try:
+        db = LandscapeDB.from_url(db_url, passphrase=passphrase, create_tables=False)
+    except Exception as e:
+        typer.echo(f"Error connecting to database: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    try:
+        from sqlalchemy import inspect as sa_inspect
+
+        try:
+            inspector = sa_inspect(db.engine)
+            existing_tables = set(inspector.get_table_names())
+        except Exception as e:
+            typer.echo(f"Error inspecting database schema: {e}", err=True)
+            raise typer.Exit(1) from None
+        if "runs" not in existing_tables:
+            typer.echo(
+                "Error: Database exists but is not a Landscape database (missing table: runs). Check the database path.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        from elspeth.core.landscape.factory import RecorderFactory
+
+        run = RecorderFactory(db).run_lifecycle.get_run(run_id)
+        refusal = audit_export_resume_refusal(run, run_id)
+
+        export_info: dict[str, Any] = {
+            "run_id": run_id,
+            "run_status": run.status.value if run is not None else None,
+            "export_status": (run.export_status.value if run is not None and run.export_status is not None else None),
+            "export_error": run.export_error if run is not None else None,
+            "eligible": refusal is None,
+            "reason": refusal,
+        }
+
+        if output_format != "json":
+            typer.echo(f"Run status: {export_info['run_status']}")
+            typer.echo(f"Export status: {export_info['export_status']}")
+            if export_info["export_error"]:
+                typer.echo(f"Export error: {export_info['export_error']}")
+
+        if refusal is not None:
+            if output_format == "json":
+                import json as json_module
+
+                typer.echo(json_module.dumps(export_info, indent=2))
+            else:
+                typer.echo(f"Cannot resume export for run {run_id}: {refusal}", err=True)
+            raise typer.Exit(1)
+
+        if not execute:
+            if output_format == "json":
+                import json as json_module
+
+                export_info["dry_run"] = True
+                typer.echo(json_module.dumps(export_info, indent=2))
+            else:
+                typer.echo(f"Run {run_id} export can be resumed.")
+                typer.echo("\nDry run - use --execute to actually resume the export.")
+            return
+
+        # Build the same export resources the run path uses.
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        if settings_config.payload_store.backend != "filesystem":
+            typer.echo(
+                f"Error: Unsupported payload store backend '{settings_config.payload_store.backend}'. "
+                f"Only 'filesystem' is currently supported.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        payload_path = settings_config.payload_store.base_path
+        if not payload_path.exists():
+            typer.echo(f"Error: Payload directory not found: {payload_path}", err=True)
+            raise typer.Exit(1)
+        payload_store = FilesystemPayloadStore(payload_path)
+
+        from elspeth.contracts.coordination import mint_worker_id
+        from elspeth.core.audit_export_content_store import create_audit_export_content_store
+        from elspeth.plugins.infrastructure.runtime_factory import make_sink_factory
+
+        audit_export_content_store, audit_export_content_store_resolver = create_audit_export_content_store(export_settings)
+
+        if output_format != "json":
+            typer.echo(f"\nResuming audit export for run {run_id}...")
+
+        try:
+            resume_audit_export(
+                db,
+                run_id,
+                settings_config,
+                make_sink_factory(settings_config),
+                payload_store=payload_store,
+                audit_export_content_store=audit_export_content_store,
+                audit_export_content_store_resolver=audit_export_content_store_resolver,
+                worker_id=mint_worker_id(run_id),
+            )
+        except contract_errors.TIER_1_ERRORS:
+            raise  # Tier 1 errors must crash with full traceback, not Exit(1)
+        except Exception as e:
+            if output_format == "json":
+                import json as json_module
+
+                typer.echo(
+                    json_module.dumps({**export_info, "event": "error", "error": str(e), "error_type": type(e).__name__}),
+                    err=True,
+                )
+            else:
+                typer.echo(f"Error during export resume: {e}", err=True)
+            raise typer.Exit(1) from e
+
+        if output_format == "json":
+            import json as json_module
+
+            typer.echo(json_module.dumps({**export_info, "export_status": "completed", "resumed": True}, indent=2))
+        else:
+            typer.echo(f"Export resumed successfully for run {run_id}: export status is now 'completed'.")
+    finally:
+        import sys
+
+        _close_landscape_db(db, pending_exc=sys.exc_info()[1])
+
+
 @app.command()
 def join(
     run_id: str = typer.Argument(..., help="Run ID to join as a follower worker."),

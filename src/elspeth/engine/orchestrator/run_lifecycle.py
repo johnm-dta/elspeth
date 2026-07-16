@@ -358,6 +358,31 @@ class RunLifecycleCoordinator:
         if payload_store is None:
             raise OrchestrationInvariantError("PayloadStore is required for audit compliance.")
 
+        # Fail fast on missing export resources (elspeth-749e75a59b): when
+        # export is enabled, the sink factory and durable content-store
+        # resources are REQUIRED and must be validated BEFORE any irreversible
+        # work — run-row creation, pipeline processing, terminal finalize,
+        # checkpoint deletion, and leader-seat release. The identical checks
+        # at the export-phase call site below remain as a fail-closed backstop
+        # (and narrow the Optional types for the execute_export_phase call).
+        if settings is not None and settings.landscape.export.enabled:
+            if sink_factory is None:
+                raise ValueError(
+                    "Export is enabled but no sink_factory was provided to orchestrator.run(). "
+                    "The caller must supply a sink_factory so the export phase can create "
+                    "a fresh sink instance (the pipeline's sinks are already closed)."
+                )
+            if audit_export_content_store is None:
+                raise ValueError(
+                    "Export is enabled but no audit_export_content_store was provided; "
+                    "the durable winning store must be resolved explicitly."
+                )
+            if audit_export_content_store_resolver is None:
+                raise ValueError(
+                    "Export is enabled but no audit_export_content_store_resolver was provided; "
+                    "prior immutable winning store IDs must remain resolvable."
+                )
+
         # ADR-010 §Decision 3: assert registry non-empty and freeze both
         # registries before any row is processed. prepare_for_run() is
         # idempotent when the registry is already frozen (short-circuits on

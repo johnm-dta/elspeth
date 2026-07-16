@@ -31,6 +31,7 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.sink_effects import SINK_EFFECT_PROTOCOL_VERSION, AuditExportFormat, SinkEffectInputKind
+from elspeth.core.landscape.factory import RecorderFactory as _RealRecorderFactory
 from elspeth.engine.orchestrator.export import (
     export_landscape as _production_export_landscape,
 )
@@ -211,7 +212,7 @@ def test_export_landscape_materializes_snapshot_before_audit_rows_and_executes_e
         events.append("register_node")
         register_node(*args, **kwargs)
 
-    factory = SimpleNamespace(data_flow=SimpleNamespace(register_node=register))
+    factory = SimpleNamespace(data_flow=SimpleNamespace(register_node=register, get_node=lambda *_a, **_k: None))
 
     def prepare(*args: Any, **kwargs: Any) -> object:
         events.append("snapshot")
@@ -264,7 +265,7 @@ def test_csv_export_runs_bundle_capability_probe_before_snapshot_reservation(tmp
     )
     binding, admission = prepare_audit_export_binding(settings, lambda _name: binding)
     observed: list[str] = []
-    factory = SimpleNamespace(data_flow=SimpleNamespace(register_node=_CallRecorder()))
+    factory = SimpleNamespace(data_flow=SimpleNamespace(register_node=_CallRecorder(), get_node=lambda *_a, **_k: None))
 
     with (
         patch("elspeth.core.landscape.factory.RecorderFactory", return_value=factory),
@@ -1272,3 +1273,93 @@ class TestJsonSchemaToPythonType:
         # Null value (optional)
         instance2 = model(name="Bob", address=None)
         assert instance2.address is None
+
+
+class TestExportNodeRegistrationIdempotence:
+    """elspeth-08350558e6: the deterministic ``export:<sink>`` node must be
+    re-registerable so an export retry (after a failed or lost publication
+    response) reaches SinkEffectCoordinator reconciliation instead of
+    crashing on the nodes composite primary key."""
+
+    @staticmethod
+    def _real_db_setup() -> tuple[Any, Any, str]:
+        from elspeth.core.landscape.database import LandscapeDB
+        from tests.fixtures.stores import MockPayloadStore
+
+        db = LandscapeDB.in_memory()
+        factory = _RealRecorderFactory(db, payload_store=MockPayloadStore())
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-export-retry")
+        return db, factory, run.run_id
+
+    def test_export_retry_after_lost_publication_response_reuses_registered_node(self) -> None:
+        db, real_factory, run_id = self._real_db_setup()
+        try:
+            settings = _make_settings()
+            _sink, sink_factory = _make_sink_and_factory(source_file_hash="sha256:" + "0" * 16)
+            snapshot = object()
+            executed: list[str] = []
+
+            with (
+                patch("elspeth.core.landscape.factory.RecorderFactory", _RealRecorderFactory),
+                patch(
+                    "elspeth.engine.orchestrator.audit_export_effects.prepare_audit_export_snapshot",
+                    return_value=snapshot,
+                ),
+                patch(
+                    "elspeth.engine.orchestrator.audit_export_effects.execute_audit_export_effect",
+                    side_effect=RuntimeError("publication response lost"),
+                ),
+                pytest.raises(RuntimeError, match="publication response lost"),
+            ):
+                export_landscape(db, run_id, settings, sink_factory)
+
+            assert real_factory.data_flow.get_node("export:output", run_id) is not None
+
+            with (
+                patch("elspeth.core.landscape.factory.RecorderFactory", _RealRecorderFactory),
+                patch(
+                    "elspeth.engine.orchestrator.audit_export_effects.prepare_audit_export_snapshot",
+                    return_value=snapshot,
+                ),
+                patch(
+                    "elspeth.engine.orchestrator.audit_export_effects.execute_audit_export_effect",
+                    side_effect=lambda **_kwargs: executed.append("effect"),
+                ),
+            ):
+                export_landscape(db, run_id, settings, sink_factory)
+
+            assert executed == ["effect"], "retry must reach durable effect recovery"
+            assert real_factory.data_flow.get_node("export:output", run_id) is not None
+        finally:
+            db.close()
+
+    def test_export_refuses_to_reuse_node_registered_with_divergent_identity(self) -> None:
+        from elspeth.contracts import NodeType
+        from tests.fixtures.landscape import register_test_node
+
+        db, real_factory, run_id = self._real_db_setup()
+        try:
+            register_test_node(
+                real_factory.data_flow,
+                run_id,
+                "export:output",
+                node_type=NodeType.TRANSFORM,
+                plugin_name="imposter",
+            )
+            settings = _make_settings()
+            _sink, sink_factory = _make_sink_and_factory(source_file_hash="sha256:" + "0" * 16)
+
+            with (
+                patch("elspeth.core.landscape.factory.RecorderFactory", _RealRecorderFactory),
+                patch(
+                    "elspeth.engine.orchestrator.audit_export_effects.prepare_audit_export_snapshot",
+                    return_value=object(),
+                ),
+                patch("elspeth.engine.orchestrator.audit_export_effects.execute_audit_export_effect") as execute,
+                pytest.raises(AuditIntegrityError, match="export:output"),
+            ):
+                export_landscape(db, run_id, settings, sink_factory)
+
+            execute.assert_not_called()
+        finally:
+            db.close()

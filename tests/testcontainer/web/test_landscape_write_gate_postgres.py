@@ -23,8 +23,17 @@ from testcontainers.postgres import PostgresContainer  # type: ignore[import-unt
 from elspeth.contracts import NodeType
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.landscape.database import SchemaCompatibilityError
+from elspeth.core.landscape.scheduler.branch_losses import record_coalesce_branch_loss
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
-from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table, scheduler_events_table, token_work_items_table, tokens_table
+from elspeth.core.landscape.schema import (
+    coalesce_branch_losses_table,
+    nodes_table,
+    rows_table,
+    runs_table,
+    scheduler_events_table,
+    token_work_items_table,
+    tokens_table,
+)
 from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.config import WebSettings
 from elspeth.web.deployment_contract import validate_aws_ecs_settings
@@ -376,6 +385,66 @@ def test_postgres_scheduler_enqueue_and_accounting_projection_are_dialect_safe(
                 ).scalar_one()
                 == item.work_item_id
             )
+
+
+def test_postgres_coalesce_branch_loss_insert_is_dialect_safe(
+    tmp_path: Path,
+    runtime_database: _RuntimeDatabase,
+) -> None:
+    """Coalesce disposition writes must use PostgreSQL's conflict builder."""
+    settings = _settings(tmp_path, runtime_database)
+    now = datetime.now(UTC)
+
+    with open_landscape_db(settings) as landscape:
+        with landscape.engine.begin() as conn:
+            conn.execute(
+                insert(runs_table).values(
+                    run_id="coalesce-loss-postgres-run",
+                    started_at=now,
+                    config_hash="config",
+                    settings_json="{}",
+                    canonical_version="v1",
+                    status="running",
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
+                )
+            )
+            first_inserted = record_coalesce_branch_loss(
+                conn,
+                run_id="coalesce-loss-postgres-run",
+                coalesce_name="merge",
+                row_id="row-1",
+                branch_name="left",
+                token_id="token-left",
+                reason="failed",
+                recorded_by="worker-1",
+                now=now,
+            )
+            duplicate_inserted = record_coalesce_branch_loss(
+                conn,
+                run_id="coalesce-loss-postgres-run",
+                coalesce_name="merge",
+                row_id="row-1",
+                branch_name="left",
+                token_id="token-left",
+                reason="failed",
+                recorded_by="worker-1",
+                now=now,
+            )
+
+        with landscape.engine.connect() as conn:
+            rows = (
+                conn.execute(
+                    select(coalesce_branch_losses_table).where(coalesce_branch_losses_table.c.run_id == "coalesce-loss-postgres-run")
+                )
+                .mappings()
+                .all()
+            )
+
+    assert first_inserted is True
+    assert duplicate_inserted is False
+    assert len(rows) == 1
+    assert rows[0]["token_id"] == "token-left"
 
 
 def test_request_open_does_not_repair_missing_additive_index(

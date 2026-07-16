@@ -12,8 +12,10 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, RowMapping
 
@@ -71,23 +73,40 @@ def record_coalesce_branch_loss(
     Returns ``True`` if this call inserted the row, ``False`` if the row
     pre-existed.
     """
-    result = conn.execute(
-        sqlite_insert(coalesce_branch_losses_table)
-        .values(
-            loss_id=f"loss_{generate_id()[:12]}",
-            run_id=run_id,
-            coalesce_name=coalesce_name,
-            row_id=row_id,
-            branch_name=branch_name,
-            token_id=token_id,
-            reason=reason,
-            recorded_by=recorded_by,
-            recorded_at=now,
-            adopted_epoch=None,
+    loss_id = f"loss_{generate_id()[:12]}"
+    values = {
+        "loss_id": loss_id,
+        "run_id": run_id,
+        "coalesce_name": coalesce_name,
+        "row_id": row_id,
+        "branch_name": branch_name,
+        "token_id": token_id,
+        "reason": reason,
+        "recorded_by": recorded_by,
+        "recorded_at": now,
+        "adopted_epoch": None,
+    }
+    dialect = conn.dialect.name
+    stmt: Any
+    if dialect == "sqlite":
+        stmt = sqlite_insert(coalesce_branch_losses_table).values(**values)
+    elif dialect == "postgresql":
+        stmt = postgresql_insert(coalesce_branch_losses_table).values(**values)
+    else:
+        raise NotImplementedError(
+            "coalesce branch-loss recording requires an atomic insert-or-ignore for landscape database "
+            f"dialect {dialect!r}; supported dialects: sqlite, postgresql"
         )
-        .on_conflict_do_nothing(index_elements=["run_id", "coalesce_name", "row_id", "branch_name"])
-    )
-    if result.rowcount == 1:
+    inserted_loss_id = conn.execute(
+        stmt.on_conflict_do_nothing(index_elements=["run_id", "coalesce_name", "row_id", "branch_name"]).returning(
+            coalesce_branch_losses_table.c.loss_id
+        )
+    ).scalar_one_or_none()
+    if inserted_loss_id is not None:
+        if inserted_loss_id != loss_id:
+            raise AuditIntegrityError(
+                f"Coalesce branch-loss insert returned unexpected loss_id={inserted_loss_id!r}; expected {loss_id!r}."
+            )
         return True
     existing = (
         conn.execute(

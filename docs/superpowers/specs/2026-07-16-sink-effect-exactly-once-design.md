@@ -156,9 +156,9 @@ request-derived kind and the persisted effect kind.
 
 ### Audit-export snapshot
 
-A transactionally consistent, terminal-run view materialized before any
+A transactionally consistent, immutable export-terminal run view materialized before any
 export node, effect, operation, attempt, or call row is registered. It is a
-bounded ordered chunk manifest plus source-run terminal witness and aggregate
+bounded ordered chunk manifest plus immutable source-run export-terminal witness and aggregate
 hash, not an unbounded copy of records in Landscape. Once its registry row
 exists, every retry reads the immutable manifest/chunks and never rereads the
 now-self-modified live audit tables.
@@ -457,17 +457,29 @@ signer must change this ID. Existing-winner lookup exact-checks it before
 reuse; the same run/config with a different signer ID selects a distinct
 snapshot winner or fails closed under explicit single-export policy.
 
-The registry stores explicit `snapshot_id`, `source_run_id`, terminal
-`source_status`/`source_completed_at`, stable `exported_at`, `registry_key_hash`,
+The registry stores explicit `snapshot_id`, `source_run_id`, immutable
+export-terminal `source_status`/`source_completed_at`, stable `exported_at`,
+`registry_key_hash`,
 exporter and canonical serialization versions, format, signing mode,
-`signer_key_id`, `public_export_config_hash`, chunking algorithm/per-chunk
-manifest-shaping limits, `record_count`, `total_bytes`, `chunk_count`, `manifest_hash`,
-`last_chunk_seal_hash`, `snapshot_hash`, and `snapshot_seal_hash`. A unique
-`runs(run_id, status, completed_at)` witness is referenced by a composite FK;
-the snapshot CHECK allows only `completed`, `completed_with_failures`,
-`failed`, or `empty` with non-null completion; resumable `interrupted` is not
-an export terminal witness.
-`exported_at` is exactly the persisted terminal `runs.completed_at` witness,
+`signer_key_id`, `derivation_version`, `public_export_config_hash`,
+chunking algorithm/per-chunk manifest-shaping limits, `record_count`,
+`total_bytes`, `chunk_count`, `manifest_hash`,
+`last_chunk_seal_hash`, `snapshot_hash`, `snapshot_seal_hash`, nullable
+`signature_hex`, and signed-manifest hash/ref/size. The exact named,
+non-partial parent index is
+`CREATE UNIQUE INDEX uq_runs_export_witness ON runs(run_id, status, completed_at)`;
+the ordered columns and default binary/backend collation are part of the
+physical schema contract. Both fresh SQLAlchemy schema creation and the
+epoch-25-to-26 migration create and verify this index before creating any
+audit-export snapshot child table. The registry references those exact three
+columns with a composite FK; this ordering prevents SQLite from accepting the
+DDL only to raise `foreign key mismatch` on the first snapshot DML. The
+snapshot CHECK allows only `completed`, `completed_with_failures`, or
+`empty` with non-null completion. Both `failed` and `interrupted` are resumable:
+takeover changes them to `running` and clears `completed_at`. Export refuses
+either status before opening a spool, writing a chunk, or reserving an effect,
+so the composite witness can never prevent a later resume.
+`exported_at` is exactly the persisted immutable `runs.completed_at` witness,
 not retry wall clock and never `datetime.now()`, so concurrent candidates sign
 identical canonical bytes. The row contains no signing key, credentials, raw
 provider body, or unbounded record payload. The operational
@@ -481,7 +493,8 @@ dedicated connection, then performs the initial registry lookup. An exact
 winner closes the read transaction immediately with zero terminal-witness or
 source-record queries, then binds and verifies the winner through its stored
 content-store resolver. Only on a miss does that same transaction read the
-terminal witness and enumerate every export record through the connection-bound adapters.
+immutable export-terminal witness and enumerate every export record through
+the connection-bound adapters.
 PostgreSQL default `READ COMMITTED` and independent repository connections are
 forbidden. A distinct-connection SQLite test proves a post-`BEGIN` insert is
 excluded just as the PostgreSQL backend-PID test does.
@@ -518,13 +531,19 @@ is forbidden.
 The ordered manifest stores `(snapshot_id, ordinal)`, credential-free
 `content_ref`, `content_hash`, `size_bytes`, `record_count`,
 `predecessor_seal_hash`, cumulative byte/record totals, and `chunk_seal_hash`.
-Ordinal zero requires a null predecessor; every later row requires the exact
-prior row seal. A chunk seal hashes the serialization version, snapshot ID,
+Every row requires a lowercase 64-hex `content_hash` and exact
+`content_ref = "sha256:" + content_hash`; fresh-schema, migration, contract,
+and restricted-reader tests separately reject a syntactically valid reference
+whose 64-hex suffix is a different digest.
+
+Ordinal zero stores a null predecessor that the canonical seal encoder maps to
+the typed `GENESIS` value; every later row requires the exact prior row seal.
+A chunk seal hashes the serialization version, snapshot ID,
 ordinal, predecessor, content reference/hash, sizes/counts, and cumulative
 totals. The manifest hash is the canonical hash of the ordered seals. The
-snapshot seal binds the registry key, terminal witness, manifest/last seal,
-actual counts, manifest-shaping chunk policy, and snapshot hash. It does not
-bind acceptance-only total limits.
+snapshot seal binds the registry key, immutable export-terminal witness,
+manifest/last seal, actual counts, manifest-shaping chunk policy, and snapshot
+hash. It does not bind acceptance-only total limits.
 
 Chunks are inserted before the registry under a deferred chunk-to-registry FK.
 Backend-specific `BEFORE INSERT` triggers are the structural authority:
@@ -596,17 +615,18 @@ Canonical public export configuration is encoded with the same named-field,
 length-delimited canonical hash primitive as other durable identities:
 
 ```text
-public_export_config_hash = H(
-  exporter_version, serialization_version, format, signing_mode,
-  signer_key_id, include_raw_error_rows, chunking_algorithm_version,
+public_export_config_hash = H(C(
+  "audit-export-public-config-v1", exporter_version,
+  serialization_version, format, signing_mode, signer_key_id,
+  include_raw_error_rows, chunking_algorithm_version,
   per_chunk_record_limit, per_chunk_byte_limit
-)
+))
 
-registry_key_hash = H(
-  "audit-export-registry-v1", source_run_id, exporter_version,
+registry_key_hash = H(C(
+  "audit-export-registry-key-v1", source_run_id, exporter_version,
   serialization_version, format, signing_mode, signer_key_id,
   public_export_config_hash
-)
+))
 ```
 
 The snapshot key is target-independent. Sink name, target/path/URI, sink public
@@ -620,6 +640,90 @@ therefore reuse one registry winner and reserve two target effects.
 `PayloadStore` and the resolved durable audit-export content store explicitly
 and threads them through `export_landscape`; constructing an implicit
 `RecorderFactory(db)`/default store inside the export path is forbidden.
+
+### Canonical audit-export derivation v1
+
+`AUDIT_EXPORT_DERIVATION_VERSION = "audit-export-derivation-v1"` fixes one
+non-circular derivation order. `C(tag, fields)` is the existing canonical
+named-field encoder with this version prefix: UTF-8 field names, fields in the
+listed order, and unsigned big-endian lengths around every field name/value.
+Values use the existing type-faithful canonical value encoder. `H(bytes)` is
+lowercase hexadecimal SHA-256 over its exact byte argument; `REF(hash)` is
+exactly the lowercase
+ASCII string `sha256:` followed by that 64-character hash. No step may reorder
+fields, use display JSON as a hash preimage, or substitute retry wall time.
+
+Every candidate executes these steps in order and completes them before the
+registry compare-and-set (CAS):
+
+1. Compute `public_export_config_hash` and then `registry_key_hash` from the
+   target-independent formulas above.
+2. Serialize ordered source records with the versioned JSON/CSV serializer and
+   the immutable run `completed_at` as `exported_at`. Frame each record with
+   its dense record ordinal and type. The exporter-owned top-level envelope
+   reserves `snapshot_id`, `snapshot_hash`, `manifest_hash`,
+   `snapshot_seal_hash`, `signature`, `signature_algorithm`, `signature_key_id`,
+   `signed_manifest_hash`, `signed_manifest_ref`, and
+   `signed_manifest_size_bytes`; caller attempts to write those envelope slots
+   are rejected. Source/user payload remains nested,
+   type-tagged canonical data and may legitimately contain the same key
+   strings. The invariant is that exporter-derived snapshot, manifest, seal,
+   and signature values never enter any record or chunk preimage.
+3. Partition complete record frames with `chunking_algorithm_version`: append
+   the next whole frame unless it would exceed the configured per-chunk record
+   or byte limit, then close the current non-empty chunk. A single oversized
+   frame fails. For each exact `chunk_bytes[i]`, compute
+   `content_hash[i] = SHA256(chunk_bytes[i]).hexdigest()` and require
+   `content_ref[i] == "sha256:" + content_hash[i]`. Hashes and refs use
+   lowercase only.
+4. Compute `snapshot_hash = H(C("audit-export-snapshot-content-v1", ...))`
+   over serialization/chunking versions, the ordered snapshot-ID-free tuples
+   `(ordinal, content_hash, size_bytes, record_count, cumulative_bytes,
+   cumulative_records)`, and final totals. This preimage contains no registry
+   target, effect ID, snapshot ID, seal, manifest, signature, or store ID.
+5. Compute deterministic
+   `snapshot_id = H(C("audit-export-snapshot-id-v1", registry_key_hash,
+   snapshot_hash))`.
+6. Compute chunk seals in ordinal order. Seal zero uses the typed `GENESIS`
+   predecessor; seal `i>0` uses `chunk_seal_hash[i-1]`. Each seal hashes the
+   derivation/serialization versions, `snapshot_id`, ordinal, exact predecessor,
+   content hash/ref, size/count, and cumulative totals.
+7. Compute `manifest_hash = H(C("audit-export-manifest-v1", snapshot_id,
+   ordered chunk descriptors and seals, chunk_count, record_count,
+   total_bytes))`.
+8. Compute `snapshot_seal_hash = H(C("audit-export-snapshot-seal-v1",
+   registry_key_hash, source_run_id, immutable source status/completed_at,
+   exported_at, snapshot_id, snapshot_hash, manifest_hash,
+   last_chunk_seal_hash, record_count, total_bytes, chunk_count,
+   chunking algorithm and per-chunk limits))`. Acceptance-only total limits,
+   target/effect identity, store ID, and signature fields remain excluded.
+9. Build the canonical signing body from the derivation version, signing mode,
+   signer ID, registry key, immutable run witness, snapshot ID/hash/seal,
+   manifest hash, ordered chunk descriptors/seals, and exact totals. The
+   signing preimage explicitly excludes `signature_hex`,
+   `signed_manifest_hash`, `signed_manifest_ref`,
+   `signed_manifest_size_bytes`, and the final encoded signed manifest bytes.
+   For `HMAC_SHA256`, compute lowercase
+   `signature_hex = HMAC-SHA256(key, signing_body).hexdigest()`; for
+   `UNSIGNED`, require a null signature and the `UNSIGNED` signer ID. Encode the
+   final signed manifest once, then derive its content address as
+   `signed_manifest_hash = SHA256(signed_manifest_bytes).hexdigest()` and
+   `signed_manifest_ref = "sha256:" + signed_manifest_hash`. Neither final
+   value feeds an earlier step.
+
+The registry stores the derivation version, detached signature (nullable only
+for `UNSIGNED`), and signed-manifest hash/ref/size in addition to the fields
+above. Its exact-winner comparison checks every derived field and byte stream.
+All derivations remain independent of sink name, target, effect ID, and
+`content_store_id`; the effect identity separately binds target configuration.
+
+A barriered concurrency test opens distinct repeatable-read snapshots, lets
+both contenders finish record serialization, chunk storage, every derivation,
+and signed-manifest storage, then releases both into registry CAS. Before and
+after CAS it asserts byte-for-byte equality of record/chunk bytes, registry
+key, snapshot hash/ID, every content hash/ref and chunk seal, manifest hash,
+snapshot seal, signing body/signature, and final signed-manifest bytes. One row
+wins; the loser exact-compares and reuses it.
 
 ### `sink_effect_attempts`
 
@@ -1130,7 +1234,7 @@ Tests force crashes before snapshot registration, after registry insertion,
 after external publication, and after finalization; concurrent exporters must
 reuse one registry/effect winner. They also mutate audit tables after snapshot
 registration and prove recovery still emits the original manifest, verify the
-terminal-run witness, and prove no export row can recursively enter its own
+immutable export-terminal witness, and prove no export row can recursively enter its own
 snapshot.
 
 ## Zero-Accepted Effects
@@ -1205,7 +1309,7 @@ deleted. Tests use effect-capable doubles.
 
 | Seam | Durable fact on restart | Recovery |
 |---|---|---|
-| Before audit snapshot registry | No export effect; possible unreferenced content chunks | Rematerialize from a terminal consistent read; bounded cleanup removes orphans |
+| Before audit snapshot registry | No export effect; possible unreferenced content chunks | Rematerialize from an immutable export-terminal consistent read; bounded cleanup removes orphans |
 | After audit snapshot registry, before export effect | Immutable manifest/chunks | Reuse registry winner; never reread live audit tables |
 | Before reservation | No effect | Reserve normally |
 | After reservation, predecessor open | Stable queued identity and chain | Wait/recover predecessor; never inspect old head |
@@ -1265,7 +1369,7 @@ exact bytes/metadata, exact audit attempt history, and convergent recovery.
 - an existing registry winner performs zero source-record queries, while a
   divergent candidate for the same registry key fails closed; and
 - signed concurrent candidates produce byte-identical output from the stable
-  terminal timestamp and exact signer/config identity.
+  immutable export-terminal timestamp and exact signer/config identity.
 
 ### Reconciliation and audit
 
@@ -1327,6 +1431,10 @@ exact bytes/metadata, exact audit attempt history, and convergent recovery.
   audit-row exclusion, with no DB transaction spanning chunk-store I/O;
 - SQLite distinct-connection consistent-snapshot exclusion and a source-query
   spy proving the existing-winner fast path performs no enumeration;
+- raw-schema and lifecycle tests reject `failed`/`interrupted` witnesses before
+  spooling, prove takeover can still set `running`/clear `completed_at`, then
+  allow export only after resumed execution reaches an immutable export-terminal
+  status;
 - raw-SQL SQLite and PostgreSQL commit/delete proofs for both input XOR forms,
   snapshot terminal/composite FKs, immutable mutation guards, dense chunk
   predecessor-reference/cumulative-total validation, and partial-graph
@@ -1388,7 +1496,8 @@ of production execution.
    is equivalent; epoch 27 remains unused.
 13. Focused and broad sink/recovery suites, real PostgreSQL probes, strict
     mypy, Ruff, and pre-commit hooks pass.
-14. Audit export materializes one bounded terminal-run repeatable-read snapshot
+14. Audit export materializes one bounded immutable export-terminal
+    repeatable-read snapshot
     before export audit rows, closes the DB transaction before chunk-store I/O,
     binds the credential-free signer key identity, reuses one concurrent
     winner, and recovers JSON/CSV publication without live-table rereads or

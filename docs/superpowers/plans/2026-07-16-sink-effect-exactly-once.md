@@ -57,9 +57,10 @@ use Loomweave in this worktree.
 - `src/elspeth/core/landscape/execution/sink_effect_finalization.py` — global
   token/state/effect/artifact/operation finalization transaction.
 - `src/elspeth/core/landscape/execution/audit_export_snapshots.py` — consistent
-  terminal-run snapshot registry, bounded spool/chunk manifest, and winner CAS.
+  immutable export-terminal snapshot registry, bounded spool/chunk manifest,
+  and winner CAS.
 - `src/elspeth/core/landscape/export_read_model.py` — connection-bound registry,
-  terminal-witness, and ordered export query adapters.
+  immutable export-terminal-witness and ordered export query adapters.
 - `src/elspeth/core/landscape/execution/sink_effects.py` — narrow repository
   facade composing the three persistence units.
 - `src/elspeth/engine/executors/sink_effects.py` — caller-level effect
@@ -268,7 +269,8 @@ def test_preflight_rejects_legacy_sink_before_lifecycle_or_io() -> None:
 
 Also write contract tests that freeze both union members to tuples, reject
 empty/non-dense pipeline members, reject missing/reordered/zero/oversized
-chunk descriptors and count/byte sum mismatches, derive `input_kind` rather
+chunk descriptors, reject a well-formed-but-different content ref/hash pair,
+and reject count/byte sum mismatches, derive `input_kind` rather
 than accepting it, require exact plan-kind equality, and reject a reader whose
 `snapshot_id`/`manifest_hash`/`chunk_count` binding differs. Prove the reader is
 excluded from comparison/repr and cannot enter `safe_evidence` or persisted
@@ -540,6 +542,9 @@ dense zero-based canonical ordinals. `SinkEffectAuditExportSnapshotInput`
 freezes chunks to a tuple, requires dense non-negative ordinals, exact
 `len`/record/byte totals, credential-free references, strict positive
 per-chunk counts/sizes, and both configured and code-owned hard bounds.
+`content_hash` is lowercase 64-character hexadecimal and `content_ref` must
+equal `"sha256:" + content_hash` exactly; a separately well-formed ref with a
+different digest is invalid.
 Unsigned input requires `signer_key_id == "UNSIGNED"`; HMAC input requires a
 non-reserved credential-free ID. Reader binding fields must equal the input,
 and the reader must expose no arbitrary-ref method. `SinkEffectPlan.input_kind`
@@ -670,17 +675,18 @@ Use the project canonical named-field, length-delimited encoder and only
 snapshot-byte/manifest-shaping fields, in this order:
 
 ```text
-public_export_config_hash = H(
-  exporter_version, serialization_version, format, signing_mode,
-  signer_key_id, include_raw_error_rows, chunking_algorithm_version,
+public_export_config_hash = H(C(
+  "audit-export-public-config-v1", exporter_version,
+  serialization_version, format, signing_mode, signer_key_id,
+  include_raw_error_rows, chunking_algorithm_version,
   per_chunk_record_limit, per_chunk_byte_limit
-)
+))
 
-registry_key_hash = H(
-  "audit-export-registry-v1", source_run_id, exporter_version,
+registry_key_hash = H(C(
+  "audit-export-registry-key-v1", source_run_id, exporter_version,
   serialization_version, format, signing_mode, signer_key_id,
   public_export_config_hash
-)
+))
 ```
 
 Sink name, target/path/URI, sink public config, secrets, secret-derived values,
@@ -691,6 +697,16 @@ every snapshot-shaping public field as well as both hashes. Preserve canonical
 serialization version and signer identity as separate registry fields. Test
 that the same source snapshot exported to two targets yields one snapshot
 winner and two distinct target effects.
+
+Define `AUDIT_EXPORT_DERIVATION_VERSION =
+"audit-export-derivation-v1"`, `C(tag, ordered_fields) -> bytes` using the
+project named-field, version-prefixed, length-delimited canonical encoder, and
+`H(encoded_bytes) -> sha256(encoded_bytes).hexdigest()`. All formulas use
+`H(C(...))`; `H` never canonicalizes its argument again. Define
+`REF(hash) = "sha256:" + hash`. Task 10 implements the design's exact
+record-bytes -> content descriptors -> snapshot hash -> snapshot ID -> chain
+seals -> manifest -> snapshot seal -> signing-body/HMAC -> signed-manifest
+order without adding a reverse dependency.
 
 - [ ] **Step 3: Define bounded spool/content-store contracts**
 
@@ -764,7 +780,8 @@ Also assert the exclusive artifact producer CHECK and the
 Assert the input-kind XOR: pipeline effects require at least one token member
 and forbid an export association; audit-export effects require zero token
 members and exactly one immutable snapshot association. Assert unique registry
-keys, dense chunk ordinals, bounded count/size columns, terminal-run ownership,
+keys, dense chunk ordinals, bounded count/size columns, immutable
+export-terminal ownership,
 and unique effect-to-snapshot association.
 
 Do not settle for repository validation. Execute raw SQL transactions on
@@ -776,6 +793,33 @@ mismatch, and `UPDATE`/`DELETE` of sealed rows. Separate loader/restricted-
 reader tests forge chunk/content/manifest/snapshot hashes because portable SQL
 cannot recompute SHA-256. PostgreSQL tests must use a real backend, not
 compiled DDL assertions.
+
+Add exact lifecycle-witness cases on both backends:
+
+```python
+@pytest.mark.parametrize("status", ["failed", "interrupted"])
+def test_resumable_run_cannot_own_audit_snapshot(status: str, connection: Connection) -> None:
+    insert_resumable_run(connection, status=status, completed_at=COMPLETED_AT)
+    insert_structurally_valid_snapshot_chunks(connection, source_status=status)
+    with pytest.raises(IntegrityError):
+        insert_and_commit_snapshot_registry(connection, source_status=status)
+
+
+@pytest.mark.parametrize("status", [RunStatus.FAILED, RunStatus.INTERRUPTED])
+def test_snapshot_schema_does_not_block_resume(status: RunStatus, factory: RecorderFactory) -> None:
+    run_id = insert_resumable_run(factory, status=status, completed_at=COMPLETED_AT)
+    resume_takeover(factory, run_id)
+    run = factory.run_lifecycle.get_run(run_id)
+    assert run.status is RunStatus.RUNNING
+    assert run.completed_at is None
+```
+
+After completing the resumed run as each of `completed`,
+`completed_with_failures`, and `empty`, prove the same snapshot DML succeeds.
+Introspect the fresh SQLite and PostgreSQL catalogs and require the exact
+non-partial unique index `uq_runs_export_witness`, with ordered columns
+`(run_id, status, completed_at)`. On SQLite, also execute valid snapshot DML so
+a latent `foreign key mismatch` cannot pass a DDL-only assertion.
 
 - [ ] **Step 2: Run the schema tests and verify epoch 26 is absent**
 
@@ -844,23 +888,33 @@ FK, and unique `(effect_id,slot)` plus `(effect_id,input_kind,slot)`. Add
 the completeness authority on both backends; do not use a child-count trigger.
 
 Add `audit_export_snapshots`, `audit_export_snapshot_chunks`, and
-`sink_effect_export_snapshots`. Add `UNIQUE(run_id,status,completed_at)` to
-`runs` and a composite snapshot FK to the exact terminal witness. Registry
+`sink_effect_export_snapshots`. Define the exact SQLAlchemy index
+`Index("uq_runs_export_witness", runs_table.c.run_id, runs_table.c.status,
+runs_table.c.completed_at, unique=True)`, with no predicate. Attach it to the
+parent metadata so fresh `metadata.create_all()` emits `runs`, then this exact
+index, then the dependent audit-export snapshot child tables. Assert the
+executed DDL order plus its unique flag and ordered columns; do not substitute
+an anonymous unique constraint. Add a composite snapshot FK to this exact
+immutable export-terminal witness. Registry
 fields are the design's explicit source witness/stable `exported_at`,
-versions/format/signing/signer/config/key hashes, manifest-shaping chunk
-policy, actual counts, winning credential-free `content_store_id`,
-manifest/last-chunk/snapshot/seal hashes. The registry key is
+versions/format/signing/signer/config/key hashes, `derivation_version`,
+manifest-shaping chunk policy, actual counts, winning credential-free
+`content_store_id`, manifest/last-chunk/snapshot/seal hashes, nullable
+`signature_hex`, and signed-manifest hash/ref/size. The registry key is
 target-independent and includes the operator-visible credential-free signer
 ID or `UNSIGNED`, never key material or a low-entropy key digest.
-The row CHECK accepts only `completed`, `completed_with_failures`, `failed`,
-or `empty` with non-null completion and excludes resumable `interrupted`.
+The row CHECK accepts only `completed`, `completed_with_failures`, or `empty`
+with non-null completion. It rejects both resumable `failed` and `interrupted`.
 
 Chunk rows include ordinal, credential-free ref/hash, size/count,
 predecessor seal, cumulative byte/record totals, and chunk seal. Chunks insert
 before their registry parent under a deferred FK. Install SQLite and
 PostgreSQL `BEFORE INSERT` triggers: ordinal zero requires null predecessor and
 self cumulative totals; ordinal `n>0` requires exactly `n-1`, its exact seal as
-predecessor, and prior-plus-current cumulative totals. Reject every chunk
+predecessor, and prior-plus-current cumulative totals. Each trigger also
+requires a lowercase 64-hex `content_hash` and exact
+`content_ref = 'sha256:' || content_hash`; a separately tested well-formed
+`sha256:<different-hex>` reference is invalid. Reject every chunk
 insert once its registry/seal row exists. The registry insert/seal
 trigger checks positive count, min/max/count dense ordinals, sums/final
 cumulative totals, and terminal descriptor. A deferred composite registry FK
@@ -951,7 +1005,16 @@ Cover exact 23 -> 24 -> 25 -> 26 ordering, `BEGIN IMMEDIATE` contention,
 malformed predecessor refusal, duplicate key refusal, close/invalidation
 failure, and successful reopen. Assert the snapshot registry, chunk manifest,
 and effect association are created atomically and an injected failure leaves
-none of them behind.
+none of them or `uq_runs_export_witness` behind.
+
+After upgrading a valid epoch-25 fixture, inspect
+`PRAGMA index_list('runs')` and `PRAGMA index_xinfo('uq_runs_export_witness')`
+and assert the exact name, unique flag, non-partial shape, and ordered key
+columns `(run_id, status, completed_at)`. Insert a valid immutable
+export-terminal run, its chunks, and registry row and commit successfully;
+the test must fail on any SQLite `foreign key mismatch`. Raw registry inserts
+for `failed` and `interrupted` witnesses remain invalid, while each run can
+still take over to `running` with `completed_at = NULL`.
 
 - [ ] **Step 2: Run the migration tests and confirm epoch 25 is rejected**
 
@@ -987,12 +1050,24 @@ existing rollback/invalidate/close discipline on every exception path.
 The artifacts rebuild also adds non-null `publication_performed` and
 `publication_evidence_kind`; legacy epoch-25 rows backfill `true` and
 `legacy_returned` so old evidence is not misclassified as no-publication.
-Create the empty audit-export snapshot registry/chunk/association tables in the
-same transaction; epoch 25 has no rows to backfill for them. Install the exact
+Create the exact non-partial parent index first:
+
+```sql
+CREATE UNIQUE INDEX uq_runs_export_witness
+ON runs(run_id, status, completed_at);
+```
+
+Verify its name, uniqueness, absence of a predicate, and ordered columns before
+creating the empty audit-export snapshot registry/chunk/association tables in
+the same transaction; epoch 25 has no rows to backfill for them. Install the
+exact
 SQLite deferred XOR FKs, chunk predecessor/cumulative `BEFORE INSERT`, registry
 density/terminal-seal, and sealed-row immutable triggers from Task 3 inside the
-migration transaction. After `PRAGMA foreign_key_check`, compare the installed
-trigger names/SQL fingerprints to the epoch-26 manifest before stamping 26.
+migration transaction. The epoch-26 physical manifest/fingerprint includes
+`uq_runs_export_witness`, its unique flag, non-partial shape, ordered key
+columns, and canonical SQL alongside every installed table, column, FK, and
+trigger. After `PRAGMA foreign_key_check`, compare the installed index and
+trigger names/shapes/SQL fingerprints to that manifest before stamping 26.
 
 - [ ] **Step 4: Run migration and compatibility suites**
 
@@ -1678,11 +1753,18 @@ Add audit-export response-loss tests proving a fresh process reuses one stable
 export effect and never repeats external publication. Assert the production
 export module does not call sink `write()` or `flush()` directly.
 
-Add terminal-witness and snapshot-store tests: non-terminal runs fail before
-spooling; PostgreSQL uses a real repeatable-read transaction (never default
-READ COMMITTED) for registry lookup, terminal witness, and enumeration;
-bounded local spooling completes and closes the DB transaction before any
+Add immutable-witness and snapshot-store tests: `running`, `failed`, and
+`interrupted` runs fail before spooling; PostgreSQL uses a real repeatable-read
+transaction (never default
+READ COMMITTED) for registry lookup, immutable export-terminal witness, and
+enumeration; bounded local spooling completes and closes the DB transaction before any
 chunk-store I/O. Concurrent exporters reuse one exact registry winner.
+Their test places a barrier immediately before CAS: each contender must first
+materialize and durably store its complete candidate, including record/chunk
+bytes, content descriptors, snapshot hash/ID, every chain seal, manifest hash,
+snapshot seal, signing body/signature, and final signed-manifest bytes. Before
+release, assert both candidates are byte-identical for every one of those
+values; after release, assert one insert and one exact winner reuse.
 Existing-winner lookup exact-checks `signer_key_id`. Same run/config with a
 rotated signer ID must select a distinct winner or fail closed under the
 configured single-export policy; it may never reuse old signed bytes silently.
@@ -1694,13 +1776,21 @@ The PostgreSQL proof uses distinct backend PIDs and demonstrates that a
 concurrent post-snapshot audit insert is invisible to the open repeatable-read
 enumeration while registry winner CAS still converges.
 
+For `failed` and `interrupted`, spy on spool creation, content-store writes,
+snapshot/effect reservation, and sink lifecycle and assert all remain zero.
+Then execute the real takeover path, prove it changes the run to `running` and
+clears `completed_at`, finish the resumed run in each immutable export-terminal
+status, and prove snapshot materialization becomes eligible. This guards both
+early refusal and future resumability.
+
 Add the matching SQLite proof with two distinct connections: begin the reader
 transaction, insert/commit a later audit row on the writer, and prove the open
 reader enumeration excludes it. Instrument every source query and assert an
-existing registry winner returns with zero terminal-witness and zero source
-enumeration calls. Assert snapshot `exported_at` and every signed canonical
-record use the persisted terminal `runs.completed_at`, never `datetime.now()`,
-so concurrent signed candidates are byte-identical. Assert the operational
+existing registry winner returns with zero immutable export-terminal-witness
+and zero source enumeration calls. Assert snapshot `exported_at` and every
+signed canonical record use the persisted immutable export-terminal
+`runs.completed_at`, never `datetime.now()`, so concurrent signed candidates
+are byte-identical. Assert the operational
 `runs.exported_at` written after effect finalization is excluded from the
 snapshot and cannot perturb retries.
 
@@ -1710,7 +1800,10 @@ the adapter. Cover same-key divergent manifests, lower current acceptance
 limits, candidate rollback, CAS-loser orphan marking/cleanup, shared winner
 chunk preservation, a current store switch that cannot resolve the winner's
 stored `content_store_id`, and one snapshot exported to two targets producing
-one snapshot plus two effects.
+one snapshot plus two effects. At the input contract, raw-schema trigger, and
+restricted-reader boundaries, separately reject a lowercase, well-formed
+`content_ref="sha256:<different-64-hex>"` whose suffix does not equal the
+declared `content_hash`; checking only each field's syntax is insufficient.
 
 - [ ] **Step 2: Run tests against the old write/flush boundary**
 
@@ -1754,22 +1847,51 @@ must be durable and replayable;
 preflight followed by legacy `write()`/`flush()` is forbidden.
 
 Implement the dedicated typed path, not synthetic tokens. Snapshot creation
-uses a connection-bound `ExportReadModel`; every registry, terminal-witness,
-and export query adapter accepts that exact `Connection` and no adapter may
+uses a connection-bound `ExportReadModel`; every registry, immutable
+export-terminal-witness, and export query adapter accepts that exact
+`Connection` and no adapter may
 open another. On PostgreSQL set `isolation_level="REPEATABLE READ"` before
 `begin()`; on SQLite acquire one dedicated connection and issue explicit
 `BEGIN` before the initial lookup. Query the registry first and return an
-exact accessible winner without any terminal/source query: close the read
+exact accessible winner without any export-terminal/source query: close the read
 transaction, resolve its stored `content_store_id`, and verify the manifest.
-On a miss, read the terminal witness and enumerate all records through that same transaction into
+On a miss, read the immutable export-terminal witness and enumerate all
+records through that same transaction into
 a bounded local spool. Fsync the complete spool, commit/rollback and close the
 connection, and only then perform content-store I/O; no database transaction or
 lock spans chunk reads/writes.
 
-Use terminal `completed_at` as stable snapshot/exported timestamp. Split the
-spool into ordered globally addressed `sha256:<hex>` chunks, verify seals and
-configured bounds, then CAS-insert or exact-compare the immutable
-registry/manifest in a short transaction. Existing winners are reusable when
+Use immutable export-terminal `completed_at` as the stable snapshot/exported
+timestamp. Split the
+spool into ordered globally addressed `sha256:<hex>` chunks and execute the
+versioned derivation without a reverse edge:
+
+1. Canonically serialize and frame stable ordered records; deterministically
+   chunk only complete frames.
+2. For each exact chunk byte string, compute lowercase `content_hash` and set
+   `content_ref = "sha256:" + content_hash`.
+3. Compute `snapshot_hash = H(C("audit-export-snapshot-content-v1", ...))`
+   over the snapshot-ID-free ordered content descriptors and exact totals.
+4. Compute `snapshot_id = H(C("audit-export-snapshot-id-v1",
+   registry_key_hash, snapshot_hash))`.
+5. Compute dense sequential chunk seals from typed `GENESIS`, then the exact
+   predecessor seal, binding the now-known snapshot ID.
+6. Compute `manifest_hash`, then `snapshot_seal_hash` over the registry key,
+   immutable run witness, derived hashes/seals, exact totals, and
+   manifest-shaping chunk policy only.
+7. Encode the canonical signing body and compute deterministic HMAC-SHA256 (or
+   the typed unsigned result), then encode the final signed manifest once and
+   derive its hash/ref/size. The signing preimage explicitly excludes
+   `signature_hex`, `signed_manifest_hash`, `signed_manifest_ref`,
+   `signed_manifest_size_bytes`, and final signed-manifest bytes; none of those
+   values feeds an earlier derivation.
+
+Verify configured bounds, durably store the fully materialized candidate, and
+only then cross the pre-CAS barrier and CAS-insert or exact-compare the immutable
+registry/manifest in a short transaction. Every formula uses the Task 2b
+`H(C(...))` and exact `REF(hash)` definitions; sink target/config, effect ID,
+acceptance-only totals, and `content_store_id` are absent from the snapshot
+derivation. Existing winners are reusable when
 actual totals meet the current acceptance limits even if those limits differ;
 per-chunk/chunking policy is part of identity. Bind the restricted reader to
 the winning `content_store_id` resolver. On CAS loss/rollback, mark only this
@@ -2206,7 +2328,7 @@ before `renameat2(RENAME_NOREPLACE)`, after rename/before return, and after
 return/before effect finalization. Two concurrent exporters must reuse one
 snapshot/effect; later audit DB mutations must not alter recovery bytes. Assert
 exact-existing bundle converges, divergent-existing is UNKNOWN/fail-closed,
-non-terminal run is refused, and no export row enters its own snapshot.
+non-export-terminal run is refused, and no export row enters its own snapshot.
 
 For CSV, add Linux-only tests for target creation between inspection and
 publication, `EEXIST`, missing/extra/reordered/changed-manifest entries,

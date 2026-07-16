@@ -300,6 +300,89 @@ def test_candidate_verification_reads_run_outside_the_write_transaction(
         db.close()
 
 
+def test_cleanup_failure_does_not_mask_primary_export_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failing orphan-marking cleanup must not replace the original export
+    error (elspeth-1c31195f26)."""
+    monkeypatch.chdir(tmp_path)
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'cleanup-mask.db'}")
+    store = _MemoryContentStore()
+
+    def failing_put(content: bytes, *, candidate_id: str, object_kind: str) -> str:
+        del content, candidate_id, object_kind
+        raise RuntimeError("primary export failure")
+
+    def failing_mark(candidate_id: str, descriptors: tuple[AuditExportContentDescriptor, ...]) -> None:
+        del candidate_id, descriptors
+        raise OSError("orphan marking failure")
+
+    store.put_immutable = failing_put  # type: ignore[method-assign]
+    store.mark_candidate_orphans = failing_mark  # type: ignore[method-assign]
+    try:
+        _insert_terminal_run(db)
+        with caplog.at_level("ERROR"), pytest.raises(RuntimeError, match="primary export failure"):
+            prepare_audit_export_snapshot(
+                db,
+                run_id="run-export",
+                config=_config(),
+                signing_key=None,
+                content_store=store,
+            )
+        assert any("orphan" in record.getMessage() for record in caplog.records)
+    finally:
+        db.close()
+
+
+def test_spool_close_failure_does_not_fail_a_registered_export(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failing spool close is contained and recorded; the registered winner
+    still binds and returns (elspeth-1c31195f26)."""
+    from elspeth.engine.orchestrator import audit_export_effects
+
+    monkeypatch.chdir(tmp_path)
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'spool-close.db'}")
+    store = _MemoryContentStore()
+
+    class _ExplodingCloseSpool:
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._inner, name)
+
+        def close(self) -> None:
+            raise OSError("spool close failure")
+
+    real_temporary_file = audit_export_effects.TemporaryFile
+
+    def exploding_temporary_file(*args: object, **kwargs: object) -> _ExplodingCloseSpool:
+        return _ExplodingCloseSpool(real_temporary_file(*args, **kwargs))
+
+    monkeypatch.setattr(audit_export_effects, "TemporaryFile", exploding_temporary_file)
+    try:
+        _insert_terminal_run(db)
+        with caplog.at_level("ERROR"):
+            snapshot = prepare_audit_export_snapshot(
+                db,
+                run_id="run-export",
+                config=_config(),
+                signing_key=None,
+                content_store=store,
+            )
+
+        assert snapshot.snapshot_id
+        assert store.orphans == []
+        assert any("spool" in record.getMessage() for record in caplog.records)
+    finally:
+        db.close()
+
+
 def test_registry_hit_reuses_verified_winner_without_rewriting_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     db = LandscapeDB(f"sqlite:///{tmp_path / 'reuse.db'}")

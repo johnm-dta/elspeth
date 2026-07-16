@@ -123,6 +123,44 @@ class TestOTLPExporterConfiguration:
             exporter.configure({})
         assert "endpoint" in str(exc_info.value)
 
+    @pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer secret-token"}])
+    def test_cleartext_remote_endpoint_is_rejected_without_echo(self, headers: dict[str, str]) -> None:
+        exporter = OTLPExporter()
+
+        with pytest.raises(TelemetryExporterError) as exc_info:
+            exporter.configure({"endpoint": "http://collector.invalid:4317", "headers": headers})
+
+        message = str(exc_info.value)
+        assert "endpoint" in message
+        assert "collector.invalid" not in message
+        assert "secret-token" not in message
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "http://localhost:4317",
+            "http://127.0.0.1:4317",
+            "http://[::1]:4317",
+        ],
+    )
+    def test_cleartext_loopback_endpoint_is_accepted(self, endpoint: str) -> None:
+        exporter = OTLPExporter()
+
+        with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
+            mock_exporter_class.return_value = _OTLPExporterDouble()
+            exporter.configure({"endpoint": endpoint})
+
+        mock_exporter_class.assert_called_once_with(endpoint=endpoint, headers=None)
+
+    def test_tls_remote_endpoint_is_accepted(self) -> None:
+        exporter = OTLPExporter()
+
+        with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
+            mock_exporter_class.return_value = _OTLPExporterDouble()
+            exporter.configure({"endpoint": "https://collector.invalid:4317"})
+
+        mock_exporter_class.assert_called_once_with(endpoint="https://collector.invalid:4317", headers=None)
+
     @pytest.mark.parametrize(
         "endpoint",
         [

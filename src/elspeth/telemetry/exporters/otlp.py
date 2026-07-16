@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC
+from ipaddress import ip_address
 from time import time_ns
 from typing import TYPE_CHECKING, Any, TypedDict
 from urllib.parse import urlsplit
@@ -55,6 +56,15 @@ def _configuration_error(field: str, check: str) -> TelemetryExporterError:
     return TelemetryExporterError("otlp", f"'{field}' {check}")
 
 
+def _is_loopback_hostname(hostname: str) -> bool:
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
 def _validate_endpoint(value: object) -> str:
     if type(value) is not str:
         raise _configuration_error("endpoint", "must be an HTTP(S) URL")
@@ -75,6 +85,8 @@ def _validate_endpoint(value: object) -> str:
         or parsed.fragment
     ):
         raise _configuration_error("endpoint", "must be a credential-free HTTP(S) URL without query or fragment")
+    if parsed.scheme == "http" and not _is_loopback_hostname(parsed.hostname):
+        raise _configuration_error("endpoint", "must use HTTPS unless it targets the local loopback interface")
     return value
 
 

@@ -423,19 +423,19 @@ class TestCsvClassifierScenario:
         # at is_valid=false (reviews surfaced, pending out-of-loop resolution).
         # The REAL preflight is what makes is_valid honest here.
         with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
-            # Six LLM calls / two forced repair turns (Branch B terminal state):
+            # Five LLM calls / two forced repair turns (Branch B terminal state):
             #   1. set_pipeline (fixed schema omitting four observed columns)
             #   2. claim completion → REPAIR 1 (preflight: schema omits columns)
             #   3. patch_source_options → schema=observed
             #   4. claim completion → REPAIR 2 (orphan gate: llm_model_choice on
             #      'classifier' has no pending review event)
             #   5. request_interpretation_review (llm_model_choice) → pending event
-            #   6. claim completion → CLEAN finalize. Both interpretation reviews
-            #      (llm_prompt_template auto-surfaced + llm_model_choice surfaced)
-            #      are now RESOLVABLE pending handoffs, zero orphans. The terminal
+            #      and immediate terminal user-action handoff. Both interpretation
+            #      reviews (llm_prompt_template auto-surfaced + llm_model_choice
+            #      surfaced) are now RESOLVABLE, with zero orphans. The terminal
             #      preflight is invalid-but-pending, so the finalize path SKIPS the
             #      "runtime preflight failed" suffix → clean message, is_valid=false.
-            mock_llm.side_effect = [turn1, turn2, turn3, turn4, turn_surface_model_choice, turn4]
+            mock_llm.side_effect = [turn1, turn2, turn3, turn4, turn_surface_model_choice]
             result = await service.compose(
                 "Classify these tickets",
                 [],
@@ -446,7 +446,7 @@ class TestCsvClassifierScenario:
 
         # Convergence behaviour: two forced repair turns (schema-mode repair +
         # the orphan-gate repair that surfaces the llm_model_choice review).
-        assert mock_llm.call_count == 6, f"expected 6 LLM calls, got {mock_llm.call_count}"
+        assert mock_llm.call_count == 5, f"expected 5 LLM calls, got {mock_llm.call_count}"
         assert result.repair_turns_used == 2, f"expected 2 repair turns, got {result.repair_turns_used}"
 
         # The terminal state is the honest Branch-B converged shape: a model-

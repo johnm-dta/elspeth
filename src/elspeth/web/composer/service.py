@@ -2533,6 +2533,7 @@ class ComposerServiceImpl:
         session_id: str | None,
         user_id: str | None,
         mutation_success_seen: bool,
+        repair_turns_used: int,
         composition_turns_used: int,
         discovery_turns_used: int,
         advisor_checkpoint_passes_used: int,
@@ -2662,6 +2663,7 @@ class ComposerServiceImpl:
                 )
                 threaded = replace(
                     handoff_result,
+                    repair_turns_used=repair_turns_used,
                     persisted_assistant_message_id=persisted_assistant_message_id,
                     persisted_tool_call_turn=persisted_tool_call_turn,
                 )
@@ -2704,7 +2706,7 @@ class ComposerServiceImpl:
                         recorder=recorder,
                         progress=progress,
                         advisor_checkpoint_passes_used=advisor_checkpoint_passes_used,
-                        repair_turns_used=0,
+                        repair_turns_used=repair_turns_used,
                         persisted_assistant_message_id=persisted_assistant_message_id,
                         persisted_tool_call_turn=persisted_tool_call_turn,
                         allow_repair_continue=False,
@@ -2726,7 +2728,8 @@ class ComposerServiceImpl:
                     # classify (dispatch -> persist -> ``current_state_id =
                     # persist.current_state_id`` -> classify), so ``state`` matches
                     # ``persist.current_state_id`` and the create_pending gate
-                    # holds. This path does NOT track ``repair_turns_used``.
+                    # holds. Thread the already-consumed repair budget through
+                    # this alternate terminal return just as P2 does.
                     result = await self._surface_and_finalize_no_tools(
                         assistant_message=assistant_message,
                         state=state,
@@ -2745,6 +2748,7 @@ class ComposerServiceImpl:
                     )
                     threaded = replace(
                         result,
+                        repair_turns_used=repair_turns_used,
                         persisted_assistant_message_id=persisted_assistant_message_id,
                         persisted_tool_call_turn=persisted_tool_call_turn,
                     )
@@ -3625,6 +3629,7 @@ class ComposerServiceImpl:
                 session_id=session_id,
                 user_id=user_id,
                 mutation_success_seen=mutation_success_seen,
+                repair_turns_used=repair_turns_used,
                 composition_turns_used=composition_turns_used,
                 discovery_turns_used=discovery_turns_used,
                 advisor_checkpoint_passes_used=advisor_checkpoint_passes_used,

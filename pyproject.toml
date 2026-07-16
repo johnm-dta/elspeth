@@ -244,11 +244,8 @@ all = [
     "websockets>=14.2,<15",
     "httpx>=0.28,<1",
     "bcrypt>=4.3,<5",
-    # NOTE: opentelemetry-exporter-prometheus and prometheus_client are listed in
-    # the webui extra but intentionally omitted from the all extra because
-    # azure-monitor-opentelemetry-exporter pins opentelemetry-sdk==1.40 exactly.
-    # Keep webui's Prometheus exporter below the 0.62 line until Azure Monitor
-    # accepts opentelemetry-sdk>=1.41.
+    "opentelemetry-exporter-prometheus>=0.61b0,<0.62",
+    "prometheus_client>=0.21,<1",
 ]
 
 [project.scripts]

@@ -556,9 +556,9 @@ def test_plan_protocol_descriptor_and_inspection_modes_validate_exactly() -> Non
         _plan(
             descriptor_mode=SinkEffectDescriptorMode.NO_PUBLICATION,
             inspection_mode=SinkEffectInspectionMode.NO_INSPECTION_REQUIRED,
-            expected_descriptor=None,
+            expected_descriptor=EXACT_DESCRIPTOR,
         ).expected_descriptor
-        is None
+        == EXACT_DESCRIPTOR
     )
 
     with pytest.raises(ValueError, match="protocol_version"):
@@ -576,12 +576,10 @@ def test_plan_protocol_descriptor_and_inspection_modes_validate_exactly() -> Non
         )
     with pytest.raises(ValueError, match="expected_descriptor"):
         _plan(expected_descriptor=None)
-    for descriptor_mode in (
-        SinkEffectDescriptorMode.RESULT_DERIVED,
-        SinkEffectDescriptorMode.NO_PUBLICATION,
-    ):
-        with pytest.raises(ValueError, match="expected_descriptor"):
-            _plan(descriptor_mode=descriptor_mode, expected_descriptor=EXACT_DESCRIPTOR)
+    with pytest.raises(ValueError, match="expected_descriptor"):
+        _plan(descriptor_mode=SinkEffectDescriptorMode.RESULT_DERIVED, expected_descriptor=EXACT_DESCRIPTOR)
+    with pytest.raises(ValueError, match="expected_descriptor"):
+        _plan(descriptor_mode=SinkEffectDescriptorMode.NO_PUBLICATION, expected_descriptor=None)
     with pytest.raises((TypeError, ValueError), match="descriptor_mode"):
         _plan().__class__(
             effect_id="effect-1",
@@ -843,7 +841,7 @@ def test_reader_is_factory_only_and_excluded_from_repr_equality_and_serializatio
             target="safe-target",
             plan_hash="plan-hash",
             payload_hash="payload-hash",
-            expected_descriptor=None,
+            expected_descriptor=EXACT_DESCRIPTOR,
             safe_evidence={"reader": first.reader},
         )
 

@@ -972,9 +972,12 @@ class SinkEffectPlan:
         _require_exact_enum(self.descriptor_mode, SinkEffectDescriptorMode, "descriptor_mode")
         _require_exact_enum(self.inspection_mode, SinkEffectInspectionMode, "inspection_mode")
         _reject_credential_bearing_reference(self.target, "target")
-        if self.descriptor_mode is SinkEffectDescriptorMode.PRECOMPUTED:
+        if self.descriptor_mode in {
+            SinkEffectDescriptorMode.PRECOMPUTED,
+            SinkEffectDescriptorMode.NO_PUBLICATION,
+        }:
             if not isinstance(self.expected_descriptor, ArtifactDescriptor):
-                raise ValueError("PRECOMPUTED descriptor_mode requires an exact expected_descriptor")
+                raise ValueError(f"{self.descriptor_mode.value} descriptor_mode requires an exact expected_descriptor")
         elif self.expected_descriptor is not None:
             raise ValueError(f"{self.descriptor_mode.value} descriptor_mode must not claim an expected_descriptor")
         frozen_evidence = _freeze_bounded_evidence(self.safe_evidence, "safe_evidence")

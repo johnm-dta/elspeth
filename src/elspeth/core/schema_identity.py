@@ -59,7 +59,13 @@ def insert_schema_identity(
 
 
 def read_schema_identities(connection: Connection, table: Table) -> tuple[SchemaIdentity, ...]:
-    """Read all identity rows so missing or non-singleton state stays visible."""
+    """Read all identity rows so missing or malformed state stays visible.
+
+    Do not coerce database values: a drifted TEXT epoch containing ``"24"``
+    must not masquerade as the current INTEGER epoch, and arbitrary text must
+    classify as a mismatch instead of escaping as a raw conversion error.
+    The static empty/zero sentinels are impossible in a valid identity row.
+    """
     rows = connection.execute(
         select(
             table.c.application_id,
@@ -69,9 +75,9 @@ def read_schema_identities(connection: Connection, table: Table) -> tuple[Schema
     )
     return tuple(
         SchemaIdentity(
-            application_id=str(row.application_id),
-            store_kind=str(row.store_kind),
-            schema_epoch=int(row.schema_epoch),
+            application_id=row.application_id if type(row.application_id) is str else "",
+            store_kind=row.store_kind if type(row.store_kind) is str else "",
+            schema_epoch=row.schema_epoch if type(row.schema_epoch) is int else 0,
         )
         for row in rows
     )

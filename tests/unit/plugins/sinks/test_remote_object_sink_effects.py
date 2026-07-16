@@ -413,6 +413,49 @@ def test_initial_all_diverted_azure_effect_is_virtual_without_upload() -> None:
     assert [request["operation"] for request in store.requests] == ["properties"]
 
 
+def test_existing_target_all_diverted_s3_effect_is_virtual_without_replacement() -> None:
+    """Zero-accepted effects must never replace an existing object (elspeth-7b46cad846)."""
+    store = _S3Store()
+    existing_body = b'[{"id": "existing"}]'
+    store.value = _Object(existing_body, '"etag-existing"', {})
+    member = _member(0, {"id": "x" * 100})
+    sink = _s3(store, max_record_chars=10)
+
+    plan = _prepare(sink, effect_id="6" * 64, current=(member,), target_snapshot=(member,))
+
+    assert plan.descriptor_mode is SinkEffectDescriptorMode.NO_PUBLICATION
+    assert plan.safe_evidence["publication_kind"] == "virtual"
+    assert plan.safe_evidence["accepted_ordinals"] == ()
+    assert plan.safe_evidence["diverted_ordinals"] == (0,)
+    assert not Path(str(plan.safe_evidence["staging_path"])).exists()
+    assert [request["operation"] for request in store.requests] == ["head"]
+    assert store.value.body == existing_body
+
+
+def test_existing_target_all_diverted_azure_effect_is_virtual_without_replacement() -> None:
+    """Zero-accepted effects must never replace an existing blob (elspeth-7b46cad846)."""
+    store = _AzureStore()
+    existing_body = b'[{"id": "existing"}]'
+    store.value = _Object(existing_body, '"etag-existing"', {})
+    member = _member(0, {"id": 1, "name": "Ada", "extra": "divert"})
+    sink = _azure(
+        store,
+        format="csv",
+        blob_path="out.csv",
+        schema={"mode": "fixed", "fields": ["id: int", "name: str"]},
+    )
+
+    plan = _prepare(sink, effect_id="7" * 64, current=(member,), target_snapshot=(member,))
+
+    assert plan.descriptor_mode is SinkEffectDescriptorMode.NO_PUBLICATION
+    assert plan.safe_evidence["publication_kind"] == "virtual"
+    assert plan.safe_evidence["accepted_ordinals"] == ()
+    assert plan.safe_evidence["diverted_ordinals"] == (0,)
+    assert not Path(str(plan.safe_evidence["staging_path"])).exists()
+    assert [request["operation"] for request in store.requests] == ["properties"]
+    assert store.value.body == existing_body
+
+
 def test_azure_fresh_process_successor_and_response_loss_reconcile() -> None:
     store = _AzureStore()
     first_member = _member(0, {"id": 1})

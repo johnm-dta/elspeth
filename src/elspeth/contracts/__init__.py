@@ -279,6 +279,7 @@ from elspeth.contracts.sink_effects import (
     AuditExportSignedManifestInput,
     AuditExportSigningMode,
     AuditExportSnapshotChunkInput,
+    ResolvedSinkEffectMode,
     RestrictedAuditExportSnapshotReader,
     RestrictedSinkEffectContext,
     SinkEffectAttemptAction,
@@ -286,6 +287,7 @@ from elspeth.contracts.sink_effects import (
     SinkEffectAuditExportSnapshotInput,
     SinkEffectCommitResult,
     SinkEffectDescriptorMode,
+    SinkEffectExecutionPurpose,
     SinkEffectInputKind,
     SinkEffectInspection,
     SinkEffectInspectionMode,
@@ -297,6 +299,7 @@ from elspeth.contracts.sink_effects import (
     SinkEffectReconcileKind,
     SinkEffectReconcileResult,
     SinkEffectRole,
+    SinkEffectRuntimeBinding,
     SinkEffectState,
 )
 from elspeth.contracts.token_usage import TokenUsage
@@ -566,6 +569,7 @@ __all__ = [  # Grouped by category for readability
     "AuditExportSignedManifestInput",
     "AuditExportSigningMode",
     "AuditExportSnapshotChunkInput",
+    "ResolvedSinkEffectMode",
     "RestrictedAuditExportSnapshotReader",
     "RestrictedSinkEffectContext",
     "SinkEffectAttemptAction",
@@ -573,6 +577,7 @@ __all__ = [  # Grouped by category for readability
     "SinkEffectAuditExportSnapshotInput",
     "SinkEffectCommitResult",
     "SinkEffectDescriptorMode",
+    "SinkEffectExecutionPurpose",
     "SinkEffectInputKind",
     "SinkEffectInspection",
     "SinkEffectInspectionMode",
@@ -584,6 +589,7 @@ __all__ = [  # Grouped by category for readability
     "SinkEffectReconcileKind",
     "SinkEffectReconcileResult",
     "SinkEffectRole",
+    "SinkEffectRuntimeBinding",
     "SinkEffectState",
     # token usage
     "TokenUsage",

@@ -64,8 +64,9 @@ if TYPE_CHECKING:
     from elspeth.contracts.schema import SchemaConfig
     from elspeth.contracts.schema_contract import SchemaContract
     from elspeth.contracts.sink import OutputValidationResult
-    from elspeth.contracts.sink_effects import SinkEffectInputKind
     from elspeth.plugins.infrastructure.config_base import PluginConfig, TransformDataConfig
+
+from elspeth.contracts.sink_effects import ResolvedSinkEffectMode, SinkEffectExecutionPurpose, SinkEffectInputKind
 from elspeth.plugins.infrastructure.results import (
     TransformResult,
 )
@@ -956,6 +957,17 @@ class BaseSink(ABC):
     effect_protocol_version: ClassVar[str | None] = None
     supported_effect_modes: ClassVar[frozenset[str]] = frozenset()
     supported_effect_input_kinds: ClassVar[frozenset[SinkEffectInputKind]] = frozenset()
+
+    @classmethod
+    def _resolve_sink_effect_mode(
+        cls,
+        config: Mapping[str, object],
+        *,
+        purpose: SinkEffectExecutionPurpose,
+    ) -> ResolvedSinkEffectMode | None:
+        """Adapter-owned, local mode resolution seam for runtime construction."""
+        del cls, config, purpose
+        return None
 
     # ── Reference content (Phase 7A) ────────────────────────────────────
     # These fields populate the catalog's reference cards. They are

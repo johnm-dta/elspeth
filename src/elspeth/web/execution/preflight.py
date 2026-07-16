@@ -14,6 +14,7 @@ import yaml
 
 from elspeth.contracts import SinkProtocol
 from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.sink_effects import SinkEffectRuntimeBinding
 from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.config import ElspethSettings, load_bounded_pipeline_yaml, resolve_config
 from elspeth.core.dag.graph import ExecutionGraph
@@ -238,15 +239,46 @@ def instantiate_runtime_plugins(
     return instantiate_plugins_from_config(settings, preflight_mode=True)
 
 
+def preflight_runtime_sink_effects(
+    settings: ElspethSettings,
+    bundle: PluginBundle,
+) -> tuple[Mapping[str, SinkProtocol], Mapping[str, str], object]:
+    """Admit web execution sinks from exact factory-owned bindings."""
+    from elspeth.contracts.hashing import stable_hash
+    from elspeth.contracts.sink_effects import SinkEffectInputKind
+    from elspeth.engine.orchestrator.preflight import (
+        SinkEffectExecutionPurpose,
+        execution_sink_bindings_for_runtime,
+        execution_sinks_for_runtime,
+        sink_effect_modes_from_runtime_bindings,
+        validate_pipeline_sink_effect_capabilities,
+    )
+
+    sinks = execution_sinks_for_runtime(settings, bundle.sinks)
+    bindings = execution_sink_bindings_for_runtime(settings, bundle.sink_effect_bindings)
+    modes = sink_effect_modes_from_runtime_bindings(
+        sinks,
+        bindings,
+        purpose=SinkEffectExecutionPurpose.FRESH,
+        expected_config_fingerprints={name: stable_hash(dict(settings.sinks[name].options)) for name in sinks},
+    )
+    admission = validate_pipeline_sink_effect_capabilities(
+        sinks,
+        configured_modes=modes,
+        required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+    )
+    return sinks, modes, admission
+
+
 def make_policy_bound_sink_factory(
     settings: ElspethSettings,
     *,
     plugin_snapshot: PluginAvailabilitySnapshot,
-) -> Callable[[str], SinkProtocol]:
+) -> Callable[[str], SinkEffectRuntimeBinding]:
     """Bind delayed sink construction to the run's frozen approval."""
     factory = make_sink_factory(settings)
 
-    def policy_bound_factory(sink_name: str) -> SinkProtocol:
+    def policy_bound_factory(sink_name: str) -> SinkEffectRuntimeBinding:
         require_settings_sink_available(settings, plugin_snapshot, sink_name)
         return factory(sink_name)
 

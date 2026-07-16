@@ -58,13 +58,13 @@ if TYPE_CHECKING:
     from elspeth.contracts import (
         ResumePoint,
         SecretResolutionInput,
-        SinkProtocol,
     )
     from elspeth.contracts.config.runtime import RuntimeCheckpointConfig, RuntimeConcurrencyConfig
     from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
     from elspeth.contracts.preflight import PreflightResult
+    from elspeth.contracts.sink_effects import SinkEffectRuntimeBinding
     from elspeth.core.checkpoint import CheckpointManager
     from elspeth.core.config import ElspethSettings
     from elspeth.core.dag import ExecutionGraph
@@ -210,7 +210,7 @@ class Orchestrator:
         secret_resolutions: list[SecretResolutionInput] | None = None,
         preflight_results: PreflightResult | None = None,
         shutdown_event: threading.Event | None = None,
-        sink_factory: Callable[[str], SinkProtocol] | None = None,
+        sink_factory: Callable[[str], SinkEffectRuntimeBinding] | None = None,
         run_id: str | None = None,
         initiated_by_user_id: str | None = None,
         auth_provider_type: str | None = None,

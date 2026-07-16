@@ -27,12 +27,18 @@ import pytest
 from pydantic import ValidationError
 
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.sink_effects import SINK_EFFECT_PROTOCOL_VERSION, SinkEffectInputKind
 from elspeth.engine.orchestrator.export import (
     _export_csv_multifile,
     _write_json_export_batches,
     export_landscape,
+)
+from elspeth.engine.orchestrator.preflight import (
+    ResolvedSinkEffectMode,
+    SinkEffectExecutionPurpose,
+    SinkEffectRuntimeBinding,
 )
 from elspeth.engine.orchestrator.schema_reconstruction import _json_schema_to_python_type, reconstruct_schema_from_json
 
@@ -118,6 +124,7 @@ class _ExporterDouble:
 
 def _make_settings(*, fmt: str = "json", sign: bool = False, sink: str = "output", include_raw_error_rows: bool = False) -> Any:
     return SimpleNamespace(
+        sinks={sink: SimpleNamespace(options={})},
         landscape=SimpleNamespace(
             export=SimpleNamespace(
                 format=fmt,
@@ -125,7 +132,7 @@ def _make_settings(*, fmt: str = "json", sign: bool = False, sink: str = "output
                 sink=sink,
                 include_raw_error_rows=include_raw_error_rows,
             )
-        )
+        ),
     )
 
 
@@ -134,7 +141,15 @@ def _make_sink_and_factory(*, config: dict[str, Any] | None = None, **overrides:
     sink = _SinkDouble(config=config, **overrides)
     for k, v in overrides.items():
         setattr(sink, k, v)
-    return sink, lambda name: sink
+    binding = SinkEffectRuntimeBinding(
+        sink_name="output",
+        sink=sink,
+        sink_type=type(sink),
+        config_fingerprint=stable_hash({}),
+        purpose=SinkEffectExecutionPurpose.AUDIT_EXPORT,
+        effect_mode=ResolvedSinkEffectMode("write"),
+    )
+    return sink, lambda _name: binding
 
 
 @pytest.fixture(autouse=True)

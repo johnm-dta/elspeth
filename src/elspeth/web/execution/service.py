@@ -51,12 +51,12 @@ from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.core.secrets import SecretResolutionError
 from elspeth.engine.orchestrator.core import Orchestrator
 from elspeth.engine.orchestrator.preflight import (
+    SinkEffectCapabilityError,
+    SinkEffectExecutionPurpose,
     assemble_and_validate_pipeline_config,
-    execution_sink_modes_for_runtime,
-    execution_sinks_for_runtime,
-    validate_pipeline_sink_effect_capabilities,
 )
 from elspeth.engine.orchestrator.types import PipelineConfig
+from elspeth.plugins.infrastructure.runtime_factory import validate_sink_effect_eligibility_from_raw_config
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import (
@@ -91,6 +91,7 @@ from elspeth.web.execution.preflight import (
     audit_safe_resolved_config,
     build_validated_runtime_graph,
     make_policy_bound_sink_factory,
+    preflight_runtime_sink_effects,
     resolve_runtime_yaml_paths,
 )
 from elspeth.web.execution.progress import BroadcastResult, ProgressBroadcaster
@@ -1167,6 +1168,7 @@ class ExecutionServiceImpl:
         rate_limit_registry: Any | None = None
         telemetry_manager: Any | None = None
         run_uuid = UUID(run_id)
+        sink_effect_gate_passed = False
         try:
             # Early shutdown check: if cancel()/shutdown() fired before we
             # start setup, skip the expensive LandscapeDB/plugin/graph work.
@@ -1191,46 +1193,6 @@ class ExecutionServiceImpl:
                 )
                 return None
 
-            # B8/C1: SessionService is async — bridge from background thread.
-            # Cancelled-race recovery: catch only the narrow subclass.  See
-            # IllegalRunTransitionError docstring for why bare ValueError must
-            # propagate (Tier-1 invariant breaches must not be masked).
-            try:
-                self._call_async(self._session_service.update_run_status(run_uuid, status="running", landscape_run_id=run_id))
-            except IllegalRunTransitionError:
-                current = self._call_async(self._session_service.get_run(run_uuid))
-                if current.status == "cancelled":
-                    self._finalize_output_blobs(run_id, success=False)
-                    self._persist_and_broadcast_run_event(
-                        run_id,
-                        RunEvent(
-                            run_id=run_id,
-                            timestamp=datetime.now(tz=UTC),
-                            event_type="cancelled",
-                            data=CancelledData(
-                                source_rows_processed=0,
-                                tokens_succeeded=0,
-                                tokens_failed=0,
-                                tokens_quarantined=0,
-                                tokens_routed_success=0,
-                                tokens_routed_failure=0,
-                            ),
-                        ),
-                    )
-                    return None
-                raise
-
-            # B3 fix: construct from WebSettings, not hardcoded paths
-            # NOTE: LandscapeDB is constructed per-run, not shared. This is safe
-            # with max_workers=1 (no concurrent access) but wasteful — each run
-            # creates a new SQLAlchemy engine. Acceptable for MVP; consider
-            # sharing a single instance if profiling shows connection overhead.
-            landscape_db = open_landscape_db(self._settings)
-            payload_store = FilesystemPayloadStore(base_path=self._settings.get_payload_store_path())
-
-            # Resolve secret refs before writing YAML to temp file.
-            # Resolved values exist only in this thread's local memory — the
-            # original pipeline_yaml (persisted in the Run record) is untouched.
             if frozen_run_settings is None:
                 if not self._trained_operator_mode:
                     raise RuntimeError("Web execution requires frozen request policy settings")
@@ -1242,6 +1204,29 @@ class ExecutionServiceImpl:
                 executable_config = cast(dict[str, Any], deep_thaw(frozen_run_settings.executable_config))
                 audit_safe_config = cast(dict[str, Any], deep_thaw(frozen_run_settings.audit_safe_config))
 
+            raw_eligibility_config = executable_config
+            if raw_eligibility_config is None:
+                loaded_eligibility_config = load_bounded_pipeline_yaml(pipeline_yaml)
+                raw_eligibility_config = (
+                    cast(dict[str, Any], loaded_eligibility_config) if type(loaded_eligibility_config) is dict else None
+                )
+            raw_eligibility_sinks = None if raw_eligibility_config is None else raw_eligibility_config.get("sinks")
+            if isinstance(raw_eligibility_sinks, Mapping) and all(
+                isinstance(component, Mapping) and "on_write_failure" in component for component in raw_eligibility_sinks.values()
+            ):
+                assert raw_eligibility_config is not None
+                validate_sink_effect_eligibility_from_raw_config(
+                    raw_eligibility_config,
+                    purpose=SinkEffectExecutionPurpose.FRESH,
+                )
+
+            # B8/C1: SessionService is async — bridge from background thread.
+            # Cancelled-race recovery: catch only the narrow subclass.  See
+            # IllegalRunTransitionError docstring for why bare ValueError must
+            # propagate (Tier-1 invariant breaches must not be masked).
+            # Resolve secret refs before writing YAML to temp file.
+            # Resolved values exist only in this thread's local memory — the
+            # original pipeline_yaml (persisted in the Run record) is untouched.
             resolved_dict: dict[str, Any] | None = executable_config
             secret_resolution_inputs: list[SecretResolutionInput] = []
             inline_blob_candidate = (
@@ -1432,17 +1417,39 @@ class ExecutionServiceImpl:
             graph = runtime_graph.graph
 
             # The composer validation surface intentionally remains ungated.
-            # Only the executable service validates the exact projected sink
-            # instances and carries the opaque admission receipt into run().
-            from elspeth.contracts.sink_effects import SinkEffectInputKind
+            # Only the executable service admits exact factory-owned bindings.
+            _execution_sinks, execution_sink_modes, sink_effect_admission = preflight_runtime_sink_effects(settings, bundle)
+            sink_effect_gate_passed = True
 
-            execution_sinks = execution_sinks_for_runtime(settings, bundle.sinks)
-            execution_sink_modes = execution_sink_modes_for_runtime(settings, bundle.sink_effect_modes)
-            sink_effect_admission = validate_pipeline_sink_effect_capabilities(
-                execution_sinks,
-                configured_modes=execution_sink_modes,
-                required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
-            )
+            try:
+                self._call_async(self._session_service.update_run_status(run_uuid, status="running", landscape_run_id=run_id))
+            except IllegalRunTransitionError:
+                current = self._call_async(self._session_service.get_run(run_uuid))
+                if current.status == "cancelled":
+                    self._finalize_output_blobs(run_id, success=False)
+                    self._persist_and_broadcast_run_event(
+                        run_id,
+                        RunEvent(
+                            run_id=run_id,
+                            timestamp=datetime.now(tz=UTC),
+                            event_type="cancelled",
+                            data=CancelledData(
+                                source_rows_processed=0,
+                                tokens_succeeded=0,
+                                tokens_failed=0,
+                                tokens_quarantined=0,
+                                tokens_routed_success=0,
+                                tokens_routed_failure=0,
+                            ),
+                        ),
+                    )
+                    return None
+                raise
+
+            # These are the first durable runtime resources. The exact sink
+            # instances have already earned admission above.
+            landscape_db = open_landscape_db(self._settings)
+            payload_store = FilesystemPayloadStore(base_path=self._settings.get_payload_store_path())
 
             # Fold aggregations into transforms, assemble PipelineConfig, and
             # run the four orchestrator route-target validators. The
@@ -1775,6 +1782,9 @@ class ExecutionServiceImpl:
             return _RUN_PIPELINE_GRACEFUL_SHUTDOWN_HANDLED
 
         except BaseException as exc:
+            if not sink_effect_gate_passed and isinstance(exc, SinkEffectCapabilityError):
+                raise
+
             # B7 fix: Catch BaseException (not Exception) to handle
             # KeyboardInterrupt, SystemExit, and OOM-triggered exceptions.
             # Without this, the Run record stays in 'running' forever.

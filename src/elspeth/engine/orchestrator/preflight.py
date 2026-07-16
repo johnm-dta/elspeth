@@ -27,10 +27,16 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, NoReturn, cast, final
 
-from elspeth.contracts.sink_effects import SINK_EFFECT_PROTOCOL_VERSION, SinkEffectInputKind
+from elspeth.contracts.sink_effects import (
+    SINK_EFFECT_PROTOCOL_VERSION,
+    ResolvedSinkEffectMode,
+    SinkEffectExecutionPurpose,
+    SinkEffectInputKind,
+    SinkEffectRuntimeBinding,
+)
 from elspeth.contracts.types import AggregationName
 from elspeth.contracts.value_source import (
     CatalogValueSource,
@@ -64,12 +70,74 @@ class SinkEffectCapabilityError(ValueError):
 _SINK_EFFECT_METHODS = ("inspect_effect", "prepare_effect", "commit_effect", "reconcile_effect")
 
 
-@dataclass(frozen=True, slots=True)
-class SinkEffectCapabilityAdmission:
-    """Opaque proof that one exact runtime sink collection passed preflight."""
+@dataclass(frozen=True, slots=True, repr=False)
+class _AdmittedSinkBinding:
+    name: str
+    sink: object
+    mode: str
+    capability_fingerprint: tuple[object, ...]
 
-    required_input_kind: SinkEffectInputKind
-    bindings: tuple[tuple[str, int, str, tuple[object, ...]], ...]
+
+_ADMISSION_ISSUER = object()
+
+
+@final
+class _SinkEffectCapabilityAdmission:
+    """Factory-only proof that one exact runtime sink collection passed."""
+
+    __slots__ = ("__bindings", "__issuer", "__required_input_kind")
+    __bindings: tuple[_AdmittedSinkBinding, ...]
+    __issuer: object
+    __required_input_kind: SinkEffectInputKind
+
+    def __init__(
+        self,
+        issuer: object,
+        *,
+        required_input_kind: SinkEffectInputKind,
+        bindings: tuple[_AdmittedSinkBinding, ...],
+    ) -> None:
+        if issuer is not _ADMISSION_ISSUER:
+            raise TypeError("Sink effect admission is validator-issued only")
+        object.__setattr__(self, "_SinkEffectCapabilityAdmission__issuer", issuer)
+        object.__setattr__(self, "_SinkEffectCapabilityAdmission__required_input_kind", required_input_kind)
+        object.__setattr__(self, "_SinkEffectCapabilityAdmission__bindings", bindings)
+
+    def __setattr__(self, _name: str, _value: object) -> NoReturn:
+        raise TypeError("Sink effect admission is immutable")
+
+    def __delattr__(self, _name: str) -> NoReturn:
+        raise TypeError("Sink effect admission is immutable")
+
+    def __copy__(self) -> NoReturn:
+        raise TypeError("Sink effect admission cannot be copied")
+
+    def __deepcopy__(self, _memo: dict[int, object]) -> NoReturn:
+        raise TypeError("Sink effect admission cannot be copied")
+
+    def __reduce__(self) -> NoReturn:
+        raise TypeError("Sink effect admission cannot be serialized")
+
+    def __repr__(self) -> str:
+        return "<SinkEffectCapabilityAdmission validator-issued>"
+
+    def _matches(
+        self,
+        sinks: Mapping[str, SinkProtocol],
+        configured_modes: Mapping[str, str],
+        required_input_kind: SinkEffectInputKind,
+    ) -> bool:
+        if self.__issuer is not _ADMISSION_ISSUER or self.__required_input_kind is not required_input_kind:
+            return False
+        if set(configured_modes) != set(sinks) or len(self.__bindings) != len(sinks):
+            return False
+        return all(
+            binding.name == sink_name
+            and binding.sink is sink
+            and binding.mode == configured_modes.get(sink_name, "")
+            and binding.capability_fingerprint == _capability_fingerprint(sink)
+            for binding, (sink_name, sink) in zip(self.__bindings, sinks.items(), strict=True)
+        )
 
 
 def validate_sink_effect_capability(
@@ -126,6 +194,82 @@ def validate_sink_effect_capability(
             )
 
 
+def validate_sink_effect_type_capability(
+    sink_type: type[object],
+    mode: str,
+    required_input_kind: SinkEffectInputKind,
+) -> None:
+    """Validate an adapter class without constructing it or reading secrets."""
+    sink_name = inspect.getattr_static(sink_type, "name", sink_type.__name__)
+    if not isinstance(required_input_kind, SinkEffectInputKind):
+        raise SinkEffectCapabilityError("Sink effect required input kind must be an exact SinkEffectInputKind")
+    protocol_version = inspect.getattr_static(sink_type, "effect_protocol_version", None)
+    if protocol_version != SINK_EFFECT_PROTOCOL_VERSION:
+        raise SinkEffectCapabilityError(
+            f"Sink {sink_name!r} does not declare the required effect protocol "
+            f"{SINK_EFFECT_PROTOCOL_VERSION!r}; legacy sink execution is unsafe"
+        )
+    supported_modes = inspect.getattr_static(sink_type, "supported_effect_modes", None)
+    if not isinstance(supported_modes, frozenset):
+        raise SinkEffectCapabilityError(f"Sink {sink_name!r} supported_effect_modes must be an exact frozenset declaration")
+    if not supported_modes or any(not isinstance(declared, str) or not declared.strip() for declared in supported_modes):
+        raise SinkEffectCapabilityError(f"Sink {sink_name!r} must declare at least one non-empty supported effect mode")
+    if not isinstance(mode, str) or not mode.strip():
+        raise SinkEffectCapabilityError(f"Sink {sink_name!r} requires a non-empty configured effect mode")
+    if mode not in supported_modes:
+        raise SinkEffectCapabilityError(
+            f"Sink {sink_name!r} does not support configured effect mode {mode!r}; declared modes: {sorted(supported_modes)!r}"
+        )
+    supported_input_kinds = inspect.getattr_static(sink_type, "supported_effect_input_kinds", None)
+    if not isinstance(supported_input_kinds, frozenset):
+        raise SinkEffectCapabilityError(f"Sink {sink_name!r} supported_effect_input_kinds must be an exact frozenset declaration")
+    if not supported_input_kinds:
+        raise SinkEffectCapabilityError(f"Sink {sink_name!r} must declare at least one supported effect input kind")
+    if any(not isinstance(declared, SinkEffectInputKind) for declared in supported_input_kinds):
+        raise SinkEffectCapabilityError(f"Sink {sink_name!r} supported_effect_input_kinds entries must be exact SinkEffectInputKind values")
+    if required_input_kind not in supported_input_kinds:
+        raise SinkEffectCapabilityError(
+            f"Sink {sink_name!r} does not support required effect input kind {required_input_kind.value!r}; "
+            f"declared input kinds: {sorted(kind.value for kind in supported_input_kinds)!r}"
+        )
+    for method_name in _SINK_EFFECT_METHODS:
+        if not callable(inspect.getattr_static(sink_type, method_name, None)):
+            raise SinkEffectCapabilityError(
+                f"Sink {sink_name!r} declares effect protocol {SINK_EFFECT_PROTOCOL_VERSION!r} but {method_name} is not callable"
+            )
+
+
+def sink_effect_modes_from_runtime_bindings(
+    sinks: Mapping[str, SinkProtocol],
+    bindings: Mapping[str, SinkEffectRuntimeBinding],
+    *,
+    purpose: SinkEffectExecutionPurpose,
+    expected_config_fingerprints: Mapping[str, str],
+) -> Mapping[str, str]:
+    """Derive modes only from bindings owned by the real runtime factory."""
+    if set(bindings) != set(sinks) or set(expected_config_fingerprints) != set(sinks):
+        raise SinkEffectCapabilityError(
+            "Sink effect runtime bindings and expected config fingerprints must exactly match runtime sink names"
+        )
+    modes: dict[str, str] = {}
+    for sink_name, sink in sinks.items():
+        binding = bindings[sink_name]
+        if (
+            type(binding) is not SinkEffectRuntimeBinding
+            or binding.sink_name != sink_name
+            or binding.sink is not sink
+            or binding.sink_type is not type(sink)
+            or binding.purpose is not purpose
+            or binding.config_fingerprint != expected_config_fingerprints[sink_name]
+        ):
+            raise SinkEffectCapabilityError(
+                f"Sink effect runtime binding for {sink_name!r} does not bind the exact sink, type, name, config, and execution purpose"
+            )
+        if binding.effect_mode is not None:
+            modes[sink_name] = binding.effect_mode.value
+    return modes
+
+
 def _capability_fingerprint(sink: object) -> tuple[object, ...]:
     sink_type = type(sink)
     return (
@@ -141,12 +285,12 @@ def validate_pipeline_sink_effect_capabilities(
     *,
     configured_modes: Mapping[str, str],
     required_input_kind: SinkEffectInputKind,
-) -> SinkEffectCapabilityAdmission:
+) -> _SinkEffectCapabilityAdmission:
     """Validate every resolved sink before per-run context/lifecycle setup."""
     extra_modes = set(configured_modes) - set(sinks)
     if extra_modes:
         raise SinkEffectCapabilityError(f"Sink effect configured modes contain non-runtime sink names: {sorted(extra_modes)!r}")
-    bindings: list[tuple[str, int, str, tuple[object, ...]]] = []
+    bindings: list[_AdmittedSinkBinding] = []
     for sink_name, sink in sinks.items():
         mode = configured_modes.get(sink_name, "")
         validate_sink_effect_capability(
@@ -154,8 +298,19 @@ def validate_pipeline_sink_effect_capabilities(
             mode=mode,
             required_input_kind=required_input_kind,
         )
-        bindings.append((sink_name, id(sink), mode, _capability_fingerprint(sink)))
-    return SinkEffectCapabilityAdmission(required_input_kind=required_input_kind, bindings=tuple(bindings))
+        bindings.append(
+            _AdmittedSinkBinding(
+                name=sink_name,
+                sink=sink,
+                mode=mode,
+                capability_fingerprint=_capability_fingerprint(sink),
+            )
+        )
+    return _SinkEffectCapabilityAdmission(
+        _ADMISSION_ISSUER,
+        required_input_kind=required_input_kind,
+        bindings=tuple(bindings),
+    )
 
 
 def require_sink_effect_admission(
@@ -164,7 +319,7 @@ def require_sink_effect_admission(
     configured_modes: Mapping[str, str],
     required_input_kind: SinkEffectInputKind,
     admission: object | None,
-) -> SinkEffectCapabilityAdmission:
+) -> _SinkEffectCapabilityAdmission:
     """Accept one exact prior proof or perform the one production validation."""
     if admission is None:
         return validate_pipeline_sink_effect_capabilities(
@@ -172,17 +327,11 @@ def require_sink_effect_admission(
             configured_modes=configured_modes,
             required_input_kind=required_input_kind,
         )
-    expected_bindings = tuple(
-        (sink_name, id(sink), configured_modes.get(sink_name, ""), _capability_fingerprint(sink)) for sink_name, sink in sinks.items()
-    )
-    if (
-        isinstance(admission, SinkEffectCapabilityAdmission)
-        and admission.required_input_kind is required_input_kind
-        and admission.bindings == expected_bindings
-        and set(configured_modes) == set(sinks)
-    ):
+    if type(admission) is _SinkEffectCapabilityAdmission and admission._matches(sinks, configured_modes, required_input_kind):
         return admission
-    raise SinkEffectCapabilityError("Sink effect admission does not bind the exact runtime sinks, modes, capability, and input kind")
+    raise SinkEffectCapabilityError(
+        "Sink effect admission is not validator-issued and does not bind the exact runtime sinks, modes, capability, and input kind"
+    )
 
 
 def execution_sinks_for_runtime(
@@ -207,13 +356,15 @@ def execution_sink_modes_for_runtime(
     return dict(configured_modes)
 
 
-def attach_sink_effect_admission(
-    config: PipelineConfig,
-    *,
-    configured_modes: Mapping[str, str],
-    admission: SinkEffectCapabilityAdmission,
-) -> PipelineConfig:
-    return replace(config, sink_effect_modes=configured_modes, sink_effect_admission=admission)
+def execution_sink_bindings_for_runtime(
+    settings: ElspethSettings,
+    bindings: Mapping[str, SinkEffectRuntimeBinding],
+) -> Mapping[str, SinkEffectRuntimeBinding]:
+    """Apply the delayed-export projection to factory-owned bindings."""
+    export = settings.landscape.export
+    if export.enabled and export.sink:
+        return {name: binding for name, binding in bindings.items() if name != export.sink}
+    return dict(bindings)
 
 
 def assemble_and_validate_pipeline_config(
@@ -512,15 +663,19 @@ def _read_field(config: object, field_name: str) -> object:
 # intentionally NOT caught by the walker — it surfaces unconfigured catalogs
 # as 500-class programmer bugs, not per-pipeline validation failures.
 __all__ = [
-    "SinkEffectCapabilityAdmission",
+    "ResolvedSinkEffectMode",
     "SinkEffectCapabilityError",
+    "SinkEffectExecutionPurpose",
+    "SinkEffectRuntimeBinding",
     "UnknownCatalogIdError",
     "assemble_and_validate_pipeline_config",
-    "attach_sink_effect_admission",
+    "execution_sink_bindings_for_runtime",
     "execution_sink_modes_for_runtime",
     "execution_sinks_for_runtime",
     "require_sink_effect_admission",
+    "sink_effect_modes_from_runtime_bindings",
     "validate_pipeline_sink_effect_capabilities",
     "validate_sink_effect_capability",
+    "validate_sink_effect_type_capability",
     "validate_value_source_compliance",
 ]

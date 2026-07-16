@@ -91,6 +91,44 @@ class SinkEffectInputKind(StrEnum):
     AUDIT_EXPORT_SNAPSHOT = "audit_export_snapshot"
 
 
+class SinkEffectExecutionPurpose(StrEnum):
+    FRESH = "fresh"
+    RESUME = "resume"
+    FOLLOWER = "follower"
+    AUDIT_EXPORT = "audit_export"
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedSinkEffectMode:
+    value: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.value, str) or not self.value.strip():
+            raise ValueError("Resolved sink effect mode must be a non-empty string")
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class SinkEffectRuntimeBinding:
+    sink_name: str
+    sink: object
+    sink_type: type[object]
+    config_fingerprint: str
+    purpose: SinkEffectExecutionPurpose
+    effect_mode: ResolvedSinkEffectMode | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.sink_name, str) or not self.sink_name.strip():
+            raise ValueError("Sink runtime binding name must be non-empty")
+        if self.sink_type is not type(self.sink):
+            raise TypeError("Sink runtime binding type must exactly match its sink instance")
+        if not isinstance(self.config_fingerprint, str) or _LOWER_HEX_64.fullmatch(self.config_fingerprint) is None:
+            raise ValueError("Sink runtime binding config fingerprint must be a lowercase SHA-256 digest")
+        if not isinstance(self.purpose, SinkEffectExecutionPurpose):
+            raise TypeError("Sink runtime binding purpose must be exact SinkEffectExecutionPurpose")
+        if self.effect_mode is not None and type(self.effect_mode) is not ResolvedSinkEffectMode:
+            raise TypeError("Sink runtime binding mode must be ResolvedSinkEffectMode or None")
+
+
 class AuditExportFormat(StrEnum):
     JSON = "json"
     CSV = "csv"
@@ -879,6 +917,7 @@ __all__ = [
     "AuditExportSignedManifestInput",
     "AuditExportSigningMode",
     "AuditExportSnapshotChunkInput",
+    "ResolvedSinkEffectMode",
     "RestrictedAuditExportSnapshotReader",
     "RestrictedSinkEffectContext",
     "SinkEffectAttemptAction",
@@ -886,6 +925,7 @@ __all__ = [
     "SinkEffectAuditExportSnapshotInput",
     "SinkEffectCommitResult",
     "SinkEffectDescriptorMode",
+    "SinkEffectExecutionPurpose",
     "SinkEffectInputKind",
     "SinkEffectInspection",
     "SinkEffectInspectionMode",
@@ -897,5 +937,6 @@ __all__ = [
     "SinkEffectReconcileKind",
     "SinkEffectReconcileResult",
     "SinkEffectRole",
+    "SinkEffectRuntimeBinding",
     "SinkEffectState",
 ]

@@ -19,7 +19,6 @@ LandscapeDB is typed but imported conditionally to avoid circular imports.
 from __future__ import annotations
 
 import csv
-import inspect
 import os
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -29,10 +28,12 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol
+    from elspeth.contracts.sink_effects import SinkEffectRuntimeBinding
     from elspeth.core.config import ElspethSettings
     from elspeth.core.landscape import LandscapeDB
 
 from elspeth.contracts import Determinism
+from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.core.operations import track_operation
 from elspeth.engine.orchestrator.schema_reconstruction import (
@@ -280,11 +281,48 @@ def _sink_supports_incremental_json_export_writes(sink: SinkProtocol) -> bool:
     return Path(path).suffix == ".jsonl"
 
 
+def prepare_audit_export_binding(
+    settings: ElspethSettings,
+    sink_factory: Callable[[str], SinkEffectRuntimeBinding],
+) -> tuple[SinkEffectRuntimeBinding, object]:
+    """Construct and admit the exact delayed sink before export mutations."""
+    from elspeth.contracts.sink_effects import SinkEffectInputKind
+    from elspeth.engine.orchestrator.preflight import (
+        SinkEffectExecutionPurpose,
+        SinkEffectRuntimeBinding,
+        sink_effect_modes_from_runtime_bindings,
+        validate_pipeline_sink_effect_capabilities,
+    )
+
+    sink_name = settings.landscape.export.sink
+    if sink_name is None:
+        raise ValueError("Export sink name is None")
+    binding = sink_factory(sink_name)
+    if type(binding) is not SinkEffectRuntimeBinding:
+        raise TypeError("Audit export sink factory must return an exact SinkEffectRuntimeBinding")
+    sink = cast("SinkProtocol", binding.sink)
+    modes = sink_effect_modes_from_runtime_bindings(
+        {sink_name: sink},
+        {sink_name: binding},
+        purpose=SinkEffectExecutionPurpose.AUDIT_EXPORT,
+        expected_config_fingerprints={sink_name: stable_hash(dict(settings.sinks[sink_name].options))},
+    )
+    admission = validate_pipeline_sink_effect_capabilities(
+        {sink_name: sink},
+        configured_modes=modes,
+        required_input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
+    )
+    return binding, admission
+
+
 def export_landscape(
     db: LandscapeDB,
     run_id: str,
     settings: ElspethSettings,
-    sink_factory: Callable[[str], SinkProtocol],
+    sink_factory: Callable[[str], SinkEffectRuntimeBinding],
+    *,
+    prepared_binding: SinkEffectRuntimeBinding | None = None,
+    sink_effect_admission: object | None = None,
 ) -> None:
     """Export audit trail to configured sink after run completion.
 
@@ -310,23 +348,19 @@ def export_landscape(
 
     export_config = settings.landscape.export
 
-    sink_name = export_config.sink
-    if sink_name is None:
-        raise ValueError("Export sink name is None")
-    sink = sink_factory(sink_name)
-
-    # The export sink is a fresh lifecycle boundary, separate from the main
-    # pipeline. Validate its resolved mode before signing-key resolution,
-    # exporter/context/node construction, on_start(), reservation, or I/O.
     from elspeth.contracts.sink_effects import SinkEffectInputKind
-    from elspeth.engine.orchestrator.preflight import validate_pipeline_sink_effect_capabilities
+    from elspeth.engine.orchestrator.preflight import require_sink_effect_admission
 
-    validate_pipeline_sink_effect_capabilities(
+    if prepared_binding is None:
+        prepared_binding, sink_effect_admission = prepare_audit_export_binding(settings, sink_factory)
+    sink_name = prepared_binding.sink_name
+    sink = cast("SinkProtocol", prepared_binding.sink)
+    mode = prepared_binding.effect_mode.value if prepared_binding.effect_mode is not None else ""
+    require_sink_effect_admission(
         {sink_name: sink},
-        configured_modes={
-            sink_name: cast(str, inspect.getattr_static(sink, "_resolved_effect_mode", "")),
-        },
+        configured_modes={sink_name: mode},
         required_input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
+        admission=sink_effect_admission,
     )
 
     # Get signing key from environment if signing enabled

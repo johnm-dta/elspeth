@@ -61,7 +61,7 @@ class _LegacyResumeSink:
     name = "legacy"
 
     def __init__(self) -> None:
-        self.configure_for_resume = MagicMock()
+        self.configure_for_resume = MagicMock(spec=[])
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +89,17 @@ def _make_minimal_config_yaml(tmp_path: Path, *, with_depends_on: bool = False) 
     settings_path = tmp_path / "pipeline.yaml"
     settings_path.write_text(yaml.dump(config))
     return settings_path
+
+
+def test_cli_run_rejects_raw_legacy_sink_before_key_vault_resolution(tmp_path: Path) -> None:
+    settings_path = _make_minimal_config_yaml(tmp_path)
+
+    with patch("elspeth.cli.load_secrets_from_config") as load_secrets:
+        result = runner.invoke(app, ["run", "-s", str(settings_path), "--execute"])
+
+    assert result.exit_code == 1
+    assert "effect protocol" in result.output.lower()
+    load_secrets.assert_not_called()
 
 
 def _make_resume_config_and_database(tmp_path: Path) -> tuple[Path, Path]:
@@ -297,6 +308,8 @@ def test_cli_resume_rejects_legacy_sink_before_resume_mutation_or_payload_access
         patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=bundle),
         patch("elspeth.cli.ExecutionGraph") as graph_cls,
         patch("elspeth.core.checkpoint.RecoveryManager") as recovery_cls,
+        patch("elspeth.cli_helpers.resolve_audit_passphrase") as resolve_passphrase,
+        patch("elspeth.core.landscape.LandscapeDB.from_url") as open_database,
     ):
         graph_cls.from_plugin_instances.return_value = _FakeGraph()
         recovery = recovery_cls.return_value
@@ -309,6 +322,8 @@ def test_cli_resume_rejects_legacy_sink_before_resume_mutation_or_payload_access
     assert result.exit_code == 1
     assert "sink effect preflight failed" in result.output.lower()
     sink.configure_for_resume.assert_not_called()
+    resolve_passphrase.assert_not_called()
+    open_database.assert_not_called()
     assert not (tmp_path / "payloads").exists()
 
 
@@ -319,6 +334,8 @@ def test_cli_join_rejects_legacy_sink_before_join_admission(tmp_path: Path) -> N
     with (
         patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=bundle),
         patch("elspeth.engine.Orchestrator") as orchestrator_cls,
+        patch("elspeth.cli_helpers.resolve_audit_passphrase") as resolve_passphrase,
+        patch("elspeth.core.landscape.LandscapeDB.from_url") as open_database,
     ):
         result = runner.invoke(
             app,
@@ -327,4 +344,6 @@ def test_cli_join_rejects_legacy_sink_before_join_admission(tmp_path: Path) -> N
 
     assert result.exit_code == 1
     assert "sink effect preflight failed" in result.output.lower()
+    resolve_passphrase.assert_not_called()
+    open_database.assert_not_called()
     orchestrator_cls.return_value.join_run.assert_not_called()

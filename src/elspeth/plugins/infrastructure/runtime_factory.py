@@ -8,11 +8,18 @@ already-instantiated primitives.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from elspeth.contracts import SinkProtocol, SourceProtocol, TransformProtocol
 from elspeth.contracts.freeze import freeze_fields
+from elspeth.contracts.hashing import stable_hash
+from elspeth.contracts.sink_effects import (
+    ResolvedSinkEffectMode,
+    SinkEffectExecutionPurpose,
+    SinkEffectRuntimeBinding,
+)
+from elspeth.engine.orchestrator.preflight import validate_sink_effect_type_capability
 
 if TYPE_CHECKING:
     from elspeth.core.config import AggregationSettings, ElspethSettings, SourceSettings, TransformSettings
@@ -35,7 +42,7 @@ class PluginBundle:
     transforms: Sequence[WiredTransform]
     sinks: Mapping[str, SinkProtocol]
     aggregations: Mapping[str, tuple[TransformProtocol, AggregationSettings]]
-    sink_effect_modes: Mapping[str, str] = field(default_factory=dict)
+    sink_effect_bindings: Mapping[str, SinkEffectRuntimeBinding]
 
     def __post_init__(self) -> None:
         from elspeth.contracts.errors import OrchestrationInvariantError
@@ -47,13 +54,27 @@ class PluginBundle:
                 f"PluginBundle sources and source_settings_map keys must match. "
                 f"sources={sorted(self.sources)}, source_settings_map={sorted(self.source_settings_map)}"
             )
-        freeze_fields(self, "sources", "source_settings_map", "transforms", "sinks", "aggregations", "sink_effect_modes")
+        if set(self.sink_effect_bindings) != set(self.sinks):
+            raise OrchestrationInvariantError("PluginBundle sink effect bindings must exactly match runtime sinks")
+        for sink_name, binding in self.sink_effect_bindings.items():
+            if binding.sink_name != sink_name or binding.sink is not self.sinks[sink_name]:
+                raise OrchestrationInvariantError("PluginBundle sink effect binding must retain the exact named sink instance")
+        freeze_fields(self, "sources", "source_settings_map", "transforms", "sinks", "aggregations", "sink_effect_bindings")
+
+    @property
+    def sink_effect_modes(self) -> Mapping[str, str]:
+        from types import MappingProxyType
+
+        return MappingProxyType(
+            {name: binding.effect_mode.value for name, binding in self.sink_effect_bindings.items() if binding.effect_mode is not None}
+        )
 
 
 def instantiate_plugins_from_config(
     config: ElspethSettings,
     *,
     preflight_mode: bool = False,
+    sink_effect_purpose: SinkEffectExecutionPurpose = SinkEffectExecutionPurpose.FRESH,
 ) -> PluginBundle:
     """Instantiate all plugins from configuration.
 
@@ -108,14 +129,33 @@ def instantiate_plugins_from_config(
 
             aggregations[agg_config.name] = (transform, agg_config)
 
+        from elspeth.plugins.infrastructure.base import BaseSink
+
         sinks = {}
+        sink_effect_bindings = {}
         delayed_export_sink = config.landscape.export.sink if config.landscape.export.enabled else None
         for sink_name, sink_config in config.sinks.items():
             if sink_name == delayed_export_sink:
                 continue
             sink_cls = manager.get_sink_by_name(sink_config.plugin)
-            sinks[sink_name] = sink_cls(dict(sink_config.options))
+            sink = sink_cls(dict(sink_config.options))
+            sinks[sink_name] = sink
             sinks[sink_name]._on_write_failure = sink_config.on_write_failure
+            resolved_mode = (
+                sink_cls._resolve_sink_effect_mode(dict(sink_config.options), purpose=sink_effect_purpose)
+                if isinstance(sink_cls, type) and issubclass(sink_cls, BaseSink)
+                else None
+            )
+            if resolved_mode is not None and type(resolved_mode) is not ResolvedSinkEffectMode:
+                raise TypeError("Sink _resolve_sink_effect_mode must return ResolvedSinkEffectMode or None")
+            sink_effect_bindings[sink_name] = SinkEffectRuntimeBinding(
+                sink_name=sink_name,
+                sink=sink,
+                sink_type=type(sink),
+                config_fingerprint=stable_hash(dict(sink_config.options)),
+                purpose=sink_effect_purpose,
+                effect_mode=resolved_mode,
+            )
 
         bundle = PluginBundle(
             sources=sources,
@@ -123,6 +163,7 @@ def instantiate_plugins_from_config(
             transforms=transforms,
             sinks=sinks,
             aggregations=aggregations,
+            sink_effect_bindings=sink_effect_bindings,
         )
 
     # Value-source compliance check. Single source of truth: every entry point
@@ -132,6 +173,77 @@ def instantiate_plugins_from_config(
 
     validate_value_source_compliance(_value_source_wired_transforms(bundle))
     return bundle
+
+
+def validate_sink_effect_eligibility_from_raw_config(
+    raw_config: Mapping[str, object],
+    *,
+    purpose: SinkEffectExecutionPurpose,
+) -> Mapping[str, ResolvedSinkEffectMode]:
+    """Reject ineligible adapter classes before credentials or constructors.
+
+    This deliberately reads only the bounded ``sinks`` and delayed-export
+    selection. Mode interpretation remains adapter-owned through
+    ``BaseSink._resolve_sink_effect_mode``; framework code never guesses from
+    generic option names.
+    """
+    from elspeth.contracts.sink_effects import SinkEffectInputKind
+    from elspeth.plugins.infrastructure.base import BaseSink
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+    if not isinstance(purpose, SinkEffectExecutionPurpose):
+        raise TypeError("Sink effect eligibility purpose must be exact SinkEffectExecutionPurpose")
+    raw_sinks = raw_config.get("sinks")
+    if not isinstance(raw_sinks, Mapping):
+        raise ValueError("'sinks' must be a mapping/object for sink effect eligibility")
+
+    delayed_export_name: str | None = None
+    raw_landscape = raw_config.get("landscape")
+    if isinstance(raw_landscape, Mapping):
+        raw_export = raw_landscape.get("export")
+        if isinstance(raw_export, Mapping) and raw_export.get("enabled") is True:
+            selected = raw_export.get("sink")
+            if isinstance(selected, str) and selected:
+                delayed_export_name = selected
+
+    if purpose is SinkEffectExecutionPurpose.AUDIT_EXPORT:
+        if delayed_export_name is None:
+            raise ValueError("Enabled audit export with a named sink is required for audit-export eligibility")
+        selected_names = (delayed_export_name,)
+        required_input_kind = SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT
+    else:
+        selected_names = tuple(name for name in raw_sinks if name != delayed_export_name)
+        required_input_kind = SinkEffectInputKind.PIPELINE_MEMBERS
+
+    manager = get_shared_plugin_manager()
+    modes: dict[str, ResolvedSinkEffectMode] = {}
+    for sink_name in selected_names:
+        if not isinstance(sink_name, str) or not sink_name:
+            raise ValueError("Sink names must be non-empty strings for sink effect eligibility")
+        component = raw_sinks[sink_name]
+        if not isinstance(component, Mapping):
+            raise ValueError(f"Sink {sink_name!r} must be a mapping/object")
+        plugin_name = component.get("plugin")
+        if not isinstance(plugin_name, str) or not plugin_name:
+            raise ValueError(f"Sink {sink_name!r} plugin must be a non-empty string")
+        raw_options = component.get("options", {})
+        if not isinstance(raw_options, Mapping):
+            raise ValueError(f"Sink {sink_name!r} options must be a mapping/object")
+        options = dict(raw_options)
+        sink_type = manager.get_sink_by_name(plugin_name)
+        mode: ResolvedSinkEffectMode | None = None
+        if issubclass(sink_type, BaseSink):
+            mode = sink_type._resolve_sink_effect_mode(options, purpose=purpose)
+            if mode is not None and type(mode) is not ResolvedSinkEffectMode:
+                raise TypeError("Sink _resolve_sink_effect_mode must return ResolvedSinkEffectMode or None")
+        validate_sink_effect_type_capability(
+            sink_type,
+            mode.value if mode is not None else "",
+            required_input_kind,
+        )
+        assert mode is not None
+        modes[sink_name] = mode
+    return modes
 
 
 def _value_source_wired_transforms(bundle: PluginBundle) -> tuple[WiredTransform, ...]:
@@ -145,7 +257,7 @@ def _value_source_wired_transforms(bundle: PluginBundle) -> tuple[WiredTransform
     return (*bundle.transforms, *aggregation_transforms)
 
 
-def make_sink_factory(config: ElspethSettings) -> Callable[[str], SinkProtocol]:
+def make_sink_factory(config: ElspethSettings) -> Callable[[str], SinkEffectRuntimeBinding]:
     """Create a factory that produces fresh sink instances from config.
 
     Used by the export phase, which runs after the pipeline's sinks have
@@ -157,7 +269,7 @@ def make_sink_factory(config: ElspethSettings) -> Callable[[str], SinkProtocol]:
     from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
     from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode
 
-    def factory(sink_name: str) -> SinkProtocol:
+    def factory(sink_name: str) -> SinkEffectRuntimeBinding:
         if sink_name not in config.sinks:
             raise ValueError(f"Export sink '{sink_name}' not found in sink configuration")
         sink_config = config.sinks[sink_name]
@@ -166,6 +278,25 @@ def make_sink_factory(config: ElspethSettings) -> Callable[[str], SinkProtocol]:
         with plugin_preflight_mode(True):
             sink = sink_cls(dict(sink_config.options))
         sink._on_write_failure = sink_config.on_write_failure
-        return sink
+        from elspeth.plugins.infrastructure.base import BaseSink
+
+        resolved_mode = (
+            sink_cls._resolve_sink_effect_mode(
+                dict(sink_config.options),
+                purpose=SinkEffectExecutionPurpose.AUDIT_EXPORT,
+            )
+            if isinstance(sink_cls, type) and issubclass(sink_cls, BaseSink)
+            else None
+        )
+        if resolved_mode is not None and type(resolved_mode) is not ResolvedSinkEffectMode:
+            raise TypeError("Sink _resolve_sink_effect_mode must return ResolvedSinkEffectMode or None")
+        return SinkEffectRuntimeBinding(
+            sink_name=sink_name,
+            sink=sink,
+            sink_type=type(sink),
+            config_fingerprint=stable_hash(dict(sink_config.options)),
+            purpose=SinkEffectExecutionPurpose.AUDIT_EXPORT,
+            effect_mode=resolved_mode,
+        )
 
     return factory

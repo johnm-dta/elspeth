@@ -210,16 +210,32 @@ class _EffectCapableSinkStub:
 
 
 def _plugin_bundle_stub() -> SimpleNamespace:
+    from elspeth.engine.orchestrator.preflight import (
+        ResolvedSinkEffectMode,
+        SinkEffectExecutionPurpose,
+        SinkEffectRuntimeBinding,
+    )
+
     source = object()
+    sink = _EffectCapableSinkStub()
     return SimpleNamespace(
         source=source,
         sources={"source": source},
         source_settings=object(),
         source_settings_map={"source": object()},
         transforms=(),
-        sinks={"primary": _EffectCapableSinkStub()},
+        sinks={"primary": sink},
         aggregations={},
-        sink_effect_modes={"primary": "write"},
+        sink_effect_bindings={
+            "primary": SinkEffectRuntimeBinding(
+                sink_name="primary",
+                sink=sink,
+                sink_type=type(sink),
+                config_fingerprint=stable_hash({}),
+                purpose=SinkEffectExecutionPurpose.FRESH,
+                effect_mode=ResolvedSinkEffectMode("write"),
+            )
+        },
     )
 
 
@@ -254,6 +270,18 @@ def _configure_runtime_success(
     mock_orch = _orchestrator_stub(result)
     mock_orch_cls.return_value = mock_orch
     return mock_orch
+
+
+@contextlib.contextmanager
+def _admitted_runtime_setup() -> Iterator[None]:
+    """Give status/resource-ordering tests a fully admitted runtime boundary."""
+    with (
+        patch("elspeth.web.execution.service.load_settings_from_yaml_string", return_value=_mock_pipeline_settings()),
+        patch("elspeth.web.execution.preflight.instantiate_plugins_from_config", return_value=_plugin_bundle_stub()),
+        patch("elspeth.web.execution.preflight.ExecutionGraph") as graph_cls,
+    ):
+        graph_cls.from_plugin_instances.return_value = _execution_graph_stub()
+        yield
 
 
 @pytest.fixture
@@ -300,7 +328,7 @@ def _mock_pipeline_settings() -> SimpleNamespace:
         sources={},
         transforms=[],
         aggregations=[],
-        sinks={},
+        sinks={"primary": SimpleNamespace(plugin="json", options={})},
         gates=[],
         coalesce=[],
         queues={},
@@ -1449,6 +1477,33 @@ class TestExecutionFanoutGuard:
 class TestWebRuntimeInfrastructure:
     """Regression coverage for web execution's orchestrator runtime wiring."""
 
+    def test_sink_effect_rejection_precedes_status_landscape_and_payload_resources(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        from elspeth.engine.orchestrator.preflight import SinkEffectCapabilityError
+
+        pipeline_yaml = """
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: output.jsonl
+"""
+        mock_session_service.update_run_status.reset_mock()
+        with (
+            patch("elspeth.web.execution.service.open_landscape_db") as open_database,
+            patch("elspeth.web.execution.service.FilesystemPayloadStore") as make_payload_store,
+            pytest.raises(SinkEffectCapabilityError, match="effect protocol"),
+        ):
+            service._run_pipeline(str(uuid4()), pipeline_yaml, threading.Event())
+
+        mock_session_service.update_run_status.assert_not_called()
+        open_database.assert_not_called()
+        make_payload_store.assert_not_called()
+
     def test_run_pipeline_records_web_user_attribution_in_landscape(
         self,
         service: ExecutionServiceImpl,
@@ -2453,7 +2508,10 @@ sinks:
 """
         mock_runtime_graph.side_effect = AssertionError("runtime graph must not be built")
 
-        with pytest.raises(ValueError, match="template_file"):
+        with (
+            patch("elspeth.web.execution.service.validate_sink_effect_eligibility_from_raw_config"),
+            pytest.raises(ValueError, match="template_file"),
+        ):
             service._run_pipeline(str(uuid4()), pipeline_yaml, threading.Event())
 
         mock_runtime_graph.assert_not_called()
@@ -2485,7 +2543,7 @@ class TestB7ExceptionHandling:
         """
         mock_landscape.side_effect = KeyboardInterrupt("ctrl-c")
 
-        with pytest.raises(KeyboardInterrupt):
+        with _admitted_runtime_setup(), pytest.raises(KeyboardInterrupt):
             service._run_pipeline(str(uuid4()), "yaml", threading.Event())
 
         # R6: The 'running' update went through, but the 'failed' update was skipped
@@ -2505,7 +2563,7 @@ class TestB7ExceptionHandling:
         """R6 fix: SystemExit skips _call_async for the 'failed' update."""
         mock_landscape.side_effect = SystemExit(1)
 
-        with pytest.raises(SystemExit):
+        with _admitted_runtime_setup(), pytest.raises(SystemExit):
             service._run_pipeline(str(uuid4()), "yaml", threading.Event())
 
         # R6: The 'running' update went through, but the 'failed' update was skipped
@@ -2522,7 +2580,7 @@ class TestB7ExceptionHandling:
         event = threading.Event()
         service._shutdown_events[run_id] = event
 
-        with patch("elspeth.web.execution.service.open_landscape_db") as mock_db:
+        with _admitted_runtime_setup(), patch("elspeth.web.execution.service.open_landscape_db") as mock_db:
             mock_db.side_effect = RuntimeError("boom")
             with pytest.raises(RuntimeError):
                 service._run_pipeline(run_id, "yaml", event)
@@ -2919,7 +2977,8 @@ class TestCancelMechanism:
         mock_session_service.get_run.return_value = _run_record_stub(status="cancelled")
 
         # Should NOT raise — graceful exit
-        service._run_pipeline(run_id, "yaml", threading.Event())
+        with _admitted_runtime_setup():
+            service._run_pipeline(run_id, "yaml", threading.Event())
 
         # No Orchestrator or LandscapeDB instantiated (early return)
         mock_landscape.assert_not_called()
@@ -2971,7 +3030,7 @@ class TestCancelMechanism:
         mock_session_service.update_run_status.side_effect = IllegalRunTransitionError("completed", "running", frozenset())
         mock_session_service.get_run.return_value = _run_record_stub(status="completed")
 
-        with pytest.raises(ValueError, match="completed"):
+        with _admitted_runtime_setup(), pytest.raises(ValueError, match="completed"):
             service._run_pipeline(run_id, "yaml", threading.Event())
 
     @patch("elspeth.web.execution.service.open_landscape_db")
@@ -3020,7 +3079,7 @@ class TestCancelMechanism:
 
         service._broadcaster.broadcast = spy_broadcast  # type: ignore[assignment]
 
-        with pytest.raises(ValueError, match="sentinel-existing-id") as exc_info:
+        with _admitted_runtime_setup(), pytest.raises(ValueError, match="sentinel-existing-id") as exc_info:
             service._run_pipeline(run_id, "yaml", threading.Event())
 
         # Discriminator #1: the propagating exception is bare ValueError, not the
@@ -4970,7 +5029,7 @@ class TestRunningStatusFailure:
 
         cast(Any, service)._call_async = failing_call_async
 
-        with pytest.raises(ConnectionError):
+        with _admitted_runtime_setup(), pytest.raises(ConnectionError):
             service._run_pipeline(str(uuid4()), "yaml", threading.Event())
 
         # The except block tried to set "failed" via the second _call_async call

@@ -34,7 +34,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 from elspeth.contracts import (
     ExportStatus,
     SecretResolutionInput,
-    SinkProtocol,
 )
 from elspeth.contracts.coordination import CoordinationToken, mint_worker_id
 from elspeth.contracts.errors import (
@@ -55,6 +54,7 @@ from elspeth.engine._best_effort import best_effort
 from elspeth.engine.orchestrator.bootstrap import prepare_for_run
 from elspeth.engine.orchestrator.export import (
     export_landscape,
+    prepare_audit_export_binding,
 )
 from elspeth.engine.orchestrator.heartbeat import RunHeartbeatThread
 from elspeth.engine.orchestrator.run_state import _RunFailedWithPartialResultError
@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
     from elspeth.contracts.preflight import PreflightResult
+    from elspeth.contracts.sink_effects import SinkEffectRuntimeBinding
     from elspeth.core.config import ElspethSettings
     from elspeth.core.dag import ExecutionGraph
     from elspeth.core.events import EventBusProtocol
@@ -245,7 +246,7 @@ class RunLifecycleCoordinator:
         factory: RecorderFactory,
         run_id: str,
         settings: ElspethSettings,
-        sink_factory: Callable[[str], SinkProtocol],
+        sink_factory: Callable[[str], SinkEffectRuntimeBinding],
     ) -> None:
         """Execute the EXPORT phase: export Landscape data to configured sink.
 
@@ -260,6 +261,7 @@ class RunLifecycleCoordinator:
         """
 
         export_config = settings.landscape.export
+        binding, sink_effect_admission = prepare_audit_export_binding(settings, sink_factory)
         factory.run_lifecycle.set_export_status(
             run_id,
             status=ExportStatus.PENDING,
@@ -281,7 +283,14 @@ class RunLifecycleCoordinator:
                 )
             )
 
-            export_landscape(self._db, run_id, settings, sink_factory)
+            export_landscape(
+                self._db,
+                run_id,
+                settings,
+                sink_factory,
+                prepared_binding=binding,
+                sink_effect_admission=sink_effect_admission,
+            )
 
             factory.run_lifecycle.set_export_status(run_id, status=ExportStatus.COMPLETED)
             self._events.emit(PhaseCompleted(phase=PipelinePhase.EXPORT, duration_seconds=time.perf_counter() - phase_start))
@@ -311,7 +320,7 @@ class RunLifecycleCoordinator:
         secret_resolutions: list[SecretResolutionInput] | None = None,
         preflight_results: PreflightResult | None = None,
         shutdown_event: threading.Event | None = None,
-        sink_factory: Callable[[str], SinkProtocol] | None = None,
+        sink_factory: Callable[[str], SinkEffectRuntimeBinding] | None = None,
         run_id: str | None = None,
         initiated_by_user_id: str | None = None,
         auth_provider_type: str | None = None,

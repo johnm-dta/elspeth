@@ -75,9 +75,9 @@ class TestMakeSinkFactory:
 
         with patch("elspeth.plugins.infrastructure.manager.get_shared_plugin_manager", return_value=manager):
             factory = make_sink_factory(config)
-            sink = factory("csv_out")
+            binding = factory("csv_out")
 
-        assert sink._on_write_failure == "quarantine"
+        assert binding.sink._on_write_failure == "quarantine"
 
     def test_returns_fresh_instances(self) -> None:
         from elspeth.plugins.infrastructure.runtime_factory import make_sink_factory
@@ -88,7 +88,7 @@ class TestMakeSinkFactory:
 
         with patch("elspeth.plugins.infrastructure.manager.get_shared_plugin_manager", return_value=manager):
             factory = make_sink_factory(config)
-            sink1 = factory("csv_out")
-            sink2 = factory("csv_out")
+            sink1 = factory("csv_out").sink
+            sink2 = factory("csv_out").sink
 
         assert sink1 is not sink2

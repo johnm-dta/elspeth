@@ -35,6 +35,7 @@ from elspeth.core.checkpoint.recovery import NonResumableRunError
 from elspeth.core.config import ElspethSettings, SourceSettings, load_settings, resolve_config
 from elspeth.core.dag import ExecutionGraph, GraphValidationError
 from elspeth.core.security.config_secrets import SecretLoadError, load_secrets_from_config
+from elspeth.engine.orchestrator.preflight import SinkEffectCapabilityError
 
 if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol, SourceProtocol
@@ -78,11 +79,23 @@ def _preflight_follower_sink_effects(
     )
 
 
-def _instantiate_plugins_for_runtime_preflight(settings: ElspethSettings) -> PluginBundle:
+def _instantiate_plugins_for_runtime_preflight(
+    settings: ElspethSettings,
+    *,
+    purpose: object | None = None,
+) -> PluginBundle:
     """Construct runtime plugins under the constructor-safe preflight posture."""
+    from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
     from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
 
-    return instantiate_plugins_from_config(settings, preflight_mode=True)
+    resolved_purpose = SinkEffectExecutionPurpose.FRESH if purpose is None else purpose
+    if not isinstance(resolved_purpose, SinkEffectExecutionPurpose):
+        raise TypeError("Runtime preflight purpose must be exact SinkEffectExecutionPurpose")
+    return instantiate_plugins_from_config(
+        settings,
+        preflight_mode=True,
+        sink_effect_purpose=resolved_purpose,
+    )
 
 
 def _join_after_follower_sink_preflight(
@@ -91,8 +104,14 @@ def _join_after_follower_sink_preflight(
     settings: ElspethSettings,
 ) -> tuple[str, PluginBundle, Mapping[str, SinkProtocol], Mapping[str, str], object]:
     """Join only after the exact follower execution sinks earn admission."""
-    plugins = _instantiate_plugins_for_runtime_preflight(settings)
-    execution_sinks, execution_sink_modes, admission = _preflight_execution_sinks(settings, plugins)
+    from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
+
+    plugins = _instantiate_plugins_for_runtime_preflight(settings, purpose=SinkEffectExecutionPurpose.FOLLOWER)
+    execution_sinks, execution_sink_modes, admission = _preflight_execution_sinks(
+        settings,
+        plugins,
+        purpose=SinkEffectExecutionPurpose.FOLLOWER,
+    )
     worker_id = orchestrator.join_run(run_id, settings)
     return worker_id, plugins, execution_sinks, execution_sink_modes, admission
 
@@ -477,23 +496,47 @@ def _execution_sinks_for_graph(
 def _preflight_execution_sinks(
     config: ElspethSettings,
     plugins: PluginBundle,
+    *,
+    purpose: object | None = None,
 ) -> tuple[Mapping[str, SinkProtocol], Mapping[str, str], object]:
     """Validate the one executable pipeline sink lane and return its receipt."""
+    from elspeth.contracts.hashing import stable_hash
     from elspeth.contracts.sink_effects import SinkEffectInputKind
     from elspeth.engine.orchestrator.preflight import (
-        execution_sink_modes_for_runtime,
+        SinkEffectExecutionPurpose,
+        execution_sink_bindings_for_runtime,
         execution_sinks_for_runtime,
+        sink_effect_modes_from_runtime_bindings,
         validate_pipeline_sink_effect_capabilities,
     )
 
+    resolved_purpose = SinkEffectExecutionPurpose.FRESH if purpose is None else purpose
+    if not isinstance(resolved_purpose, SinkEffectExecutionPurpose):
+        raise TypeError("Sink effect preflight purpose must be exact SinkEffectExecutionPurpose")
     sinks = execution_sinks_for_runtime(config, plugins.sinks)
-    modes = execution_sink_modes_for_runtime(config, plugins.sink_effect_modes)
+    bindings = execution_sink_bindings_for_runtime(config, plugins.sink_effect_bindings)
+    modes = sink_effect_modes_from_runtime_bindings(
+        sinks,
+        bindings,
+        purpose=resolved_purpose,
+        expected_config_fingerprints={name: stable_hash(dict(config.sinks[name].options)) for name in sinks},
+    )
     admission = validate_pipeline_sink_effect_capabilities(
         sinks,
         configured_modes=modes,
         required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
     )
     return sinks, modes, admission
+
+
+def _preflight_raw_settings_sink_effects(settings_path: Path, *, purpose: object) -> None:
+    """Run adapter-class eligibility before secrets or other startup work."""
+    from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
+    from elspeth.plugins.infrastructure.runtime_factory import validate_sink_effect_eligibility_from_raw_config
+
+    if not isinstance(purpose, SinkEffectExecutionPurpose):
+        raise TypeError("Raw sink effect preflight purpose must be exact SinkEffectExecutionPurpose")
+    validate_sink_effect_eligibility_from_raw_config(_load_raw_yaml(settings_path), purpose=purpose)
 
 
 @app.command()
@@ -538,6 +581,10 @@ def run(
 
     # Load and validate config with Key Vault secrets (same flow as other commands)
     try:
+        if execute and not dry_run:
+            from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
+
+            _preflight_raw_settings_sink_effects(settings_path, purpose=SinkEffectExecutionPurpose.FRESH)
         config, secret_resolutions = _load_settings_with_secrets(settings_path)
     except FileNotFoundError:
         typer.echo(f"Error: Settings file not found: {settings}", err=True)
@@ -553,6 +600,9 @@ def run(
         for error in e.errors():
             loc = ".".join(str(x) for x in error["loc"])
             typer.echo(f"  - {loc}: {error['msg']}", err=True)
+        raise typer.Exit(1) from None
+    except SinkEffectCapabilityError as e:
+        typer.echo(f"Sink effect preflight failed: {e}", err=True)
         raise typer.Exit(1) from None
     except ValueError as e:
         typer.echo(f"Configuration error: {e}", err=True)
@@ -1335,9 +1385,11 @@ def bootstrap_and_run(settings_path: Path) -> RunResult:
     from elspeth.core.landscape import LandscapeDB
     from elspeth.core.payload_store import FilesystemPayloadStore
     from elspeth.engine.bootstrap import resolve_preflight
+    from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
     from elspeth.plugins.infrastructure.probe_factory import build_collection_probes
     from elspeth.plugins.infrastructure.runtime_factory import make_sink_factory
 
+    _preflight_raw_settings_sink_effects(settings_path, purpose=SinkEffectExecutionPurpose.FRESH)
     config, secret_resolutions = _load_settings_with_secrets(settings_path)
 
     plugins = _instantiate_plugins_for_runtime_preflight(config)
@@ -2187,6 +2239,10 @@ def resume(
     # Load settings with Key Vault secrets (same flow as 'run' command)
     # This ensures ${VAR} placeholders are resolved correctly for keyvault-backed configs
     try:
+        if execute:
+            from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
+
+            _preflight_raw_settings_sink_effects(settings_path, purpose=SinkEffectExecutionPurpose.RESUME)
         settings_config, _secret_resolutions = _load_settings_with_secrets(settings_path)
     except FileNotFoundError:
         typer.echo(f"Error: Settings file not found: {settings_path}", err=True)
@@ -2200,6 +2256,9 @@ def resume(
             loc = ".".join(str(x) for x in error["loc"])
             typer.echo(f"  - {loc}: {error['msg']}", err=True)
         raise typer.Exit(1) from None
+    except SinkEffectCapabilityError as e:
+        typer.echo(f"Sink effect preflight failed: {e}", err=True)
+        raise typer.Exit(1) from None
     except ValueError as e:
         typer.echo(f"Configuration error: {e}", err=True)
         raise typer.Exit(1) from None
@@ -2209,6 +2268,25 @@ def resume(
 
     # NOTE: _secret_resolutions captured but not used for resume
     # Resume inherits the original run's secret resolution audit records
+
+    from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
+
+    try:
+        plugins = _instantiate_plugins_for_runtime_preflight(
+            settings_config,
+            purpose=SinkEffectExecutionPurpose.RESUME,
+        )
+        if execute:
+            execution_sinks, execution_sink_modes, sink_effect_admission = _preflight_execution_sinks(
+                settings_config,
+                plugins,
+                purpose=SinkEffectExecutionPurpose.RESUME,
+            )
+    except contract_errors.TIER_1_ERRORS:
+        raise
+    except Exception as e:
+        typer.echo(f"Sink effect preflight failed: {e}", err=True)
+        raise typer.Exit(1) from None
 
     # Resolve database URL
     if database:
@@ -2273,15 +2351,6 @@ def resume(
     try:
         checkpoint_manager = CheckpointManager(db)
         recovery_manager = RecoveryManager(db, checkpoint_manager)
-
-        # Instantiate plugins once — reused for validation graph, execution graph, and sink checks
-        try:
-            plugins = _instantiate_plugins_for_runtime_preflight(settings_config)
-        except contract_errors.TIER_1_ERRORS:
-            raise  # Tier 1 errors must crash with full traceback, not Exit(1)
-        except Exception as e:
-            typer.echo(f"Error instantiating plugins: {e}", err=True)
-            raise typer.Exit(1) from None
 
         # Build both graphs from the same plugin instances
         try:
@@ -2348,19 +2417,6 @@ def resume(
                 typer.echo("\nDry run - use --execute to actually resume processing.")
                 typer.echo("Topology validation passed - checkpoint is compatible with current config.")
             return
-
-        # Executable resume admission must precede payload-store construction,
-        # resume-mode mutation, field-resolution mutation, and target probing.
-        try:
-            execution_sinks, execution_sink_modes, sink_effect_admission = _preflight_execution_sinks(
-                settings_config,
-                plugins,
-            )
-        except contract_errors.TIER_1_ERRORS:
-            raise
-        except Exception as e:
-            typer.echo(f"Sink effect preflight failed: {e}", err=True)
-            raise typer.Exit(1) from None
 
         # Execute resume (graph already built above for validation)
         if output_format != "json":
@@ -2476,7 +2532,6 @@ def resume(
             sources=null_resume_sources,
             source_settings_map=null_resume_settings,
             sinks=resume_sinks,  # Use append-mode sinks
-            sink_effect_modes=execution_sink_modes,
         )
 
         # Execute resume with execution graph (NullSource)
@@ -2683,6 +2738,9 @@ def join(
 
     # Load settings with Key Vault secrets (same flow as 'run' and 'resume' commands).
     try:
+        from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
+
+        _preflight_raw_settings_sink_effects(settings_path, purpose=SinkEffectExecutionPurpose.FOLLOWER)
         settings_config, _secret_resolutions = _load_settings_with_secrets(settings_path)
     except FileNotFoundError:
         typer.echo(f"Error: Settings file not found: {settings_path}", err=True)
@@ -2696,11 +2754,30 @@ def join(
             loc = ".".join(str(x) for x in error["loc"])
             typer.echo(f"  - {loc}: {error['msg']}", err=True)
         raise typer.Exit(1) from None
+    except SinkEffectCapabilityError as e:
+        typer.echo(f"Sink effect preflight failed: {e}", err=True)
+        raise typer.Exit(1) from None
     except ValueError as e:
         typer.echo(f"Configuration error: {e}", err=True)
         raise typer.Exit(1) from None
     except SecretLoadError as e:
         typer.echo(f"Error loading secrets: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    try:
+        plugins = _instantiate_plugins_for_runtime_preflight(
+            settings_config,
+            purpose=SinkEffectExecutionPurpose.FOLLOWER,
+        )
+        execution_sinks, execution_sink_modes, sink_effect_admission = _preflight_execution_sinks(
+            settings_config,
+            plugins,
+            purpose=SinkEffectExecutionPurpose.FOLLOWER,
+        )
+    except contract_errors.TIER_1_ERRORS:
+        raise
+    except Exception as e:
+        typer.echo(f"Sink effect preflight failed: {e}", err=True)
         raise typer.Exit(1) from None
 
     # Resolve database URL.
@@ -2767,11 +2844,7 @@ def join(
         orchestrator = Orchestrator(db)
 
         try:
-            worker_id, plugins, execution_sinks, execution_sink_modes, sink_effect_admission = _join_after_follower_sink_preflight(
-                orchestrator,
-                run_id,
-                settings_config,
-            )
+            worker_id = orchestrator.join_run(run_id, settings_config)
         except JoinRefusedError as e:
             if output_format == "json":
                 import json as json_mod

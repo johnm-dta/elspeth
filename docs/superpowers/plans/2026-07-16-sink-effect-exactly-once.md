@@ -272,9 +272,14 @@ empty/non-dense pipeline members, reject missing/reordered/zero/oversized
 chunk descriptors, reject a well-formed-but-different content ref/hash pair,
 and reject count/byte sum mismatches, derive `input_kind` rather
 than accepting it, require exact plan-kind equality, and reject a reader whose
-`snapshot_id`/`manifest_hash`/`chunk_count` binding differs. Prove the reader is
-excluded from comparison/repr and cannot enter `safe_evidence` or persisted
-serialization. Preflight tests must independently vary supported mode and
+`snapshot_id`/`manifest_hash`/`chunk_count` binding differs. Add signed and
+unsigned `AuditExportSignedManifestInput` cases; reject wrong ref/hash/size,
+signature algorithm/key/signature mapping, or a reader bound to a different
+final-manifest descriptor. Prove `iter_verified_chunks()` cannot yield the
+manifest, `read_verified_signed_manifest()` takes no reference argument and
+returns only the bound verified final bytes, and the reader is excluded from
+comparison/repr and cannot enter `safe_evidence` or persisted serialization.
+Preflight tests must independently vary supported mode and
 supported input kind; neither declaration may imply the other.
 
 Add fresh-run and resume ordering regressions around
@@ -402,11 +407,23 @@ class AuditExportSnapshotChunkInput:
     record_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class AuditExportSignedManifestInput:
+    content_ref: str
+    content_hash: str
+    size_bytes: int
+    manifest_schema: str
+    derivation_version: str
+    signature_algorithm: AuditExportSigningMode
+    signature_key_id: str
+    signature: str | None
+
+
 @final
 class RestrictedAuditExportSnapshotReader:
     """Factory-created bound capability; no arbitrary-reference API."""
 
-    __slots__ = ("__binding", "__chunks", "__limits", "__store_resolver")
+    __slots__ = ("__binding", "__chunks", "__signed_manifest", "__limits", "__store_resolver")
 
     @property
     def snapshot_id(self) -> str: ...
@@ -418,6 +435,8 @@ class RestrictedAuditExportSnapshotReader:
     def chunk_count(self) -> int: ...
 
     def iter_verified_chunks(self) -> Iterator[bytes]: ...
+
+    def read_verified_signed_manifest(self) -> bytes: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -435,6 +454,7 @@ class SinkEffectAuditExportSnapshotInput:
     total_bytes: int
     chunk_count: int
     chunks: Sequence[AuditExportSnapshotChunkInput]
+    signed_manifest: AuditExportSignedManifestInput
     reader: RestrictedAuditExportSnapshotReader = field(compare=False, repr=False)
 
     @property
@@ -546,13 +566,23 @@ per-chunk counts/sizes, and both configured and code-owned hard bounds.
 equal `"sha256:" + content_hash` exactly; a separately well-formed ref with a
 different digest is invalid.
 Unsigned input requires `signer_key_id == "UNSIGNED"`; HMAC input requires a
-non-reserved credential-free ID. Reader binding fields must equal the input,
-and the reader must expose no arbitrary-ref method. `SinkEffectPlan.input_kind`
+non-reserved credential-free ID. The final-manifest descriptor uses the same
+exact ref/hash relation, positive exact size, literal
+`elspeth.audit-export-manifest.v2` schema, derivation version, signing mode,
+signer ID, and nullable/lowercase signature as the parent/registry. It is not a
+data chunk and is excluded from data totals. Reader binding fields and the
+final-manifest descriptor must equal the input, and the reader must expose no
+arbitrary-ref method or credentials. Its factory verifies signature material,
+while `read_verified_signed_manifest()` rechecks exact canonical bytes,
+ref/hash/size, schema, snapshot fields, and signature metadata without exposing
+the signer. `SinkEffectPlan.input_kind`
 must equal both request-derived and persisted kinds before CAS. Never include
 the reader in evidence or serialization. Implement the reader as a final,
-factory-only class bound to the registered immutable descriptor tuple and
-winner's store resolver; it revalidates order/ref/hash/size/count and cumulative
-bounds before each yield and has no Landscape/query or credential accessor.
+factory-only class bound to the registered immutable data-descriptor tuple,
+final-manifest descriptor, and winner's store resolver; it revalidates
+order/ref/hash/size/count and cumulative bounds before each data yield, verifies
+the one bound manifest on its no-argument read, and has no Landscape/query,
+arbitrary-reference, store-credential, or signer-credential accessor.
 Add `effect_protocol_version: ClassVar[str
 | None] = None` to `BaseSink`; first-party adapters opt in only when their task
 is complete. Add `inspect_effect`, `prepare_effect`, `commit_effect`, and
@@ -642,6 +672,7 @@ git commit -m "feat(contracts): define sink effect protocol"
 - Modify: `src/elspeth/engine/orchestrator/run_lifecycle.py`
 - Modify: `src/elspeth/engine/orchestrator/export.py`
 - Modify: `src/elspeth/engine/orchestrator/run_context_factory.py`
+- Test: `tests/unit/contracts/test_audit_export_hashing.py`
 - Test: `tests/unit/core/test_audit_export_config.py`
 - Test: `tests/unit/engine/orchestrator/test_run_lifecycle.py`
 - Test: `tests/unit/engine/orchestrator/test_export.py`
@@ -671,22 +702,38 @@ construction inside export is a test failure.
 
 - [ ] **Step 2: Implement the exact target-independent public identity**
 
-Use the project canonical named-field, length-delimited encoder and only
-snapshot-byte/manifest-shaping fields, in this order:
+Use only the committed RFC 8785/JCS primitive in `contracts/hashing.py`; there
+is no named-field or length-delimited encoder. Implement this exact production
+helper in `contracts/audit_export.py`:
+
+```python
+def C(tag: str, payload: ClosedAuditExportJSON) -> bytes:
+    validate_closed_stage_payload(tag, payload)
+    return canonical_json({"payload": payload, "schema": tag}).encode("utf-8")
+```
+
+The validator accepts only each tag's exhaustive design schema using string-
+keyed objects, ordered lists, strings, booleans, null, and integers within
+`[-9007199254740991, 9007199254740991]`. Reject floats (including finite
+floats), non-finite values, implicit enum/datetime/bytes conversion, tuples,
+sets, non-string keys, unknown/missing fields, unsafe integers, non-lowercase
+64-hex hashes/signatures, malformed refs, and non-canonical timestamps. Convert
+enum values and exact `YYYY-MM-DDTHH:MM:SS.ffffffZ` UTC timestamps before the
+call. Define `H(data) = hashlib.sha256(data).hexdigest()` over exact bytes and
+`REF(hash) = "sha256:" + hash`; `H` never canonicalizes again.
+
+The public config and registry key payloads are exact closed objects:
 
 ```text
-public_export_config_hash = H(C(
-  "audit-export-public-config-v1", exporter_version,
-  serialization_version, format, signing_mode, signer_key_id,
-  include_raw_error_rows, chunking_algorithm_version,
-  per_chunk_record_limit, per_chunk_byte_limit
-))
+public config = {chunking_algorithm_version, export_format, exporter_version,
+ include_raw_error_rows, per_chunk_byte_limit, per_chunk_record_limit,
+ serialization_version, signer_key_id, signing_mode}
 
-registry_key_hash = H(C(
-  "audit-export-registry-key-v1", source_run_id, exporter_version,
-  serialization_version, format, signing_mode, signer_key_id,
-  public_export_config_hash
-))
+registry key = {export_format, exporter_version, public_export_config_hash,
+ serialization_version, signer_key_id, signing_mode, source_run_id}
+
+public_export_config_hash = H(C("audit-export-public-config-v1", public config))
+registry_key_hash = H(C("audit-export-registry-key-v1", registry key))
 ```
 
 Sink name, target/path/URI, sink public config, secrets, secret-derived values,
@@ -699,20 +746,20 @@ that the same source snapshot exported to two targets yields one snapshot
 winner and two distinct target effects.
 
 Define `AUDIT_EXPORT_DERIVATION_VERSION =
-"audit-export-derivation-v1"`, `C(tag, ordered_fields) -> bytes` using the
-project named-field, version-prefixed, length-delimited canonical encoder, and
-`H(encoded_bytes) -> sha256(encoded_bytes).hexdigest()`. All formulas use
-`H(C(...))`; `H` never canonicalizes its argument again. Define
-`REF(hash) = "sha256:" + hash`. Task 10 implements the design's exact
-record-bytes -> content descriptors -> snapshot hash -> snapshot ID -> chain
-seals -> manifest -> snapshot seal -> signing-body/HMAC -> signed-manifest
-order without adding a reverse dependency.
+"audit-export-derivation-v1"`. Add literal golden tests for `C`, `H`, and
+`REF` plus the complete public-config and registry-key examples. The expected
+UTF-8 byte strings and hex values are handwritten literals: the test must not
+call `C`, a production payload builder, or the production derivation helper to
+construct expectations. Task 10 extends that independent vector through exact
+record bytes -> content descriptors -> snapshot hash -> snapshot ID -> chain
+seals -> chunk manifest -> snapshot seal -> signing body/HMAC -> signed and
+unsigned v2 final-manifest bytes/address, without adding a reverse dependency.
 
 - [ ] **Step 3: Define bounded spool/content-store contracts**
 
 Define a durable `AuditExportContentStore` contract that writes immutable
-globally stable `sha256:<hex>` chunks, opens only a registered descriptor
-through a bound reader, reports durability, and supports candidate-scoped
+globally stable `sha256:<hex>` data chunks and final-manifest objects, opens
+only a registered descriptor through a bound reader, reports durability, and supports candidate-scoped
 orphan marking. Persist the credential-free winning `content_store_id` as
 immutable registry provenance and retain a resolver for that ID across
 replica/store reconfiguration. A config switch that cannot open every winner
@@ -720,15 +767,15 @@ chunk fails closed; it cannot silently create a same-key replacement. The
 store ID is not part of byte/manifest identity. Safe
 garbage collection must wait the configured grace period and use a fresh
 Landscape transaction to prove no winning manifest references each exact
-content ref; it may delete only candidate-owned unreferenced objects in the
+content ref (data or final manifest); it may delete only candidate-owned unreferenced objects in the
 configured namespace, never by prefix and never a shared/winner hash.
 
 - [ ] **Step 4: Run and commit the configuration boundary**
 
 ```bash
-.venv/bin/pytest -q tests/unit/core/test_audit_export_config.py tests/unit/engine/orchestrator/test_run_lifecycle.py tests/unit/engine/orchestrator/test_export.py
+.venv/bin/pytest -q tests/unit/contracts/test_audit_export_hashing.py tests/unit/core/test_audit_export_config.py tests/unit/engine/orchestrator/test_run_lifecycle.py tests/unit/engine/orchestrator/test_export.py
 .venv/bin/mypy src/elspeth/contracts/audit_export.py src/elspeth/core/config.py src/elspeth/engine/orchestrator/run_lifecycle.py src/elspeth/engine/orchestrator/export.py
-git add src/elspeth/contracts/audit_export.py src/elspeth/core/config.py src/elspeth/engine/orchestrator/run_lifecycle.py src/elspeth/engine/orchestrator/export.py src/elspeth/engine/orchestrator/run_context_factory.py tests/unit/core/test_audit_export_config.py tests/unit/engine/orchestrator/test_run_lifecycle.py tests/unit/engine/orchestrator/test_export.py
+git add src/elspeth/contracts/audit_export.py src/elspeth/core/config.py src/elspeth/engine/orchestrator/run_lifecycle.py src/elspeth/engine/orchestrator/export.py src/elspeth/engine/orchestrator/run_context_factory.py tests/unit/contracts/test_audit_export_hashing.py tests/unit/core/test_audit_export_config.py tests/unit/engine/orchestrator/test_run_lifecycle.py tests/unit/engine/orchestrator/test_export.py
 git commit -m "feat(export): define durable snapshot configuration"
 ```
 
@@ -900,7 +947,8 @@ fields are the design's explicit source witness/stable `exported_at`,
 versions/format/signing/signer/config/key hashes, `derivation_version`,
 manifest-shaping chunk policy, actual counts, winning credential-free
 `content_store_id`, manifest/last-chunk/snapshot/seal hashes, nullable
-`signature_hex`, and signed-manifest hash/ref/size. The registry key is
+`signature_hex`, `record_chain_algorithm`, `final_hash`, literal
+`signed_manifest_schema`, and signed-manifest hash/ref/size. The registry key is
 target-independent and includes the operator-visible credential-free signer
 ID or `UNSIGNED`, never key material or a low-entropy key digest.
 The row CHECK accepts only `completed`, `completed_with_failures`, or `empty`
@@ -926,7 +974,9 @@ SQL is structural authority, not a fictional portable crypto engine. The
 repository recomputes canonical chunk/manifest/snapshot seals against bytes
 before registry insertion. The public snapshot loader requires the winning
 store resolver and recomputes them against bytes before returning a capability;
-the restricted reader repeats per-chunk verification. The association uses the
+the restricted reader repeats per-chunk verification and validates the bound
+v2 final-manifest descriptor/bytes through its no-argument method. The
+association uses the
 discriminator/slot schema above. Set
 `SQLITE_SCHEMA_EPOCH = 26`; do not add any epoch-27 symbol.
 
@@ -945,8 +995,10 @@ Add `SinkEffectStream`, `SinkEffect`, `SinkEffectMemberRecord`,
 input XOR, bounds, and nullable-state validation must raise on malformed rows.
 Do not expose a row-only audit-snapshot loader: the public loader requires the
 winner's content-store resolver and recomputes chunk/content/manifest/snapshot
-hashes before returning a snapshot capability. Keep internal row decoders
-private and unusable by adapters; the bound reader rechecks each yield.
+hashes plus final-manifest hash/ref/size/canonical fields and signer binding
+before returning a snapshot capability. Keep internal row decoders private and
+unusable by adapters; the bound reader rechecks each data yield and the one
+final-manifest read.
 
 - [ ] **Step 5: Run SQLite and real PostgreSQL schema probes**
 
@@ -978,7 +1030,8 @@ git commit -m "feat(landscape): define epoch 26 sink effects"
 - [ ] **Step 1: Write failing populated-epoch migration tests**
 
 Build a genuine epoch-25 database using the existing helper, insert a legacy
-state-linked artifact and operation, then open it through current
+state-linked artifact plus an operation with a `calls.operation_id` child, then
+open it through current
 `LandscapeDB`:
 
 ```python
@@ -991,6 +1044,7 @@ def test_epoch_25_migrates_to_26_and_preserves_legacy_artifact(tmp_path: Path) -
             "SELECT produced_by_state_id, sink_effect_id FROM artifacts WHERE artifact_id='artifact-legacy'"
         ).one()
         assert artifact == ("state-legacy", None)
+        assert read_operation_and_child_call(conn) == EXACT_PRE_MIGRATION_OPERATION_AND_CALL
 
 
 def test_epoch_25_to_26_rolls_back_every_object_when_artifact_rebuild_fails(tmp_path: Path) -> None:
@@ -1001,11 +1055,16 @@ def test_epoch_25_to_26_rolls_back_every_object_when_artifact_rebuild_fails(tmp_
     assert read_table_names(corrupt_epoch_25_path) == EPOCH_25_TABLES
 ```
 
-Cover exact 23 -> 24 -> 25 -> 26 ordering, `BEGIN IMMEDIATE` contention,
-malformed predecessor refusal, duplicate key refusal, close/invalidation
-failure, and successful reopen. Assert the snapshot registry, chunk manifest,
-and effect association are created atomically and an injected failure leaves
-none of them or `uq_runs_export_witness` behind.
+Cover exact 23 -> 24 -> 25 -> 26 ordering, `BEGIN IMMEDIATE` contention with
+two independent openers, malformed predecessor refusal, duplicate key refusal,
+operation+child-call and artifact preservation, rollback failure,
+foreign-key-restore failure, close failure, physical-connection invalidation,
+and successful reopen. Snapshot the complete normalized `sqlite_schema` plus
+row contents before every injected rebuild/new-object failure and assert exact
+equality afterward. The snapshot registry, chunk manifest, final-manifest
+fields, and effect association are atomic: no table, index, trigger,
+`uq_runs_export_witness`, renamed temporary table, copied row, or epoch stamp
+may survive a failed migration.
 
 After upgrading a valid epoch-25 fixture, inspect
 `PRAGMA index_list('runs')` and `PRAGMA index_xinfo('uq_runs_export_witness')`
@@ -1024,29 +1083,77 @@ Run:
 .venv/bin/pytest -q tests/unit/core/landscape/test_sink_effect_migration.py tests/unit/core/landscape/test_artifact_idempotency_migration.py
 ```
 
-Expected: FAIL because database synchronization has no 25 -> 26 verb.
+Expected: FAIL because `_migrate_sqlite_schema()` has no 25 -> 26 verb.
 
-- [ ] **Step 3: Add ordered migration dispatch**
+- [ ] **Step 3: Extend the live constructor's ordered migration dispatch**
 
-Extend `_sync_sqlite_schema_epoch()` so only these populated predecessors are
-accepted:
+The constructor already calls `_migrate_sqlite_schema()` before
+`_validate_schema()`. Extend that method, not `_sync_sqlite_schema_epoch()`,
+from `range(2)` to the exact three-step chain:
 
 ```python
-if epoch == 23:
-    self._migrate_sqlite_epoch_23_to_24()
-    epoch = 24
-if epoch == 24:
-    self._migrate_sqlite_epoch_24_to_25()
-    epoch = 25
-if epoch == 25:
-    self._migrate_sqlite_epoch_25_to_26()
+for _step in range(3):
+    epoch = self._get_sqlite_schema_epoch()
+    if epoch == 23:
+        self._migrate_sqlite_epoch_23_to_24()
+        continue
+    if epoch == 24:
+        self._migrate_sqlite_epoch_24_to_25()
+        continue
+    if epoch == 25:
+        self._migrate_sqlite_epoch_25_to_26()
+        continue
+    return
 ```
 
-`_migrate_sqlite_epoch_25_to_26()` must validate the exact epoch-25 physical
-shape before and after `BEGIN IMMEDIATE`, create effect tables in FK-safe
-order, rebuild artifacts and operations with data-preserving `INSERT SELECT`,
-run `PRAGMA foreign_key_check`, stamp 26 inside the transaction, and apply the
-existing rollback/invalidate/close discipline on every exception path.
+Update its docstring and `_get_sqlite_schema_epoch()` documentation to name the
+three-step chain; no comment may still describe epoch 25 as the terminal
+migration.
+
+Keep `_sync_sqlite_schema_epoch()` as the post-validation stamp/guard for a
+fresh/compatible schema only; it must not run a populated predecessor
+migration. Update both concurrent-successor checks in
+`_migrate_sqlite_epoch_23_to_24()` to treat 24, 25, or 26 as peer-completed,
+and both checks in `_migrate_sqlite_epoch_24_to_25()` to treat 25 or 26 as
+peer-completed. Tests pause each older step before and after the writer lock
+while another opener reaches 26, proving the chain returns cleanly rather than
+misclassifying the current schema.
+
+`_migrate_sqlite_epoch_25_to_26()` follows the existing epoch-23-to-24 raw-
+connection protocol exactly:
+
+1. Validate the exact epoch-25 physical shape and duplicate-free artifact keys
+   before checking out the raw migration connection. Do not call an engine-
+   based inspector/validator while holding the raw transaction.
+2. On validation failure, re-read the epoch; return only if a peer already
+   completed epoch 26, otherwise preserve the original validation traceback.
+3. Check out one raw connection, execute `PRAGMA foreign_keys=OFF`, verify it
+   returns zero, then and only then execute `BEGIN IMMEDIATE`.
+4. Re-read `PRAGMA user_version` under the writer lock. Roll back and return for
+   peer-completed 26; require exactly 25 otherwise.
+5. Capture dependent index/trigger DDL. Create replacement `operations` and
+   `artifacts` tables, copy with explicit-column `INSERT SELECT`, drop/rename in
+   FK-safe order while enforcement is off, and recreate every required
+   dependent object. Preserve operation IDs exactly so existing
+   `calls.operation_id` children remain valid. Backfill only the new columns;
+   compare source/destination row counts and exact legacy columns before
+   proceeding.
+6. Create all new epoch-26 tables, indexes, deferred FKs, and triggers in
+   deterministic FK-safe order. Verify the exact parent witness index before
+   creating snapshot children.
+7. Execute `PRAGMA foreign_key_check` and require no rows. Using the same raw
+   cursor, compare every table/column/FK/check/index/trigger and canonical DDL
+   fingerprint to the epoch-26 physical manifest; an engine checkout here is
+   forbidden.
+8. Execute `PRAGMA user_version=26` and commit only after all checks pass.
+9. On any exception, retain the primary traceback and roll back. A rollback
+   failure marks the connection uncertain and requires invalidation.
+10. In `finally`, execute `PRAGMA foreign_keys=ON` and verify it returns one on
+    every success, peer-winner, and failure path. Restoration failure requires
+    invalidation and an integrity error (or note on the primary error). Close
+    the connection; close failure also requires invalidation. If invalidation
+    itself fails, attach that failure without hiding the primary error.
+
 The artifacts rebuild also adds non-null `publication_performed` and
 `publication_evidence_kind`; legacy epoch-25 rows backfill `true` and
 `legacy_returned` so old evidence is not misclassified as no-publication.
@@ -1068,6 +1175,9 @@ migration transaction. The epoch-26 physical manifest/fingerprint includes
 columns, and canonical SQL alongside every installed table, column, FK, and
 trigger. After `PRAGMA foreign_key_check`, compare the installed index and
 trigger names/shapes/SQL fingerprints to that manifest before stamping 26.
+Inject a failure after each replacement table creation/copy/drop/rename and
+after each new-object family. Assert the exact operation+call and artifact rows,
+full schema, epoch 25, and absence of partial objects after every rollback.
 
 - [ ] **Step 4: Run migration and compatibility suites**
 
@@ -1711,11 +1821,17 @@ git commit -m "feat(landscape): finalize sink effects atomically"
 - Create: `src/elspeth/core/landscape/export_read_model.py`
 - Create: `src/elspeth/engine/orchestrator/audit_export_effects.py`
 - Create: `tests/fixtures/sink_effects.py`
+- Modify: `src/elspeth/contracts/audit_export.py`
+- Modify: `src/elspeth/contracts/sink_effects.py`
 - Modify: `src/elspeth/engine/executors/sink.py`
 - Modify: `src/elspeth/engine/orchestrator/sink_flush.py`
 - Modify: `src/elspeth/engine/orchestrator/export.py`
 - Modify: `src/elspeth/core/landscape/exporter.py`
 - Modify: `src/elspeth/core/landscape/export_mappers.py`
+- Test: `tests/unit/contracts/test_audit_export_hashing.py`
+- Test: `tests/unit/core/landscape/test_exporter.py`
+- Test: `tests/property/core/test_exporter_properties.py`
+- Test: `tests/integration/audit/test_exporter_batch_queries.py`
 - Test: `tests/unit/engine/test_sink_effect_executor.py`
 - Test: `tests/unit/core/landscape/test_audit_export_snapshots.py`
 - Test: `tests/unit/core/landscape/test_audit_export_read_model.py`
@@ -1796,7 +1912,18 @@ snapshot and cannot perturb retries.
 
 Exercise corrupt, missing, reordered, descriptor-mismatched, and oversized
 chunks through `RestrictedAuditExportSnapshotReader`; no bad bytes may reach
-the adapter. Cover same-key divergent manifests, lower current acceptance
+the adapter. Separately tamper the final-manifest content, ref, hash, size,
+schema, snapshot linkage, public `signature`, `signature_algorithm`, and
+`signature_key_id`; reject missing, duplicate, and non-final manifests. Assert
+`iter_verified_chunks()` yields data chunks only and the no-argument
+`read_verified_signed_manifest()` returns exactly the bound winner bytes.
+Pin transport framing: descriptor/hash/size cover RFC 8785 final-object bytes
+with no newline. JSON target bytes are the concatenated verified data chunks
+(whose records are already newline-framed) plus those manifest bytes at EOF,
+with no trailing newline added; reconciliation hashes the same exact bytes.
+CSV stores the identical bytes at reserved `audit_manifest.v2.json` and rejects
+generated-name aliases or case-folding collisions.
+Cover same-key divergent manifests, lower current acceptance
 limits, candidate rollback, CAS-loser orphan marking/cleanup, shared winner
 chunk preservation, a current store switch that cannot resolve the winner's
 stored `content_store_id`, and one snapshot exported to two targets producing
@@ -1804,6 +1931,28 @@ one snapshot plus two effects. At the input contract, raw-schema trigger, and
 restricted-reader boundaries, separately reject a lowercase, well-formed
 `content_ref="sha256:<different-64-hex>"` whose suffix does not equal the
 declared `content_hash`; checking only each field's syntax is insufficient.
+
+Version the existing exporter contract explicitly in
+`tests/unit/core/landscape/test_exporter.py`,
+`tests/property/core/test_exporter_properties.py`, and
+`tests/integration/audit/test_exporter_batch_queries.py`. HMAC mode retains a
+public per-record `signature` over the RFC 8785 unsigned record and preserves
+`final_hash = SHA256(concatenated signature hex ASCII)`; unsigned mode omits
+per-record signatures and uses the design's deterministic record-digest chain.
+Both modes now emit exactly one `elspeth.audit-export-manifest.v2` object last.
+Pin the exhaustive fields, `signature` string versus null, internal/public
+mapping, stable `completed_at` timestamp, deterministic repeats, and manifest-
+last ordering. Do not retain the obsolete unsigned-no-manifest or dynamic
+`datetime.now()` expectations.
+
+Extend `tests/unit/contracts/test_audit_export_hashing.py` with one independent
+end-to-end literal vector. Hard-code expected UTF-8 bytes and lowercase hex for
+public config, registry key, snapshot content, snapshot ID, each chunk seal
+including the exact `{kind:"genesis"}` predecessor, chunk manifest, snapshot
+seal, signing body, HMAC signature, and signed/unsigned final-manifest bytes,
+hash/ref/size. The expectations may use `hashlib`/`hmac` only to cross-check
+literal values after asserting them; they must not call `C`, production payload
+builders, or the production derivation helper to construct expectations.
 
 - [ ] **Step 2: Run tests against the old write/flush boundary**
 
@@ -1862,29 +2011,47 @@ connection, and only then perform content-store I/O; no database transaction or
 lock spans chunk reads/writes.
 
 Use immutable export-terminal `completed_at` as the stable snapshot/exported
-timestamp. Split the
-spool into ordered globally addressed `sha256:<hex>` chunks and execute the
-versioned derivation without a reverse edge:
+timestamp. Execute only the exact closed RFC 8785 stage schemas and tags from
+the design and Task 2b:
 
-1. Canonically serialize and frame stable ordered records; deterministically
-   chunk only complete frames.
-2. For each exact chunk byte string, compute lowercase `content_hash` and set
-   `content_ref = "sha256:" + content_hash`.
-3. Compute `snapshot_hash = H(C("audit-export-snapshot-content-v1", ...))`
-   over the snapshot-ID-free ordered content descriptors and exact totals.
-4. Compute `snapshot_id = H(C("audit-export-snapshot-id-v1",
-   registry_key_hash, snapshot_hash))`.
-5. Compute dense sequential chunk seals from typed `GENESIS`, then the exact
-   predecessor seal, binding the now-known snapshot ID.
-6. Compute `manifest_hash`, then `snapshot_seal_hash` over the registry key,
-   immutable run witness, derived hashes/seals, exact totals, and
-   manifest-shaping chunk policy only.
-7. Encode the canonical signing body and compute deterministic HMAC-SHA256 (or
-   the typed unsigned result), then encode the final signed manifest once and
-   derive its hash/ref/size. The signing preimage explicitly excludes
-   `signature_hex`, `signed_manifest_hash`, `signed_manifest_ref`,
-   `signed_manifest_size_bytes`, and final signed-manifest bytes; none of those
-   values feeds an earlier derivation.
+1. Canonically serialize each stable ordered data record without `signature`.
+   HMAC mode preserves the current per-record HMAC contract and adds lowercase
+   `signature`; unsigned mode omits it. Frame the final record object as RFC
+   8785 UTF-8 plus `b"\n"` and chunk only complete frames.
+2. Preserve current signed `final_hash` semantics as SHA-256 of concatenated
+   per-record signature hex ASCII. For unsigned v2, use SHA-256 of concatenated
+   per-record SHA-256 hex ASCII. Persist the exact closed
+   `record_chain_algorithm`; the final manifest never enters either chain.
+3. For each exact data-chunk byte string, compute lowercase `content_hash` and
+   exact `content_ref = REF(content_hash)`. The final manifest is not a data
+   chunk and contributes to no data count/total.
+4. Compute `snapshot_hash = H(C("audit-export-snapshot-content-v1",
+   exact_payload))`, then `snapshot_id =
+   H(C("audit-export-snapshot-id-v1", exact_payload))`.
+5. Compute every dense chunk seal from the exact closed predecessor object:
+   ordinal zero is `{kind:"genesis"}` with no hash; every successor is
+   `{hash:<previous-seal>,kind:"chunk_seal"}`. Compute the sealed data-chunk
+   manifest and then snapshot seal from their exhaustive schemas.
+6. Build the exhaustive final-manifest core object with schema
+   `elspeth.audit-export-manifest.v2`. Its signing preimage is exactly
+   `C("audit-export-final-manifest-signing-body-v2", core_without_signature)`.
+   HMAC mode derives `signature_hex`; unsigned requires null and `UNSIGNED`.
+   Add the one public `signature` field and encode the final object once with
+   RFC 8785.
+7. Derive final-manifest size/hash/ref from those exact UTF-8 bytes and persist
+   them only in the registry and `AuditExportSignedManifestInput`. The signing
+   preimage and final object contain no final-manifest address/hash/ref/size or
+   bytes, so no reverse edge exists. Public `signature`,
+   `signature_algorithm`, and `signature_key_id` map exactly to internal
+   `signature_hex`, `signing_mode`, and `signer_key_id`.
+
+`signed_manifest_bytes` has no newline. JSON publication is exactly
+`b"".join(reader.iter_verified_chunks()) +
+reader.read_verified_signed_manifest()` and therefore ends at the final `}`;
+JSON reconciliation compares the exact complete bytes and manifest suffix.
+CSV writes the same no-newline bytes at reserved `audit_manifest.v2.json`.
+Reject a data filename equal to that path or any case-folding alias before
+staging.
 
 Verify configured bounds, durably store the fully materialized candidate, and
 only then cross the pre-CAS barrier and CAS-insert or exact-compare the immutable
@@ -1894,12 +2061,15 @@ acceptance-only totals, and `content_store_id` are absent from the snapshot
 derivation. Existing winners are reusable when
 actual totals meet the current acceptance limits even if those limits differ;
 per-chunk/chunking policy is part of identity. Bind the restricted reader to
-the winning `content_store_id` resolver. On CAS loss/rollback, mark only this
+the winning `content_store_id` resolver, exact data descriptors, and exact
+final-manifest descriptor. It exposes only verified data iteration plus the
+one no-argument verified final-manifest read. On CAS loss/rollback, mark only this
 candidate's objects; grace-period GC must prove no manifest reference in a
 fresh transaction before exact deletion. The coordinator reserves one
 zero-member `AUDIT_EXPORT_SNAPSHOT` effect with one
-snapshot association and replays only manifest chunks through an
-effect-capable fake/JSON adapter. Effect identity binds the manifest and safe
+snapshot association and replays only verified data chunks followed by the
+verified v2 manifest through an effect-capable fake/JSON adapter. Effect
+identity binds the data manifest, final-manifest descriptor, and safe
 target configuration. Export audit rows are registered only after the
 snapshot winner exists, making self-recursion structural.
 
@@ -1908,7 +2078,7 @@ snapshot winner exists, making self-recursion structural.
 Run:
 
 ```bash
-.venv/bin/pytest -q tests/unit/engine/test_sink_effect_executor.py tests/unit/core/landscape/test_audit_export_snapshots.py tests/unit/core/landscape/test_audit_export_read_model.py tests/integration/pipeline/test_sink_effect_recovery.py tests/integration/pipeline/test_audit_export_effect_recovery.py tests/unit/engine/test_sink_executor_diversion.py tests/unit/engine/orchestrator/test_pending_sink_grouping.py tests/unit/engine/orchestrator/test_export.py
+.venv/bin/pytest -q tests/unit/contracts/test_audit_export_hashing.py tests/unit/core/landscape/test_exporter.py tests/property/core/test_exporter_properties.py tests/integration/audit/test_exporter_batch_queries.py tests/unit/engine/test_sink_effect_executor.py tests/unit/core/landscape/test_audit_export_snapshots.py tests/unit/core/landscape/test_audit_export_read_model.py tests/integration/pipeline/test_sink_effect_recovery.py tests/integration/pipeline/test_audit_export_effect_recovery.py tests/unit/engine/test_sink_executor_diversion.py tests/unit/engine/orchestrator/test_pending_sink_grouping.py tests/unit/engine/orchestrator/test_export.py
 .venv/bin/pytest -q -m testcontainer tests/testcontainer/core/test_audit_export_snapshot_postgres.py
 .venv/bin/mypy src/elspeth/core/landscape/execution/audit_export_snapshots.py src/elspeth/core/landscape/export_read_model.py src/elspeth/core/landscape/exporter.py src/elspeth/engine/executors/sink_effects.py src/elspeth/engine/executors/sink.py src/elspeth/engine/orchestrator/audit_export_effects.py src/elspeth/engine/orchestrator/sink_flush.py src/elspeth/engine/orchestrator/export.py
 ```
@@ -1919,7 +2089,7 @@ remains semantically correct.
 - [ ] **Step 5: Commit the production boundary**
 
 ```bash
-git add src/elspeth/core/landscape/execution/audit_export_snapshots.py src/elspeth/core/landscape/export_read_model.py src/elspeth/core/landscape/exporter.py src/elspeth/core/landscape/export_mappers.py src/elspeth/engine/executors src/elspeth/engine/orchestrator/audit_export_effects.py src/elspeth/engine/orchestrator/sink_flush.py src/elspeth/engine/orchestrator/export.py tests/fixtures/sink_effects.py tests/unit/core/landscape/test_audit_export_snapshots.py tests/unit/core/landscape/test_audit_export_read_model.py tests/unit/engine/test_sink_effect_executor.py tests/unit/engine/orchestrator/test_export.py tests/integration/pipeline/test_sink_effect_recovery.py tests/integration/pipeline/test_audit_export_effect_recovery.py tests/testcontainer/core/test_audit_export_snapshot_postgres.py
+git add src/elspeth/contracts/audit_export.py src/elspeth/contracts/sink_effects.py src/elspeth/core/landscape/execution/audit_export_snapshots.py src/elspeth/core/landscape/export_read_model.py src/elspeth/core/landscape/exporter.py src/elspeth/core/landscape/export_mappers.py src/elspeth/engine/executors src/elspeth/engine/orchestrator/audit_export_effects.py src/elspeth/engine/orchestrator/sink_flush.py src/elspeth/engine/orchestrator/export.py tests/fixtures/sink_effects.py tests/unit/contracts/test_audit_export_hashing.py tests/unit/core/landscape/test_exporter.py tests/property/core/test_exporter_properties.py tests/integration/audit/test_exporter_batch_queries.py tests/unit/core/landscape/test_audit_export_snapshots.py tests/unit/core/landscape/test_audit_export_read_model.py tests/unit/engine/test_sink_effect_executor.py tests/unit/engine/orchestrator/test_export.py tests/integration/pipeline/test_sink_effect_recovery.py tests/integration/pipeline/test_audit_export_effect_recovery.py tests/testcontainer/core/test_audit_export_snapshot_postgres.py
 git commit -m "feat(engine): coordinate durable sink effects"
 ```
 
@@ -2329,6 +2499,12 @@ return/before effect finalization. Two concurrent exporters must reuse one
 snapshot/effect; later audit DB mutations must not alter recovery bytes. Assert
 exact-existing bundle converges, divergent-existing is UNKNOWN/fail-closed,
 non-export-terminal run is refused, and no export row enters its own snapshot.
+For both signing modes, assert JSON writes verified data chunks followed by the
+exact v2 final-manifest bytes as the one last record. Assert CSV places the
+same no-newline bytes at reserved `audit_manifest.v2.json` and includes that path/hash/size
+in the exact-tree manifest. Reject tampered, missing, duplicate, or non-final
+manifest input plus exact/case-folded filename collisions before target
+publication.
 
 For CSV, add Linux-only tests for target creation between inspection and
 publication, `EEXIST`, missing/extra/reordered/changed-manifest entries,
@@ -2359,10 +2535,16 @@ terminal evidence in the token-first transaction. Use `NO_PUBLICATION` for
 prepare-known zero accepted groups and the target marker for result-derived
 Database zero accepted groups.
 
-Complete the real audit-export adapters. JSON consumes ordered registered
-manifest chunks through its effect methods. CSV multifile prepares a private
+Complete the real audit-export adapters. JSON consumes ordered registered data
+chunks through `iter_verified_chunks()`, then writes exactly one
+`read_verified_signed_manifest()` result as the final record; no adapter may
+synthesize, mutate, or reorder the manifest. CSV multifile prepares a private
 effect-addressed sibling directory with a canonical relative-file manifest and
-aggregate bundle hash, fsyncs every file and the staging directory, then
+aggregate bundle hash, places the same verified v2 final-manifest bytes at the
+reserved literal relative path `audit_manifest.v2.json` with no trailing
+newline, rejects that exact generated name and every case-folding alias, binds
+its exact ref/hash/size in the bundle,
+fsyncs every file and the staging directory, then
 publishes only with Linux
 `renameat2(AT_FDCWD, staging, AT_FDCWD, target, RENAME_NOREPLACE)` through a
 checked libc/syscall wrapper. Preflight proves Linux/syscall support,

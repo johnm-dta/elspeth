@@ -136,8 +136,8 @@ parallel optional collections and never a caller-supplied discriminator:
 - `SinkEffectAuditExportSnapshotInput(snapshot_id, source_run_id,
   registry_key_hash, manifest_hash, snapshot_hash, serialization_version,
   export_format, signing_mode, signer_key_id, record_count, total_bytes,
-  chunk_count, chunks, reader)` has no token fields. Its `input_kind` property
-  is derived as `AUDIT_EXPORT_SNAPSHOT`.
+  chunk_count, chunks, signed_manifest, reader)` has no token fields. Its
+  `input_kind` property is derived as `AUDIT_EXPORT_SNAPSHOT`.
 
 `AuditExportSnapshotChunkInput(ordinal, content_ref, content_hash, size_bytes,
 record_count)` is a frozen descriptor. Ordinals are dense and non-negative;
@@ -148,6 +148,18 @@ tuple order before the request reaches an adapter. Export format is closed to
 `JSON`/`CSV`; signing mode is closed to `UNSIGNED`/`HMAC_SHA256`. Unsigned
 input requires the reserved `UNSIGNED` signer identity, while signed input
 requires a non-reserved, operator-visible, credential-free `signer_key_id`.
+
+`AuditExportSignedManifestInput(content_ref, content_hash, size_bytes,
+manifest_schema, derivation_version, signature_algorithm, signature_key_id,
+signature)` is the public immutable descriptor for the one final manifest. Its reference/hash
+equality and lowercase-hex/positive-size rules match a chunk descriptor, but
+it is not a data chunk and is excluded from `chunk_count`, `record_count`, and
+`total_bytes`. `manifest_schema` is exactly
+`elspeth.audit-export-manifest.v2`. `signature_algorithm` is the same closed
+`AuditExportSigningMode` used by the parent; `signature_key_id` equals the
+parent `signer_key_id`; and public `signature` maps exactly to the registry's
+internal `signature_hex`. It is lowercase 64-hex for `HMAC_SHA256` and `None`
+for `UNSIGNED`.
 
 `SinkEffectPrepareRequest(effect_id, effect_input, inspection)` accepts only
 that union. Its `input_kind` is derived from `effect_input` and is never
@@ -163,14 +175,20 @@ hash, not an unbounded copy of records in Landscape. Once its registry row
 exists, every retry reads the immutable manifest/chunks and never rereads the
 now-self-modified live audit tables.
 
-The input carries a bound `RestrictedAuditExportSnapshotReader`. The frozen
-capability exposes immutable `snapshot_id`, `manifest_hash`, and `chunk_count`
-and only `iter_verified_chunks() -> Iterator[bytes]`; it has no arbitrary-ref
-read method, Landscape/query access, or store credentials. Before yielding
-each registered chunk it rechecks descriptor order, content reference, exact
-hash, byte size, record count, and cumulative limits. The capability is
-excluded from dataclass comparison and representation; only its binding fields
-are compared. It is never serialized into plans, safe evidence, or Landscape.
+The input carries a bound `RestrictedAuditExportSnapshotReader`. The frozen,
+factory-only capability exposes immutable `snapshot_id`, `manifest_hash`, and
+`chunk_count`, `iter_verified_chunks() -> Iterator[bytes]` for data chunks,
+and one no-argument `read_verified_signed_manifest() -> bytes` for the bound
+winner descriptor. It has no arbitrary-ref read method, Landscape/query
+access, store credentials, or signer-key access. Before yielding each data
+chunk it rechecks descriptor order, content reference, exact hash, byte size,
+record count, and cumulative limits. Before returning the final manifest it
+rechecks its exact ref/hash/size, canonical bytes, schema, snapshot binding,
+signature metadata, and equality with the public descriptor and registry;
+the factory verifies HMAC with the resolved secret before constructing the
+credential-free reader. The capability is excluded from dataclass comparison
+and representation; only its binding fields are compared. It is never
+serialized into plans, safe evidence, or Landscape.
 
 ### Plan
 
@@ -465,7 +483,8 @@ exporter and canonical serialization versions, format, signing mode,
 chunking algorithm/per-chunk manifest-shaping limits, `record_count`,
 `total_bytes`, `chunk_count`, `manifest_hash`,
 `last_chunk_seal_hash`, `snapshot_hash`, `snapshot_seal_hash`, nullable
-`signature_hex`, and signed-manifest hash/ref/size. The exact named,
+`signature_hex`, `record_chain_algorithm`, `final_hash`,
+`signed_manifest_schema`, and signed-manifest hash/ref/size. The exact named,
 non-partial parent index is
 `CREATE UNIQUE INDEX uq_runs_export_witness ON runs(run_id, status, completed_at)`;
 the ordered columns and default binary/backend collation are part of the
@@ -502,8 +521,9 @@ excluded just as the PostgreSQL backend-PID test does.
 Enumeration and canonical serialization finish into a bounded operator-owned
 local spool inside that read transaction. The spool is fsynced and the DB
 transaction/connection closes before any content-store read or write. Chunking
-then writes bounded immutable content-addressed objects. Only after every
-chunk is durable does a short transaction CAS-insert or exact-compare the
+then writes bounded immutable content-addressed data objects and the separate
+final-manifest object. Only after every data chunk and the final manifest are
+durable does a short transaction CAS-insert or exact-compare the
 immutable registry candidate. Concurrent candidates reuse an existing exact
 winner; any same-key difference in descriptor, seal, signer identity,
 manifest-shaping chunk policy, or canonical bytes is an audit-integrity error.
@@ -515,10 +535,11 @@ lowering one below the winner's actual total fails before effect reservation.
 Candidate cleanup is reference-safe. On CAS loss or rollback, the producer
 may mark only objects written by that candidate in its configured namespace;
 garbage collection observes a grace period and deletes an object only after a
-fresh transaction proves no winning manifest references it. It never deletes
+fresh transaction proves no winning manifest references it, including a final-
+manifest reference. It never deletes
 by prefix alone and never removes a winner/shared content hash. After registry
-insertion, recovery uses only the manifest/chunks and never rereads live audit
-tables.
+insertion, recovery uses only the registered data chunks plus final manifest
+and never rereads live audit tables.
 
 An exporter whose initial registry lookup races with another exporter keeps
 the same consistent read snapshot it opened before the other export's audit
@@ -528,7 +549,7 @@ is forbidden.
 
 ### `audit_export_snapshot_chunks`
 
-The ordered manifest stores `(snapshot_id, ordinal)`, credential-free
+The ordered data-chunk manifest stores `(snapshot_id, ordinal)`, credential-free
 `content_ref`, `content_hash`, `size_bytes`, `record_count`,
 `predecessor_seal_hash`, cumulative byte/record totals, and `chunk_seal_hash`.
 Every row requires a lowercase 64-hex `content_hash` and exact
@@ -540,8 +561,10 @@ Ordinal zero stores a null predecessor that the canonical seal encoder maps to
 the typed `GENESIS` value; every later row requires the exact prior row seal.
 A chunk seal hashes the serialization version, snapshot ID,
 ordinal, predecessor, content reference/hash, sizes/counts, and cumulative
-totals. The manifest hash is the canonical hash of the ordered seals. The
-snapshot seal binds the registry key, immutable export-terminal witness,
+totals. The manifest hash is the canonical hash of the ordered data-chunk
+seals. The v2 final manifest is a separate content object and never occupies a
+chunk ordinal or contributes to data `chunk_count`, `record_count`, or
+`total_bytes`. The snapshot seal binds the registry key, immutable export-terminal witness,
 manifest/last seal, actual counts, manifest-shaping chunk policy, and snapshot
 hash. It does not bind acceptance-only total limits.
 
@@ -562,10 +585,12 @@ non-dense graph is impossible.
 SQLite/PostgreSQL cannot portably recompute SHA-256 in a CHECK/trigger, so the
 database does not pretend to prove cryptographic content. The repository
 recomputes each canonical chunk seal plus manifest/snapshot seals against
-content bytes before registry insertion. There is no public unverified
+content bytes and verifies the final-manifest bytes before registry insertion.
+There is no public unverified
 snapshot loader: the loading API requires the winning store resolver and
 recomputes all seals against bytes before returning the snapshot; the
-restricted reader repeats per-chunk verification before each yield. Internal
+restricted reader repeats per-chunk verification before each yield and
+verifies the bound final manifest before returning it. Internal
 row decoders alone are not usable snapshot capabilities. Backend mutation
 guards reject `UPDATE` or `DELETE` of any sealed registry or chunk row. Raw-SQL tests cover structural
 order/predecessor/totals/terminal and mutation guards; loader/reader adversarial
@@ -611,22 +636,24 @@ key-derived identity is forbidden. The configured export policy explicitly
 chooses either multi-version winners or single-export refusal when the signer
 ID changes.
 
-Canonical public export configuration is encoded with the same named-field,
-length-delimited canonical hash primitive as other durable identities:
+Canonical public export configuration uses the committed RFC 8785 primitive
+in `contracts/hashing.py`. Its closed payloads are:
+
+```json
+{"chunking_algorithm_version":"<string>","export_format":"json|csv","exporter_version":"<string>","include_raw_error_rows":false,"per_chunk_byte_limit":1,"per_chunk_record_limit":1,"serialization_version":"<string>","signer_key_id":"<credential-free string>","signing_mode":"unsigned|hmac_sha256"}
+```
+
+for `C("audit-export-public-config-v1", payload)`, and:
+
+```json
+{"export_format":"json|csv","exporter_version":"<string>","public_export_config_hash":"<lowercase 64-hex>","serialization_version":"<string>","signer_key_id":"<credential-free string>","signing_mode":"unsigned|hmac_sha256","source_run_id":"<string>"}
+```
+
+for `C("audit-export-registry-key-v1", payload)`. Therefore:
 
 ```text
-public_export_config_hash = H(C(
-  "audit-export-public-config-v1", exporter_version,
-  serialization_version, format, signing_mode, signer_key_id,
-  include_raw_error_rows, chunking_algorithm_version,
-  per_chunk_record_limit, per_chunk_byte_limit
-))
-
-registry_key_hash = H(C(
-  "audit-export-registry-key-v1", source_run_id, exporter_version,
-  serialization_version, format, signing_mode, signer_key_id,
-  public_export_config_hash
-))
+public_export_config_hash = H(C("audit-export-public-config-v1", public_config_payload))
+registry_key_hash = H(C("audit-export-registry-key-v1", registry_key_payload))
 ```
 
 The snapshot key is target-independent. Sink name, target/path/URI, sink public
@@ -641,81 +668,172 @@ therefore reuse one registry winner and reserve two target effects.
 and threads them through `export_landscape`; constructing an implicit
 `RecorderFactory(db)`/default store inside the export path is forbidden.
 
-### Canonical audit-export derivation v1
+### Canonical audit-export derivation v1 and final manifest v2
 
 `AUDIT_EXPORT_DERIVATION_VERSION = "audit-export-derivation-v1"` fixes one
-non-circular derivation order. `C(tag, fields)` is the existing canonical
-named-field encoder with this version prefix: UTF-8 field names, fields in the
-listed order, and unsigned big-endian lengths around every field name/value.
-Values use the existing type-faithful canonical value encoder. `H(bytes)` is
-lowercase hexadecimal SHA-256 over its exact byte argument; `REF(hash)` is
-exactly the lowercase
-ASCII string `sha256:` followed by that 64-character hash. No step may reorder
-fields, use display JSON as a hash preimage, or substitute retry wall time.
+non-circular derivation order. There is no length-delimited or implicit
+type-faithful encoder. Production implements one helper in
+`contracts/audit_export.py`:
 
-Every candidate executes these steps in order and completes them before the
-registry compare-and-set (CAS):
+```python
+def C(tag: str, payload: ClosedAuditExportJSON) -> bytes:
+    return canonical_json({"payload": payload, "schema": tag}).encode("utf-8")
+```
 
-1. Compute `public_export_config_hash` and then `registry_key_hash` from the
-   target-independent formulas above.
-2. Serialize ordered source records with the versioned JSON/CSV serializer and
-   the immutable run `completed_at` as `exported_at`. Frame each record with
-   its dense record ordinal and type. The exporter-owned top-level envelope
-   reserves `snapshot_id`, `snapshot_hash`, `manifest_hash`,
-   `snapshot_seal_hash`, `signature`, `signature_algorithm`, `signature_key_id`,
-   `signed_manifest_hash`, `signed_manifest_ref`, and
-   `signed_manifest_size_bytes`; caller attempts to write those envelope slots
-   are rejected. Source/user payload remains nested,
-   type-tagged canonical data and may legitimately contain the same key
-   strings. The invariant is that exporter-derived snapshot, manifest, seal,
-   and signature values never enter any record or chunk preimage.
-3. Partition complete record frames with `chunking_algorithm_version`: append
-   the next whole frame unless it would exceed the configured per-chunk record
-   or byte limit, then close the current non-empty chunk. A single oversized
-   frame fails. For each exact `chunk_bytes[i]`, compute
-   `content_hash[i] = SHA256(chunk_bytes[i]).hexdigest()` and require
-   `content_ref[i] == "sha256:" + content_hash[i]`. Hashes and refs use
-   lowercase only.
-4. Compute `snapshot_hash = H(C("audit-export-snapshot-content-v1", ...))`
-   over serialization/chunking versions, the ordered snapshot-ID-free tuples
-   `(ordinal, content_hash, size_bytes, record_count, cumulative_bytes,
-   cumulative_records)`, and final totals. This preimage contains no registry
-   target, effect ID, snapshot ID, seal, manifest, signature, or store ID.
-5. Compute deterministic
-   `snapshot_id = H(C("audit-export-snapshot-id-v1", registry_key_hash,
-   snapshot_hash))`.
-6. Compute chunk seals in ordinal order. Seal zero uses the typed `GENESIS`
-   predecessor; seal `i>0` uses `chunk_seal_hash[i-1]`. Each seal hashes the
-   derivation/serialization versions, `snapshot_id`, ordinal, exact predecessor,
-   content hash/ref, size/count, and cumulative totals.
-7. Compute `manifest_hash = H(C("audit-export-manifest-v1", snapshot_id,
-   ordered chunk descriptors and seals, chunk_count, record_count,
-   total_bytes))`.
-8. Compute `snapshot_seal_hash = H(C("audit-export-snapshot-seal-v1",
-   registry_key_hash, source_run_id, immutable source status/completed_at,
-   exported_at, snapshot_id, snapshot_hash, manifest_hash,
-   last_chunk_seal_hash, record_count, total_bytes, chunk_count,
-   chunking algorithm and per-chunk limits))`. Acceptance-only total limits,
-   target/effect identity, store ID, and signature fields remain excluded.
-9. Build the canonical signing body from the derivation version, signing mode,
-   signer ID, registry key, immutable run witness, snapshot ID/hash/seal,
-   manifest hash, ordered chunk descriptors/seals, and exact totals. The
-   signing preimage explicitly excludes `signature_hex`,
-   `signed_manifest_hash`, `signed_manifest_ref`,
-   `signed_manifest_size_bytes`, and the final encoded signed manifest bytes.
-   For `HMAC_SHA256`, compute lowercase
-   `signature_hex = HMAC-SHA256(key, signing_body).hexdigest()`; for
-   `UNSIGNED`, require a null signature and the `UNSIGNED` signer ID. Encode the
-   final signed manifest once, then derive its content address as
-   `signed_manifest_hash = SHA256(signed_manifest_bytes).hexdigest()` and
-   `signed_manifest_ref = "sha256:" + signed_manifest_hash`. Neither final
-   value feeds an earlier step.
+`canonical_json` is exactly `elspeth.contracts.hashing.canonical_json`, backed
+by RFC 8785/JCS. `ClosedAuditExportJSON` permits only closed-schema objects
+with string keys, ordered arrays, strings, booleans, null, and integers in
+`[-9007199254740991, 9007199254740991]`. Stage validators reject extra or
+missing keys, floats (including finite floats), non-finite numbers, implicit
+enum instances, datetimes, bytes, tuples, sets, maps with non-string keys, and
+integers outside that safe range. Callers convert enums to their exact
+lowercase `.value`, hashes/signatures to lowercase 64-hex strings, content refs
+to `sha256:<lowercase-64-hex>`, and instants to UTC RFC 3339 strings of the
+exact form `YYYY-MM-DDTHH:MM:SS.ffffffZ` before calling `C`; no Unicode or time
+normalization occurs inside `C`. Arrays preserve caller order; RFC 8785 sorts
+object keys.
 
-The registry stores the derivation version, detached signature (nullable only
-for `UNSIGNED`), and signed-manifest hash/ref/size in addition to the fields
-above. Its exact-winner comparison checks every derived field and byte stream.
-All derivations remain independent of sink name, target, effect ID, and
-`content_store_id`; the effect identity separately binds target configuration.
+`H(bytes)` is `hashlib.sha256(bytes).hexdigest()` over the exact supplied bytes
+and never canonicalizes again. `REF(hash)` is the exact ASCII string
+`"sha256:" + hash`. The implementation and independent golden tests use these
+closed stage payload schemas (the shown keys are exhaustive):
+
+```text
+public config:
+  {chunking_algorithm_version, export_format, exporter_version,
+   include_raw_error_rows, per_chunk_byte_limit, per_chunk_record_limit,
+   serialization_version, signer_key_id, signing_mode}
+
+registry key:
+  {export_format, exporter_version, public_export_config_hash,
+   serialization_version, signer_key_id, signing_mode, source_run_id}
+
+snapshot content:
+  {chunking_algorithm_version, chunks: [
+     {content_hash, cumulative_bytes, cumulative_records, ordinal,
+      record_count, size_bytes}
+   ], record_count, serialization_version, total_bytes}
+
+snapshot ID:
+  {registry_key_hash, snapshot_hash}
+
+chunk seal:
+  {chunking_algorithm_version, content_hash, content_ref, cumulative_bytes,
+   cumulative_records, derivation_version, ordinal,
+   predecessor: {kind: "genesis"} |
+                {hash: <lowercase-64-hex>, kind: "chunk_seal"},
+   record_count, serialization_version, size_bytes, snapshot_id}
+
+chunk manifest:
+  {chunk_count, chunks: [
+     {chunk_seal_hash, content_hash, content_ref, cumulative_bytes,
+      cumulative_records, ordinal, predecessor_seal_hash: null|<lowercase-64-hex>,
+      record_count, size_bytes}
+   ], record_count, snapshot_id, total_bytes}
+
+snapshot seal:
+  {chunk_count, chunking_algorithm_version, exported_at,
+   last_chunk_seal_hash, manifest_hash, per_chunk_byte_limit,
+   per_chunk_record_limit, record_count, registry_key_hash,
+   snapshot_hash, snapshot_id, source_completed_at, source_run_id,
+   source_status, total_bytes}
+```
+
+The corresponding tags are, respectively,
+`audit-export-public-config-v1`, `audit-export-registry-key-v1`,
+`audit-export-snapshot-content-v1`, `audit-export-snapshot-id-v1`,
+`audit-export-chunk-seal-v1`, `audit-export-manifest-v1`, and
+`audit-export-snapshot-seal-v1`. `predecessor.kind="genesis"` is the only
+GENESIS representation; it has no `hash` key. A later predecessor must use the
+second exact object shape. The snapshot-content chunks intentionally omit refs,
+snapshot ID, and seals; content hash plus size/order/totals defines content.
+
+Every candidate executes these steps before the registry compare-and-set
+(CAS):
+
+1. Compute `public_export_config_hash` and `registry_key_hash` with the first
+   two schemas.
+2. Serialize source records in stable order. Each record without its public
+   `signature` field is RFC 8785 UTF-8. In `HMAC_SHA256`, add the current public
+   per-record `signature = HMAC-SHA256(key, unsigned_record_bytes).hexdigest()`;
+   in `UNSIGNED`, omit `signature`. Frame each final data-record object as its
+   exact RFC 8785 bytes followed by `b"\n"`. `exported_at` is the immutable run
+   completion witness. Exporter-owned fields are reserved from caller payloads.
+3. Preserve the current signed record-chain semantics:
+   `final_hash = SHA256(concat(ASCII(record.signature) for records)).hexdigest()`
+   and `record_chain_algorithm = "sha256_concat_hmac_sha256_signatures_v1"`.
+   For v2 unsigned exports, use the deterministic replacement
+   `final_hash = SHA256(concat(ASCII(SHA256(unsigned_record_bytes).hexdigest())
+   for records)).hexdigest()` and
+   `record_chain_algorithm = "sha256_concat_record_sha256_v1"`. The manifest is
+   not a data record and never enters either chain.
+4. Chunk only complete framed data records. For each exact `chunk_bytes[i]`,
+   compute lowercase `content_hash[i]` and exact `content_ref[i] =
+   REF(content_hash[i])`. Data chunks exclude the final manifest.
+5. Compute `snapshot_hash`, then `snapshot_id`, then dense chunk seals from the
+   exact schemas above. Compute `manifest_hash` from the ordered sealed chunk
+   descriptors, then `snapshot_seal_hash`. Acceptance-only total limits,
+   target/effect identity, content-store ID, final-manifest descriptor, and
+   signature remain excluded from all earlier stages.
+6. Construct the exact final-manifest core object below, except `signature`.
+   The signing body is
+   `C("audit-export-final-manifest-signing-body-v2", core_object)`. For
+   `HMAC_SHA256`, compute lowercase `signature_hex =
+   HMAC-SHA256(key, signing_body).hexdigest()`; for `UNSIGNED`, require
+   `signature_hex is None` and `signer_key_id == "UNSIGNED"`.
+7. Add exactly one `signature` key whose value is `signature_hex` or JSON null,
+   encode the object once with RFC 8785, with no leading/trailing whitespace or
+   newline, and define
+   `signed_manifest_size_bytes = len(signed_manifest_bytes)`,
+   `signed_manifest_hash = SHA256(signed_manifest_bytes).hexdigest()`, and
+   `signed_manifest_ref = REF(signed_manifest_hash)`.
+
+The final object has this exhaustive v2 field set and types:
+
+```json
+{"chunk_count":1,"derivation_version":"audit-export-derivation-v1","export_format":"json|csv","exported_at":"YYYY-MM-DDTHH:MM:SS.ffffffZ","final_hash":"<lowercase 64-hex>","hash_algorithm":"sha256","last_chunk_seal_hash":"<lowercase 64-hex>","manifest_hash":"<lowercase 64-hex>","record_chain_algorithm":"sha256_concat_hmac_sha256_signatures_v1|sha256_concat_record_sha256_v1","record_count":1,"record_type":"manifest","registry_key_hash":"<lowercase 64-hex>","run_id":"<source_run_id>","schema":"elspeth.audit-export-manifest.v2","signature":"<lowercase 64-hex>|null","signature_algorithm":"hmac_sha256|unsigned","signature_key_id":"<credential-free ID|UNSIGNED>","snapshot_hash":"<lowercase 64-hex>","snapshot_id":"<lowercase 64-hex>","snapshot_seal_hash":"<lowercase 64-hex>","source_completed_at":"YYYY-MM-DDTHH:MM:SS.ffffffZ","source_status":"completed|completed_with_failures|empty","total_bytes":1}
+```
+
+Angle brackets and `|` above are schema metavariables, not literal output;
+golden vectors contain one concrete value for each mode. Count/size fields are
+safe non-negative integers, with `chunk_count`, `record_count`, and
+`total_bytes` positive for the required run record.
+
+`signature_algorithm` equals the internal `signing_mode` value exactly,
+`signature_key_id` equals `signer_key_id`, and public `signature` equals
+internal `signature_hex`. Signed and unsigned manifests contain the same keys;
+only the three signing values and record-chain algorithm differ. The signed
+preimage omits only `signature`. Self-address fields
+`signed_manifest_hash`, `signed_manifest_ref`, `signed_manifest_size_bytes`
+(and aliases such as `content_hash`, `content_ref`, or `size_bytes` for the
+manifest itself) are absent from both the signing preimage and final object.
+They live only in the registry and `AuditExportSignedManifestInput`, preventing
+self-reference. The reader rejects a final object with any extra/missing key,
+wrong canonical bytes, wrong mapping, or wrong descriptor binding.
+
+Transport never changes those bytes. JSON/JSONL target bytes are exactly
+`b"".join(verified_data_chunks) + signed_manifest_bytes`: every data record
+frame already ends in `b"\n"`, while the final manifest is the last record at
+EOF and has no trailing newline. Its descriptor/hash/size cover only those
+canonical manifest bytes, and JSON reconcile hashes/compares that exact target
+suffix and complete target byte string. CSV writes the identical bytes, also
+without a newline, at the literal reserved relative path
+`audit_manifest.v2.json`. No record type or generated CSV filename may claim
+that path or any case-folding alias; exact-tree reconciliation rejects aliases,
+duplicates, and case collisions.
+
+The registry stores the derivation version, detached `signature_hex` (nullable
+only for `UNSIGNED`), record-chain result/algorithm, literal signed-manifest
+schema, and signed-manifest
+hash/ref/size. Its exact-winner comparison checks every derived field and byte
+stream. All derivations remain independent of sink name, target, effect ID,
+and `content_store_id`; the effect identity separately binds target
+configuration. Production golden tests hard-code literal expected UTF-8 bytes,
+SHA-256/HMAC hex, and refs for public config, registry key, snapshot content,
+snapshot ID, every chunk seal including GENESIS, chunk manifest, snapshot seal,
+signing body, and both signed and unsigned final-manifest bytes/address. Those
+expectations must be written as literals and must not call `C`, the production
+schema builders, or the production derivation helper.
 
 A barriered concurrency test opens distinct repeatable-read snapshots, lets
 both contenders finish record serialization, chunk storage, every derivation,
@@ -792,13 +910,38 @@ an epoch-26 sink artifact without a valid same-run/same-node effect. Exported
 records carry both nullable fields plus an explicit producer kind so consumers
 do not infer it from missing data.
 
-SQLite 25 to 26 therefore performs a transactional artifacts-table rebuild
-to make the state link nullable, add the effect link and exclusive check, then
-adds the operation effect link and creates the stream, effect, member, and
-attempt tables, constraints, and indexes. It validates epoch
-25 structure and duplicate-free artifact keys before `BEGIN IMMEDIATE`,
-rechecks under the lock, rolls back on any anomaly, and stamps epoch 26 only
-after full verification. Exact epoch-23 databases retain the ordered
+SQLite 25 to 26 therefore performs transactional `artifacts` and `operations`
+table rebuilds to make the artifact state link nullable, add both effect links,
+and install the exclusive checks before creating the stream, effect, member,
+snapshot, and attempt objects. The live constructor invokes
+`_migrate_sqlite_schema()` before compatibility validation, so that method is
+the only migration dispatcher: its bounded loop grows from two to three steps
+and walks exactly 23 -> 24 -> 25 -> 26. `_sync_sqlite_schema_epoch()` remains
+the post-validation fresh-schema stamp/guard and never dispatches a populated
+predecessor migration. The older 23->24 step treats a peer already at 24, 25,
+or 26 as success both after predecessor-validation failure and after acquiring
+the write lock; the 24->25 step likewise accepts a peer already at 25 or 26.
+
+The 25->26 step follows the epoch-23-to-24 raw-connection discipline. It
+validates the exact predecessor before raw connection checkout, sets
+`PRAGMA foreign_keys=OFF` and verifies zero before `BEGIN IMMEDIATE`, then
+rechecks the epoch under the writer lock. A peer-completed epoch 26 rolls back
+the empty transaction and returns; any other predecessor change fails. The
+transaction snapshots dependent DDL, rebuilds populated `operations` and
+`artifacts` with explicit-column `INSERT SELECT`, and restores their exact
+indexes/triggers while preserving every operation primary key referenced by a
+`calls.operation_id` child. It then creates the new epoch-26 objects, runs
+`PRAGMA foreign_key_check`, validates the complete physical manifest, stamps
+26, and commits. Every failure rolls back all rebuilt and new objects. The
+finally path restores and verifies `PRAGMA foreign_keys=ON` on every exit; a
+rollback, restoration, or close failure marks the physical connection
+uncertain and invalidates it before surfacing the primary/cleanup error.
+
+Migration tests preserve an operation plus its child call byte-for-byte, race
+two openers through the writer lock, inject failures during each rebuild/new-
+object phase, compare the full pre/post `sqlite_schema` to prove no partial
+objects, and cover rollback plus foreign-key-restore/close failure and
+invalidation. Exact epoch-23 databases retain the ordered
 23-to-24-to-25-to-26 chain. PostgreSQL fresh schema and testcontainer probes
 must match metadata. Epoch 27 is untouched.
 
@@ -1021,9 +1164,11 @@ or fail closed.
 
 The adapter must copy the request-derived input kind into its plan. The
 coordinator rejects a mismatch with the persisted effect before plan CAS. An
-audit-export adapter may consume chunks only through
-`iter_verified_chunks()`; it cannot replace descriptors, request an arbitrary
-content ref, query Landscape, or serialize the capability into evidence.
+audit-export adapter may consume data chunks only through
+`iter_verified_chunks()` and the one final manifest only through
+`read_verified_signed_manifest()`; it cannot replace descriptors, request an
+arbitrary content ref, query Landscape, access signer credentials, or serialize
+the capability into evidence.
 
 ### Commit
 
@@ -1192,12 +1337,16 @@ members, one snapshot association, and an identity over the manifest hash plus
 safe sink target/configuration. It otherwise uses the same inspect, immutable
 plan, attempt, lease, commit, reconcile, and finalization lifecycle.
 
-JSON audit export replays the ordered manifest chunks through an effect-capable
-JSON sink adapter; retries never enumerate live Landscape rows. CSV multifile
-export uses a dedicated create-only directory-bundle adapter: prepare
-reconstructs the complete bundle into a private effect-addressed sibling
-staging directory containing a canonical bundle manifest, and the plan binds
-every relative file hash/size plus one aggregate bundle hash. Prepare fsyncs
+JSON audit export replays the ordered verified data chunks and then writes the
+exact bytes from `read_verified_signed_manifest()` as the one final record; it
+rejects a missing, duplicate, non-final, or tampered manifest, and retries never
+enumerate live Landscape rows. CSV multifile export uses a dedicated
+create-only directory-bundle adapter: prepare reconstructs the complete bundle
+into a private effect-addressed sibling staging directory containing the data
+files plus the exact verified v2 audit manifest at the reserved literal path
+`audit_manifest.v2.json`. The canonical directory-bundle manifest binds that
+audit-manifest file like every other file, and the plan binds every relative file hash/size plus
+one aggregate bundle hash. Prepare fsyncs
 each completed regular file and the staging directory before plan completion.
 Commit publishes
 on Linux only through `renameat2(AT_FDCWD, staging, AT_FDCWD, target,
@@ -1408,9 +1557,15 @@ exact bytes/metadata, exact audit attempt history, and convergent recovery.
 - Dataverse and Chroma prove durable per-member partial progress and exact
   member reconciliation; and
 - Chroma `skip/error` rejects before reservation/on_start/I/O;
-- audit JSON replays only registered manifest chunks; and
+- audit JSON replays only registered data chunks followed by the bound v2 final
+  manifest, preserving current per-record HMAC signatures and manifest-last
+  semantics;
 - audit JSON rejects missing, corrupt, reordered, descriptor-mismatched, and
-  oversized chunks before adapter-visible bytes;
+  oversized chunks before adapter-visible bytes, plus tampered, missing,
+  duplicate, or non-final manifests;
+- exporter, JSON, and CSV tests pin independent literal RFC 8785/HMAC golden
+  bytes for both signed and unsigned manifests, require the public/internal
+  signature mapping, and verify the adapter output bytes/tree exactly;
 - CSV multifile uses Linux `renameat2(RENAME_NOREPLACE)` with a forced target
   creation race, exact-tree extra/missing/symlink/path-escape/hash checks,
   legacy-directory collision, every fsync crash seam, exact-existing
@@ -1425,8 +1580,11 @@ exact bytes/metadata, exact audit attempt history, and convergent recovery.
 - real PostgreSQL distinct-backend composed lock races for reservation versus
   outcome, finalization versus state/outcome, stream reservations, takeover
   versus finalization, and artifact mutation/read paths;
-- exact 25-to-26 migration, 23-to-24-to-25-to-26 ordered migration, rollback,
-  lock contention, duplicate/malformed predecessor refusal, and reopen;
+- exact 25-to-26 migration dispatched from `_migrate_sqlite_schema()`,
+  23-to-24-to-25-to-26 ordered migration, populated operation+child-call and
+  artifact preservation, rollback/no-partial-object comparison, concurrent
+  opener short-circuits through epoch 26, FK restore/close invalidation, lock
+  contention, duplicate/malformed predecessor refusal, and reopen;
 - real PostgreSQL repeatable-read snapshot winner and concurrent post-snapshot
   audit-row exclusion, with no DB transaction spanning chunk-store I/O;
 - SQLite distinct-connection consistent-snapshot exclusion and a source-query
@@ -1439,8 +1597,9 @@ exact bytes/metadata, exact audit attempt history, and convergent recovery.
   snapshot terminal/composite FKs, immutable mutation guards, dense chunk
   predecessor-reference/cumulative-total validation, and partial-graph
   rollback, with separate loader/reader cryptographic-forgery tests;
-- content-store candidate rollback/orphan cleanup proves shared and winner
-  chunks survive, and only unreferenced candidate-owned chunks age out;
+- content-store candidate rollback/orphan cleanup proves shared and winner data
+  chunks/final manifests survive, and only unreferenced candidate-owned objects
+  age out;
 - full sink recovery, diversion, failsink, scheduler handoff, artifact export,
   and checkpoint suites;
 - strict mypy, Ruff, and repository pre-commit hooks.

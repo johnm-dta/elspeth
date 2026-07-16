@@ -11,19 +11,21 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Literal, Protocol, cast
 
-from elspeth.contracts.audit import SinkEffect
-from elspeth.contracts.hashing import stable_hash
+from elspeth.contracts.audit import SinkEffect, SinkEffectAttempt
+from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.hashing import canonical_json, stable_hash
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.contracts.sink_effects import (
     RestrictedSinkEffectContext,
     SinkEffectAttemptAction,
     SinkEffectAttemptRequest,
     SinkEffectAttemptResult,
+    SinkEffectAttemptState,
     SinkEffectCommitResult,
     SinkEffectDescriptorMode,
     SinkEffectFinalizationMember,
@@ -34,6 +36,8 @@ from elspeth.contracts.sink_effects import (
     SinkEffectInspectionMode,
     SinkEffectInspectionRequest,
     SinkEffectLease,
+    SinkEffectMember,
+    SinkEffectPipelineMembersInput,
     SinkEffectPlan,
     SinkEffectPrepareRequest,
     SinkEffectReconcileKind,
@@ -42,6 +46,11 @@ from elspeth.contracts.sink_effects import (
     SinkEffectState,
 )
 from elspeth.core.landscape.errors import LandscapeRecordError
+from elspeth.core.landscape.execution.sink_effect_attempt_results import (
+    SinkEffectReturnedResult,
+    decode_sink_effect_returned_result,
+    encode_sink_effect_returned_result,
+)
 from elspeth.core.landscape.factory import RecorderFactory
 
 
@@ -148,21 +157,38 @@ class SinkEffectCoordinator:
         if type(request) is not SinkEffectExecutionRequest:
             raise TypeError("request must be exact SinkEffectExecutionRequest")
 
+        self._persist_pipeline_member_payloads(request.effect_input)
         reservation = self._effects.reserve(request.reservation)
-        if reservation.finalized_effect_ids:
-            if reservation.new_effect is not None or reservation.open_effect_ids:
-                raise LandscapeRecordError("sink effect reservation returned a mixed finalized/open partition")
-            if len(reservation.finalized_effect_ids) != 1:
-                raise LandscapeRecordError("one execution request must resolve to exactly one finalized effect")
-            return self._load_finalized(reservation.finalized_effect_ids[0])
-
-        effect_ids = tuple(reservation.open_effect_ids)
+        effect_ids = (*reservation.finalized_effect_ids, *reservation.open_effect_ids)
         if reservation.new_effect is not None:
             effect_ids = (*effect_ids, reservation.new_effect.effect_id)
         effect_ids = tuple(dict.fromkeys(effect_ids))
-        if len(effect_ids) != 1:
-            raise LandscapeRecordError("one execution request must resolve to exactly one open effect")
-        effect = self._require_effect(effect_ids[0])
+        if not effect_ids:
+            raise LandscapeRecordError("sink effect reservation returned no effect partition")
+        effects = sorted(
+            (self._require_effect(effect_id) for effect_id in effect_ids),
+            key=lambda effect: (
+                effect.stream_id is None,
+                -1 if effect.stream_sequence is None else effect.stream_sequence,
+                effect.effect_id,
+            ),
+        )
+        results: list[SinkEffectFinalizationResult] = []
+        for effect in effects:
+            refreshed = self._require_effect(effect.effect_id)
+            if refreshed.state is SinkEffectState.FINALIZED:
+                results.append(self._load_finalized(refreshed.effect_id))
+                continue
+            partition_request = self._request_for_effect(refreshed, request)
+            results.append(self._execute_effect(refreshed, partition_request, sink))
+        return results[-1]
+
+    def _execute_effect(
+        self,
+        effect: SinkEffect,
+        request: SinkEffectExecutionRequest,
+        sink: _SinkEffectAdapter,
+    ) -> SinkEffectFinalizationResult:
         self._require_predecessor(effect)
         ctx = self._context(effect)
         plan = self._prepare(effect, request, sink, ctx)
@@ -174,6 +200,34 @@ class SinkEffectCoordinator:
             return result
 
         lease = self._lease(effect)
+        self._close_abandoned_attempts(
+            effect.effect_id,
+            actions=(SinkEffectAttemptAction.COMMIT, SinkEffectAttemptAction.RECONCILE),
+            recovery_lease=lease,
+        )
+        returned_commit = self._returned_attempt(
+            effect.effect_id,
+            action=SinkEffectAttemptAction.COMMIT,
+            request_hash=self._commit_request_hash(plan),
+        )
+        if returned_commit is not None:
+            commit_result, commit_attempt = returned_commit
+            if not isinstance(commit_result, SinkEffectCommitResult):
+                raise LandscapeRecordError("durable commit attempt decoded to the wrong result type")
+            result = self._finalize(
+                effect_id=effect.effect_id,
+                request=request,
+                lease=lease,
+                descriptor=commit_result.descriptor,
+                evidence=commit_result.evidence,
+                accepted_ordinals=tuple(commit_result.accepted_ordinals),
+                diverted_ordinals=tuple(commit_result.diverted_ordinals),
+                attempt_id=commit_attempt.attempt_id,
+                evidence_kind="returned",
+                reconcile_kind=None,
+            )
+            self._fault(SinkEffectExecutionSeam.AFTER_FINALIZE_BEFORE_RESPONSE)
+            return result
         reconciliation, reconcile_attempt_id = self._reconcile(plan, sink, ctx, lease)
         if reconciliation.kind is SinkEffectReconcileKind.UNKNOWN:
             raise SinkEffectUnknownError(effect.effect_id)
@@ -211,6 +265,118 @@ class SinkEffectCoordinator:
         self._fault(SinkEffectExecutionSeam.AFTER_FINALIZE_BEFORE_RESPONSE)
         return result
 
+    def _request_for_effect(
+        self,
+        effect: SinkEffect,
+        request: SinkEffectExecutionRequest,
+    ) -> SinkEffectExecutionRequest:
+        if not isinstance(request.effect_input, SinkEffectPipelineMembersInput):
+            return request
+        durable_members = self._effects.get_members(effect.effect_id)
+        caller_by_token = {member.token_id: member for member in request.effect_input.members}
+        finalization_by_token = {
+            member.token_id: finalization
+            for member, finalization in zip(request.effect_input.members, request.finalization_members, strict=True)
+        }
+        current_members: list[SinkEffectMember] = []
+        current_finalization: list[SinkEffectFinalizationMember] = []
+        for durable in durable_members:
+            caller = caller_by_token.get(durable.token_id)
+            finalization = finalization_by_token.get(durable.token_id)
+            if caller is None or finalization is None:
+                raise LandscapeRecordError(f"open sink effect {effect.effect_id} cannot be recovered from a partial caller partition")
+            current_members.append(
+                replace(
+                    caller,
+                    ordinal=durable.ordinal,
+                    member_effect_id=durable.member_effect_id,
+                )
+            )
+            current_finalization.append(replace(finalization, ordinal=durable.ordinal))
+        members = tuple(current_members)
+        return SinkEffectExecutionRequest(
+            reservation=request.reservation,
+            effect_input=SinkEffectPipelineMembersInput(
+                members=members,
+                target_snapshot_members=self._target_snapshot_members(
+                    effect,
+                    members,
+                    known_members=caller_by_token,
+                ),
+            ),
+            finalization_members=tuple(current_finalization),
+        )
+
+    def _target_snapshot_members(
+        self,
+        effect: SinkEffect,
+        current_members: tuple[SinkEffectMember, ...],
+        *,
+        known_members: Mapping[str, SinkEffectMember],
+    ) -> tuple[SinkEffectMember, ...]:
+        chain: list[SinkEffect] = []
+        predecessor_id = effect.predecessor_effect_id
+        seen = {effect.effect_id}
+        while predecessor_id is not None:
+            if predecessor_id in seen or len(chain) >= 256:
+                raise LandscapeRecordError("sink effect predecessor chain is cyclic or exceeds 256 effects")
+            seen.add(predecessor_id)
+            predecessor = self._require_effect(predecessor_id)
+            if predecessor.state is not SinkEffectState.FINALIZED:
+                raise SinkEffectPredecessorPending(f"sink effect {effect.effect_id} is waiting for predecessor {predecessor.effect_id}")
+            chain.append(predecessor)
+            predecessor_id = predecessor.predecessor_effect_id
+        chain.reverse()
+
+        snapshot: list[SinkEffectMember] = []
+        for predecessor in chain:
+            for durable in self._effects.get_members(predecessor.effect_id):
+                known = known_members.get(durable.token_id)
+                member = replace(known, member_effect_id=durable.member_effect_id) if known is not None else self._hydrate_member(durable)
+                snapshot.append(replace(member, ordinal=len(snapshot)))
+        current_start = len(snapshot)
+        snapshot.extend(replace(member, ordinal=current_start + ordinal) for ordinal, member in enumerate(current_members))
+        return tuple(snapshot)
+
+    def _persist_pipeline_member_payloads(self, effect_input: object) -> None:
+        if not isinstance(effect_input, SinkEffectPipelineMembersInput):
+            return
+        store = self._factory.payload_store
+        if store is None:
+            return
+        for member in effect_input.members:
+            content = canonical_json(deep_thaw(member.row)).encode("utf-8")
+            content_hash = store.store(content)
+            if content_hash != member.payload_hash:
+                raise LandscapeRecordError("sink effect payload store returned a divergent member content hash")
+
+    def _hydrate_member(self, durable: object) -> SinkEffectMember:
+        from elspeth.contracts.audit import SinkEffectMemberRecord
+
+        if not isinstance(durable, SinkEffectMemberRecord):
+            raise TypeError("durable must be SinkEffectMemberRecord")
+        store = self._factory.payload_store
+        if store is None:
+            raise LandscapeRecordError("replacing sink effect recovery requires the configured payload store")
+        content = store.retrieve(durable.payload_hash)
+        try:
+            row = json.loads(content)
+        except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LandscapeRecordError("sink effect member payload is not canonical JSON") from exc
+        if type(row) is not dict or canonical_json(row).encode("utf-8") != content:
+            raise LandscapeRecordError("sink effect member payload is not an exact canonical object")
+        return SinkEffectMember(
+            ordinal=durable.ordinal,
+            token_id=durable.token_id,
+            row_id=durable.row_id,
+            ingest_sequence=durable.ingest_sequence,
+            lineage_json=durable.lineage_json,
+            lineage_hash=durable.lineage_hash,
+            payload_hash=durable.payload_hash,
+            row=row,
+            member_effect_id=durable.member_effect_id,
+        )
+
     def _prepare(
         self,
         effect: SinkEffect,
@@ -226,35 +392,48 @@ class SinkEffectCoordinator:
             target=effect.target_json,
             predecessor_descriptor=predecessor,
         )
-        inspection_attempt = self._effects.begin_attempt(
-            SinkEffectAttemptRequest(
-                effect_id=effect.effect_id,
-                member_ordinal=None,
-                generation=effect.generation,
-                action=SinkEffectAttemptAction.INSPECT,
-                request_hash=stable_hash(
-                    {
-                        "effect_id": effect.effect_id,
-                        "predecessor": None if predecessor is None else predecessor.content_hash,
-                        "schema": "sink-effect-inspection-request-v1",
-                        "target": effect.target_json,
-                    }
-                ),
-            )
+        request_hash = stable_hash(
+            {
+                "effect_id": effect.effect_id,
+                "predecessor": None if predecessor is None else predecessor.content_hash,
+                "schema": "sink-effect-inspection-request-v1",
+                "target": effect.target_json,
+            }
         )
-        started = time.monotonic()
-        try:
-            inspection = sink.inspect_effect(inspection_request, ctx)
-        except BaseException:
-            self._effects.mark_response_lost(inspection_attempt.attempt_id)
-            raise
-        self._effects.record_attempt_result(
-            SinkEffectAttemptResult(
-                attempt_id=inspection_attempt.attempt_id,
-                evidence=inspection.evidence,
-                latency_ms=(time.monotonic() - started) * 1_000,
-            )
+        self._close_abandoned_attempts(effect.effect_id, actions=(SinkEffectAttemptAction.INSPECT,))
+        returned_inspection = self._returned_attempt(
+            effect.effect_id,
+            action=SinkEffectAttemptAction.INSPECT,
+            request_hash=request_hash,
         )
+        if returned_inspection is not None:
+            inspection_result, _attempt = returned_inspection
+            if not isinstance(inspection_result, SinkEffectInspection):
+                raise LandscapeRecordError("durable inspect attempt decoded to the wrong result type")
+            inspection = inspection_result
+        else:
+            inspection_attempt = self._effects.begin_attempt(
+                SinkEffectAttemptRequest(
+                    effect_id=effect.effect_id,
+                    member_ordinal=None,
+                    generation=effect.generation,
+                    action=SinkEffectAttemptAction.INSPECT,
+                    request_hash=request_hash,
+                )
+            )
+            started = time.monotonic()
+            try:
+                inspection = sink.inspect_effect(inspection_request, ctx)
+            except BaseException:
+                self._effects.mark_response_lost(inspection_attempt.attempt_id)
+                raise
+            self._effects.record_attempt_result(
+                SinkEffectAttemptResult(
+                    attempt_id=inspection_attempt.attempt_id,
+                    evidence=encode_sink_effect_returned_result(inspection),
+                    latency_ms=(time.monotonic() - started) * 1_000,
+                )
+            )
         prepare_request = SinkEffectPrepareRequest(
             effect_id=effect.effect_id,
             effect_input=request.effect_input,  # type: ignore[arg-type]
@@ -319,7 +498,7 @@ class SinkEffectCoordinator:
             return self._effects.acquire_lease(effect.effect_id, owner=self._worker_id, ttl=self._lease_ttl)
         if expires_at < datetime.now(UTC):
             return self._effects.takeover_expired(effect.effect_id, owner=self._worker_id, ttl=self._lease_ttl)
-        raise LandscapeRecordError("sink effect has a live lease owned by another worker")
+        raise SinkEffectPredecessorPending(f"sink effect {effect.effect_id} has a live lease owned by another worker")
 
     def _reconcile(
         self,
@@ -328,15 +507,30 @@ class SinkEffectCoordinator:
         ctx: RestrictedSinkEffectContext,
         lease: SinkEffectLease,
     ) -> tuple[SinkEffectReconcileResult, str]:
+        request_hash = self._reconcile_request_hash(plan)
+        latest_lost_commit = self._latest_attempt(
+            plan.effect_id,
+            action=SinkEffectAttemptAction.COMMIT,
+            state=SinkEffectAttemptState.RESPONSE_LOST,
+        )
+        returned = self._returned_attempt(
+            plan.effect_id,
+            action=SinkEffectAttemptAction.RECONCILE,
+            request_hash=request_hash,
+            started_after=None if latest_lost_commit is None else latest_lost_commit.started_at,
+        )
+        if returned is not None:
+            result, attempt = returned
+            if not isinstance(result, SinkEffectReconcileResult):
+                raise LandscapeRecordError("durable reconcile attempt decoded to the wrong result type")
+            return result, attempt.attempt_id
         attempt = self._effects.begin_attempt(
             SinkEffectAttemptRequest(
                 effect_id=plan.effect_id,
                 member_ordinal=None,
                 generation=lease.generation,
                 action=SinkEffectAttemptAction.RECONCILE,
-                request_hash=stable_hash(
-                    {"effect_id": plan.effect_id, "plan_hash": plan.plan_hash, "schema": "sink-effect-reconcile-request-v1"}
-                ),
+                request_hash=request_hash,
             )
         )
         started = time.monotonic()
@@ -348,7 +542,7 @@ class SinkEffectCoordinator:
         self._effects.record_attempt_result(
             SinkEffectAttemptResult(
                 attempt_id=attempt.attempt_id,
-                evidence=result.evidence,
+                evidence=encode_sink_effect_returned_result(result),
                 latency_ms=(time.monotonic() - started) * 1_000,
             )
         )
@@ -361,15 +555,14 @@ class SinkEffectCoordinator:
         ctx: RestrictedSinkEffectContext,
         lease: SinkEffectLease,
     ) -> tuple[SinkEffectCommitResult, str]:
+        request_hash = self._commit_request_hash(plan)
         attempt = self._effects.begin_attempt(
             SinkEffectAttemptRequest(
                 effect_id=plan.effect_id,
                 member_ordinal=None,
                 generation=lease.generation,
                 action=SinkEffectAttemptAction.COMMIT,
-                request_hash=stable_hash(
-                    {"effect_id": plan.effect_id, "plan_hash": plan.plan_hash, "schema": "sink-effect-commit-request-v1"}
-                ),
+                request_hash=request_hash,
             )
         )
         self._fault(SinkEffectExecutionSeam.BEFORE_EFFECT)
@@ -383,11 +576,71 @@ class SinkEffectCoordinator:
         self._effects.record_attempt_result(
             SinkEffectAttemptResult(
                 attempt_id=attempt.attempt_id,
-                evidence=result.evidence,
+                evidence=encode_sink_effect_returned_result(result),
                 latency_ms=(time.monotonic() - started) * 1_000,
             )
         )
         return result, attempt.attempt_id
+
+    @staticmethod
+    def _reconcile_request_hash(plan: SinkEffectPlan) -> str:
+        return stable_hash({"effect_id": plan.effect_id, "plan_hash": plan.plan_hash, "schema": "sink-effect-reconcile-request-v1"})
+
+    @staticmethod
+    def _commit_request_hash(plan: SinkEffectPlan) -> str:
+        return stable_hash({"effect_id": plan.effect_id, "plan_hash": plan.plan_hash, "schema": "sink-effect-commit-request-v1"})
+
+    def _close_abandoned_attempts(
+        self,
+        effect_id: str,
+        *,
+        actions: tuple[SinkEffectAttemptAction, ...],
+        recovery_lease: SinkEffectLease | None = None,
+    ) -> None:
+        for attempt in self._effects.get_attempts(effect_id):
+            if attempt.action in actions and attempt.state is SinkEffectAttemptState.INTENT:
+                self._effects.mark_response_lost(attempt.attempt_id, recovery_lease=recovery_lease)
+
+    def _returned_attempt(
+        self,
+        effect_id: str,
+        *,
+        action: SinkEffectAttemptAction,
+        request_hash: str,
+        started_after: datetime | None = None,
+    ) -> tuple[SinkEffectReturnedResult, SinkEffectAttempt] | None:
+        winners = [
+            attempt
+            for attempt in self._effects.get_attempts(effect_id)
+            if attempt.action is action
+            and attempt.request_hash == request_hash
+            and attempt.state is SinkEffectAttemptState.RETURNED
+            and (started_after is None or self._utc(attempt.started_at) > self._utc(started_after))
+        ]
+        if not winners:
+            return None
+        winner = winners[-1]
+        if winner.evidence_json is None:
+            raise LandscapeRecordError("returned sink effect attempt is missing its durable result")
+        result = decode_sink_effect_returned_result(action, winner.evidence_json)
+        for attempt in winners[:-1]:
+            if attempt.evidence_json is None or decode_sink_effect_returned_result(action, attempt.evidence_json) != result:
+                raise LandscapeRecordError("same sink effect request has divergent durable returned results")
+        return result, winner
+
+    def _latest_attempt(
+        self,
+        effect_id: str,
+        *,
+        action: SinkEffectAttemptAction,
+        state: SinkEffectAttemptState,
+    ) -> SinkEffectAttempt | None:
+        attempts = [attempt for attempt in self._effects.get_attempts(effect_id) if attempt.action is action and attempt.state is state]
+        return attempts[-1] if attempts else None
+
+    @staticmethod
+    def _utc(value: datetime) -> datetime:
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
     def _finalize(
         self,

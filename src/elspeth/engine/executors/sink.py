@@ -791,8 +791,19 @@ class SinkExecutor:
             ),
             sink,  # type: ignore[arg-type]  # capability was statically admitted before execution
         )
-        durable_members = self._execution.sink_effects.get_members(result.effect.effect_id)
-        diverted_ordinals = {member.ordinal for member in durable_members if member.prepared_disposition == "diverted"}
+        requested_token_ids = tuple(member.token_id for member in identity.members)
+        durable_members = self._execution.sink_effects.get_members_for_tokens(
+            run_id=self._run_id,
+            sink_node_id=sink_node_id,
+            role=SinkEffectRole.PRIMARY,
+            token_ids=requested_token_ids,
+        )
+        if {member.token_id for member in durable_members} != set(requested_token_ids):
+            raise AuditIntegrityError("durable effect partition does not cover every requested primary token")
+        caller_ordinal_by_token = {member.token_id: member.ordinal for member in identity.members}
+        diverted_ordinals = {
+            caller_ordinal_by_token[member.token_id] for member in durable_members if member.prepared_disposition == "diverted"
+        }
         get_diversions = getattr(sink, "_get_diversions", None)
         diversions = tuple(get_diversions()) if callable(get_diversions) else ()
         if {item.row_index for item in diversions} != diverted_ordinals:

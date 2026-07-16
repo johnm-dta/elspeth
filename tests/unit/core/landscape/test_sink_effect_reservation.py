@@ -11,7 +11,7 @@ from hashlib import sha256
 import pytest
 from sqlalchemy import func, select, update
 
-from elspeth.contracts import NodeType
+from elspeth.contracts import NodeStateStatus, NodeType
 from elspeth.contracts.sink_effects import SinkEffectInputKind, SinkEffectMember, SinkEffectMemberCandidate, SinkEffectRole
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.execution.sink_effect_identity import compute_pipeline_effect_identity, resolve_sink_effect_members
@@ -23,6 +23,7 @@ from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import (
     audit_export_snapshot_chunks_table,
     audit_export_snapshots_table,
+    node_states_table,
     operations_table,
     sink_effect_export_snapshots_table,
     sink_effect_members_table,
@@ -126,6 +127,33 @@ def test_pipeline_reservation_is_idempotent_under_reverse_arrival(db_factory: tu
         assert conn.scalar(select(func.count()).select_from(sink_effects_table)) == 1
         assert conn.scalar(select(func.count()).select_from(sink_effect_members_table)) == 3
         assert conn.scalar(select(func.count()).select_from(operations_table)) == 1
+
+
+@pytest.mark.parametrize("terminal_status", (NodeStateStatus.COMPLETED, NodeStateStatus.FAILED))
+def test_pipeline_reservation_refuses_non_open_latest_sink_state_before_mutation(
+    db_factory: tuple[LandscapeDB, RecorderFactory],
+    terminal_status: NodeStateStatus,
+) -> None:
+    db, factory = db_factory
+    run_id, sink_id, members = _pipeline_members(factory, 1)
+    with db.engine.begin() as conn:
+        conn.execute(
+            update(node_states_table)
+            .where(
+                node_states_table.c.run_id == run_id,
+                node_states_table.c.node_id == sink_id,
+                node_states_table.c.token_id == members[0].token_id,
+            )
+            .values(status=terminal_status.value)
+        )
+
+    with pytest.raises(ValueError, match="latest sink-node state must be open"):
+        factory.execution.sink_effects.reserve(_pipeline_request(run_id, sink_id, members))
+
+    with db.read_only_connection() as conn:
+        assert conn.scalar(select(func.count()).select_from(sink_effects_table)) == 0
+        assert conn.scalar(select(func.count()).select_from(sink_effect_members_table)) == 0
+        assert conn.scalar(select(func.count()).select_from(operations_table)) == 0
 
 
 def test_overlap_partitions_finalized_open_and_unbound_members(db_factory: tuple[LandscapeDB, RecorderFactory]) -> None:

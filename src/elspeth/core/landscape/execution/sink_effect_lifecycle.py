@@ -336,6 +336,16 @@ class SinkEffectLifecycle:
             assert operation is not None
             return self._attempt_loader.load(row)
 
+    def get_attempts(self, effect_id: str) -> tuple[SinkEffectAttempt, ...]:
+        _require_hash(effect_id, "effect_id")
+        with self._db.read_only_connection() as conn:
+            rows = conn.execute(
+                select(sink_effect_attempts_table)
+                .where(sink_effect_attempts_table.c.effect_id == effect_id)
+                .order_by(sink_effect_attempts_table.c.started_at, sink_effect_attempts_table.c.attempt_id)
+            ).fetchall()
+        return tuple(self._attempt_loader.load(row) for row in rows)
+
     def record_attempt_result(self, result: SinkEffectAttemptResult) -> SinkEffectAttempt:
         if type(result) is not SinkEffectAttemptResult:
             raise TypeError("result must be exact SinkEffectAttemptResult")
@@ -392,8 +402,15 @@ class SinkEffectLifecycle:
             ).one()
             return self._attempt_loader.load(winner)
 
-    def mark_response_lost(self, attempt_id: str) -> SinkEffectAttempt:
+    def mark_response_lost(
+        self,
+        attempt_id: str,
+        *,
+        recovery_lease: SinkEffectLease | None = None,
+    ) -> SinkEffectAttempt:
         _require_hash(attempt_id, "attempt_id")
+        if recovery_lease is not None and type(recovery_lease) is not SinkEffectLease:
+            raise TypeError("recovery_lease must be exact SinkEffectLease or None")
         evidence = {"classification": "response_lost"}
         evidence_json = canonical_json(evidence)
         evidence_hash = sha256(evidence_json.encode("utf-8")).hexdigest()
@@ -406,13 +423,23 @@ class SinkEffectLifecycle:
             effect = self._lock_effect(conn, optimistic.effect_id, include_stream=True)
             operation = self._lock_operation(conn, optimistic.effect_id)
             attempt = self._lock_attempt(conn, attempt_id)
+            timestamp = now()
+            if recovery_lease is None:
+                if effect.generation != attempt.generation:
+                    raise LandscapeRecordError("response-lost classification has stale generation")
+            elif (
+                recovery_lease.effect_id != effect.effect_id
+                or effect.state != SinkEffectState.IN_FLIGHT.value
+                or effect.lease_owner != recovery_lease.owner
+                or effect.generation != recovery_lease.generation
+                or _utc(effect.lease_expires_at) < timestamp
+                or attempt.generation > recovery_lease.generation
+            ):
+                raise LandscapeRecordError("response-lost recovery has stale lease authority")
             if attempt.state == SinkEffectAttemptState.RESPONSE_LOST.value:
                 return self._attempt_loader.load(attempt)
             if attempt.state != SinkEffectAttemptState.INTENT.value:
                 raise LandscapeRecordError(f"attempt cannot become response-lost from state {attempt.state!r}")
-            if effect.generation != attempt.generation:
-                raise LandscapeRecordError("response-lost classification has stale generation")
-            timestamp = now()
             latency_ms = max(0.0, (timestamp - _utc(attempt.started_at)).total_seconds() * 1_000)
             conn.execute(
                 sink_effect_attempts_table.update()

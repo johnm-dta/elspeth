@@ -15,6 +15,7 @@ from sqlalchemy.engine import Connection
 
 from elspeth.contracts.audit import SinkEffect
 from elspeth.contracts.audit_export import C, H, final_manifest_identity_payload, hash_final_manifest_identity_payload
+from elspeth.contracts.enums import NodeStateStatus
 from elspeth.contracts.hashing import canonical_json
 from elspeth.contracts.sink_effects import (
     SINK_EFFECT_PROTOCOL_VERSION,
@@ -315,6 +316,7 @@ class SinkEffectReservation:
                 node_states_table.c.state_id,
                 node_states_table.c.token_id,
                 node_states_table.c.input_hash,
+                node_states_table.c.status,
             )
             .where(
                 node_states_table.c.run_id == request.run_id,
@@ -333,6 +335,8 @@ class SinkEffectReservation:
         for row in rows:
             if row.token_id in current:
                 continue
+            if row.status != NodeStateStatus.OPEN.value and not self._has_finalized_binding(conn, request, row.token_id):
+                raise ValueError(f"sink effect member {row.token_id!r} latest sink-node state must be open")
             member = member_by_token[row.token_id]
             if row.input_hash != member.payload_hash:
                 raise ValueError(f"sink effect member {row.token_id!r} payload is divergent from its current state")
@@ -341,6 +345,20 @@ class SinkEffectReservation:
         if missing:
             raise ValueError(f"sink effect members have no current sink-node state: {missing!r}")
         return current
+
+    @staticmethod
+    def _has_finalized_binding(conn: Connection, request: SinkEffectReservationRequest, token_id: str) -> bool:
+        state = conn.scalar(
+            select(sink_effects_table.c.state)
+            .join(sink_effect_members_table, sink_effect_members_table.c.effect_id == sink_effects_table.c.effect_id)
+            .where(
+                sink_effect_members_table.c.run_id == request.run_id,
+                sink_effect_members_table.c.sink_node_id == request.sink_node_id,
+                sink_effect_members_table.c.role == request.role.value,
+                sink_effect_members_table.c.token_id == token_id,
+            )
+        )
+        return state == SinkEffectState.FINALIZED.value
 
     @staticmethod
     def _validate_token_rows(request: SinkEffectReservationRequest, rows: Sequence[Row[Any]]) -> None:

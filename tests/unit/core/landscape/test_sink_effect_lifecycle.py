@@ -160,8 +160,22 @@ def test_lease_takeover_increments_generation_and_fences_stale_results(db_factor
     repo = factory.execution.sink_effects
     repo.complete_plan(effect.effect_id, _plan(effect.effect_id))
     first = repo.acquire_lease(effect.effect_id, owner="worker-a", ttl=timedelta(microseconds=1))
+    abandoned = repo.begin_attempt(
+        SinkEffectAttemptRequest(
+            effect_id=effect.effect_id,
+            member_ordinal=None,
+            generation=first.generation,
+            action=SinkEffectAttemptAction.COMMIT,
+            request_hash="c" * 64,
+        )
+    )
     second = repo.takeover_expired(effect.effect_id, owner="worker-b", ttl=timedelta(seconds=30))
     assert second.generation == first.generation + 1
+
+    with pytest.raises(LandscapeRecordError, match="stale lease authority"):
+        repo.mark_response_lost(abandoned.attempt_id, recovery_lease=first)
+    recovered = repo.mark_response_lost(abandoned.attempt_id, recovery_lease=second)
+    assert recovered.state is SinkEffectAttemptState.RESPONSE_LOST
 
     with pytest.raises(LandscapeRecordError, match="stale generation"):
         repo.begin_attempt(

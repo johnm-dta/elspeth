@@ -132,11 +132,19 @@ class SinkEffectRepository:
     def begin_attempt(self, request: SinkEffectAttemptRequest) -> SinkEffectAttempt:
         return self._lifecycle.begin_attempt(request)
 
+    def get_attempts(self, effect_id: str) -> tuple[SinkEffectAttempt, ...]:
+        return self._lifecycle.get_attempts(effect_id)
+
     def record_attempt_result(self, result: SinkEffectAttemptResult) -> SinkEffectAttempt:
         return self._lifecycle.record_attempt_result(result)
 
-    def mark_response_lost(self, attempt_id: str) -> SinkEffectAttempt:
-        return self._lifecycle.mark_response_lost(attempt_id)
+    def mark_response_lost(
+        self,
+        attempt_id: str,
+        *,
+        recovery_lease: SinkEffectLease | None = None,
+    ) -> SinkEffectAttempt:
+        return self._lifecycle.mark_response_lost(attempt_id, recovery_lease=recovery_lease)
 
     def finalize(self, request: SinkEffectFinalizeRequest) -> SinkEffectFinalizationResult:
         """Finalize one exact effect winner and all dependent audit state."""
@@ -147,6 +155,31 @@ class SinkEffectRepository:
             select(sink_effect_members_table)
             .where(sink_effect_members_table.c.effect_id == effect_id)
             .order_by(sink_effect_members_table.c.ordinal)
+        )
+        return tuple(self._member_loader.load(row) for row in rows)
+
+    def get_members_for_tokens(
+        self,
+        *,
+        run_id: str,
+        sink_node_id: str,
+        role: SinkEffectRole,
+        token_ids: Sequence[str],
+    ) -> tuple[SinkEffectMemberRecord, ...]:
+        if type(role) is not SinkEffectRole:
+            raise TypeError("role must be exact SinkEffectRole")
+        requested = tuple(token_ids)
+        if not requested:
+            return ()
+        rows = self._ops.execute_fetchall(
+            select(sink_effect_members_table)
+            .where(
+                sink_effect_members_table.c.run_id == run_id,
+                sink_effect_members_table.c.sink_node_id == sink_node_id,
+                sink_effect_members_table.c.role == role.value,
+                sink_effect_members_table.c.token_id.in_(requested),
+            )
+            .order_by(sink_effect_members_table.c.effect_id, sink_effect_members_table.c.ordinal)
         )
         return tuple(self._member_loader.load(row) for row in rows)
 

@@ -20,11 +20,13 @@ from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.contracts.sink_effects import (
     SinkEffectAttemptAction,
     SinkEffectAttemptState,
+    SinkEffectCommitResult,
     SinkEffectDescriptorMode,
     SinkEffectFinalizationMember,
     SinkEffectFinalizationResult,
     SinkEffectFinalizeRequest,
     SinkEffectReconcileKind,
+    SinkEffectReconcileResult,
     SinkEffectState,
 )
 from elspeth.core.canonical import canonical_json, stable_hash
@@ -36,6 +38,7 @@ from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.execution.artifacts import ArtifactRepository
 from elspeth.core.landscape.execution.node_states import NodeStateRepository
+from elspeth.core.landscape.execution.sink_effect_attempt_results import encode_sink_effect_returned_result
 from elspeth.core.landscape.model_loaders import (
     ArtifactLoader,
     NodeStateLoader,
@@ -524,7 +527,7 @@ class SinkEffectFinalization:
         ).fetchone()
         if attempt is None or attempt.effect_id != request.effect_id:
             raise LandscapeRecordError("finalization attempt does not belong to the sink effect")
-        if attempt.state != SinkEffectAttemptState.RETURNED.value or attempt.generation != request.generation:
+        if attempt.state != SinkEffectAttemptState.RETURNED.value or attempt.generation > request.generation:
             raise LandscapeRecordError("finalization attempt is not an exact returned result for this generation")
         expected_action = (
             SinkEffectAttemptAction.RECONCILE.value
@@ -533,14 +536,30 @@ class SinkEffectFinalization:
         )
         if attempt.action != expected_action:
             raise LandscapeRecordError("finalization attempt action disagrees with publication evidence kind")
-        evidence_json = canonical_json(deep_thaw(request.evidence))
-        if attempt.evidence_json != evidence_json or attempt.evidence_hash != sha256(evidence_json.encode("utf-8")).hexdigest():
-            raise LandscapeRecordError("finalization evidence differs from the returned attempt winner")
         if request.publication_evidence_kind == "reconciled":
             if request.reconcile_kind is not SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR:
                 raise LandscapeRecordError("reconciled finalization requires APPLIED_WITH_EXACT_DESCRIPTOR")
-        elif request.reconcile_kind is not None:
-            raise LandscapeRecordError("returned commit finalization must not claim a reconcile result")
+            returned_result: SinkEffectReconcileResult | SinkEffectCommitResult = SinkEffectReconcileResult(
+                kind=request.reconcile_kind,
+                descriptor=request.descriptor,
+                evidence=request.evidence,
+            )
+        else:
+            if request.reconcile_kind is not None:
+                raise LandscapeRecordError("returned commit finalization must not claim a reconcile result")
+            returned_result = SinkEffectCommitResult(
+                descriptor=request.descriptor,
+                evidence=request.evidence,
+                accepted_ordinals=request.accepted_ordinals,
+                diverted_ordinals=request.diverted_ordinals,
+            )
+        typed_evidence_json = canonical_json(deep_thaw(encode_sink_effect_returned_result(returned_result)))
+        legacy_evidence_json = canonical_json(deep_thaw(request.evidence))
+        if (
+            attempt.evidence_json not in {typed_evidence_json, legacy_evidence_json}
+            or attempt.evidence_hash != sha256(attempt.evidence_json.encode("utf-8")).hexdigest()
+        ):
+            raise LandscapeRecordError("finalization evidence differs from the returned attempt winner")
         assert operation.operation_id is not None
 
     @staticmethod
@@ -642,13 +661,28 @@ class SinkEffectFinalization:
         attempt = conn.execute(
             select(sink_effect_attempts_table).where(sink_effect_attempts_table.c.attempt_id == request.attempt_id)
         ).fetchone()
-        evidence_json = canonical_json(deep_thaw(request.evidence))
+        if request.publication_evidence_kind == "reconciled":
+            assert request.reconcile_kind is not None
+            returned_result: SinkEffectReconcileResult | SinkEffectCommitResult = SinkEffectReconcileResult(
+                kind=request.reconcile_kind,
+                descriptor=request.descriptor,
+                evidence=request.evidence,
+            )
+        else:
+            returned_result = SinkEffectCommitResult(
+                descriptor=request.descriptor,
+                evidence=request.evidence,
+                accepted_ordinals=request.accepted_ordinals,
+                diverted_ordinals=request.diverted_ordinals,
+            )
+        typed_evidence_json = canonical_json(deep_thaw(encode_sink_effect_returned_result(returned_result)))
+        legacy_evidence_json = canonical_json(deep_thaw(request.evidence))
         if (
             attempt is None
             or attempt.effect_id != request.effect_id
-            or attempt.generation != request.generation
+            or attempt.generation > request.generation
             or attempt.state != SinkEffectAttemptState.RETURNED.value
-            or attempt.evidence_json != evidence_json
+            or attempt.evidence_json not in {typed_evidence_json, legacy_evidence_json}
         ):
             raise LandscapeRecordError("finalized retry attempt/evidence differs from the durable winner")
 

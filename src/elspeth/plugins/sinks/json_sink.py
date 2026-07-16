@@ -65,6 +65,7 @@ from elspeth.plugins.infrastructure.schema_factory import create_schema_from_con
 from elspeth.plugins.sinks._diversion_attribution import DiversionAttribution, build_diversion_attribution
 from elspeth.plugins.sinks._local_file_effects import (
     commit_local_effect,
+    continuation_emission,
     inspect_local_effect,
     iter_path_chunks,
     predecessor_local_path,
@@ -152,7 +153,7 @@ class JSONSink(BaseSink):
     name = "json"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:a81a3d321f946234"
+    source_file_hash: str | None = "sha256:3fbf7434e6d8b266"
     config_model = JSONSinkConfig
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"append", "write"})
@@ -432,18 +433,20 @@ class JSONSink(BaseSink):
         current_by_effect_id = {member.member_effect_id: member for member in members}
         target = Path(str(request.inspection.evidence["target_path"]))
         predecessor_declared = bool(request.inspection.evidence["predecessor_declared"])
-        has_predecessor_snapshot_members = any(member.member_effect_id not in current_by_effect_id for member in target_snapshot_members)
-        include_baseline = (predecessor_declared and not has_predecessor_snapshot_members) or (
-            self._mode == "append" and not predecessor_declared
+        include_baseline, emitted_members = continuation_emission(
+            append_mode=self._mode == "append",
+            predecessor_declared=predecessor_declared,
+            current_member_effect_ids=current_by_effect_id.keys(),
+            target_snapshot_members=target_snapshot_members,
         )
         accepted: list[int] = []
         diverted: list[int] = []
         diversion_attribution: list[DiversionAttribution] = []
 
         def serialized_rows() -> Iterator[tuple[int, str]]:
-            source_rows = [deep_thaw(member.row) for member in target_snapshot_members]
+            source_rows = [deep_thaw(member.row) for member in emitted_members]
             output_rows = apply_display_headers(self, source_rows)
-            for snapshot_member, original, output in zip(target_snapshot_members, source_rows, output_rows, strict=True):
+            for snapshot_member, original, output in zip(emitted_members, source_rows, output_rows, strict=True):
                 current_member = current_by_effect_id.get(snapshot_member.member_effect_id)
                 try:
                     serialized = json.dumps(output, indent=self._indent if self._format == "json" else None, allow_nan=False)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import fcntl
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -41,18 +42,18 @@ _CTX = RestrictedSinkEffectContext(
 )
 
 
-def _member(ordinal: int, row: dict[str, object]) -> SinkEffectMember:
+def _member(ordinal: int, row: dict[str, object], *, generation: str = "token") -> SinkEffectMember:
     row_bytes = canonical_json(row).encode("utf-8")
     return SinkEffectMember(
         ordinal=ordinal,
-        token_id=f"token-{ordinal}",
-        row_id=f"row-{ordinal}",
+        token_id=f"{generation}-{ordinal}",
+        row_id=f"{generation}-row-{ordinal}",
         ingest_sequence=ordinal,
         lineage_json="[]",
         lineage_hash=sha256(b"[]").hexdigest(),
         payload_hash=sha256(row_bytes).hexdigest(),
         row=row,
-        member_effect_id=sha256(f"member-{ordinal}-{row_bytes!r}".encode()).hexdigest(),
+        member_effect_id=sha256(f"member-{generation}-{ordinal}-{row_bytes!r}".encode()).hexdigest(),
     )
 
 
@@ -62,8 +63,16 @@ def _prepare(
     effect_id: str,
     rows: list[dict[str, object]],
     predecessor=None,
+    predecessor_rows: list[dict[str, object]] | None = None,
 ):
     members = tuple(_member(index, row) for index, row in enumerate(rows))
+    if predecessor_rows:
+        # Mirror the coordinator's cumulative snapshot: finalized predecessor
+        # members first, then the current partition, with contiguous ordinals.
+        predecessor_members = tuple(_member(index, row, generation="predecessor") for index, row in enumerate(predecessor_rows))
+        snapshot = tuple(replace(member, ordinal=ordinal) for ordinal, member in enumerate((*predecessor_members, *members)))
+    else:
+        snapshot = members
     inspection = sink.inspect_effect(
         SinkEffectInspectionRequest(
             effect_id=effect_id,
@@ -75,7 +84,7 @@ def _prepare(
     return sink.prepare_effect(
         SinkEffectPrepareRequest(
             effect_id=effect_id,
-            effect_input=SinkEffectPipelineMembersInput(members=members, target_snapshot_members=members),
+            effect_input=SinkEffectPipelineMembersInput(members=members, target_snapshot_members=snapshot),
             inspection=inspection,
         ),
         _CTX,
@@ -216,6 +225,7 @@ def test_disjoint_effects_publish_predecessor_then_successor_without_loss(tmp_pa
         effect_id="d" * 64,
         rows=[{"id": 2}],
         predecessor=first_result.descriptor,
+        predecessor_rows=[{"id": 1}],
     )
     second_sink.commit_effect(second, _CTX)
 
@@ -238,6 +248,89 @@ def test_append_effect_includes_validated_initial_baseline(tmp_path: Path) -> No
     assert target.read_text() == "id\n0\n1\n"
 
 
+def test_append_successor_effects_preserve_pre_run_baseline(tmp_path: Path) -> None:
+    """A cumulative successor snapshot must not erase pre-run append content."""
+    target = tmp_path / "append.csv"
+    target.write_text("id\n0\n")
+    config = {
+        "path": str(target),
+        "schema": _SCHEMA,
+        "mode": "append",
+        "collision_policy": "append_or_create",
+    }
+    first_sink = CSVSink(config)
+    first = _prepare(first_sink, effect_id="aa" * 32, rows=[{"id": 1}])
+    first_result = first_sink.commit_effect(first, _CTX)
+    assert target.read_text() == "id\n0\n1\n"
+
+    second_sink = CSVSink(config)
+    second = _prepare(
+        second_sink,
+        effect_id="ab" * 32,
+        rows=[{"id": 2}],
+        predecessor=first_result.descriptor,
+        predecessor_rows=[{"id": 1}],
+    )
+    second_sink.commit_effect(second, _CTX)
+    assert target.read_text() == "id\n0\n1\n2\n"
+
+
+def test_append_successor_effects_preserve_text_and_json_baselines(tmp_path: Path) -> None:
+    text_target = tmp_path / "append.txt"
+    text_target.write_text("zero\n")
+    text_config = {
+        "path": str(text_target),
+        "field": "message",
+        "schema": _SCHEMA,
+        "mode": "append",
+        "collision_policy": "append_or_create",
+    }
+    first_text = TextSink(text_config)
+    first_text_result = first_text.commit_effect(
+        _prepare(first_text, effect_id="ba" * 32, rows=[{"message": "one"}]),
+        _CTX,
+    )
+    second_text = TextSink(text_config)
+    second_text.commit_effect(
+        _prepare(
+            second_text,
+            effect_id="bb" * 32,
+            rows=[{"message": "two"}],
+            predecessor=first_text_result.descriptor,
+            predecessor_rows=[{"message": "one"}],
+        ),
+        _CTX,
+    )
+    assert text_target.read_text() == "zero\none\ntwo\n"
+
+    jsonl_target = tmp_path / "append.jsonl"
+    jsonl_target.write_text('{"id": 0}\n')
+    jsonl_config = {
+        "path": str(jsonl_target),
+        "format": "jsonl",
+        "schema": _SCHEMA,
+        "mode": "append",
+        "collision_policy": "append_or_create",
+    }
+    first_jsonl = JSONSink(jsonl_config)
+    first_jsonl_result = first_jsonl.commit_effect(
+        _prepare(first_jsonl, effect_id="cc" * 32, rows=[{"id": 1}]),
+        _CTX,
+    )
+    second_jsonl = JSONSink(jsonl_config)
+    second_jsonl.commit_effect(
+        _prepare(
+            second_jsonl,
+            effect_id="cd" * 32,
+            rows=[{"id": 2}],
+            predecessor=first_jsonl_result.descriptor,
+            predecessor_rows=[{"id": 1}],
+        ),
+        _CTX,
+    )
+    assert jsonl_target.read_text() == '{"id": 0}\n{"id": 1}\n{"id": 2}\n'
+
+
 def test_json_and_text_effect_adapters_publish_cumulative_snapshots(tmp_path: Path) -> None:
     json_target = tmp_path / "out.json"
     json_config = {"path": str(json_target), "format": "json", "schema": _SCHEMA}
@@ -250,6 +343,7 @@ def test_json_and_text_effect_adapters_publish_cumulative_snapshots(tmp_path: Pa
         effect_id="f" * 64,
         rows=[{"id": 2}],
         predecessor=first_result.descriptor,
+        predecessor_rows=[{"id": 1}],
     )
     second_json.commit_effect(second_plan, _CTX)
     assert json_target.read_text() == '[{"id": 1}, {"id": 2}]'
@@ -265,6 +359,7 @@ def test_json_and_text_effect_adapters_publish_cumulative_snapshots(tmp_path: Pa
         effect_id="2" * 64,
         rows=[{"message": "two"}],
         predecessor=first_text_result.descriptor,
+        predecessor_rows=[{"message": "one"}],
     )
     second_text.commit_effect(second_text_plan, _CTX)
     assert text_target.read_bytes() == b"one\ntwo\n"
@@ -479,6 +574,7 @@ def test_effect_streaming_preserves_stateful_text_encodings(tmp_path: Path) -> N
         effect_id="b3" * 32,
         rows=[{"id": 3}],
         predecessor=csv_result.descriptor,
+        predecessor_rows=[{"id": 1}, {"id": 2}],
     )
     next_csv_sink.commit_effect(next_csv_plan, _CTX)
     with csv_target.open(encoding="utf-16", newline="") as stream:
@@ -494,6 +590,7 @@ def test_effect_streaming_preserves_stateful_text_encodings(tmp_path: Path) -> N
         effect_id="b4" * 32,
         rows=[{"id": 3}],
         predecessor=json_result.descriptor,
+        predecessor_rows=[{"id": 1}, {"id": 2}],
     )
     next_json_sink.commit_effect(next_json_plan, _CTX)
     with json_target.open(encoding="utf-16") as stream:
@@ -512,6 +609,7 @@ def test_indented_json_array_effects_preserve_cumulative_format(tmp_path: Path) 
         effect_id="c2" * 32,
         rows=[{"id": 2}],
         predecessor=first_result.descriptor,
+        predecessor_rows=[{"id": 1}],
     )
     second_sink.commit_effect(second, _CTX)
     assert target.read_text() == json.dumps([{"id": 1}, {"id": 2}], indent=2)

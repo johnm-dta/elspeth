@@ -13,7 +13,7 @@ import hashlib
 import os
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +30,7 @@ from elspeth.contracts.sink_effects import (
     SinkEffectInspection,
     SinkEffectInspectionMode,
     SinkEffectInspectionRequest,
+    SinkEffectMember,
     SinkEffectPlan,
     SinkEffectReconcileResult,
 )
@@ -700,6 +701,30 @@ def cleanup_local_effect(plan: SinkEffectPlan) -> bool:
     return True
 
 
+def continuation_emission(
+    *,
+    append_mode: bool,
+    predecessor_declared: bool,
+    current_member_effect_ids: Collection[str | None],
+    target_snapshot_members: Sequence[SinkEffectMember],
+) -> tuple[bool, tuple[SinkEffectMember, ...]]:
+    """Select baseline inclusion and the members one rebuild must serialize.
+
+    Append-mode rebuilds treat the target file as the durable prefix: at the
+    first effect it holds pre-run content, at successors it holds the
+    predecessor's exact output (pinned by inspection and the commit CAS), so
+    only current members are re-serialized behind it. Re-serializing
+    predecessor snapshot members instead would drop the pre-run bytes, which
+    member rows cannot represent. Replace-mode rebuilds serialize the full
+    cumulative snapshot and never include file bytes.
+    """
+    if not append_mode:
+        return False, tuple(target_snapshot_members)
+    if not predecessor_declared:
+        return True, tuple(target_snapshot_members)
+    return True, tuple(member for member in target_snapshot_members if member.member_effect_id in current_member_effect_ids)
+
+
 def iter_path_chunks(path: Path) -> Iterator[bytes]:
     """Yield bounded chunks from a baseline file without retaining it in memory."""
     with path.open("rb") as stream:
@@ -718,6 +743,7 @@ __all__ = [
     "LocalFileUnsupportedIdentity",
     "cleanup_local_effect",
     "commit_local_effect",
+    "continuation_emission",
     "inspect_local_effect",
     "iter_path_chunks",
     "predecessor_local_path",

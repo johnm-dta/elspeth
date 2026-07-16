@@ -5620,15 +5620,15 @@
     },
     {
       "file_path": "plugins/sinks/csv_sink.py",
+      "fingerprint": "6381620be5481f59"
+    },
+    {
+      "file_path": "plugins/sinks/csv_sink.py",
       "fingerprint": "96ec4f890bdb48b7"
     },
     {
       "file_path": "plugins/sinks/csv_sink.py",
       "fingerprint": "abd8146d6870754a"
-    },
-    {
-      "file_path": "plugins/sinks/csv_sink.py",
-      "fingerprint": "db858c2d7de79ab9"
     },
     {
       "file_path": "plugins/sinks/database_sink.py",
@@ -5816,7 +5816,11 @@
     },
     {
       "file_path": "plugins/sinks/json_sink.py",
-      "fingerprint": "36272cfd14861b85"
+      "fingerprint": "0c7a9e7bc1d80107"
+    },
+    {
+      "file_path": "plugins/sinks/json_sink.py",
+      "fingerprint": "319416b564b8957a"
     },
     {
       "file_path": "plugins/sinks/json_sink.py",
@@ -5831,10 +5835,6 @@
       "fingerprint": "a750c6f92880b4d2"
     },
     {
-      "file_path": "plugins/sinks/json_sink.py",
-      "fingerprint": "e92698b479b1cfda"
-    },
-    {
       "file_path": "plugins/sinks/text_sink.py",
       "fingerprint": "07e3a68c41600b54"
     },
@@ -5844,19 +5844,19 @@
     },
     {
       "file_path": "plugins/sinks/text_sink.py",
-      "fingerprint": "8fdae68405354f09"
+      "fingerprint": "2eb793374fc4c6f4"
     },
     {
       "file_path": "plugins/sinks/text_sink.py",
-      "fingerprint": "92a4f4c178fcd65f"
-    },
-    {
-      "file_path": "plugins/sinks/text_sink.py",
-      "fingerprint": "9fa431bf199632d5"
+      "fingerprint": "30b1ef73f86fc201"
     },
     {
       "file_path": "plugins/sinks/text_sink.py",
       "fingerprint": "b40283677445104c"
+    },
+    {
+      "file_path": "plugins/sinks/text_sink.py",
+      "fingerprint": "bd9cf2fbd3413539"
     },
     {
       "file_path": "plugins/sources/aws_s3_source.py",

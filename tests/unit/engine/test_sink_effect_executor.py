@@ -41,6 +41,7 @@ from elspeth.engine.executors.sink_effects import (
     SinkEffectInjectedFault,
     SinkEffectPredecessorPending,
 )
+from elspeth.plugins.sinks.csv_sink import CSVSink
 from tests.fixtures.landscape import make_factory, make_landscape_db
 from tests.fixtures.sink_effects import DuplicateObservableSink, DuplicateObservableTarget
 from tests.fixtures.stores import MockPayloadStore
@@ -299,6 +300,35 @@ def test_replacing_successor_prepares_cumulative_predecessor_and_current_members
 
         assert successor.effect.stream_sequence == 1
         assert target.published_rows == [[{"ordinal": 0}], [{"ordinal": 0}, {"ordinal": 1}]]
+    finally:
+        db.close()
+
+
+def test_append_mode_successor_preserves_pre_run_baseline(tmp_path: Path) -> None:
+    db = make_landscape_db()
+    try:
+        payload_store = MockPayloadStore()
+        factory = make_factory(db, payload_store=payload_store)
+        run_id, sink_id, members = _pipeline_members(factory, 2)
+        target = tmp_path / "append.csv"
+        target.write_text("ordinal\n99\n")
+        config = {
+            "path": str(target),
+            "schema": {"mode": "observed"},
+            "mode": "append",
+            "collision_policy": "append_or_create",
+        }
+
+        SinkEffectCoordinator(factory=factory, worker_id="worker-a").execute(
+            _execution_request(run_id, sink_id, members[:1]), CSVSink(config)
+        )
+        assert target.read_text() == "ordinal\n99\n0\n"
+
+        successor_factory = make_factory(db, payload_store=payload_store)
+        SinkEffectCoordinator(factory=successor_factory, worker_id="worker-b").execute(
+            _execution_request(run_id, sink_id, members[1:]), CSVSink(config)
+        )
+        assert target.read_text() == "ordinal\n99\n0\n1\n"
     finally:
         db.close()
 

@@ -70,6 +70,7 @@ from elspeth.plugins.sinks._audit_export_bundle_effects import (
 from elspeth.plugins.sinks._diversion_attribution import DiversionAttribution, build_diversion_attribution
 from elspeth.plugins.sinks._local_file_effects import (
     commit_local_effect,
+    continuation_emission,
     inspect_local_effect,
     iter_path_chunks,
     predecessor_local_path,
@@ -148,7 +149,7 @@ class CSVSink(BaseSink):
     name = "csv"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:ce58617c86d664f5"
+    source_file_hash: str | None = "sha256:dad10d0b233c1a3e"
     config_model = CSVSinkConfig
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"append", "write"})
@@ -379,12 +380,14 @@ class CSVSink(BaseSink):
         current_by_effect_id = {member.member_effect_id: member for member in members}
         target = Path(str(request.inspection.evidence["target_path"]))
         predecessor_declared = bool(request.inspection.evidence["predecessor_declared"])
-        has_predecessor_snapshot_members = any(member.member_effect_id not in current_by_effect_id for member in target_snapshot_members)
-        include_baseline = (predecessor_declared and not has_predecessor_snapshot_members) or (
-            self._mode == "append" and not predecessor_declared
+        include_baseline, emitted_members = continuation_emission(
+            append_mode=self._mode == "append",
+            predecessor_declared=predecessor_declared,
+            current_member_effect_ids=current_by_effect_id.keys(),
+            target_snapshot_members=target_snapshot_members,
         )
         baseline_nonempty = include_baseline and target.exists() and target.stat().st_size > 0
-        rows = [deep_thaw(member.row) for member in target_snapshot_members]
+        rows = [deep_thaw(member.row) for member in emitted_members]
 
         if baseline_nonempty:
             validation = self.validate_output_target()
@@ -419,7 +422,7 @@ class CSVSink(BaseSink):
             else:
                 yield encoder.encode(header_text())
             locked_fields = set(data_fields)
-            for snapshot_member, row in zip(target_snapshot_members, rows, strict=True):
+            for snapshot_member, row in zip(emitted_members, rows, strict=True):
                 current_member = current_by_effect_id.get(snapshot_member.member_effect_id)
                 extra_fields = set(row) - locked_fields
                 if extra_fields:

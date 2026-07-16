@@ -41,6 +41,7 @@ from elspeth.plugins.infrastructure.schema_factory import create_schema_from_con
 from elspeth.plugins.sinks._diversion_attribution import DiversionAttribution, build_diversion_attribution
 from elspeth.plugins.sinks._local_file_effects import (
     commit_local_effect,
+    continuation_emission,
     inspect_local_effect,
     iter_path_chunks,
     predecessor_local_path,
@@ -96,7 +97,7 @@ class TextSink(BaseSink):
     name = "text"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:343ad49d29c46b92"
+    source_file_hash: str | None = "sha256:74a177bf601b88f1"
     config_model = TextSinkConfig
     supports_resume = True
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
@@ -193,9 +194,11 @@ class TextSink(BaseSink):
         current_by_effect_id = {member.member_effect_id: member for member in members}
         target = Path(str(request.inspection.evidence["target_path"]))
         predecessor_declared = bool(request.inspection.evidence["predecessor_declared"])
-        has_predecessor_snapshot_members = any(member.member_effect_id not in current_by_effect_id for member in target_snapshot_members)
-        include_baseline = (predecessor_declared and not has_predecessor_snapshot_members) or (
-            self._mode == "append" and not predecessor_declared
+        include_baseline, emitted_members = continuation_emission(
+            append_mode=self._mode == "append",
+            predecessor_declared=predecessor_declared,
+            current_member_effect_ids=current_by_effect_id.keys(),
+            target_snapshot_members=target_snapshot_members,
         )
         accepted: list[int] = []
         diverted: list[int] = []
@@ -208,7 +211,7 @@ class TextSink(BaseSink):
                     raise ValueError(f"Existing text output is incompatible: {validation.error_message}")
                 yield from iter_path_chunks(target)
             missing = object()
-            for snapshot_member in target_snapshot_members:
+            for snapshot_member in emitted_members:
                 current_member = current_by_effect_id.get(snapshot_member.member_effect_id)
                 row = deep_thaw(snapshot_member.row)
                 value = row.get(self._field, missing)

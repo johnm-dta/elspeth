@@ -169,10 +169,16 @@ def test_overlap_partitions_finalized_open_and_unbound_members(db_factory: tuple
             .where(sink_effects_table.c.effect_id == finalized.effect_id)
             .values(
                 state="finalized",
+                inspection_mode="no_inspection_required",
+                inspection_attempt_id="c" * 64,
+                plan_json='{"kind":"test-finalized-overlap"}',
                 plan_hash="a" * 64,
+                descriptor_mode="result_derived",
+                precondition_hash="d" * 64,
+                prepared_at=now,
                 result_descriptor_hash="b" * 64,
                 publication_performed=True,
-                publication_evidence_kind="test",
+                publication_evidence_kind="returned",
                 finalized_at=now,
                 updated_at=now,
             )

@@ -233,7 +233,7 @@ def _expand_env_placeholders_for_raw_preflight(
                 return default
             raise ValueError(
                 f"Required environment variable '{var_name}' is not set. "
-                f"Either set the variable or use ${{{{var_name}}:-default}} syntax for optional values."
+                f"Either set the variable or use ${{{var_name}:-default}} syntax for optional values."
             )
 
         return _ENV_VAR_PATTERN.sub(replacer, text)

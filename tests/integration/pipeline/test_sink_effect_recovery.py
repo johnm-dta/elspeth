@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from elspeth.contracts import NodeType, PendingOutcome, RoutingMode, TerminalOutcome, TerminalPath, TokenInfo
+from elspeth.contracts import NodeStateStatus, NodeType, PendingOutcome, RoutingMode, TerminalOutcome, TerminalPath, TokenInfo
+from elspeth.contracts.errors import SinkTransactionalInvariantError
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.contracts.sink_effects import SinkEffectReconcileResult
@@ -262,6 +263,79 @@ def test_primary_finalizes_once_while_diverted_token_waits_for_linked_failsink(t
         assert len(routing_events) == 1
         assert routing_events[0].edge_id == edge.edge_id
         assert routing_events[0].mode is RoutingMode.DIVERT
+    finally:
+        db.close()
+
+
+class _RejectingFailsink(PartitioningObservableSink):
+    """Failsink whose transactional backstop rejects every enriched row."""
+
+    declared_required_fields = frozenset({"must_exist"})
+
+
+def test_failsink_validation_rejection_terminalizes_states_and_outcomes(tmp_path: Path) -> None:
+    """When the linked failsink rejects the enriched rows at the validation
+    boundary, the diverted token must receive a failure outcome and every
+    opened primary/quarantine node state must be terminalized
+    (elspeth-2a75af7f8f)."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'reject.db'}")
+    try:
+        factory = make_factory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source_id = register_test_node(factory.data_flow, run.run_id, "source", node_type=NodeType.SOURCE, plugin_name="source")
+        primary_id = register_test_node(factory.data_flow, run.run_id, "primary", node_type=NodeType.SINK, plugin_name="partitioning")
+        failsink_id = register_test_node(factory.data_flow, run.run_id, "failsink", node_type=NodeType.SINK, plugin_name="rejecting")
+        edge = factory.data_flow.register_edge(run.run_id, primary_id, failsink_id, "__failsink__", RoutingMode.DIVERT)
+        accepted, diverted = _effect_tokens(
+            factory,
+            run_id=run.run_id,
+            source_id=source_id,
+            rows=[{"value": 1}, {"value": 2, "divert": True}],
+        )
+        primary_target = DuplicateObservableTarget()
+        failsink_target = DuplicateObservableTarget()
+        primary = PartitioningObservableSink(primary_target, name="primary")
+        primary.node_id = primary_id
+        failsink = _RejectingFailsink(failsink_target, name="failsink", divert_rows=False)
+        failsink.node_id = failsink_id
+        ctx = PluginContext(run_id=run.run_id, config={}, landscape=factory.plugin_audit_writer(), node_id=primary_id)
+
+        with pytest.raises(SinkTransactionalInvariantError, match="must_exist"):
+            SinkExecutor(
+                factory.execution,
+                factory.data_flow,
+                SpanFactory(),
+                run.run_id,
+                factory=factory,
+                worker_id="worker-a",
+            ).write(
+                primary,  # type: ignore[arg-type]
+                [accepted, diverted],
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW),
+                effect_mode="write",
+                failsink=failsink,  # type: ignore[arg-type]
+                failsink_name="failsink",
+                failsink_effect_mode="write",
+                failsink_edge_id=edge.edge_id,
+            )
+
+        assert failsink_target.publication_count == 0
+        # The diverted token must not be left without a terminal outcome.
+        outcome = factory.data_flow.get_token_outcome(diverted.token_id)
+        assert outcome is not None
+        assert outcome.outcome is TerminalOutcome.FAILURE
+        assert outcome.path is TerminalPath.UNROUTED
+        # Every opened node state for the diverted token (primary anchor and
+        # failsink quarantine state) must be terminalized.
+        diverted_states = factory.query.get_node_states_for_token(diverted.token_id)
+        assert {state.node_id for state in diverted_states} >= {primary_id, failsink_id}
+        assert all(state.status is not NodeStateStatus.OPEN for state in diverted_states)
+        accepted_outcome = factory.data_flow.get_token_outcome(accepted.token_id)
+        assert accepted_outcome is not None
+        assert accepted_outcome.outcome is TerminalOutcome.SUCCESS
     finally:
         db.close()
 

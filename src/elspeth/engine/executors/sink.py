@@ -777,7 +777,7 @@ class SinkExecutor:
             enriched_by_token[token.token_id] = row
             diverted_tokens.append(token)
 
-        self._open_or_reuse_effect_states(
+        failsink_states = self._open_or_reuse_effect_states(
             tokens=diverted_tokens,
             rows=enriched_rows,
             sink_node_id=failsink_node_id,
@@ -785,15 +785,40 @@ class SinkExecutor:
             ctx=ctx,
             role=SinkEffectRole.FAILSINK,
         )
-        self._run_sink_boundary_checks(
-            sink=failsink,
-            rows=enriched_rows,
-            tokens=diverted_tokens,
-            run_id=self._run_id,
-            node_id=failsink_node_id,
-            row_contracts=None,
-        )
-        self._validate_sink_input(failsink, enriched_rows, skip_schema=True)
+        try:
+            self._run_sink_boundary_checks(
+                sink=failsink,
+                rows=enriched_rows,
+                tokens=diverted_tokens,
+                run_id=self._run_id,
+                node_id=failsink_node_id,
+                row_contracts=None,
+            )
+            self._validate_sink_input(failsink, enriched_rows, skip_schema=True)
+        except (DeclarationContractViolation, AggregateDeclarationContractViolation, SinkTransactionalInvariantError) as violation:
+            # Mirror the primary path's boundary-failure terminalization
+            # (elspeth-2a75af7f8f): the enriched row never reached the
+            # failsink, so terminalize both the quarantine states just opened
+            # and the still-open primary divert anchors, then record failure
+            # outcomes so no diverted token is left in progress.
+            boundary_error = self._build_boundary_error(exc=violation, phase="failsink_write")
+            self._complete_states_failed(
+                states=[(token, state) for token, state in failsink_states if isinstance(state, NodeStateOpen)],
+                duration_ms=0.0,
+                error=boundary_error,
+            )
+            self._complete_states_failed(
+                states=[(token, state) for token, _index, state in primary_divert_states if isinstance(state, NodeStateOpen)],
+                duration_ms=0.0,
+                error=boundary_error,
+            )
+            self._record_boundary_failure_outcomes(
+                tokens=diverted_tokens,
+                sink_name=failsink_name,
+                phase="failsink_write",
+                violation=violation,
+            )
+            raise
         candidates = tuple(
             SinkEffectMemberCandidate(
                 token_id=token.token_id,

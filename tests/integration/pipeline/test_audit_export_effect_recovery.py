@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -245,6 +246,56 @@ def test_configured_total_limits_fail_before_content_store_or_registry_writes(
         assert store.put_count == 0
         with db.engine.connect() as connection:
             assert connection.scalar(select(func.count()).select_from(audit_export_snapshots_table)) == 0
+    finally:
+        db.close()
+
+
+def test_candidate_verification_reads_run_outside_the_write_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chunk/manifest reread and graph verification must complete before the
+    short registry write/CAS transaction begins (elspeth-107ecfec1c)."""
+    monkeypatch.chdir(tmp_path)
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'verify-outside.db'}")
+    store = _MemoryContentStore()
+    in_write_transaction = False
+    verification_reads_under_write_lock: list[str] = []
+
+    original_open = store.open_registered
+
+    def observing_open(registration: RegisteredAuditExportContent) -> IterableBoundAuditExportContentReader:
+        if in_write_transaction:
+            verification_reads_under_write_lock.append(registration.descriptor.content_ref)
+        return original_open(registration)
+
+    store.open_registered = observing_open  # type: ignore[method-assign]
+
+    real_write_connection = db.write_connection
+
+    @contextmanager
+    def observing_write_connection():  # type: ignore[no-untyped-def]
+        nonlocal in_write_transaction
+        in_write_transaction = True
+        try:
+            with real_write_connection() as connection:
+                yield connection
+        finally:
+            in_write_transaction = False
+
+    monkeypatch.setattr(db, "write_connection", observing_write_connection)
+    try:
+        _insert_terminal_run(db)
+        snapshot = prepare_audit_export_snapshot(
+            db,
+            run_id="run-export",
+            config=_config(),
+            signing_key=None,
+            content_store=store,
+        )
+
+        assert snapshot.snapshot_id
+        assert verification_reads_under_write_lock == []
     finally:
         db.close()
 

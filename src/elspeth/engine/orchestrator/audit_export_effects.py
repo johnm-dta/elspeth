@@ -376,18 +376,21 @@ def prepare_audit_export_snapshot(
             config=config,
             content_store_id=content_store.content_store_id,
         )
+        # Content reread, hashing, parsing, and signature verification run
+        # before the write transaction so the registry write lock and the
+        # signer-lineage lock cover only the short CAS insert.
+        verified = snapshots.verify_candidate(
+            candidate,
+            content_store_resolver=resolver,
+            limits=_read_limits(config),
+            signed_manifest_verifier=verifier,
+            record_signature_verifier=record_verifier,
+        )
         with db.write_connection() as connection:
             _acquire_signer_lineage_authority(connection, key)
             for existing_signer_key_id in snapshots.find_lineage_signer_key_ids(connection, key):
                 config.assert_signer_rotation_allowed(existing_signer_key_id=existing_signer_key_id)
-            registration = snapshots.register_candidate(
-                connection,
-                candidate,
-                content_store_resolver=resolver,
-                limits=_read_limits(config),
-                signed_manifest_verifier=verifier,
-                record_signature_verifier=record_verifier,
-            )
+            registration = snapshots.register_verified_candidate(connection, verified)
         if not registration.inserted:
             content_store.mark_candidate_orphans(candidate_id, descriptors)
         winner = registration.winner

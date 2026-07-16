@@ -228,7 +228,8 @@ def _assert_schema_sentinels(bind: Engine | Connection) -> None:
 
 
 def _assert_schema_sentinels_on_connection(connection: Connection) -> None:
-    tables = _user_tables(inspect(connection))
+    inspector = inspect(connection)
+    tables = _user_tables(inspector)
 
     if connection.dialect.name == "sqlite":
         app_id = connection.execute(text("PRAGMA application_id")).scalar_one()
@@ -256,6 +257,23 @@ def _assert_schema_sentinels_on_connection(connection: Connection) -> None:
                 "does not migrate session databases. Delete the session DB file and restart."
             )
         return
+
+    # Validate the live identity-table shape BEFORE selecting from it:
+    # ``read_schema_identities`` selects the declared model columns, so a
+    # missing or renamed column would otherwise leak a raw SQLAlchemy
+    # OperationalError instead of the actionable delete-and-restart error
+    # (elspeth-5cf1ca2852). Column presence is all the read requires; type
+    # drift is classified by ``read_schema_identities`` itself and full-shape
+    # drift by the downstream schema validator.
+    live_identity_columns = {column["name"] for column in inspector.get_columns(SCHEMA_IDENTITY_TABLE_NAME)}
+    missing_identity_columns = {column.name for column in schema_identity_table.columns} - live_identity_columns
+    if missing_identity_columns:
+        raise SessionSchemaError(
+            f"Session DB {SCHEMA_IDENTITY_TABLE_NAME} table is missing column(s) "
+            f"{', '.join(sorted(missing_identity_columns))} for "
+            f"SESSION_SCHEMA_EPOCH={SESSION_SCHEMA_EPOCH}. Pre-release ELSPETH "
+            "does not migrate session databases. Delete the session DB file and restart."
+        )
 
     rows = read_schema_identities(connection, schema_identity_table)
     mismatch = schema_identity_mismatch(rows, store_kind="session", schema_epoch=SESSION_SCHEMA_EPOCH)

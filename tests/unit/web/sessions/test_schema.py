@@ -254,6 +254,33 @@ def test_initialize_session_schema_rejects_prior_epoch_database() -> None:
         initialize_session_schema(eng)
 
 
+@pytest.mark.parametrize("renamed_column", ["singleton_id", "application_id", "store_kind", "schema_epoch"])
+def test_initialize_session_schema_rejects_identity_table_with_renamed_column(renamed_column: str) -> None:
+    """A divergent identity-table shape fail-closes with the actionable error.
+
+    Regression for elspeth-5cf1ca2852: ``read_schema_identities()`` selected
+    the declared identity columns before any live-shape validation, so a
+    missing or renamed column leaked a raw ``sqlalchemy.exc.OperationalError``
+    instead of the delete-and-restart ``SessionSchemaError``.
+    """
+    eng = create_session_engine("sqlite:///:memory:")
+    initialize_session_schema(eng)
+    with eng.begin() as conn:
+        conn.execute(text(f"ALTER TABLE elspeth_schema_identity RENAME COLUMN {renamed_column} TO drifted_away"))
+
+    with pytest.raises(SessionSchemaError, match=renamed_column):
+        initialize_session_schema(eng)
+
+
+def test_probe_current_schema_returns_false_for_identity_table_with_renamed_column() -> None:
+    eng = create_session_engine("sqlite:///:memory:")
+    initialize_session_schema(eng)
+    with eng.begin() as conn:
+        conn.execute(text("ALTER TABLE elspeth_schema_identity RENAME COLUMN schema_epoch TO drifted_away"))
+
+    assert probe_current_schema(eng) is False
+
+
 def test_current_schema_enforces_ready_blob_hash_check(engine) -> None:
     session_id = str(uuid.uuid4())
     with engine.begin() as conn:

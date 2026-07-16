@@ -406,6 +406,7 @@ class _FakeYamlGenerator:
 class _FakeSettings:
     gates: tuple[Any, ...] = ()
     coalesce: tuple[Any, ...] = ()
+    landscape: Any = field(default_factory=lambda: SimpleNamespace(export=SimpleNamespace(enabled=False, sink=None)))
 
     def model_dump(self, *, mode: str = "json") -> dict[str, Any]:
         assert mode == "json"

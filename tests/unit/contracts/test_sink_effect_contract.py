@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import inspect
+import math
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError, asdict, fields, replace
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -81,6 +83,7 @@ def _export_input(
     signing_mode: AuditExportSigningMode = AuditExportSigningMode.UNSIGNED,
     chunk_bytes: bytes = b'{"record":1}\n',
     objects_out: dict[str, bytes] | None = None,
+    manifest_mutator: Callable[[dict[str, object]], object] | None = None,
 ) -> SinkEffectAuditExportSnapshotInput:
     snapshot_id = "1" * 64
     registry_key_hash = "2" * 64
@@ -103,10 +106,14 @@ def _export_input(
         "chunk_count": 1,
         "derivation_version": "audit-export-derivation-v1",
         "export_format": "json",
+        "exported_at": "2026-07-16T01:02:03.456789Z",
         "final_hash": "6" * 64,
+        "hash_algorithm": "sha256",
+        "last_chunk_seal_hash": "7" * 64,
         "manifest_hash": manifest_hash,
         "record_chain_algorithm": record_chain_algorithm,
         "record_count": 1,
+        "record_type": "manifest",
         "registry_key_hash": registry_key_hash,
         "run_id": "source-run-1",
         "schema": "elspeth.audit-export-manifest.v2",
@@ -115,8 +122,13 @@ def _export_input(
         "signature_key_id": signer_key_id,
         "snapshot_hash": snapshot_hash,
         "snapshot_id": snapshot_id,
+        "snapshot_seal_hash": "8" * 64,
+        "source_completed_at": "2026-07-16T01:02:03.456789Z",
+        "source_status": "completed",
         "total_bytes": len(chunk_bytes),
     }
+    if manifest_mutator is not None:
+        manifest_mutator(manifest_object)
     manifest_bytes = canonical_json(manifest_object).encode("utf-8")
     signed_manifest_hash = _sha256(manifest_bytes)
     signed_manifest = AuditExportSignedManifestInput(
@@ -371,6 +383,39 @@ def test_evidence_and_member_rows_are_deeply_immutable_and_copy_isolated() -> No
         member.ordinal = 2  # type: ignore[misc]
 
 
+def test_member_row_is_a_detached_closed_canonical_value_tree() -> None:
+    source = {"nested": [{"value": 1, "float": 1.25, "null": None}]}
+    member = replace(_member(), row=source)
+    source["nested"][0]["value"] = 99
+    assert member.row["nested"][0]["value"] == 1
+    with pytest.raises(TypeError):
+        member.row["nested"][0]["value"] = 2  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        bytearray(b"mutable"),
+        object(),
+        {"unordered"},
+        frozenset({"unordered"}),
+        math.inf,
+        math.nan,
+        2**53,
+    ],
+)
+def test_member_row_rejects_noncanonical_or_authority_values(bad_value: object) -> None:
+    with pytest.raises((TypeError, ValueError), match="row"):
+        replace(_member(), row={"bad": {"nested": bad_value}})
+
+
+def test_member_row_rejects_non_string_keys_and_nested_reader_smuggling() -> None:
+    with pytest.raises(TypeError, match="string keys"):
+        replace(_member(), row={1: "bad"})  # type: ignore[dict-item]
+    with pytest.raises(TypeError, match="reader"):
+        replace(_member(), row={"nested": [{"reader": _export_input().reader}]})
+
+
 def test_all_evidence_fields_enforce_the_64_kib_canonical_json_bound() -> None:
     oversized = {"payload": "x" * (64 * 1024)}
 
@@ -610,9 +655,10 @@ def test_export_input_is_dense_bounded_exact_and_has_no_pipeline_fields() -> Non
     export_input = _export_input()
     assert export_input.input_kind is SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT
     assert isinstance(export_input.chunks, tuple)
-    assert not hasattr(export_input, "members")
-    assert not hasattr(export_input, "target_snapshot_members")
-    assert not hasattr(export_input, "token_id")
+    missing = object()
+    assert inspect.getattr_static(export_input, "members", missing) is missing
+    assert inspect.getattr_static(export_input, "target_snapshot_members", missing) is missing
+    assert inspect.getattr_static(export_input, "token_id", missing) is missing
     assert list(export_input.reader.iter_verified_chunks()) == [b'{"record":1}\n']
 
     chunk = export_input.chunks[0]
@@ -694,7 +740,7 @@ def test_restricted_reader_keeps_manifest_separate_and_exposes_no_arbitrary_read
     assert b'"record":1' not in manifest_bytes
     assert inspect.signature(reader.read_verified_signed_manifest).parameters == {}
     for forbidden in ("read", "read_ref", "resolve", "query", "landscape", "credentials", "signer", "secret"):
-        assert not hasattr(reader, forbidden)
+        assert inspect.getattr_static(reader, forbidden, None) is None
     with pytest.raises(TypeError):
         reader.read_verified_signed_manifest("sha256:" + "0" * 64)  # type: ignore[call-arg]
 
@@ -738,6 +784,116 @@ def test_reader_is_factory_only_and_excluded_from_repr_equality_and_serializatio
             expected_descriptor=None,
             safe_evidence={"reader": first.reader},
         )
+
+
+def test_restricted_reader_slots_cannot_be_replaced_or_deleted() -> None:
+    export_input = _export_input()
+    reader = export_input.reader
+    before = (reader.snapshot_id, reader.manifest_hash, reader.chunk_count, list(reader.iter_verified_chunks()))
+    for slot in RestrictedAuditExportSnapshotReader.__slots__:
+        mangled = f"_RestrictedAuditExportSnapshotReader{slot}" if slot.startswith("__") else slot
+        with pytest.raises(TypeError, match="immutable"):
+            setattr(reader, mangled, object())
+        with pytest.raises(TypeError, match="immutable"):
+            delattr(reader, mangled)
+    assert (reader.snapshot_id, reader.manifest_hash, reader.chunk_count, list(reader.iter_verified_chunks())) == before
+
+
+_V2_MANIFEST_FIELDS = {
+    "chunk_count",
+    "derivation_version",
+    "export_format",
+    "exported_at",
+    "final_hash",
+    "hash_algorithm",
+    "last_chunk_seal_hash",
+    "manifest_hash",
+    "record_chain_algorithm",
+    "record_count",
+    "record_type",
+    "registry_key_hash",
+    "run_id",
+    "schema",
+    "signature",
+    "signature_algorithm",
+    "signature_key_id",
+    "snapshot_hash",
+    "snapshot_id",
+    "snapshot_seal_hash",
+    "source_completed_at",
+    "source_status",
+    "total_bytes",
+}
+
+
+@pytest.mark.parametrize("missing_field", sorted(_V2_MANIFEST_FIELDS))
+def test_reader_rejects_each_missing_v2_manifest_field(missing_field: str) -> None:
+    with pytest.raises(ValueError, match="exact v2 field set"):
+        _export_input(manifest_mutator=lambda manifest: manifest.pop(missing_field))
+
+
+def test_reader_rejects_extra_v2_manifest_field_and_missing_unsigned_signature() -> None:
+    with pytest.raises(ValueError, match="exact v2 field set"):
+        _export_input(manifest_mutator=lambda manifest: manifest.__setitem__("extra", "forbidden"))
+    with pytest.raises(ValueError, match="exact v2 field set"):
+        _export_input(manifest_mutator=lambda manifest: manifest.pop("signature"))
+
+
+@pytest.mark.parametrize("integer_field", ["chunk_count", "record_count", "total_bytes"])
+def test_reader_rejects_bool_for_v2_manifest_integer(integer_field: str) -> None:
+    with pytest.raises(TypeError, match=integer_field):
+        _export_input(manifest_mutator=lambda manifest: manifest.__setitem__(integer_field, True))
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("schema", "elspeth.audit-export-manifest.v1"),
+        ("derivation_version", "audit-export-derivation-v0"),
+        ("export_format", "xml"),
+        ("hash_algorithm", "sha512"),
+        ("record_type", "chunk"),
+        ("signature_algorithm", "unknown"),
+        ("source_status", "running"),
+    ],
+)
+def test_reader_rejects_wrong_v2_manifest_literals(field_name: str, invalid_value: str) -> None:
+    with pytest.raises(ValueError):
+        _export_input(manifest_mutator=lambda manifest: manifest.__setitem__(field_name, invalid_value))
+
+
+@pytest.mark.parametrize(
+    "hash_field",
+    [
+        "final_hash",
+        "last_chunk_seal_hash",
+        "manifest_hash",
+        "registry_key_hash",
+        "snapshot_hash",
+        "snapshot_id",
+        "snapshot_seal_hash",
+    ],
+)
+def test_reader_rejects_noncanonical_v2_manifest_hash(hash_field: str) -> None:
+    with pytest.raises(ValueError, match=hash_field):
+        _export_input(manifest_mutator=lambda manifest: manifest.__setitem__(hash_field, "A" * 64))
+
+
+@pytest.mark.parametrize("timestamp_field", ["exported_at", "source_completed_at"])
+def test_reader_rejects_noncanonical_v2_manifest_timestamp(timestamp_field: str) -> None:
+    with pytest.raises(ValueError, match=timestamp_field):
+        _export_input(manifest_mutator=lambda manifest: manifest.__setitem__(timestamp_field, "2026-07-16T01:02:03Z"))
+
+
+@pytest.mark.parametrize("field_name", sorted(_V2_MANIFEST_FIELDS - {"chunk_count", "record_count", "signature", "total_bytes"}))
+def test_reader_rejects_non_string_v2_manifest_field(field_name: str) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        _export_input(manifest_mutator=lambda manifest: manifest.__setitem__(field_name, 1))
+
+
+def test_reader_rejects_non_string_non_null_v2_signature() -> None:
+    with pytest.raises(TypeError, match="signature"):
+        _export_input(manifest_mutator=lambda manifest: manifest.__setitem__("signature", 1))
 
 
 def test_restricted_context_is_frozen() -> None:

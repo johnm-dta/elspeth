@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,13 +63,17 @@ composer_app.add_typer(composer_users_app, name="users")
 app.add_typer(doctor_app, name="doctor")
 
 
-def _preflight_follower_sink_effects(sinks: Mapping[str, SinkProtocol]) -> None:
+def _preflight_follower_sink_effects(
+    sinks: Mapping[str, SinkProtocol],
+    configured_modes: Mapping[str, str],
+) -> object:
     """Fail closed over resolved follower sinks before any startup work."""
     from elspeth.contracts.sink_effects import SinkEffectInputKind
     from elspeth.engine.orchestrator.preflight import validate_pipeline_sink_effect_capabilities
 
-    validate_pipeline_sink_effect_capabilities(
+    return validate_pipeline_sink_effect_capabilities(
         sinks,
+        configured_modes=configured_modes,
         required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
     )
 
@@ -79,6 +83,18 @@ def _instantiate_plugins_for_runtime_preflight(settings: ElspethSettings) -> Plu
     from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
 
     return instantiate_plugins_from_config(settings, preflight_mode=True)
+
+
+def _join_after_follower_sink_preflight(
+    orchestrator: Orchestrator,
+    run_id: str,
+    settings: ElspethSettings,
+) -> tuple[str, PluginBundle, Mapping[str, SinkProtocol], Mapping[str, str], object]:
+    """Join only after the exact follower execution sinks earn admission."""
+    plugins = _instantiate_plugins_for_runtime_preflight(settings)
+    execution_sinks, execution_sink_modes, admission = _preflight_execution_sinks(settings, plugins)
+    worker_id = orchestrator.join_run(run_id, settings)
+    return worker_id, plugins, execution_sinks, execution_sink_modes, admission
 
 
 @doctor_app.command("aws-ecs")
@@ -235,7 +251,11 @@ def main(
         )
 
 
-def _ensure_output_directories(config: ElspethSettings) -> list[str]:
+def _ensure_output_directories(
+    config: ElspethSettings,
+    *,
+    execution_sink_names: Collection[str] | None = None,
+) -> list[str]:
     """Ensure required output directories exist, creating them if needed.
 
     Creates directories BEFORE attempting to create databases or files,
@@ -298,6 +318,8 @@ def _ensure_output_directories(config: ElspethSettings) -> list[str]:
 
     # 3. Ensure sink output directories exist (for file-based sinks)
     for sink_name, sink_config in config.sinks.items():
+        if execution_sink_names is not None and sink_name not in execution_sink_names:
+            continue
         # SinkSettings.options is always dict[str, Any]; "path" key present for file-based sinks
         sink_path = sink_config.options.get("path")
         if sink_path:
@@ -446,11 +468,32 @@ def _execution_sinks_for_graph(
     config: ElspethSettings,
     sinks: Mapping[str, SinkProtocol],
 ) -> Mapping[str, SinkProtocol]:
-    """Return only sinks that participate in row-flow graph validation/execution."""
-    if config.landscape.export.enabled and config.landscape.export.sink:
-        export_sink_name = config.landscape.export.sink
-        return {name: sink for name, sink in sinks.items() if name != export_sink_name}
-    return sinks
+    """Return the canonical pipeline-execution sink projection."""
+    from elspeth.engine.orchestrator.preflight import execution_sinks_for_runtime
+
+    return execution_sinks_for_runtime(config, sinks)
+
+
+def _preflight_execution_sinks(
+    config: ElspethSettings,
+    plugins: PluginBundle,
+) -> tuple[Mapping[str, SinkProtocol], Mapping[str, str], object]:
+    """Validate the one executable pipeline sink lane and return its receipt."""
+    from elspeth.contracts.sink_effects import SinkEffectInputKind
+    from elspeth.engine.orchestrator.preflight import (
+        execution_sink_modes_for_runtime,
+        execution_sinks_for_runtime,
+        validate_pipeline_sink_effect_capabilities,
+    )
+
+    sinks = execution_sinks_for_runtime(config, plugins.sinks)
+    modes = execution_sink_modes_for_runtime(config, plugins.sink_effect_modes)
+    admission = validate_pipeline_sink_effect_capabilities(
+        sinks,
+        configured_modes=modes,
+        required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+    )
+    return sinks, modes, admission
 
 
 @app.command()
@@ -577,10 +620,21 @@ def run(
         if dry_run or not execute:
             raise typer.Exit(1)
 
+    # Executable admission: validate the projected pipeline sinks before any
+    # output/payload/database directory can be created. Dry-run/configuration
+    # assembly above intentionally remains side-effect and capability-gate free.
+    try:
+        execution_sinks, execution_sink_modes, sink_effect_admission = _preflight_execution_sinks(config, plugins)
+    except contract_errors.TIER_1_ERRORS:
+        raise
+    except Exception as e:
+        typer.echo(f"Sink effect preflight failed: {e}", err=True)
+        raise typer.Exit(1) from None
+
     # Ensure output directories exist BEFORE attempting to create resources
     # Creates directories automatically, only errors if creation fails
     # NOTE: Only when actually executing (not dry-run or validation-only)
-    dir_errors = _ensure_output_directories(config)
+    dir_errors = _ensure_output_directories(config, execution_sink_names=execution_sinks)
     if dir_errors:
         typer.echo("Output directory errors:", err=True)
         for dir_error in dir_errors:
@@ -636,6 +690,8 @@ def run(
             secret_resolutions=secret_resolutions,
             passphrase=passphrase,
             preflight_results=preflight,
+            sink_effect_modes=execution_sink_modes,
+            sink_effect_admission=sink_effect_admission,
         )
     except GracefulShutdownError as e:
         if output_format == "json":
@@ -1034,6 +1090,8 @@ def _orchestrator_context(
     formatter_prefix: str = "Run",
     output_format: Literal["console", "json", "none"] = "console",
     checkpoint_always: bool = False,
+    sink_effect_modes: Mapping[str, str] | None = None,
+    sink_effect_admission: object | None = None,
 ) -> Iterator[_OrchestratorContext]:
     """Shared orchestrator setup and teardown for run/resume CLI paths.
 
@@ -1073,10 +1131,13 @@ def _orchestrator_context(
     from elspeth.core.rate_limit import RateLimitRegistry
     from elspeth.engine import Orchestrator as _Orchestrator
     from elspeth.engine import PipelineConfig as _PipelineConfig
+    from elspeth.engine.orchestrator.preflight import execution_sink_modes_for_runtime
     from elspeth.telemetry import create_telemetry_manager
 
     # Unpack pre-instantiated plugins
-    sinks: Mapping[str, SinkProtocol] = plugins.sinks
+    sinks: Mapping[str, SinkProtocol] = _execution_sinks_for_graph(config, plugins.sinks)
+    configured_sink_effect_modes = plugins.sink_effect_modes if sink_effect_modes is None else sink_effect_modes
+    effective_sink_effect_modes = execution_sink_modes_for_runtime(config, configured_sink_effect_modes)
 
     # Build transforms list: row_plugins + aggregations (with node_id)
     transforms: list[RowPlugin] = [wired.plugin for wired in plugins.transforms]
@@ -1099,6 +1160,8 @@ def _orchestrator_context(
         gates=list(config.gates),
         aggregation_settings=aggregation_settings,
         coalesce_settings=(list(config.coalesce) if config.coalesce else []),
+        sink_effect_modes=effective_sink_effect_modes,
+        sink_effect_admission=sink_effect_admission,
     )
 
     # EventBus + formatters. Programmatic dependency execution uses the
@@ -1159,6 +1222,8 @@ def _execute_pipeline_with_instances(
     secret_resolutions: list[SecretResolutionInput] | None = None,
     passphrase: str | None = None,
     preflight_results: PreflightResult | None = None,
+    sink_effect_modes: Mapping[str, str] | None = None,
+    sink_effect_admission: object | None = None,
 ) -> ExecutionResult:
     """Execute pipeline using pre-instantiated plugin instances.
 
@@ -1224,6 +1289,8 @@ def _execute_pipeline_with_instances(
             db=db,
             formatter_prefix="Run",
             output_format=output_format,
+            sink_effect_modes=sink_effect_modes,
+            sink_effect_admission=sink_effect_admission,
         ) as ctx:
             from elspeth.plugins.infrastructure.runtime_factory import make_sink_factory
             from elspeth.plugins.transforms.llm.model_catalog import read_openrouter_catalog_snapshot_id
@@ -1274,7 +1341,7 @@ def bootstrap_and_run(settings_path: Path) -> RunResult:
     config, secret_resolutions = _load_settings_with_secrets(settings_path)
 
     plugins = _instantiate_plugins_for_runtime_preflight(config)
-    execution_sinks = _execution_sinks_for_graph(config, plugins.sinks)
+    execution_sinks, execution_sink_modes, sink_effect_admission = _preflight_execution_sinks(config, plugins)
 
     graph = ExecutionGraph.from_plugin_instances(
         sources=plugins.sources,
@@ -1288,7 +1355,7 @@ def bootstrap_and_run(settings_path: Path) -> RunResult:
     )
     graph.validate()
 
-    dir_errors = _ensure_output_directories(config)
+    dir_errors = _ensure_output_directories(config, execution_sink_names=execution_sinks)
     if dir_errors:
         raise ValueError(f"Failed to create output directories: {'; '.join(dir_errors)}")
 
@@ -1329,6 +1396,8 @@ def bootstrap_and_run(settings_path: Path) -> RunResult:
             plugins,
             db=db,
             output_format="none",
+            sink_effect_modes=execution_sink_modes,
+            sink_effect_admission=sink_effect_admission,
         ) as ctx:
             from elspeth.plugins.transforms.llm.model_catalog import read_openrouter_catalog_snapshot_id
 
@@ -1919,6 +1988,8 @@ def _execute_resume_with_instances(
     payload_store: PayloadStore | None,
     db: LandscapeDB,
     output_format: Literal["console", "json"] = "console",
+    sink_effect_modes: Mapping[str, str] | None = None,
+    sink_effect_admission: object | None = None,
 ) -> Any:  # Returns RunResult from orchestrator.resume()
     """Execute resume using pre-instantiated plugins.
 
@@ -1945,6 +2016,8 @@ def _execute_resume_with_instances(
         formatter_prefix="Resume",
         output_format=output_format,
         checkpoint_always=True,
+        sink_effect_modes=sink_effect_modes,
+        sink_effect_admission=sink_effect_admission,
     ) as ctx:
         return ctx.orchestrator.resume(
             resume_point=resume_point,
@@ -1975,11 +2048,12 @@ def _build_resume_graphs(
     # hash and source node IDs computed during the original run. The runtime
     # PluginBundle is swapped to NullSource separately before execution; graph
     # identity must not change just because resume does not reopen sources.
+    execution_sinks = _execution_sinks_for_graph(settings_config, plugins.sinks)
     validation_graph = ExecutionGraph.from_plugin_instances(
         sources=plugins.sources,
         source_settings_map=plugins.source_settings_map,
         transforms=plugins.transforms,
-        sinks=plugins.sinks,
+        sinks=execution_sinks,
         aggregations=plugins.aggregations,
         gates=gate_settings,
         coalesce_settings=coalesce_settings,
@@ -1991,7 +2065,7 @@ def _build_resume_graphs(
         sources=plugins.sources,
         source_settings_map=plugins.source_settings_map,
         transforms=plugins.transforms,
-        sinks=plugins.sinks,
+        sinks=execution_sinks,
         aggregations=plugins.aggregations,
         gates=gate_settings,
         coalesce_settings=coalesce_settings,
@@ -2275,6 +2349,19 @@ def resume(
                 typer.echo("Topology validation passed - checkpoint is compatible with current config.")
             return
 
+        # Executable resume admission must precede payload-store construction,
+        # resume-mode mutation, field-resolution mutation, and target probing.
+        try:
+            execution_sinks, execution_sink_modes, sink_effect_admission = _preflight_execution_sinks(
+                settings_config,
+                plugins,
+            )
+        except contract_errors.TIER_1_ERRORS:
+            raise
+        except Exception as e:
+            typer.echo(f"Sink effect preflight failed: {e}", err=True)
+            raise typer.Exit(1) from None
+
         # Execute resume (graph already built above for validation)
         if output_format != "json":
             typer.echo(f"\nResuming run {run_id}...")
@@ -2303,7 +2390,7 @@ def resume(
 
         resume_sinks = {}
 
-        for sink_name, sink in plugins.sinks.items():
+        for sink_name, sink in execution_sinks.items():
             # Check if sink supports resume
             if not sink.supports_resume:
                 typer.echo(
@@ -2389,6 +2476,7 @@ def resume(
             sources=null_resume_sources,
             source_settings_map=null_resume_settings,
             sinks=resume_sinks,  # Use append-mode sinks
+            sink_effect_modes=execution_sink_modes,
         )
 
         # Execute resume with execution graph (NullSource)
@@ -2403,6 +2491,8 @@ def resume(
                 payload_store=payload_store,
                 db=db,
                 output_format=output_format,
+                sink_effect_modes=execution_sink_modes,
+                sink_effect_admission=sink_effect_admission,
             )
         except GracefulShutdownError as e:
             if output_format == "json":
@@ -2677,7 +2767,11 @@ def join(
         orchestrator = Orchestrator(db)
 
         try:
-            worker_id = orchestrator.join_run(run_id, settings_config)
+            worker_id, plugins, execution_sinks, execution_sink_modes, sink_effect_admission = _join_after_follower_sink_preflight(
+                orchestrator,
+                run_id,
+                settings_config,
+            )
         except JoinRefusedError as e:
             if output_format == "json":
                 import json as json_mod
@@ -2694,6 +2788,11 @@ def join(
                 )
             else:
                 typer.echo(f"Cannot join run {run_id}: {e.reason}", err=True)
+            raise typer.Exit(1) from None
+        except contract_errors.TIER_1_ERRORS:
+            raise
+        except Exception as e:
+            typer.echo(f"Sink effect preflight failed: {e}", err=True)
             raise typer.Exit(1) from None
 
         # Derive the per-worker hex suffix from the minted worker_id
@@ -2719,18 +2818,6 @@ def join(
 
         # Build the execution graph for the follower (needed to recognise
         # barrier / sink nodes for hand-off routing).
-        try:
-            plugins = _instantiate_plugins_for_runtime_preflight(settings_config)
-            # Resolved follower sink instances/modes are now available. Gate
-            # them before graph/processor/context construction or any plugin
-            # lifecycle, reservation, sink client initialization, or sink I/O.
-            _preflight_follower_sink_effects(plugins.sinks)
-        except contract_errors.TIER_1_ERRORS:
-            raise
-        except Exception as e:
-            typer.echo(f"Error instantiating plugins: {e}", err=True)
-            raise typer.Exit(1) from None
-
         try:
             _validation_graph, execution_graph = _build_resume_graphs(settings_config, plugins)
         except contract_errors.TIER_1_ERRORS:
@@ -2806,10 +2893,12 @@ def join(
             config=resolve_config(settings_config),
             sources=plugins.sources,
             transforms=follower_transforms,
-            sinks=plugins.sinks,
+            sinks=execution_sinks,
             gates=list(settings_config.gates),
             aggregation_settings=follower_agg_settings,
             coalesce_settings=(list(settings_config.coalesce) if settings_config.coalesce else []),
+            sink_effect_modes=execution_sink_modes,
+            sink_effect_admission=sink_effect_admission,
         )
 
         follower_proc = build_follower_processor(
@@ -2836,7 +2925,7 @@ def join(
         try:
             for _follower_transform in follower_transforms:
                 _follower_transform.on_start(ctx)
-            for _follower_sink in plugins.sinks.values():
+            for _follower_sink in execution_sinks.values():
                 _follower_sink.on_start(ctx)
 
             follower_run_entered = True

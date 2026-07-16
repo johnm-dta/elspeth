@@ -11,13 +11,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
 from elspeth.cli import _preflight_follower_sink_effects, app
 from elspeth.contracts.preflight import DependencyRunResult, PreflightResult
-from elspeth.contracts.sink_effects import SinkEffectInputKind
+from elspeth.contracts.sink_effects import SINK_EFFECT_PROTOCOL_VERSION, SinkEffectInputKind
 
 runner = CliRunner()
 
@@ -25,9 +25,10 @@ runner = CliRunner()
 def test_follower_preflight_passes_explicit_pipeline_members_kind() -> None:
     sinks = {"output": object()}
     with patch("elspeth.engine.orchestrator.preflight.validate_pipeline_sink_effect_capabilities") as validate:
-        _preflight_follower_sink_effects(sinks)  # type: ignore[arg-type]
+        _preflight_follower_sink_effects(sinks, {"output": "write"})  # type: ignore[arg-type]
     validate.assert_called_once_with(
         sinks,
+        configured_modes={"output": "write"},
         required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
     )
 
@@ -41,13 +42,36 @@ class _FakeGraph:
         """Match the ExecutionGraph API used by the CLI run command."""
 
 
+class _EffectCapableSink:
+    name = "effect-capable"
+    effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    supported_effect_modes = frozenset({"write"})
+    supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
+
+    def inspect_effect(self, _request: object, _ctx: object) -> None: ...
+
+    def prepare_effect(self, _request: object, _ctx: object) -> None: ...
+
+    def commit_effect(self, _plan: object, _ctx: object) -> None: ...
+
+    def reconcile_effect(self, _plan: object, _ctx: object) -> None: ...
+
+
+class _LegacyResumeSink:
+    name = "legacy"
+
+    def __init__(self) -> None:
+        self.configure_for_resume = MagicMock()
+
+
 @dataclass(frozen=True, slots=True)
 class _FakePluginBundle:
     sources: dict[str, object] = field(default_factory=lambda: {"primary": object()})
     source_settings_map: dict[str, object] = field(default_factory=lambda: {"primary": object()})
     transforms: tuple[object, ...] = ()
-    sinks: dict[str, object] = field(default_factory=lambda: {"output": object()})
+    sinks: dict[str, object] = field(default_factory=lambda: {"output": _EffectCapableSink()})
     aggregations: dict[str, object] = field(default_factory=dict)
+    sink_effect_modes: dict[str, str] = field(default_factory=lambda: {"output": "write"})
 
 
 def _make_minimal_config_yaml(tmp_path: Path, *, with_depends_on: bool = False) -> Path:
@@ -65,6 +89,43 @@ def _make_minimal_config_yaml(tmp_path: Path, *, with_depends_on: bool = False) 
     settings_path = tmp_path / "pipeline.yaml"
     settings_path.write_text(yaml.dump(config))
     return settings_path
+
+
+def _make_resume_config_and_database(tmp_path: Path) -> tuple[Path, Path]:
+    import yaml
+
+    db_path = tmp_path / "landscape.db"
+    config = {
+        "sources": {
+            "primary": {
+                "plugin": "csv",
+                "on_success": "default",
+                "options": {
+                    "path": str(tmp_path / "input.csv"),
+                    "on_validation_failure": "discard",
+                    "schema": {"mode": "observed"},
+                },
+            }
+        },
+        "transforms": [],
+        "sinks": {
+            "output": {
+                "plugin": "csv",
+                "on_write_failure": "discard",
+                "options": {"path": str(tmp_path / "output.csv"), "schema": {"mode": "observed"}},
+            }
+        },
+        "landscape": {"url": f"sqlite:///{db_path}"},
+        "payload_store": {"backend": "filesystem", "base_path": str(tmp_path / "payloads")},
+    }
+    settings_path = tmp_path / "resume.yaml"
+    settings_path.write_text(yaml.dump(config))
+
+    from elspeth.core.landscape import LandscapeDB
+
+    db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=True)
+    db.close()
+    return settings_path, db_path
 
 
 def _fake_config(*, with_depends_on: bool) -> SimpleNamespace:
@@ -203,3 +264,67 @@ class TestCLIRunCallsResolvePreflight:
         assert result.exit_code == 1
         assert "pre-flight check failed" in result.output.lower()
         assert "circular dependency" in result.output.lower()
+
+    def test_cli_run_rejects_legacy_sink_before_output_directories(self, tmp_path: Path) -> None:
+        settings_path = _make_minimal_config_yaml(tmp_path)
+        legacy_bundle = _FakePluginBundle(sinks={"output": object()}, sink_effect_modes={})
+
+        with (
+            patch("elspeth.cli._load_settings_with_secrets", return_value=(_fake_config(with_depends_on=False), [])),
+            patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=legacy_bundle),
+            patch("elspeth.cli.ExecutionGraph") as graph_cls,
+            patch("elspeth.cli._ensure_output_directories") as ensure_directories,
+            patch("elspeth.engine.bootstrap.resolve_preflight") as resolve_preflight,
+        ):
+            graph_cls.from_plugin_instances.return_value = _FakeGraph()
+            result = runner.invoke(app, ["run", "-s", str(settings_path), "--execute"])
+
+        assert result.exit_code == 1
+        assert "sink effect preflight failed" in result.output.lower()
+        ensure_directories.assert_not_called()
+        resolve_preflight.assert_not_called()
+
+
+def test_cli_resume_rejects_legacy_sink_before_resume_mutation_or_payload_access(tmp_path: Path) -> None:
+    from elspeth.contracts.checkpoint import ResumeCheck
+
+    settings_path, _db_path = _make_resume_config_and_database(tmp_path)
+    sink = _LegacyResumeSink()
+    bundle = _FakePluginBundle(sinks={"output": sink}, sink_effect_modes={})
+    resume_point = SimpleNamespace(sequence_number=0, barrier_scalars=None)
+
+    with (
+        patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=bundle),
+        patch("elspeth.cli.ExecutionGraph") as graph_cls,
+        patch("elspeth.core.checkpoint.RecoveryManager") as recovery_cls,
+    ):
+        graph_cls.from_plugin_instances.return_value = _FakeGraph()
+        recovery = recovery_cls.return_value
+        recovery.can_resume.return_value = ResumeCheck(can_resume=True)
+        recovery.get_resume_point.return_value = resume_point
+        recovery.get_unprocessed_rows.return_value = []
+        recovery.count_blocked_barrier_items.return_value = 0
+        result = runner.invoke(app, ["resume", "run-1", "-s", str(settings_path), "--execute"])
+
+    assert result.exit_code == 1
+    assert "sink effect preflight failed" in result.output.lower()
+    sink.configure_for_resume.assert_not_called()
+    assert not (tmp_path / "payloads").exists()
+
+
+def test_cli_join_rejects_legacy_sink_before_join_admission(tmp_path: Path) -> None:
+    settings_path, db_path = _make_resume_config_and_database(tmp_path)
+    bundle = _FakePluginBundle(sinks={"output": _LegacyResumeSink()}, sink_effect_modes={})
+
+    with (
+        patch("elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=bundle),
+        patch("elspeth.engine.Orchestrator") as orchestrator_cls,
+    ):
+        result = runner.invoke(
+            app,
+            ["join", "run-1", "-s", str(settings_path), "--database", str(db_path)],
+        )
+
+    assert result.exit_code == 1
+    assert "sink effect preflight failed" in result.output.lower()
+    orchestrator_cls.return_value.join_run.assert_not_called()

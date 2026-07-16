@@ -94,10 +94,10 @@ class TestBaseSinkContract:
         assert BaseSink._output_contract is None
 
     def test_effect_protocol_capabilities_default_to_explicitly_unsupported(self) -> None:
-        sink = StubSink({})
         assert BaseSink.effect_protocol_version is None
         assert BaseSink.supported_effect_modes == frozenset()
         assert BaseSink.supported_effect_input_kinds == frozenset()
         assert isinstance(BaseSink.supported_effect_input_kinds, frozenset)
-        assert sink.effect_mode is None
+        assert "_resolved_effect_mode" not in BaseSink.__annotations__
+        assert "effect_mode" not in BaseSink.__annotations__
         assert SinkEffectInputKind.PIPELINE_MEMBERS not in BaseSink.supported_effect_input_kinds

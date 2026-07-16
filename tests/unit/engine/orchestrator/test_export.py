@@ -81,7 +81,7 @@ class _SinkDouble:
 
     def __init__(self, *, config: dict[str, Any] | None = None, **overrides: Any) -> None:
         self.config = config or {}
-        self.effect_mode = "write"
+        self._resolved_effect_mode = "write"
         self.node_id = None
         self.on_start = _CallRecorder()
         self.write = _CallRecorder()
@@ -171,6 +171,7 @@ class TestExportLandscapeJSON:
             export_landscape(object(), "run-1", self._make_settings(), factory)
         validate.assert_called_once_with(
             {"output": sink},
+            configured_modes={"output": "write"},
             required_input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
         )
 

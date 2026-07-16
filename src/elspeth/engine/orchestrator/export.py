@@ -19,6 +19,7 @@ LandscapeDB is typed but imported conditionally to avoid circular imports.
 from __future__ import annotations
 
 import csv
+import inspect
 import os
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -322,6 +323,9 @@ def export_landscape(
 
     validate_pipeline_sink_effect_capabilities(
         {sink_name: sink},
+        configured_modes={
+            sink_name: cast(str, inspect.getattr_static(sink, "_resolved_effect_mode", "")),
+        },
         required_input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
     )
 

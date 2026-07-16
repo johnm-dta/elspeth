@@ -8,7 +8,7 @@ already-instantiated primitives.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
 from elspeth.contracts import SinkProtocol, SourceProtocol, TransformProtocol
@@ -35,6 +35,7 @@ class PluginBundle:
     transforms: Sequence[WiredTransform]
     sinks: Mapping[str, SinkProtocol]
     aggregations: Mapping[str, tuple[TransformProtocol, AggregationSettings]]
+    sink_effect_modes: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         from elspeth.contracts.errors import OrchestrationInvariantError
@@ -46,7 +47,7 @@ class PluginBundle:
                 f"PluginBundle sources and source_settings_map keys must match. "
                 f"sources={sorted(self.sources)}, source_settings_map={sorted(self.source_settings_map)}"
             )
-        freeze_fields(self, "sources", "source_settings_map", "transforms", "sinks", "aggregations")
+        freeze_fields(self, "sources", "source_settings_map", "transforms", "sinks", "aggregations", "sink_effect_modes")
 
 
 def instantiate_plugins_from_config(
@@ -108,7 +109,10 @@ def instantiate_plugins_from_config(
             aggregations[agg_config.name] = (transform, agg_config)
 
         sinks = {}
+        delayed_export_sink = config.landscape.export.sink if config.landscape.export.enabled else None
         for sink_name, sink_config in config.sinks.items():
+            if sink_name == delayed_export_sink:
+                continue
             sink_cls = manager.get_sink_by_name(sink_config.plugin)
             sinks[sink_name] = sink_cls(dict(sink_config.options))
             sinks[sink_name]._on_write_failure = sink_config.on_write_failure

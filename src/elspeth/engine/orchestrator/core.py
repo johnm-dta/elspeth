@@ -32,12 +32,14 @@ import threading
 from typing import TYPE_CHECKING, Any
 
 import elspeth.engine.executors.declaration_contract_bootstrap  # noqa: F401
+from elspeth.contracts.sink_effects import SinkEffectInputKind
 from elspeth.engine.orchestrator.bootstrap import prepare_for_run as prepare_for_run
 from elspeth.engine.orchestrator.ceremony import RunCeremony
 from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
 from elspeth.engine.orchestrator.graph_registration import GraphRegistrationService
 from elspeth.engine.orchestrator.join_admission import JoinAdmissionService
 from elspeth.engine.orchestrator.leader_drain import LeaderDrainCoordinator
+from elspeth.engine.orchestrator.preflight import require_sink_effect_admission
 from elspeth.engine.orchestrator.processor_factory import ProcessorFactory
 from elspeth.engine.orchestrator.resume import ResumeCoordinator
 from elspeth.engine.orchestrator.run_context_factory import RunContextFactory
@@ -246,6 +248,12 @@ class Orchestrator:
         Raises:
             OrchestrationInvariantError: If graph or payload_store is not provided
         """
+        require_sink_effect_admission(
+            config.sinks,
+            configured_modes=config.sink_effect_modes,
+            required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            admission=config.sink_effect_admission,
+        )
         return self._run_lifecycle.run(
             config,
             graph,
@@ -324,6 +332,12 @@ class Orchestrator:
         orchestration extracted from this class. The public signature is the
         stable contract; the implementation lives in resume.py.
         """
+        require_sink_effect_admission(
+            config.sinks,
+            configured_modes=config.sink_effect_modes,
+            required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            admission=config.sink_effect_admission,
+        )
         return self._resume_coordinator.resume(
             resume_point,
             config,

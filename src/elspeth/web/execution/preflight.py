@@ -389,11 +389,13 @@ def audit_safe_resolved_config(
 
 def build_runtime_graph(settings: ElspethSettings, bundle: PluginBundle) -> ExecutionGraph:
     """Build an ExecutionGraph through the production graph factory."""
+    from elspeth.engine.orchestrator.preflight import execution_sinks_for_runtime
+
     return ExecutionGraph.from_plugin_instances(
         sources=bundle.sources,
         source_settings_map=bundle.source_settings_map,
         transforms=bundle.transforms,
-        sinks=bundle.sinks,
+        sinks=execution_sinks_for_runtime(settings, bundle.sinks),
         aggregations=bundle.aggregations,
         gates=list(settings.gates),
         coalesce_settings=(list(settings.coalesce) if settings.coalesce else None),

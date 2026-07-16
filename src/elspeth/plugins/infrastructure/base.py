@@ -956,7 +956,6 @@ class BaseSink(ABC):
     effect_protocol_version: ClassVar[str | None] = None
     supported_effect_modes: ClassVar[frozenset[str]] = frozenset()
     supported_effect_input_kinds: ClassVar[frozenset[SinkEffectInputKind]] = frozenset()
-    effect_mode: str | None = None
 
     # ── Reference content (Phase 7A) ────────────────────────────────────
     # These fields populate the catalog's reference cards. They are
@@ -1157,7 +1156,6 @@ class BaseSink(ABC):
             config: Plugin configuration
         """
         self.config = config
-        self.effect_mode = None
         # Per-instance lifecycle guards — see BaseTransform.__init__ for
         # the full rationale (lifecycle-guard contract, missing-super()
         # detection, why class-level state would mask bugs).

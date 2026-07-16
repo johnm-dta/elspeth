@@ -37,6 +37,7 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.run_result import RunResult
+from elspeth.contracts.sink_effects import SINK_EFFECT_PROTOCOL_VERSION, SinkEffectInputKind
 from elspeth.core.config import (
     CheckpointSettings,
     ConcurrencySettings,
@@ -192,6 +193,22 @@ def _blob_record_stub(
     )
 
 
+class _EffectCapableSinkStub:
+    name = "effect-capable"
+    _on_write_failure = "discard"
+    effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    supported_effect_modes = frozenset({"write"})
+    supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
+
+    def inspect_effect(self, _request: object, _ctx: object) -> None: ...
+
+    def prepare_effect(self, _request: object, _ctx: object) -> None: ...
+
+    def commit_effect(self, _plan: object, _ctx: object) -> None: ...
+
+    def reconcile_effect(self, _plan: object, _ctx: object) -> None: ...
+
+
 def _plugin_bundle_stub() -> SimpleNamespace:
     source = object()
     return SimpleNamespace(
@@ -200,8 +217,9 @@ def _plugin_bundle_stub() -> SimpleNamespace:
         source_settings=object(),
         source_settings_map={"source": object()},
         transforms=(),
-        sinks={"primary": object()},
+        sinks={"primary": _EffectCapableSinkStub()},
         aggregations={},
+        sink_effect_modes={"primary": "write"},
     )
 
 
@@ -286,6 +304,7 @@ def _mock_pipeline_settings() -> SimpleNamespace:
         gates=[],
         coalesce=[],
         queues={},
+        landscape=SimpleNamespace(export=SimpleNamespace(enabled=False, sink=None)),
         rate_limit=RateLimitSettings(enabled=False),
         concurrency=ConcurrencySettings(),
         checkpoint=CheckpointSettings(enabled=False),

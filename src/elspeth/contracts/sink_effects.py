@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from hashlib import sha256
 from types import MappingProxyType
@@ -32,6 +33,34 @@ _AUDIT_EXPORT_DERIVATION_VERSION: Final = "audit-export-derivation-v1"
 _UNSIGNED_RECORD_CHAIN: Final = "sha256_concat_record_sha256_v1"
 _HMAC_RECORD_CHAIN: Final = "sha256_concat_hmac_sha256_signatures_v1"
 _LOWER_HEX_64 = re.compile(r"[0-9a-f]{64}\Z")
+_UTC_MICROSECOND_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z\Z")
+_V2_MANIFEST_FIELDS: Final = frozenset(
+    {
+        "chunk_count",
+        "derivation_version",
+        "export_format",
+        "exported_at",
+        "final_hash",
+        "hash_algorithm",
+        "last_chunk_seal_hash",
+        "manifest_hash",
+        "record_chain_algorithm",
+        "record_count",
+        "record_type",
+        "registry_key_hash",
+        "run_id",
+        "schema",
+        "signature",
+        "signature_algorithm",
+        "signature_key_id",
+        "snapshot_hash",
+        "snapshot_id",
+        "snapshot_seal_hash",
+        "source_completed_at",
+        "source_status",
+        "total_bytes",
+    }
+)
 
 
 class SinkEffectRole(StrEnum):
@@ -174,6 +203,32 @@ def _freeze_bounded_evidence(evidence: Mapping[str, object], field_name: str) ->
     return frozen
 
 
+def _freeze_canonical_row_value(value: object, path: str) -> object:
+    """Detach one JSON/RFC-8785-safe value tree and reject authority objects."""
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, int):
+        if abs(value) > 2**53 - 1:
+            raise ValueError(f"{path} integer exceeds the canonical JSON safe range")
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{path} float must be finite")
+        return value
+    if isinstance(value, Mapping):
+        frozen_items: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{path} mappings require string keys")
+            frozen_items[key] = _freeze_canonical_row_value(item, f"{path}.{key}")
+        return MappingProxyType(frozen_items)
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_canonical_row_value(item, f"{path}[{index}]") for index, item in enumerate(value))
+    if isinstance(value, RestrictedAuditExportSnapshotReader):
+        raise TypeError(f"{path} cannot contain a restricted audit export reader")
+    raise TypeError(f"{path} contains unsupported non-canonical value {type(value).__name__}")
+
+
 def _contains_restricted_reader(value: object) -> bool:
     reader_type = globals().get("RestrictedAuditExportSnapshotReader")
     if isinstance(reader_type, type) and isinstance(value, reader_type):
@@ -185,13 +240,8 @@ def _contains_restricted_reader(value: object) -> bool:
     return False
 
 
-def _freeze_evidence_field(instance: object, field_name: str) -> None:
-    frozen = _freeze_bounded_evidence(getattr(instance, field_name), field_name)
-    object.__setattr__(instance, field_name, frozen)
-
-
-def _freeze_member_sequence(instance: object, field_name: str) -> tuple[SinkEffectMember, ...]:
-    members = tuple(getattr(instance, field_name))
+def _freeze_member_sequence(members_input: Sequence[SinkEffectMember], field_name: str) -> tuple[SinkEffectMember, ...]:
+    members = tuple(members_input)
     ordinals: list[int] = []
     for member in members:
         if not isinstance(member, SinkEffectMember):
@@ -201,19 +251,17 @@ def _freeze_member_sequence(instance: object, field_name: str) -> tuple[SinkEffe
         raise ValueError(f"{field_name} ordinals must be unique")
     if ordinals != list(range(len(ordinals))):
         raise ValueError(f"{field_name} ordinals must be dense and ordered from zero")
-    object.__setattr__(instance, field_name, members)
     return members
 
 
-def _freeze_ordinal_sequence(instance: object, field_name: str) -> tuple[int, ...]:
-    ordinals = tuple(getattr(instance, field_name))
+def _freeze_ordinal_sequence(ordinals_input: Sequence[int], field_name: str) -> tuple[int, ...]:
+    ordinals = tuple(ordinals_input)
     for ordinal in ordinals:
         require_int(ordinal, f"{field_name} ordinal")
         if ordinal < 0:
             raise ValueError(f"{field_name} ordinals must be non-negative")
     if len(ordinals) != len(set(ordinals)):
         raise ValueError(f"{field_name} ordinals must be unique")
-    object.__setattr__(instance, field_name, ordinals)
     return ordinals
 
 
@@ -232,10 +280,10 @@ class SinkEffectMember:
         require_int(self.ingest_sequence, "ingest_sequence", min_value=0)
         for field_name in ("token_id", "row_id", "lineage_key", "payload_hash"):
             _require_nonempty_string(getattr(self, field_name), field_name)
-        frozen_row = deep_freeze(self.row)
+        frozen_row = _freeze_canonical_row_value(self.row, "row")
         if not isinstance(frozen_row, Mapping):
             raise TypeError("row must be a mapping")
-        object.__setattr__(self, "row", frozen_row)
+        object.__setattr__(self, "row", deep_freeze(frozen_row))
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,10 +292,12 @@ class SinkEffectPipelineMembersInput:
     target_snapshot_members: Sequence[SinkEffectMember]
 
     def __post_init__(self) -> None:
-        members = _freeze_member_sequence(self, "members")
+        members = _freeze_member_sequence(self.members, "members")
         if not members:
             raise ValueError("members must be non-empty")
-        _freeze_member_sequence(self, "target_snapshot_members")
+        target_snapshot_members = _freeze_member_sequence(self.target_snapshot_members, "target_snapshot_members")
+        object.__setattr__(self, "members", tuple(members))
+        object.__setattr__(self, "target_snapshot_members", tuple(target_snapshot_members))
 
     @property
     def input_kind(self) -> SinkEffectInputKind:
@@ -351,6 +401,12 @@ class RestrictedAuditExportSnapshotReader:
 
     def __init__(self) -> None:
         raise TypeError("RestrictedAuditExportSnapshotReader is factory-created only")
+
+    def __setattr__(self, _name: str, _value: object) -> None:
+        raise TypeError("RestrictedAuditExportSnapshotReader is immutable")
+
+    def __delattr__(self, _name: str) -> None:
+        raise TypeError("RestrictedAuditExportSnapshotReader is immutable")
 
     @property
     def snapshot_id(self) -> str:
@@ -463,6 +519,43 @@ def _verify_signed_manifest_bytes(
         raise ValueError("signed manifest must be canonical JSON UTF-8") from exc
     if not isinstance(manifest, dict) or canonical_json(manifest).encode("utf-8") != content:
         raise ValueError("signed manifest must use exact canonical JSON bytes")
+    if set(manifest) != _V2_MANIFEST_FIELDS:
+        raise ValueError("signed manifest must contain the exact v2 field set")
+    for field_name in ("chunk_count", "record_count", "total_bytes"):
+        if type(manifest[field_name]) is not int:
+            raise TypeError(f"signed manifest {field_name} must be exact int")
+        if manifest[field_name] < 1:
+            raise ValueError(f"signed manifest {field_name} must be strictly positive")
+    for field_name in _V2_MANIFEST_FIELDS - {"chunk_count", "record_count", "signature", "total_bytes"}:
+        if type(manifest[field_name]) is not str:
+            raise TypeError(f"signed manifest {field_name} must be exact str")
+    if manifest["signature"] is not None and type(manifest["signature"]) is not str:
+        raise TypeError("signed manifest signature must be exact str or None")
+    for field_name in (
+        "final_hash",
+        "last_chunk_seal_hash",
+        "manifest_hash",
+        "registry_key_hash",
+        "snapshot_hash",
+        "snapshot_id",
+        "snapshot_seal_hash",
+    ):
+        _require_lower_hex_64(manifest[field_name], f"signed manifest {field_name}")
+    for field_name in ("exported_at", "source_completed_at"):
+        timestamp = manifest[field_name]
+        assert isinstance(timestamp, str)
+        if _UTC_MICROSECOND_TIMESTAMP.fullmatch(timestamp) is None:
+            raise ValueError(f"signed manifest {field_name} must be an exact UTC microsecond timestamp")
+        try:
+            datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+        except ValueError as exc:
+            raise ValueError(f"signed manifest {field_name} must be a valid UTC timestamp") from exc
+    if manifest["hash_algorithm"] != "sha256":
+        raise ValueError("signed manifest hash_algorithm must equal 'sha256'")
+    if manifest["record_type"] != "manifest":
+        raise ValueError("signed manifest record_type must equal 'manifest'")
+    if manifest["source_status"] not in {"completed", "completed_with_failures", "empty"}:
+        raise ValueError("signed manifest source_status is not export-terminal")
     expected_fields: dict[str, object] = {
         "schema": descriptor.manifest_schema,
         "derivation_version": descriptor.derivation_version,
@@ -482,7 +575,7 @@ def _verify_signed_manifest_bytes(
         "chunk_count": chunk_count,
     }
     for field_name, expected in expected_fields.items():
-        if manifest.get(field_name) != expected:
+        if manifest[field_name] != expected:
             raise ValueError(f"signed manifest {field_name} does not match its bound descriptor")
 
 
@@ -588,7 +681,7 @@ class SinkEffectAuditExportSnapshotInput:
             raise ValueError("record_count must equal the exact chunk record_count sum")
         if sum(chunk.size_bytes for chunk in chunks) != self.total_bytes:
             raise ValueError("total_bytes must equal the exact chunk size_bytes sum")
-        object.__setattr__(self, "chunks", chunks)
+        object.__setattr__(self, "chunks", tuple(chunks))
 
         if not isinstance(self.signed_manifest, AuditExportSignedManifestInput):
             raise TypeError("signed_manifest must be AuditExportSignedManifestInput")
@@ -643,7 +736,8 @@ class SinkEffectInspection:
     def __post_init__(self) -> None:
         _require_exact_enum(self.mode, SinkEffectInspectionMode, "mode")
         _reject_credential_bearing_reference(self.reference, "reference")
-        _freeze_evidence_field(self, "evidence")
+        frozen_evidence = _freeze_bounded_evidence(self.evidence, "evidence")
+        object.__setattr__(self, "evidence", deep_freeze(frozen_evidence))
 
 
 @dataclass(frozen=True, slots=True)
@@ -699,7 +793,8 @@ class SinkEffectPlan:
                 raise ValueError("PRECOMPUTED descriptor_mode requires an exact expected_descriptor")
         elif self.expected_descriptor is not None:
             raise ValueError(f"{self.descriptor_mode.value} descriptor_mode must not claim an expected_descriptor")
-        _freeze_evidence_field(self, "safe_evidence")
+        frozen_evidence = _freeze_bounded_evidence(self.safe_evidence, "safe_evidence")
+        object.__setattr__(self, "safe_evidence", deep_freeze(frozen_evidence))
 
 
 @dataclass(frozen=True, slots=True)
@@ -712,9 +807,12 @@ class SinkEffectCommitResult:
     def __post_init__(self) -> None:
         if not isinstance(self.descriptor, ArtifactDescriptor):
             raise TypeError("descriptor must be ArtifactDescriptor")
-        _freeze_evidence_field(self, "evidence")
-        accepted = _freeze_ordinal_sequence(self, "accepted_ordinals")
-        diverted = _freeze_ordinal_sequence(self, "diverted_ordinals")
+        frozen_evidence = _freeze_bounded_evidence(self.evidence, "evidence")
+        object.__setattr__(self, "evidence", deep_freeze(frozen_evidence))
+        accepted = _freeze_ordinal_sequence(self.accepted_ordinals, "accepted_ordinals")
+        diverted = _freeze_ordinal_sequence(self.diverted_ordinals, "diverted_ordinals")
+        object.__setattr__(self, "accepted_ordinals", tuple(accepted))
+        object.__setattr__(self, "diverted_ordinals", tuple(diverted))
         if set(accepted) & set(diverted):
             raise ValueError("accepted_ordinals and diverted_ordinals must not overlap")
 
@@ -732,7 +830,8 @@ class SinkEffectReconcileResult:
                 raise ValueError("APPLIED_WITH_EXACT_DESCRIPTOR requires an exact descriptor")
         elif self.descriptor is not None:
             raise ValueError(f"{self.kind.value} must not carry a descriptor")
-        _freeze_evidence_field(self, "evidence")
+        frozen_evidence = _freeze_bounded_evidence(self.evidence, "evidence")
+        object.__setattr__(self, "evidence", deep_freeze(frozen_evidence))
 
     @property
     def may_commit(self) -> bool:

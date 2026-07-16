@@ -50,7 +50,12 @@ from elspeth.core.landscape.run_lifecycle_repository import is_valid_sha256_hex
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.core.secrets import SecretResolutionError
 from elspeth.engine.orchestrator.core import Orchestrator
-from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
+from elspeth.engine.orchestrator.preflight import (
+    assemble_and_validate_pipeline_config,
+    execution_sink_modes_for_runtime,
+    execution_sinks_for_runtime,
+    validate_pipeline_sink_effect_capabilities,
+)
 from elspeth.engine.orchestrator.types import PipelineConfig
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import UserIdentity
@@ -1426,6 +1431,19 @@ class ExecutionServiceImpl:
             bundle = runtime_graph.plugin_bundle
             graph = runtime_graph.graph
 
+            # The composer validation surface intentionally remains ungated.
+            # Only the executable service validates the exact projected sink
+            # instances and carries the opaque admission receipt into run().
+            from elspeth.contracts.sink_effects import SinkEffectInputKind
+
+            execution_sinks = execution_sinks_for_runtime(settings, bundle.sinks)
+            execution_sink_modes = execution_sink_modes_for_runtime(settings, bundle.sink_effect_modes)
+            sink_effect_admission = validate_pipeline_sink_effect_capabilities(
+                execution_sinks,
+                configured_modes=execution_sink_modes,
+                required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            )
+
             # Fold aggregations into transforms, assemble PipelineConfig, and
             # run the four orchestrator route-target validators. The
             # orchestrator runs these validators again at run-init
@@ -1440,6 +1458,8 @@ class ExecutionServiceImpl:
                 aggregations=bundle.aggregations,
                 settings=settings,
                 graph=graph,
+                sink_effect_modes=execution_sink_modes,
+                sink_effect_admission=sink_effect_admission,
             )
             if isinstance(pipeline_config, PipelineConfig) and audit_safe_config is not None:
                 pipeline_config = replace(

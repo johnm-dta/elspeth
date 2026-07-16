@@ -82,6 +82,7 @@ def _make_plugin_bundle() -> PluginBundle:
         transforms=[],
         sinks={},
         aggregations={},
+        sink_effect_modes={},
     )
 
 
@@ -283,6 +284,7 @@ class TestBootstrapProgrammaticExecution:
             sources={"source": source},
             source_settings_map={},
             sinks={"out": object()},
+            sink_effect_modes={},
         )
         mock_db = _CloseableDouble()
 
@@ -319,6 +321,7 @@ class TestBootstrapProgrammaticExecution:
             aggregations={},
             sources={"orders": first_source, "refunds": second_source},
             sinks={"out": object()},
+            sink_effect_modes={},
         )
         mock_db = _CloseableDouble()
 

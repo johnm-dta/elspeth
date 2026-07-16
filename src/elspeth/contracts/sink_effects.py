@@ -1132,12 +1132,14 @@ class SinkEffectInspectionRequest:
     effect_id: str
     target: str
     predecessor_descriptor: ArtifactDescriptor | None
+    input_kind: SinkEffectInputKind = SinkEffectInputKind.PIPELINE_MEMBERS
 
     def __post_init__(self) -> None:
         _require_nonempty_string(self.effect_id, "effect_id")
         _reject_credential_bearing_reference(self.target, "target")
         if self.predecessor_descriptor is not None and not isinstance(self.predecessor_descriptor, ArtifactDescriptor):
             raise TypeError("predecessor_descriptor must be ArtifactDescriptor or None")
+        _require_exact_enum(self.input_kind, SinkEffectInputKind, "input_kind")
 
 
 @dataclass(frozen=True, slots=True)

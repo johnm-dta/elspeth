@@ -36,6 +36,7 @@ from elspeth.contracts.errors import SinkEffectCapabilityError
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.sink_effects import (
     SINK_EFFECT_PROTOCOL_VERSION,
+    AuditExportFormat,
     ResolvedSinkEffectMode,
     SinkEffectExecutionPurpose,
     SinkEffectInputKind,
@@ -229,6 +230,24 @@ def validate_sink_effect_type_capability(
         for method_name in _MEMBER_SINK_EFFECT_METHODS:
             if not callable(inspect.getattr_static(sink_type, method_name, None)):
                 raise SinkEffectCapabilityError(f"Sink {sink_name!r} declares durable member effects but {method_name} is not callable")
+
+
+def validate_audit_export_sink_type_capability(
+    sink_type: type[object],
+    export_format: AuditExportFormat,
+) -> None:
+    """Require one explicit closed audit-export serialization declaration."""
+    if type(export_format) is not AuditExportFormat:
+        raise SinkEffectCapabilityError("Audit export format must be an exact AuditExportFormat")
+    sink_name = inspect.getattr_static(sink_type, "name", sink_type.__name__)
+    supported = inspect.getattr_static(sink_type, "supported_audit_export_formats", None)
+    if not isinstance(supported, frozenset) or any(type(item) is not AuditExportFormat for item in supported):
+        raise SinkEffectCapabilityError(f"Sink {sink_name!r} must explicitly declare exact supported_audit_export_formats")
+    if export_format not in supported:
+        raise SinkEffectCapabilityError(
+            f"Sink {sink_name!r} does not support audit export format {export_format.value!r}; "
+            f"declared formats: {sorted(item.value for item in supported)!r}"
+        )
 
 
 def sink_effect_modes_from_runtime_bindings(

@@ -328,7 +328,7 @@ def test_sink_effect_protocol_has_independent_kind_capability_and_exact_methods(
                 "final_manifest_identity_hash",
             ),
         ),
-        (SinkEffectInspectionRequest, ("effect_id", "target", "predecessor_descriptor")),
+        (SinkEffectInspectionRequest, ("effect_id", "target", "predecessor_descriptor", "input_kind")),
         (SinkEffectInspection, ("mode", "reference", "evidence")),
         (SinkEffectPipelineMembersInput, ("members", "target_snapshot_members")),
         (AuditExportSnapshotChunkInput, ("ordinal", "content_ref", "content_hash", "size_bytes", "record_count")),

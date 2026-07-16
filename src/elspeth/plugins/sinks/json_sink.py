@@ -19,13 +19,16 @@ from pydantic import Field, model_validator
 
 from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
 from elspeth.contracts.diversion import SinkWriteResult
+from elspeth.contracts.errors import SinkEffectCapabilityError
 from elspeth.contracts.header_modes import HeaderMode
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.sink_effects import (
     SINK_EFFECT_PROTOCOL_VERSION,
+    AuditExportFormat,
     ResolvedSinkEffectMode,
     RestrictedSinkEffectContext,
+    SinkEffectAuditExportSnapshotInput,
     SinkEffectCommitResult,
     SinkEffectExecutionPurpose,
     SinkEffectInputKind,
@@ -148,11 +151,12 @@ class JSONSink(BaseSink):
     name = "json"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:aaa586501df65381"
+    source_file_hash: str | None = "sha256:c9a247c5b371eab3"
     config_model = JSONSinkConfig
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"append", "write"})
-    supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
+    supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS, SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT})
+    supported_audit_export_formats = frozenset({AuditExportFormat.JSON})
 
     @classmethod
     def _resolve_sink_effect_mode(
@@ -161,9 +165,26 @@ class JSONSink(BaseSink):
         *,
         purpose: SinkEffectExecutionPurpose,
     ) -> ResolvedSinkEffectMode | None:
-        del purpose
         cfg = JSONSinkConfig.from_dict(dict(config), plugin_name=cls.name)
+        if purpose is SinkEffectExecutionPurpose.AUDIT_EXPORT:
+            cls._validate_audit_export_config(cfg)
         return ResolvedSinkEffectMode(cfg.mode)
+
+    @classmethod
+    def _validate_audit_export_config(cls, cfg: JSONSinkConfig) -> None:
+        if cfg.mode != "write" or cfg.collision_policy not in {None, "fail_if_exists"}:
+            raise SinkEffectCapabilityError("JSON audit export requires mode='write' and collision policy 'fail_if_exists' or null")
+
+    def _validate_sink_effect_capability_configuration(
+        self,
+        *,
+        mode: str,
+        required_input_kind: SinkEffectInputKind,
+    ) -> None:
+        if mode != self._mode:
+            raise SinkEffectCapabilityError("JSON sink effect mode does not match configured mode")
+        if required_input_kind is SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT:
+            self._validate_audit_export_config(JSONSinkConfig.from_dict(dict(self.config), plugin_name=self.name))
 
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -372,6 +393,29 @@ class JSONSink(BaseSink):
     ) -> SinkEffectPlan:
         del ctx
         effect_input = request.effect_input
+        if type(effect_input) is SinkEffectAuditExportSnapshotInput:
+            if effect_input.export_format is not AuditExportFormat.JSON:
+                raise TypeError("JSONSink audit effects require a JSON audit snapshot")
+
+            def audit_export_chunks() -> Iterator[bytes]:
+                yield from effect_input.reader.iter_verified_chunks()
+                manifest = effect_input.reader.read_verified_signed_manifest()
+                if manifest.endswith(b"\n"):
+                    raise ValueError("audit export final manifest must not carry a trailing newline")
+                yield manifest
+
+            return prepare_local_effect(
+                effect_id=request.effect_id,
+                input_kind=request.input_kind,
+                inspection=request.inspection,
+                chunks=audit_export_chunks(),
+                row_count=0,
+                accepted_ordinals=(),
+                diverted_ordinals=(),
+                encoding="utf-8",
+                format_name="audit_export_jsonl",
+                stream_sequence=0,
+            )
         if type(effect_input) is not SinkEffectPipelineMembersInput:
             raise TypeError("JSONSink effects require a closed supported effect input")
 

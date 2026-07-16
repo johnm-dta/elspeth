@@ -25,6 +25,7 @@ from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.contracts.sink_effects import (
     SINK_EFFECT_PROTOCOL_VERSION,
+    AuditExportFormat,
     RestrictedSinkEffectContext,
     SinkEffectAuditExportSnapshotInput,
     SinkEffectCommitResult,
@@ -419,5 +420,146 @@ def test_interrupted_audit_export_effect_reuses_snapshot_and_publishes_once(
         assert target.publication_count == 1
         assert result.artifact.sink_effect_id == target.effect_id
         assert result.state_ids == () and result.outcome_ids == ()
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("signed", [False, True])
+def test_json_sink_replays_verified_snapshot_and_exact_manifest_after_response_loss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signed: bool,
+) -> None:
+    from elspeth.plugins.sinks import _local_file_effects
+    from elspeth.plugins.sinks.json_sink import JSONSink
+
+    monkeypatch.chdir(tmp_path)
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'json-adapter.db'}")
+    store = _MemoryContentStore()
+    try:
+        _insert_terminal_run(db)
+        snapshot = prepare_audit_export_snapshot(
+            db,
+            run_id="run-export",
+            config=_config(
+                format="json",
+                signing_mode="hmac_sha256" if signed else "unsigned",
+                signer_key_id="audit-key-v1" if signed else "UNSIGNED",
+                signing_secret_ref="AUDIT_EXPORT_TEST_KEY" if signed else None,
+            ),
+            signing_key=b"integration-signing-key" if signed else None,
+            content_store=store,
+        )
+        assert snapshot.export_format is AuditExportFormat.JSON
+        expected = b"".join(snapshot.reader.iter_verified_chunks()) + snapshot.reader.read_verified_signed_manifest()
+        output = tmp_path / "audit.jsonl"
+        sink_options = {"path": str(output), "format": "jsonl", "mode": "write", "schema": {"mode": "observed"}}
+        factory = RecorderFactory(db)
+        sink_node_id = register_test_node(
+            factory.data_flow,
+            "run-export",
+            "audit-export-json",
+            node_type=NodeType.SINK,
+            plugin_name="json",
+        )
+        publications: list[Path] = []
+        monkeypatch.setattr(_local_file_effects, "_after_replace", lambda path: publications.append(path))
+
+        with pytest.raises(SinkEffectInjectedFault):
+            execute_audit_export_effect(
+                factory=factory,
+                snapshot=snapshot,
+                sink=JSONSink(sink_options),
+                sink_node_id=sink_node_id,
+                target_config=sink_options,
+                worker_id="audit-export-json-worker",
+                fault_hook=lambda seam: (
+                    (_ for _ in ()).throw(SinkEffectInjectedFault(seam))
+                    if seam is SinkEffectExecutionSeam.AFTER_RETURN_BEFORE_FINALIZE
+                    else None
+                ),
+            )
+
+        result = execute_audit_export_effect(
+            factory=RecorderFactory(db),
+            snapshot=snapshot,
+            sink=JSONSink(sink_options),
+            sink_node_id=sink_node_id,
+            target_config=sink_options,
+            worker_id="audit-export-json-worker",
+        )
+
+        assert output.read_bytes() == expected
+        assert output.read_bytes().endswith(snapshot.reader.read_verified_signed_manifest())
+        assert publications == [output]
+        assert result.artifact.content_hash == sha256(expected).hexdigest()
+    finally:
+        db.close()
+
+
+def test_csv_sink_recovers_exact_bundle_without_republication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elspeth.plugins.sinks import _audit_export_bundle_effects
+    from elspeth.plugins.sinks.csv_sink import CSVSink
+
+    monkeypatch.chdir(tmp_path)
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'csv-adapter.db'}")
+    store = _MemoryContentStore()
+    try:
+        _insert_terminal_run(db)
+        snapshot = prepare_audit_export_snapshot(
+            db,
+            run_id="run-export",
+            config=_config(format="csv"),
+            signing_key=None,
+            content_store=store,
+        )
+        assert snapshot.export_format is AuditExportFormat.CSV
+        target = tmp_path / "audit-bundle"
+        sink_options = {"path": str(target), "mode": "write", "schema": {"mode": "observed"}}
+        factory = RecorderFactory(db)
+        sink_node_id = register_test_node(
+            factory.data_flow,
+            "run-export",
+            "audit-export-csv",
+            node_type=NodeType.SINK,
+            plugin_name="csv",
+        )
+        publications: list[Path] = []
+        monkeypatch.setattr(
+            _audit_export_bundle_effects,
+            "_after_parent_fsync_before_return",
+            lambda path: publications.append(path),
+        )
+
+        with pytest.raises(SinkEffectInjectedFault):
+            execute_audit_export_effect(
+                factory=factory,
+                snapshot=snapshot,
+                sink=CSVSink(sink_options),
+                sink_node_id=sink_node_id,
+                target_config=sink_options,
+                worker_id="audit-export-csv-worker",
+                fault_hook=lambda seam: (
+                    (_ for _ in ()).throw(SinkEffectInjectedFault(seam))
+                    if seam is SinkEffectExecutionSeam.AFTER_RETURN_BEFORE_FINALIZE
+                    else None
+                ),
+            )
+
+        result = execute_audit_export_effect(
+            factory=RecorderFactory(db),
+            snapshot=snapshot,
+            sink=CSVSink(sink_options),
+            sink_node_id=sink_node_id,
+            target_config=sink_options,
+            worker_id="audit-export-csv-worker",
+        )
+
+        assert (target / _audit_export_bundle_effects.AUDIT_MANIFEST_NAME).read_bytes() == snapshot.reader.read_verified_signed_manifest()
+        assert publications == [target]
+        assert result.artifact.path_or_uri.endswith("/audit-bundle")
     finally:
         db.close()

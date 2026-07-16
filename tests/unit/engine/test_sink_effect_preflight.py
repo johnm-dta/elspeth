@@ -24,6 +24,7 @@ from elspeth.cli import (
 from elspeth.contracts.audit_export import AuditExportContentStoreResolver
 from elspeth.contracts.sink_effects import (
     SINK_EFFECT_PROTOCOL_VERSION,
+    AuditExportFormat,
     ResolvedSinkEffectMode,
     SinkEffectExecutionPurpose,
     SinkEffectInputKind,
@@ -844,7 +845,7 @@ def test_valid_delayed_export_is_excluded_then_constructed_by_fresh_export_facto
                     "path": str(tmp_path / "audit.jsonl"),
                     "schema": {"mode": "observed"},
                     "format": "jsonl",
-                    "mode": "append",
+                    "mode": "write",
                 },
                 on_write_failure="discard",
             )
@@ -882,6 +883,7 @@ def test_real_runtime_factory_carries_adapter_resolved_mode_with_exact_sink(
         effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
         supported_effect_modes = frozenset({"write"})
         supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS, SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT})
+        supported_audit_export_formats = frozenset({AuditExportFormat.JSON})
 
         @classmethod
         def _resolve_sink_effect_mode(

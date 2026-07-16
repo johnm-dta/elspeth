@@ -21,11 +21,14 @@ from pydantic import Field, field_validator, model_validator
 
 from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
 from elspeth.contracts.diversion import SinkWriteResult
+from elspeth.contracts.errors import SinkEffectCapabilityError
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.sink_effects import (
     SINK_EFFECT_PROTOCOL_VERSION,
+    AuditExportFormat,
     ResolvedSinkEffectMode,
     RestrictedSinkEffectContext,
+    SinkEffectAuditExportSnapshotInput,
     SinkEffectCommitResult,
     SinkEffectExecutionPurpose,
     SinkEffectInputKind,
@@ -57,6 +60,12 @@ from elspeth.plugins.infrastructure.output_paths import (
 )
 from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode_enabled
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sinks._audit_export_bundle_effects import (
+    commit_audit_export_bundle,
+    inspect_audit_export_bundle,
+    prepare_audit_export_bundle,
+    reconcile_audit_export_bundle,
+)
 from elspeth.plugins.sinks._diversion_attribution import DiversionAttribution, build_diversion_attribution
 from elspeth.plugins.sinks._local_file_effects import (
     commit_local_effect,
@@ -138,11 +147,12 @@ class CSVSink(BaseSink):
     name = "csv"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:29b6574378578aa6"
+    source_file_hash: str | None = "sha256:333e1458d2ad08f2"
     config_model = CSVSinkConfig
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"append", "write"})
-    supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
+    supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS, SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT})
+    supported_audit_export_formats = frozenset({AuditExportFormat.CSV})
 
     @classmethod
     def _resolve_sink_effect_mode(
@@ -151,9 +161,28 @@ class CSVSink(BaseSink):
         *,
         purpose: SinkEffectExecutionPurpose,
     ) -> ResolvedSinkEffectMode | None:
-        del purpose
         cfg = CSVSinkConfig.from_dict(dict(config), plugin_name=cls.name)
+        if purpose is SinkEffectExecutionPurpose.AUDIT_EXPORT:
+            cls._validate_audit_export_config(cfg)
         return ResolvedSinkEffectMode(cfg.mode)
+
+    @classmethod
+    def _validate_audit_export_config(cls, cfg: CSVSinkConfig) -> None:
+        if cfg.mode != "write" or cfg.collision_policy not in {None, "fail_if_exists"}:
+            raise SinkEffectCapabilityError(
+                "CSV audit export requires mode='write' and create-only collision policy 'fail_if_exists' or null"
+            )
+
+    def _validate_sink_effect_capability_configuration(
+        self,
+        *,
+        mode: str,
+        required_input_kind: SinkEffectInputKind,
+    ) -> None:
+        if mode != self._mode:
+            raise SinkEffectCapabilityError("CSV sink effect mode does not match configured mode")
+        if required_input_kind is SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT:
+            self._validate_audit_export_config(CSVSinkConfig.from_dict(dict(self.config), plugin_name=self.name))
 
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -317,6 +346,10 @@ class CSVSink(BaseSink):
         ctx: RestrictedSinkEffectContext,
     ) -> SinkEffectInspection:
         del ctx
+        if request.input_kind is SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT:
+            self._path = self._requested_path
+            self._write_target_claimed = True
+            return inspect_audit_export_bundle(target_path=self._path, request=request)
         predecessor_path = predecessor_local_path(request)
         if predecessor_path is not None:
             self._path = predecessor_path
@@ -331,6 +364,8 @@ class CSVSink(BaseSink):
         ctx: RestrictedSinkEffectContext,
     ) -> SinkEffectPlan:
         del ctx
+        if type(request.effect_input) is SinkEffectAuditExportSnapshotInput:
+            return prepare_audit_export_bundle(target_path=self._requested_path, request=request)
         if type(request.effect_input) is not SinkEffectPipelineMembersInput:
             raise TypeError("CSVSink effects require pipeline member input")
         members = request.effect_input.target_snapshot_members
@@ -427,10 +462,14 @@ class CSVSink(BaseSink):
 
     def commit_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectCommitResult:
         del ctx
+        if plan.input_kind is SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT:
+            return commit_audit_export_bundle(plan)
         return commit_local_effect(plan)
 
     def reconcile_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectReconcileResult:
         del ctx
+        if plan.input_kind is SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT:
+            return reconcile_audit_export_bundle(plan)
         return reconcile_local_effect(plan)
 
     def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:

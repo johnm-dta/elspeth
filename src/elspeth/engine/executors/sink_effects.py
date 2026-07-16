@@ -664,6 +664,7 @@ class SinkEffectCoordinator:
             effect_id=effect.effect_id,
             target=effect.target_json,
             predecessor_descriptor=predecessor,
+            input_kind=request.reservation.input_kind,
         )
         request_hash = stable_hash(
             {

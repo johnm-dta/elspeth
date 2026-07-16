@@ -50,8 +50,11 @@ def prepare_audit_export_binding(
     sink_factory: Callable[[str], SinkEffectRuntimeBinding],
 ) -> tuple[SinkEffectRuntimeBinding, object]:
     """Construct and admit the exact delayed sink before export mutations."""
-    from elspeth.contracts.sink_effects import SinkEffectInputKind
-    from elspeth.engine.orchestrator.preflight import validate_pipeline_sink_effect_capabilities
+    from elspeth.contracts.sink_effects import AuditExportFormat, SinkEffectInputKind
+    from elspeth.engine.orchestrator.preflight import (
+        validate_audit_export_sink_type_capability,
+        validate_pipeline_sink_effect_capabilities,
+    )
 
     sink_name = settings.landscape.export.sink
     if sink_name is None:
@@ -63,7 +66,34 @@ def prepare_audit_export_binding(
         configured_modes=modes,
         required_input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
     )
+    export_format = AuditExportFormat(settings.landscape.export.format)
+    validate_audit_export_sink_type_capability(type(sink), export_format)
     return binding, admission
+
+
+def _probe_audit_export_publication(
+    settings: ElspethSettings,
+    *,
+    sink_name: str,
+    sink: SinkProtocol,
+) -> None:
+    """Run the sole bounded non-declarative export probe before snapshot I/O."""
+    from pathlib import Path
+
+    from elspeth.contracts.errors import SinkEffectCapabilityError
+    from elspeth.contracts.sink_effects import AuditExportFormat
+    from elspeth.engine.orchestrator.preflight import validate_audit_export_sink_type_capability
+
+    export_format = AuditExportFormat(settings.landscape.export.format)
+    validate_audit_export_sink_type_capability(type(sink), export_format)
+    if export_format is not AuditExportFormat.CSV:
+        return
+    raw_path = settings.sinks[sink_name].options.get("path")
+    if type(raw_path) is not str or not raw_path.strip():
+        raise SinkEffectCapabilityError("CSV audit export requires an explicit local bundle target path")
+    from elspeth.plugins.sinks._audit_export_bundle_effects import preflight_audit_export_bundle
+
+    preflight_audit_export_bundle(Path(raw_path))
 
 
 def _validate_audit_export_binding_provenance(
@@ -157,6 +187,7 @@ def export_landscape(
         required_input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
         admission=sink_effect_admission,
     )
+    _probe_audit_export_publication(settings, sink_name=sink_name, sink=sink)
 
     # Get signing key from environment if signing enabled
     signing_key: bytes | None = None

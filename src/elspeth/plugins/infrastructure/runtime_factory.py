@@ -15,11 +15,15 @@ from elspeth.contracts import SinkProtocol, SourceProtocol, TransformProtocol
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.sink_effects import (
+    AuditExportFormat,
     ResolvedSinkEffectMode,
     SinkEffectExecutionPurpose,
     SinkEffectRuntimeBinding,
 )
-from elspeth.engine.orchestrator.preflight import validate_sink_effect_type_capability
+from elspeth.engine.orchestrator.preflight import (
+    validate_audit_export_sink_type_capability,
+    validate_sink_effect_type_capability,
+)
 
 if TYPE_CHECKING:
     from elspeth.core.config import AggregationSettings, ElspethSettings, LandscapeExportSettings, SourceSettings, TransformSettings
@@ -244,6 +248,8 @@ def validate_sink_effect_eligibility_from_raw_config(
             mode.value if mode is not None else "",
             required_input_kind,
         )
+        if purpose is SinkEffectExecutionPurpose.AUDIT_EXPORT:
+            validate_audit_export_sink_type_capability(sink_type, AuditExportFormat(export_settings.format))
         assert mode is not None
         modes[sink_name] = mode
     return modes

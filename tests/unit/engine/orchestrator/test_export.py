@@ -30,7 +30,7 @@ from elspeth.contracts.audit_export import AuditExportContentStoreResolver
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.plugin_context import PluginContext
-from elspeth.contracts.sink_effects import SINK_EFFECT_PROTOCOL_VERSION, SinkEffectInputKind
+from elspeth.contracts.sink_effects import SINK_EFFECT_PROTOCOL_VERSION, AuditExportFormat, SinkEffectInputKind
 from elspeth.engine.orchestrator.export import (
     export_landscape as _production_export_landscape,
 )
@@ -86,6 +86,7 @@ class _SinkDouble:
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"write"})
     supported_effect_input_kinds = frozenset({SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT})
+    supported_audit_export_formats = frozenset({AuditExportFormat.JSON, AuditExportFormat.CSV})
 
     @classmethod
     def _resolve_sink_effect_mode(
@@ -241,6 +242,50 @@ def test_export_landscape_materializes_snapshot_before_audit_rows_and_executes_e
     sink.on_start.assert_not_called()
     sink.on_complete.assert_not_called()
     sink.close.assert_called_once()
+
+
+def test_csv_export_runs_bundle_capability_probe_before_snapshot_reservation(tmp_path: Path) -> None:
+    from elspeth.plugins.sinks.csv_sink import CSVSink
+
+    target = tmp_path / "audit-bundle"
+    options = {"path": str(target), "schema": {"mode": "observed"}}
+    settings = _make_settings(fmt="csv")
+    settings.sinks["output"].options = options
+    sink = CSVSink(options)
+    binding = SinkEffectRuntimeBinding(
+        sink_name="output",
+        sink=sink,
+        sink_type=type(sink),
+        config_fingerprint=stable_hash(options),
+        purpose=SinkEffectExecutionPurpose.AUDIT_EXPORT,
+        effect_mode=ResolvedSinkEffectMode("write"),
+    )
+    binding, admission = prepare_audit_export_binding(settings, lambda _name: binding)
+    observed: list[str] = []
+    factory = SimpleNamespace(data_flow=SimpleNamespace(register_node=_CallRecorder()))
+
+    with (
+        patch("elspeth.core.landscape.factory.RecorderFactory", return_value=factory),
+        patch(
+            "elspeth.plugins.sinks._audit_export_bundle_effects.preflight_audit_export_bundle",
+            side_effect=lambda path: observed.append(f"probe:{path}"),
+        ),
+        patch(
+            "elspeth.engine.orchestrator.audit_export_effects.prepare_audit_export_snapshot",
+            side_effect=lambda *_args, **_kwargs: observed.append("snapshot") or object(),
+        ),
+        patch("elspeth.engine.orchestrator.audit_export_effects.execute_audit_export_effect"),
+    ):
+        export_landscape(
+            object(),
+            "run-1",
+            settings,
+            lambda _name: binding,
+            prepared_binding=binding,
+            sink_effect_admission=admission,
+        )
+
+    assert observed == [f"probe:{target}", "snapshot"]
 
 
 # =============================================================================

@@ -29,6 +29,11 @@ LLM_BASE_URL_POLICY_ERROR: Final[str] = (
     f"the canonical OpenRouter endpoint ({OPENROUTER_BASE_URL}); a private OpenAI-compatible "
     "gateway requires an operator-controlled runtime outside the web composer."
 )
+LLM_TRACING_POLICY_ERROR: Final[str] = (
+    "Web-authored LLM nodes may not configure tracing. Tracing can send server-held "
+    "credentials and pipeline inputs or outputs to a configured destination; use "
+    "operator-controlled runtime configuration instead."
+)
 LLM_RETRY_BUDGET_POLICY_ERROR: Final[str] = (
     "Web-authored sequential multi-query LLM nodes must explicitly set "
     f"max_capacity_retry_seconds <= {WEB_LLM_SEQUENTIAL_MULTI_QUERY_MAX_RETRY_SECONDS}. "
@@ -218,3 +223,21 @@ def web_llm_base_url_policy_error(plugin: str | None, options: Mapping[str, Any]
     if normalize_openrouter_base_url(base_url.strip()) == normalize_openrouter_base_url(OPENROUTER_BASE_URL):
         return None
     return LLM_BASE_URL_POLICY_ERROR
+
+
+@trust_boundary(
+    tier=3,
+    source="web-authored LLM tracing options (untrusted author-supplied mapping)",
+    source_param="options",
+    suppresses=("R1", "R5"),
+    invariant=(
+        "non-LLM plugins and absent/null tracing return None; every non-null LLM tracing "
+        "value returns a static policy error without inspecting or echoing nested values; never raises"
+    ),
+    non_raising=True,
+)
+def web_llm_tracing_policy_error(plugin: str | None, options: Mapping[str, Any]) -> str | None:
+    """Reject every author-supplied LLM tracing configuration."""
+    if plugin != "llm" or options.get("tracing") is None:
+        return None
+    return LLM_TRACING_POLICY_ERROR

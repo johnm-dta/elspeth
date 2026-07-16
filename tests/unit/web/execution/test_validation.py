@@ -972,6 +972,7 @@ class TestValidatePipelineWebFetchNetworkPolicy:
             "managed_identity_policy",
             "llm_retry_budget_policy",
             "llm_base_url_policy",
+            "llm_tracing_policy",
             "aws_s3_endpoint_url_policy",
         ):
             check = _check(result, later_check)
@@ -1117,6 +1118,65 @@ class TestValidatePipelineLlmBaseUrlPolicy:
 
         assert _check(result, "llm_base_url_policy").passed is True
         mock_yaml_gen.generate_yaml.assert_called_once_with(state)
+
+
+class TestValidatePipelineLlmTracingPolicy:
+    """Web-authored LLM nodes may not configure provider tracing egress."""
+
+    def test_tracing_rejected_without_operator_profiles_before_yaml_or_plugins(self) -> None:
+        from elspeth.web.dependencies import create_catalog_service
+
+        unrestricted = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+        snapshot = PluginAvailabilitySnapshot.create(
+            policy_hash="tracing-policy",
+            principal_scope="local:alice",
+            available=unrestricted.available,
+            unavailable=(),
+            selected=unrestricted.selected,
+            usable_profile_aliases=(),
+            selected_profile_aliases=(),
+            binding_generation_fingerprint="tracing-policy-generation",
+        )
+        state = _make_state(
+            nodes=(
+                _make_node(
+                    plugin="llm",
+                    options={
+                        "tracing": {
+                            "provider": "langfuse",
+                            "host": "https://credential-canary.attacker.invalid",
+                            "secret_key": {"secret_ref": "LANGFUSE_SECRET_KEY"},
+                        }
+                    },
+                ),
+            ),
+            outputs=(_make_output(name="results"),),
+        )
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "sources: {}\nsinks: {}\n"
+
+        with (
+            patch(
+                "elspeth.web.execution.validation.load_settings_from_yaml_string",
+                side_effect=ValueError("settings stop"),
+            ) as mock_load,
+            patch("elspeth.web.execution.validation.instantiate_runtime_plugins") as mock_instantiate,
+        ):
+            result = validate_pipeline_for_trained_operator(
+                state,
+                _make_settings(),
+                mock_yaml_gen,
+                plugin_snapshot=snapshot,
+            )
+
+        assert result.is_valid is False
+        assert _check(result, "llm_tracing_policy").passed is False
+        assert result.errors[0].error_code == "llm_tracing_not_allowed"
+        assert "credential-canary" not in result.errors[0].message
+        assert "LANGFUSE_SECRET_KEY" not in result.errors[0].message
+        mock_yaml_gen.generate_yaml.assert_called_once_with(state)
+        mock_load.assert_not_called()
+        mock_instantiate.assert_not_called()
 
 
 class TestValidatePipelineAwsS3EndpointUrlPolicy:
@@ -2393,13 +2453,14 @@ class TestValidatePipelineSuccess:
         result = validate_pipeline_for_trained_operator(state, settings, mock_yaml_gen)
 
         assert result.is_valid is True
-        assert len(result.checks) == 21
+        assert len(result.checks) == 22
         assert all(c.passed for c in result.checks)
         # B11 fix: path_allowlist check is always recorded
         assert _check(result, "path_allowlist").passed is True
         assert _check(result, "web_scrape_network_policy").passed is True
         assert _check(result, "llm_retry_budget_policy").passed is True
         assert _check(result, "llm_base_url_policy").passed is True
+        assert _check(result, "llm_tracing_policy").passed is True
         assert _check(result, "aws_s3_endpoint_url_policy").passed is True
         assert _check(result, "secret_refs").passed is True
         assert _check(result, "blob_inline_refs").passed is True
@@ -4039,7 +4100,8 @@ sinks:
         # after blob_inline_refs (their declared #8/#9 home), not before web_scrape.
         assert emitted.index("managed_identity_policy") > emitted.index("blob_inline_refs")
         assert emitted.index("llm_retry_budget_policy") > emitted.index("managed_identity_policy")
-        assert emitted.index("aws_s3_endpoint_url_policy") == emitted.index("llm_base_url_policy") + 1
+        assert emitted.index("llm_tracing_policy") == emitted.index("llm_base_url_policy") + 1
+        assert emitted.index("aws_s3_endpoint_url_policy") == emitted.index("llm_tracing_policy") + 1
         assert emitted.index("web_scrape_network_policy") < emitted.index("managed_identity_policy")
 
     @patch("elspeth.web.execution.validation.load_settings_from_yaml_string")

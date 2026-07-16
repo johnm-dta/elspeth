@@ -87,6 +87,7 @@ from elspeth.web.execution.schemas import (
     CHECK_INTERPRETATION_REVIEW,
     CHECK_LLM_BASE_URL_POLICY,
     CHECK_LLM_RETRY_BUDGET_POLICY,
+    CHECK_LLM_TRACING_POLICY,
     CHECK_MANAGED_IDENTITY_POLICY,
     CHECK_OPERATOR_PROFILE_OPTIONS,
     CHECK_OUTCOME_SECRET_REFS_NO_REFS,
@@ -127,6 +128,7 @@ from elspeth.web.provider_config_policy import (
     web_aws_s3_endpoint_url_policy_error,
     web_llm_base_url_policy_error,
     web_llm_retry_budget_policy_error,
+    web_llm_tracing_policy_error,
     web_rag_provider_config_policy_error,
 )
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_secret_ref_fields_text
@@ -146,6 +148,7 @@ _CHECK_INTERPRETATION_REVIEW = CHECK_INTERPRETATION_REVIEW
 _CHECK_MANAGED_IDENTITY_POLICY = CHECK_MANAGED_IDENTITY_POLICY
 _CHECK_LLM_RETRY_BUDGET_POLICY = CHECK_LLM_RETRY_BUDGET_POLICY
 _CHECK_LLM_BASE_URL_POLICY = CHECK_LLM_BASE_URL_POLICY
+_CHECK_LLM_TRACING_POLICY = CHECK_LLM_TRACING_POLICY
 _CHECK_AWS_S3_ENDPOINT_URL_POLICY = CHECK_AWS_S3_ENDPOINT_URL_POLICY
 _CHECK_SETTINGS = CHECK_SETTINGS
 _CHECK_PLUGINS = RUNTIME_CHECK_PLUGIN_INSTANTIATION
@@ -1722,6 +1725,51 @@ def validate_pipeline(
             name=_CHECK_LLM_BASE_URL_POLICY,
             passed=True,
             detail="No web-authored OpenRouter base_url override",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
+
+    for node in state.nodes:
+        if node.node_type != "transform":
+            continue
+        llm_tracing_policy_error = web_llm_tracing_policy_error(node.plugin, node.options)
+        if llm_tracing_policy_error is not None:
+            checks.append(
+                ValidationCheck(
+                    name=_CHECK_LLM_TRACING_POLICY,
+                    passed=False,
+                    detail=f"Transform '{node.id}' configures tracing in a web-authored pipeline",
+                    affected_nodes=(node.id,),
+                    outcome_code=None,
+                )
+            )
+            _append_skipped_checks(checks, _CHECK_LLM_TRACING_POLICY)
+            return ValidationResult(
+                is_valid=False,
+                checks=checks,
+                errors=[
+                    ValidationError(
+                        component_id=node.id,
+                        component_type="transform",
+                        message=llm_tracing_policy_error,
+                        suggestion="Remove tracing; tracing destinations and credentials are operator-controlled.",
+                        error_code="llm_tracing_not_allowed",
+                    ),
+                ],
+                readiness=_blocked_readiness(
+                    code=_CHECK_LLM_TRACING_POLICY,
+                    detail=f"transform {node.id} configures tracing in a web-authored pipeline",
+                    component_id=node.id,
+                    component_type="transform",
+                ),
+                semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+            )
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_LLM_TRACING_POLICY,
+            passed=True,
+            detail="No web-authored LLM tracing configuration",
             affected_nodes=(),
             outcome_code=None,
         )

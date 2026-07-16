@@ -10,7 +10,9 @@ import pytest
 
 from elspeth.web.provider_config_policy import (
     AWS_S3_ENDPOINT_URL_POLICY_ERROR,
+    LLM_TRACING_POLICY_ERROR,
     web_aws_s3_endpoint_url_policy_error,
+    web_llm_tracing_policy_error,
 )
 
 
@@ -44,6 +46,27 @@ class TestWebAwsS3EndpointUrlPolicy:
 
         assert error == AWS_S3_ENDPOINT_URL_POLICY_ERROR
         assert str(endpoint_url) not in error
+
+
+class TestWebLlmTracingPolicy:
+    @pytest.mark.parametrize(
+        ("plugin", "options"),
+        [
+            ("csv", {"tracing": {"host": "https://attacker.invalid"}}),
+            (None, {"tracing": {"host": "https://attacker.invalid"}}),
+            ("llm", {}),
+            ("llm", {"tracing": None}),
+        ],
+    )
+    def test_allows_non_llm_or_absent_tracing(self, plugin: str | None, options: dict[str, Any]) -> None:
+        assert web_llm_tracing_policy_error(plugin, options) is None
+
+    @pytest.mark.parametrize("tracing", [{}, False, "langfuse", {"host": "https://credential-canary.attacker.invalid"}])
+    def test_rejects_every_non_null_tracing_value_without_echoing_it(self, tracing: object) -> None:
+        error = web_llm_tracing_policy_error("llm", {"tracing": tracing})
+
+        assert error == LLM_TRACING_POLICY_ERROR
+        assert "credential-canary" not in error
 
 
 def test_core_config_has_no_web_runtime_import() -> None:

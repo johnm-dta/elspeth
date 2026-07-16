@@ -29,6 +29,7 @@ from elspeth.contracts import (
     RoutingReason,
     RoutingSpec,
 )
+from elspeth.contracts.advisory_locks import ELSPETH_ROUTING_GROUP_LOCK_CLASSID
 from elspeth.contracts.audit import validate_node_state_completion_fields
 from elspeth.contracts.errors import AuditIntegrityError, ExecutionError, TransformErrorReason
 from elspeth.contracts.hashing import repr_hash
@@ -694,7 +695,14 @@ class NodeStateRepository:
         ordinal: int = 0,
         reason_ref: str | None = None,
     ) -> RoutingEvent:
-        """Record a single routing event.
+        """Record one complete one-route routing decision.
+
+        A state owns exactly one complete decision. This method cannot append
+        routes to an existing decision. Fork and multi-destination callers
+        must pass the entire decision to :meth:`record_routing_events` once.
+        ``routing_group_id`` and ``ordinal`` are explicit/legacy identity
+        controls for retry compatibility, not permission to assemble a group
+        through sequential calls.
 
         Args:
             state_id: Node state that made the routing decision
@@ -702,8 +710,8 @@ class NodeStateRepository:
             mode: RoutingMode enum (MOVE or COPY)
             reason: Reason for this routing decision
             event_id: Optional event ID
-            routing_group_id: Group ID (for multi-destination routing)
-            ordinal: Position in routing group
+            routing_group_id: Optional explicit or legacy group identity
+            ordinal: Optional explicit or legacy ordinal identity
             reason_ref: Optional payload store reference
 
         Returns:
@@ -752,9 +760,11 @@ class NodeStateRepository:
         routes: list[RoutingSpec],
         reason: RoutingReason | None = None,
     ) -> list[RoutingEvent]:
-        """Record multiple routing events (fork/multi-destination).
+        """Record one complete fork/multi-destination routing decision.
 
-        All events share the same routing_group_id.
+        All events share one routing_group_id and commit atomically. Callers
+        must provide every destination in this call; later single-event calls
+        cannot extend the decision.
 
         Args:
             state_id: Node state that made the routing decision
@@ -920,6 +930,28 @@ class NodeStateRepository:
         )
 
     @staticmethod
+    def _acquire_routing_group_authority(conn: Connection, *, routing_group_id: str) -> None:
+        """Serialize one group before locking its state or checking absence.
+
+        Global routing lock order is group advisory authority, then the
+        ``node_states`` row. PostgreSQL's transaction-scoped two-int4 lock
+        supplies authority for an absent group key and releases on commit or
+        rollback. Its classid is reserved ABI; ``hashtext`` collisions only
+        over-serialize unrelated groups. SQLite is explicit no-op here because
+        ``write_connection()`` already holds ``BEGIN IMMEDIATE`` authority for
+        the whole database before this helper runs.
+        """
+        if conn.dialect.name == "sqlite":
+            return
+        if conn.dialect.name == "postgresql":
+            conn.exec_driver_sql(
+                "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
+                (ELSPETH_ROUTING_GROUP_LOCK_CLASSID, routing_group_id),
+            )
+            return
+        raise LandscapeRecordError(f"Routing group authority is unsupported for database dialect {conn.dialect.name!r}")
+
+    @staticmethod
     def _lock_routing_state(conn: Connection, *, state_id: str, owner: str) -> str:
         """Take state-wide decision authority and return the state's run ID."""
         query = select(node_states_table.c.state_id, node_states_table.c.run_id).where(node_states_table.c.state_id == state_id)
@@ -1012,6 +1044,7 @@ class NodeStateRepository:
         routing_group_id = events[0].routing_group_id
         try:
             with self._db.write_connection() as conn:
+                self._acquire_routing_group_authority(conn, routing_group_id=routing_group_id)
                 locked_run_id = self._lock_routing_state(conn, state_id=state_id, owner=owner)
                 for event, expected_run_id in zip(events, run_ids, strict=True):
                     if event.state_id != state_id or event.routing_group_id != routing_group_id:

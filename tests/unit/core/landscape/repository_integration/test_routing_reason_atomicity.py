@@ -33,8 +33,10 @@ SINK_ID = "sink-0"
 ROW_ID = "row-0"
 TOKEN_ID = "token-0"
 STATE_ID = "state-0"
+STATE_B_ID = "state-1"
 EDGE_ID = "edge-0"
 EDGE_B_ID = "edge-1"
+SHARED_GROUP_ID = "caller-shared-cross-state-group"
 REASON: ConfigGateReason = {"condition": "row['route'] == 'accepted'", "result": "true"}
 SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
@@ -106,6 +108,30 @@ def _seed_routing_state(db_url: str) -> None:
         )
 
 
+def _seed_additional_routing_state(db_url: str) -> None:
+    """Add a second state in the seeded run for cross-state ownership races."""
+    with LandscapeDB.from_url(db_url, create_tables=False) as db:
+        factory = RecorderFactory(db)
+        factory.data_flow.create_row(
+            RUN_ID,
+            SOURCE_ID,
+            1,
+            {"route": "accepted"},
+            row_id="row-1",
+            source_row_index=1,
+            ingest_sequence=1,
+        )
+        factory.data_flow.create_token("row-1", token_id="token-1")
+        factory.execution.begin_node_state(
+            "token-1",
+            GATE_ID,
+            RUN_ID,
+            0,
+            {"route": "accepted"},
+            state_id=STATE_B_ID,
+        )
+
+
 class _CrashAfterStore(PayloadStore):
     """Persist through the real filesystem store, then lose the process."""
 
@@ -159,42 +185,62 @@ def _record_decision_with_sqlite_lock_pause(
     payload_dir: str,
     decision_kind: str,
     pause_after_lock: bool,
-    lock_acquired: Any,
+    begin_attempted: Any,
+    write_lock_acquired: Any,
     release_lock: Any,
-    call_started: Any,
+    result_ready: Any,
     results: Any,
+    state_id: str = STATE_ID,
+    routing_group_id: str | None = None,
+    ordinal: int = 0,
+    event_id: str | None = None,
 ) -> None:
     """Record one single/group decision, optionally pausing with write authority."""
     with LandscapeDB.from_url(db_url, create_tables=False) as db:
-        if pause_after_lock:
 
-            def pause_on_begin(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:  # type: ignore[no-untyped-def]
-                if statement.strip().upper() == "BEGIN IMMEDIATE" and not lock_acquired.is_set():
-                    lock_acquired.set()
-                    if not release_lock.wait(timeout=30):
-                        raise TimeoutError("test did not release SQLite routing authority")
+        def observe_begin_attempt(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:  # type: ignore[no-untyped-def]
+            if statement.strip().upper() == "BEGIN IMMEDIATE":
+                begin_attempted.set()
 
-            sqlalchemy_event.listen(db.engine, "after_cursor_execute", pause_on_begin)
+        def observe_lock_acquired(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:  # type: ignore[no-untyped-def]
+            if statement.strip().upper() == "BEGIN IMMEDIATE":
+                write_lock_acquired.set()
+                if pause_after_lock and not release_lock.wait(timeout=30):
+                    raise TimeoutError("test did not release SQLite routing authority")
+
+        sqlalchemy_event.listen(db.engine, "before_cursor_execute", observe_begin_attempt)
+        sqlalchemy_event.listen(db.engine, "after_cursor_execute", observe_lock_acquired)
 
         store = FilesystemPayloadStore(Path(payload_dir))
         factory = RecorderFactory(db, payload_store=store)
-        call_started.set()
         try:
-            if decision_kind == "single":
-                recorded = [factory.execution.record_routing_event(STATE_ID, EDGE_ID, RoutingMode.MOVE, reason=REASON)]
-            else:
+            if decision_kind == "group":
                 recorded = factory.execution.record_routing_events(
-                    STATE_ID,
+                    state_id,
                     [
                         RoutingSpec(edge_id=EDGE_ID, mode=RoutingMode.MOVE),
                         RoutingSpec(edge_id=EDGE_B_ID, mode=RoutingMode.MOVE),
                     ],
                     reason=REASON,
                 )
+            else:
+                recorded = [
+                    factory.execution.record_routing_event(
+                        state_id,
+                        EDGE_ID,
+                        RoutingMode.MOVE,
+                        reason=REASON,
+                        event_id=event_id,
+                        routing_group_id=routing_group_id,
+                        ordinal=ordinal,
+                    )
+                ]
         except BaseException as exc:
-            results.put((decision_kind, "error", type(exc).__name__, str(exc)))
+            results.put((decision_kind, "error", os.getpid(), type(exc).__name__, str(exc)))
         else:
-            results.put((decision_kind, "ok", len(recorded), tuple(event.event_id for event in recorded)))
+            results.put((decision_kind, "ok", os.getpid(), len(recorded), tuple(event.event_id for event in recorded)))
+        finally:
+            result_ready.set()
 
 
 def _insert_legacy_routing_group(
@@ -350,12 +396,14 @@ def test_spawned_single_group_race_has_one_complete_winner(tmp_path: Path, winne
     _seed_routing_state(db_url)
     loser_kind = "group" if winner_kind == "single" else "single"
     context = multiprocessing.get_context("spawn")
-    winner_lock_acquired = context.Event()
+    winner_begin_attempted = context.Event()
+    winner_write_lock_acquired = context.Event()
     release_winner = context.Event()
-    loser_lock_acquired = context.Event()
+    winner_result_ready = context.Event()
+    loser_begin_attempted = context.Event()
+    loser_write_lock_acquired = context.Event()
     release_loser = context.Event()
-    winner_started = context.Event()
-    loser_started = context.Event()
+    loser_result_ready = context.Event()
     results = context.Queue()
     winner = context.Process(
         target=_record_decision_with_sqlite_lock_pause,
@@ -364,9 +412,10 @@ def test_spawned_single_group_race_has_one_complete_winner(tmp_path: Path, winne
             str(payload_dir),
             winner_kind,
             True,
-            winner_lock_acquired,
+            winner_begin_attempted,
+            winner_write_lock_acquired,
             release_winner,
-            winner_started,
+            winner_result_ready,
             results,
         ),
     )
@@ -377,30 +426,151 @@ def test_spawned_single_group_race_has_one_complete_winner(tmp_path: Path, winne
             str(payload_dir),
             loser_kind,
             False,
-            loser_lock_acquired,
+            loser_begin_attempted,
+            loser_write_lock_acquired,
             release_loser,
-            loser_started,
+            loser_result_ready,
             results,
         ),
     )
-    winner.start()
-    assert winner_started.wait(timeout=15)
-    assert winner_lock_acquired.wait(timeout=15)
-    loser.start()
-    assert loser_started.wait(timeout=15)
-    release_winner.set()
-    for process in (winner, loser):
-        process.join(timeout=45)
-        assert not process.is_alive()
-        assert process.exitcode == 0
+    try:
+        winner.start()
+        assert winner_begin_attempted.wait(timeout=15)
+        assert winner_write_lock_acquired.wait(timeout=15)
+        assert not winner_result_ready.is_set()
+
+        loser.start()
+        assert loser_begin_attempted.wait(timeout=15)
+        assert not loser_write_lock_acquired.wait(timeout=1)
+        assert not loser_result_ready.is_set()
+        assert not winner_result_ready.is_set()
+
+        release_winner.set()
+        assert winner_result_ready.wait(timeout=15)
+        assert loser_write_lock_acquired.wait(timeout=15)
+        assert loser_result_ready.wait(timeout=15)
+    finally:
+        release_winner.set()
+        release_loser.set()
+        for process in (winner, loser):
+            if process.pid is not None:
+                process.join(timeout=45)
+                assert not process.is_alive()
+                assert process.exitcode == 0
 
     outcomes = {result[0]: result[1:] for result in (results.get(timeout=10), results.get(timeout=10))}
     assert outcomes[winner_kind][0] == "ok"
-    assert outcomes[loser_kind][0:2] == ("error", "AuditIntegrityError")
+    assert outcomes[loser_kind][0] == "error"
+    assert outcomes[loser_kind][2] == "AuditIntegrityError"
+    assert outcomes[winner_kind][1] == winner.pid
+    assert outcomes[loser_kind][1] == loser.pid
+    assert winner.pid != loser.pid
+    assert os.getpid() not in {winner.pid, loser.pid}
     with LandscapeDB.from_url(db_url, create_tables=False) as db:
         durable = RecorderFactory(db).query.get_routing_events(STATE_ID)
     assert len(durable) == (1 if winner_kind == "single" else 2)
     assert len({event.routing_group_id for event in durable}) == 1
+
+
+def test_spawned_cross_state_shared_group_has_one_durable_owner(tmp_path: Path) -> None:
+    """SQLite write authority serializes ownership of an absent shared group."""
+    db_url = f"sqlite:///{tmp_path / 'audit.db'}"
+    payload_dir = tmp_path / "payloads"
+    _seed_routing_state(db_url)
+    _seed_additional_routing_state(db_url)
+    context = multiprocessing.get_context("spawn")
+    winner_begin_attempted = context.Event()
+    winner_write_lock_acquired = context.Event()
+    release_winner = context.Event()
+    winner_result_ready = context.Event()
+    loser_begin_attempted = context.Event()
+    loser_write_lock_acquired = context.Event()
+    release_loser = context.Event()
+    loser_result_ready = context.Event()
+    results = context.Queue()
+    winner = context.Process(
+        target=_record_decision_with_sqlite_lock_pause,
+        args=(
+            db_url,
+            str(payload_dir),
+            "state-first",
+            True,
+            winner_begin_attempted,
+            winner_write_lock_acquired,
+            release_winner,
+            winner_result_ready,
+            results,
+            STATE_ID,
+            SHARED_GROUP_ID,
+            0,
+            "cross-state-event-0",
+        ),
+    )
+    loser = context.Process(
+        target=_record_decision_with_sqlite_lock_pause,
+        args=(
+            db_url,
+            str(payload_dir),
+            "state-second",
+            False,
+            loser_begin_attempted,
+            loser_write_lock_acquired,
+            release_loser,
+            loser_result_ready,
+            results,
+            STATE_B_ID,
+            SHARED_GROUP_ID,
+            1,
+            "cross-state-event-1",
+        ),
+    )
+    try:
+        winner.start()
+        assert winner_begin_attempted.wait(timeout=15)
+        assert winner_write_lock_acquired.wait(timeout=15)
+        assert not winner_result_ready.is_set()
+
+        loser.start()
+        assert loser_begin_attempted.wait(timeout=15)
+        assert not loser_write_lock_acquired.wait(timeout=1)
+        assert not loser_result_ready.is_set()
+        assert not winner_result_ready.is_set()
+
+        release_winner.set()
+        assert winner_result_ready.wait(timeout=15)
+        assert loser_write_lock_acquired.wait(timeout=15)
+        assert loser_result_ready.wait(timeout=15)
+    finally:
+        release_winner.set()
+        release_loser.set()
+        for process in (winner, loser):
+            if process.pid is not None:
+                process.join(timeout=45)
+                assert not process.is_alive()
+                assert process.exitcode == 0
+
+    outcomes = {result[0]: result[1:] for result in (results.get(timeout=10), results.get(timeout=10))}
+    assert outcomes["state-first"][0] == "ok"
+    assert outcomes["state-second"][0] == "error"
+    assert outcomes["state-second"][2] == "AuditIntegrityError"
+    assert outcomes["state-first"][1] == winner.pid
+    assert outcomes["state-second"][1] == loser.pid
+    assert winner.pid != loser.pid
+    assert os.getpid() not in {winner.pid, loser.pid}
+
+    with LandscapeDB.from_url(db_url, create_tables=False) as db, db.read_only_connection() as conn:
+        durable = list(
+            conn.execute(
+                select(
+                    routing_events_table.c.event_id,
+                    routing_events_table.c.state_id,
+                    routing_events_table.c.ordinal,
+                ).where(routing_events_table.c.routing_group_id == SHARED_GROUP_ID)
+            ).fetchall()
+        )
+    assert len(durable) == 1
+    assert durable[0].state_id == STATE_ID
+    assert durable[0].ordinal == 0
 
 
 def test_legacy_single_default_retry_returns_random_id_row(tmp_path: Path) -> None:

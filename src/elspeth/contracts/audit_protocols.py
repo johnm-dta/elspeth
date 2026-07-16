@@ -139,14 +139,18 @@ class PluginAuditWriter(Protocol):
         routing_group_id: str | None = None,
         ordinal: int = 0,
         reason_ref: str | None = None,
-    ) -> RoutingEvent: ...
+    ) -> RoutingEvent:
+        """Record one complete one-route decision; identity controls do not append."""
+        ...
 
     def record_routing_events(
         self,
         state_id: str,
         routes: list[RoutingSpec],
         reason: RoutingReason | None = None,
-    ) -> list[RoutingEvent]: ...
+    ) -> list[RoutingEvent]:
+        """Atomically record one complete fork/multi-destination decision."""
+        ...
 
     # ── DataFlowRepository methods ───────────────────────────────────────
 

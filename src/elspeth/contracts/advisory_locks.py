@@ -56,3 +56,10 @@ ELSPETH_SESSIONS_LOCK_CLASSID: int = 0x454C5350
 # same classid and target so distinct schemas in one connecting database are
 # deliberately over-serialized during bootstrap.
 ELSPETH_SCHEMA_INIT_LOCK_CLASSID: int = 0x53434845
+
+# 0x524F5554 = ASCII "ROUT". Used by routing-event persistence to
+# serialize ownership of a routing_group_id before any state row is locked
+# or an absent group is inspected. The second int4 key is
+# hashtext(routing_group_id); collisions only over-serialize unrelated
+# groups and cannot weaken the ownership invariant.
+ELSPETH_ROUTING_GROUP_LOCK_CLASSID: int = 0x524F5554

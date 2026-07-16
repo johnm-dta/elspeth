@@ -288,7 +288,13 @@ class ExecutionRepository:
         ordinal: int = 0,
         reason_ref: str | None = None,
     ) -> RoutingEvent:
-        """Record a single routing event."""
+        """Record one complete one-route decision for a state.
+
+        Fork/multi-destination decisions must use ``record_routing_events``
+        with every route in one call. ``routing_group_id`` and ``ordinal``
+        are explicit/legacy retry identities, not permission to append routes
+        through sequential calls.
+        """
         return self.node_states.record_routing_event(
             state_id,
             edge_id,
@@ -306,7 +312,7 @@ class ExecutionRepository:
         routes: list[RoutingSpec],
         reason: RoutingReason | None = None,
     ) -> list[RoutingEvent]:
-        """Record multiple routing events (fork/multi-destination)."""
+        """Atomically record one complete fork/multi-destination decision."""
         return self.node_states.record_routing_events(state_id, routes, reason)
 
     # ── Call recording (CallAuditRepository) ───────────────────────────

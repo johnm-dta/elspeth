@@ -988,6 +988,288 @@ class TestExportRunSigned:
 
 
 # ===========================================================================
+# export_run — bounded streaming (elspeth-4087266b7d)
+# ===========================================================================
+
+
+class _SpyReadModel:
+    """Delegating read-model proxy that records every query-family call."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.calls: list[str] = []
+
+    def __getattr__(self, name: str) -> Any:
+        original = getattr(self._inner, name)
+        if not callable(original):
+            return original
+
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            self.calls.append(name)
+            return original(*args, **kwargs)
+
+        return wrapper
+
+
+def _make_row(index: int) -> Row:
+    return Row(
+        row_id=f"row-{index}",
+        run_id="run-1",
+        source_node_id="node-1",
+        row_index=index,
+        source_row_index=index,
+        ingest_sequence=index,
+        source_data_hash=f"data-hash-{index}",
+        created_at=_DT,
+    )
+
+
+class TestExportRunStreaming:
+    """export_run must stay on a bounded streaming path (elspeth-4087266b7d).
+
+    Regression lineage: elspeth-05980fe1bb fixed the orchestrator streaming
+    path; the exporter later regressed by routing export_run() through
+    derive_run_bundle(), which accumulates records, frames, chunks, and the
+    manifest before yielding anything.
+    """
+
+    def test_first_record_yields_before_later_query_families(self) -> None:
+        """Pulling the first record must not touch nodes/edges/rows/batches/artifacts."""
+        read_model = _SpyReadModel(_make_export_read_model(nodes=[_NODE], edges=[_EDGE], rows=[_make_row(0)]))
+        exporter = LandscapeExporter(_fake_landscape_db(), read_model=read_model)
+
+        iterator = exporter.export_run("run-1")
+        first = next(iterator)
+
+        assert first["record_type"] == "run"
+        touched = set(read_model.calls)
+        # Only run-level metadata may be resolved before the first yield.
+        allowed = {"get_run", "get_run_attribution"}
+        assert touched <= allowed, (
+            f"export_run touched {sorted(touched - allowed)} before yielding "
+            "its first record — the full bundle is being accumulated up front"
+        )
+
+    def test_row_batches_stream_lazily(self) -> None:
+        """Consuming the first row record must not drain later row batches."""
+        rows = [_make_row(i) for i in range(6)]
+        read_model = _make_export_read_model(rows=rows)
+        batches_pulled = 0
+        original_iter = read_model.iter_rows_for_run
+
+        def counting_iter(run_id: str, *, batch_size: int) -> Iterator[list[Any]]:
+            nonlocal batches_pulled
+            for batch in original_iter(run_id, batch_size=batch_size):
+                batches_pulled += 1
+                yield batch
+
+        read_model = _SpyReadModel(read_model)
+        read_model.iter_rows_for_run = counting_iter  # type: ignore[attr-defined]
+        exporter = LandscapeExporter(_fake_landscape_db(), read_model=read_model, row_batch_size=1)
+
+        iterator = exporter.export_run("run-1")
+        first_row = next(record for record in iterator if record["record_type"] == "row")
+
+        assert first_row["row_id"] == "row-0"
+        assert batches_pulled <= 2, (
+            f"{batches_pulled} of 6 single-row batches were pulled before the "
+            "first row record was consumed — memory is O(run), not O(row_batch_size)"
+        )
+
+    def test_streamed_output_matches_derived_bundle_unsigned(self) -> None:
+        """The streamed public export must stay hash-identical to the bundle."""
+        from elspeth.contracts.freeze import deep_thaw
+
+        exporter = _make_exporter(nodes=[_NODE], edges=[_EDGE], rows=[_make_row(0)])
+        streamed = list(exporter.export_run("run-1"))
+        bundle = exporter.derive_run_bundle("run-1")
+
+        expected = [deep_thaw(record) for record in bundle.record_objects]
+        expected.append(deep_thaw(bundle.final_manifest))
+        assert streamed == expected
+
+    def test_streamed_output_matches_derived_bundle_signed(self) -> None:
+        from elspeth.contracts.freeze import deep_thaw
+
+        exporter = _make_exporter(signing_key=b"stream-key", nodes=[_NODE], edges=[_EDGE], rows=[_make_row(0)])
+        streamed = list(exporter.export_run("run-1", sign=True))
+        bundle = exporter.derive_run_bundle("run-1", sign=True)
+
+        expected = [deep_thaw(record) for record in bundle.record_objects]
+        expected.append(deep_thaw(bundle.final_manifest))
+        assert streamed == expected
+
+
+# ===========================================================================
+# derivation config vs sign request (elspeth-f7d63e2d56)
+# ===========================================================================
+
+
+def _make_derivation_config(
+    *,
+    signing_mode: str,
+    signer_key_id: str,
+    signing_key: bytes | None,
+    source_run_id: str = "run-1",
+) -> Any:
+    from elspeth.contracts.audit_export import (
+        AUDIT_EXPORT_SERIALIZATION_VERSION,
+        AuditExportDerivationConfig,
+    )
+
+    return AuditExportDerivationConfig(
+        source_run_id=source_run_id,
+        source_status="completed",
+        source_completed_at="2026-01-15T13:00:00.000000Z",
+        export_format="json",
+        exporter_version="landscape-exporter-v1",
+        serialization_version=AUDIT_EXPORT_SERIALIZATION_VERSION,
+        chunking_algorithm_version="record-framing-v1",
+        include_raw_error_rows=False,
+        per_chunk_byte_limit=64 * 1024 * 1024,
+        per_chunk_record_limit=1_000_000,
+        signing_mode=signing_mode,  # type: ignore[arg-type]
+        signer_key_id=signer_key_id,
+        signing_key=signing_key,
+    )
+
+
+def _unsigned_config() -> Any:
+    return _make_derivation_config(signing_mode="unsigned", signer_key_id="UNSIGNED", signing_key=None)
+
+
+def _hmac_config() -> Any:
+    return _make_derivation_config(signing_mode="hmac_sha256", signer_key_id="explicit-signer-v1", signing_key=b"explicit-key")
+
+
+class TestDerivationConfigSignEnforcement:
+    """An explicit derivation config must never override the sign request.
+
+    Regression lock for elspeth-f7d63e2d56: only source_run_id was checked,
+    so an unsigned config silently downgraded sign=True exports and an HMAC
+    config silently signed sign=False exports — in a publication-integrity
+    surface, both directions must fail closed instead.
+    """
+
+    def test_sign_true_with_unsigned_config_fails_closed(self) -> None:
+        exporter = _make_exporter(signing_key=b"test-key")
+        with pytest.raises(ValueError, match="signing_mode"):
+            exporter.derive_run_bundle("run-1", sign=True, derivation_config=_unsigned_config())
+
+    def test_sign_false_with_hmac_config_fails_closed(self) -> None:
+        exporter = _make_exporter()
+        with pytest.raises(ValueError, match="signing_mode"):
+            exporter.derive_run_bundle("run-1", sign=False, derivation_config=_hmac_config())
+
+    def test_export_run_sign_false_with_instance_hmac_config_fails_closed(self) -> None:
+        """The public iterator must not silently emit signed records."""
+        exporter = LandscapeExporter(
+            _fake_landscape_db(),
+            read_model=_make_export_read_model(),
+            derivation_config=_hmac_config(),
+        )
+        with pytest.raises(ValueError, match="signing_mode"):
+            list(exporter.export_run("run-1"))
+
+    def test_export_run_sign_true_with_instance_unsigned_config_fails_closed(self) -> None:
+        exporter = LandscapeExporter(
+            _fake_landscape_db(),
+            signing_key=b"test-key",
+            signer_key_id="test-signer-v1",
+            read_model=_make_export_read_model(),
+            derivation_config=_unsigned_config(),
+        )
+        with pytest.raises(ValueError, match="signing_mode"):
+            list(exporter.export_run("run-1", sign=True))
+
+    def test_matching_unsigned_config_still_exports(self) -> None:
+        exporter = _make_exporter()
+        bundle = exporter.derive_run_bundle("run-1", sign=False, derivation_config=_unsigned_config())
+        assert bundle.final_manifest["signature"] is None
+        assert "signature" not in bundle.record_objects[0]
+
+    def test_matching_hmac_config_still_exports(self) -> None:
+        exporter = _make_exporter(signing_key=b"test-key")
+        bundle = exporter.derive_run_bundle("run-1", sign=True, derivation_config=_hmac_config())
+        assert bundle.final_manifest["signature"] is not None
+        assert "signature" in bundle.record_objects[0]
+
+    def test_mismatched_source_run_id_still_fails_closed(self) -> None:
+        exporter = _make_exporter()
+        config = _make_derivation_config(
+            signing_mode="unsigned",
+            signer_key_id="UNSIGNED",
+            signing_key=None,
+            source_run_id="other-run",
+        )
+        with pytest.raises(ValueError, match="source_run_id"):
+            exporter.derive_run_bundle("run-1", sign=False, derivation_config=config)
+
+
+# ===========================================================================
+# export_run — deep-thawed JSON-lines output (elspeth-9f8a0e61a6)
+# ===========================================================================
+
+
+class TestExportRunDeepThaw:
+    """export_run must yield deeply thawed, json.dumps-compatible records.
+
+    Regression lock for elspeth-9f8a0e61a6, fixed by d9d680b5e: the earlier
+    ``dict(record)`` thawed only the top level of the deep-frozen bundle
+    records, leaving nested tuples and mappingproxy objects that broke
+    ``json.dumps()`` (e.g. node ``schema_fields``). The commit shipped
+    without a test; this pins the contract for the streaming path too.
+    """
+
+    @staticmethod
+    def _assert_json_native(value: Any, path: str) -> None:
+        if isinstance(value, dict):
+            assert type(value) is dict, f"{path} is {type(value).__name__}, not dict"
+            for key, child in value.items():
+                TestExportRunDeepThaw._assert_json_native(child, f"{path}.{key}")
+        elif isinstance(value, list):
+            assert type(value) is list, f"{path} is {type(value).__name__}, not list"
+            for index, child in enumerate(value):
+                TestExportRunDeepThaw._assert_json_native(child, f"{path}[{index}]")
+        else:
+            assert value is None or isinstance(value, str | int | float | bool), (
+                f"{path} is non-JSON type {type(value).__name__}: {value!r}"
+            )
+
+    def test_unsigned_records_are_json_lines_compatible(self) -> None:
+        """Every yielded record — nested containers included — must json.dumps."""
+        import json as json_module
+
+        exporter = _make_exporter(nodes=[_NODE], edges=[_EDGE], rows=[_make_row(0)])
+        records = list(exporter.export_run("run-1"))
+
+        assert records, "export must yield records"
+        for record in records:
+            json_module.dumps(record)  # raises TypeError on frozen leftovers
+            self._assert_json_native(record, record["record_type"])
+
+    def test_signed_records_are_json_lines_compatible(self) -> None:
+        import json as json_module
+
+        exporter = _make_exporter(signing_key=b"thaw-key", nodes=[_NODE], edges=[_EDGE], rows=[_make_row(0)])
+        records = list(exporter.export_run("run-1", sign=True))
+
+        assert records[-1]["record_type"] == "manifest"
+        for record in records:
+            json_module.dumps(record)
+            self._assert_json_native(record, record["record_type"])
+
+    def test_nested_node_schema_fields_are_thawed(self) -> None:
+        """The exact failure shape from the report: nested list/dict values."""
+        exporter = _make_exporter(nodes=[_NODE])
+        node_record = next(r for r in exporter.export_run("run-1") if r["record_type"] == "node")
+
+        schema_fields = node_record["schema_fields"]
+        assert type(schema_fields) is list, type(schema_fields).__name__
+        assert type(schema_fields[0]) is dict, type(schema_fields[0]).__name__
+
+
+# ===========================================================================
 # Record types — field mapping
 # ===========================================================================
 

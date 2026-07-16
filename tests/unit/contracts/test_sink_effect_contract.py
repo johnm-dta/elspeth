@@ -161,6 +161,7 @@ def _export_input(
         "signer_key_id": signer_key_id,
         "record_count": chunk_record_count,
         "total_bytes": len(chunk_bytes),
+        "serialization_version": "audit-export-v2",
         "exported_at": "2026-07-16T01:02:03.456789Z",
         "source_completed_at": "2026-07-16T01:02:03.456789Z",
         "source_status": "completed",
@@ -691,6 +692,14 @@ def test_export_input_is_dense_bounded_exact_and_has_no_pipeline_fields() -> Non
         replace(export_input, total_bytes=chunk.size_bytes + 1)
     with pytest.raises(ValueError, match="strictly positive"):
         replace(export_input, chunks=(replace(chunk, size_bytes=0),), total_bytes=0)
+
+
+def test_audit_export_reader_binds_exact_serialization_version() -> None:
+    export_input = _export_input()
+
+    assert replace(export_input, serialization_version="audit-export-v2").serialization_version == "audit-export-v2"
+    with pytest.raises(ValueError, match=r"serialization_version|reader binding"):
+        replace(export_input, serialization_version="audit-export-v3")
 
 
 def test_chunk_and_manifest_references_must_match_exact_lowercase_hashes() -> None:

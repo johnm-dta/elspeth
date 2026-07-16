@@ -53,6 +53,7 @@ from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine._best_effort import best_effort
 from elspeth.engine.orchestrator.bootstrap import prepare_for_run
 from elspeth.engine.orchestrator.export import (
+    _validate_audit_export_binding_provenance,
     export_landscape,
     prepare_audit_export_binding,
 )
@@ -262,6 +263,7 @@ class RunLifecycleCoordinator:
 
         export_config = settings.landscape.export
         binding, sink_effect_admission = prepare_audit_export_binding(settings, sink_factory)
+        _validate_audit_export_binding_provenance(settings, binding)
         factory.run_lifecycle.set_export_status(
             run_id,
             status=ExportStatus.PENDING,

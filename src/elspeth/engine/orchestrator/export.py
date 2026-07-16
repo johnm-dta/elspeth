@@ -287,17 +287,35 @@ def prepare_audit_export_binding(
 ) -> tuple[SinkEffectRuntimeBinding, object]:
     """Construct and admit the exact delayed sink before export mutations."""
     from elspeth.contracts.sink_effects import SinkEffectInputKind
-    from elspeth.engine.orchestrator.preflight import (
-        SinkEffectExecutionPurpose,
-        SinkEffectRuntimeBinding,
-        sink_effect_modes_from_runtime_bindings,
-        validate_pipeline_sink_effect_capabilities,
-    )
+    from elspeth.engine.orchestrator.preflight import validate_pipeline_sink_effect_capabilities
 
     sink_name = settings.landscape.export.sink
     if sink_name is None:
         raise ValueError("Export sink name is None")
     binding = sink_factory(sink_name)
+    sink_name, sink, modes = _validate_audit_export_binding_provenance(settings, binding)
+    admission = validate_pipeline_sink_effect_capabilities(
+        {sink_name: sink},
+        configured_modes=modes,
+        required_input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
+    )
+    return binding, admission
+
+
+def _validate_audit_export_binding_provenance(
+    settings: ElspethSettings,
+    binding: SinkEffectRuntimeBinding,
+) -> tuple[str, SinkProtocol, Mapping[str, str]]:
+    """Bind one delayed-export runtime binding to its exact settings authority."""
+    from elspeth.engine.orchestrator.preflight import (
+        SinkEffectExecutionPurpose,
+        SinkEffectRuntimeBinding,
+        sink_effect_modes_from_runtime_bindings,
+    )
+
+    sink_name = settings.landscape.export.sink
+    if sink_name is None:
+        raise ValueError("Export sink name is None")
     if type(binding) is not SinkEffectRuntimeBinding:
         raise TypeError("Audit export sink factory must return an exact SinkEffectRuntimeBinding")
     sink = cast("SinkProtocol", binding.sink)
@@ -307,12 +325,7 @@ def prepare_audit_export_binding(
         purpose=SinkEffectExecutionPurpose.AUDIT_EXPORT,
         expected_config_fingerprints={sink_name: stable_hash(dict(settings.sinks[sink_name].options))},
     )
-    admission = validate_pipeline_sink_effect_capabilities(
-        {sink_name: sink},
-        configured_modes=modes,
-        required_input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
-    )
-    return binding, admission
+    return sink_name, sink, modes
 
 
 def export_landscape(
@@ -353,12 +366,10 @@ def export_landscape(
 
     if prepared_binding is None:
         prepared_binding, sink_effect_admission = prepare_audit_export_binding(settings, sink_factory)
-    sink_name = prepared_binding.sink_name
-    sink = cast("SinkProtocol", prepared_binding.sink)
-    mode = prepared_binding.effect_mode.value if prepared_binding.effect_mode is not None else ""
+    sink_name, sink, modes = _validate_audit_export_binding_provenance(settings, prepared_binding)
     require_sink_effect_admission(
         {sink_name: sink},
-        configured_modes={sink_name: mode},
+        configured_modes=modes,
         required_input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
         admission=sink_effect_admission,
     )

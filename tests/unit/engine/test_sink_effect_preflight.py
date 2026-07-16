@@ -8,6 +8,7 @@ import inspect
 import pickle
 import weakref
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -757,6 +758,63 @@ def test_runtime_factory_does_not_construct_delayed_export_sink(
     assert constructed_sinks == ["pipeline"]
 
 
+def test_real_runtime_factory_validates_delayed_export_options_without_constructing_it(tmp_path: Path) -> None:
+    from elspeth.plugins.infrastructure.config_base import PluginConfigError
+    from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
+
+    settings = SimpleNamespace(
+        sources={"source": SimpleNamespace(plugin="null", options={}, on_success="discard")},
+        transforms=(),
+        aggregations=(),
+        sinks={
+            "audit-export": SimpleNamespace(
+                plugin="json",
+                options={
+                    "path": str(tmp_path / "audit.json"),
+                    "schema": {"mode": "observed"},
+                    "format": "json",
+                    "mode": "append",
+                },
+                on_write_failure="discard",
+            )
+        },
+        landscape=SimpleNamespace(export=SimpleNamespace(enabled=True, sink="audit-export")),
+    )
+
+    with pytest.raises(PluginConfigError, match="append"):
+        instantiate_plugins_from_config(settings, preflight_mode=True)  # type: ignore[arg-type]
+
+
+def test_valid_delayed_export_is_excluded_then_constructed_by_fresh_export_factory(tmp_path: Path) -> None:
+    from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config, make_sink_factory
+    from elspeth.plugins.sinks.json_sink import JSONSink
+
+    settings = SimpleNamespace(
+        sources={"source": SimpleNamespace(plugin="null", options={}, on_success="discard")},
+        transforms=(),
+        aggregations=(),
+        sinks={
+            "audit-export": SimpleNamespace(
+                plugin="json",
+                options={
+                    "path": str(tmp_path / "audit.jsonl"),
+                    "schema": {"mode": "observed"},
+                    "format": "jsonl",
+                    "mode": "append",
+                },
+                on_write_failure="discard",
+            )
+        },
+        landscape=SimpleNamespace(export=SimpleNamespace(enabled=True, sink="audit-export")),
+    )
+
+    bundle = instantiate_plugins_from_config(settings, preflight_mode=True)  # type: ignore[arg-type]
+    binding = make_sink_factory(settings)("audit-export")  # type: ignore[arg-type]
+
+    assert bundle.sinks == {}
+    assert type(binding.sink) is JSONSink
+
+
 def test_real_runtime_factory_carries_adapter_resolved_mode_with_exact_sink(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1085,6 +1143,52 @@ def test_export_admission_precedes_pending_events_telemetry_and_signing_key_read
     factory.run_lifecycle.set_export_status.assert_not_called()
     coordinator._events.emit.assert_not_called()
     coordinator._ceremony.emit_telemetry.assert_not_called()
+
+
+def test_prepared_export_binding_provenance_precedes_pending_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    from elspeth.engine.orchestrator.run_lifecycle import RunLifecycleCoordinator
+
+    sink = EffectCapableSink()
+    binding = _audit_export_binding("wrong-export", sink, "write")
+    admission = validate_pipeline_sink_effect_capabilities(
+        {"wrong-export": sink},  # type: ignore[arg-type]
+        configured_modes={"wrong-export": "write"},
+        required_input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
+    )
+    coordinator = object.__new__(RunLifecycleCoordinator)
+    coordinator._db = object()
+    coordinator._events = MagicMock(spec=["emit"])
+    coordinator._ceremony = MagicMock(spec=["emit_telemetry", "emit_phase_error"])
+    factory = SimpleNamespace(run_lifecycle=MagicMock(spec=["set_export_status"]))
+    settings = SimpleNamespace(
+        sinks={"audit-output": SimpleNamespace(options={})},
+        landscape=SimpleNamespace(
+            export=SimpleNamespace(
+                enabled=True,
+                sign=False,
+                include_raw_error_rows=False,
+                sink="audit-output",
+                format="json",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "elspeth.engine.orchestrator.run_lifecycle.prepare_audit_export_binding",
+        lambda _settings, _factory: (binding, admission),
+    )
+
+    with pytest.raises(SinkEffectCapabilityError):
+        coordinator.execute_export_phase(
+            factory,  # type: ignore[arg-type]
+            "run-1",
+            settings,  # type: ignore[arg-type]
+            lambda _name: pytest.fail("prepared path must not reconstruct the sink"),  # type: ignore[arg-type]
+        )
+
+    factory.run_lifecycle.set_export_status.assert_not_called()
+    coordinator._events.emit.assert_not_called()
+    coordinator._ceremony.emit_telemetry.assert_not_called()
+    coordinator._ceremony.emit_phase_error.assert_not_called()
 
 
 def test_audit_export_requires_export_input_kind_and_rejects_pipeline_only_sink() -> None:

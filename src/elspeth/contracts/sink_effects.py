@@ -30,6 +30,7 @@ _AUDIT_EXPORT_MAX_TOTAL_BYTES: Final = 1024 * 1024 * 1024 * 1024
 _AUDIT_EXPORT_MAX_TOTAL_RECORDS: Final = 100_000_000
 _AUDIT_EXPORT_MANIFEST_SCHEMA: Final = "elspeth.audit-export-manifest.v2"
 _AUDIT_EXPORT_DERIVATION_VERSION: Final = "audit-export-derivation-v1"
+_AUDIT_EXPORT_SERIALIZATION_VERSION: Final = "audit-export-v2"
 _UNSIGNED_RECORD_CHAIN: Final = "sha256_concat_record_sha256_v1"
 _HMAC_RECORD_CHAIN: Final = "sha256_concat_hmac_sha256_signatures_v1"
 _LOWER_HEX_64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -427,6 +428,7 @@ class _AuditExportReaderBinding:
     signer_key_id: str
     record_count: int
     total_bytes: int
+    serialization_version: str
     exported_at: str
     source_completed_at: str
     source_status: str
@@ -529,6 +531,7 @@ class RestrictedAuditExportSnapshotReader:
         signer_key_id: str,
         record_count: int,
         total_bytes: int,
+        serialization_version: str,
         chunks: tuple[AuditExportSnapshotChunkInput, ...],
         signed_manifest: AuditExportSignedManifestInput,
     ) -> bool:
@@ -544,6 +547,7 @@ class RestrictedAuditExportSnapshotReader:
             and binding.signer_key_id == signer_key_id
             and binding.record_count == record_count
             and binding.total_bytes == total_bytes
+            and binding.serialization_version == serialization_version
             and self.__chunks == chunks
             and self.__signed_manifest == signed_manifest
         )
@@ -647,6 +651,7 @@ def _create_restricted_audit_export_snapshot_reader(
     signer_key_id: str,
     record_count: int,
     total_bytes: int,
+    serialization_version: str,
     exported_at: str,
     source_completed_at: str,
     source_status: str,
@@ -676,6 +681,8 @@ def _create_restricted_audit_export_snapshot_reader(
         raise ValueError("source_status is not export-terminal")
     _require_lower_hex_64(last_chunk_seal_hash, "last_chunk_seal_hash")
     _require_lower_hex_64(snapshot_seal_hash, "snapshot_seal_hash")
+    if serialization_version != _AUDIT_EXPORT_SERIALIZATION_VERSION:
+        raise ValueError(f"serialization_version must equal {_AUDIT_EXPORT_SERIALIZATION_VERSION!r}")
     if total_bytes > max_total_bytes or record_count > max_total_records or len(chunk_tuple) > max_chunks:
         raise ValueError("snapshot exceeds configured reader limits")
     for chunk in chunk_tuple:
@@ -694,6 +701,7 @@ def _create_restricted_audit_export_snapshot_reader(
         signer_key_id=signer_key_id,
         record_count=record_count,
         total_bytes=total_bytes,
+        serialization_version=serialization_version,
         exported_at=exported_at,
         source_completed_at=source_completed_at,
         source_status=source_status,
@@ -745,7 +753,8 @@ class SinkEffectAuditExportSnapshotInput:
         _require_nonempty_string(self.source_run_id, "source_run_id")
         for field_name in ("registry_key_hash", "manifest_hash", "snapshot_hash"):
             _require_lower_hex_64(getattr(self, field_name), field_name)
-        _require_nonempty_string(self.serialization_version, "serialization_version")
+        if self.serialization_version != _AUDIT_EXPORT_SERIALIZATION_VERSION:
+            raise ValueError(f"serialization_version must equal {_AUDIT_EXPORT_SERIALIZATION_VERSION!r}")
         _require_exact_enum(self.export_format, AuditExportFormat, "export_format")
         _require_exact_enum(self.signing_mode, AuditExportSigningMode, "signing_mode")
         _require_nonempty_string(self.signer_key_id, "signer_key_id")
@@ -789,6 +798,7 @@ class SinkEffectAuditExportSnapshotInput:
             signer_key_id=self.signer_key_id,
             record_count=self.record_count,
             total_bytes=self.total_bytes,
+            serialization_version=self.serialization_version,
             chunks=chunks,
             signed_manifest=self.signed_manifest,
         ):

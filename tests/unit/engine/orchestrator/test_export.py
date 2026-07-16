@@ -15,6 +15,7 @@ import ast
 import csv
 import json
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -34,11 +35,14 @@ from elspeth.engine.orchestrator.export import (
     _export_csv_multifile,
     _write_json_export_batches,
     export_landscape,
+    prepare_audit_export_binding,
 )
 from elspeth.engine.orchestrator.preflight import (
     ResolvedSinkEffectMode,
+    SinkEffectCapabilityError,
     SinkEffectExecutionPurpose,
     SinkEffectRuntimeBinding,
+    validate_pipeline_sink_effect_capabilities,
 )
 from elspeth.engine.orchestrator.schema_reconstruction import _json_schema_to_python_type, reconstruct_schema_from_json
 
@@ -189,6 +193,96 @@ class TestExportLandscapeJSON:
             configured_modes={"output": "write"},
             required_input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
         )
+
+    @pytest.mark.parametrize("tamper", ["name", "purpose", "config_fingerprint"])
+    def test_prepared_export_binding_revalidates_settings_provenance_before_io(self, tamper: str) -> None:
+        settings = self._make_settings()
+        sink, factory = _make_sink_and_factory()
+        binding, _original_admission = prepare_audit_export_binding(settings, factory)
+        if tamper == "name":
+            binding = replace(binding, sink_name="other")
+        elif tamper == "purpose":
+            binding = replace(binding, purpose=SinkEffectExecutionPurpose.FRESH)
+        else:
+            binding = replace(binding, config_fingerprint=stable_hash({"different": True}))
+        admission = validate_pipeline_sink_effect_capabilities(
+            {binding.sink_name: sink},
+            configured_modes={binding.sink_name: "write"},
+            required_input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
+        )
+
+        with (
+            patch(
+                "elspeth.core.landscape.exporter.LandscapeExporter",
+                side_effect=lambda *_args, **_kwargs: pytest.fail("export I/O must not begin"),
+            ),
+            pytest.raises(SinkEffectCapabilityError),
+        ):
+            export_landscape(
+                object(),
+                "run-1",
+                settings,
+                factory,
+                prepared_binding=binding,
+                sink_effect_admission=admission,
+            )
+
+        sink.on_start.assert_not_called()
+        sink.write.assert_not_called()
+
+    def test_prepared_export_rejects_receipt_for_separately_admitted_sink_before_io(self) -> None:
+        settings = self._make_settings()
+        sink, factory = _make_sink_and_factory()
+        binding, _admission = prepare_audit_export_binding(settings, factory)
+        other_sink = _SinkDouble()
+        other_admission = validate_pipeline_sink_effect_capabilities(
+            {"output": other_sink},
+            configured_modes={"output": "write"},
+            required_input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
+        )
+
+        with (
+            patch(
+                "elspeth.core.landscape.exporter.LandscapeExporter",
+                side_effect=lambda *_args, **_kwargs: pytest.fail("export I/O must not begin"),
+            ),
+            pytest.raises(SinkEffectCapabilityError, match="does not bind"),
+        ):
+            export_landscape(
+                object(),
+                "run-1",
+                settings,
+                factory,
+                prepared_binding=binding,
+                sink_effect_admission=other_admission,
+            )
+
+        sink.on_start.assert_not_called()
+        sink.write.assert_not_called()
+
+    def test_exact_prepared_export_binding_uses_receipt_without_capability_revalidation(self) -> None:
+        class StopAfterBinding(Exception):
+            pass
+
+        settings = self._make_settings()
+        _sink, factory = _make_sink_and_factory()
+        binding, admission = prepare_audit_export_binding(settings, factory)
+        with (
+            patch(
+                "elspeth.engine.orchestrator.preflight.validate_sink_effect_capability",
+                side_effect=lambda *_args, **_kwargs: pytest.fail("prepared receipt consumption must be match-only"),
+            ),
+            patch("elspeth.core.landscape.exporter.LandscapeExporter", side_effect=StopAfterBinding),
+            pytest.raises(StopAfterBinding),
+        ):
+            export_landscape(
+                object(),
+                "run-1",
+                settings,
+                factory,
+                prepared_binding=binding,
+                sink_effect_admission=admission,
+            )
 
     def test_jsonl_export_helpers_do_not_probe_sink_shape_with_getattr(self) -> None:
         import inspect

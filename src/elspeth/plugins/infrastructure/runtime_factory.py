@@ -22,7 +22,7 @@ from elspeth.contracts.sink_effects import (
 from elspeth.engine.orchestrator.preflight import validate_sink_effect_type_capability
 
 if TYPE_CHECKING:
-    from elspeth.core.config import AggregationSettings, ElspethSettings, SourceSettings, TransformSettings
+    from elspeth.core.config import AggregationSettings, ElspethSettings, LandscapeExportSettings, SourceSettings, TransformSettings
     from elspeth.core.dag.wiring import WiredTransform
 
 
@@ -135,9 +135,14 @@ def instantiate_plugins_from_config(
         sink_effect_bindings = {}
         delayed_export_sink = config.landscape.export.sink if config.landscape.export.enabled else None
         for sink_name, sink_config in config.sinks.items():
-            if sink_name == delayed_export_sink:
-                continue
             sink_cls = manager.get_sink_by_name(sink_config.plugin)
+            if sink_name == delayed_export_sink:
+                if isinstance(sink_cls, type) and issubclass(sink_cls, BaseSink):
+                    options = dict(sink_config.options)
+                    config_model = sink_cls.get_config_model(options)
+                    if config_model is not None:
+                        config_model.from_dict(options, plugin_name=sink_config.plugin)
+                continue
             sink = sink_cls(dict(sink_config.options))
             sinks[sink_name] = sink
             sinks[sink_name]._on_write_failure = sink_config.on_write_failure
@@ -197,14 +202,10 @@ def validate_sink_effect_eligibility_from_raw_config(
     if not isinstance(raw_sinks, Mapping):
         raise ValueError("'sinks' must be a mapping/object for sink effect eligibility")
 
+    export_settings = validate_landscape_export_settings_from_raw_config(raw_config)
     delayed_export_name: str | None = None
-    raw_landscape = raw_config.get("landscape")
-    if isinstance(raw_landscape, Mapping):
-        raw_export = raw_landscape.get("export")
-        if isinstance(raw_export, Mapping) and raw_export.get("enabled") is True:
-            selected = raw_export.get("sink")
-            if isinstance(selected, str) and selected:
-                delayed_export_name = selected
+    if export_settings.enabled and export_settings.sink:
+        delayed_export_name = export_settings.sink
 
     if purpose is SinkEffectExecutionPurpose.AUDIT_EXPORT:
         if delayed_export_name is None:
@@ -248,6 +249,23 @@ def validate_sink_effect_eligibility_from_raw_config(
         assert mode is not None
         modes[sink_name] = mode
     return modes
+
+
+def validate_landscape_export_settings_from_raw_config(raw_config: Mapping[str, object]) -> LandscapeExportSettings:
+    """Normalize bounded raw export settings through the authoritative model."""
+    from elspeth.core.config import LandscapeExportSettings
+
+    raw_landscape = raw_config.get("landscape")
+    if raw_landscape is None:
+        return LandscapeExportSettings()
+    if not isinstance(raw_landscape, Mapping):
+        raise ValueError("'landscape' must be a mapping/object before sink effect eligibility")
+    raw_export = raw_landscape.get("export")
+    if raw_export is None:
+        return LandscapeExportSettings()
+    if not isinstance(raw_export, Mapping):
+        raise ValueError("'landscape.export' must be a mapping/object before sink effect eligibility")
+    return LandscapeExportSettings.model_validate(dict(raw_export))
 
 
 def _value_source_wired_transforms(bundle: PluginBundle) -> tuple[WiredTransform, ...]:

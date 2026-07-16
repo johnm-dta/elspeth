@@ -557,16 +557,18 @@ def _preflight_execution_sinks(
 def _preflight_raw_settings_sink_effects(settings_path: Path, *, purpose: object) -> None:
     """Run adapter-class eligibility before secrets or other startup work."""
     from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
-    from elspeth.plugins.infrastructure.runtime_factory import validate_sink_effect_eligibility_from_raw_config
+    from elspeth.plugins.infrastructure.runtime_factory import (
+        validate_landscape_export_settings_from_raw_config,
+        validate_sink_effect_eligibility_from_raw_config,
+    )
 
     if not isinstance(purpose, SinkEffectExecutionPurpose):
         raise TypeError("Raw sink effect preflight purpose must be exact SinkEffectExecutionPurpose")
     raw_config = _load_raw_yaml(settings_path)
     validate_sink_effect_eligibility_from_raw_config(raw_config, purpose=purpose)
     if purpose is SinkEffectExecutionPurpose.FRESH:
-        raw_landscape = raw_config.get("landscape")
-        raw_export = raw_landscape.get("export") if isinstance(raw_landscape, Mapping) else None
-        if isinstance(raw_export, Mapping) and raw_export.get("enabled") is True:
+        export_settings = validate_landscape_export_settings_from_raw_config(raw_config)
+        if export_settings.enabled:
             validate_sink_effect_eligibility_from_raw_config(
                 raw_config,
                 purpose=SinkEffectExecutionPurpose.AUDIT_EXPORT,

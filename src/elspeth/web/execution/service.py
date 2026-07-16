@@ -56,7 +56,10 @@ from elspeth.engine.orchestrator.preflight import (
     assemble_and_validate_pipeline_config,
 )
 from elspeth.engine.orchestrator.types import PipelineConfig
-from elspeth.plugins.infrastructure.runtime_factory import validate_sink_effect_eligibility_from_raw_config
+from elspeth.plugins.infrastructure.runtime_factory import (
+    validate_landscape_export_settings_from_raw_config,
+    validate_sink_effect_eligibility_from_raw_config,
+)
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import (
@@ -1216,9 +1219,8 @@ class ExecutionServiceImpl:
                 raw_eligibility_config,
                 purpose=SinkEffectExecutionPurpose.FRESH,
             )
-            raw_landscape = raw_eligibility_config.get("landscape")
-            raw_export = raw_landscape.get("export") if isinstance(raw_landscape, Mapping) else None
-            if isinstance(raw_export, Mapping) and raw_export.get("enabled") is True:
+            export_settings = validate_landscape_export_settings_from_raw_config(raw_eligibility_config)
+            if export_settings.enabled:
                 validate_sink_effect_eligibility_from_raw_config(
                     raw_eligibility_config,
                     purpose=SinkEffectExecutionPurpose.AUDIT_EXPORT,

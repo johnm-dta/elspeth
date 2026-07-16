@@ -13,9 +13,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from typer.testing import CliRunner
 
-from elspeth.cli import _preflight_follower_sink_effects, app
+from elspeth.cli import _preflight_follower_sink_effects, _preflight_raw_settings_sink_effects, app
 from elspeth.contracts.preflight import DependencyRunResult, PreflightResult
 from elspeth.contracts.sink_effects import SINK_EFFECT_PROTOCOL_VERSION, SinkEffectInputKind
 
@@ -139,6 +140,81 @@ def test_cli_fresh_run_screens_pipeline_and_export_lanes_before_secret_loading(t
 
     assert result.exit_code == 1
     assert purposes == [SinkEffectExecutionPurpose.FRESH, SinkEffectExecutionPurpose.AUDIT_EXPORT]
+    load_settings_with_secrets.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("raw_enabled", "expected_enabled"),
+    [
+        (True, True),
+        ("true", True),
+        ("1", True),
+        ("yes", True),
+        (1, True),
+        (False, False),
+        ("false", False),
+        ("0", False),
+        ("no", False),
+        (0, False),
+    ],
+)
+def test_raw_export_lane_classification_matches_pydantic_bool_coercion(
+    tmp_path: Path,
+    raw_enabled: bool | str | int,
+    expected_enabled: bool,
+) -> None:
+    import yaml
+
+    from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
+
+    settings_path = tmp_path / "coerced-export.yaml"
+    settings_path.write_text(
+        yaml.dump(
+            {
+                "sinks": {
+                    "pipeline": {"plugin": "csv", "options": {}},
+                    "audit": {"plugin": "json", "options": {}},
+                },
+                "landscape": {"export": {"enabled": raw_enabled, "sink": "audit"}},
+            }
+        )
+    )
+    purposes: list[SinkEffectExecutionPurpose] = []
+    with patch(
+        "elspeth.plugins.infrastructure.runtime_factory.validate_sink_effect_eligibility_from_raw_config",
+        side_effect=lambda _raw, *, purpose: purposes.append(purpose) or {},
+    ):
+        _preflight_raw_settings_sink_effects(settings_path, purpose=SinkEffectExecutionPurpose.FRESH)
+
+    expected = [SinkEffectExecutionPurpose.FRESH]
+    if expected_enabled:
+        expected.append(SinkEffectExecutionPurpose.AUDIT_EXPORT)
+    assert purposes == expected
+
+
+def test_malformed_raw_export_shape_fails_before_secret_loading(tmp_path: Path) -> None:
+    import yaml
+
+    settings_path = tmp_path / "malformed-export.yaml"
+    settings_path.write_text(
+        yaml.dump(
+            {
+                "sinks": {"pipeline": {"plugin": "csv", "options": {}}},
+                "landscape": {"export": {"enabled": []}},
+            }
+        )
+    )
+    with (
+        patch(
+            "elspeth.plugins.infrastructure.runtime_factory.validate_sink_effect_eligibility_from_raw_config",
+            return_value={},
+        ),
+        patch("elspeth.cli._load_settings_with_secrets") as load_settings_with_secrets,
+    ):
+        result = runner.invoke(app, ["run", "-s", str(settings_path), "--execute"])
+
+    assert result.exit_code == 1
+    assert "enabled" in result.output
     load_settings_with_secrets.assert_not_called()
 
 

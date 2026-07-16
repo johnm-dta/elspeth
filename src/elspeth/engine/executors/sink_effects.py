@@ -437,6 +437,13 @@ class SinkEffectCoordinator:
     ) -> SinkEffectFinalizationResult:
         if plan.expected_descriptor is None:
             raise LandscapeRecordError("no-publication effect requires its precomputed descriptor")
+        publication_kind = plan.safe_evidence.get("publication_kind")
+        if publication_kind == "inherited":
+            evidence_kind: Literal["inherited", "virtual"] = "inherited"
+        elif publication_kind == "virtual":
+            evidence_kind = "virtual"
+        else:
+            raise LandscapeRecordError("no-publication effect requires inherited or virtual publication evidence")
         accepted = tuple(member.ordinal for member in request.finalization_members)
         return self._effects.finalize(
             SinkEffectFinalizeRequest(
@@ -445,7 +452,7 @@ class SinkEffectCoordinator:
                 generation=effect.generation,
                 descriptor=plan.expected_descriptor,
                 publication_performed=False,
-                publication_evidence_kind="virtual",
+                publication_evidence_kind=evidence_kind,
                 accepted_ordinals=accepted,
                 diverted_ordinals=(),
                 evidence=plan.safe_evidence,

@@ -981,6 +981,10 @@ class SinkEffectPlan:
         elif self.expected_descriptor is not None:
             raise ValueError(f"{self.descriptor_mode.value} descriptor_mode must not claim an expected_descriptor")
         frozen_evidence = _freeze_bounded_evidence(self.safe_evidence, "safe_evidence")
+        if self.descriptor_mode is SinkEffectDescriptorMode.NO_PUBLICATION:
+            publication_kind = frozen_evidence.get("publication_kind")
+            if publication_kind not in {"inherited", "virtual"}:
+                raise ValueError("NO_PUBLICATION safe_evidence requires publication_kind inherited or virtual")
         object.__setattr__(self, "safe_evidence", deep_freeze(frozen_evidence))
 
 

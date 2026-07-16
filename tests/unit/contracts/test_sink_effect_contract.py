@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import FrozenInstanceError, asdict, fields, replace
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -210,6 +210,7 @@ def _plan(
     descriptor_mode: SinkEffectDescriptorMode = SinkEffectDescriptorMode.PRECOMPUTED,
     inspection_mode: SinkEffectInspectionMode = SinkEffectInspectionMode.INSPECTED,
     expected_descriptor: ArtifactDescriptor | None = EXACT_DESCRIPTOR,
+    safe_evidence: Mapping[str, object] = SAFE_EVIDENCE,
 ) -> SinkEffectPlan:
     return SinkEffectPlan(
         effect_id="effect-1",
@@ -221,7 +222,7 @@ def _plan(
         plan_hash="plan-hash",
         payload_hash="payload-hash",
         expected_descriptor=expected_descriptor,
-        safe_evidence=SAFE_EVIDENCE,
+        safe_evidence=safe_evidence,
     )
 
 
@@ -557,6 +558,7 @@ def test_plan_protocol_descriptor_and_inspection_modes_validate_exactly() -> Non
             descriptor_mode=SinkEffectDescriptorMode.NO_PUBLICATION,
             inspection_mode=SinkEffectInspectionMode.NO_INSPECTION_REQUIRED,
             expected_descriptor=EXACT_DESCRIPTOR,
+            safe_evidence={"publication_kind": "virtual"},
         ).expected_descriptor
         == EXACT_DESCRIPTOR
     )
@@ -579,7 +581,19 @@ def test_plan_protocol_descriptor_and_inspection_modes_validate_exactly() -> Non
     with pytest.raises(ValueError, match="expected_descriptor"):
         _plan(descriptor_mode=SinkEffectDescriptorMode.RESULT_DERIVED, expected_descriptor=EXACT_DESCRIPTOR)
     with pytest.raises(ValueError, match="expected_descriptor"):
-        _plan(descriptor_mode=SinkEffectDescriptorMode.NO_PUBLICATION, expected_descriptor=None)
+        _plan(
+            descriptor_mode=SinkEffectDescriptorMode.NO_PUBLICATION,
+            expected_descriptor=None,
+            safe_evidence={"publication_kind": "virtual"},
+        )
+    with pytest.raises(ValueError, match="publication_kind"):
+        _plan(descriptor_mode=SinkEffectDescriptorMode.NO_PUBLICATION, expected_descriptor=EXACT_DESCRIPTOR)
+    with pytest.raises(ValueError, match="publication_kind"):
+        _plan(
+            descriptor_mode=SinkEffectDescriptorMode.NO_PUBLICATION,
+            expected_descriptor=EXACT_DESCRIPTOR,
+            safe_evidence={"publication_kind": "returned"},
+        )
     with pytest.raises((TypeError, ValueError), match="descriptor_mode"):
         _plan().__class__(
             effect_id="effect-1",
@@ -842,7 +856,7 @@ def test_reader_is_factory_only_and_excluded_from_repr_equality_and_serializatio
             plan_hash="plan-hash",
             payload_hash="payload-hash",
             expected_descriptor=EXACT_DESCRIPTOR,
-            safe_evidence={"reader": first.reader},
+            safe_evidence={"publication_kind": "virtual", "reader": first.reader},
         )
 
 

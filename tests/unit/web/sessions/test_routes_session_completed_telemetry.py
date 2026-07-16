@@ -152,9 +152,9 @@ async def test_export_yaml_route_emits_completion_counter(tmp_path: Path) -> Non
     )
 
     async def _pass_preflight(  # type: ignore[no-untyped-def]
-        state, *, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry
+        state, *, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry, catalog
     ):
-        del state, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry
+        del state, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry, catalog
         return ValidationResult(is_valid=True, checks=[], errors=[], readiness=_ready_readiness())
 
     # Baseline.
@@ -207,9 +207,9 @@ async def test_export_yaml_route_runtime_preflight_failure_does_not_emit(tmp_pat
     )
 
     async def _fail_preflight(  # type: ignore[no-untyped-def]
-        state, *, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry
+        state, *, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry, catalog
     ):
-        del state, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry
+        del state, settings, secret_service, user_id, session_id, plugin_snapshot, profile_registry, catalog
         return ValidationResult(
             is_valid=False,
             checks=[],

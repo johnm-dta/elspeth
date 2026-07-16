@@ -22,6 +22,7 @@ from elspeth.core.landscape.schema import metadata as landscape_metadata
 from elspeth.core.landscape.schema import nodes_table, run_sources_table, runs_table
 from elspeth.core.schema_identity import SCHEMA_IDENTITY_TABLE_NAME
 from elspeth.web.schema_probe import SchemaState, init_landscape_schema, init_session_schema, probe_landscape_schema, probe_session_schema
+from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import POSTGRESQL_AUDIT_DDL_COHORT
 from elspeth.web.sessions.models import metadata as session_metadata
 from elspeth.web.sessions.models import schema_identity_table as session_schema_identity_table
@@ -117,7 +118,7 @@ def _create_release_landscape_shape(engine: Engine, *, hash_width: int) -> None:
 
 
 def _create_release_0_7_0_shapes(pair: _DatabasePair, *, hash_width: int) -> tuple[Engine, Engine]:
-    session = create_engine(pair.session_url)
+    session = create_session_engine(pair.session_url)
     landscape = create_engine(pair.landscape_url)
     _create_release_session_shape(session)
     _create_release_landscape_shape(landscape, hash_width=hash_width)
@@ -469,7 +470,7 @@ def test_unrecognized_pre_state_fails_before_any_ddl(
 
 
 def test_only_session_current_landscape_old_partial_resumes(database_pair: _DatabasePair) -> None:
-    session = create_engine(database_pair.session_url)
+    session = create_session_engine(database_pair.session_url)
     landscape = create_engine(database_pair.landscape_url)
     try:
         init_session_schema(session)
@@ -486,7 +487,7 @@ def test_only_session_current_landscape_old_partial_resumes(database_pair: _Data
 
 
 def test_reverse_partial_fails_before_session_ddl(database_pair: _DatabasePair) -> None:
-    session = create_engine(database_pair.session_url)
+    session = create_session_engine(database_pair.session_url)
     landscape = create_engine(database_pair.landscape_url)
     try:
         _create_release_session_shape(session)

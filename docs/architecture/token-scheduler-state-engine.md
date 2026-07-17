@@ -5,7 +5,8 @@
 | Scope | Durable token scheduler, from source-plugin ingress through transform, gate, barrier, and sink-plugin boundaries. |
 | Excluded | The web session engine. |
 | Mapped against | Commit `8c5e9533c80c00bfc3b401c1c394e8308815ce1e` (release `0.7.1`). |
-| Evidence state | Implementation mapped; Wave 1 executed for intake, leasing/recovery, claimed dispositions, and their plugin boundaries. Remaining families are still candidates. |
+| Disposition follow-up | Commit `360f3cf9e` on 2026-07-17; canonical subtype admission and TS-07–TS-10 closure matrix. |
+| Evidence state | Implementation mapped; Wave 1 executed for intake, leasing/recovery, claimed dispositions, and their plugin boundaries. The disposition follow-up is recorded below; remaining families retain their stated status. |
 
 This is the canonical working map for the token scheduler's test-verification
 campaign. It describes what the current code does. It does not replace an ADR,
@@ -68,6 +69,44 @@ The enum is `TokenWorkStatus` in `src/elspeth/contracts/scheduler.py`.
 `WAITING` is not a state. It and its maintenance path were deleted after being
 found unreachable. The scheduler event journal still records immutable history
 for rotated work-item identities.
+
+### Durable subtype admission truth table v1
+
+This table is the maintained scheduler contract as of 2026-07-17. Status alone
+does not authorize a transition: the durable subtype predicate, owner CAS, and
+any required membership or leader fence are part of the same admission cell.
+
+| Durable state/subtype | Canonical durable predicate | Normal dispositions TS-07–TS-10 | Sink claim/completion | Required refusal behavior |
+|---|---|---|---|---|
+| Transform lease | `status=LEASED` and `pending_sink_name IS NULL` | Admitted with the matching owner; the optional worker fence must also pass. | Refused by TS-11–TS-13. | Wrong status, owner, or membership is zero row, event, and branch-loss mutation. |
+| Sink-redrive lease | `status=LEASED` and the complete pending-sink bundle below | Refused by all four verbs even though the status is `LEASED`. | TS-12/13 may terminalize after sink durability with the matching owner and leader fence. Expiry recovery returns it to `PENDING_SINK`. | Refusal preserves the row, lease, pending bundle, scheduler events, and branch-loss ledger exactly. |
+| Attributed sink park | `status=PENDING_SINK`, complete bundle, non-empty owner, and no lease expiry | Refused by status. | TS-04 may transfer ownership; TS-11/13 may complete for the matching owner under the leader fence. | A stale owner cannot complete or partially mutate the park. |
+| Recovered sink park | `status=PENDING_SINK`, complete bundle, NULL owner, and no lease expiry | Refused by status. | TS-04 must reclaim it before ordinary TS-12/13 completion. | NULL-owner acceptance is forbidden on the strict terminalization path. |
+| Malformed sink work | A `PENDING_SINK` row, or `LEASED` row with sink metadata, that fails the complete-bundle predicate | Refused; a non-NULL sink name can never be consumed as transform work. | TS-04 refuses before lease/event mutation. TS-11–TS-14 may only clear debt under their separately documented external-durability or outcome-witness contract. | Fail closed at the first admission boundary with an actionable invariant error. |
+| Any other status | `READY`, `BLOCKED`, `TERMINAL`, or `FAILED` | Refused by the exact-status CAS. | Refused except for the explicitly mapped barrier transitions. | No durable mutation. |
+
+The source-level predicate authority is deliberately small:
+`pending_sink_bundle_clause()` owns the four legal sink-bound outcome/path and
+evidence combinations. TS-04 uses it for both diagnostic selection and CAS
+admission; TS-10 evaluates the same predicate against its post-transition row
+inside the disposition transaction, before its event or optional branch loss
+can commit. The transform-lease discriminator remains the complementary
+`pending_sink_name IS NULL` predicate in the shared disposition CAS.
+
+Every complete pending-sink bundle has a non-empty serialized row payload and
+sink name. Its outcome/path evidence must match exactly one row below:
+
+| Outcome | Path | Error evidence | Additional evidence |
+|---|---|---|---|
+| `SUCCESS` | `DEFAULT_FLOW` | Both error fields NULL | None |
+| `SUCCESS` | `GATE_ROUTED` | Both error fields NULL | None |
+| `FAILURE` | `ON_ERROR_ROUTED` | Non-empty error hash and non-NULL message | None |
+| `SUCCESS` | `COALESCED` | Both error fields NULL | Non-empty `join_group_id` |
+
+The negative regression contract is stronger than “the call raised”: rejected
+operations compare the complete work row, lease/fence image, scheduler-event
+history, and branch-loss ledger before and after the call. Event-insert and
+branch-loss fault injection must likewise roll the disposition row back.
 
 ## Canonical lifecycle
 
@@ -392,6 +431,37 @@ that every behavior on the leg is broken. The baseline for this pass was commit
 | PB-02 | **Gap** | Real transform plugin retry/node audit and scheduler failure disposition are each exercised | No single real-plugin test carries a failure through FAILED node audit, TS-09, event, and effects. |
 | PB-03 | **Gap** | Real gate evaluation and routing are exercised | Scheduler disposition state, event, payload, fencing, and branch-loss effects are not asserted at the gate boundary. |
 | PB-08 | **Gap** | Follower-shaped terminal, blocked, branch-loss, and sink-handoff cases execute repository dispositions | Tests bypass the production follower build/drain/plugin traversal. |
+
+### Disposition follow-up executed evidence — 2026-07-17
+
+This follow-up does not rewrite the 2026-07-15 Wave 1 snapshot above. It records
+the later closure evidence for `elspeth-f8f9272b68`,
+`elspeth-d8e172676c`, and `elspeth-1076e2716a` against the versioned subtype
+truth table in this document.
+
+| Leg | Follow-up verdict | Closure evidence |
+|---|---|---|
+| TS-04 malformed-subtype arm | **Confirmed fail-closed** | A table-driven incomplete-bundle suite proves the diagnostic SELECT and atomic CAS both refuse malformed work without changing the row, owner, expiry, attempt, coordination image, or events. Complete legal bundles remain claimable. Broader TS-04/06 preservation and contention work remains separately tracked. |
+| TS-07 | **Confirmed** | Exact BLOCKED row, release key/timestamp, lease clear, event attribution, owner/membership/missing-key refusals, sink-redrive refusal, and event rollback are covered in one maintained matrix plus the real drain path. |
+| TS-08 | **Confirmed** | Exact TERMINAL row and payload scrub, event, optional branch-loss commit/rollback, owner/membership and sink-redrive refusals, and event rollback are covered together plus the real drain path. |
+| TS-09 | **Confirmed** | Exact FAILED row and payload scrub, event, optional branch-loss commit/rollback, owner/membership and sink-redrive refusals, and event rollback are covered together plus the real drain path. PB-02 still owns the real failing-plugin audit composition. |
+| TS-10 | **Confirmed** | Exact PENDING_SINK replacement payload, complete bundle, attributed owner/no-expiry image, event, branch-loss commit/rollback, stale-owner/membership and sink-redrive refusals, event rollback, and six producer-side malformed-bundle refusals are covered together plus the real drain path. |
+
+Maintained regression entry points:
+
+- `test_scheduler_events.py::test_transform_disposition_truth_table_commits_exact_row_event_and_branch_loss`;
+- the adjacent stale-owner, departed-member, event-failure, branch-loss-failure,
+  sink-redrive, missing-key, and malformed-bundle parameterizations;
+- `test_scheduler_pending_sink_claim.py::test_claim_pending_sink_rejects_incomplete_bundle_without_mutation`;
+  and
+- the TS-07–TS-10 production-drain characterizations in
+  `test_scheduler_drain_characterization.py` and `test_processor.py`.
+
+The focused disposition, pending-sink claim, branch-loss, and coordination-fence
+selection passed 127 tests; the four real drain characterizations passed
+separately. These results close the disposition proof package, not the broader
+PB-02/PB-03/PB-08 composition, registered multi-process contention, or crash
+seams tracked by other issues.
 
 Specialist selections executed 83 passing pytest node invocations across the
 three packages; some nodes intentionally overlapped. The root review then ran

@@ -20,6 +20,23 @@ not production-complete as a whole product. Hard-gate failures remain in durable
 subtype handling, fencing, idempotency, atomic evidence, and secret-bearing
 configuration surfaces.
 
+## Post-assessment remediation
+
+The dated assessment remains immutable and its 2.4/5 indicator has not been
+re-scored. The following safety-floor work landed afterward and must be included
+when the next full assessment establishes a new baseline:
+
+| Date | Assessment gap | Current result | Maintained evidence |
+|---|---|---|---|
+| 2026-07-17 | R1: normal dispositions accepted a reclaimed sink-redrive lease (`elspeth-f8f9272b68`) | Fixed: TS-07–TS-10 require the transform-lease subtype and preserve the complete durable image on refusal. | [`token-scheduler-state-engine.md`](../token-scheduler-state-engine.md#durable-subtype-admission-truth-table-v1) and the disposition truth-table regression matrix |
+| 2026-07-17 | R2: malformed `PENDING_SINK` rows were claimable (`elspeth-d8e172676c`) | Fixed: TS-04 uses the complete bundle predicate in both diagnosis and CAS admission. | Pending-sink incomplete/legal/atomic-race parameterizations |
+| 2026-07-17 | TS-07–TS-10 effects, guards, and rollback proof (`elspeth-1076e2716a`) | Verified: exact state, payload, lease, event, branch-loss, owner, membership, subtype, and rollback cells are maintained as one matrix. TS-10 also refuses malformed bundles at the writer boundary. | [Disposition follow-up evidence](../token-scheduler-state-engine.md#disposition-follow-up-executed-evidence--2026-07-17) |
+
+This closes the two reproduced subtype defects and their disposition proof
+package. It does **not** change the whole-DAG verdict: fencing, idempotency,
+crash/restart, multi-process, secret-safety, and cross-surface scenario gaps
+remain until a fresh assessment proves otherwise.
+
 ## Start here
 
 - [Completeness criteria](completeness-criteria.md) — the stable definition,

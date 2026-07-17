@@ -311,8 +311,8 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
             composer_model_identifier="openai/gpt-5-mini",
             composer_model_version="gpt-5-mini-2026-05-01",
             composer_provider="openai",
-            composer_skill_hash="sha256:composer-skill",
-            tool_arguments_hash="sha256:tool-arguments",
+            composer_skill_hash="a" * 64,
+            tool_arguments_hash="b" * 64,
         )
         create_result = _execute_create_blob(
             {"filename": "generated.txt", "mime_type": "text/plain", "content": "generated row text"},

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Final, cast
 from uuid import UUID
@@ -24,6 +24,7 @@ from uuid import UUID
 from elspeth.contracts.composer_progress import ComposerProgressEvent, ComposerProgressSink
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.async_workers import run_sync_in_worker
+from elspeth.web.blobs.protocol import BlobQuotaExceededError
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer._compose_loop_carriers import (
     _CallModelOutcome,
@@ -44,6 +45,7 @@ from elspeth.web.composer.audit import (
     finish_arg_error,
     finish_plugin_crash,
     finish_success,
+    rebind_dispatch_arguments,
 )
 from elspeth.web.composer.discovery_cache import (
     CachedDiscoveryPayload as _CachedDiscoveryPayload,
@@ -67,6 +69,11 @@ from elspeth.web.composer.discovery_cache import (
     tool_result_mutated_composition_state as _tool_result_mutated_composition_state,
 )
 from elspeth.web.composer.llm_response_parsing import safe_response_model
+from elspeth.web.composer.pipeline_custody import (
+    finalize_pipeline_custody,
+    inline_custody_audit_projection,
+    prepare_pipeline_custody,
+)
 from elspeth.web.composer.progress import (
     emit_progress,
     tool_batch_progress_event,
@@ -98,6 +105,7 @@ from elspeth.web.composer.tools import (
     is_session_aware_tool,
     normalize_tool_result_validation,
 )
+from elspeth.web.composer.tools._common import _failure_result
 from elspeth.web.execution.schemas import ValidationResult
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
@@ -110,6 +118,47 @@ if TYPE_CHECKING:
 
 
 _MAX_PENDING_PROPOSALS_PER_TURN: Final[int] = 10
+
+
+def _replace_llm_tool_call_arguments(
+    llm_messages: Sequence[Mapping[str, Any]],
+    *,
+    tool_call_id: str,
+    arguments: Mapping[str, Any],
+) -> None:
+    """Replace the latest assistant call with custody-safe arguments.
+
+    The compose loop appends the provider-authored assistant message before
+    dispatch.  A subsequent provider turn must not receive raw inline bytes
+    from that history after ELSPETH has intercepted them for proposal custody.
+    """
+    encoded = json.dumps(arguments, sort_keys=True, separators=(",", ":"))
+    for message in reversed(llm_messages):
+        if message.get("role") != "assistant":
+            continue
+        tool_calls = message.get("tool_calls")
+        if type(tool_calls) is not list:
+            continue
+        for call in tool_calls:
+            if type(call) is not dict or call.get("id") != tool_call_id:
+                continue
+            function = call.get("function")
+            if type(function) is not dict:
+                raise AuditIntegrityError("Assistant tool call has malformed function envelope")
+            function["arguments"] = encoded
+            return
+    raise AuditIntegrityError("Assistant tool call was not present in the active LLM transcript")
+
+
+def _remove_inline_blob_redaction_defaults(value: Any) -> Any:
+    """Remove schema defaults that would recreate intercepted custody fields."""
+    if type(value) is dict:
+        return {
+            key: _remove_inline_blob_redaction_defaults(item) for key, item in value.items() if not (key == "inline_blob" and item is None)
+        }
+    if type(value) is list:
+        return [_remove_inline_blob_redaction_defaults(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -399,7 +448,8 @@ async def run_tool_batch(
             continue
 
         arguments = cast(dict[str, Any], decoded_arguments)
-        decoded_args_by_call_id[tool_call.id] = arguments
+        audit_arguments = cast(dict[str, Any], inline_custody_audit_projection(arguments)) if tool_name == "set_pipeline" else arguments
+        decoded_args_by_call_id[tool_call.id] = audit_arguments
 
         # Open the audit envelope ONCE per dispatch — the cache,
         # required-paths, ToolArgumentError, plugin-crash, and
@@ -409,10 +459,16 @@ async def run_tool_batch(
         audit, canonicalization_failed = begin_dispatch_or_arg_error(
             tool_call.id,
             tool_name,
-            arguments,
+            audit_arguments,
             version_before=state.version,
             actor=actor,
         )
+        if audit_arguments is not arguments:
+            _replace_llm_tool_call_arguments(
+                llm_messages,
+                tool_call_id=tool_call.id,
+                arguments=audit_arguments,
+            )
         if canonicalization_failed is not None:
             if is_discovery_tool(tool_name):
                 turn_has_discovery = True
@@ -636,6 +692,82 @@ async def run_tool_batch(
                         context=candidate_context,
                         prior_validation=candidate_prior_validation,
                     )
+                    proposal_acceptable = candidate.acceptable
+                    if proposal_acceptable and candidate.prepared_inline_blob is not None:
+                        if session_id is None or ctx.service._session_engine is None:
+                            raise AuditIntegrityError("Inline proposal custody requires session context")
+                        custody = prepare_pipeline_custody(
+                            arguments,
+                            candidate.prepared_inline_blob,
+                            session_id=session_id,
+                        )
+
+                        # From this point forward every authority-bearing and
+                        # externally visible copy uses only source.blob_id.
+                        # This happens before custody I/O so a reservation
+                        # failure cannot leave raw content in the dispatch
+                        # audit, persisted turn manifest, or next LLM request.
+                        arguments = cast(dict[str, Any], custody.arguments)
+                        audit = rebind_dispatch_arguments(audit, arguments)
+                        decoded_args_by_call_id[tool_call.id] = arguments
+                        _replace_llm_tool_call_arguments(
+                            llm_messages,
+                            tool_call_id=tool_call.id,
+                            arguments=arguments,
+                        )
+                        safe_candidate_context = replace(
+                            candidate_context,
+                            tool_arguments_hash=audit.arguments_hash,
+                        )
+                        try:
+                            await finalize_pipeline_custody(
+                                custody,
+                                engine=ctx.service._session_engine,
+                                data_dir=ctx.service._data_dir,
+                                max_storage_per_session=ctx.service._settings.max_blob_storage_per_session_bytes,
+                            )
+                        except BlobQuotaExceededError:
+                            proposal_acceptable = False
+                            finalized_candidate_result = finalize_tool_result(
+                                _failure_result(
+                                    state,
+                                    "Session blob quota exceeded while reserving inline proposal custody.",
+                                    error_code="BLOB_QUOTA_EXCEEDED",
+                                ),
+                                tool_name=tool_name,
+                                catalog=ctx.policy_catalog,
+                                context=safe_candidate_context,
+                                prior_validation=candidate_prior_validation,
+                            )
+                        else:
+                            candidate = await run_sync_in_worker(
+                                build_set_pipeline_candidate,
+                                arguments,
+                                state,
+                                safe_candidate_context,
+                            )
+                            finalized_candidate_result = finalize_tool_result(
+                                candidate.result,
+                                tool_name=tool_name,
+                                catalog=ctx.policy_catalog,
+                                context=safe_candidate_context,
+                                prior_validation=candidate_prior_validation,
+                            )
+                            proposal_acceptable = candidate.acceptable
+
+                        # Re-run the manifest against the final safe shape;
+                        # neither proposal summary nor public arguments may be
+                        # derived from the original inline-content payload.
+                        redacted_arguments = cast(
+                            dict[str, Any],
+                            _remove_inline_blob_redaction_defaults(
+                                redact_tool_call_arguments(
+                                    tool_name,
+                                    arguments,
+                                    telemetry=ctx.service._redaction_telemetry,
+                                )
+                            ),
+                        )
                 except BaseException as exc:
                     # Candidate construction and finalization are one-time
                     # pre-proposal work. Re-raise the exact exception from
@@ -645,7 +777,7 @@ async def run_tool_batch(
                     preproposal_exception = exc
                     redacted_arguments = None
                 else:
-                    if not candidate.acceptable:
+                    if not proposal_acceptable:
                         if isinstance(finalized_candidate_result.data, Mapping):
                             feedback_data = dict(finalized_candidate_result.data)
                         elif finalized_candidate_result.data is None:

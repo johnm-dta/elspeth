@@ -16,12 +16,16 @@ from sqlalchemy import Engine, func, insert, select
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.composer_audit import ComposerToolStatus
+from elspeth.contracts.freeze import deep_thaw
+from elspeth.core.canonical import canonical_json, stable_hash
+from elspeth.web.blobs.protocol import BlobPendingProposalError
+from elspeth.web.blobs.service import BlobServiceImpl
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.anti_anchor import AntiAnchorTracker
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.protocol import ComposerPluginCrashError
 from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl
-from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
+from elspeth.web.composer.state import CompositionState, PipelineMetadata, SourceSpec, ValidationEntry, ValidationSummary
 from elspeth.web.composer.tools import ToolResult
 from elspeth.web.composer.tools.sessions import build_set_pipeline_candidate as real_build_set_pipeline_candidate
 from elspeth.web.dependencies import create_catalog_service
@@ -33,6 +37,7 @@ from elspeth.web.sessions.models import (
     chat_messages_table,
     composition_proposals_table,
     composition_states_table,
+    proposal_events_table,
     sessions_table,
 )
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -384,15 +389,33 @@ async def test_final_profile_rejection_is_unapplied_audited_and_repairable(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_inline_candidate_creates_proposal_without_blob_state_file_or_quota_persistence(tmp_path: Path) -> None:
+async def test_inline_candidate_materializes_one_custody_safe_proposal_without_raw_audit_surfaces(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     harness = _harness(tmp_path)
-    state = _empty_state()
+    existing_path = tmp_path / "existing.csv"
+    existing_path.write_text("value\n1\n", encoding="utf-8")
+    state = CompositionState(
+        source=SourceSpec(
+            plugin="csv",
+            on_success="main",
+            options={"path": str(existing_path), "schema": {"mode": "observed"}},
+            on_validation_failure="discard",
+        ),
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="existing non-empty pipeline"),
+        version=4,
+    )
     args = _inline_pipeline_args(tmp_path)
+    raw_content = "private-inline-value-7f45\n42\n"
+    args["source"]["inline_blob"]["content"] = raw_content
     llm = _ScriptedLLM(
         _tool_turn("call_inline", "set_pipeline", args),
         _fake_llm_response(content="The inline pipeline proposal is pending approval."),
     )
-    files_before = tuple(sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_file()))
 
     with (
         patch.object(harness.service, "_call_llm", new=llm),
@@ -414,19 +437,145 @@ async def test_inline_candidate_creates_proposal_without_blob_state_file_or_quot
     assert len(proposals) == 1
     assert proposals[0].tool_call_id == "call_inline"
     assert proposals[0].status == "pending"
-    assert builder.call_count == 1
+    safe_arguments = deep_thaw(proposals[0].arguments_json)
+    safe_redacted_arguments = deep_thaw(proposals[0].arguments_redacted_json)
+    assert "inline_blob" not in safe_arguments["source"]
+    assert "inline_blob" not in safe_redacted_arguments["source"]
+    assert UUID(safe_arguments["source"]["blob_id"]).version == 5
+    assert safe_redacted_arguments["source"]["blob_id"] == safe_arguments["source"]["blob_id"]
+    assert proposals[0].tool_arguments_hash == stable_hash(safe_arguments)
+    assert builder.call_count == 2
     assert result.state is state
-    assert _count_rows(harness.engine, blobs_table) == 0
+    assert _count_rows(harness.engine, blobs_table) == 1
     assert _count_rows(harness.engine, composition_states_table) == 0
     with harness.engine.connect() as conn:
         quota_bytes = conn.execute(
             select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0)).where(blobs_table.c.session_id == harness.session_id)
         ).scalar_one()
-    assert int(quota_bytes) == 0
-    files_after = tuple(sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_file()))
-    assert files_after == files_before
+        blob_row = conn.execute(select(blobs_table)).one()
+        event_payloads = tuple(conn.execute(select(proposal_events_table.c.payload)).scalars())
+        persisted_messages = tuple(
+            conn.execute(
+                select(chat_messages_table.c.content, chat_messages_table.c.raw_content, chat_messages_table.c.tool_calls).where(
+                    chat_messages_table.c.session_id == harness.session_id
+                )
+            )
+        )
+    assert int(quota_bytes) == len(raw_content.encode("utf-8"))
+    assert blob_row.id == safe_arguments["source"]["blob_id"]
+    assert blob_row.creating_arguments_hash == stable_hash(safe_arguments)
+    assert raw_content not in json.dumps(event_payloads)
+    assert raw_content not in json.dumps(tuple(tuple(row) for row in persisted_messages))
+    assert raw_content not in json.dumps(safe_arguments)
     assert len(result.tool_invocations) == 1
     assert result.tool_invocations[0].version_after == state.version
+    assert result.tool_invocations[0].arguments_canonical == canonical_json(safe_arguments)
+    assert result.tool_invocations[0].arguments_hash == stable_hash(safe_arguments)
+    api_facing_result = {
+        "message": result.message,
+        "tool_invocations": [
+            {
+                "arguments_canonical": invocation.arguments_canonical,
+                "result_canonical": invocation.result_canonical,
+                "error_message": invocation.error_message,
+            }
+            for invocation in result.tool_invocations
+        ],
+    }
+    assert raw_content not in json.dumps(api_facing_result)
+    assert "[redacted inline content held for custody]" not in json.dumps(api_facing_result)
+    assert raw_content not in caplog.text
+    assert "[redacted inline content held for custody]" not in caplog.text
+    assert len(llm.message_snapshots) == 2
+    assert raw_content not in json.dumps(llm.message_snapshots[1])
+    assert result.llm_calls[1].messages_hash == stable_hash(llm.message_snapshots[1])
+
+    blob_service = BlobServiceImpl(harness.engine, tmp_path)
+    blob_id = UUID(safe_arguments["source"]["blob_id"])
+    with pytest.raises(BlobPendingProposalError):
+        await blob_service.delete_blob(blob_id)
+    rejected = await harness.sessions.reject_composition_proposal(
+        session_id=UUID(harness.session_id),
+        proposal_id=proposals[0].id,
+        actor="composer-parity-test",
+    )
+    assert rejected.status == "rejected"
+    assert Path(blob_row.storage_path).exists()
+    await blob_service.delete_blob(blob_id)
+    assert not Path(blob_row.storage_path).exists()
+
+
+@pytest.mark.asyncio
+async def test_inline_proposal_gap_retry_reuses_one_custody_blob_and_quota_charge(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    state = _empty_state()
+    arguments = _inline_pipeline_args(tmp_path)
+    raw_content = "proposal-gap-private-value-2f16\n42\n"
+    arguments["source"]["inline_blob"]["content"] = raw_content
+    captured_safe_arguments: list[dict[str, Any]] = []
+
+    async def _interrupt_before_proposal(**kwargs: Any) -> Any:
+        captured_safe_arguments.append(deepcopy(kwargs["arguments_json"]))
+        raise RuntimeError("simulated interruption before proposal creation")
+
+    first_llm = _ScriptedLLM(_tool_turn("call_gap", "set_pipeline", arguments))
+    with (
+        patch.object(harness.service, "_call_llm", new=first_llm),
+        patch.object(harness.sessions, "create_composition_proposal", new=_interrupt_before_proposal),
+        pytest.raises(RuntimeError, match="simulated interruption before proposal creation"),
+    ):
+        await harness.service.compose(
+            "Build a reviewed inline pipeline.",
+            [],
+            state,
+            session_id=harness.session_id,
+            user_id="proposal-prevalidation-user",
+            user_message_id=harness.user_message_id,
+        )
+
+    assert len(captured_safe_arguments) == 1
+    assert "inline_blob" not in captured_safe_arguments[0]["source"]
+    assert raw_content not in json.dumps(captured_safe_arguments)
+    assert _count_rows(harness.engine, blobs_table) == 1
+    assert _count_rows(harness.engine, composition_proposals_table) == 0
+    with harness.engine.connect() as conn:
+        first_blob = conn.execute(select(blobs_table)).one()
+        quota_after_interruption = conn.execute(
+            select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0)).where(blobs_table.c.session_id == harness.session_id)
+        ).scalar_one()
+    assert int(quota_after_interruption) == len(raw_content.encode("utf-8"))
+    assert Path(first_blob.storage_path).read_bytes() == raw_content.encode("utf-8")
+
+    retry_llm = _ScriptedLLM(
+        _tool_turn("call_gap_retry", "set_pipeline", arguments),
+        _fake_llm_response(content="The retried inline proposal is pending approval."),
+    )
+    with patch.object(harness.service, "_call_llm", new=retry_llm):
+        await harness.service.compose(
+            "Build a reviewed inline pipeline.",
+            [],
+            state,
+            session_id=harness.session_id,
+            user_id="proposal-prevalidation-user",
+            user_message_id=harness.user_message_id,
+        )
+
+    proposals = await harness.sessions.list_composition_proposals(UUID(harness.session_id))
+    assert len(proposals) == 1
+    retry_arguments = deep_thaw(proposals[0].arguments_json)
+    assert retry_arguments["source"]["blob_id"] == first_blob.id
+    assert "inline_blob" not in retry_arguments["source"]
+    assert raw_content not in json.dumps(retry_arguments)
+    assert _count_rows(harness.engine, blobs_table) == 1
+    with harness.engine.connect() as conn:
+        retried_blob = conn.execute(select(blobs_table)).one()
+        quota_after_retry = conn.execute(
+            select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0)).where(blobs_table.c.session_id == harness.session_id)
+        ).scalar_one()
+    assert retried_blob.id == first_blob.id
+    assert retried_blob.creating_arguments_hash == stable_hash(retry_arguments)
+    assert int(quota_after_retry) == len(raw_content.encode("utf-8"))
+    assert Path(retried_blob.storage_path).read_bytes() == raw_content.encode("utf-8")
 
 
 @pytest.mark.asyncio
@@ -493,8 +642,8 @@ async def test_inline_candidate_argument_error_is_audited_once_and_repairable(
     assert len(proposals) == 1
     assert proposals[0].tool_call_id == f"call_{case}_repaired"
     assert result.state is state
-    assert builder.call_count == 2
-    assert _count_rows(harness.engine, blobs_table) == 0
+    assert builder.call_count == 3
+    assert _count_rows(harness.engine, blobs_table) == 1
     assert _count_rows(harness.engine, composition_states_table) == 0
 
     arg_error_invocations = [invocation for invocation in result.tool_invocations if invocation.status is ComposerToolStatus.ARG_ERROR]
@@ -504,6 +653,9 @@ async def test_inline_candidate_argument_error_is_audited_once_and_repairable(
     assert arg_error_invocation.error_class == "ToolArgumentError"
     assert arg_error_invocation.version_before == state.version
     assert arg_error_invocation.version_after is None
+    inline_content = invalid["source"]["inline_blob"]["content"]
+    assert inline_content not in arg_error_invocation.arguments_canonical
+    assert inline_content not in json.dumps(message_snapshots[1])
 
     arg_error_outcomes = [outcome for outcome in invalid_turn_outcomes if outcome.error_class == "ToolArgumentError"]
     assert len(arg_error_outcomes) == 1
@@ -568,19 +720,21 @@ async def test_surrogate_inline_content_fails_closed_at_canonicalization_and_is_
     assert len(proposals) == 1
     assert proposals[0].tool_call_id == "call_surrogate_repaired"
     assert result.state is state
-    assert builder.call_count == 1
-    assert _count_rows(harness.engine, blobs_table) == 0
+    assert builder.call_count == 2
+    assert _count_rows(harness.engine, blobs_table) == 1
     assert _count_rows(harness.engine, composition_states_table) == 0
 
     arg_error_invocations = [invocation for invocation in result.tool_invocations if invocation.status is ComposerToolStatus.ARG_ERROR]
     assert len(arg_error_invocations) == 1
     arg_error_invocation = arg_error_invocations[0]
     assert arg_error_invocation.tool_call_id == "call_surrogate"
-    assert arg_error_invocation.error_class == "CanonicalizationError"
+    assert arg_error_invocation.error_class == "ToolArgumentError"
     assert arg_error_invocation.version_before == state.version
     assert arg_error_invocation.version_after is None
+    assert rejected_content not in arg_error_invocation.arguments_canonical
+    assert rejected_content not in json.dumps(message_snapshots[1])
 
-    arg_error_outcomes = [outcome for outcome in invalid_turn_outcomes if outcome.error_class == "CanonicalizationError"]
+    arg_error_outcomes = [outcome for outcome in invalid_turn_outcomes if outcome.error_class == "ToolArgumentError"]
     assert len(arg_error_outcomes) == 1
     assert arg_error_outcomes[0].pre_version == state.version
     assert arg_error_outcomes[0].post_version == state.version
@@ -588,14 +742,11 @@ async def test_surrogate_inline_content_fails_closed_at_canonicalization_and_is_
 
     feedback = next(message for message in message_snapshots[1] if message.get("tool_call_id") == "call_surrogate")
     feedback_payload = json.loads(feedback["content"])
-    assert feedback_payload == {"error": "Tool 'set_pipeline' arguments are not canonical JSON (CanonicalizationError)."}
+    assert "object conforming to SetPipelineArgumentsModel" in feedback_payload["error"]
     assert rejected_content not in feedback["content"]
 
     persisted_feedback = _persisted_tool_content(harness, "call_surrogate")
-    assert json.loads(persisted_feedback) == {
-        "error_class": "CanonicalizationError",
-        "error_message": "CanonicalizationError",
-    }
+    assert json.loads(persisted_feedback)["error_class"] == "ToolArgumentError"
     assert rejected_content not in persisted_feedback
 
 

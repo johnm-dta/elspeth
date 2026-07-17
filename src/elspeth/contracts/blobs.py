@@ -12,7 +12,7 @@ down instead of importing upward from L3.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import ClassVar, Literal, Protocol, get_args, runtime_checkable
 from uuid import UUID
@@ -77,6 +77,30 @@ class BlobRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class InlineCustodyRequest:
+    """Exact bytes and provenance for one idempotent inline-source write.
+
+    ``content`` is deliberately excluded from ``repr`` because these requests
+    can cross exception and diagnostic boundaries. The deterministic identity
+    is derived by the blob service from its SHA-256 digest, never by rendering
+    the bytes into logs or audit records.
+    """
+
+    session_id: UUID
+    filename: str
+    content: bytes = field(repr=False)
+    mime_type: AllowedMimeType
+    source_description: str | None
+    creation_modality: CreationModality
+    created_from_message_id: str
+    creating_model_identifier: str | None
+    creating_model_version: str | None
+    creating_provider: str | None
+    creating_composer_skill_hash: str | None
+    creating_arguments_hash: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class BlobRunLinkRecord:
     """Represents a row from the blob_run_links table."""
 
@@ -127,6 +151,20 @@ class BlobActiveRunError(BlobError):
         super().__init__(f"Blob {blob_id} is linked to active run {run_id} and cannot be deleted")
         self.blob_id = blob_id
         self.run_id = run_id
+
+    def __setattr__(self, name: str, value: object) -> None:
+        _guard_frozen_attr(self, name, value)
+
+
+class BlobPendingProposalError(BlobError):
+    """Raised when a pending proposal still authorizes use of a blob."""
+
+    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"blob_id", "proposal_id"})
+
+    def __init__(self, blob_id: str, *, proposal_id: str) -> None:
+        super().__init__(f"Blob {blob_id} is referenced by pending proposal {proposal_id} and cannot be deleted")
+        self.blob_id = blob_id
+        self.proposal_id = proposal_id
 
     def __setattr__(self, name: str, value: object) -> None:
         _guard_frozen_attr(self, name, value)
@@ -245,6 +283,10 @@ class BlobServiceProtocol(Protocol):
         Writes content to storage, computes its hash, and persists
         metadata.
         """
+        ...
+
+    async def reserve_inline_custody(self, request: InlineCustodyRequest) -> BlobRecord:
+        """Idempotently materialize one deterministic inline-source blob."""
         ...
 
     async def create_pending_blob(

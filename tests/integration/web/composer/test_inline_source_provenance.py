@@ -220,8 +220,8 @@ def test_llm_generated_blob_carries_llm_provenance(tmp_path: Path) -> None:
         creating_model_identifier="gpt-5.4-mini",
         creating_model_version="2026-05-01",
         creating_provider="openai",
-        creating_composer_skill_hash="sha256:cafebabe" + "0" * 56,
-        creating_arguments_hash="sha256:deadbeef" + "0" * 56,
+        creating_composer_skill_hash="cafebabe" + "0" * 56,
+        creating_arguments_hash="deadbeef" + "0" * 56,
     )
     quota_error = _persist_prepared_blob_create(
         prepared,
@@ -238,8 +238,8 @@ def test_llm_generated_blob_carries_llm_provenance(tmp_path: Path) -> None:
     assert row.creating_model_identifier == "gpt-5.4-mini"
     assert row.creating_model_version == "2026-05-01"
     assert row.creating_provider == "openai"
-    assert row.creating_composer_skill_hash.startswith("sha256:cafebabe")
-    assert row.creating_arguments_hash.startswith("sha256:deadbeef")
+    assert row.creating_composer_skill_hash == "cafebabe" + "0" * 56
+    assert row.creating_arguments_hash == "deadbeef" + "0" * 56
 
 
 def test_llm_generated_blob_requires_message_anchor(tmp_path: Path) -> None:
@@ -260,8 +260,8 @@ def test_llm_generated_blob_requires_message_anchor(tmp_path: Path) -> None:
             creating_model_identifier="gpt-5.4-mini",
             creating_model_version="2026-05-01",
             creating_provider="openai",
-            creating_composer_skill_hash="sha256:cafebabe" + "0" * 56,
-            creating_arguments_hash="sha256:deadbeef" + "0" * 56,
+            creating_composer_skill_hash="cafebabe" + "0" * 56,
+            creating_arguments_hash="deadbeef" + "0" * 56,
         )
 
 

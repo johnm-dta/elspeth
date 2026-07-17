@@ -4,20 +4,24 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import re
+import tempfile
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TypeVar
-from uuid import UUID, uuid4
+from typing import Any, TypedDict, TypeVar, cast
+from uuid import UUID, uuid4, uuid5
 
 from opentelemetry import metrics
 from sqlalchemy import Engine, func, select
-from sqlalchemy.engine import Connection
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.engine import Connection, Row
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.hashing import canonical_json
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.blobs.protocol import (
     ALLOWED_MIME_TYPES,
@@ -33,17 +37,20 @@ from elspeth.web.blobs.protocol import (
     BlobFinalizationResult,
     BlobIntegrityError,
     BlobNotFoundError,
+    BlobPendingProposalError,
     BlobQuotaExceededError,
     BlobRecord,
     BlobRunLinkDirection,
     BlobRunLinkRecord,
     BlobStateError,
     FinalizeBlobStatus,
+    InlineCustodyRequest,
 )
 from elspeth.web.sessions.converters import pipeline_dict_from_record
 from elspeth.web.sessions.models import (
     blob_run_links_table,
     blobs_table,
+    composition_proposals_table,
     composition_states_table,
     runs_table,
     sessions_table,
@@ -53,6 +60,46 @@ from elspeth.web.sessions.protocol import CompositionStateRecord
 _T = TypeVar("_T")
 
 _BLOB_COPY_FORK_ORPHAN_ROWS_COUNTER = metrics.get_meter(__name__).create_counter("blob_copy_fork.orphan_rows_left_behind")
+
+_INLINE_CUSTODY_NAMESPACE = UUID("8ef5fd65-8a90-5fe4-9084-eab5b9d2d2db")
+_INLINE_CUSTODY_SCHEMA = "elspeth.inline-custody.v1"
+_LOWERCASE_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_SESSION_BLOB_LOCKS: dict[tuple[tuple[str, ...], str], threading.RLock] = {}
+_SESSION_BLOB_LOCKS_GUARD = threading.Lock()
+
+
+class _NormalizedInlineCustodyFields(TypedDict):
+    session_id: str
+    filename: str
+    mime_type: AllowedMimeType
+    source_description: str | None
+    creation_modality: CreationModality
+    created_from_message_id: str
+    creating_model_identifier: str | None
+    creating_model_version: str | None
+    creating_provider: str | None
+    creating_composer_skill_hash: str | None
+    creating_arguments_hash: str | None
+    content_hash: str
+    size_bytes: int
+
+
+class _ExpectedBlobFields(TypedDict):
+    session_id: str
+    filename: str
+    mime_type: AllowedMimeType
+    source_description: str | None
+    creation_modality: CreationModality
+    created_from_message_id: str | None
+    creating_model_identifier: str | None
+    creating_model_version: str | None
+    creating_provider: str | None
+    creating_composer_skill_hash: str | None
+    creating_arguments_hash: str | None
+    content_hash: str
+    size_bytes: int
+    created_by: BlobCreator
+
 
 _ACTIVE_RUN_COMPOSITION_COLUMNS = (
     runs_table.c.id.label("run_id"),
@@ -131,6 +178,353 @@ def sanitize_filename(filename: str) -> str:
     return sanitized
 
 
+def _normalized_optional_text(value: str | None, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be str or None, got {type(value).__name__}")
+    normalized = value.strip()
+    return normalized if normalized else None
+
+
+def _normalized_optional_sha256(value: str | None, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be str or None, got {type(value).__name__}")
+    if _LOWERCASE_SHA256.fullmatch(value) is None:
+        raise AuditIntegrityError(f"{field_name} must be an exact lowercase SHA-256 digest")
+    return value
+
+
+def _normalized_inline_custody_fields(request: InlineCustodyRequest) -> _NormalizedInlineCustodyFields:
+    """Validate and normalize the identity-bearing custody fields."""
+    if type(request.content) is not bytes:
+        raise TypeError(f"InlineCustodyRequest.content must be bytes, got {type(request.content).__name__}")
+    if not isinstance(request.session_id, UUID):
+        raise TypeError(f"InlineCustodyRequest.session_id must be UUID, got {type(request.session_id).__name__}")
+    if type(request.filename) is not str:
+        raise TypeError(f"InlineCustodyRequest.filename must be str, got {type(request.filename).__name__}")
+    filename = sanitize_filename(request.filename)
+    untrusted_mime_type: object = request.mime_type
+    if type(untrusted_mime_type) is not str:
+        raise TypeError(f"InlineCustodyRequest.mime_type must be str, got {type(untrusted_mime_type).__name__}")
+    mime_type_value = untrusted_mime_type.strip().lower()
+    if mime_type_value not in ALLOWED_MIME_TYPES:
+        raise RuntimeError(f"Invalid mime_type {mime_type_value!r} — not in the allowed MIME set")
+    mime_type = cast(AllowedMimeType, mime_type_value)
+    if type(request.creation_modality) is not CreationModality:
+        raise TypeError(f"InlineCustodyRequest.creation_modality must be CreationModality, got {type(request.creation_modality).__name__}")
+    message_id = _normalized_optional_text(request.created_from_message_id, field_name="created_from_message_id")
+    if message_id is None:
+        raise AuditIntegrityError("Inline custody requires a non-blank originating message id")
+    description = _normalized_optional_text(request.source_description, field_name="source_description")
+    model_identifier = _normalized_optional_text(request.creating_model_identifier, field_name="creating_model_identifier")
+    model_version = _normalized_optional_text(request.creating_model_version, field_name="creating_model_version")
+    provider = _normalized_optional_text(request.creating_provider, field_name="creating_provider")
+    skill_hash = _normalized_optional_sha256(
+        request.creating_composer_skill_hash,
+        field_name="creating_composer_skill_hash",
+    )
+    arguments_hash = _normalized_optional_sha256(
+        request.creating_arguments_hash,
+        field_name="creating_arguments_hash",
+    )
+    llm_fields = (model_identifier, model_version, provider, skill_hash, arguments_hash)
+    if request.creation_modality.requires_llm_provenance():
+        if any(value is None for value in llm_fields):
+            raise AuditIntegrityError("LLM-authored inline custody requires complete composer provenance")
+    elif any(value is not None for value in llm_fields):
+        raise AuditIntegrityError("Verbatim inline custody must not carry LLM composer provenance")
+    return {
+        "session_id": str(request.session_id),
+        "filename": filename,
+        "mime_type": mime_type,
+        "source_description": description,
+        "creation_modality": request.creation_modality,
+        "created_from_message_id": message_id,
+        "creating_model_identifier": model_identifier,
+        "creating_model_version": model_version,
+        "creating_provider": provider,
+        "creating_composer_skill_hash": skill_hash,
+        "creating_arguments_hash": arguments_hash,
+        "content_hash": content_hash(request.content),
+        "size_bytes": len(request.content),
+    }
+
+
+def inline_custody_blob_id(request: InlineCustodyRequest) -> UUID:
+    """Return the domain-separated deterministic UUID5 for a custody request."""
+    fields = _normalized_inline_custody_fields(request)
+    identity = {
+        "schema": _INLINE_CUSTODY_SCHEMA,
+        "session_id": fields["session_id"],
+        "originating_message_id": fields["created_from_message_id"],
+        "filename": fields["filename"],
+        "mime_type": fields["mime_type"],
+        "description": fields["source_description"],
+        "content_hash": fields["content_hash"],
+        "creation_provenance": {
+            "modality": fields["creation_modality"].value,
+            "model_identifier": fields["creating_model_identifier"],
+            "model_version": fields["creating_model_version"],
+            "provider": fields["creating_provider"],
+            "composer_skill_hash": fields["creating_composer_skill_hash"],
+        },
+    }
+    return uuid5(_INLINE_CUSTODY_NAMESPACE, canonical_json(identity))
+
+
+def _database_lock_identity(engine: Engine) -> tuple[str, ...]:
+    """Return a credential-free identity shared by engines for one database.
+
+    SQLAlchemy engine identity is too narrow: separate ``Engine`` instances
+    can target the same database and data directory.  Rendering the URL is too
+    broad because it retains usernames and connection options, so otherwise
+    equivalent engines can miss the same-session file mutex (and credentials
+    can leak into a process-global diagnostic key).  File-backed SQLite is
+    keyed by its resolved database path; server databases use only their
+    backend, host, port, and database name.  Independent in-memory SQLite
+    engines do not share a database and are intentionally keyed by pool.
+    """
+    url = engine.url
+    backend = url.get_backend_name()
+    if backend == "sqlite":
+        database = url.database
+        if database is None or database in {"", ":memory:"}:
+            return (backend, "memory", str(id(engine.pool)))
+        return (backend, "file", str(Path(database).expanduser().resolve()))
+    return (
+        backend,
+        url.host or "",
+        str(url.port) if url.port is not None else "",
+        url.database or "",
+    )
+
+
+def _session_blob_lock(engine: Engine, session_id: str) -> threading.RLock:
+    """Return the process-wide blob/file mutex for one DB and session."""
+    database_identity = _database_lock_identity(engine)
+    key = (database_identity, session_id)
+    with _SESSION_BLOB_LOCKS_GUARD:
+        if key not in _SESSION_BLOB_LOCKS:
+            _SESSION_BLOB_LOCKS[key] = threading.RLock()
+        return _SESSION_BLOB_LOCKS[key]
+
+
+def _atomic_write_blob(storage: Path, content: bytes) -> None:
+    storage.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(dir=storage.parent, prefix=f".{storage.name}.", suffix=".tmp")
+    temp_path = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, storage)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _validate_reusable_blob_row(
+    row: Any,
+    *,
+    expected: _ExpectedBlobFields,
+    blob_id: str,
+    storage_path: Path,
+) -> None:
+    expected_fields = {
+        "session_id": expected["session_id"],
+        "filename": expected["filename"],
+        "mime_type": expected["mime_type"],
+        "size_bytes": expected["size_bytes"],
+        "content_hash": expected["content_hash"],
+        "storage_path": str(storage_path),
+        "created_by": expected["created_by"],
+        "source_description": expected["source_description"],
+        "creation_modality": expected["creation_modality"].value,
+        "created_from_message_id": expected["created_from_message_id"],
+        "creating_model_identifier": expected["creating_model_identifier"],
+        "creating_model_version": expected["creating_model_version"],
+        "creating_provider": expected["creating_provider"],
+        "creating_composer_skill_hash": expected["creating_composer_skill_hash"],
+        "creating_arguments_hash": expected["creating_arguments_hash"],
+    }
+    for field_name, expected_value in expected_fields.items():
+        if getattr(row, field_name) != expected_value:
+            raise AuditIntegrityError(f"Inline custody blob {blob_id} has mismatched {field_name}")
+    if row.status not in {"pending", "ready"}:
+        raise AuditIntegrityError(f"Inline custody blob {blob_id} has invalid reuse status {row.status!r}")
+
+
+def _persist_blob_content(
+    *,
+    engine: Engine,
+    data_dir: Path,
+    max_storage_per_session: int,
+    blob_id: UUID,
+    session_id: UUID | str,
+    filename: str,
+    content: bytes,
+    mime_type: AllowedMimeType,
+    created_by: BlobCreator,
+    source_description: str | None,
+    creation_modality: CreationModality,
+    created_from_message_id: str | None,
+    creating_model_identifier: str | None,
+    creating_model_version: str | None,
+    creating_provider: str | None,
+    creating_composer_skill_hash: str | None,
+    creating_arguments_hash: str | None,
+    idempotent: bool,
+) -> Row[Any]:
+    """Persist one blob under the shared file/row/quota transaction."""
+    if not isinstance(blob_id, UUID):
+        raise TypeError(f"blob_id must be UUID, got {type(blob_id).__name__}")
+    if not isinstance(session_id, UUID) and type(session_id) is not str:
+        raise TypeError(f"session_id must be UUID or str, got {type(session_id).__name__}")
+    if type(filename) is not str:
+        raise TypeError(f"filename must be str, got {type(filename).__name__}")
+    if type(content) is not bytes:
+        raise TypeError(f"Blob content must be bytes, got {type(content).__name__}")
+    untrusted_mime_type: object = mime_type
+    if type(untrusted_mime_type) is not str:
+        raise TypeError(f"mime_type must be str, got {type(untrusted_mime_type).__name__}")
+    if untrusted_mime_type not in ALLOWED_MIME_TYPES:
+        raise RuntimeError(f"Invalid mime_type {untrusted_mime_type!r} — not in the allowed MIME set")
+    untrusted_created_by: object = created_by
+    if type(untrusted_created_by) is not str:
+        raise TypeError(f"created_by must be str, got {type(untrusted_created_by).__name__}")
+    if untrusted_created_by not in BLOB_CREATORS:
+        raise RuntimeError(f"Invalid created_by {untrusted_created_by!r} — must be one of {sorted(BLOB_CREATORS)}")
+    if type(creation_modality) is not CreationModality:
+        raise TypeError(f"creation_modality must be CreationModality, got {type(creation_modality).__name__}")
+    source_description = _normalized_optional_text(source_description, field_name="source_description")
+    created_from_message_id = _normalized_optional_text(created_from_message_id, field_name="created_from_message_id")
+    creating_model_identifier = _normalized_optional_text(
+        creating_model_identifier,
+        field_name="creating_model_identifier",
+    )
+    creating_model_version = _normalized_optional_text(creating_model_version, field_name="creating_model_version")
+    creating_provider = _normalized_optional_text(creating_provider, field_name="creating_provider")
+    creating_composer_skill_hash = _normalized_optional_sha256(
+        creating_composer_skill_hash,
+        field_name="creating_composer_skill_hash",
+    )
+    creating_arguments_hash = _normalized_optional_sha256(
+        creating_arguments_hash,
+        field_name="creating_arguments_hash",
+    )
+    llm_provenance = (
+        creating_model_identifier,
+        creating_model_version,
+        creating_provider,
+        creating_composer_skill_hash,
+        creating_arguments_hash,
+    )
+    if creation_modality.requires_llm_provenance():
+        if created_from_message_id is None or any(value is None for value in llm_provenance):
+            raise AuditIntegrityError("LLM-authored blob persistence requires complete composer provenance")
+    elif any(value is not None for value in llm_provenance):
+        raise AuditIntegrityError("Verbatim blob persistence must not carry LLM composer provenance")
+    session_id_str = str(session_id)
+    if not session_id_str or Path(session_id_str).name != session_id_str or session_id_str in {".", ".."}:
+        raise AuditIntegrityError("session_id must be a non-empty opaque path segment")
+    blob_id_str = str(blob_id)
+    safe_filename = sanitize_filename(filename)
+    storage = data_dir.expanduser().resolve() / "blobs" / session_id_str / f"{blob_id_str}_{safe_filename}"
+    expected: _ExpectedBlobFields = {
+        "session_id": session_id_str,
+        "filename": safe_filename,
+        "mime_type": mime_type,
+        "size_bytes": len(content),
+        "content_hash": content_hash(content),
+        "created_by": created_by,
+        "source_description": source_description,
+        "creation_modality": creation_modality,
+        "created_from_message_id": created_from_message_id,
+        "creating_model_identifier": creating_model_identifier,
+        "creating_model_version": creating_model_version,
+        "creating_provider": creating_provider,
+        "creating_composer_skill_hash": creating_composer_skill_hash,
+        "creating_arguments_hash": creating_arguments_hash,
+    }
+    file_created = False
+    file_write_attempted = False
+    with _session_blob_lock(engine, session_id_str):
+        try:
+            with engine.begin() as conn:
+                _lock_session_for_blob_quota(conn, session_id_str)
+                row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id_str)).first()
+                if row is None:
+                    current_total = conn.execute(
+                        select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0)).where(blobs_table.c.session_id == session_id_str)
+                    ).scalar()
+                    if type(current_total) is not int:
+                        raise AuditIntegrityError(f"Tier 1: COALESCE(SUM) returned {type(current_total).__name__}, expected int")
+                    if current_total + len(content) > max_storage_per_session:
+                        raise BlobQuotaExceededError(
+                            session_id_str,
+                            current_bytes=current_total,
+                            limit_bytes=max_storage_per_session,
+                        )
+                    try:
+                        with conn.begin_nested():
+                            conn.execute(
+                                blobs_table.insert().values(
+                                    id=blob_id_str,
+                                    session_id=session_id_str,
+                                    filename=safe_filename,
+                                    mime_type=mime_type,
+                                    size_bytes=len(content),
+                                    content_hash=expected["content_hash"],
+                                    storage_path=str(storage),
+                                    created_at=datetime.now(UTC),
+                                    created_by=created_by,
+                                    source_description=source_description,
+                                    status="pending",
+                                    creation_modality=creation_modality.value,
+                                    created_from_message_id=created_from_message_id,
+                                    creating_model_identifier=creating_model_identifier,
+                                    creating_model_version=creating_model_version,
+                                    creating_provider=creating_provider,
+                                    creating_composer_skill_hash=creating_composer_skill_hash,
+                                    creating_arguments_hash=creating_arguments_hash,
+                                )
+                            )
+                    except IntegrityError:
+                        if not idempotent:
+                            raise
+                    row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id_str)).first()
+                    if row is None:
+                        raise AuditIntegrityError(f"Blob {blob_id_str} reservation conflict produced no winning row")
+                elif not idempotent:
+                    raise AuditIntegrityError(f"Unexpected duplicate blob id {blob_id_str}")
+                _validate_reusable_blob_row(row, expected=expected, blob_id=blob_id_str, storage_path=storage)
+
+                if storage.exists():
+                    existing_content = storage.read_bytes()
+                    actual_hash = content_hash(existing_content)
+                    if not hmac.compare_digest(existing_content, content) or not hmac.compare_digest(actual_hash, expected["content_hash"]):
+                        raise BlobIntegrityError(blob_id_str, expected=expected["content_hash"], actual=actual_hash)
+                elif row.status == "ready":
+                    raise BlobContentMissingError(blob_id_str, storage_path=str(storage))
+                else:
+                    file_write_attempted = True
+                    _atomic_write_blob(storage, content)
+                    file_created = True
+
+                if row.status == "pending":
+                    conn.execute(blobs_table.update().where(blobs_table.c.id == blob_id_str).values(status="ready"))
+                final_row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id_str)).one()
+                _guard_blob_row_literals(final_row)
+                return final_row
+        except Exception:
+            if not idempotent and (file_created or file_write_attempted):
+                storage.unlink(missing_ok=True)
+            raise
+
+
 def _option_value_references_blob(value: Any, blob_id: str, storage_path: str) -> bool:
     """Recursively inspect an option value for blob identity markers."""
     if type(value) is dict:
@@ -142,6 +536,46 @@ def _option_value_references_blob(value: Any, blob_id: str, storage_path: str) -
     if type(value) is list:
         return any(_option_value_references_blob(child, blob_id, storage_path) for child in value)
     return False
+
+
+def pending_proposal_reference_id(conn: Connection, *, session_id: str, blob_id: str) -> str | None:
+    """Return the pending proposal retaining a blob, if any.
+
+    Proposal arguments are private canonical JSON.  Only the exact
+    ``blob_id`` key is authoritative for Plan-02 custody; filenames, storage
+    paths, descriptions, and arbitrary scalar equality do not create a
+    retention edge.
+    """
+    rows = conn.execute(
+        select(
+            composition_proposals_table.c.id,
+            composition_proposals_table.c.arguments_json,
+        ).where(
+            composition_proposals_table.c.session_id == session_id,
+            composition_proposals_table.c.status == "pending",
+            composition_proposals_table.c.tool_name == "set_pipeline",
+        )
+    ).fetchall()
+    for proposal_id, arguments_json in rows:
+        if type(arguments_json) is not dict:
+            raise AuditIntegrityError(
+                f"Tier 1: pending proposal {proposal_id} arguments_json is {type(arguments_json).__name__}, expected dict"
+            )
+        source = arguments_json.get("source")
+        if source is None:
+            continue
+        if type(source) is not dict:
+            raise AuditIntegrityError(
+                f"Tier 1: pending set_pipeline proposal {proposal_id} source is {type(source).__name__}, expected dict"
+            )
+        proposal_blob_id = source.get("blob_id")
+        if proposal_blob_id is not None and type(proposal_blob_id) is not str:
+            raise AuditIntegrityError(
+                f"Tier 1: pending set_pipeline proposal {proposal_id} source.blob_id is {type(proposal_blob_id).__name__}, expected str"
+            )
+        if proposal_blob_id == blob_id:
+            return str(proposal_id)
+    return None
 
 
 def _options_reference_blob(options: Any, blob_id: str, storage_path: str, owner: str) -> bool:
@@ -412,93 +846,23 @@ class BlobServiceImpl:
         source_description: str | None = None,
     ) -> BlobRecord:
         """Create a blob from content bytes."""
-        # Programmer-bug guards on Literal-typed parameters.  Explicit
-        # raises (not ``assert``) so the guard survives ``python -O`` —
-        # mirrors the RuntimeError at ``link_blob_to_run`` (direction) and
-        # ``_finalize_blob_sync`` (status).
         if created_by not in BLOB_CREATORS:
             raise RuntimeError(f"Invalid created_by {created_by!r} — must be one of {sorted(BLOB_CREATORS)}")
         if mime_type not in ALLOWED_MIME_TYPES:
             raise RuntimeError(f"Invalid mime_type {mime_type!r} — not in the allowed MIME set")
-        safe_filename = sanitize_filename(filename)
-        blob_id = str(uuid4())
-        session_id_str = str(session_id)
-        file_hash = content_hash(content)
-        storage = self._storage_path(session_id_str, blob_id, safe_filename)
-
-        def _sync() -> BlobRecord:
-            # Write file first (before DB transaction)
-            storage.parent.mkdir(parents=True, exist_ok=True)
-            storage.write_bytes(content)
-
-            # Single transaction: session row lock + quota check + insert.
-            now = self._now()
-            try:
-                with self._engine.begin() as conn:
-                    _lock_session_for_blob_quota(conn, session_id_str)
-
-                    # Quota check inside the write transaction
-                    current_total = conn.execute(
-                        select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0)).where(blobs_table.c.session_id == session_id_str)
-                    ).scalar()
-                    # COALESCE guarantees an exact int; bool/subclasses or any
-                    # other type are Tier 1 anomalies. Explicit raise (not
-                    # assert) so the guard survives -O.
-                    if type(current_total) is not int:
-                        raise AuditIntegrityError(f"Tier 1: COALESCE(SUM) returned {type(current_total).__name__}, expected int")
-                    if current_total + len(content) > self._max_storage_per_session:
-                        raise BlobQuotaExceededError(
-                            session_id_str,
-                            current_bytes=current_total,
-                            limit_bytes=self._max_storage_per_session,
-                        )
-
-                    conn.execute(
-                        blobs_table.insert().values(
-                            id=blob_id,
-                            session_id=session_id_str,
-                            filename=safe_filename,
-                            mime_type=mime_type,
-                            size_bytes=len(content),
-                            content_hash=file_hash,
-                            storage_path=str(storage),
-                            created_at=now,
-                            created_by=created_by,
-                            source_description=source_description,
-                            status="ready",
-                            # User-uploaded blobs (REST POST /blobs, drag-
-                            # and-drop): content was provided verbatim by
-                            # the operator outside the chat surface, so
-                            # ``created_from_message_id`` is NULL and all
-                            # ``creating_*`` fields are NULL (Phase 5a
-                            # Task 2.5).
-                            creation_modality=CreationModality.VERBATIM.value,
-                            created_from_message_id=None,
-                            creating_model_identifier=None,
-                            creating_model_version=None,
-                            creating_provider=None,
-                            creating_composer_skill_hash=None,
-                            creating_arguments_hash=None,
-                        )
-                    )
-            except Exception:
-                # Clean up file on quota exceeded or any DB failure
-                if storage.exists():
-                    storage.unlink()
-                raise
-
-            return BlobRecord(
-                id=UUID(blob_id),
+        blob_id = uuid4()
+        row = await self._run_sync(
+            lambda: _persist_blob_content(
+                engine=self._engine,
+                data_dir=self._data_dir,
+                max_storage_per_session=self._max_storage_per_session,
+                blob_id=blob_id,
                 session_id=session_id,
-                filename=safe_filename,
+                filename=filename,
+                content=content,
                 mime_type=mime_type,
-                size_bytes=len(content),
-                content_hash=file_hash,
-                storage_path=str(storage),
-                created_at=now,
                 created_by=created_by,
                 source_description=source_description,
-                status="ready",
                 creation_modality=CreationModality.VERBATIM,
                 created_from_message_id=None,
                 creating_model_identifier=None,
@@ -506,9 +870,38 @@ class BlobServiceImpl:
                 creating_provider=None,
                 creating_composer_skill_hash=None,
                 creating_arguments_hash=None,
+                idempotent=False,
             )
+        )
+        return _row_to_blob_record(row)
 
-        return await self._run_sync(_sync)
+    async def reserve_inline_custody(self, request: InlineCustodyRequest) -> BlobRecord:
+        """Idempotently materialize one composer inline source."""
+        fields = _normalized_inline_custody_fields(request)
+        blob_id = inline_custody_blob_id(request)
+        row = await self._run_sync(
+            lambda: _persist_blob_content(
+                engine=self._engine,
+                data_dir=self._data_dir,
+                max_storage_per_session=self._max_storage_per_session,
+                blob_id=blob_id,
+                session_id=request.session_id,
+                filename=fields["filename"],
+                content=request.content,
+                mime_type=fields["mime_type"],
+                created_by="assistant",
+                source_description=fields["source_description"],
+                creation_modality=request.creation_modality,
+                created_from_message_id=fields["created_from_message_id"],
+                creating_model_identifier=fields["creating_model_identifier"],
+                creating_model_version=fields["creating_model_version"],
+                creating_provider=fields["creating_provider"],
+                creating_composer_skill_hash=fields["creating_composer_skill_hash"],
+                creating_arguments_hash=fields["creating_arguments_hash"],
+                idempotent=True,
+            )
+        )
+        return _row_to_blob_record(row)
 
     async def create_pending_blob(
         self,
@@ -688,6 +1081,14 @@ class BlobServiceImpl:
                 row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id_str)).first()
                 if row is None:
                     raise BlobNotFoundError(blob_id_str)
+
+                retaining_proposal_id = pending_proposal_reference_id(
+                    conn,
+                    session_id=row.session_id,
+                    blob_id=blob_id_str,
+                )
+                if retaining_proposal_id is not None:
+                    raise BlobPendingProposalError(blob_id_str, proposal_id=retaining_proposal_id)
 
                 # Active-run guard (two checks):
                 #

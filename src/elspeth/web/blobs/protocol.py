@@ -21,6 +21,7 @@ from elspeth.contracts.blobs import BlobFinalizationError as BlobFinalizationErr
 from elspeth.contracts.blobs import BlobFinalizationResult as BlobFinalizationResult
 from elspeth.contracts.blobs import BlobIntegrityError as BlobIntegrityError
 from elspeth.contracts.blobs import BlobNotFoundError as BlobNotFoundError
+from elspeth.contracts.blobs import BlobPendingProposalError as BlobPendingProposalError
 from elspeth.contracts.blobs import BlobQuotaExceededError as BlobQuotaExceededError
 from elspeth.contracts.blobs import BlobRecord as BlobRecord
 from elspeth.contracts.blobs import BlobRunLinkDirection as BlobRunLinkDirection
@@ -29,3 +30,4 @@ from elspeth.contracts.blobs import BlobServiceProtocol as BlobServiceProtocol
 from elspeth.contracts.blobs import BlobStateError as BlobStateError
 from elspeth.contracts.blobs import BlobStatus as BlobStatus
 from elspeth.contracts.blobs import FinalizeBlobStatus as FinalizeBlobStatus
+from elspeth.contracts.blobs import InlineCustodyRequest as InlineCustodyRequest

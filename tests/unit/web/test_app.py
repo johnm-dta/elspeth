@@ -31,6 +31,7 @@ from elspeth.contracts import RunStatus
 from elspeth.contracts.plugin_capabilities import PluginCapability
 from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
 from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH
 from elspeth.web.app import (
     _BodySizeLimitMiddleware,
     _BrowserDocumentHeadersMiddleware,
@@ -2114,6 +2115,67 @@ class TestDataDirCreation:
         create_app(settings)
         assert fresh_dir.exists()
         assert fresh_dir.is_dir()
+
+
+class TestDefaultLandscapeStartup:
+    """Default web startup must gate Landscape before serving auth traffic."""
+
+    def test_stale_landscape_fails_before_local_auth_database_mutation(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        landscape_path = tmp_path / "runs" / "audit.db"
+        landscape_path.parent.mkdir(parents=True)
+
+        with LandscapeDB.from_url(settings.get_landscape_url()):
+            pass
+
+        stale_epoch = SQLITE_SCHEMA_EPOCH - 1
+        engine = create_engine(settings.get_landscape_url())
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {stale_epoch}")
+            conn.exec_driver_sql(
+                "UPDATE elspeth_schema_identity SET schema_epoch = ? WHERE singleton_id = 1",
+                (stale_epoch,),
+            )
+        engine.dispose()
+
+        with pytest.raises(SchemaCompatibilityError, match="schema epoch is incompatible"):
+            create_app(settings)
+
+        assert landscape_path.exists()
+        assert (tmp_path / "auth.db").exists() is False
+
+    def test_fresh_startup_creates_current_landscape_and_auth_write_persists(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+
+        app = create_app(settings)
+
+        engine = create_engine(settings.get_landscape_url())
+        with engine.connect() as conn:
+            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == SQLITE_SCHEMA_EPOCH
+        engine.dispose()
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/auth/login",
+                "headers": [],
+                "client": ("127.0.0.1", 12345),
+            }
+        )
+        request.state.request_id = "startup-gate-regression"
+        app.state.auth_audit_recorder.record_login_success(
+            request,
+            provider="local",
+            user_id="user-1",
+            username="alice",
+        )
+
+        engine = create_engine(settings.get_landscape_url())
+        with engine.connect() as conn:
+            row = conn.exec_driver_sql("SELECT event_type, outcome, user_id, request_id FROM auth_events").one()
+        engine.dispose()
+        assert row == ("login", "success", "user-1", "startup-gate-regression")
 
 
 class TestValidationErrorRedaction:

@@ -80,6 +80,7 @@ from elspeth.web.execution.routes import create_execution_router
 from elspeth.web.execution.runtime_preflight import RuntimePreflightCoordinator
 from elspeth.web.execution.service import ExecutionServiceImpl
 from elspeth.web.execution.websocket_ticket import WebSocketTicketStore
+from elspeth.web.landscape_access import open_landscape_db
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.middleware.request_id import RequestIdMiddleware
 from elspeth.web.operator_telemetry import bootstrap_operator_telemetry
@@ -940,6 +941,13 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         # not create parent directories, so we must ensure runs/ exists too.
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         (settings.data_dir / "runs").mkdir(exist_ok=True)
+
+        # Landscape-backed auth auditing opens lazily on each request, so a
+        # stale pre-1.0 store would otherwise survive startup and fail only
+        # after traffic arrived. Open once now to initialize a fresh store or
+        # reject an old schema before auth/session state can be mutated.
+        with open_landscape_db(settings):
+            pass
 
     # --- Catalog ---
     app.state.catalog_service = create_catalog_service()

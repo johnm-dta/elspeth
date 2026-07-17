@@ -345,6 +345,76 @@ def _structured_llm_args(tmp_path: Path) -> dict[str, Any]:
     return args
 
 
+def _secret_bearing_structured_fork_coalesce_args(tmp_path: Path) -> dict[str, Any]:
+    """A complete fork whose enriched branch consumes structured LLM fields."""
+    args = _fork_coalesce_args(tmp_path)
+    args["source"]["options"]["schema"] = {
+        "mode": "flexible",
+        "fields": ["text: str"],
+        "guaranteed_fields": ["text"],
+    }
+    args["nodes"][2] = {
+        "id": "classify",
+        "node_type": "transform",
+        "plugin": "llm",
+        "input": "copy",
+        "on_success": "classified",
+        "on_error": "discard",
+        "options": {
+            "provider": "azure",
+            "deployment_name": "candidate-test",
+            "endpoint": "https://candidate-test.openai.azure.com",
+            "api_key": {"secret_ref": "AZURE_OPENAI_API_KEY"},
+            "prompt_template": "Classify {{ text }}",
+            "required_input_fields": ["text"],
+            "pool_size": 2,
+            "queries": [
+                {
+                    "name": "colour",
+                    "input_fields": {"text": "text"},
+                    "template": "Classify {{ text }}",
+                    "response_format": "structured",
+                    "output_fields": [
+                        {"suffix": "label", "type": "string"},
+                        {"suffix": "score", "type": "number"},
+                    ],
+                }
+            ],
+            "schema": {
+                "mode": "flexible",
+                "fields": ["text: str"],
+                "guaranteed_fields": ["text"],
+            },
+        },
+    }
+    args["nodes"].insert(
+        3,
+        {
+            "id": "select_classification",
+            "node_type": "transform",
+            "plugin": "field_mapper",
+            "input": "classified",
+            "on_success": "copy_out",
+            "on_error": "discard",
+            "options": {
+                "schema": {
+                    "mode": "flexible",
+                    "fields": ["colour_label: str", "colour_score: float"],
+                    "required_fields": ["colour_label", "colour_score"],
+                },
+                "mapping": {
+                    "colour_label": "colour_label",
+                    "colour_score": "colour_score",
+                },
+                "select_only": True,
+                "strict": True,
+            },
+        },
+    )
+    args["metadata"] = {"name": "secret-bearing-structured-fork-coalesce"}
+    return args
+
+
 def _multi_output_args(tmp_path: Path) -> dict[str, Any]:
     args = _linear_args(tmp_path)
     args["outputs"] = [
@@ -664,6 +734,24 @@ def test_current_executor_reopens_stale_authoritative_review(tmp_path: Path) -> 
     assert current["event_id"] is None
     assert current["accepted_value"] is None
     assert current["resolved_prompt_template_hash"] is None
+
+
+def test_secret_bearing_structured_llm_probe_preserves_contract_and_authored_marker(tmp_path: Path) -> None:
+    """Resolver-free probes must expose LLM fields without rewriting secret wiring."""
+    args = _secret_bearing_structured_fork_coalesce_args(tmp_path)
+    original_marker = deepcopy(args["nodes"][2]["options"]["api_key"])
+
+    result = _execute_set_pipeline(args, _empty_state(), _trained_context(data_dir=tmp_path))
+
+    assert result.success is True, result.to_dict()
+    assert result.validation.is_valid, result.validation.errors
+    assert not any("computed contract probe" in warning.message.lower() for warning in result.validation.warnings)
+    mapper_contract = next(contract for contract in result.validation.edge_contracts if contract.to_id == "select_classification")
+    assert {"colour_label", "colour_score"} <= set(mapper_contract.producer_guarantees)
+    assert {"colour_label", "colour_score"} <= set(mapper_contract.consumer_requires)
+    assert mapper_contract.satisfied is True
+    assert args["nodes"][2]["options"]["api_key"] == original_marker == {"secret_ref": "AZURE_OPENAI_API_KEY"}
+    assert deep_thaw(result.updated_state.nodes[2].options["api_key"]) == original_marker
 
 
 def _session_with_user_message() -> tuple[Any, str, str]:

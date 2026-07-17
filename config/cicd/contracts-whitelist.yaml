@@ -118,6 +118,9 @@ allowed_dict_patterns:
   - "src/elspeth/plugins/infrastructure/base.py:BaseTransform.get_config_model:config"
   - "src/elspeth/plugins/infrastructure/base.py:BaseSink.get_config_model:config"
   - "src/elspeth/plugins/infrastructure/base.py:BaseSource.get_config_model:config"
+  # Composer construction probes retain dynamic plugin config shape after
+  # detaching authoring state and replacing deferred secret references.
+  - "src/elspeth/web/composer/_validation_probe.py:prepare_validation_probe_options:return"
   - "src/elspeth/plugins/transforms/llm/transform.py:LLMTransform.get_config_model:config"
 
   # probe_config classmethod (ADR-009 §Clause 4) — returns the exact shape

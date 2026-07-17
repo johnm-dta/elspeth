@@ -265,7 +265,18 @@ async def prepare_pipeline_proposal_commit(
     if stable_hash(pipeline_arguments) != authority.row.tool_arguments_hash:
         raise AuditIntegrityError("authoritative pipeline arguments do not match the proposal row")
 
-    prior_validation = policy_catalog.validate_composition_state(current_state).validation
+    deadline = asyncio.get_running_loop().time() + float(config.timeout_seconds)
+
+    async def bounded(func: Any, *args: Any, **kwargs: Any) -> Any:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise PipelineCommitError("pipeline commit preparation timed out", code="TIMEOUT")
+        try:
+            return await asyncio.wait_for(run_sync_in_worker(func, *args, **kwargs), timeout=remaining)
+        except TimeoutError as exc:
+            raise PipelineCommitError("pipeline commit preparation timed out", code="TIMEOUT") from exc
+
+    prior_validation = (await bounded(policy_catalog.validate_composition_state, current_state)).validation
     context = ToolContext(
         catalog=policy_catalog,
         plugin_snapshot=plugin_snapshot,
@@ -287,12 +298,6 @@ async def prepare_pipeline_proposal_commit(
         composer_skill_hash=authority.row.composer_skill_hash,
         tool_arguments_hash=authority.row.tool_arguments_hash,
     )
-
-    async def bounded(func: Any, *args: Any, **kwargs: Any) -> Any:
-        try:
-            return await asyncio.wait_for(run_sync_in_worker(func, *args, **kwargs), timeout=config.timeout_seconds)
-        except TimeoutError as exc:
-            raise PipelineCommitError("pipeline commit preparation timed out", code="TIMEOUT") from exc
 
     candidate = await bounded(
         build_set_pipeline_candidate,

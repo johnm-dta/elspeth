@@ -450,7 +450,7 @@ async def test_authoritative_pipeline_restore_rejects_every_tampered_binding(ser
 
 
 @pytest.mark.asyncio
-async def test_authoritative_pipeline_restore_requires_one_same_session_creation_event_and_ignores_mutable_pointer(service) -> None:
+async def test_authoritative_pipeline_restore_requires_one_same_session_creation_event_and_pending_pointer(service) -> None:
     session_id = uuid4()
     other_session_id = uuid4()
     with service._engine.begin() as conn:
@@ -473,11 +473,21 @@ async def test_authoritative_pipeline_restore_requires_one_same_session_creation
             update(composition_proposals_table).where(composition_proposals_table.c.id == str(row.id)).values(audit_event_id=str(uuid4()))
         )
 
-    restored = await service.get_authoritative_pipeline_proposal(
-        session_id=session_id,
-        proposal_id=row.id,
-        reviewed_facts={},
-    )
+    with pytest.raises(AuditIntegrityError, match="pending"):
+        await service.get_authoritative_pipeline_proposal(
+            session_id=session_id,
+            proposal_id=row.id,
+            reviewed_facts={},
+        )
+    assert row.audit_event_id is not None
+    with service._engine.begin() as conn:
+        conn.execute(
+            update(composition_proposals_table)
+            .where(composition_proposals_table.c.id == str(row.id))
+            .values(audit_event_id=str(row.audit_event_id))
+        )
+
+    restored = await service.get_authoritative_pipeline_proposal(session_id=session_id, proposal_id=row.id, reviewed_facts={})
     assert restored.proposal == _pipeline_plan_result().proposal
     with pytest.raises(KeyError):
         await service.get_authoritative_pipeline_proposal(

@@ -1,21 +1,26 @@
 from __future__ import annotations
 
+import asyncio
+import threading
+import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
 import structlog
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.composer_audit import ComposerToolStatus
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import stable_hash
 from elspeth.web.catalog.policy_view import PolicyCatalogView
-from elspeth.web.composer.audit import BufferingRecorder, begin_dispatch, finish_success
+from elspeth.web.composer.audit import BufferingRecorder, begin_dispatch, finish_plugin_crash, finish_success
 from elspeth.web.composer.pipeline_commit import (
     PipelineCommitConfig,
+    PipelineCommitError,
     PipelineCommitMismatchError,
     PipelineDispatchAuditBinding,
     prepare_pipeline_proposal_commit,
@@ -210,6 +215,70 @@ async def _persist_dispatch(
     )
     assert len(bindings) == 1
     return bindings[0]
+
+
+async def _persist_failed_dispatch(
+    service: SessionServiceImpl,
+    session_id: UUID,
+    *,
+    tool_call_id: str = "planner-terminal-call",
+) -> None:
+    audit = begin_dispatch(
+        tool_call_id,
+        "set_pipeline",
+        _pipeline(),
+        version_before=0,
+        actor="user:alice",
+    )
+    await _persist_tool_invocations(
+        service,
+        session_id,
+        (finish_plugin_crash(audit, exc=RuntimeError("redacted")),),
+        None,
+        plugin_crash_pending=False,
+    )
+
+
+def _settlement_kwargs(session_id: UUID, proposal_id: UUID, plan: PipelinePlanResult, binding: PipelineDispatchAuditBinding):
+    return {
+        "session_id": session_id,
+        "proposal_id": proposal_id,
+        "draft_hash": plan.proposal.draft_hash,
+        "reviewed_facts": {},
+        "state": _state_data(),
+        "candidate_content_hash": _state_content_hash(_state_data()),
+        "executor_content_hash": _state_content_hash(_state_data()),
+        "final_composer_metadata": None,
+        "dispatch": binding,
+        "actor": "user:alice",
+    }
+
+
+def _latest_audit_envelope(service: SessionServiceImpl) -> dict[str, object]:
+    with service._engine.begin() as conn:
+        row = conn.execute(
+            select(chat_messages_table.c.tool_calls)
+            .where(chat_messages_table.c.role == "audit")
+            .order_by(chat_messages_table.c.created_at.desc())
+            .limit(1)
+        ).one()
+    envelope = deep_thaw(row.tool_calls[0])
+    assert type(envelope) is dict
+    return envelope
+
+
+async def _persist_cloned_audit_envelope(
+    service: SessionServiceImpl,
+    session_id: UUID,
+    envelope: dict[str, object],
+) -> None:
+    await service.add_message(
+        session_id,
+        role="audit",
+        content="set_pipeline: success",
+        tool_calls=[envelope],
+        writer_principal="compose_loop",
+    )
 
 
 @pytest.mark.asyncio
@@ -466,6 +535,123 @@ async def test_settlement_rejects_unrelated_successful_dispatch_call_id(service:
 
 
 @pytest.mark.asyncio
+async def test_settlement_rejects_concurrent_successes_for_same_proposal_call_id(service: SessionServiceImpl) -> None:
+    session_id = uuid4()
+    _insert_session(service, session_id)
+    plan = _plan()
+    row = await _create(service, session_id, plan)
+    state_hash = _state_content_hash(_state_data())
+    first_audit = begin_dispatch(plan.tool_call_id, "set_pipeline", _pipeline(), version_before=0, actor="user:alice")
+    second_audit = begin_dispatch(plan.tool_call_id, "set_pipeline", _pipeline(), version_before=0, actor="user:alice")
+    first = finish_success(
+        first_audit,
+        result_payload={
+            "success": True,
+            "attempt": 1,
+            "pipeline_content_hash_schema": "composer.pipeline-dispatch-result.v1",
+            "pipeline_content_hash": state_hash,
+        },
+        version_after=1,
+    )
+    second = finish_success(
+        second_audit,
+        result_payload={
+            "success": True,
+            "attempt": 2,
+            "pipeline_content_hash_schema": "composer.pipeline-dispatch-result.v1",
+            "pipeline_content_hash": state_hash,
+        },
+        version_after=1,
+    )
+    persisted = await asyncio.gather(
+        _persist_tool_invocations(service, session_id, (first,), None, plugin_crash_pending=False),
+        _persist_tool_invocations(service, session_id, (second,), None, plugin_crash_pending=False),
+    )
+    binding = persisted[0][0]
+
+    with pytest.raises(AuditIntegrityError, match=r"duplicate|exactly one|one durable|does not match"):
+        await service.settle_pipeline_composition_proposal(**_settlement_kwargs(session_id, row.id, plan, binding))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", ["wrong_tool", "unknown_status", "arguments_hash", "result_canonical"])
+async def test_settlement_rejects_malformed_or_mismatched_success_for_same_call_id(
+    service: SessionServiceImpl,
+    corruption: str,
+) -> None:
+    session_id = uuid4()
+    _insert_session(service, session_id)
+    plan = _plan()
+    row = await _create(service, session_id, plan)
+    binding = await _persist_dispatch(service, session_id)
+    malformed = _latest_audit_envelope(service)
+    invocation = malformed["invocation"]
+    assert type(invocation) is dict
+    if corruption == "wrong_tool":
+        invocation["tool_name"] = "inspect_pipeline"
+    elif corruption == "unknown_status":
+        invocation["status"] = "not-a-status"
+    elif corruption == "arguments_hash":
+        invocation["arguments_hash"] = "0" * 64
+    else:
+        invocation["result_canonical"] = "{"
+    await _persist_cloned_audit_envelope(service, session_id, malformed)
+
+    with pytest.raises(AuditIntegrityError):
+        await service.settle_pipeline_composition_proposal(**_settlement_kwargs(session_id, row.id, plan, binding))
+
+
+@pytest.mark.asyncio
+async def test_failed_dispatch_then_one_success_remains_recoverable(service: SessionServiceImpl) -> None:
+    session_id = uuid4()
+    _insert_session(service, session_id)
+    plan = _plan()
+    row = await _create(service, session_id, plan)
+    await _persist_failed_dispatch(service, session_id)
+    binding = await _persist_dispatch(service, session_id)
+
+    settled = await service.settle_pipeline_composition_proposal(**_settlement_kwargs(session_id, row.id, plan, binding))
+
+    assert settled.proposal.status == "committed"
+
+
+@pytest.mark.asyncio
+async def test_committed_retry_rejects_duplicate_successful_dispatch_evidence(service: SessionServiceImpl) -> None:
+    session_id = uuid4()
+    _insert_session(service, session_id)
+    plan = _plan()
+    row = await _create(service, session_id, plan)
+    binding = await _persist_dispatch(service, session_id)
+    kwargs = _settlement_kwargs(session_id, row.id, plan, binding)
+    await service.settle_pipeline_composition_proposal(**kwargs)
+    await _persist_cloned_audit_envelope(service, session_id, _latest_audit_envelope(service))
+
+    with pytest.raises(AuditIntegrityError, match=r"duplicated|duplicate|one durable"):
+        await service.settle_pipeline_composition_proposal(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_rejection_rejects_duplicate_successful_dispatch_evidence(service: SessionServiceImpl) -> None:
+    session_id = uuid4()
+    _insert_session(service, session_id)
+    plan = _plan()
+    row = await _create(service, session_id, plan)
+    binding = await _persist_dispatch(service, session_id)
+    await _persist_cloned_audit_envelope(service, session_id, _latest_audit_envelope(service))
+
+    with pytest.raises(AuditIntegrityError, match=r"exactly one|duplicate"):
+        await service.reject_pipeline_composition_proposal(
+            session_id=session_id,
+            proposal_id=row.id,
+            draft_hash=plan.proposal.draft_hash,
+            reviewed_facts={},
+            reason="candidate_executor_mismatch",
+            dispatch=binding,
+            actor="system:pipeline-commit",
+        )
+
+
+@pytest.mark.asyncio
 async def test_pipeline_rejection_uses_closed_versioned_reason_and_is_exactly_idempotent(service: SessionServiceImpl) -> None:
     session_id = uuid4()
     _insert_session(service, session_id)
@@ -539,6 +725,125 @@ async def test_pipeline_rejection_exact_retry_rejects_tampered_terminal_event_po
 
     with pytest.raises(AuditIntegrityError, match="terminal binding"):
         await service.reject_pipeline_composition_proposal(**kwargs)
+
+
+async def _reload_canonical_proposal(
+    service: SessionServiceImpl,
+    session_id: UUID,
+    proposal_id: UUID,
+    accessor: str,
+) -> None:
+    if accessor == "get":
+        await service.get_authoritative_composition_proposal(
+            session_id=session_id,
+            proposal_id=proposal_id,
+            reviewed_facts={},
+        )
+    else:
+        await service.list_composition_proposals(session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("accessor", ["get", "list"])
+async def test_pending_canonical_reload_rejects_terminal_event(
+    service: SessionServiceImpl,
+    accessor: str,
+) -> None:
+    session_id = uuid4()
+    _insert_session(service, session_id)
+    plan = _plan()
+    row = await _create(service, session_id, plan)
+    with service._engine.begin() as conn:
+        conn.execute(
+            insert(proposal_events_table).values(
+                id=str(uuid4()),
+                session_id=str(session_id),
+                proposal_id=str(row.id),
+                event_type="proposal.rejected",
+                actor="tamper",
+                payload={"status": "rejected"},
+                created_at=datetime.now(UTC),
+            )
+        )
+
+    with pytest.raises(AuditIntegrityError, match="pending"):
+        await _reload_canonical_proposal(service, session_id, row.id, accessor)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("accessor", ["get", "list"])
+async def test_pending_canonical_reload_rejects_non_creation_event_pointer(
+    service: SessionServiceImpl,
+    accessor: str,
+) -> None:
+    session_id = uuid4()
+    _insert_session(service, session_id)
+    plan = _plan()
+    row = await _create(service, session_id, plan)
+    with service._engine.begin() as conn:
+        conn.execute(
+            update(composition_proposals_table).where(composition_proposals_table.c.id == str(row.id)).values(audit_event_id=str(uuid4()))
+        )
+
+    with pytest.raises(AuditIntegrityError, match="pending"):
+        await _reload_canonical_proposal(service, session_id, row.id, accessor)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("accessor", ["get", "list"])
+@pytest.mark.parametrize("corruption", ["missing", "duplicate", "tampered", "pointer"])
+async def test_rejected_canonical_reload_fails_closed_on_terminal_corruption(
+    service: SessionServiceImpl,
+    accessor: str,
+    corruption: str,
+) -> None:
+    session_id = uuid4()
+    _insert_session(service, session_id)
+    plan = _plan()
+    row = await _create(service, session_id, plan)
+    await service.reject_pipeline_composition_proposal(
+        session_id=session_id,
+        proposal_id=row.id,
+        draft_hash=plan.proposal.draft_hash,
+        reviewed_facts={},
+        reason="operator_rejected",
+        dispatch=None,
+        actor="user:alice",
+    )
+    with service._engine.begin() as conn:
+        terminal = conn.execute(
+            select(proposal_events_table)
+            .where(proposal_events_table.c.proposal_id == str(row.id))
+            .where(proposal_events_table.c.event_type == "proposal.rejected")
+        ).one()
+        if corruption == "missing":
+            conn.execute(delete(proposal_events_table).where(proposal_events_table.c.id == terminal.id))
+        elif corruption == "duplicate":
+            conn.execute(
+                insert(proposal_events_table).values(
+                    id=str(uuid4()),
+                    session_id=terminal.session_id,
+                    proposal_id=terminal.proposal_id,
+                    event_type=terminal.event_type,
+                    actor=terminal.actor,
+                    payload=deep_thaw(terminal.payload),
+                    created_at=datetime.now(UTC),
+                )
+            )
+        elif corruption == "tampered":
+            payload = deep_thaw(terminal.payload)
+            assert type(payload) is dict
+            payload["draft_hash"] = "0" * 64
+            conn.execute(update(proposal_events_table).where(proposal_events_table.c.id == terminal.id).values(payload=payload))
+        else:
+            conn.execute(
+                update(composition_proposals_table)
+                .where(composition_proposals_table.c.id == str(row.id))
+                .values(audit_event_id=str(uuid4()))
+            )
+
+    with pytest.raises(AuditIntegrityError, match="rejected"):
+        await _reload_canonical_proposal(service, session_id, row.id, accessor)
 
 
 @pytest.mark.asyncio
@@ -644,6 +949,149 @@ async def test_prepare_pipeline_commit_revalidates_and_audits_exact_arguments_wi
     assert len(recorder.invocations) == 1
     assert await service.get_current_state(session_id) is None
     assert (await service.list_composition_proposals(session_id))[0].status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_prepare_pipeline_commit_runs_blocking_policy_validation_off_event_loop(
+    service: SessionServiceImpl,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = uuid4()
+    _insert_session(service, session_id)
+    plan = _runnable_plan(tmp_path)
+    row = await service.create_pipeline_composition_proposal(
+        session_id=session_id,
+        plan=plan,
+        summary="Replace the pipeline.",
+        rationale="Requested by the operator.",
+        affects=("graph",),
+        arguments_redacted_json=_redacted_pipeline(_runnable_pipeline(tmp_path)),
+        actor="composer-web:user:alice",
+        composer_model_identifier="planner-model",
+        composer_model_version="planner-model-v1",
+        composer_provider="provider",
+    )
+    authority = await service.get_authoritative_pipeline_proposal(
+        session_id=session_id,
+        proposal_id=row.id,
+        reviewed_facts={},
+    )
+    catalog = create_catalog_service()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    policy = PolicyCatalogView.for_trained_operator(catalog, snapshot)
+    original_validate = policy.validate_composition_state
+    started = threading.Event()
+    release = threading.Event()
+    validation_thread_ids: list[int] = []
+    event_loop_thread_id = threading.get_ident()
+
+    def blocking_validate(state: CompositionState):
+        validation_thread_ids.append(threading.get_ident())
+        started.set()
+        release.wait(timeout=0.4)
+        return original_validate(state)
+
+    monkeypatch.setattr(policy, "validate_composition_state", blocking_validate)
+    task = asyncio.create_task(
+        prepare_pipeline_proposal_commit(
+            authority=authority,
+            current_state=CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1),
+            current_state_id=None,
+            policy_catalog=policy,
+            plugin_snapshot=snapshot,
+            config=PipelineCommitConfig(
+                data_dir=str(tmp_path),
+                session_engine=service._engine,
+                secret_service=None,
+                user_id="alice",
+                user_message_content=None,
+                max_blob_storage_per_session_bytes=1_000_000,
+                runtime_preflight=None,
+                timeout_seconds=2.0,
+            ),
+            recorder=BufferingRecorder(),
+            actor="user:alice",
+        )
+    )
+    for _ in range(50):
+        if started.is_set():
+            break
+        await asyncio.sleep(0.01)
+    assert started.is_set()
+    assert not task.done()
+    assert validation_thread_ids == [validation_thread_ids[0]]
+    assert validation_thread_ids[0] != event_loop_thread_id
+    release.set()
+
+    await task
+
+
+@pytest.mark.asyncio
+async def test_prepare_pipeline_commit_uses_one_total_timeout_budget(
+    service: SessionServiceImpl,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = uuid4()
+    _insert_session(service, session_id)
+    plan = _runnable_plan(tmp_path)
+    row = await service.create_pipeline_composition_proposal(
+        session_id=session_id,
+        plan=plan,
+        summary="Replace the pipeline.",
+        rationale="Requested by the operator.",
+        affects=("graph",),
+        arguments_redacted_json=_redacted_pipeline(_runnable_pipeline(tmp_path)),
+        actor="composer-web:user:alice",
+        composer_model_identifier="planner-model",
+        composer_model_version="planner-model-v1",
+        composer_provider="provider",
+    )
+    authority = await service.get_authoritative_pipeline_proposal(
+        session_id=session_id,
+        proposal_id=row.id,
+        reviewed_facts={},
+    )
+    catalog = create_catalog_service()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    policy = PolicyCatalogView.for_trained_operator(catalog, snapshot)
+    original_validate = policy.validate_composition_state
+
+    def slow_validate(state: CompositionState):
+        time.sleep(0.12)
+        return original_validate(state)
+
+    from elspeth.web.composer.tools.sessions import build_set_pipeline_candidate as original_candidate
+
+    def slow_candidate(*args, **kwargs):
+        time.sleep(0.12)
+        return original_candidate(*args, **kwargs)
+
+    monkeypatch.setattr(policy, "validate_composition_state", slow_validate)
+    monkeypatch.setattr("elspeth.web.composer.pipeline_commit.build_set_pipeline_candidate", slow_candidate)
+    with pytest.raises(PipelineCommitError, match="timed out") as exc_info:
+        await prepare_pipeline_proposal_commit(
+            authority=authority,
+            current_state=CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1),
+            current_state_id=None,
+            policy_catalog=policy,
+            plugin_snapshot=snapshot,
+            config=PipelineCommitConfig(
+                data_dir=str(tmp_path),
+                session_engine=service._engine,
+                secret_service=None,
+                user_id="alice",
+                user_message_content=None,
+                max_blob_storage_per_session_bytes=1_000_000,
+                runtime_preflight=None,
+                timeout_seconds=0.2,
+            ),
+            recorder=BufferingRecorder(),
+            actor="user:alice",
+        )
+
+    assert exc_info.value.code == "TIMEOUT"
 
 
 @pytest.mark.asyncio

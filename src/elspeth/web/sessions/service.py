@@ -446,6 +446,19 @@ _PIPELINE_ACCEPTED_FIELDS = frozenset(
     }
 )
 
+_PIPELINE_REJECTED_FIELDS = frozenset(
+    {
+        "schema",
+        "tool_call_id",
+        "tool_name",
+        "status",
+        "outcome",
+        "reason_code",
+        "draft_hash",
+        "dispatch",
+    }
+)
+
 
 def _pipeline_rejected_payload(
     *,
@@ -481,48 +494,58 @@ def _persisted_pipeline_dispatch_content_hashes(
         if type(tool_calls) is not list:
             continue
         for envelope in tool_calls:
-            if type(envelope) is not dict or envelope.get("_kind") != "audit":
-                continue
-            invocation = envelope.get("invocation")
-            if type(invocation) is not dict:
-                continue
-            if invocation.get("tool_call_id") != dispatch.tool_call_id:
-                continue
-            if invocation.get("tool_name") != dispatch.tool_name:
-                continue
-            if invocation.get("status") != dispatch.status.value:
-                continue
-            arguments_canonical = invocation.get("arguments_canonical")
-            result_canonical = invocation.get("result_canonical")
-            if type(arguments_canonical) is not str or type(result_canonical) is not str:
-                continue
             try:
-                arguments_hash = stable_hash(json.loads(arguments_canonical))
-                result_hash = stable_hash(json.loads(result_canonical))
-            except (TypeError, ValueError, json.JSONDecodeError):
+                recovery = _pipeline_dispatch_recovery_from_envelope(
+                    envelope,
+                    expected_tool_call_id=dispatch.tool_call_id,
+                )
+            except AuditIntegrityError as exc:
+                raise AuditIntegrityError("pipeline dispatch audit evidence is malformed") from exc
+            if recovery is None:
                 continue
-            if invocation.get("arguments_hash") != arguments_hash or invocation.get("result_hash") != result_hash:
-                continue
-            if arguments_hash != dispatch.arguments_hash or result_hash != dispatch.result_hash:
-                continue
-            if result_canonical != invocation.get("result_canonical"):
-                raise AuditIntegrityError("pipeline dispatch result canonical binding is malformed")
-            if result_canonical is None or type(result_canonical) is not str:
-                raise AuditIntegrityError("pipeline dispatch result canonical binding is missing")
-            result_payload = json.loads(result_canonical)
-            if type(result_payload) is not dict:
-                raise AuditIntegrityError("pipeline dispatch result payload is malformed")
-            if result_payload.get("pipeline_content_hash_schema") != "composer.pipeline-dispatch-result.v1":
-                raise AuditIntegrityError("pipeline dispatch result content schema is malformed")
-            content_hash = result_payload.get("pipeline_content_hash")
-            if (
-                type(content_hash) is not str
-                or len(content_hash) != 64
-                or any(character not in "0123456789abcdef" for character in content_hash)
-            ):
-                raise AuditIntegrityError("pipeline dispatch result content hash is malformed")
-            matches.append(content_hash)
+            if recovery.binding != dispatch:
+                raise AuditIntegrityError("pipeline successful dispatch evidence does not match the terminal binding")
+            matches.append(recovery.executor_content_hash)
     return tuple(matches)
+
+
+def _pipeline_dispatch_recovery_from_envelope(
+    envelope: object,
+    *,
+    expected_tool_call_id: str,
+) -> PipelineDispatchRecovery | None:
+    """Restore one successful same-call dispatch; ignore unrelated and failed attempts."""
+    if type(envelope) is not dict or envelope.get("_kind") != "audit":
+        return None
+    invocation = envelope.get("invocation")
+    if type(invocation) is not dict or invocation.get("tool_call_id") != expected_tool_call_id:
+        return None
+    if invocation.get("tool_name") != "set_pipeline":
+        raise AuditIntegrityError("pipeline dispatch call id is bound to a different tool")
+    raw_status = invocation.get("status")
+    if type(raw_status) is not str:
+        raise AuditIntegrityError("pipeline dispatch status is malformed")
+    try:
+        status = ComposerToolStatus(raw_status)
+    except (TypeError, ValueError) as exc:
+        raise AuditIntegrityError("pipeline dispatch status is malformed") from exc
+    if status is not ComposerToolStatus.SUCCESS:
+        return None
+    binding = PipelineDispatchAuditBinding.from_persisted_envelope(envelope)
+    result_canonical = invocation.get("result_canonical")
+    assert type(result_canonical) is str
+    try:
+        result_payload = json.loads(result_canonical)
+    except json.JSONDecodeError as exc:
+        raise AuditIntegrityError("pipeline dispatch result canonical is malformed") from exc
+    if type(result_payload) is not dict:
+        raise AuditIntegrityError("pipeline dispatch result payload is malformed")
+    if result_payload.get("pipeline_content_hash_schema") != "composer.pipeline-dispatch-result.v1":
+        raise AuditIntegrityError("pipeline dispatch result content schema is malformed")
+    content_hash = result_payload.get("pipeline_content_hash")
+    if type(content_hash) is not str or len(content_hash) != 64 or any(character not in "0123456789abcdef" for character in content_hash):
+        raise AuditIntegrityError("pipeline dispatch result content hash is malformed")
+    return PipelineDispatchRecovery(binding=binding, executor_content_hash=content_hash)
 
 
 def _verify_committed_pipeline_authority(
@@ -547,8 +570,10 @@ def _verify_committed_pipeline_authority(
     if type(payload) is not dict or set(payload) != _PIPELINE_ACCEPTED_FIELDS:
         raise AuditIntegrityError("committed pipeline proposal terminal payload is malformed")
     row = authority.row
-    if row.committed_state_id is None or row.audit_event_id != terminal.id:
-        raise AuditIntegrityError("committed pipeline proposal row terminal binding is malformed")
+    if row.audit_event_id != terminal.id:
+        raise AuditIntegrityError("committed pipeline proposal terminal event pointer is malformed")
+    if row.committed_state_id is None:
+        raise AuditIntegrityError("committed pipeline proposal is missing committed state")
     dispatch_payload = payload["dispatch"]
     if type(dispatch_payload) is not dict or set(dispatch_payload) != {
         "tool_call_id",
@@ -588,6 +613,91 @@ def _verify_committed_pipeline_authority(
         raise AuditIntegrityError("committed pipeline proposal exact retry binding mismatch")
     if _persisted_pipeline_dispatch_content_hashes(conn, session_id=sid, dispatch=dispatch) != (state_hash,):
         raise AuditIntegrityError("committed pipeline proposal dispatch audit is missing or duplicated")
+
+
+def _verify_rejected_pipeline_authority(
+    conn: Connection,
+    *,
+    authority: AuthoritativePipelineProposal,
+) -> None:
+    """Verify the closed terminal authority for a canonical rejection."""
+    sid = str(authority.row.session_id)
+    pid = str(authority.row.id)
+    terminal_rows = conn.execute(
+        select(proposal_events_table)
+        .where(proposal_events_table.c.session_id == sid)
+        .where(proposal_events_table.c.proposal_id == pid)
+        .where(proposal_events_table.c.event_type.in_(("proposal.accepted", "proposal.rejected")))
+    ).fetchall()
+    if len(terminal_rows) != 1 or terminal_rows[0].event_type != "proposal.rejected":
+        raise AuditIntegrityError("rejected pipeline proposal must have one rejected terminal event")
+    terminal = _proposal_event_record_from_row(terminal_rows[0])
+    row = authority.row
+    if row.audit_event_id != terminal.id or row.committed_state_id is not None:
+        raise AuditIntegrityError("rejected pipeline proposal row terminal binding is malformed")
+    payload = deep_thaw(terminal.payload)
+    if type(payload) is not dict or set(payload) != _PIPELINE_REJECTED_FIELDS:
+        raise AuditIntegrityError("rejected pipeline proposal terminal payload is malformed")
+    reason = _validated_pipeline_rejection_reason(payload["reason_code"])
+    dispatch_payload = payload["dispatch"]
+    if dispatch_payload is None:
+        dispatch = None
+    elif type(dispatch_payload) is dict and set(dispatch_payload) == {
+        "tool_call_id",
+        "tool_name",
+        "status",
+        "arguments_hash",
+        "result_hash",
+    }:
+        try:
+            dispatch = PipelineDispatchAuditBinding(
+                tool_call_id=dispatch_payload["tool_call_id"],
+                tool_name=dispatch_payload["tool_name"],
+                status=ComposerToolStatus(dispatch_payload["status"]),
+                arguments_hash=dispatch_payload["arguments_hash"],
+                result_hash=dispatch_payload["result_hash"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise AuditIntegrityError("rejected pipeline proposal dispatch binding is malformed") from exc
+    else:
+        raise AuditIntegrityError("rejected pipeline proposal dispatch binding is malformed")
+    if reason == "candidate_executor_mismatch" and dispatch is None:
+        raise AuditIntegrityError("rejected pipeline proposal mismatch outcome is missing dispatch evidence")
+    expected = _pipeline_rejected_payload(authority=authority, reason=reason, dispatch=dispatch)
+    if payload != expected:
+        raise AuditIntegrityError("rejected pipeline proposal exact terminal binding mismatch")
+    if dispatch is not None and len(_persisted_pipeline_dispatch_content_hashes(conn, session_id=sid, dispatch=dispatch)) != 1:
+        raise AuditIntegrityError("rejected pipeline proposal dispatch audit is missing or duplicated")
+
+
+def _verify_pipeline_lifecycle_authority(
+    conn: Connection,
+    *,
+    service: SessionServiceImpl,
+    authority: AuthoritativePipelineProposal,
+) -> None:
+    """Verify the complete canonical lifecycle before exposing or mutating it."""
+    if authority.row.status == "committed":
+        _verify_committed_pipeline_authority(conn, service=service, authority=authority)
+        return
+    if authority.row.status == "rejected":
+        _verify_rejected_pipeline_authority(conn, authority=authority)
+        return
+    if authority.row.status != "pending":
+        raise AuditIntegrityError("pipeline proposal lifecycle status is malformed")
+    sid = str(authority.row.session_id)
+    pid = str(authority.row.id)
+    terminal_count = conn.execute(
+        select(func.count())
+        .select_from(proposal_events_table)
+        .where(proposal_events_table.c.session_id == sid)
+        .where(proposal_events_table.c.proposal_id == pid)
+        .where(proposal_events_table.c.event_type.in_(("proposal.accepted", "proposal.rejected")))
+    ).scalar_one()
+    if terminal_count != 0:
+        raise AuditIntegrityError("pending pipeline proposal must not have a terminal event")
+    if authority.row.audit_event_id != authority.creation_event_id or authority.row.committed_state_id is not None:
+        raise AuditIntegrityError("pending pipeline proposal row authority binding is malformed")
 
 
 def _normalize_optional_provenance_text(value: str | None) -> str | None:
@@ -3522,8 +3632,8 @@ class SessionServiceImpl:
                     creation_event=_proposal_event_record_from_row(creation_rows[0]),
                     reviewed_facts=reviewed_facts,
                 )
-                if authority.pipeline is not None and authority.row.status == "committed":
-                    _verify_committed_pipeline_authority(
+                if authority.pipeline is not None:
+                    _verify_pipeline_lifecycle_authority(
                         conn,
                         service=self,
                         authority=authority.pipeline,
@@ -3580,6 +3690,7 @@ class SessionServiceImpl:
                     creation_event=_proposal_event_record_from_row(creation_rows[0]),
                     reviewed_facts=reviewed_facts,
                 )
+                _verify_pipeline_lifecycle_authority(conn, service=self, authority=authority)
                 if authority.proposal.draft_hash != draft_hash:
                     raise StaleComposeStateError("pipeline proposal draft hash echo is stale or mismatched")
                 if dispatch.tool_call_id != authority.row.tool_call_id:
@@ -3744,42 +3855,15 @@ class SessionServiceImpl:
                     if type(row.tool_calls) is not list:
                         continue
                     for envelope in row.tool_calls:
-                        if type(envelope) is not dict or envelope.get("_kind") != "audit":
-                            continue
-                        invocation = envelope.get("invocation")
-                        if type(invocation) is not dict:
-                            continue
-                        if invocation.get("tool_call_id") != authority.row.tool_call_id:
-                            continue
-                        if invocation.get("tool_name") != "set_pipeline" or invocation.get("status") != "success":
-                            continue
-                        binding = PipelineDispatchAuditBinding.from_persisted_envelope(envelope)
-                        if binding.arguments_hash != expected_arguments_hash:
-                            raise AuditIntegrityError("pipeline recovery dispatch arguments do not match authority")
-                        result_canonical = invocation.get("result_canonical")
-                        if type(result_canonical) is not str:
-                            continue
-                        try:
-                            result_payload = json.loads(result_canonical)
-                        except json.JSONDecodeError as exc:
-                            raise AuditIntegrityError("pipeline recovery result canonical is malformed") from exc
-                        if type(result_payload) is not dict:
-                            raise AuditIntegrityError("pipeline recovery result payload is malformed")
-                        if result_payload.get("pipeline_content_hash_schema") != "composer.pipeline-dispatch-result.v1":
-                            continue
-                        executor_content_hash = result_payload.get("pipeline_content_hash")
-                        if (
-                            type(executor_content_hash) is not str
-                            or len(executor_content_hash) != 64
-                            or any(character not in "0123456789abcdef" for character in executor_content_hash)
-                        ):
-                            raise AuditIntegrityError("pipeline recovery executor-content hash is malformed")
-                        matches.append(
-                            PipelineDispatchRecovery(
-                                binding=binding,
-                                executor_content_hash=executor_content_hash,
-                            )
+                        recovery = _pipeline_dispatch_recovery_from_envelope(
+                            envelope,
+                            expected_tool_call_id=authority.row.tool_call_id,
                         )
+                        if recovery is None:
+                            continue
+                        if recovery.binding.arguments_hash != expected_arguments_hash:
+                            raise AuditIntegrityError("pipeline recovery dispatch arguments do not match authority")
+                        matches.append(recovery)
                 if len(matches) > 1:
                     raise AuditIntegrityError("pipeline recovery has duplicate successful content-bound dispatches")
                 return matches[0] if matches else None
@@ -3830,6 +3914,7 @@ class SessionServiceImpl:
                     creation_event=_proposal_event_record_from_row(creation_rows[0]),
                     reviewed_facts=reviewed_facts,
                 )
+                _verify_pipeline_lifecycle_authority(conn, service=self, authority=authority)
                 if authority.proposal.draft_hash != draft_hash:
                     raise StaleComposeStateError("pipeline proposal draft hash echo is stale or mismatched")
                 if dispatch is not None:
@@ -3939,6 +4024,12 @@ class SessionServiceImpl:
                         creation_event=_proposal_event_record_from_row(events[0]),
                         reviewed_facts=None,
                     )
+                    if authority.pipeline is not None:
+                        _verify_pipeline_lifecycle_authority(
+                            conn,
+                            service=self,
+                            authority=authority.pipeline,
+                        )
                     metadata = _pipeline_public_metadata(authority.pipeline) if authority.pipeline is not None else None
                     enriched.append(replace(record, pipeline_metadata=metadata))
                 return enriched

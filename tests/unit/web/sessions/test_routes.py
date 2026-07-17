@@ -1190,13 +1190,10 @@ async def test_canonical_pipeline_cancel_then_settlement_failure_preserves_cance
 
 
 def test_canonical_pipeline_accept_requires_and_echoes_draft_hash(tmp_path, monkeypatch) -> None:
-    from sqlalchemy import select, update
-
     from elspeth.web.composer.pipeline_planner import PipelinePlanResult
     from elspeth.web.composer.pipeline_proposal import AbsentBase, PipelineProposal, PlannerSurface
     from elspeth.web.composer.redaction import redact_tool_call_arguments
     from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
-    from elspeth.web.sessions.models import chat_messages_table
 
     app, service = _make_app(tmp_path)
     monkeypatch.setattr(
@@ -1285,13 +1282,6 @@ def test_canonical_pipeline_accept_requires_and_echoes_draft_hash(tmp_path, monk
         message for message in asyncio.run(service.get_messages(session_id, limit=None)) if message.role == "audit" and message.tool_calls
     ]
     assert len(audit_rows_before_retry) == 1
-    with service._engine.begin() as conn:
-        audit_row = conn.execute(select(chat_messages_table).where(chat_messages_table.c.role == "audit")).one()
-        envelopes = list(audit_row.tool_calls)
-        envelopes[0]["invocation"]["pipeline_content_hash_schema"] = "tampered.unbound"
-        envelopes[0]["invocation"]["pipeline_content_hash"] = "0" * 64
-        conn.execute(update(chat_messages_table).where(chat_messages_table.c.id == audit_row.id).values(tool_calls=envelopes))
-
     monkeypatch.setattr(service, "settle_pipeline_composition_proposal", settle)
     accepted = client.post(endpoint, json={"draft_hash": proposal_envelope.draft_hash})
 
@@ -1312,6 +1302,48 @@ def test_canonical_pipeline_accept_requires_and_echoes_draft_hash(tmp_path, monk
         message for message in asyncio.run(service.get_messages(session_id, limit=None)) if message.role == "audit" and message.tool_calls
     ]
     assert len(audit_rows_after_retry) == 1
+
+
+@pytest.mark.asyncio
+async def test_canonical_pipeline_recovery_rejects_tampered_bound_content_hash(tmp_path, monkeypatch) -> None:
+    from sqlalchemy import select, update
+
+    from elspeth.core.canonical import canonical_json
+    from elspeth.web.sessions.models import chat_messages_table
+
+    app, service, _pipeline, session_id, row, endpoint = await _create_canonical_pipeline_route_proposal(
+        tmp_path,
+        monkeypatch,
+        tool_call_id="canonical-bound-tamper-call",
+    )
+    settle = service.settle_pipeline_composition_proposal
+
+    async def interrupt_before_settlement(**kwargs: Any):
+        del kwargs
+        raise RuntimeError("interrupted before atomic settlement")
+
+    monkeypatch.setattr(service, "settle_pipeline_composition_proposal", interrupt_before_settlement)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with pytest.raises(RuntimeError, match="interrupted before atomic settlement"):
+            await client.post(endpoint, json={"draft_hash": row.pipeline_metadata.draft_hash})
+
+        with service._engine.begin() as conn:
+            audit_row = conn.execute(select(chat_messages_table).where(chat_messages_table.c.role == "audit")).one()
+            envelopes = list(audit_row.tool_calls)
+            invocation = envelopes[0]["invocation"]
+            result_payload = json.loads(invocation["result_canonical"])
+            result_payload["pipeline_content_hash"] = "0" * 64
+            invocation["result_canonical"] = canonical_json(result_payload)
+            invocation["result_hash"] = stable_hash(result_payload)
+            conn.execute(update(chat_messages_table).where(chat_messages_table.c.id == audit_row.id).values(tool_calls=envelopes))
+
+        monkeypatch.setattr(service, "settle_pipeline_composition_proposal", settle)
+        rejected = await client.post(endpoint, json={"draft_hash": row.pipeline_metadata.draft_hash})
+
+    assert rejected.status_code == 422
+    assert "candidate/executor content mismatch" in rejected.text
+    assert await service.get_current_state(session_id) is None
+    assert (await service.list_composition_proposals(session_id))[0].status == "rejected"
 
 
 @pytest.mark.parametrize("surface_name", ["GUIDED_STAGED", "TUTORIAL_PROFILE"])
@@ -1372,6 +1404,17 @@ def test_generic_accept_rejects_guided_pipeline_surfaces_before_dispatch(tmp_pat
     prepare.assert_not_awaited()
     assert asyncio.run(service.get_current_state(session_id)) is None
     assert asyncio.run(service.get_messages(session_id, limit=None)) == []
+    assert (asyncio.run(service.list_composition_proposals(session_id)))[0].status == "pending"
+
+    rejected = client.post(
+        f"/api/sessions/{session['id']}/proposals/{row.id}/reject",
+        json={},
+    )
+
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"] == "This pipeline proposal must be rejected through its guided workflow."
+    events = asyncio.run(service.list_proposal_events(session_id))
+    assert [event.event_type for event in events] == ["proposal.created"]
     assert (asyncio.run(service.list_composition_proposals(session_id)))[0].status == "pending"
 
 

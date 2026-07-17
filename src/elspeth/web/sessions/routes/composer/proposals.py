@@ -681,6 +681,11 @@ async def reject_composition_proposal(
                     actor=f"user:{user.user_id}",
                 )
             else:
+                if authority.pipeline.proposal.surface.value in {"guided_staged", "tutorial_profile"}:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="This pipeline proposal must be rejected through its guided workflow.",
+                    )
                 proposal = await service.reject_pipeline_composition_proposal(
                     session_id=session.id,
                     proposal_id=proposal_id,

@@ -71,6 +71,7 @@ from ._helpers import (
     merge_composer_meta_updates,
     slog,
 )
+from .composer.pipeline_settlement import settle_pipeline_proposal_under_compose_lock
 
 
 def _requests_audit_grade_messages_view(
@@ -629,7 +630,26 @@ def register_message_routes(router: APIRouter) -> None:
 
                 state_response: CompositionStateResponse | None = None
                 post_compose_state_id: UUID | None = compose_base_state_id
-                if result.state.version != state.version:
+                if result.pipeline_commit_intent is not None:
+                    authority = await service.get_authoritative_pipeline_proposal(
+                        session_id=session.id,
+                        proposal_id=result.pipeline_commit_intent.proposal_id,
+                        reviewed_facts={},
+                    )
+                    route_settlement = await settle_pipeline_proposal_under_compose_lock(
+                        request=request,
+                        user=user,
+                        authority=authority,
+                        draft_hash=result.pipeline_commit_intent.draft_hash,
+                        composer_meta=_post_compose_meta,
+                        telemetry_source="compose",
+                    )
+                    state_response = _state_response(
+                        route_settlement.settlement.state,
+                        live_validation=route_settlement.validation,
+                    )
+                    post_compose_state_id = route_settlement.settlement.state.id
+                elif result.state.version != state.version:
                     await _publish_progress(
                         progress_registry,
                         session_id=str(session.id),

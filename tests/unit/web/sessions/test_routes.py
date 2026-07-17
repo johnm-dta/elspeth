@@ -49,7 +49,7 @@ from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import TurnResponse, TurnType
 from elspeth.web.composer.guided.state_machine import GuidedSession, GuidedStep, TerminalKind, TerminalReason, TerminalState
 from elspeth.web.composer.progress import ComposerProgressRegistry
-from elspeth.web.composer.protocol import ComposerPluginCrashError, ComposerResult, ComposerService
+from elspeth.web.composer.protocol import ComposerPluginCrashError, ComposerResult, ComposerService, PipelineCommitIntent
 from elspeth.web.composer.redaction import REDACTED_BLOB_SOURCE_PATH
 from elspeth.web.composer.state import CompositionState, OutputSpec, PipelineMetadata, SourceSpec, ValidationSummary
 from elspeth.web.config import WebSettings
@@ -863,6 +863,138 @@ async def _create_canonical_pipeline_route_proposal(
     return app, service, pipeline, session_id, row, endpoint
 
 
+def test_send_message_auto_commit_settles_exact_pipeline_intent(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app, service, _pipeline, session_id, row, _endpoint = asyncio.run(
+        _create_canonical_pipeline_route_proposal(tmp_path, monkeypatch, tool_call_id="send-auto-pipeline")
+    )
+    assert row.pipeline_metadata is not None
+    composer = SimpleNamespace()
+    composer.compose = AsyncMock(
+        spec=ComposerService.compose,
+        return_value=ComposerResult(
+            message="Pipeline prepared.",
+            state=_EMPTY_STATE,
+            repair_turns_used=2,
+            pipeline_commit_intent=PipelineCommitIntent(
+                proposal_id=row.id,
+                draft_hash=row.pipeline_metadata.draft_hash,
+            ),
+        ),
+    )
+    app.state.composer_service = composer
+    client = TestClient(app)
+
+    response = client.post(
+        f"/api/sessions/{session_id}/messages",
+        json={"content": "Build the pipeline."},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["state"] is not None
+    assert body["proposals"] == []
+    settled = asyncio.run(service.list_composition_proposals(session_id))
+    assert len(settled) == 1
+    assert settled[0].status == "committed"
+    assert settled[0].committed_state_id == uuid.UUID(body["state"]["id"])
+    current_state = asyncio.run(service.get_current_state(session_id))
+    assert current_state is not None
+    assert current_state.composer_meta is not None
+    assert current_state.composer_meta["repair_turns_used"] == 2
+    from sqlalchemy import func, select
+
+    from elspeth.web.sessions.models import composition_states_table
+
+    with service._engine.connect() as conn:
+        assert conn.execute(select(func.count()).select_from(composition_states_table)).scalar_one() == 1
+    messages = asyncio.run(service.get_messages(session_id, limit=None))
+    assistant = next(message for message in reversed(messages) if message.role == "assistant")
+    assert assistant.composition_state_id == settled[0].committed_state_id
+
+
+def test_send_message_explicit_approval_leaves_canonical_pipeline_pending(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app, service, _pipeline, session_id, row, _endpoint = asyncio.run(
+        _create_canonical_pipeline_route_proposal(tmp_path, monkeypatch, tool_call_id="send-explicit-pipeline")
+    )
+    asyncio.run(
+        service.update_composer_preferences(
+            session_id,
+            trust_mode="explicit_approve",
+            density_default="high",
+            actor="user:alice",
+        )
+    )
+    composer = SimpleNamespace()
+    composer.compose = AsyncMock(
+        spec=ComposerService.compose,
+        return_value=ComposerResult(message="Pipeline prepared for review.", state=_EMPTY_STATE),
+    )
+    app.state.composer_service = composer
+    client = TestClient(app)
+
+    response = client.post(
+        f"/api/sessions/{session_id}/messages",
+        json={"content": "Build the pipeline."},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["state"] is None
+    assert len(body["proposals"]) == 1
+    assert body["proposals"][0]["id"] == str(row.id)
+    assert body["proposals"][0]["status"] == "pending"
+    assert asyncio.run(service.get_current_state(session_id)) is None
+
+
+def test_recompose_auto_commit_uses_shared_pipeline_settlement(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app, service, _pipeline, session_id, row, _endpoint = asyncio.run(
+        _create_canonical_pipeline_route_proposal(tmp_path, monkeypatch, tool_call_id="recompose-auto-pipeline")
+    )
+    asyncio.run(
+        service.add_message(
+            session_id,
+            "user",
+            "Build the pipeline.",
+            writer_principal="route_user_message",
+        )
+    )
+    assert row.pipeline_metadata is not None
+    composer = SimpleNamespace()
+    composer.compose = AsyncMock(
+        spec=ComposerService.compose,
+        return_value=ComposerResult(
+            message="Pipeline prepared.",
+            state=_EMPTY_STATE,
+            repair_turns_used=1,
+            pipeline_commit_intent=PipelineCommitIntent(
+                proposal_id=row.id,
+                draft_hash=row.pipeline_metadata.draft_hash,
+            ),
+        ),
+    )
+    app.state.composer_service = composer
+    client = TestClient(app)
+
+    response = client.post(f"/api/sessions/{session_id}/recompose")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["state"] is not None
+    assert body["proposals"] == []
+    settled = asyncio.run(service.list_composition_proposals(session_id))
+    assert settled[0].status == "committed"
+    current_state = asyncio.run(service.get_current_state(session_id))
+    assert current_state is not None
+    assert current_state.composer_meta is not None
+    assert current_state.composer_meta["repair_turns_used"] == 1
+    from sqlalchemy import func, select
+
+    from elspeth.web.sessions.models import composition_states_table
+
+    with service._engine.connect() as conn:
+        assert conn.execute(select(func.count()).select_from(composition_states_table)).scalar_one() == 1
+
+
 @pytest.mark.parametrize(
     ("failure_mode", "reason_code"),
     [
@@ -945,7 +1077,7 @@ async def test_canonical_pipeline_cancel_then_prepare_failure_terminalizes_befor
         raise PipelineCommitError("candidate validation failed", code="VALIDATION_FAILED")
 
     monkeypatch.setattr(
-        "elspeth.web.sessions.routes.composer.proposals.prepare_pipeline_proposal_commit",
+        "elspeth.web.sessions.routes.composer.pipeline_settlement.prepare_pipeline_proposal_commit",
         fail_prepare,
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -971,7 +1103,7 @@ async def test_canonical_pipeline_cancel_then_prepare_failure_preserves_binding_
         PipelineCommitError,
         PipelineDispatchAuditBinding,
     )
-    from elspeth.web.sessions.routes.composer import proposals as proposal_routes
+    from elspeth.web.sessions.routes.composer import pipeline_settlement as proposal_routes
 
     app, service, pipeline, session_id, row, endpoint = await _create_canonical_pipeline_route_proposal(
         tmp_path,
@@ -1034,7 +1166,7 @@ async def test_canonical_pipeline_cancel_then_prepare_failure_preserves_rejectio
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from elspeth.web.composer.pipeline_commit import PipelineCommitError
-    from elspeth.web.sessions.routes.composer import proposals as proposal_routes
+    from elspeth.web.sessions.routes.composer import pipeline_settlement as proposal_routes
 
     app, service, _pipeline, session_id, row, endpoint = await _create_canonical_pipeline_route_proposal(
         tmp_path,
@@ -1080,7 +1212,7 @@ async def test_canonical_pipeline_cancel_during_failed_dispatch_audit_persist_te
         PipelineCommitError,
         PipelineDispatchAuditBinding,
     )
-    from elspeth.web.sessions.routes.composer import proposals as proposal_routes
+    from elspeth.web.sessions.routes.composer import pipeline_settlement as proposal_routes
 
     app, service, pipeline, session_id, row, endpoint = await _create_canonical_pipeline_route_proposal(
         tmp_path,
@@ -1400,7 +1532,7 @@ def test_generic_accept_rejects_guided_pipeline_surfaces_before_dispatch(tmp_pat
     )
     prepare = AsyncMock(side_effect=AssertionError("generic route dispatched guided proposal"))
     monkeypatch.setattr(
-        "elspeth.web.sessions.routes.composer.proposals.prepare_pipeline_proposal_commit",
+        "elspeth.web.sessions.routes.composer.pipeline_settlement.prepare_pipeline_proposal_commit",
         prepare,
     )
 

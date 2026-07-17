@@ -1,20 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable
-from dataclasses import dataclass
-
 from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.web.catalog.policy_view import PolicyCatalogView
-from elspeth.web.composer.audit import BufferingRecorder
-from elspeth.web.composer.pipeline_commit import (
-    PipelineCommitConfig,
-    PipelineCommitError,
-    RecoveredPipelineCommit,
-    prepare_pipeline_proposal_commit,
-)
-from elspeth.web.composer.pipeline_proposal import reviewed_anchor_hash
 from elspeth.web.composer.tools import is_approval_required_blob_store_only_mutation_tool
-from elspeth.web.sessions.protocol import PipelineProposalRejectionReason
 
 from .._helpers import (
     _DATA_ERROR_KEY,
@@ -37,7 +25,6 @@ from .._helpers import (
     _composition_proposal_response,
     _get_session_compose_lock_registry,
     _initial_composition_state_with_guided_session,
-    _persist_tool_invocations,
     _proposal_event_response,
     _state_data_from_composer_state,
     _state_from_record,
@@ -48,6 +35,11 @@ from .._helpers import (
     execute_tool,
     get_current_user,
     run_sync_in_worker,
+)
+from .pipeline_settlement import (
+    _await_with_deferred_cancellation,
+    _proposal_user_message_content,
+    settle_pipeline_proposal_under_compose_lock,
 )
 
 router = APIRouter()
@@ -87,29 +79,6 @@ def _inline_blob_content_for_proposal(
     return content if isinstance(content, str) else None
 
 
-async def _proposal_user_message_content(
-    service: SessionServiceProtocol,
-    proposal: CompositionProposalRecord,
-) -> str | None:
-    """Recover the immutable originating user-message body for accept replay."""
-    if proposal.user_message_id is None:
-        return None
-    messages = await service.get_messages(proposal.session_id, limit=None)
-    for message in messages:
-        if message.id != proposal.user_message_id:
-            continue
-        if message.role != "user":
-            raise HTTPException(
-                status_code=409,
-                detail="Stored proposal references a non-user originating message; ask ELSPETH to regenerate the proposal.",
-            )
-        return message.content
-    raise HTTPException(
-        status_code=409,
-        detail="Stored proposal references an originating message that could not be recovered; ask ELSPETH to regenerate the proposal.",
-    )
-
-
 def _missing_proposal_composer_context(
     proposal: CompositionProposalRecord,
     *,
@@ -142,36 +111,6 @@ def _ensure_inline_blob_proposal_context(
             f"({', '.join(missing)}). Ask ELSPETH to regenerate the proposal."
         ),
     )
-
-
-@dataclass(slots=True)
-class _DeferredCancellationState:
-    requested: bool = False
-
-
-async def _await_with_deferred_cancellation[T](
-    awaitable: Awaitable[T],
-    *,
-    state: _DeferredCancellationState | None = None,
-) -> tuple[T, bool]:
-    """Await critical proposal work to completion while recording cancellation.
-
-    ``run_sync_in_worker`` deliberately leaves its worker running if the
-    request task is cancelled. Once an approved tool execution starts, the
-    route must keep the session lock until the side effect is paired with a
-    terminal proposal transition.
-    """
-    task = asyncio.ensure_future(awaitable)
-    cancelled = False
-    cancellation_state = state if state is not None else _DeferredCancellationState()
-    while True:
-        try:
-            return await asyncio.shield(task), cancelled
-        except asyncio.CancelledError:
-            cancelled = True
-            cancellation_state.requested = True
-            if task.done():
-                return task.result(), cancelled
 
 
 @router.get(
@@ -233,178 +172,13 @@ async def accept_composition_proposal(
         if pipeline_authority is not None:
             if body is None or body.draft_hash is None:
                 raise HTTPException(status_code=422, detail="Canonical pipeline proposal acceptance requires draft_hash.")
-            if body.draft_hash != pipeline_authority.proposal.draft_hash:
-                raise HTTPException(status_code=409, detail="The pipeline proposal draft hash is stale or mismatched.")
-            if pipeline_authority.proposal.surface.value in {"guided_staged", "tutorial_profile"}:
-                raise HTTPException(
-                    status_code=409,
-                    detail="This pipeline proposal must be accepted through its guided workflow.",
-                )
-            if pipeline_authority.proposal.reviewed_anchor_hash != reviewed_anchor_hash({}):
-                raise HTTPException(status_code=409, detail="The pipeline proposal reviewed anchor is stale or mismatched.")
-            if proposal.status == "committed":
-                return _composition_proposal_response(proposal)
-            if proposal.status != "pending":
-                raise HTTPException(status_code=409, detail="Only pending proposals can be accepted.")
-
-            current_record = await service.get_current_state(session.id)
-            current_state = (
-                _state_from_record(current_record) if current_record is not None else _initial_composition_state_with_guided_session()
+            route_settlement = await settle_pipeline_proposal_under_compose_lock(
+                request=request,
+                user=user,
+                authority=pipeline_authority,
+                draft_hash=body.draft_hash,
             )
-            user_message_content = await _proposal_user_message_content(service, proposal)
-            plugin_snapshot = request.app.state.plugin_snapshot_factory(user)
-            policy_catalog = PolicyCatalogView(
-                request.app.state.catalog_service,
-                plugin_snapshot,
-                request.app.state.operator_profile_registry,
-            )
-            recorder = BufferingRecorder()
-            recovery = await service.get_pipeline_dispatch_recovery(authority=pipeline_authority)
-            cancellation_state = _DeferredCancellationState()
-            try:
-                prepared, _ = await _await_with_deferred_cancellation(
-                    prepare_pipeline_proposal_commit(
-                        authority=pipeline_authority,
-                        current_state=current_state,
-                        current_state_id=current_record.id if current_record is not None else None,
-                        policy_catalog=policy_catalog,
-                        plugin_snapshot=plugin_snapshot,
-                        config=PipelineCommitConfig(
-                            data_dir=str(request.app.state.settings.data_dir),
-                            session_engine=request.app.state.session_engine,
-                            secret_service=request.app.state.scoped_secret_resolver,
-                            user_id=str(user.user_id),
-                            user_message_content=user_message_content,
-                            max_blob_storage_per_session_bytes=request.app.state.settings.max_blob_storage_per_session_bytes,
-                            runtime_preflight=None,
-                            timeout_seconds=request.app.state.settings.composer_timeout_seconds,
-                        ),
-                        recorder=recorder,
-                        actor=f"user:{user.user_id}",
-                        recovery_dispatch=recovery.binding if recovery is not None else None,
-                        recovery_executor_content_hash=recovery.executor_content_hash if recovery is not None else None,
-                    ),
-                    state=cancellation_state,
-                )
-            except PipelineCommitError as exc:
-                try:
-                    persisted_dispatch = recovery.binding if recovery is not None else exc.dispatch if exc.invocation is None else None
-                    captured = (exc.invocation,) if exc.invocation is not None else tuple(recorder.invocations)
-                    if captured:
-                        bindings, _ = await _await_with_deferred_cancellation(
-                            _persist_tool_invocations(
-                                service,
-                                session.id,
-                                captured,
-                                None,
-                                plugin_crash_pending=True,
-                            ),
-                            state=cancellation_state,
-                        )
-                        if exc.invocation is not None:
-                            if exc.dispatch is None or len(bindings) != 1:
-                                raise RuntimeError("pipeline failure dispatch did not persist exactly one rebound binding") from exc
-                            persisted_dispatch = bindings[0]
-                    reason_by_code: dict[str, PipelineProposalRejectionReason] = {
-                        "CANDIDATE_EXECUTOR_MISMATCH": "candidate_executor_mismatch",
-                        "VALIDATION_FAILED": "validation_failed",
-                        "BASE_CONFLICT": "base_conflict",
-                    }
-                    reason = reason_by_code.get(exc.code)
-                    if reason is not None:
-                        _rejected, _ = await _await_with_deferred_cancellation(
-                            service.reject_pipeline_composition_proposal(
-                                session_id=session.id,
-                                proposal_id=proposal.id,
-                                draft_hash=pipeline_authority.proposal.draft_hash,
-                                reviewed_facts={},
-                                reason=reason,
-                                dispatch=persisted_dispatch,
-                                actor=f"system:pipeline_commit:user:{user.user_id}",
-                            ),
-                            state=cancellation_state,
-                        )
-                except BaseException as cleanup_exc:
-                    if cancellation_state.requested:
-                        raise asyncio.CancelledError from cleanup_exc
-                    raise
-                if cancellation_state.requested:
-                    raise asyncio.CancelledError from exc
-                status_code = 409 if exc.code in {"BASE_CONFLICT", "NOT_PENDING"} else 422
-                raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-            except BaseException as exc:
-                captured = tuple(recorder.invocations)
-                if captured:
-                    await _await_with_deferred_cancellation(
-                        _persist_tool_invocations(
-                            service,
-                            session.id,
-                            captured,
-                            None,
-                            plugin_crash_pending=True,
-                        ),
-                        state=cancellation_state,
-                    )
-                if cancellation_state.requested:
-                    raise asyncio.CancelledError from exc
-                raise
-
-            try:
-                if isinstance(prepared, RecoveredPipelineCommit):
-                    bindings = (prepared.dispatch,)
-                else:
-                    bindings, _ = await _await_with_deferred_cancellation(
-                        _persist_tool_invocations(
-                            service,
-                            session.id,
-                            (prepared.invocation,),
-                            None,
-                            plugin_crash_pending=False,
-                        ),
-                        state=cancellation_state,
-                    )
-                if len(bindings) != 1:
-                    raise RuntimeError("pipeline acceptance dispatch did not persist exactly one binding")
-                (state_data, _validation), _ = await _await_with_deferred_cancellation(
-                    _state_data_from_composer_state(
-                        prepared.result.updated_state,
-                        settings=request.app.state.settings,
-                        secret_service=request.app.state.scoped_secret_resolver,
-                        user_id=str(user.user_id),
-                        session_id=session.id,
-                        plugin_snapshot=plugin_snapshot,
-                        profile_registry=request.app.state.operator_profile_registry,
-                        catalog=request.app.state.catalog_service,
-                        runtime_preflight=prepared.result.runtime_preflight,
-                        preflight_exception_policy="raise",
-                        initial_version=current_state.version,
-                        telemetry_source="compose",
-                    ),
-                    state=cancellation_state,
-                )
-                settled, _ = await _await_with_deferred_cancellation(
-                    service.settle_pipeline_composition_proposal(
-                        session_id=session.id,
-                        proposal_id=proposal.id,
-                        draft_hash=body.draft_hash,
-                        reviewed_facts={},
-                        state=state_data,
-                        candidate_content_hash=prepared.candidate_content_hash,
-                        executor_content_hash=prepared.executor_content_hash,
-                        final_composer_metadata=state_data.composer_meta,
-                        dispatch=bindings[0],
-                        actor=f"user:{user.user_id}",
-                    ),
-                    state=cancellation_state,
-                )
-            except BaseException as exc:
-                if cancellation_state.requested:
-                    raise asyncio.CancelledError from exc
-                raise
-            response = _composition_proposal_response(settled.proposal)
-            if cancellation_state.requested:
-                raise asyncio.CancelledError
-            return response
+            return _composition_proposal_response(route_settlement.settlement.proposal)
 
         if proposal.status != "pending":
             raise HTTPException(

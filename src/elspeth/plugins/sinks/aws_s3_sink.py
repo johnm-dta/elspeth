@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
+from elspeth.contracts import ArtifactDescriptor, CallType, Determinism, PluginSchema
 from elspeth.contracts import errors as contract_errors
 from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
@@ -668,9 +668,10 @@ class AWSS3Sink(BaseSink):
     name = "aws_s3"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:1f34674910e495ab"
+    source_file_hash: str | None = "sha256:bd78030e88ef8c9c"
     config_model = AWSS3SinkConfig
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    effect_call_type = CallType.HTTP
     supported_effect_modes = frozenset({"write"})
     supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
     supports_resume = False

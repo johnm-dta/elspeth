@@ -10,7 +10,6 @@ import hashlib
 import json
 import os
 import re
-import time
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
@@ -25,10 +24,11 @@ if TYPE_CHECKING:
 from sqlalchemy.engine import Engine
 from sqlalchemy.types import TypeEngine
 
-from elspeth.contracts import ArtifactDescriptor, CallStatus, CallType, Determinism, PluginSchema
+from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
 from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
-from elspeth.contracts.errors import AuditIntegrityError, SinkEffectCapabilityError
+from elspeth.contracts.enums import CallType
+from elspeth.contracts.errors import SinkEffectCapabilityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.sink_effects import (
@@ -214,9 +214,10 @@ class DatabaseSink(BaseSink):
     name = "database"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2f799a90639ff7a1"
+    source_file_hash: str | None = "sha256:4cb64957f47335f4"
     config_model = DatabaseSinkConfig
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    effect_call_type = CallType.SQL
     supported_effect_modes = frozenset({"append"})
     supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
     # determinism inherited from BaseSink (IO_WRITE)
@@ -317,9 +318,7 @@ class DatabaseSink(BaseSink):
         self._any_typed_fields: frozenset[str] = self._compute_any_typed_fields()
 
         self._engine: Engine | None = None
-        self._table: Table | None = None
         self._metadata: MetaData | None = None
-        self._table_replaced: bool = False  # Track if we've done the replace for this instance
 
     def _target_reference(self) -> str:
         ledger = self._require_effect_ledger_config()
@@ -966,7 +965,7 @@ class DatabaseSink(BaseSink):
         """Initialize engine/metadata pair together.
 
         Invariant: if self._engine is set, self._metadata must also be set.
-        This keeps validate_output_target() and write() lifecycle paths consistent.
+        This keeps validate_output_target() and the effect lifecycle paths consistent.
         """
         if self._engine is None:
             self._engine = create_engine(self._url)
@@ -1037,456 +1036,19 @@ class DatabaseSink(BaseSink):
 
         return OutputValidationResult.success(target_fields=existing)
 
-    def _ensure_table(self, row: dict[str, Any], ctx: SinkContext) -> None:
-        """Create table, handling if_exists behavior.
-
-        if_exists behavior (follows pandas to_sql semantics):
-        - "append": Create table if not exists, insert rows (default)
-        - "replace": Drop table on first write, recreate with fresh schema
-
-        When schema is explicit (not dynamic), columns are derived from schema
-        fields with proper type mapping. This ensures all defined fields
-        (including optional ones) are present in the table.
-
-        When schema is dynamic, columns are inferred from the first row's keys.
-
-        DDL operations (DROP TABLE, CREATE TABLE) are instrumented via
-        ctx.record_call for audit trail completeness.
-        """
-        self._ensure_engine_and_metadata_initialized()
-        if self._engine is None:
-            raise RuntimeError("Database sink write() called before initialization")
-
-        if self._table is None:
-            # Handle if_exists="replace": drop table on first write
-            if self._if_exists == "replace" and not self._table_replaced:
-                self._drop_table_if_exists(ctx)
-                self._table_replaced = True
-
-            columns = self._create_columns_from_schema_or_row(row)
-            # Metadata is always set when engine is created
-            if self._metadata is None:
-                raise RuntimeError("Database sink write() called before initialization")
-            self._table = Table(
-                self._table_name,
-                self._metadata,
-                *columns,
-            )
-
-            # Instrument CREATE TABLE DDL for audit trail
-            start_time = time.perf_counter()
-            try:
-                self._metadata.create_all(self._engine, checkfirst=True)
-                latency_ms = (time.perf_counter() - start_time) * 1000
-                try:
-                    ctx.record_call(
-                        call_type=CallType.SQL,
-                        status=CallStatus.SUCCESS,
-                        request_data={
-                            "operation": "CREATE_TABLE",
-                            "table": self._table_name,
-                            "if_not_exists": True,
-                        },
-                        response_data={"table_created": self._table_name},
-                        latency_ms=latency_ms,
-                        provider="sqlalchemy",
-                    )
-                except Exception as exc:
-                    raise AuditIntegrityError(
-                        f"Failed to record successful CREATE TABLE to audit trail "
-                        f"(table={self._table_name!r}). "
-                        f"DDL completed but audit record is missing."
-                    ) from exc
-            except AuditIntegrityError:
-                raise  # Audit failure — do not misattribute as SQL error
-            except Exception as e:
-                latency_ms = (time.perf_counter() - start_time) * 1000
-                ctx.record_call(
-                    call_type=CallType.SQL,
-                    status=CallStatus.ERROR,
-                    request_data={
-                        "operation": "CREATE_TABLE",
-                        "table": self._table_name,
-                        "if_not_exists": True,
-                    },
-                    error={"type": type(e).__name__, "message": str(e)},
-                    latency_ms=latency_ms,
-                    provider="sqlalchemy",
-                )
-                raise
-
-    def _drop_table_if_exists(self, ctx: SinkContext) -> None:
-        """Drop the table if it exists (for replace mode).
-
-        Uses SQLAlchemy's Table.drop() for portable, dialect-safe drops.
-        This handles identifier quoting correctly across all databases
-        (SQLite, PostgreSQL, MySQL, etc.).
-
-        DDL is instrumented via ctx.record_call for audit trail completeness.
-        """
-        engine = self._engine
-        if engine is None:
-            raise RuntimeError(
-                "engine is None at DROP TABLE time — invariant violation (_ensure_engine_and_metadata_initialized must run first)"
-            )
-
-        from sqlalchemy import MetaData, Table, inspect
-
-        inspector = inspect(engine)
-        if inspector.has_table(self._table_name):
-            # Use SQLAlchemy's Table.drop() for dialect-safe drop
-            # This generates correct identifier quoting for any database
-            temp_metadata = MetaData()
-            table = Table(self._table_name, temp_metadata)
-
-            start_time = time.perf_counter()
-            try:
-                table.drop(engine)
-                latency_ms = (time.perf_counter() - start_time) * 1000
-                try:
-                    ctx.record_call(
-                        call_type=CallType.SQL,
-                        status=CallStatus.SUCCESS,
-                        request_data={
-                            "operation": "DROP_TABLE",
-                            "table": self._table_name,
-                            "mode": self._if_exists,
-                        },
-                        response_data={"table_dropped": self._table_name},
-                        latency_ms=latency_ms,
-                        provider="sqlalchemy",
-                    )
-                except Exception as exc:
-                    raise AuditIntegrityError(
-                        f"Failed to record successful DROP TABLE to audit trail "
-                        f"(table={self._table_name!r}). "
-                        f"DDL completed but audit record is missing."
-                    ) from exc
-            except AuditIntegrityError:
-                raise  # Audit failure — do not misattribute as SQL error
-            except Exception as e:
-                latency_ms = (time.perf_counter() - start_time) * 1000
-                ctx.record_call(
-                    call_type=CallType.SQL,
-                    status=CallStatus.ERROR,
-                    request_data={
-                        "operation": "DROP_TABLE",
-                        "table": self._table_name,
-                        "mode": self._if_exists,
-                    },
-                    error={"type": type(e).__name__, "message": str(e)},
-                    latency_ms=latency_ms,
-                    provider="sqlalchemy",
-                )
-                raise
-
-    def _create_columns_from_schema_or_row(self, row: dict[str, Any]) -> list[Column[Any]]:
-        """Create SQLAlchemy columns from schema or row keys.
-
-        Column creation depends on schema mode:
-        - fixed: Only declared fields with proper types
-        - flexible: Declared fields with proper types, then extras as Text
-        - observed: All fields from first row as Text (infer and lock)
-        """
-        if self._schema_config.is_observed:
-            # Observed mode: infer from row keys (all as Text for portability)
-            return [Column(key, Text) for key in row]
-
-        if self._schema_config.fields:
-            # Explicit schema: start with declared fields and their types
-            columns: list[Column[Any]] = []
-            declared_names: set[str] = set()
-
-            for field_def in self._schema_config.fields:
-                sql_type = SCHEMA_TYPE_TO_SQLALCHEMY[field_def.field_type]
-                # Enforce nullable based on required status: required fields
-                # are NOT NULL, optional fields are nullable.
-                columns.append(Column(field_def.name, sql_type, nullable=not field_def.required))
-                declared_names.add(field_def.name)
-
-            if self._schema_config.mode == "flexible":
-                # Flexible mode: add extra columns from row as Text type
-                for key in row:
-                    if key not in declared_names:
-                        columns.append(Column(key, Text))
-
-            return columns
-
-        # Fallback (shouldn't happen with valid config): use row keys
-        return [Column(key, Text) for key in row]
-
     def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
-        """Write a batch of rows to the database.
-
-        CRITICAL: Hashes the canonical JSON payload of the ACTUAL SQL rows
-        that were COMMITTED (after any-field serialization and after per-row
-        diversion). This proves what was durably written — the database may
-        further transform data (add timestamps, auto-increment IDs, normalize
-        strings, etc.). Rows diverted on a per-row constraint failure are not
-        committed, so they are excluded from the hash and ``row_count``; they
-        are recorded in the diversion log and returned in ``SinkWriteResult``.
-
-        A per-row-attributable constraint violation (UNIQUE / NOT NULL / CHECK
-        / foreign-key) on one row diverts that row and commits the rest (see
-        ``_insert_with_per_row_diversion``). Batch-integrity failures
-        (connection loss, lock timeout, bad SQL) are not row-attributable:
-        they roll the whole transaction back, are recorded as an ERROR call,
-        and re-raise.
-
-        Args:
-            rows: List of row dicts to write
-            ctx: Plugin context
-
-        Returns:
-            SinkWriteResult with the committed-rows artifact and any per-row
-            diversions.
-
-        Raises:
-            ValidationError: If a row fails schema validation.
-                This indicates a bug in an upstream transform.
-        """
-        if not rows:
-            # Empty batch - hash the empty list for consistent audit trail
-            canonical_payload = canonical_json(rows).encode("utf-8")
-            content_hash = hashlib.sha256(canonical_payload).hexdigest()
-            return SinkWriteResult(
-                artifact=ArtifactDescriptor.for_database(
-                    url=self._sanitized_url,
-                    table=self._table_name,
-                    content_hash=content_hash,
-                    payload_size=len(canonical_payload),
-                    row_count=0,
-                )
-            )
-
-        # Ensure table exists (infer from first row)
-        # Enforce the existing-target contract BEFORE binding/creating the table.
-        # validate_output_target() detects fixed/flexible-mode mismatches against
-        # an existing table (e.g. a fixed ['id','name'] sink pointed at an
-        # existing output(id, name, extra) table). Without enforcing it here, an
-        # append write silently inserts into the drifted target, leaving the
-        # extra column NULL and violating the fixed-mode field contract — unless
-        # an external caller happened to run and honor validate_output_target()
-        # first. Runs once: on the first write self._table is None; afterwards
-        # the table is bound and the row-key check below covers subsequent writes
-        # (elspeth-bed11173bf). Replace mode drops the target, so it is exempt.
-        if self._table is None and self._if_exists == "append" and not self._schema_config.is_observed:
-            validation = self.validate_output_target()
-            if not validation.valid:
-                raise ValueError(
-                    f"DatabaseSink target table {self._table_name!r} is incompatible with the "
-                    f"configured schema and cannot be appended to: {validation.error_message} "
-                    f"(missing_fields={validation.missing_fields}, extra_fields={validation.extra_fields}). "
-                    f"Use if_exists='replace', align the schema to the existing table, or point at a "
-                    f"different table."
-                )
-
-        self._ensure_table(rows[0], ctx)
-
-        # Validate rows against table columns before INSERT.
-        # SQLAlchemy silently drops keys not in the table schema, which
-        # hides upstream bugs. In fixed mode, extra fields are rejected.
-        # In all modes after table creation, unknown columns are rejected.
-        if self._table is not None:
-            known_columns = {c.name for c in self._table.columns}
-            for i, row in enumerate(rows):
-                extra = sorted(set(row) - known_columns)
-                if extra:
-                    raise ValueError(
-                        f"DatabaseSink row {i} has fields not in table schema: {extra}. This indicates an upstream transform/schema bug."
-                    )
-
-        # Serialize dict/list values in 'any'-typed fields to JSON strings
-        # before INSERT. SQL TEXT columns cannot store Python dicts/lists.
-        # insert_rows is 1:1 with `rows`; rows[i] is the canonical pipeline row
-        # handed to the failsink on diversion, insert_rows[i] is what we INSERT.
-        insert_rows = self._serialize_any_typed_fields(rows)
-
-        # Insert all rows in batch with call recording for audit trail
-        # (ctx.operation_id is set by executor)
-        if self._engine is None or self._table is None:
-            raise RuntimeError("engine/table is None at INSERT time — invariant violation (_ensure_table must set both before write)")
-        start_time = time.perf_counter()
-        try:
-            written_rows = self._insert_with_per_row_diversion(rows, insert_rows)
-            latency_ms = (time.perf_counter() - start_time) * 1000
-
-            # Hash the ACTUAL SQL payload that was committed (post-serialization,
-            # post-diversion) using RFC 8785 canonical JSON. This proves what was
-            # written to the database — diverted rows were NOT written, so they
-            # must not appear in the artifact hash or row_count, or the audit
-            # trail would assert rows landed that were actually routed elsewhere.
-            canonical_payload = canonical_json(written_rows).encode("utf-8")
-            content_hash = hashlib.sha256(canonical_payload).hexdigest()
-            payload_size = len(canonical_payload)
-            rows_written = len(written_rows)
-
-            # Record successful INSERT in audit trail.
-            try:
-                ctx.record_call(
-                    call_type=CallType.SQL,
-                    status=CallStatus.SUCCESS,
-                    request_data={
-                        "operation": "INSERT",
-                        "table": self._table_name,
-                        "row_count": rows_written,
-                    },
-                    response_data={"rows_inserted": rows_written},
-                    latency_ms=latency_ms,
-                    provider="sqlalchemy",
-                )
-            except Exception as exc:
-                raise AuditIntegrityError(
-                    f"Failed to record successful INSERT to audit trail "
-                    f"(table={self._table_name!r}, row_count={rows_written}). "
-                    f"INSERT completed but audit record is missing."
-                ) from exc
-        except AuditIntegrityError:
-            raise  # Audit failure — do not misattribute as SQL error
-        except Exception as e:
-            latency_ms = (time.perf_counter() - start_time) * 1000
-
-            # Record failed INSERT in audit trail. We reach here only for
-            # batch-integrity failures (connection/operational/programming errors)
-            # that are NOT per-row attributable: the outer transaction rolled back,
-            # so nothing was committed and the recorded ERROR is accurate.
-            ctx.record_call(
-                call_type=CallType.SQL,
-                status=CallStatus.ERROR,
-                request_data={
-                    "operation": "INSERT",
-                    "table": self._table_name,
-                    "row_count": len(rows),
-                },
-                error={"type": type(e).__name__, "message": str(e)},
-                latency_ms=latency_ms,
-                provider="sqlalchemy",
-            )
-            raise
-
-        return SinkWriteResult(
-            artifact=ArtifactDescriptor.for_database(
-                url=self._sanitized_url,
-                table=self._table_name,
-                content_hash=content_hash,
-                payload_size=payload_size,
-                row_count=rows_written,
-            ),
-            diversions=self._get_diversions(),
-        )
-
-    def _insert_with_per_row_diversion(
-        self,
-        rows: list[dict[str, Any]],
-        insert_rows: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """INSERT the batch, diverting per-row-attributable constraint failures.
-
-        Transaction strategy (exactly-once write-or-divert):
-
-        The entire operation runs inside ONE outer ``engine.begin()``
-        transaction. Nothing is durable until that outer block commits, so
-        any exception that propagates out of it rolls back EVERYTHING.
-
-        1. Fast path: attempt the whole batch inside a SAVEPOINT
-           (``begin_nested()``). If it commits, every row is written — return
-           them all. This is the common all-good case.
-        2. On :class:`~sqlalchemy.exc.IntegrityError` the batch cannot tell us
-           WHICH row violated a UNIQUE / NOT NULL / CHECK / foreign-key
-           constraint, so we roll the batch savepoint back and re-execute the
-           batch row-by-row, each row in its own SAVEPOINT. A row that commits
-           is recorded as written; a row that raises ``IntegrityError`` is
-           rolled back to its savepoint and diverted via ``_divert_row`` (the
-           canonical pipeline row ``rows[i]`` is handed to the failsink, not
-           the JSON-serialized ``insert_rows[i]``).
-
-        Why a SAVEPOINT and not a fresh per-row ``engine.begin()``: on
-        Postgres / SQL Server an IntegrityError aborts the surrounding
-        transaction, so subsequent rows cannot be probed without a savepoint
-        to roll back to. Separate per-row transactions would also leave
-        already-committed good rows durable if a later row raised a
-        connection/operational error — the audit trail would then record an
-        ERROR while rows were physically written (a double-write on retry).
-        Keeping one outer transaction guarantees that a non-attributable
-        failure rolls back the good rows too, so the recorded ERROR is honest.
-
-        Per-row-attributable failures (``IntegrityError``) divert. All other
-        failures (connection/operational/programming/auth) are batch-integrity
-        failures that affect every row equally — they propagate out of the
-        outer transaction, roll everything back, and are re-raised by the
-        caller (recorded as an ERROR call).
-
-        Returns the rows that were actually committed (1:1 subset of
-        ``insert_rows``), in input order.
-
-        SAVEPOINT dependency: this recovery pattern REQUIRES the backend to
-        support SAVEPOINT (``begin_nested()``). Every dialect this sink
-        targets does — sqlite (pysqlite), PostgreSQL, MySQL/InnoDB, SQL
-        Server. If a backend lacked savepoint support, ``begin_nested()``
-        would raise; that raise propagates out of the outer transaction as a
-        batch-integrity failure (recorded ERROR + re-raise), rolling back
-        everything. That is a safe crash — no double-write, no row loss — not
-        a silent or partial-write path, so no speculative non-savepoint
-        fallback is provided.
-        """
-        engine = self._engine
-        table = self._table
-        if engine is None or table is None:
-            raise RuntimeError("engine/table is None at INSERT time — invariant violation")
-        written_rows: list[dict[str, Any]] = []
-        with engine.begin() as conn:
-            batch_savepoint = conn.begin_nested()
-            try:
-                conn.execute(insert(table), insert_rows)
-                batch_savepoint.commit()
-            except (IntegrityError, DataError):
-                # Per-row-attributable: re-execute row-by-row to identify the
-                # offending row(s). Roll the failed batch attempt back first.
-                # DataError (e.g. integer overflow on a typed column) is a sibling
-                # of IntegrityError under DatabaseError -- both are row-attributable
-                # faults that must divert the bad row rather than crash the batch.
-                batch_savepoint.rollback()
-                written_rows = []
-                for i, sql_row in enumerate(insert_rows):
-                    row_savepoint = conn.begin_nested()
-                    try:
-                        conn.execute(insert(table), [sql_row])
-                        row_savepoint.commit()
-                        written_rows.append(sql_row)
-                    except (IntegrityError, DataError) as exc:
-                        row_savepoint.rollback()
-                        self._divert_row(
-                            rows[i],
-                            row_index=i,
-                            reason=f"Constraint violation: {exc.orig}",
-                        )
-            else:
-                # Batch fast path committed every row.
-                written_rows = list(insert_rows)
-        return written_rows
+        del rows, ctx
+        raise RuntimeError("DatabaseSink publication requires the recoverable sink effect coordinator") from None
 
     def flush(self) -> None:
-        """Flush any pending operations.
-
-        No-op for DatabaseSink - durability is guaranteed by auto-commit in write().
-
-        DatabaseSink uses `engine.begin()` context manager which commits the
-        transaction when write() returns. This provides the same durability
-        guarantee as an explicit flush() - all data is committed to the database
-        before this method is called.
-
-        Future enhancement: Hold transaction open between write() and flush()
-        for explicit two-phase durability control.
-        """
+        """No-op: ``commit_effect`` commits its transaction before returning, so there are no pending operations."""
 
     def close(self) -> None:
         """Close database connection."""
         if self._engine is not None:
             self._engine.dispose()
             self._engine = None
-            self._table = None
             self._metadata = None
-            self._table_replaced = False
 
     @classmethod
     def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:

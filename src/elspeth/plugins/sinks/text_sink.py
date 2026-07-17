@@ -3,18 +3,14 @@
 from __future__ import annotations
 
 import codecs
-import hashlib
-import io
 import keyword
-import os
-import tempfile
 from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import IO, Any, Literal
+from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
+from elspeth.contracts import CallType, Determinism, PluginSchema
 from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.freeze import deep_thaw
@@ -97,10 +93,11 @@ class TextSink(BaseSink):
     name = "text"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:74a177bf601b88f1"
+    source_file_hash: str | None = "sha256:b84f2eb34c0f00c1"
     config_model = TextSinkConfig
     supports_resume = True
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    effect_call_type = CallType.FILESYSTEM
     supported_effect_modes = frozenset({"append", "write"})
     supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
 
@@ -136,11 +133,6 @@ class TextSink(BaseSink):
         )
         self.input_schema = self._schema_class
         self.declared_required_fields = self._schema_config.get_effective_required_fields() | {self._field}
-        self._file: IO[bytes] | None = None
-        self._hasher: hashlib._Hash | None = None
-        self._write_target_claimed = False
-        self._reservation_owned = False
-        self._write_has_committed = False
 
     def configure_for_resume(self) -> None:
         """Switch a configured write sink to canonical append mode."""
@@ -178,7 +170,6 @@ class TextSink(BaseSink):
             self._path = predecessor_path
         elif self._mode != "append":
             self._path = resolve_output_collision_path(self._requested_path, self._collision_policy)
-        self._write_target_claimed = True
         return inspect_local_effect(target_path=self._path, request=request)
 
     def prepare_effect(
@@ -261,229 +252,20 @@ class TextSink(BaseSink):
         return reconcile_local_effect(plan)
 
     def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
-        """Write accepted rows as encoded, LF-delimited bytes."""
-        del ctx
-        staged = self._stage_rows(rows)
-        if not staged:
-            return SinkWriteResult(artifact=self._describe_current_or_virtual(), diversions=self._get_diversions())
-
-        if self._mode == "append":
-            artifact = self._append_bytes(staged)
-        else:
-            artifact = self._replace_with_bytes(staged)
-        return SinkWriteResult(artifact=artifact, diversions=self._get_diversions())
-
-    def _stage_rows(self, rows: list[dict[str, Any]]) -> bytes:
-        staged = io.BytesIO()
-        missing = object()
-        for row_index, row in enumerate(rows):
-            value = row.get(self._field, missing)
-            if type(value) is not str:
-                self._divert_row(
-                    row,
-                    row_index=row_index,
-                    reason=f"Text field {self._field!r} must be a string",
-                )
-                continue
-            if "\r" in value or "\n" in value:
-                self._divert_row(
-                    row,
-                    row_index=row_index,
-                    reason="Text values cannot contain CR or LF record separators",
-                )
-                continue
-            try:
-                staged.write((value + "\n").encode(self._encoding))
-            except UnicodeEncodeError:
-                self._divert_row(
-                    row,
-                    row_index=row_index,
-                    reason=f"Text value is not representable in configured codec {self._encoding}",
-                )
-        return staged.getvalue()
-
-    def _describe_current_or_virtual(self) -> ArtifactDescriptor:
-        path = self._path
-        if path.exists():
-            content_hash = self._hash_path(path).hexdigest()
-            size = self._artifact_stat(path).st_size
-        else:
-            content_hash = hashlib.sha256(b"").hexdigest()
-            size = 0
-        return ArtifactDescriptor.for_file(path=str(path), content_hash=content_hash, size_bytes=size)
-
-    def _replace_with_bytes(self, staged: bytes) -> ArtifactDescriptor:
-        self._claim_write_target()
-        temp_fd: int | None = None
-        temp_path: Path | None = None
-        replaced = False
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            base = self._path.read_bytes() if self._write_has_committed else b""
-            temp_fd, temp_name = tempfile.mkstemp(prefix=f".{self._path.name}.", suffix=".tmp", dir=self._path.parent)
-            temp_path = Path(temp_name)
-            stream = os.fdopen(temp_fd, "wb")
-            temp_fd = None  # fdopen transferred ownership to stream.
-            with stream:
-                stream.write(base)
-                stream.write(staged)
-                self._sync_stream(stream)
-
-            candidate_hasher = self._hash_path(temp_path)
-            candidate_stat = self._artifact_stat(temp_path)
-            os.replace(temp_path, self._path)
-            replaced = True
-            self._reservation_owned = False
-            self._write_has_committed = True
-            self._hasher = candidate_hasher
-            self._fsync_parent()
-            return ArtifactDescriptor.for_file(
-                path=str(self._path),
-                content_hash=candidate_hasher.hexdigest(),
-                size_bytes=candidate_stat.st_size,
-            )
-        except BaseException:
-            try:
-                if temp_fd is not None:
-                    os.close(temp_fd)
-                if not replaced and temp_path is not None and temp_path.exists():
-                    temp_path.unlink()
-            finally:
-                if not replaced:
-                    self._remove_owned_reservation()
-            raise
-
-    def _append_bytes(self, staged: bytes) -> ArtifactDescriptor:
-        self._ensure_append_open()
-        handle = self._file
-        if handle is None or self._hasher is None:
-            raise RuntimeError("TextSink append handle was not initialized")
-        handle.flush()
-        offset = os.fstat(handle.fileno()).st_size
-        try:
-            handle.write(staged)
-            self._sync_stream(handle)
-            candidate_hasher = self._extend_hasher(staged)
-            candidate_stat = self._artifact_stat(self._path)
-        except BaseException:
-            try:
-                self._truncate_append(handle, offset)
-            except BaseException:
-                try:
-                    handle.close()
-                finally:
-                    self._file = None
-                    self._hasher = None
-                raise RuntimeError(f"Text append rollback failed at byte offset {offset}") from None
-            handle.close()
-            self._file = None
-            self._hasher = self._hash_path(self._path)
-            raise
-
-        self._hasher = candidate_hasher
-        return ArtifactDescriptor.for_file(
-            path=str(self._path),
-            content_hash=candidate_hasher.hexdigest(),
-            size_bytes=candidate_stat.st_size,
-        )
-
-    def _claim_write_target(self) -> None:
-        if self._write_target_claimed:
-            return
-        self._requested_path.parent.mkdir(parents=True, exist_ok=True)
-        if self._collision_policy is None:
-            self._path = self._requested_path
-        elif self._collision_policy == "fail_if_exists":
-            self._reserve(self._requested_path)
-            self._path = self._requested_path
-        elif self._collision_policy == "auto_increment":
-            self._path = self._reserve_auto_increment()
-        else:
-            raise AssertionError(f"Unexpected write collision policy: {self._collision_policy!r}")
-        self._write_target_claimed = True
-
-    def _reserve(self, path: Path) -> None:
-        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
-        os.close(descriptor)
-        self._reservation_owned = True
-
-    def _reserve_auto_increment(self) -> Path:
-        suffix = "".join(self._requested_path.suffixes)
-        stem = self._requested_path.name[: -len(suffix)] if suffix else self._requested_path.name
-        candidates = (self._requested_path, *(self._requested_path.with_name(f"{stem}-{index}{suffix}") for index in range(1, 10_000)))
-        for candidate in candidates:
-            try:
-                self._reserve(candidate)
-            except FileExistsError:
-                continue
-            return candidate
-        raise FileExistsError(f"No free output path found near {self._requested_path}.")
-
-    def _remove_owned_reservation(self) -> None:
-        if not self._reservation_owned:
-            return
-        try:
-            if self._path.exists() and self._path.stat().st_size == 0:
-                self._path.unlink()
-        finally:
-            self._reservation_owned = False
-            self._write_target_claimed = False
-
-    def _ensure_append_open(self) -> None:
-        if self._file is not None:
-            return
-        validation = self.validate_output_target()
-        if not validation.valid:
-            raise ValueError(f"Existing text output is incompatible: {validation.error_message}")
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._file = open(self._path, "a+b")  # noqa: SIM115 - streaming lifecycle handle
-        self._file.flush()
-        self._hasher = self._hash_path(self._path)
-
-    def _truncate_append(self, handle: IO[bytes], offset: int) -> None:
-        handle.seek(offset)
-        handle.truncate(offset)
-        handle.flush()
-        os.fsync(handle.fileno())
-
-    def _hash_path(self, path: Path) -> hashlib._Hash:
-        hasher = hashlib.sha256()
-        with open(path, "rb") as stream:
-            for chunk in iter(lambda: stream.read(64 * 1024), b""):
-                hasher.update(chunk)
-        return hasher
-
-    def _extend_hasher(self, staged: bytes) -> hashlib._Hash:
-        if self._hasher is None:
-            raise RuntimeError("TextSink hasher was not initialized")
-        candidate = self._hasher.copy()
-        candidate.update(staged)
-        return candidate
-
-    def _sync_stream(self, stream: IO[bytes]) -> None:
-        stream.flush()
-        os.fsync(stream.fileno())
-
-    def _artifact_stat(self, path: Path) -> os.stat_result:
-        return path.stat()
-
-    def _fsync_parent(self) -> None:
-        descriptor = os.open(self._path.parent, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        del rows, ctx
+        raise RuntimeError("TextSink publication requires the recoverable sink effect coordinator") from None
 
     def flush(self) -> None:
-        """Flush and fsync the persistent append handle, when open."""
-        if self._file is not None:
-            self._sync_stream(self._file)
+        """No-op: ``commit_effect`` performs synchronous publication.
+
+        Direct ``write`` publication is forbidden. The recoverable sink-effect
+        coordinator owns inspection, intent recording, synchronous commit, and
+        reconciliation, so there is no independent buffered state to flush.
+        """
+        pass
 
     def close(self) -> None:
-        """Close the persistent append handle; repeated calls are safe."""
-        if self._file is not None:
-            self._file.close()
-            self._file = None
+        """No-op: file handles are opened and closed inside the effect commit path."""
 
     @classmethod
     def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:

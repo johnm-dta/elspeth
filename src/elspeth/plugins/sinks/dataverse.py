@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import time
 import urllib.parse
 from collections.abc import Mapping
 from types import MappingProxyType
@@ -17,10 +16,11 @@ from typing import Any, ClassVar, Literal, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from elspeth.contracts import CallStatus, CallType, Determinism, PluginSchema
+from elspeth.contracts import Determinism, PluginSchema
 from elspeth.contracts.contexts import LifecycleContext, SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
-from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
+from elspeth.contracts.enums import CallType
+from elspeth.contracts.errors import FrameworkBugError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.plugin_assistance import PluginAssistance
@@ -272,12 +272,13 @@ class DataverseSink(BaseSink):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:5a66501c68b516d3"
+    source_file_hash: str | None = "sha256:cf5eb66494366d40"
     determinism = Determinism.EXTERNAL_CALL
     config_model = DataverseSinkConfig
     idempotent = True  # PATCH upsert is idempotent — safe for retries and crash recovery (engine does not yet read this flag)
     supports_resume = False  # Dataverse writes are not locally staged
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    effect_call_type = CallType.HTTP
     supported_effect_modes = frozenset({"upsert"})
     supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
     supports_member_effects = True
@@ -376,7 +377,8 @@ class DataverseSink(BaseSink):
 
         URL-encodes entity name, alternate key name, and key value to prevent
         injection via special characters.
-        key_value is guaranteed str by the isinstance check in write().
+        key_value is guaranteed str by the isinstance checks on the effect paths
+        (_member_effect_material / _validate_member_effect).
         """
         encoded_entity = urllib.parse.quote(self._entity, safe="")
         encoded_key_name = urllib.parse.quote(self._alternate_key, safe="")
@@ -406,7 +408,7 @@ class DataverseSink(BaseSink):
                     # The value is interpolated into the UNQUOTED key position,
                     # so reject any value that isn't a plain record-reference
                     # token before it can change the bind URI's shape. Mirrors
-                    # the offensive alternate_key guard in write(): a structurally
+                    # the offensive alternate_key guard on the effect path: a structurally
                     # unsafe bind value fails clearly at the boundary rather than
                     # producing an ambiguous/injectable outbound payload.
                     bind_value = str(value)
@@ -596,7 +598,7 @@ class DataverseSink(BaseSink):
         try:
             self._client.upsert(url, payload)
         except DataverseClientError as exc:
-            # Mirror write(): only explicitly row-attributable, non-retryable
+            # Only explicitly row-attributable, non-retryable
             # responses divert; batch-integrity/unknown failures still raise so
             # the engine retries or crashes instead of silently dropping rows.
             if not _is_row_attributable_write_error(exc):
@@ -663,179 +665,8 @@ class DataverseSink(BaseSink):
         raise FrameworkBugError("Dataverse reconciliation requires durable member-effect coordination")
 
     def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
-        """Write batch of rows to Dataverse via individual PATCH requests.
-
-        Processes rows serially. On success, returns a single ArtifactDescriptor.
-        On failure, raises on the first failing row (engine retries entire batch,
-        PATCH idempotency makes re-sends safe).
-
-        Args:
-            rows: List of row dicts to upsert
-            ctx: Sink context for audit recording
-
-        Returns:
-            ArtifactDescriptor with batch metadata
-
-        Raises:
-            RuntimeError: If any row fails to upsert
-        """
-        if not rows:
-            return SinkWriteResult(
-                artifact=ArtifactDescriptor(
-                    artifact_type="webhook",
-                    path_or_uri=f"dataverse://{self._entity}@{self._environment_url}",
-                    content_hash=hashlib.sha256(b"").hexdigest(),
-                    size_bytes=0,
-                    metadata=MappingProxyType({"row_count": 0, "entity": self._entity}),
-                )
-            )
-
-        # Client and key field must be set by on_start/__init__
-        assert self._client is not None, "on_start() must be called before write()"
-        assert self._alternate_key_pipeline_field is not None
-
-        # Pre-process ALL rows before making any HTTP calls.  If _map_row or
-        # key validation fails on row N, we must not have already written rows
-        # 1..N-1 — that would leave audit states as FAILED while Dataverse data
-        # was actually modified (partial success = audit inconsistency).
-        # Each entry carries the original row and its index into the input batch
-        # so a per-row write failure can be diverted with correct row_data and
-        # row_index (the executor correlates the diversion back to the row token).
-        prepared: list[tuple[str, dict[str, Any], dict[str, Any], int]] = []
-        for i, row in enumerate(rows):
-            # Tier 2: field_mapping guarantees the field exists. Direct access
-            # — KeyError if absent is an upstream bug.
-            key_value = row[self._alternate_key_pipeline_field]
-
-            # Offensive guard: empty/blank key produces a valid-looking OData
-            # URL (entity(key='')) that Dataverse would accept or reject
-            # ambiguously. Crash here with a clear message instead.
-            if not isinstance(key_value, str) or not key_value.strip():
-                raise ValueError(
-                    f"alternate_key field '{self._alternate_key_pipeline_field}' has "
-                    f"empty or non-string value {key_value!r} — cannot construct "
-                    f"PATCH URL for entity '{self._entity}'"
-                )
-
-            url = self._build_upsert_url(key_value)
-            payload = self._map_row(row)
-            prepared.append((url, payload, row, i))
-
-        # Payloads actually written to Dataverse (excludes per-row diversions).
-        # The content hash and row_count must describe only what we wrote, so an
-        # auditor can independently verify the hash against the Dataverse-side
-        # data — a diverted row was never written and must not appear here.
-        written_payloads: list[dict[str, Any]] = []
-
-        # All pre-processing succeeded — safe to make HTTP calls
-        for url, payload, original_row, row_index in prepared:
-            # Execute upsert with audit recording + telemetry
-            start_time = time.perf_counter()
-            try:
-                response = self._client.upsert(url, payload)
-                latency_ms = (time.perf_counter() - start_time) * 1000
-
-                # Audit first (primacy), then telemetry
-                request_data: dict[str, Any] = {
-                    "method": "PATCH",
-                    "url": url,
-                    "headers": response.request_headers,
-                    "json": payload,
-                }
-                response_data = {"status_code": response.status_code}
-                try:
-                    ctx.record_call(
-                        call_type=CallType.HTTP,
-                        status=CallStatus.SUCCESS,
-                        request_data=request_data,
-                        response_data=response_data,
-                        latency_ms=latency_ms,
-                        provider="dataverse",
-                    )
-                except Exception as exc:
-                    raise AuditIntegrityError(
-                        f"Failed to record successful Dataverse upsert to audit trail "
-                        f"(url={url!r}). "
-                        f"Upsert completed but audit record is missing."
-                    ) from exc
-                written_payloads.append(payload)
-            except DataverseClientError as e:
-                latency_ms = (time.perf_counter() - start_time) * 1000
-
-                # Audit first, then telemetry
-                request_data = {
-                    "method": "PATCH",
-                    "url": url,
-                    "headers": e.request_headers,  # Fingerprinted by client; mirrors the success path
-                    "json": payload,
-                }
-                ctx.record_call(
-                    call_type=CallType.HTTP,
-                    status=CallStatus.ERROR,
-                    request_data=request_data,
-                    error={
-                        "error_type": type(e).__name__,
-                        "message": str(e),
-                        "status_code": e.status_code,
-                        "retryable": e.retryable,
-                        "error_category": e.error_category,
-                    },
-                    latency_ms=latency_ms,
-                    provider="dataverse",
-                )
-                # 401 with retryable=True: reconstruct credential before engine retry
-                if e.status_code == 401 and e.retryable:
-                    assert self._client is not None
-                    self._client.reconstruct_credential(self._auth_config)
-
-                # Classify the failure by structured Dataverse semantics:
-                #
-                #   DIVERT — explicitly row-attributable: this row's payload or
-                #     alternate key is bad and a retry will not help. The row is
-                #     routed to on_write_failure and the batch continues.
-                #
-                #   RAISE — batch-integrity or unknown: authn/authz (401/403),
-                #     rate limit (429), retryable errors, 5xx server errors, and
-                #     generic 4xx protocol/configuration errors. Diverting these
-                #     can silently drop rows from a misconfigured sink.
-                #
-                # Fail safe: a missing/None status_code cannot be attributed to a
-                # single row, so it falls through to RAISE.
-                if _is_row_attributable_write_error(e):
-                    self._divert_row(
-                        original_row,
-                        row_index=row_index,
-                        reason=(f"Dataverse PATCH failed with non-retryable HTTP {e.status_code}: {e}"),
-                    )
-                    continue
-
-                # Re-raise original error — engine sink executor records
-                # exception_type for audit diagnostics, and DataverseClientError
-                # preserves the retryable/status_code metadata in the chain.
-                raise
-
-        # Compute the content hash over only the payloads we actually wrote to
-        # Dataverse, so the hash verifies against the Dataverse-side data.
-        canonical_payload = canonical_json(written_payloads).encode("utf-8")
-        content_hash = hashlib.sha256(canonical_payload).hexdigest()
-        total_size = len(canonical_payload)
-
-        return SinkWriteResult(
-            artifact=ArtifactDescriptor(
-                artifact_type="webhook",
-                path_or_uri=f"dataverse://{self._entity}@{self._environment_url}",
-                content_hash=content_hash,
-                size_bytes=total_size,
-                metadata=MappingProxyType(
-                    {
-                        "row_count": len(written_payloads),
-                        "entity": self._entity,
-                        "mode": self._mode,
-                    }
-                ),
-            ),
-            diversions=self._get_diversions(),
-        )
+        del rows, ctx
+        raise RuntimeError("DataverseSink publication requires the recoverable sink effect coordinator") from None
 
     def flush(self) -> None:
         """No-op — Dataverse writes are immediate, no local staging buffer."""

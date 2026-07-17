@@ -18,7 +18,6 @@ from elspeth.plugins.sinks.database_sink import DatabaseSink
 from elspeth.plugins.sinks.json_sink import JSONSink
 from elspeth.plugins.sinks.text_sink import TextSink
 from tests.fixtures.base_classes import inject_write_failure
-from tests.fixtures.factories import make_operation_context
 
 
 class TestTextSinkResumeSchemaValidation:
@@ -186,51 +185,6 @@ class TestDatabaseSinkResumeSchemaValidation:
 
         assert validation.valid is True
         sink.close()
-
-    def test_resume_validate_then_write_succeeds(self, tmp_path: Path):
-        """After validate_output_target(), first write should not fail initialization."""
-        from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, text
-
-        db_path = tmp_path / "test.db"
-        url = f"sqlite:///{db_path}"
-
-        # Create table with correct columns for resume validation.
-        engine = create_engine(url)
-        metadata = MetaData()
-        Table("output_data", metadata, Column("id", Integer), Column("name", String))
-        metadata.create_all(engine)
-        engine.dispose()
-
-        sink = inject_write_failure(
-            DatabaseSink(
-                {
-                    "url": url,
-                    "table": "output_data",
-                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                }
-            )
-        )
-
-        sink.configure_for_resume()
-        validation = sink.validate_output_target()
-        assert validation.valid is True
-
-        # Regression check: write must not raise RuntimeError after validation.
-        # Sink context requires landscape + operation_id for record_call() audit trail.
-        ctx = make_operation_context(
-            node_id="sink",
-            plugin_name="database_sink",
-            node_type="SINK",
-            operation_type="sink_write",
-        )
-        sink.write([{"id": 1, "name": "alice"}], ctx)
-        sink.close()
-
-        engine = create_engine(url)
-        with engine.connect() as conn:
-            count = conn.execute(text("SELECT COUNT(*) FROM output_data")).scalar_one()
-        engine.dispose()
-        assert count == 1
 
 
 class TestJSONLSinkResumeSchemaValidation:

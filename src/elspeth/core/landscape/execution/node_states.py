@@ -417,6 +417,14 @@ class NodeStateRepository:
         The method preserves the single-row immutability and post-write loader
         validation contract from ``complete_node_state`` while avoiding one
         transaction per sink token in high-volume writes.
+
+        PostgreSQL prelocks the unique state set in ascending
+        ``_STATE_ID_CHUNK_SIZE`` chunks: chunk N's ids all sort before chunk
+        N+1's, so overlapping bulk callers keep one global acquisition order
+        while every statement stays under dialect bound-parameter ceilings.
+        Non-PostgreSQL dialects skip the prelock entirely — SQLite ignores
+        ``FOR UPDATE`` because ``BEGIN IMMEDIATE`` already owns the file's
+        write slot for the complete boundary.
         """
         if not completions:
             return
@@ -462,12 +470,15 @@ class NodeStateRepository:
         )
 
         def _complete_on(active_conn: Connection) -> list[Any]:
-            for state_id in lock_state_ids:
-                active_conn.execute(
-                    select(node_states_table.c.state_id)
-                    .where(node_states_table.c.state_id == state_id)
-                    .with_for_update(of=node_states_table)
-                ).fetchall()
+            if active_conn.dialect.name == "postgresql":
+                for i in range(0, len(lock_state_ids), _STATE_ID_CHUNK_SIZE):
+                    lock_chunk = lock_state_ids[i : i + _STATE_ID_CHUNK_SIZE]
+                    active_conn.execute(
+                        select(node_states_table.c.state_id)
+                        .where(node_states_table.c.state_id.in_(lock_chunk))
+                        .order_by(node_states_table.c.state_id)
+                        .with_for_update(of=node_states_table)
+                    ).fetchall()
 
             before_rows: list[Any] = []
             for i in range(0, len(state_ids), _STATE_ID_CHUNK_SIZE):
@@ -726,16 +737,13 @@ class NodeStateRepository:
         Returns:
             RoutingEvent model
         """
-        run_id = self._routing_event_run_id(
-            state_id=state_id,
-            edge_id=edge_id,
-            owner="record_routing_event",
-        )
         event_id_was_supplied = event_id is not None
         routing_group_id_was_supplied = routing_group_id is not None
         routing_group_id = routing_group_id or self._default_routing_group_id(state_id)
         event_id = event_id or self._default_routing_event_id(routing_group_id, ordinal)
         reason_hash = stable_hash(reason) if reason is not None else None
+        if reason is not None and self._payload_store is not None:
+            self._assert_routing_targets_recordable(state_id=state_id, edge_ids=(edge_id,), owner="record_routing_event")
         materialized_reason_ref = self._materialize_routing_reason_before_insert(
             reason=reason,
             reason_hash=reason_hash,
@@ -757,7 +765,6 @@ class NodeStateRepository:
 
         return self._insert_or_load_routing_decision(
             [event],
-            run_ids=[run_id],
             owner="record_routing_event",
             enforce_event_ids=event_id_was_supplied,
             enforce_group_id=routing_group_id_was_supplied,
@@ -786,16 +793,14 @@ class NodeStateRepository:
         if not routes:
             return []
 
-        route_run_ids = [
-            self._routing_event_run_id(
-                state_id=state_id,
-                edge_id=route.edge_id,
-                owner="record_routing_events",
-            )
-            for route in routes
-        ]
         routing_group_id = self._default_routing_group_id(state_id)
         reason_hash = stable_hash(reason) if reason is not None else None
+        if reason is not None and self._payload_store is not None:
+            self._assert_routing_targets_recordable(
+                state_id=state_id,
+                edge_ids=tuple(route.edge_id for route in routes),
+                owner="record_routing_events",
+            )
         reason_ref = self._materialize_routing_reason_before_insert(
             reason=reason,
             reason_hash=reason_hash,
@@ -818,7 +823,6 @@ class NodeStateRepository:
         ]
         return self._insert_or_load_routing_decision(
             events,
-            run_ids=route_run_ids,
             owner="record_routing_events",
             enforce_event_ids=False,
             enforce_group_id=False,
@@ -830,7 +834,7 @@ class NodeStateRepository:
         state_id: str,
         edge_id: str,
         owner: str,
-        conn: Connection | None = None,
+        conn: Connection,
     ) -> str:
         """Return the shared run_id for a routing state/edge pair or reject."""
         query = (
@@ -841,12 +845,44 @@ class NodeStateRepository:
             .select_from(node_states_table.join(edges_table, edges_table.c.edge_id == edge_id))
             .where(node_states_table.c.state_id == state_id)
         )
-        row = conn.execute(query).fetchone() if conn is not None else self._ops.execute_fetchone(query)
+        row = conn.execute(query).fetchone()
         if row is None:
             raise LandscapeRecordError(f"{owner} requires existing state_id={state_id!r} and edge_id={edge_id!r} in the same run")
         if row.state_run_id != row.edge_run_id:
             raise LandscapeRecordError(f"{owner} requires state_id={state_id!r} and edge_id={edge_id!r} to belong to the same run")
         return str(row.state_run_id)
+
+    def _assert_routing_targets_recordable(
+        self,
+        *,
+        state_id: str,
+        edge_ids: Sequence[str],
+        owner: str,
+    ) -> None:
+        """Reject a doomed decision before its reason bytes reach the payload store.
+
+        The write transaction re-derives every state/edge run pairing
+        authoritatively; this single pre-transaction read exists only so a
+        decision that can never insert does not first leak an orphaned reason
+        blob into the payload store.
+        """
+        unique_edge_ids = sorted(set(edge_ids))
+        rows = self._ops.execute_fetchall(
+            select(
+                edges_table.c.edge_id,
+                edges_table.c.run_id.label("edge_run_id"),
+                node_states_table.c.run_id.label("state_run_id"),
+            )
+            .select_from(node_states_table.join(edges_table, edges_table.c.edge_id.in_(unique_edge_ids)))
+            .where(node_states_table.c.state_id == state_id)
+        )
+        found = {str(row.edge_id): row for row in rows}
+        for edge_id in unique_edge_ids:
+            row = found.get(edge_id)
+            if row is None:
+                raise LandscapeRecordError(f"{owner} requires existing state_id={state_id!r} and edge_id={edge_id!r} in the same run")
+            if row.state_run_id != row.edge_run_id:
+                raise LandscapeRecordError(f"{owner} requires state_id={state_id!r} and edge_id={edge_id!r} to belong to the same run")
 
     @staticmethod
     def _default_routing_group_id(state_id: str) -> str:
@@ -954,7 +990,7 @@ class NodeStateRepository:
             return
         if conn.dialect.name == "postgresql":
             conn.exec_driver_sql(
-                "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
+                "SELECT pg_catalog.pg_advisory_xact_lock(%s, pg_catalog.hashtext(%s))",
                 (ELSPETH_ROUTING_GROUP_LOCK_CLASSID, routing_group_id),
             )
             return
@@ -1043,7 +1079,6 @@ class NodeStateRepository:
         self,
         events: list[RoutingEvent],
         *,
-        run_ids: list[str],
         owner: str,
         enforce_event_ids: bool,
         enforce_group_id: bool,
@@ -1055,7 +1090,8 @@ class NodeStateRepository:
             with self._db.write_connection() as conn:
                 self._acquire_routing_group_authority(conn, routing_group_id=routing_group_id)
                 locked_run_id = self._lock_routing_state(conn, state_id=state_id, owner=owner)
-                for event, expected_run_id in zip(events, run_ids, strict=True):
+                run_ids: list[str] = []
+                for event in events:
                     if event.state_id != state_id or event.routing_group_id != routing_group_id:
                         raise AuditIntegrityError(f"{owner} attempted to write a mixed routing decision")
                     durable_run_id = self._routing_event_run_id(
@@ -1064,10 +1100,11 @@ class NodeStateRepository:
                         owner=owner,
                         conn=conn,
                     )
-                    if durable_run_id != locked_run_id or durable_run_id != expected_run_id:
+                    if durable_run_id != locked_run_id:
                         raise LandscapeRecordError(
                             f"{owner} requires state_id={state_id!r} and edge_id={event.edge_id!r} to remain in the same run"
                         )
+                    run_ids.append(durable_run_id)
 
                 existing = list(conn.execute(self._routing_state_decision_query(state_id)).fetchall())
                 if existing:

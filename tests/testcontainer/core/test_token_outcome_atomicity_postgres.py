@@ -301,15 +301,14 @@ def test_bulk_state_completion_lock_order_is_sorted_across_distinct_postgres_bac
     first_lock_acquired = {name: threading.Event() for name in ("first", "second")}
     release_first = threading.Event()
     backend_pids: dict[str, int] = {}
-    lock_orders: dict[str, list[str]] = {"first": [], "second": []}
+    lock_orders: dict[str, list[tuple[str, ...]]] = {"first": [], "second": []}
 
-    def locked_state_id(statement: str, parameters: Any) -> str | None:
+    def locked_state_ids(statement: str, parameters: Any) -> tuple[str, ...]:
         if "FROM node_states" not in statement or "FOR UPDATE" not in statement.upper():
-            return None
+            return ()
         if not isinstance(parameters, dict):
-            return None
-        matches = [value for value in parameters.values() if value in target_state_ids]
-        return str(matches[0]) if len(matches) == 1 else None
+            return ()
+        return tuple(str(value) for value in parameters.values() if value in target_state_ids)
 
     listeners: list[tuple[Any, str, Any]] = []
 
@@ -322,7 +321,7 @@ def test_bulk_state_completion_lock_order_is_sorted_across_distinct_postgres_bac
             _context: Any,
             _executemany: bool,
         ) -> None:
-            if locked_state_id(statement, parameters) is None:
+            if not locked_state_ids(statement, parameters):
                 return
             driver_connection = conn.connection.driver_connection
             backend_pids.setdefault(name, driver_connection.info.backend_pid)
@@ -336,14 +335,14 @@ def test_bulk_state_completion_lock_order_is_sorted_across_distinct_postgres_bac
             _context: Any,
             _executemany: bool,
         ) -> None:
-            state_id = locked_state_id(statement, parameters)
-            if state_id is None:
+            state_ids = locked_state_ids(statement, parameters)
+            if not state_ids:
                 return
-            lock_orders[name].append(state_id)
+            lock_orders[name].append(state_ids)
             if len(lock_orders[name]) == 1:
                 first_lock_acquired[name].set()
                 if name == "first":
-                    assert release_first.wait(timeout=5), "first contender was not released after acquiring its first state lock"
+                    assert release_first.wait(timeout=5), "first contender was not released after acquiring its state locks"
 
         event.listen(db.engine, "before_cursor_execute", before_cursor_execute)
         event.listen(db.engine, "after_cursor_execute", after_cursor_execute)
@@ -406,7 +405,7 @@ def test_bulk_state_completion_lock_order_is_sorted_across_distinct_postgres_bac
     assert isinstance(results[1], LandscapeRecordError)
     assert "already terminal" in str(results[1])
     assert "40P01" not in str(results[1])
-    assert lock_orders == {"first": list(expected_order), "second": list(expected_order)}
+    assert lock_orders == {"first": [expected_order], "second": [expected_order]}
 
     with first_db.read_only_connection() as conn:
         terminal_rows = conn.execute(
@@ -450,3 +449,34 @@ def test_postgres_outcome_dependency_lock_chunks_large_flushes(
     assert [len(chunk) for chunk in chunks] == [500, 500, 200]
     flattened = [token_id for chunk in chunks for token_id in chunk]
     assert flattened == sorted(ref.token_id for ref in refs)
+
+
+def test_postgres_bulk_state_completion_prelock_chunks_large_batches(
+    postgres_factory: tuple[LandscapeDB, RecorderFactory],
+) -> None:
+    """A 1200-state bulk completion prelocks in ascending 500-id chunks: every
+    FOR UPDATE statement stays under the dialect bound-parameter ceilings and
+    the concatenated chunk ids form one globally ascending acquisition order,
+    so chunking cannot reintroduce a lock-order inversion."""
+    db, factory = postgres_factory
+    completions = tuple((f"bulk-chunk-state-{index:05d}", {"value": index}, 1.0) for index in range(1200))
+    chunks: list[list[str]] = []
+
+    with db.engine.begin() as conn:
+        original_execute = conn.execute
+
+        def spy(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+            if getattr(stmt, "_for_update_arg", None) is not None:
+                compiled = stmt.compile(dialect=conn.dialect)
+                chunk_ids = [value for value in compiled.params.values() if isinstance(value, (list, tuple))]
+                assert len(chunk_ids) == 1
+                chunks.append([str(state_id) for state_id in chunk_ids[0]])
+            return original_execute(stmt, *args, **kwargs)
+
+        conn.execute = spy  # type: ignore[method-assign]
+        with pytest.raises(LandscapeRecordError, match="target rows do not exist"):
+            factory.execution.complete_node_states_completed_many(completions, conn=conn)
+
+    assert [len(chunk) for chunk in chunks] == [500, 500, 200]
+    flattened = [state_id for chunk in chunks for state_id in chunk]
+    assert flattened == sorted(state_id for state_id, _output_data, _duration_ms in completions)

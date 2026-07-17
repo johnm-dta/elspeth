@@ -363,11 +363,16 @@ class TestCompleteNodeStateCrashPaths:
         assert sorted(observed_select_sizes) == [1, 1, 500, 500]
 
     @pytest.mark.parametrize("caller_owns_connection", [False, True], ids=["repository-owned", "caller-owned"])
-    def test_complete_node_states_completed_many_prelocks_unique_states_in_sorted_order(
+    def test_complete_node_states_completed_many_skips_prelock_on_sqlite(
         self,
         caller_owns_connection: bool,
     ) -> None:
-        """Bulk completion locks the whole unique state set before reading or updating."""
+        """SQLite bulk completion must not issue the no-op FOR UPDATE prelock.
+
+        ``BEGIN IMMEDIATE`` already owns the file's write slot, so the prelock
+        locks nothing there; batch atomicity (rowcount mismatch rolls the whole
+        completion back) must hold without it.
+        """
         db, repo, fac, tok = _make_repo_with_token()
         fac.data_flow.create_row(
             "run-1",
@@ -394,9 +399,7 @@ class TestCompleteNodeStateCrashPaths:
             def observed_execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
                 if getattr(stmt, "is_select", False) and "FROM node_states" in str(stmt):
                     if getattr(stmt, "_for_update_arg", None) is not None:
-                        compiled = stmt.compile(dialect=conn.dialect)
-                        locked_state_id = next(value for name, value in compiled.params.items() if name.startswith("state_id"))
-                        events.append(("lock", str(locked_state_id)))
+                        events.append(("lock", None))
                     else:
                         events.append(("read", None))
                 elif getattr(stmt, "is_update", False) and stmt.table is node_states_table:
@@ -424,9 +427,8 @@ class TestCompleteNodeStateCrashPaths:
             with pytest.raises(LandscapeRecordError, match="affected 2 rows for 3 states"):
                 repo.complete_node_states_completed_many(completions)
 
-        assert events[:3] == [("lock", "state-a"), ("lock", "state-b"), ("read", None)]
-        assert events.count(("lock", "state-a")) == 1
-        assert events.count(("lock", "state-b")) == 1
+        assert ("lock", None) not in events
+        assert events[0] == ("read", None)
         with db.read_only_connection() as conn:
             statuses = conn.execute(
                 select(node_states_table.c.state_id, node_states_table.c.status)
@@ -1881,6 +1883,97 @@ class TestRecordRoutingEvent:
         state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
         events = repo.record_routing_events(state.state_id, [])
         assert events == []
+
+    def test_record_routing_event_without_reason_reads_run_id_only_in_transaction(self) -> None:
+        """A reason-free routing event has nothing to guard pre-transaction.
+
+        The write transaction resolves the state/edge run pairing
+        authoritatively under the state lock, so any pre-transaction read is a
+        redundant round trip.
+        """
+        _db, repo, fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        edge = fac.data_flow.register_edge(
+            run_id="run-1",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="continue",
+            mode=RoutingMode.MOVE,
+            edge_id="edge-1",
+        )
+        pre_transaction_reads: list[str] = []
+        original_fetchone = repo._ops.execute_fetchone
+        original_fetchall = repo._ops.execute_fetchall
+
+        def spy_fetchone(query: Any) -> Any:
+            pre_transaction_reads.append("fetchone")
+            return original_fetchone(query)
+
+        def spy_fetchall(query: Any) -> Any:
+            pre_transaction_reads.append("fetchall")
+            return original_fetchall(query)
+
+        repo._ops.execute_fetchone = spy_fetchone  # type: ignore[method-assign]
+        repo._ops.execute_fetchall = spy_fetchall  # type: ignore[method-assign]
+        try:
+            event = repo.record_routing_event(state.state_id, edge.edge_id, RoutingMode.MOVE)
+        finally:
+            repo._ops.execute_fetchone = original_fetchone  # type: ignore[method-assign]
+            repo._ops.execute_fetchall = original_fetchall  # type: ignore[method-assign]
+
+        assert pre_transaction_reads == []
+        assert event.state_id == state.state_id
+        assert event.edge_id == edge.edge_id
+
+    def test_record_routing_events_with_reason_validates_targets_in_one_pre_read(self) -> None:
+        """A reason-bearing fork validates all its edges with one query.
+
+        The pre-transaction read exists only to keep a doomed decision's
+        reason bytes out of the payload store; one batched query covers every
+        route, replacing the old one-read-per-edge loop.
+        """
+        store = _TrackingPayloadStore()
+        _db, repo, fac, tok = _make_repo_with_token(payload_store=store)
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        for label in ("path-a", "path-b"):
+            fac.data_flow.register_edge(
+                run_id="run-1",
+                from_node_id="transform-1",
+                to_node_id="sink-0",
+                label=label,
+                mode=RoutingMode.COPY,
+                edge_id=f"edge-{label}",
+            )
+        pre_transaction_reads: list[str] = []
+        original_fetchone = repo._ops.execute_fetchone
+        original_fetchall = repo._ops.execute_fetchall
+
+        def spy_fetchone(query: Any) -> Any:
+            pre_transaction_reads.append("fetchone")
+            return original_fetchone(query)
+
+        def spy_fetchall(query: Any) -> Any:
+            pre_transaction_reads.append("fetchall")
+            return original_fetchall(query)
+
+        repo._ops.execute_fetchone = spy_fetchone  # type: ignore[method-assign]
+        repo._ops.execute_fetchall = spy_fetchall  # type: ignore[method-assign]
+        try:
+            events = repo.record_routing_events(
+                state.state_id,
+                [
+                    RoutingSpec(edge_id="edge-path-a", mode=RoutingMode.COPY),
+                    RoutingSpec(edge_id="edge-path-b", mode=RoutingMode.COPY),
+                ],
+                reason={"condition": "fork", "result": "true"},
+            )
+        finally:
+            repo._ops.execute_fetchone = original_fetchone  # type: ignore[method-assign]
+            repo._ops.execute_fetchall = original_fetchall  # type: ignore[method-assign]
+
+        assert pre_transaction_reads == ["fetchall"]
+        assert [event.edge_id for event in events] == ["edge-path-a", "edge-path-b"]
+        assert len(store.store_calls) == 1
 
 
 # ---------------------------------------------------------------------------

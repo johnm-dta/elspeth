@@ -199,6 +199,186 @@ def test_unrelated_sqlite_import_is_accepted() -> None:
     assert findings == []
 
 
+def test_dialects_module_import_insert_call_is_rejected() -> None:
+    findings = _analyze(
+        """
+        from sqlalchemy.dialects import sqlite
+
+        def write(conn, table, values):
+            return conn.execute(sqlite.insert(table).values(**values))
+        """
+    )
+
+    assert len(findings) == 1
+    assert findings[0].rule_id == "contract_invariants.portable_sqlite_insert"
+    assert findings[0].line == 5
+
+
+def test_aliased_dialects_module_import_insert_call_is_rejected() -> None:
+    findings = _analyze(
+        """
+        from sqlalchemy.dialects import sqlite as sq
+
+        def write(conn, table, values):
+            return conn.execute(sq.insert(table).values(**values))
+        """
+    )
+
+    assert len(findings) == 1
+    assert findings[0].line == 5
+
+
+def test_dotted_module_import_insert_call_is_rejected() -> None:
+    findings = _analyze(
+        """
+        import sqlalchemy.dialects.sqlite
+
+        def write(conn, table, values):
+            return conn.execute(sqlalchemy.dialects.sqlite.insert(table).values(**values))
+        """
+    )
+
+    assert len(findings) == 1
+    assert findings[0].line == 5
+
+
+def test_aliased_dotted_module_import_insert_call_is_rejected() -> None:
+    findings = _analyze(
+        """
+        import sqlalchemy.dialects.sqlite as sq
+
+        def write(conn, table, values):
+            return conn.execute(sq.insert(table).values(**values))
+        """
+    )
+
+    assert len(findings) == 1
+    assert findings[0].line == 5
+
+
+def test_module_attribute_dispatch_pairing_is_accepted() -> None:
+    findings = _analyze(
+        """
+        from sqlalchemy.dialects import postgresql, sqlite
+
+        def write(conn, table, values):
+            dialect = conn.dialect.name
+            if dialect == "sqlite":
+                stmt = sqlite.insert(table).values(**values)
+            elif dialect == "postgresql":
+                stmt = postgresql.insert(table).values(**values)
+            else:
+                raise NotImplementedError(dialect)
+            return conn.execute(stmt)
+        """
+    )
+
+    assert findings == []
+
+
+def test_symbol_and_module_attribute_pairing_is_accepted() -> None:
+    findings = _analyze(
+        """
+        from sqlalchemy.dialects import sqlite
+        from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+
+        def write(conn, table, values):
+            dialect = conn.dialect.name
+            if dialect == "sqlite":
+                stmt = sqlite.insert(table).values(**values)
+            elif dialect == "postgresql":
+                stmt = postgresql_insert(table).values(**values)
+            else:
+                raise NotImplementedError(dialect)
+            return conn.execute(stmt)
+        """
+    )
+
+    assert findings == []
+
+
+def test_module_attribute_builder_without_postgresql_call_is_rejected() -> None:
+    findings = _analyze(
+        """
+        from sqlalchemy.dialects import postgresql, sqlite
+
+        def write(conn, table, values):
+            dialect = conn.dialect.name
+            if dialect == "sqlite":
+                stmt = sqlite.insert(table).values(**values)
+            elif dialect == "postgresql":
+                stmt = sqlite.insert(table).values(**values)
+            else:
+                raise NotImplementedError(dialect)
+            return conn.execute(stmt)
+        """
+    )
+
+    assert len(findings) == 2
+    assert [finding.line for finding in findings] == [7, 9]
+    assert all("no complete PostgreSQL counterpart" in finding.message for finding in findings)
+
+
+def test_swapped_module_attribute_builders_are_rejected() -> None:
+    findings = _analyze(
+        """
+        from sqlalchemy.dialects import postgresql, sqlite
+
+        def write(conn, table, values):
+            dialect = conn.dialect.name
+            if dialect == "sqlite":
+                stmt = postgresql.insert(table).values(**values)
+            elif dialect == "postgresql":
+                stmt = sqlite.insert(table).values(**values)
+            else:
+                raise NotImplementedError(dialect)
+            return conn.execute(stmt)
+        """
+    )
+
+    assert len(findings) == 2
+    assert [finding.line for finding in findings] == [7, 9]
+    assert "postgresql.insert" in findings[0].message
+    assert "sqlite.insert" in findings[1].message
+
+
+def test_module_import_without_insert_call_is_accepted() -> None:
+    findings = _analyze(
+        """
+        from sqlalchemy.dialects import postgresql, sqlite
+
+        sqlite_dialect = sqlite.dialect()
+        postgresql_dialect = postgresql.dialect()
+        """
+    )
+
+    assert findings == []
+
+
+def test_unrelated_module_alias_insert_call_is_accepted() -> None:
+    findings = _analyze(
+        """
+        from mypkg.dialects import sqlite
+
+        def write(items, value):
+            return sqlite.insert(items, value)
+        """
+    )
+
+    assert findings == []
+
+
+def test_unbound_attribute_insert_call_is_accepted() -> None:
+    findings = _analyze(
+        """
+        def write(items, value):
+            items.insert(0, value)
+        """
+    )
+
+    assert findings == []
+
+
 @pytest.mark.parametrize("relative_path", PORTABLE_DISPATCH_MODULES)
 def test_current_repository_dispatch_modules_are_accepted(relative_path: str) -> None:
     source = (REPO_ROOT / relative_path).read_text(encoding="utf-8")

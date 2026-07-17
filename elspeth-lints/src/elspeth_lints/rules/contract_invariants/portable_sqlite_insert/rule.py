@@ -18,7 +18,7 @@ _SUPPORTED_DIALECTS = frozenset({"sqlite", "postgresql"})
 
 @dataclass(frozen=True, slots=True)
 class PortableSQLiteInsertRule:
-    """Reject SQLite insert imports without an explicit PostgreSQL dispatch."""
+    """Reject SQLite insert usage without an explicit PostgreSQL dispatch."""
 
     id: str = RULE_ID
     scope: RuleScope = RuleScope.INCREMENTAL
@@ -30,15 +30,20 @@ class PortableSQLiteInsertRule:
 
 
 def find_portable_sqlite_insert_findings(tree: ast.AST, file_path: str) -> list[Finding]:
-    """Return findings for unpaired SQLite insert imports and misbound dialect branches."""
+    """Return findings for unpaired SQLite insert usage and misbound dialect branches."""
+    bindings = _import_bindings(tree)
     sqlite_imports = _insert_imports(tree, module=_SQLITE_INSERT_MODULE)
-    if not sqlite_imports:
+    sqlite_module_calls = _insert_module_calls(tree, bindings, module=_SQLITE_INSERT_MODULE)
+    if not sqlite_imports and not sqlite_module_calls:
         return []
 
     postgresql_imports = _insert_imports(tree, module=_POSTGRESQL_INSERT_MODULE)
+    postgresql_module_calls = _insert_module_calls(tree, bindings, module=_POSTGRESQL_INSERT_MODULE)
     compared_dialects = _compared_dialect_names(tree)
-    if not postgresql_imports or not _SUPPORTED_DIALECTS.issubset(compared_dialects):
-        return [_import_finding(file_path=file_path, node=node) for node in sqlite_imports]
+    if (not postgresql_imports and not postgresql_module_calls) or not _SUPPORTED_DIALECTS.issubset(compared_dialects):
+        findings = [_import_finding(file_path=file_path, node=node) for node in sqlite_imports]
+        findings.extend(_module_call_finding(file_path=file_path, node=node) for node in sqlite_module_calls)
+        return sorted(findings, key=lambda finding: (finding.line, finding.column))
 
     builder_dialects = _builder_dialects(sqlite_imports, postgresql_imports)
     aliases = _dialect_name_aliases(tree)
@@ -50,7 +55,7 @@ def find_portable_sqlite_insert_findings(tree: ast.AST, file_path: str) -> list[
             builder_name=builder_name,
             builder_dialect=builder_dialect,
         )
-        for call, branch_dialect, builder_name, builder_dialect in _misbound_builder_calls(tree, aliases, builder_dialects)
+        for call, branch_dialect, builder_name, builder_dialect in _misbound_builder_calls(tree, aliases, builder_dialects, bindings)
     ]
 
 
@@ -60,6 +65,59 @@ def _insert_imports(tree: ast.AST, *, module: str) -> list[ast.ImportFrom]:
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom) and node.module == module and any(alias.name == "insert" for alias in node.names)
     ]
+
+
+def _import_bindings(tree: ast.AST) -> dict[str, str]:
+    """Map each import-bound local name to its dotted target; conflicting rebinds are dropped."""
+    bindings: dict[str, str] = {}
+    conflicted: set[str] = set()
+
+    def bind(name: str, target: str) -> None:
+        if bindings.get(name, target) != target:
+            conflicted.add(name)
+        bindings[name] = target
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname is not None:
+                    bind(alias.asname, alias.name)
+                else:
+                    root = alias.name.partition(".")[0]
+                    bind(root, root)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None and node.level == 0:
+            for alias in node.names:
+                if alias.name != "*":
+                    bind(alias.asname or alias.name, f"{node.module}.{alias.name}")
+    for name in conflicted:
+        del bindings[name]
+    return bindings
+
+
+def _insert_module_calls(tree: ast.AST, bindings: dict[str, str], *, module: str) -> list[ast.Call]:
+    """Return calls that reach ``<module>.insert`` through an imported module binding."""
+    target = f"{module}.insert"
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and _dotted_call_target(node.func, bindings) == target
+    ]
+
+
+def _dotted_call_target(func: ast.Attribute, bindings: dict[str, str]) -> str | None:
+    """Resolve an attribute-chain call target to its import-derived dotted path."""
+    parts: list[str] = []
+    node: ast.expr = func
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    base = bindings.get(node.id)
+    if base is None:
+        return None
+    parts.append(base)
+    return ".".join(reversed(parts))
 
 
 def _compared_dialect_names(tree: ast.AST) -> frozenset[str]:
@@ -119,7 +177,7 @@ def _builder_dialects(sqlite_imports: list[ast.ImportFrom], postgresql_imports: 
 
 
 def _misbound_builder_calls(
-    tree: ast.AST, aliases: frozenset[str], builder_dialects: dict[str, str]
+    tree: ast.AST, aliases: frozenset[str], builder_dialects: dict[str, str], bindings: dict[str, str]
 ) -> list[tuple[ast.Call, str, str, str]]:
     """Return builder calls bound to a dialect branch that executes the other dialect's builder.
 
@@ -138,15 +196,30 @@ def _misbound_builder_calls(
             for stmt in node.orelse:
                 visit(stmt, branch_dialect)
             return
-        if branch_dialect is not None and isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            builder_dialect = builder_dialects.get(node.func.id)
-            if builder_dialect is not None and builder_dialect != branch_dialect:
-                misbound.append((node, branch_dialect, node.func.id, builder_dialect))
+        if branch_dialect is not None and isinstance(node, ast.Call):
+            builder = _call_builder(node, bindings, builder_dialects)
+            if builder is not None:
+                builder_name, builder_dialect = builder
+                if builder_dialect != branch_dialect:
+                    misbound.append((node, branch_dialect, builder_name, builder_dialect))
         for child in ast.iter_child_nodes(node):
             visit(child, branch_dialect)
 
     visit(tree, None)
     return sorted(misbound, key=lambda item: (item[0].lineno, item[0].col_offset))
+
+
+def _call_builder(node: ast.Call, bindings: dict[str, str], builder_dialects: dict[str, str]) -> tuple[str, str] | None:
+    """Return the display name and owning dialect of the insert builder a call invokes, if any."""
+    if isinstance(node.func, ast.Name):
+        dialect = builder_dialects.get(node.func.id)
+        return None if dialect is None else (node.func.id, dialect)
+    if isinstance(node.func, ast.Attribute):
+        dotted = _dotted_call_target(node.func, bindings)
+        for module, dialect in ((_SQLITE_INSERT_MODULE, "sqlite"), (_POSTGRESQL_INSERT_MODULE, "postgresql")):
+            if dotted == f"{module}.insert":
+                return ast.unparse(node.func), dialect
+    return None
 
 
 def _single_dialect_guard(test: ast.expr, aliases: frozenset[str]) -> str | None:
@@ -185,6 +258,17 @@ def _import_finding(*, file_path: str, node: ast.ImportFrom) -> Finding:
         node=node,
         message=(
             "SQLite-specific insert import has no complete PostgreSQL counterpart and explicit "
+            "sqlite/postgresql dialect dispatch in this module."
+        ),
+    )
+
+
+def _module_call_finding(*, file_path: str, node: ast.Call) -> Finding:
+    return _node_finding(
+        file_path=file_path,
+        node=node,
+        message=(
+            "SQLite-specific insert builder call has no complete PostgreSQL counterpart and explicit "
             "sqlite/postgresql dialect dispatch in this module."
         ),
     )

@@ -19,6 +19,6 @@ RULE_METADATA = RuleMetadata(
     cwe=("CWE-754",),
     scope=RuleScope.INCREMENTAL,
     path_filter=r".*\.py$",
-    examples_violation_count=2,
-    examples_clean_count=3,
+    examples_violation_count=3,
+    examples_clean_count=4,
 )

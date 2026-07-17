@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import fields, is_dataclass, replace
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
+import numpy as np
 import pytest
 
 from elspeth.contracts.errors import AuditIntegrityError
@@ -26,6 +28,72 @@ from elspeth.web.composer.pipeline_proposal import (
 _STATE_ID = UUID("00000000-0000-4000-8000-000000000001")
 _INTENT_A = "00000000-0000-4000-8000-00000000000a"
 _INTENT_B = "00000000-0000-4000-8000-00000000000b"
+
+
+class _StrSubclass(str):
+    pass
+
+
+class _IntSubclass(int):
+    pass
+
+
+class _FloatSubclass(float):
+    pass
+
+
+class _ChangingMapping(Mapping[str, object]):
+    """Return one safe snapshot, then expose a non-JSON replacement."""
+
+    def __init__(self) -> None:
+        self._items_calls = 0
+
+    def __getitem__(self, key: str) -> object:
+        if key != "value":
+            raise KeyError(key)
+        return "safe"
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(("value",))
+
+    def __len__(self) -> int:
+        return 1
+
+    def items(self) -> Any:
+        self._items_calls += 1
+        value: object = "safe" if self._items_calls == 1 else np.array([1, 2])
+        return {"value": value}.items()
+
+
+_INVALID_JSON_TREES: tuple[tuple[str, dict[object, object]], ...] = (
+    ("decimal", {"value": Decimal("1.25")}),
+    ("ndarray", {"value": np.array([1, 2])}),
+    ("set", {"value": {1, 2}}),
+    ("tuple", {"value": (1, 2)}),
+    ("opaque", {"value": object()}),
+    ("str-subclass", {"value": _StrSubclass("text")}),
+    ("int-subclass", {"value": _IntSubclass(1)}),
+    ("float-subclass", {"value": _FloatSubclass(1.25)}),
+    ("str-key-subclass", {_StrSubclass("value"): "text"}),
+    ("non-str-key", {1: "text"}),
+    ("nan", {"value": float("nan")}),
+    ("positive-infinity", {"value": float("inf")}),
+    ("negative-infinity", {"value": float("-inf")}),
+    ("outside-jcs-integer-domain", {"value": 2**53}),
+)
+
+_CANONICAL_JSON_COLLISIONS: tuple[
+    tuple[str, dict[str, Any], dict[object, object]],
+    ...,
+] = (
+    ("decimal-string-collision", {"value": "1.25"}, {"value": Decimal("1.25")}),
+    ("ndarray-list-collision", {"value": [1, 2]}, {"value": np.array([1, 2])}),
+    ("tuple-list-collision", {"value": [1, 2]}, {"value": (1, 2)}),
+    ("str-subclass-collision", {"value": "text"}, {"value": _StrSubclass("text")}),
+    ("int-subclass-collision", {"value": 1}, {"value": _IntSubclass(1)}),
+    ("float-subclass-collision", {"value": 1.25}, {"value": _FloatSubclass(1.25)}),
+    ("str-key-subclass-collision", {"value": "text"}, {_StrSubclass("value"): "text"}),
+)
 
 
 def _pipeline() -> dict[str, Any]:
@@ -65,7 +133,7 @@ def _reviewed_facts() -> dict[str, Any]:
 
 def _create_proposal(
     *,
-    pipeline: dict[str, Any] | None = None,
+    pipeline: Mapping[str, Any] | None = None,
     base: AbsentBase | PresentBase | None = None,
     reviewed_facts: dict[str, Any] | None = None,
     surface: PlannerSurface = PlannerSurface.GUIDED_FULL,
@@ -427,3 +495,92 @@ def test_composition_content_hash_exactly_matches_moved_legacy_preimage() -> Non
 def test_proposal_rejects_non_mapping_or_noncanonical_pipeline(pipeline: object) -> None:
     with pytest.raises(AuditIntegrityError):
         _create_proposal(pipeline=pipeline)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "invalid_tree",
+    [tree for _, tree in _INVALID_JSON_TREES],
+    ids=[case_id for case_id, _ in _INVALID_JSON_TREES],
+)
+def test_create_rejects_values_outside_strict_json_tree(invalid_tree: dict[object, object]) -> None:
+    with pytest.raises(AuditIntegrityError, match="pipeline"):
+        _create_proposal(pipeline=invalid_tree)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "invalid_tree",
+    [tree for _, tree in _INVALID_JSON_TREES],
+    ids=[case_id for case_id, _ in _INVALID_JSON_TREES],
+)
+def test_pipeline_draft_hash_rejects_values_outside_strict_json_tree(invalid_tree: dict[object, object]) -> None:
+    with pytest.raises(AuditIntegrityError, match="pipeline"):
+        pipeline_draft_hash(
+            pipeline=invalid_tree,  # type: ignore[arg-type]
+            base=AbsentBase(),
+            reviewed_anchor_hash="a" * 64,
+            surface=PlannerSurface.FREEFORM,
+            repair_count=0,
+            skill_hash="b" * 64,
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_tree",
+    [tree for _, tree in _INVALID_JSON_TREES],
+    ids=[case_id for case_id, _ in _INVALID_JSON_TREES],
+)
+def test_reviewed_anchor_hash_rejects_values_outside_strict_json_tree(invalid_tree: dict[object, object]) -> None:
+    with pytest.raises(AuditIntegrityError, match="reviewed_facts"):
+        reviewed_anchor_hash(invalid_tree)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("valid_pipeline", "invalid_pipeline"),
+    [(valid, invalid) for _, valid, invalid in _CANONICAL_JSON_COLLISIONS],
+    ids=[case_id for case_id, _, _ in _CANONICAL_JSON_COLLISIONS],
+)
+def test_restore_rejects_non_json_values_even_when_they_collide_with_stored_hash(
+    valid_pipeline: dict[str, Any],
+    invalid_pipeline: dict[object, object],
+) -> None:
+    proposal = _create_proposal(pipeline=valid_pipeline)
+    payload = proposal.to_dict()
+    payload["pipeline"] = invalid_pipeline  # type: ignore[typeddict-item]
+
+    with pytest.raises(AuditIntegrityError, match="pipeline"):
+        PipelineProposal.from_dict(payload, reviewed_facts=_reviewed_facts())
+
+
+@pytest.mark.parametrize(
+    ("valid_pipeline", "invalid_pipeline"),
+    [(valid, invalid) for _, valid, invalid in _CANONICAL_JSON_COLLISIONS],
+    ids=[case_id for case_id, _, _ in _CANONICAL_JSON_COLLISIONS],
+)
+def test_direct_construction_rejects_non_json_values_even_when_they_collide_with_draft_hash(
+    valid_pipeline: dict[str, Any],
+    invalid_pipeline: dict[object, object],
+) -> None:
+    proposal = _create_proposal(pipeline=valid_pipeline)
+
+    with pytest.raises(AuditIntegrityError, match="pipeline"):
+        PipelineProposal(
+            pipeline=invalid_pipeline,  # type: ignore[arg-type]
+            draft_hash=proposal.draft_hash,
+            base=proposal.base,
+            reviewed_anchor_hash=proposal.reviewed_anchor_hash,
+            surface=proposal.surface,
+            repair_count=proposal.repair_count,
+            skill_hash=proposal.skill_hash,
+            covered_deferred_intent_ids=proposal.covered_deferred_intent_ids,
+            supersedes_draft_hash=proposal.supersedes_draft_hash,
+        )
+
+
+def test_create_hashes_and_seals_the_same_validated_mapping_snapshot() -> None:
+    changing_pipeline = _ChangingMapping()
+
+    proposal = _create_proposal(pipeline=changing_pipeline)
+    baseline = _create_proposal(pipeline={"value": "safe"})
+
+    assert proposal.draft_hash == baseline.draft_hash
+    assert deep_thaw(proposal.pipeline) == {"value": "safe"}

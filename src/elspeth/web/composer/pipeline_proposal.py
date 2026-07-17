@@ -14,11 +14,12 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Literal, Self, TypedDict
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Literal, Self, TypedDict, cast
 from uuid import UUID
 
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.contracts.freeze import deep_freeze, deep_thaw, freeze_fields
+from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.core.canonical import canonical_json, stable_hash
 
 if TYPE_CHECKING:
@@ -95,6 +96,10 @@ class PipelineProposalData(TypedDict):
     supersedes_draft_hash: str | None
 
 
+class _FrozenJsonArray(tuple[Any, ...]):
+    """Internal marker distinguishing validated arrays from caller tuples."""
+
+
 def _require_hash(value: object, field_name: str, *, optional: bool = False) -> None:
     if optional and value is None:
         return
@@ -126,14 +131,75 @@ def _canonical_uuid_text(value: object, field_name: str) -> str:
     return value
 
 
-def _validate_canonical_mapping(value: object, field_name: str) -> Mapping[str, Any]:
+def _validate_and_freeze_strict_json_value(
+    value: object,
+    field_name: str,
+    *,
+    path: str,
+    active_container_ids: set[int],
+) -> Any:
+    """Validate and detach one strict JSON value in a single recursive pass."""
+    if isinstance(value, Mapping):
+        container_id = id(value)
+        if container_id in active_container_ids:
+            raise AuditIntegrityError(f"{field_name} contains a recursive mapping at {path}")
+        active_container_ids.add(container_id)
+        try:
+            frozen_children: dict[str, Any] = {}
+            for key, child in value.items():
+                if type(key) is not str:
+                    raise AuditIntegrityError(f"{field_name} key at {path} must be an exact str")
+                frozen_children[key] = _validate_and_freeze_strict_json_value(
+                    child,
+                    field_name,
+                    path=f"{path}.{key}",
+                    active_container_ids=active_container_ids,
+                )
+        finally:
+            active_container_ids.remove(container_id)
+        return MappingProxyType(frozen_children)
+
+    if isinstance(value, list | _FrozenJsonArray):
+        container_id = id(value)
+        if container_id in active_container_ids:
+            raise AuditIntegrityError(f"{field_name} contains a recursive list at {path}")
+        active_container_ids.add(container_id)
+        try:
+            frozen_items = _FrozenJsonArray(
+                _validate_and_freeze_strict_json_value(
+                    child,
+                    field_name,
+                    path=f"{path}[{index}]",
+                    active_container_ids=active_container_ids,
+                )
+                for index, child in enumerate(value)
+            )
+        finally:
+            active_container_ids.remove(container_id)
+        return frozen_items
+
+    if value is None or type(value) in {bool, str, int, float}:
+        return value
+
+    raise AuditIntegrityError(
+        f"{field_name} value at {path} must be an exact JSON leaf or a list/mapping container, got {type(value).__name__}"
+    )
+
+
+def _validate_and_freeze_canonical_mapping(value: object, field_name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise AuditIntegrityError(f"{field_name} must be a mapping")
+    frozen = _validate_and_freeze_strict_json_value(
+        value,
+        field_name,
+        path="$",
+        active_container_ids=set(),
+    )
     try:
-        canonical_json(value)
+        canonical_json(frozen)
     except (TypeError, ValueError) as exc:
-        raise AuditIntegrityError(f"{field_name} must contain canonical JSON values") from exc
-    return value
+        raise AuditIntegrityError(f"{field_name} contains a number outside the RFC 8785 JSON domain") from exc
+    return cast(Mapping[str, Any], frozen)
 
 
 def _validate_covered_intent_ids(intent_ids: tuple[str, ...]) -> None:
@@ -149,8 +215,7 @@ def _validate_covered_intent_ids(intent_ids: tuple[str, ...]) -> None:
 
 def reviewed_anchor_hash(reviewed_facts: Mapping[str, Any]) -> str:
     """Hash a detached, recursively immutable snapshot of reviewed facts."""
-    frozen_facts = deep_freeze(reviewed_facts)
-    _validate_canonical_mapping(frozen_facts, "reviewed_facts")
+    frozen_facts = _validate_and_freeze_canonical_mapping(reviewed_facts, "reviewed_facts")
     preimage = {
         "schema": _REVIEWED_ANCHOR_SCHEMA,
         "facts": frozen_facts,
@@ -171,8 +236,7 @@ def pipeline_draft_hash(
     supersedes_draft_hash: str | None = None,
 ) -> str:
     """Hash the complete authority-bearing proposal envelope under v2."""
-    frozen_pipeline = deep_freeze(pipeline)
-    _validate_canonical_mapping(frozen_pipeline, "pipeline")
+    frozen_pipeline = _validate_and_freeze_canonical_mapping(pipeline, "pipeline")
     _require_hash(reviewed_anchor_hash, "reviewed_anchor_hash")
     if type(surface) is not PlannerSurface:
         raise AuditIntegrityError("surface must be PlannerSurface")
@@ -212,8 +276,7 @@ class PipelineProposal:
     supersedes_draft_hash: str | None = None
 
     def __post_init__(self) -> None:
-        freeze_fields(self, "pipeline", "covered_deferred_intent_ids")
-        _validate_canonical_mapping(self.pipeline, "pipeline")
+        frozen_pipeline = _validate_and_freeze_canonical_mapping(self.pipeline, "pipeline")
         _base_to_dict(self.base)
         _require_hash(self.draft_hash, "draft_hash")
         _require_hash(self.reviewed_anchor_hash, "reviewed_anchor_hash")
@@ -226,7 +289,7 @@ class PipelineProposal:
         _require_hash(self.supersedes_draft_hash, "supersedes_draft_hash", optional=True)
 
         expected_draft_hash = pipeline_draft_hash(
-            pipeline=self.pipeline,
+            pipeline=frozen_pipeline,
             base=self.base,
             reviewed_anchor_hash=self.reviewed_anchor_hash,
             surface=self.surface,
@@ -237,6 +300,8 @@ class PipelineProposal:
         )
         if self.draft_hash != expected_draft_hash:
             raise AuditIntegrityError("PipelineProposal draft_hash mismatch")
+        object.__setattr__(self, "pipeline", frozen_pipeline)
+        freeze_fields(self, "covered_deferred_intent_ids")
 
     @classmethod
     def create(
@@ -254,8 +319,7 @@ class PipelineProposal:
         supplied_reviewed_anchor_hash: str | None = None,
     ) -> Self:
         """Construct from reviewed facts, optionally verifying supplied hashes."""
-        frozen_pipeline = deep_freeze(pipeline)
-        _validate_canonical_mapping(frozen_pipeline, "pipeline")
+        frozen_pipeline = _validate_and_freeze_canonical_mapping(pipeline, "pipeline")
         computed_anchor_hash = reviewed_anchor_hash(reviewed_facts)
         if supplied_reviewed_anchor_hash is not None and supplied_reviewed_anchor_hash != computed_anchor_hash:
             raise AuditIntegrityError("PipelineProposal reviewed_anchor_hash mismatch")
@@ -300,7 +364,10 @@ class PipelineProposal:
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any], *, reviewed_facts: Mapping[str, Any]) -> Self:
         """Strictly restore and reverify an envelope against reviewed facts."""
-        if not isinstance(payload, Mapping) or set(payload) != _PROPOSAL_FIELDS:
+        if not isinstance(payload, Mapping):
+            raise AuditIntegrityError("PipelineProposal persisted fields are malformed")
+        payload = _validate_and_freeze_canonical_mapping(payload, "pipeline proposal payload")
+        if set(payload) != _PROPOSAL_FIELDS:
             raise AuditIntegrityError("PipelineProposal persisted fields are malformed")
         _require_hash(payload["draft_hash"], "PipelineProposal draft_hash")
         _require_hash(payload["reviewed_anchor_hash"], "PipelineProposal reviewed_anchor_hash")
@@ -333,7 +400,7 @@ class PipelineProposal:
             raise AuditIntegrityError("PipelineProposal surface is malformed") from exc
 
         raw_covered_ids = payload["covered_deferred_intent_ids"]
-        if type(raw_covered_ids) is not list:
+        if type(raw_covered_ids) is not _FrozenJsonArray:
             raise AuditIntegrityError("PipelineProposal covered_deferred_intent_ids must be a list")
 
         return cls.create(

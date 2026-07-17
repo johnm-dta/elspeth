@@ -33,8 +33,7 @@ GUIDED_SESSION_SCHEMA_VERSION = 8
 class GuidedProposalRef:
     proposal_id: UUID
     draft_hash: str
-    base_state_id: UUID
-    base_composition_content_hash: str
+    base: ProposalBase
     reviewed_anchor_hash: str
     covered_deferred_intent_ids: tuple[str, ...]
     creation_event_schema: Literal["pipeline_proposal_created.v1"]
@@ -57,7 +56,10 @@ constraints),
 `active_edit_target: ComponentTarget | None`. It also stores an optional
 same-session `root_intent_message_id` rather than duplicating the raw initial
 request in composer metadata. It does not embed canonical arguments or another
-graph model.
+graph model. `GuidedProposalRef.base` reuses Plan 02's tagged `AbsentBase |
+PresentBase` union: a new pipeline has an explicit absent base, while a present
+base always carries both state id and composition-content hash. It is never a
+nullable or wildcard base.
 
 - [ ] Preserve current closed decoding, exact types, non-negative counters,
   terminal-state rules, and workflow-profile validation. Reject every

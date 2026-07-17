@@ -12,6 +12,7 @@ import pytest
 import structlog
 from sqlalchemy import text
 
+from elspeth.contracts.advisory_locks import ELSPETH_SESSIONS_LOCK_CLASSID
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.sessions._persist_payload import StatePayload
 from elspeth.web.sessions.service import SessionServiceImpl
@@ -45,6 +46,28 @@ def test_advisory_lock_sqlite_is_noop(service):
     with service._engine.begin() as conn:
         # No raise expected.
         service._acquire_session_advisory_lock(conn, "session_1")
+
+
+def test_advisory_lock_postgres_sql_is_pg_catalog_qualified(service, monkeypatch):
+    """The Postgres branch must emit the two-argument advisory-lock form
+    with every function ``pg_catalog``-qualified: an operator-set
+    ``search_path`` with a writable schema ahead of ``pg_catalog`` could
+    otherwise shadow ``hashtext``/``pg_advisory_xact_lock`` and silently
+    change the locked value (elspeth-09ba2972e2)."""
+    statements: list[tuple[str, tuple[object, ...]]] = []
+
+    class _FakePostgresConnection:
+        def exec_driver_sql(self, statement, parameters):
+            statements.append((statement, parameters))
+
+    monkeypatch.setattr(service._engine.dialect, "name", "postgresql")
+    service._acquire_session_advisory_lock(_FakePostgresConnection(), "session_1")
+    assert statements == [
+        (
+            "SELECT pg_catalog.pg_advisory_xact_lock(%s, pg_catalog.hashtext(%s))",
+            (ELSPETH_SESSIONS_LOCK_CLASSID, "session_1"),
+        )
+    ]
 
 
 def test_session_write_lock_sqlite_is_reentrant(service):

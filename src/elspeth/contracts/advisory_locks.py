@@ -63,3 +63,12 @@ ELSPETH_SCHEMA_INIT_LOCK_CLASSID: int = 0x53434845
 # hashtext(routing_group_id); collisions only over-serialize unrelated
 # groups and cannot weaken the ownership invariant.
 ELSPETH_ROUTING_GROUP_LOCK_CLASSID: int = 0x524F5554
+
+# 0x41455850 = ASCII "AEXP". Used by audit-export snapshot registration
+# (_acquire_signer_lineage_authority in
+# src/elspeth/engine/orchestrator/audit_export_effects.py) to serialize
+# the signer-policy recheck with the registry CAS insert for one export
+# lineage. The second int4 key is hashtext() of the lineage string;
+# collisions only over-serialize unrelated lineages and cannot weaken
+# the registry's insert-once guarantee.
+ELSPETH_AUDIT_EXPORT_LOCK_CLASSID: int = 0x41455850

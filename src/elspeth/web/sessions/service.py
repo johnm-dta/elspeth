@@ -1623,7 +1623,7 @@ class SessionServiceImpl:
             return  # SQLite serialization is owned by _session_write_lock
         if dialect == "postgresql":
             conn.exec_driver_sql(
-                "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
+                "SELECT pg_catalog.pg_advisory_xact_lock(%s, pg_catalog.hashtext(%s))",
                 (ELSPETH_SESSIONS_LOCK_CLASSID, session_id),
             )
             return

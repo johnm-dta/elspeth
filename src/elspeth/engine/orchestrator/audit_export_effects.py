@@ -15,6 +15,7 @@ from tempfile import TemporaryFile
 from typing import Any, BinaryIO, cast
 from uuid import uuid4
 
+from elspeth.contracts.advisory_locks import ELSPETH_AUDIT_EXPORT_LOCK_CLASSID
 from elspeth.contracts.audit import AuditExportSnapshot, AuditExportSnapshotChunk
 from elspeth.contracts.audit_export import (
     AUDIT_EXPORT_DERIVATION_VERSION,
@@ -84,8 +85,8 @@ def _acquire_signer_lineage_authority(connection: Any, key: AuditExportSnapshotR
     if connection.dialect.name == "postgresql":
         lineage = "\x1f".join((key.source_run_id, key.exporter_version, key.serialization_version, key.export_format.value))
         connection.exec_driver_sql(
-            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-            (lineage,),
+            "SELECT pg_catalog.pg_advisory_xact_lock(%s, pg_catalog.hashtext(%s))",
+            (ELSPETH_AUDIT_EXPORT_LOCK_CLASSID, lineage),
         )
         return
     raise RuntimeError(f"unsupported Landscape backend {connection.dialect.name!r}")

@@ -45,6 +45,45 @@ class AuthAuditRepository:
     def __init__(self, ops: DatabaseOps) -> None:
         self._ops = ops
 
+    @staticmethod
+    def _auth_event_values(
+        *,
+        event_type: AuthAuditEventType,
+        outcome: AuthAuditOutcome,
+        provider: AuthProviderType,
+        user_id: str | None,
+        username: str | None,
+        failure_category: str | None,
+        request_id: str | None,
+        client_host: str | None,
+        user_agent: str | None,
+        metadata: Mapping[str, object],
+    ) -> tuple[str, dict[str, object]]:
+        if event_type not in AUTH_AUDIT_EVENT_TYPES:
+            raise AuditIntegrityError(f"Unsupported auth audit event_type: {event_type!r}")
+        if outcome not in AUTH_AUDIT_OUTCOMES:
+            raise AuditIntegrityError(f"Unsupported auth audit outcome: {outcome!r}")
+        if outcome == AUTH_AUDIT_SUCCESS and failure_category is not None:
+            raise AuditIntegrityError("Successful auth audit events must not carry failure_category")
+        if outcome == AUTH_AUDIT_FAILURE and failure_category is None:
+            raise AuditIntegrityError("Failed auth audit events must carry failure_category")
+
+        event_id = generate_id()
+        return event_id, {
+            "event_id": event_id,
+            "occurred_at": now(),
+            "event_type": event_type,
+            "outcome": outcome,
+            "provider": provider,
+            "user_id": _bounded_principal(user_id),
+            "username": _bounded_principal(username),
+            "failure_category": failure_category,
+            "request_id": request_id,
+            "client_host": client_host,
+            "user_agent": user_agent,
+            "metadata_json": canonical_json(metadata),
+        }
+
     def record_auth_event(
         self,
         *,
@@ -60,34 +99,66 @@ class AuthAuditRepository:
         metadata: Mapping[str, object],
     ) -> str:
         """Record an auth event synchronously before the HTTP response is sent."""
-        if event_type not in AUTH_AUDIT_EVENT_TYPES:
-            raise AuditIntegrityError(f"Unsupported auth audit event_type: {event_type!r}")
-        if outcome not in AUTH_AUDIT_OUTCOMES:
-            raise AuditIntegrityError(f"Unsupported auth audit outcome: {outcome!r}")
-        if outcome == AUTH_AUDIT_SUCCESS and failure_category is not None:
-            raise AuditIntegrityError("Successful auth audit events must not carry failure_category")
-        if outcome == AUTH_AUDIT_FAILURE and failure_category is None:
-            raise AuditIntegrityError("Failed auth audit events must carry failure_category")
-
-        event_id = generate_id()
+        event_id, values = self._auth_event_values(
+            event_type=event_type,
+            outcome=outcome,
+            provider=provider,
+            user_id=user_id,
+            username=username,
+            failure_category=failure_category,
+            request_id=request_id,
+            client_host=client_host,
+            user_agent=user_agent,
+            metadata=metadata,
+        )
         self._ops.execute_insert(
-            auth_events_table.insert().values(
-                event_id=event_id,
-                occurred_at=now(),
-                event_type=event_type,
-                outcome=outcome,
-                provider=provider,
-                user_id=_bounded_principal(user_id),
-                username=_bounded_principal(username),
-                failure_category=failure_category,
-                request_id=request_id,
-                client_host=client_host,
-                user_agent=user_agent,
-                metadata_json=canonical_json(metadata),
-            ),
+            auth_events_table.insert().values(**values),
             context=f"record_auth_event event_type={event_type} outcome={outcome}",
         )
         return event_id
+
+    def record_login_success_and_token_issued(
+        self,
+        *,
+        provider: AuthProviderType,
+        user_id: str,
+        username: str,
+        request_id: str | None,
+        client_host: str | None,
+        user_agent: str | None,
+        login_metadata: Mapping[str, object],
+        token_metadata: Mapping[str, object],
+    ) -> tuple[str, str]:
+        """Record successful login and token issuance in one transaction."""
+        login_event_id, login_values = self._auth_event_values(
+            event_type="login",
+            outcome=AUTH_AUDIT_SUCCESS,
+            provider=provider,
+            user_id=user_id,
+            username=username,
+            failure_category=None,
+            request_id=request_id,
+            client_host=client_host,
+            user_agent=user_agent,
+            metadata=login_metadata,
+        )
+        token_event_id, token_values = self._auth_event_values(
+            event_type="token_issued",
+            outcome=AUTH_AUDIT_SUCCESS,
+            provider=provider,
+            user_id=user_id,
+            username=username,
+            failure_category=None,
+            request_id=request_id,
+            client_host=client_host,
+            user_agent=user_agent,
+            metadata=token_metadata,
+        )
+        self._ops.execute_insert(
+            auth_events_table.insert().values([login_values, token_values]),
+            context="record_login_success_and_token_issued",
+        )
+        return login_event_id, token_event_id
 
     def record_login_outcome(
         self,

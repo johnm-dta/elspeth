@@ -10,6 +10,7 @@ Covers all branches exhaustively per the spec:
 from __future__ import annotations
 
 import os
+import urllib.parse
 from unittest.mock import patch
 
 import pytest
@@ -199,6 +200,25 @@ class TestFilterResponseHeaders:
         result = filter_response_headers(headers)
         assert result == headers
 
+    def test_sanitizes_credential_bearing_location_header(self) -> None:
+        """Redirect targets are URLs, so Location cannot bypass URL fingerprinting."""
+        env = dict(os.environ)
+        env["ELSPETH_FINGERPRINT_KEY"] = "test-key-for-location-fingerprinting"
+        env.pop("ELSPETH_ALLOW_RAW_SECRETS", None)
+        location = "https://o'connor:password@download.example.com/blob?token=!!!!&view=summary#access_token=FRAGMENT_SECRET"
+
+        with patch.dict(os.environ, env, clear=True):
+            result = filter_response_headers({"Location": location})
+
+        persisted = result["Location"]
+        assert "download.example.com/blob" in persisted
+        assert "view=summary" in persisted
+        assert "token=" in persisted
+        assert "o'connor" not in persisted
+        assert "password" not in persisted
+        assert "!!!!" not in persisted
+        assert "FRAGMENT_SECRET" not in persisted
+
 
 class TestFingerprintQueryBounds:
     """Bounds for query redaction at external URL/params boundaries."""
@@ -253,3 +273,23 @@ class TestFingerprintQueryBounds:
         assert result == "https://api.example.com/search?__elspeth_query_redacted=too_many_fields"
         fp.assert_not_called()
         assert "S" * 128 not in result
+
+    def test_fingerprint_url_removes_userinfo_and_fragment(self) -> None:
+        """Persisted audit URLs must not retain authority credentials or fragments."""
+        env = dict(os.environ)
+        env["ELSPETH_FINGERPRINT_KEY"] = "test-key-for-fingerprinting"
+        env.pop("ELSPETH_ALLOW_RAW_SECRETS", None)
+
+        with patch.dict(os.environ, env, clear=True):
+            result = fingerprint_url("https://alice:password@example.com:8443/data?token=SECRET&view=full#access_token=FRAGMENT_SECRET")
+
+        parsed = urllib.parse.urlsplit(result)
+        assert parsed.username is None
+        assert parsed.password is None
+        assert parsed.netloc == "example.com:8443"
+        assert parsed.fragment == ""
+        assert urllib.parse.parse_qs(parsed.query)["view"] == ["full"]
+        assert urllib.parse.parse_qs(parsed.query)["token"][0].startswith("<fingerprint:")
+        assert "password" not in result
+        assert "SECRET" not in result
+        assert "FRAGMENT_SECRET" not in result

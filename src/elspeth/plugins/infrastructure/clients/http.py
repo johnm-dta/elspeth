@@ -7,6 +7,7 @@ to prevent DNS rebinding attacks. See core/security/web.py for details.
 from __future__ import annotations
 
 import base64
+import re
 import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -44,6 +45,24 @@ from elspeth.plugins.infrastructure.clients.fingerprinting import (
 from elspeth.plugins.infrastructure.clients.json_utils import parse_json_strict as _parse_json_strict
 
 logger = structlog.get_logger(__name__)
+
+_HTTP_URL_IN_TEXT = re.compile(r"https?://\S+", re.IGNORECASE)
+
+
+def _sanitize_http_error_message(message: str) -> str:
+    """Fingerprint URL candidates before an HTTP error enters the audit trail."""
+
+    def sanitize_match(match: re.Match[str]) -> str:
+        candidate = match.group(0)
+        try:
+            return _fingerprint_url(candidate)
+        except (ValueError, UnicodeError, contract_errors.FrameworkBugError):
+            # Audit persistence must neither leak an unparseable URL nor mask
+            # the original transport exception with a sanitization failure.
+            return "<redacted-http-url>"
+
+    return _HTTP_URL_IN_TEXT.sub(sanitize_match, message)
+
 
 if TYPE_CHECKING:
     from elspeth.contracts import Call
@@ -155,6 +174,36 @@ class AuditedHTTPClient(AuditedClientBase):
 
     def _filter_response_headers(self, headers: dict[str, str]) -> dict[str, str]:
         return _filter_response_headers(headers)
+
+    def _record_call(
+        self,
+        *,
+        call_index: int,
+        call_type: CallType,
+        status: CallStatus,
+        request_data: CallPayload,
+        response_data: CallPayload | None = None,
+        error: CallPayload | None = None,
+        latency_ms: float | None = None,
+        resolved_prompt_template_hash: str | None = None,
+    ) -> Call:
+        """Sanitize HTTP error URLs at the shared audit persistence boundary."""
+        if isinstance(error, HTTPCallError):
+            error = HTTPCallError(
+                type=error.type,
+                message=_sanitize_http_error_message(error.message),
+                status_code=error.status_code,
+            )
+        return super()._record_call(
+            call_index=call_index,
+            call_type=call_type,
+            status=status,
+            request_data=request_data,
+            response_data=response_data,
+            error=error,
+            latency_ms=latency_ms,
+            resolved_prompt_template_hash=resolved_prompt_template_hash,
+        )
 
     def _extract_provider(self, url: str) -> str:
         """Extract provider (host) from URL for telemetry.

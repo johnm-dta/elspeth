@@ -1,9 +1,8 @@
-// LLM-provider-schema spec — catalog must surface provider union fields.
+// LLM-provider-schema spec — catalog must surface the operator-profiled
+// public contract without exposing private provider configuration.
 //
 // Targets epic: elspeth-e1ab67e55a
-// Targets sub-issue: elspeth-dcf12c061b (open, P2) — "CatalogServiceImpl.get_schema(
-//   'transform', 'llm') returns only the base LLMConfig schema, omitting required
-//   provider-specific fields such as Azure deployment_name"
+// Targets sub-issue: elspeth-dcf12c061b (open, P2).
 //
 // Phase 7A/7B/7C reshape changed the catalog card layout (new aria labels, no
 // "Use in pipeline" button per OD-C, rewritten schema-preview surface). The
@@ -29,8 +28,8 @@ import { ComposerPage } from "./page-objects/composer-page";
 // the validation-error assertions cannot run.
 const hasStateSeed = false;
 
-test.describe("llm-provider-schema — catalog must surface provider-union fields", () => {
-  test("llm transform schema enumerates Azure and OpenRouter variants", async ({ page }) => {
+test.describe("llm-provider-schema — catalog must enforce the operator-profile contract", () => {
+  test("llm transform schema exposes an operator profile without private provider fields", async ({ page }) => {
     // Seed a session so the composer mounts (the catalog drawer renders on
     // the composer surface; without a session the empty-state shows instead).
     const token = tokenFromStorageState(await page.context().storageState());
@@ -48,23 +47,34 @@ test.describe("llm-provider-schema — catalog must surface provider-union field
 
       // 2. Switch to Transforms tab and expand the llm transform schema.
       await catalog.getByRole("tab", { name: /transforms/i }).click();
+      const schemaResponsePromise = page.waitForResponse(
+        (response) =>
+          response.url().endsWith("/api/catalog/transforms/llm/schema") &&
+          response.ok(),
+      );
       await catalog.getByRole("button", { name: /^schema for llm$/i }).click();
+      const schemaResponse = await schemaResponsePromise;
+      const schema = (await schemaResponse.json()) as {
+        json_schema: {
+          properties: { profile: { enum: string[] } };
+        };
+      };
 
-      // 3. Assert the schema preview surfaces Azure-specific field (deployment_name)
-      //    and OpenRouter-specific field (api_key).
-      const azureVariant = catalog.locator(".plugin-card-variant").filter({ hasText: "provider: azure" });
-      const openRouterVariant = catalog.locator(".plugin-card-variant").filter({ hasText: "provider: openrouter" });
-      await expect(azureVariant).toBeVisible();
-      await expect(openRouterVariant).toBeVisible();
-      await expect(azureVariant.getByText("deployment_name", { exact: true })).toBeVisible();
-      await expect(openRouterVariant.getByText("api_key", { exact: true })).toBeVisible();
+      // 3. The public schema exposes only the operator-owned alias and safe
+      //    authoring fields. Provider bindings and credentials stay private.
+      expect(schema.json_schema.properties.profile.enum).toEqual(["e2e-bedrock"]);
+      await expect(catalog.getByText("profile", { exact: true })).toBeVisible();
+      await expect(catalog.getByText("Operator-approved LLM profile alias", { exact: true })).toBeVisible();
+      for (const privateField of ["provider", "model", "deployment_name", "api_key"]) {
+        await expect(catalog.getByText(privateField, { exact: true })).toHaveCount(0);
+      }
     } finally {
       await deleteSession(ctx, session.id);
       await ctx.dispose();
     }
   });
 
-  test("llm node without provider fields surfaces a Stage-1 error", async ({ page }) => {
+  test("llm node without a profile surfaces a Stage-1 error", async ({ page }) => {
     // Gate first — the add-node-without-driving-LLM affordance doesn't exist
     // post-OD-C. Skip with bug-ID before any UI interaction so the failure
     // is visible in CI output rather than producing a vacuous timeout.
@@ -84,7 +94,7 @@ test.describe("llm-provider-schema — catalog must surface provider-union field
       await page.getByRole("tab", { name: /transforms/i }).click();
       await page.getByText("llm").first().click();
 
-      // 2. Add the llm node to the pipeline without configuring a provider.
+      // 2. Add the llm node to the pipeline without selecting a profile.
       //    "Use in pipeline" was removed per OD-C; the add-node successor
       //    affordance lands with the state-seed work. Replace this section
       //    with the real add-node sequence once the affordance is in place.
@@ -92,8 +102,8 @@ test.describe("llm-provider-schema — catalog must surface provider-union field
       // 3. Assert the validation dot reads "Validation failed".
       await expect(page.getByText(/validation failed/i)).toBeVisible();
 
-      // 4. Assert validation banner mentions a provider-specific field.
-      await expect(page.getByText(/deployment_name|provider/i)).toBeVisible();
+      // 4. Assert validation banner names the missing public profile field.
+      await expect(page.getByText(/profile/i)).toBeVisible();
     } finally {
       await deleteSession(ctx, session.id);
       await ctx.dispose();

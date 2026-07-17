@@ -106,7 +106,7 @@ The web deployment is a source-checkout service:
 - Azure plugin dependency extra when using Azure services: `.[azure]`
 - Uvicorn transport: Unix domain socket at `/run/elspeth/uvicorn.sock`
 - Static frontend build command: `npm run build` from `src/elspeth/web/frontend`
-- Frontend build dependency: Node.js 20.19+ or a newer compatible LTS release
+- Frontend build dependency: Node.js 24.x with npm 11.x
 - Required non-local settings (web service refuses to start without these —
   no Python default):
   - `ELSPETH_WEB__SECRET_KEY` (non-loopback hosts; reject default)
@@ -363,16 +363,16 @@ elspeth_python_packages:
   - python3.12-venv
   - python3.12-dev
 elspeth_node_binary: /usr/bin/node
-# How Node.js 20.19+ gets onto the host. Pick ONE:
+# How Node.js 24.x gets onto the host. Pick ONE:
 #   - elspeth_node_packages populated with apt-installable names
-#     (the apt source must ship Node 20.19+; Ubuntu 22.04 defaults do
+#     (the apt source must ship Node 24.x; Ubuntu defaults do
 #     not). Leave elspeth_install_nodesource_repo at false.
 #   - elspeth_install_nodesource_repo: true
-#     adds the official NodeSource Node 20.x repo before package install.
+#     adds the official NodeSource Node 24.x repo before package install.
 #     Sets elspeth_node_packages to ['nodejs'] if it's still empty.
 #   - Bake Node.js into the VM image and leave both empty; the role's
 #     verify-Node-version assert will accept any pre-installed Node
-#     20.19+ at elspeth_node_binary.
+#     24.x at elspeth_node_binary.
 elspeth_node_packages: []
 elspeth_install_nodesource_repo: false
 elspeth_system_packages:
@@ -785,7 +785,7 @@ auditability of escalations, model-provider dependency).
 
 Use the same role for both Ubuntu releases, but make Python provisioning
 explicit. The frontend lockfile currently includes packages that require
-Node.js 20.19+ or a newer compatible LTS release, so do not rely on the Ubuntu
+Node.js 24.x, so do not rely on the Ubuntu
 `nodejs` package unless your apt source is pinned to a compatible version.
 
 ```yaml
@@ -805,7 +805,7 @@ Node.js 20.19+ or a newer compatible LTS release, so do not rely on the Ubuntu
     - ansible_distribution_version == "22.04"
     - elspeth_python312_apt_repository is defined
 
-- name: Provision NodeSource Node 20.x apt repo (optional)
+- name: Provision NodeSource Node 24.x apt repo (optional)
   when: elspeth_install_nodesource_repo | default(false) | bool
   block:
     - name: Ensure NodeSource apt key directory exists
@@ -845,14 +845,14 @@ Node.js 20.19+ or a newer compatible LTS release, so do not rely on the Ubuntu
       # and accept the risk. The risk-register entry "NodeSource apt
       # key fetched without checksum pin" applies.
 
-    - name: Configure NodeSource apt source for Node 20.x
+    - name: Configure NodeSource apt source for Node 24.x
       ansible.builtin.copy:
         dest: /etc/apt/sources.list.d/nodesource.list
         owner: root
         group: root
         mode: "0644"
         content: |
-          deb [signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_20.x nodistro main
+          deb [signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_24.x nodistro main
 
     - name: Add nodejs to the install list when NodeSource is in use
       ansible.builtin.set_fact:
@@ -888,30 +888,28 @@ Node.js 20.19+ or a newer compatible LTS release, so do not rely on the Ubuntu
     fail_msg: >-
       Node.js was not found at {{ elspeth_node_binary }}
       (exit code {{ elspeth_node_version.rc }}). The frontend bundle
-      build needs Node.js 20.19+. Resolve by one of:
+      build needs Node.js 24.x. Resolve by one of:
         (a) set elspeth_node_packages to a list installable by apt
-            (e.g. ['nodejs'] when your apt source ships Node 20.19+),
+            (e.g. ['nodejs'] when your apt source ships Node 24.x),
         (b) enable elspeth_install_nodesource_repo=true to add the
-            official NodeSource apt repo for Node 20.x (Ubuntu 22.04
-            does NOT ship Node 20.19+ in the default repos),
+            official NodeSource apt repo for Node 24.x,
         (c) bake Node.js into the VM image and set elspeth_node_binary
             to its install path.
 
 - name: Fail if Node.js is too old for the frontend lockfile
   ansible.builtin.assert:
     that:
-      - elspeth_node_version.stdout is match('v(20\\.(1[9]|[2-9][0-9])|2[2-9]\\.|[3-9][0-9]\\.)')
+      - elspeth_node_version.stdout is match('v24\\.')
     fail_msg: >-
       Node.js at {{ elspeth_node_binary }} is
       {{ elspeth_node_version.stdout }}, but the frontend lockfile
-      requires Node.js 20.19+ or a newer compatible LTS. The default
-      Ubuntu 22.04 nodejs package is too old; the default Ubuntu
-      24.04 nodejs package depends on the apt mirror's snapshot.
+      requires Node.js 24.x. The default Ubuntu nodejs package depends
+      on the apt mirror's snapshot and may be too old.
       Resolve by one of:
         (a) point elspeth_node_packages at a newer apt source,
         (b) set elspeth_install_nodesource_repo=true to provision the
-            NodeSource Node 20.x repo,
-        (c) re-bake the VM image with Node.js 20.19+ pre-installed.
+            NodeSource Node 24.x repo,
+        (c) re-bake the VM image with Node.js 24.x pre-installed.
 ```
 
 If your organization does not permit third-party apt repositories on Ubuntu
@@ -3708,7 +3706,7 @@ HSTS max-age and includeSubDomains/preload rows further down). -->
 | `elspeth` service account added to `caddy` group for log access | An elspeth compromise gains read access to all Caddy access logs | Runbook explicitly says NOT to add `elspeth` to the Caddy group; elspeth does not need Caddy log access |
 | HSTS `includeSubDomains` or `preload` enabled without explicit audit | One-way pin extends to every subdomain or to the browser preload list; rollback requires waiting out cached max-age or a multi-week preload-removal cycle | `elspeth_hsts_include_subdomains` and `elspeth_hsts_preload` are explicit booleans defaulting to `false`; both require a discrete variable change visible in Git history |
 | HSTS max-age bumped to 1 year before TLS posture is proven | Botched cert during the year-long pin bricks the domain for clients that cached the policy | `elspeth_hsts_max_age` variable with documented three-stage ramp (300 → 86400 → 31536000); ramp progression is an auditable variable change, not a Caddyfile diff |
-| Node.js missing or too old crashes the deploy late with an opaque message | Operator wastes time triaging "Node too old" without knowing which lever to pull | Two-step assert: first checks Node is present and names the three resolution paths (apt source, NodeSource repo, image bake); second checks the version is ≥ 20.19 and repeats the resolution paths with the observed version |
+| Node.js missing or too old crashes the deploy late with an opaque message | Operator wastes time triaging "Node too old" without knowing which lever to pull | Two-step assert: first checks Node is present and names the three resolution paths (apt source, NodeSource repo, image bake); second requires Node 24.x and repeats the resolution paths with the observed version |
 | NodeSource apt key fetched without checksum pin | Supply-chain compromise of nodesource.com replaces the key and silently changes the package source | NodeSource get_url task pins the key by SHA256 via `vault_nodesource_apt_key_sha256`; runbook documents how to obtain and rotate the value |
 | Container app discovery treats auth/permission failures as "app does not exist" | One-shot bootstrap task tries to create over the running app; deploy ends in a half-applied confused state | "Distinguish 404 from auth / permission / network failures" assert fires loudly with operator guidance on the typical fix (Container Apps Reader role) |
 | Traffic-shift PATCH abbreviates the container spec | ARM PATCH-merge replaces `containers[]` wholesale and drops env vars, secret refs, probes; new revision starts up without `SECRET_KEY`, fails health probe, gets deactivated, and operator chases the wrong root cause | Container spec extracted into `templates/container-app-template.yml.j2`, loaded once into `elspeth_container_template` fact, consumed by both bootstrap PUT and traffic-shift PATCH; runbook calls this REQUIRED, not stylistic |

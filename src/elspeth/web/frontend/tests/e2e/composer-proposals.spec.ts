@@ -85,6 +85,7 @@ async function installDeterministicComposerRoutes(page: Page): Promise<void> {
         composer_provider: "playwright-route",
         composer_reason: null,
         composer_missing_keys: [],
+        composer_timeout_seconds: 180,
       },
     });
   });

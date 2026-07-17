@@ -114,7 +114,7 @@ then sets `landscape_evidence` true only after the atomic
 - AWS authentication comes only from the ECS task role/default credential
   chain. Do not add keys, profiles, credential headers, role overrides, or
   AWS service endpoint overrides to either container.
-- AWS CLI v2, `jq`, `curl`, Docker, the Session Manager plugin, Node 22/npm,
+- AWS CLI v2, `jq`, `curl`, Docker, the Session Manager plugin, Node 24/npm 11,
   and Playwright Chromium are installed from reviewed locks before mutation.
 - Every web, doctor, payload-verifier, and local-auth-verifier task definition
   uses Linux Fargate 1.4.0 or `LATEST`, declares `runtimePlatform`, and uses

@@ -33,13 +33,15 @@ left behind when proposal creation fails is diagnostic and never reviewable.
 - Create: `tests/unit/web/composer/test_pipeline_proposal.py`
 - Modify: `src/elspeth/web/sessions/routes/composer/guided.py`
 
-- [ ] Write failing tests for recursive immutability, deterministic hashes,
+- [x] Write failing tests for recursive immutability, deterministic hashes,
   safe `secret_ref` preservation, and rejection of a supplied hash mismatch.
-- [ ] Move the existing `_composition_content_hash()` implementation from
+- [x] Move the existing `_composition_content_hash()` implementation from
   `sessions/routes/composer/guided.py` into the new module without changing its
   preimage.
-- [ ] Implement these contracts using existing `canonical_json()`,
-  `stable_hash()`, `deep_freeze()`, and `freeze_fields()` utilities:
+- [x] Implement these contracts using existing `canonical_json()`,
+  `stable_hash()`, and freezing utilities. The implementation uses a stricter
+  one-pass JSON validation/freezing boundary rather than generic
+  `deep_freeze()`, which accepts values the integrity envelope must reject:
 
 ```python
 class PlannerSurface(StrEnum):
@@ -97,6 +99,8 @@ uv run pytest tests/unit/web/composer/test_pipeline_proposal.py -q
 
 Expected: PASS.
 
+Completed in `f2aec7a22`, `6d4f1df53`, and `73a363aa9`.
+
 ## Task 2: Finalize inline content into existing blob custody
 
 **Files:**
@@ -110,54 +114,54 @@ Expected: PASS.
 - Create: `tests/integration/web/composer/test_pipeline_custody.py`
 - Modify: `tests/unit/web/blobs/test_service.py`
 
-- [ ] Write failing tests submitting `source.inline_blob.content` and asserting
+- [x] Write failing tests submitting `source.inline_blob.content` and asserting
   that the reviewable arguments contain `source.blob_id` instead, with no raw
   content in proposal rows, event payloads, LLM/tool audit, validation errors,
   logs, or API responses.
-- [ ] Add retry and interruption cases after reservation, file write, blob-row
+- [x] Add retry and interruption cases after reservation, file write, blob-row
   finalization, and before proposal creation. The same session, user message,
   MIME metadata, and content hash must reuse one blob; any mismatch fails
   closed.
-- [ ] Derive a stable, domain-separated custody key from session id,
+- [x] Derive a stable, domain-separated custody key from session id,
   originating message id, content hash, MIME type, filename, and creation
   provenance. Hold the same-session write lock (and the repository's equivalent
   PostgreSQL row/advisory serialization) across lookup/reservation/finalization;
   validate every field before reuse. Test concurrent callers on SQLite and
   PostgreSQL, orphan recovery after file write, mismatch rejection, and quota
   charged exactly once.
-- [ ] Identity uses only stable pre-custody provenance. In particular,
+- [x] Identity uses only stable pre-custody provenance. In particular,
   `creating_arguments_hash` is deliberately excluded from the UUID input:
   the final tool-arguments hash is computed only after custody replaces inline
   bytes with `blob_id`, so including it would make identity circular. Persist
   that hash on the row and compare it exactly whenever an existing UUID is
   reused; it is post-identity reuse evidence, and a mismatch is an integrity
   conflict rather than a second blob identity.
-- [ ] Derive the blob primary key as a domain-separated UUID5 (128-bit,
+- [x] Derive the blob primary key as a domain-separated UUID5 (128-bit,
   UUID-column-compatible) from that custody key; never store an arbitrary hash
   in `blobs.id`. Rely on existing primary-key uniqueness. On a concurrent
   insert conflict, load and validate the winning row byte-for-byte against the
   reservation before reuse; a mismatch is an integrity error. Do not add a
   second uniqueness mechanism or a Plan-02 schema bump.
-- [ ] Add an idempotent `reserve_inline_custody()` operation to the existing
+- [x] Add an idempotent `reserve_inline_custody()` operation to the existing
   blob service by extracting and reusing the storage/provenance/quota primitive
   currently shared conceptually by `_prepare_blob_create()`,
   `_persist_prepared_blob_create()`, and `BlobServiceImpl.create_blob()`. The
   old executor and the new proposal path delegate to that primitive; do not
   leave three independent custody implementations. Keep its row, registry,
   path confinement, provenance, retention, and cleanup rules.
-- [ ] Implement `finalize_pipeline_custody()` to materialize only the legacy
+- [x] Implement `finalize_pipeline_custody()` to materialize only the legacy
   `source.inline_blob` shape currently accepted by canonical `set_pipeline`,
   remove the entire `source.inline_blob` member, set `source.blob_id`, and
   compute the proposal hash afterward. Never leave both forms, write
   `source.options.blob_ref`, or claim named-source inline blob support while the
   canonical validator rejects it.
-- [ ] Route every reviewable `set_pipeline` proposal through this function,
+- [x] Route every reviewable `set_pipeline` proposal through this function,
   including terminal planner output and an ordinary freeform compose-loop tool
   call intercepted in explicit-approval mode on a non-empty composition.
   Centralize this before the final candidate build, hash, and proposal creation
   so all three observe the same `blob_id` arguments and no caller can persist
   raw inline content. Add that non-empty explicit-approval regression.
-- [ ] On proposal rejection, leave the materialized blob under current session
+- [x] On proposal rejection, leave the materialized blob under current session
   retention rather than adding destructive cleanup to the approval path. A
   blob referenced by a pending proposal is retained; after terminal rejection
   or supersession, an unreferenced custody blob follows the existing
@@ -175,6 +179,11 @@ uv run pytest \
 
 Expected: PASS; retries create one ready blob and persisted proposal/audit
 surfaces contain no raw inline bytes.
+
+Completed in `fd166503b`, `d81474dfa`, and `550a383ce`. The SQLite
+concurrency coverage passed locally. The real PostgreSQL multi-process case is
+present but remained environment-gated because `ELSPETH_TEST_POSTGRES_URL` was
+not available in this worktree.
 
 ## Task 3: Implement one read-only planner loop
 
@@ -203,10 +212,10 @@ the planner's only topology schema. The shared planner also requires injected,
 frozen request budget and route-lifecycle adapters because no existing helper
 owns all ordinary-route controls as one reusable unit.
 
-- [ ] Write failing tests that send canonical fixtures through a deterministic
+- [x] Write failing tests that send canonical fixtures through a deterministic
   fake completion using the real terminal tool-call parser. Do not inject a
   preconstructed proposal or state.
-- [ ] Expose a defensive-copy accessor in `tools/schema_contract.py` by
+- [x] Expose a defensive-copy accessor in `tools/schema_contract.py` by
   selecting `set_pipeline` from `get_tool_definitions()`. Do not reach into the
   private `_TOOL_DEFS_BY_NAME` registry. Add a directional compatibility test
   against `SetPipelineArgumentsModel.model_json_schema()`: every typed-valid
@@ -215,19 +224,19 @@ owns all ordinary-route controls as one reusable unit.
   Do not require byte equality or identical prose/strictness; the LLM schema and
   Pydantic security boundary are intentionally distinct artifacts, and runtime
   validation may be stricter about extra properties.
-- [ ] Implement `planner_terminal_tool_definition()` with a `pipeline` property
+- [x] Implement `planner_terminal_tool_definition()` with a `pipeline` property
   equal to that registered declaration. Do not ask the model for a public
   rationale field; public summary/rationale are generated by the server after
   redaction.
-- [ ] Implement `plan_pipeline()` with inputs for intent, current state,
+- [x] Implement `plan_pipeline()` with inputs for intent, current state,
   reviewed facts, surface, request-scoped policy catalog/plugin snapshot,
   originating message, a server-constructed `ProposalBase`, model
   configuration, rendered skill, and repair budget. The planner seals that base
   into the immutable envelope exactly once; callers may not replace it after
   the draft hash is computed.
-- [ ] Advertise the current read-only composer discovery tools plus the terminal
+- [x] Advertise the current read-only composer discovery tools plus the terminal
   proposal tool. Reject mutation calls and unknown discovery tools.
-- [ ] Reuse the current discovery/composition turn caps and absolute provider
+- [x] Reuse the current discovery/composition turn caps and absolute provider
   deadline through a required frozen `PlannerBudgetPolicy`: total wire attempts
   (including each LiteLLM retry), exact canonical UTF-8 bytes of the full
   post-cache-marker `{messages, tools}` payload, requested completion tokens,
@@ -242,14 +251,14 @@ owns all ordinary-route controls as one reusable unit.
   ordinary anti-anchor tracker clears on successful discovery. Test 429,
   deadline, disconnect, repeated discovery, malformed response, exact request
   byte/completion/cost exhaustion, and zero residual state/proposal mutation.
-- [ ] Strictly parse the terminal payload and build a preliminary,
+- [x] Strictly parse the terminal payload and build a preliminary,
   side-effect-free candidate using prepared inline content. If it is invalid,
   feed only the existing allowlisted structured validation projection back for
   bounded repair and create no ready blob. Only after a draft is otherwise
   acceptable, finalize custody, replace inline content with the resulting blob
   ids, rebuild/revalidate the custody-safe candidate, hash it, and return the
   `PipelineProposal`. Failed drafts create no proposal row and publish no state.
-- [ ] Record hashes of the actual rendered messages and advertised tool schemas
+- [x] Record hashes of the actual rendered messages and advertised tool schemas
   after cache markers using the existing LLM audit path. Extend the closed
   durable audit contract with requested completion tokens, planner policy hash,
   and exact wire-attempt ordinal. Do not copy raw provider or validation errors
@@ -268,6 +277,8 @@ uv run pytest \
 
 Expected: PASS; one repair may replace an invalid draft, an exhausted budget
 fails closed, and no planner discovery call mutates state.
+
+Completed in `eb5a59c3f`, `9bd7dc2ff`, and `74d025d27`.
 
 ## Task 4: Adapt the existing proposal lifecycle and acceptance route
 
@@ -505,8 +516,9 @@ git diff --check
 
 Expected: all commands exit 0.
 
-Completed in `d650e77dc`, `7dfbeef6e`, and `6dadccebf`. The prescribed
-verification passed on 2026-07-18 (189 tests; Ruff and mypy clean).
+Completed in `d650e77dc`, `7dfbeef6e`, `6dadccebf`, `52eeffcae`, and
+`70061c766`. The prescribed verification passed on 2026-07-18 (189 tests;
+Ruff and mypy clean); the final broad composer/session gate passed 3,961 tests.
 
 **Definition of done:** A production freeform new-pipeline request can derive,
 review, and commit a full graph through one custody-safe canonical proposal

@@ -4,6 +4,7 @@ import subprocess
 import sys
 from copy import deepcopy
 from pathlib import Path
+from string import Template
 from typing import cast, get_args
 
 import pytest
@@ -16,6 +17,12 @@ from tests.fixtures.dag_scenario_corpus.loader import (
     iter_harness_cases,
     load_manifest,
     resolve_fixture_path,
+)
+from tests.fixtures.dag_scenario_corpus.plugins import (
+    CorpusFailOnceEOFBatchTransform,
+    CorpusInputSchema,
+    CorpusOutputSchema,
+    install_corpus_plugin_manager,
 )
 from tests.fixtures.dag_scenario_corpus.schema import (
     EXPECTED_DIMENSIONS,
@@ -39,6 +46,11 @@ from tests.fixtures.dag_scenario_corpus.schema import (
     Stage,
     Workflow,
 )
+
+from elspeth.contracts import Determinism, PipelineRow, PluginSchema
+from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+from elspeth.core.config import load_settings_from_yaml_string
+from elspeth.plugins.infrastructure import manager as manager_module
 
 EXPECTED_DIMENSION_VALUES = (
     "config",
@@ -333,6 +345,75 @@ EXPECTED_ASSESSMENT_EVIDENCE = tuple(
     for evidence_group, locators in EXPECTED_ASSESSMENT_LOCATORS.items()
     for index, locator in enumerate(locators, start=1)
 )
+
+EXPECTED_HARNESS_EVIDENCE = (
+    (
+        "harness-linear-happy-path",
+        "linear:happy-path",
+        ("config", "build", "runtime", "audit"),
+    ),
+    (
+        "harness-checkpoint-deterministic-resume-reopen-resume",
+        "checkpoint-deterministic-resume:reopen-resume",
+        ("config", "build", "runtime", "audit", "recovery"),
+    ),
+)
+
+EXPECTED_INPUT_CSV = b"id,value\n1,10\n2,20\n3,30\n"
+
+EXPECTED_HAPPY_PATH_YAML = b"""sources:
+  primary:
+    plugin: csv
+    on_success: inbound
+    options:
+      path: ${input_csv}
+      on_validation_failure: discard
+      schema: {mode: fixed, fields: ["id: int", "value: int"]}
+queues: {inbound: {}}
+transforms:
+  - name: pass_rows
+    plugin: passthrough
+    input: inbound
+    on_success: output
+    on_error: discard
+    options: {schema: {mode: observed}}
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: ${output_jsonl}
+      format: jsonl
+      schema: {mode: observed}
+"""
+
+EXPECTED_REOPEN_RESUME_YAML = b"""sources:
+  primary:
+    plugin: csv
+    on_success: batch_in
+    options:
+      path: ${input_csv}
+      on_validation_failure: discard
+      schema: {mode: fixed, fields: ["id: int", "value: int"]}
+aggregations:
+  - name: eof_sum
+    plugin: dag_corpus_fail_once_eof_batch
+    input: batch_in
+    on_success: output
+    on_error: discard
+    trigger: {count: 100}
+    output_mode: transform
+    options:
+      fault_marker_path: ${fault_marker}
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: ${output_jsonl}
+      format: jsonl
+      schema: {mode: observed}
+"""
 
 
 def _reference(*, kind: EvidenceKind = "harness") -> EvidenceReference:
@@ -832,7 +913,20 @@ def _add_harness_evidence(raw: dict[str, object], locator: str) -> str:
     return evidence_id
 
 
+def _remove_harness_evidence(raw: dict[str, object], locator: str) -> None:
+    removed_ids = {
+        cast(str, evidence["id"])
+        for evidence in _raw_evidence(raw)
+        if evidence.get("kind") == "harness" and evidence.get("locator") == locator
+    }
+    raw["evidence"] = [evidence for evidence in _raw_evidence(raw) if evidence.get("id") not in removed_ids]
+    for scenario in _raw_scenarios(raw):
+        for cell in _raw_dimensions(scenario).values():
+            cell["evidence"] = [evidence_id for evidence_id in cast(list[str], cell.get("evidence", [])) if evidence_id not in removed_ids]
+
+
 def _register_linear_case(raw: dict[str, object], case: dict[str, object]) -> None:
+    _remove_harness_evidence(raw, "linear:happy-path")
     scenario = _raw_scenarios(raw)[0]
     scenario["cases"] = [case]
     evidence_id = _add_harness_evidence(raw, f"linear:{case['id']}")
@@ -841,7 +935,7 @@ def _register_linear_case(raw: dict[str, object], case: dict[str, object]) -> No
     _raw_dimensions(scenario)["runtime"] = runtime_cell
 
 
-def test_manifest_has_exact_inventory_status_matrix_and_no_task_3_cases() -> None:
+def test_manifest_has_exact_inventory_status_matrix_and_task_3_cases() -> None:
     manifest = load_manifest()
 
     assert manifest.schema_version == 1
@@ -852,20 +946,223 @@ def test_manifest_has_exact_inventory_status_matrix_and_no_task_3_cases() -> Non
     for scenario in manifest.scenarios:
         assert tuple(scenario.dimensions) == EXPECTED_DIMENSIONS
         assert tuple(cell.status for cell in scenario.dimensions.values()) == EXPECTED_STATUS_MATRIX[scenario.id]
-        assert scenario.cases == ()
-    assert iter_harness_cases(manifest) == ()
+    assert tuple((scenario.id, case.id) for scenario, case in iter_harness_cases(manifest)) == (
+        ("linear", "happy-path"),
+        ("checkpoint-deterministic-resume", "reopen-resume"),
+    )
     assert manifest.verdict == "not_complete"
 
 
 def test_manifest_pins_every_exact_current_assessment_pytest_locator() -> None:
     manifest = load_manifest()
 
-    actual_evidence = tuple((reference.id, reference.locator) for reference in manifest.evidence)
-    assert actual_evidence == EXPECTED_ASSESSMENT_EVIDENCE
-    assert len(actual_evidence) == 47
-    assert len({evidence_id for evidence_id, _locator in actual_evidence}) == 47
-    assert len({locator for _evidence_id, locator in actual_evidence}) == 47
-    assert all(reference.kind == "pytest" for reference in manifest.evidence)
+    assessment_evidence = tuple((reference.id, reference.locator) for reference in manifest.evidence if reference.kind == "pytest")
+    harness_evidence = tuple(
+        (reference.id, reference.locator, reference.stages) for reference in manifest.evidence if reference.kind == "harness"
+    )
+    assert assessment_evidence == EXPECTED_ASSESSMENT_EVIDENCE
+    assert harness_evidence == EXPECTED_HARNESS_EVIDENCE
+    assert len(manifest.evidence) == 49
+    assert len(assessment_evidence) == 47
+    assert len(harness_evidence) == 2
+    assert len({reference.id for reference in manifest.evidence}) == 49
+    assert len({reference.locator for reference in manifest.evidence}) == 49
+
+
+def test_task_3_cases_and_harness_references_have_exact_atomic_parity() -> None:
+    manifest = load_manifest()
+    cases = tuple((scenario.id, case.model_dump(mode="json")) for scenario, case in iter_harness_cases(manifest))
+    assert cases == (
+        (
+            "linear",
+            {
+                "id": "happy-path",
+                "workflow": "run",
+                "fixture": "linear/happy-path.yaml",
+                "input_fixture": "linear/input.csv",
+                "expected": {
+                    "status": "completed",
+                    "output_rows": 3,
+                    "required_audit_record_types": ["run"],
+                },
+            },
+        ),
+        (
+            "checkpoint-deterministic-resume",
+            {
+                "id": "reopen-resume",
+                "workflow": "recovery",
+                "fixture": "checkpoint-deterministic-resume/reopen-resume.yaml",
+                "input_fixture": "checkpoint-deterministic-resume/input.csv",
+                "expected": {
+                    "status": "completed",
+                    "output_rows": 1,
+                    "required_audit_record_types": ["run"],
+                },
+            },
+        ),
+    )
+
+    referenced_cells = {
+        reference.id: tuple(
+            (scenario.id, dimension)
+            for scenario in manifest.scenarios
+            for dimension, cell in scenario.dimensions.items()
+            if reference.id in cell.evidence
+        )
+        for reference in manifest.evidence
+        if reference.kind == "harness"
+    }
+    assert referenced_cells == {
+        "harness-linear-happy-path": (("linear", "runtime"), ("linear", "audit")),
+        "harness-checkpoint-deterministic-resume-reopen-resume": (
+            ("checkpoint-deterministic-resume", "runtime"),
+            ("checkpoint-deterministic-resume", "audit"),
+            ("checkpoint-deterministic-resume", "recovery"),
+        ),
+    }
+
+
+def _corpus_rows() -> list[PipelineRow]:
+    contract = SchemaContract(
+        mode="OBSERVED",
+        fields=(
+            FieldContract("id", "id", int, False, "inferred"),
+            FieldContract("value", "value", int, False, "inferred"),
+        ),
+        locked=True,
+    )
+    return [
+        PipelineRow({"id": 1, "value": 10}, contract),
+        PipelineRow({"id": 2, "value": 20}, contract),
+        PipelineRow({"id": 3, "value": 30}, contract),
+    ]
+
+
+def test_corpus_plugin_manager_exposes_builtins_and_custom_through_public_instantiation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = install_corpus_plugin_manager(monkeypatch)
+    input_path = tmp_path / "input.csv"
+    input_path.write_bytes(EXPECTED_INPUT_CSV)
+
+    csv_source = manager.create_source(
+        "csv",
+        {
+            "path": str(input_path),
+            "on_validation_failure": "discard",
+            "schema": {"mode": "fixed", "fields": ["id: int", "value: int"]},
+        },
+    )
+    passthrough = manager.create_transform("passthrough", {"schema": {"mode": "observed"}})
+    json_sink = manager.create_sink(
+        "json",
+        {"path": str(tmp_path / "output.jsonl"), "format": "jsonl", "schema": {"mode": "observed"}},
+    )
+    custom = manager.create_transform(
+        "dag_corpus_fail_once_eof_batch",
+        {"fault_marker_path": str(tmp_path / "fault.marker")},
+    )
+
+    assert (csv_source.name, passthrough.name, json_sink.name, custom.name) == (
+        "csv",
+        "passthrough",
+        "json",
+        "dag_corpus_fail_once_eof_batch",
+    )
+    assert manager.get_transform_by_name("dag_corpus_fail_once_eof_batch") is CorpusFailOnceEOFBatchTransform
+    assert manager_module.get_shared_plugin_manager() is manager
+
+
+def test_corpus_transform_declares_exact_schema_and_runtime_contract() -> None:
+    assert issubclass(CorpusInputSchema, PluginSchema)
+    assert CorpusInputSchema.model_fields["id"].annotation is int
+    assert CorpusInputSchema.model_fields["value"].annotation is int
+    assert issubclass(CorpusOutputSchema, PluginSchema)
+    assert CorpusOutputSchema.model_fields["value"].annotation is int
+    assert CorpusOutputSchema.model_fields["count"].annotation is int
+    assert CorpusFailOnceEOFBatchTransform.name == "dag_corpus_fail_once_eof_batch"
+    assert CorpusFailOnceEOFBatchTransform.determinism is Determinism.DETERMINISTIC
+    assert CorpusFailOnceEOFBatchTransform.input_schema is CorpusInputSchema
+    assert CorpusFailOnceEOFBatchTransform.output_schema is CorpusOutputSchema
+    assert CorpusFailOnceEOFBatchTransform.is_batch_aware is True
+    assert CorpusFailOnceEOFBatchTransform.on_error == "discard"
+
+
+def test_corpus_transform_scalar_call_buffers_the_same_row(tmp_path: Path) -> None:
+    transform = CorpusFailOnceEOFBatchTransform({"fault_marker_path": str(tmp_path / "fault.marker")})
+    row = _corpus_rows()[0]
+
+    result = transform.process(row, object())
+
+    assert result.row is row
+    assert result.success_reason == {"action": "buffer"}
+    assert not (tmp_path / "fault.marker").exists()
+
+
+def test_corpus_transform_first_atomic_batch_crashes_then_fresh_instance_succeeds(tmp_path: Path) -> None:
+    marker = tmp_path / "nested" / "fault.marker"
+    rows = _corpus_rows()
+    crashing = CorpusFailOnceEOFBatchTransform({"fault_marker_path": str(marker)})
+
+    with pytest.raises(RuntimeError, match=r"^injected DAG corpus EOF flush crash$"):
+        crashing.process(rows, object())
+
+    assert marker.read_bytes() == b""
+    fresh = CorpusFailOnceEOFBatchTransform({"fault_marker_path": str(marker)})
+    result = fresh.process(rows, object())
+    expected_contract = SchemaContract(
+        mode="OBSERVED",
+        fields=(
+            FieldContract("value", "value", int, False, "inferred"),
+            FieldContract("count", "count", int, False, "inferred"),
+        ),
+        locked=True,
+    )
+
+    assert result.success_reason == {"action": "batch_sum"}
+    assert result.row is not None
+    assert result.row.to_dict() == {"value": 60, "count": 3}
+    assert result.row.contract == expected_contract
+
+
+@pytest.mark.parametrize("marker", [None, "", 0, False])
+def test_corpus_transform_rejects_invalid_fault_marker_config(marker: object) -> None:
+    with pytest.raises(ValueError, match=r"^fault_marker_path must be a non-empty string$"):
+        CorpusFailOnceEOFBatchTransform({"fault_marker_path": marker})
+
+
+def test_task_3_fixture_bytes_and_production_config_loading_are_exact(tmp_path: Path) -> None:
+    fixture_bytes = {
+        "linear/happy-path.yaml": EXPECTED_HAPPY_PATH_YAML,
+        "linear/input.csv": EXPECTED_INPUT_CSV,
+        "checkpoint-deterministic-resume/reopen-resume.yaml": EXPECTED_REOPEN_RESUME_YAML,
+        "checkpoint-deterministic-resume/input.csv": EXPECTED_INPUT_CSV,
+    }
+    for relative_path, expected in fixture_bytes.items():
+        assert resolve_fixture_path(relative_path).read_bytes() == expected
+
+    substitutions = {
+        "input_csv": str(resolve_fixture_path("linear/input.csv")),
+        "output_jsonl": str(tmp_path / "happy.jsonl"),
+    }
+    happy = load_settings_from_yaml_string(Template(EXPECTED_HAPPY_PATH_YAML.decode()).substitute(substitutions))
+    assert happy.sources["primary"].plugin == "csv"
+    assert happy.transforms[0].plugin == "passthrough"
+    assert happy.sinks["output"].plugin == "json"
+
+    substitutions.update(
+        input_csv=str(resolve_fixture_path("checkpoint-deterministic-resume/input.csv")),
+        output_jsonl=str(tmp_path / "recovery.jsonl"),
+        fault_marker=str(tmp_path / "fault.marker"),
+    )
+    recovery = load_settings_from_yaml_string(Template(EXPECTED_REOPEN_RESUME_YAML.decode()).substitute(substitutions))
+    assert recovery.sources["primary"].on_success == "batch_in"
+    assert recovery.aggregations[0].name == "eof_sum"
+    assert recovery.aggregations[0].plugin == "dag_corpus_fail_once_eof_batch"
+    assert recovery.aggregations[0].trigger.count == 100
+    assert recovery.aggregations[0].options == {"fault_marker_path": str(tmp_path / "fault.marker")}
 
 
 def test_manifest_pytest_evidence_batch_collects_without_running_suites() -> None:
@@ -1123,7 +1420,6 @@ def test_manifest_rejects_duplicate_case_ids(tmp_path: Path) -> None:
     raw = valid_manifest_dict()
     case = _case_dict()
     _raw_scenarios(raw)[0]["cases"] = [case, deepcopy(case)]
-    _add_harness_evidence(raw, "linear:happy-path")
     with pytest.raises(ValueError, match=r"duplicate case id.*linear:happy-path"):
         load_manifest(write_manifest(tmp_path, raw))
 
@@ -1137,6 +1433,7 @@ def test_manifest_rejects_unknown_harness_locator(tmp_path: Path) -> None:
 
 def test_manifest_rejects_case_without_matching_harness_locator(tmp_path: Path) -> None:
     raw = valid_manifest_dict()
+    _remove_harness_evidence(raw, "linear:happy-path")
     _raw_scenarios(raw)[0]["cases"] = [_case_dict()]
     with pytest.raises(ValueError, match=r"harness case.*linear:happy-path.*matching evidence locator"):
         load_manifest(write_manifest(tmp_path, raw))

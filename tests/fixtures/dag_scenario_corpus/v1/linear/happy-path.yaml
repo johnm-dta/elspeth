@@ -1,0 +1,24 @@
+sources:
+  primary:
+    plugin: csv
+    on_success: inbound
+    options:
+      path: ${input_csv}
+      on_validation_failure: discard
+      schema: {mode: fixed, fields: ["id: int", "value: int"]}
+queues: {inbound: {}}
+transforms:
+  - name: pass_rows
+    plugin: passthrough
+    input: inbound
+    on_success: output
+    on_error: discard
+    options: {schema: {mode: observed}}
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: ${output_jsonl}
+      format: jsonl
+      schema: {mode: observed}

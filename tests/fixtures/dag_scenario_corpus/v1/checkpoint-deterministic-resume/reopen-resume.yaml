@@ -1,0 +1,26 @@
+sources:
+  primary:
+    plugin: csv
+    on_success: batch_in
+    options:
+      path: ${input_csv}
+      on_validation_failure: discard
+      schema: {mode: fixed, fields: ["id: int", "value: int"]}
+aggregations:
+  - name: eof_sum
+    plugin: dag_corpus_fail_once_eof_batch
+    input: batch_in
+    on_success: output
+    on_error: discard
+    trigger: {count: 100}
+    output_mode: transform
+    options:
+      fault_marker_path: ${fault_marker}
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: ${output_jsonl}
+      format: jsonl
+      schema: {mode: observed}

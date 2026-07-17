@@ -244,11 +244,30 @@ evidence:
     claim: Initial enqueue routing and legacy references remain pinned.
     stages: [runtime, audit]
 
+  - id: harness-linear-happy-path
+    kind: harness
+    locator: linear:happy-path
+    claim: The linear corpus case exercises the production config, build, runtime, and audit path.
+    stages: [config, build, runtime, audit]
+  - id: harness-checkpoint-deterministic-resume-reopen-resume
+    kind: harness
+    locator: checkpoint-deterministic-resume:reopen-resume
+    claim: The deterministic-resume corpus case exercises production restart and recovery with fresh objects.
+    stages: [config, build, runtime, audit, recovery]
+
 scenarios:
   - id: linear
     ordinal: 1
     title: Linear source → transform → sink
-    cases: []
+    cases:
+      - id: happy-path
+        workflow: run
+        fixture: linear/happy-path.yaml
+        input_fixture: linear/input.csv
+        expected:
+          status: completed
+          output_rows: 3
+          required_audit_record_types: [run]
     dimensions:
       config:
         status: pass
@@ -259,13 +278,15 @@ scenarios:
       contracts: &contracts_pass
         status: pass
         evidence: [core-builder-schema-plural-sources-03, composer-runtime-agreement]
-      runtime: &runtime_partial
+      runtime:
         status: partial
+        evidence: [harness-linear-happy-path]
         reason: Existing runtime evidence does not execute every required production disposition for this scenario.
         owner_issue: elspeth-ef29ef6ba4
         exit_gate: The scenario corpus case passes exact production runtime result and disposition assertions.
-      audit: &audit_partial
+      audit:
         status: partial
+        evidence: [harness-linear-happy-path]
         reason: Existing audit evidence does not prove every required durable record and portable export for this scenario.
         owner_issue: elspeth-ef29ef6ba4
         exit_gate: The scenario corpus case passes exact durable audit-state and exported-record assertions.
@@ -318,7 +339,11 @@ scenarios:
           - core-builder-schema-plural-sources-08
           - core-builder-schema-plural-sources-11
       contracts: *contracts_pass
-      runtime: *runtime_partial
+      runtime: &runtime_partial
+        status: partial
+        reason: Existing runtime evidence does not execute every required production disposition for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes exact production runtime result and disposition assertions.
       audit:
         status: partial
         evidence: [core-builder-schema-plural-sources-07]
@@ -367,7 +392,11 @@ scenarios:
           - core-builder-schema-plural-sources-12
           - composer-runtime-agreement-08
       runtime: *runtime_partial
-      audit: *audit_partial
+      audit: &audit_partial
+        status: partial
+        reason: Existing audit evidence does not prove every required durable record and portable export for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes exact durable audit-state and exported-record assertions.
       recovery: &recovery_unknown
         status: unknown
         reason: No complete database-reopen recovery case exists for this scenario.
@@ -716,14 +745,37 @@ scenarios:
   - id: checkpoint-deterministic-resume
     ordinal: 14
     title: Checkpoint and deterministic resume
-    cases: []
+    cases:
+      - id: reopen-resume
+        workflow: recovery
+        fixture: checkpoint-deterministic-resume/reopen-resume.yaml
+        input_fixture: checkpoint-deterministic-resume/input.csv
+        expected:
+          status: completed
+          output_rows: 1
+          required_audit_record_types: [run]
     dimensions:
       config: *config_pass
       build: *build_pass
       contracts: *contracts_partial
-      runtime: *runtime_partial
-      audit: *audit_partial
-      recovery: *recovery_partial
+      runtime:
+        status: partial
+        evidence: [harness-checkpoint-deterministic-resume-reopen-resume]
+        reason: Existing runtime evidence does not execute every required production disposition for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes exact production runtime result and disposition assertions.
+      audit:
+        status: partial
+        evidence: [harness-checkpoint-deterministic-resume-reopen-resume]
+        reason: Existing audit evidence does not prove every required durable record and portable export for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes exact durable audit-state and exported-record assertions.
+      recovery:
+        status: partial
+        evidence: [harness-checkpoint-deterministic-resume-reopen-resume]
+        reason: Selected restart seams pass, but the complete scenario recovery path is not executable evidence.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes database-reopen and public-resume assertions without duplicate work.
       concurrency: *concurrency_unknown
       freeform: &checkpoint_authoring_not_applicable
         status: not_applicable

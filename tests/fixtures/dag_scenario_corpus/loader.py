@@ -167,13 +167,19 @@ def _validate_evidence_references(manifest: ScenarioManifest) -> None:
     if missing_harness_locators:
         raise ValueError("DAG scenario harness case(s) " + ", ".join(missing_harness_locators) + " lack a matching evidence locator")
 
+    referenced_evidence_ids: set[str] = set()
     for scenario in manifest.scenarios:
         for dimension, cell in scenario.dimensions.items():
+            referenced_evidence_ids.update(cell.evidence)
             unknown_ids = tuple(evidence_id for evidence_id in cell.evidence if evidence_id not in evidence_by_id)
             if unknown_ids:
                 raise ValueError(f"DAG scenario {scenario.id}.{dimension} references unknown evidence id(s): {', '.join(unknown_ids)}")
             if cell.status == "pass" and not any(evidence_by_id[evidence_id].executable for evidence_id in cell.evidence):
                 raise ValueError(f"DAG scenario pass cell {scenario.id}.{dimension} references only document/decision evidence")
+
+    orphan_evidence_ids = sorted(set(evidence_by_id) - referenced_evidence_ids)
+    if orphan_evidence_ids:
+        raise ValueError(f"DAG scenario manifest contains orphan evidence id(s): {', '.join(orphan_evidence_ids)}")
 
 
 def _validate_evidence_locator(reference: EvidenceReference) -> None:
@@ -195,6 +201,7 @@ def _validate_pytest_locator(locator: str) -> None:
         not parts[0].startswith("tests/")
         or relative_file.is_absolute()
         or relative_file.suffix != ".py"
+        or not relative_file.name.startswith("test_")
         or ".." in relative_file.parts
         or any(character.isspace() for character in locator)
         or any(not selector for selector in parts[1:])
@@ -208,20 +215,42 @@ def _validate_pytest_locator(locator: str) -> None:
         raise ValueError(f"Pytest evidence locator escapes the repository: {locator}") from exc
     if not resolved_file.is_file():
         raise ValueError(f"pytest locator file does not exist: {locator}")
-    if len(parts) == 1:
-        return
 
     tree = ast.parse(resolved_file.read_text(encoding="utf-8"), filename=str(resolved_file))
+    if len(parts) == 1:
+        if not any(_is_pytest_collectable_node(node) for node in tree.body):
+            raise ValueError(f"Pytest locator file contains no statically collectable test nodes: {locator}")
+        return
+
     scope = tree.body
     for raw_selector in parts[1:]:
-        selector = raw_selector.partition("[")[0]
+        if "[" in raw_selector or "]" in raw_selector:
+            raise ValueError(f"A parameter-specific pytest locator is not supported; reference the unparameterized node: {locator}")
         selected = next(
-            (node for node in scope if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == selector),
+            (
+                node
+                for node in scope
+                if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == raw_selector
+            ),
             None,
         )
         if selected is None:
             raise ValueError(f"Pytest locator does not select pytest node {raw_selector!r}: {locator}")
+        if not _is_pytest_collectable_node(selected):
+            raise ValueError(f"Pytest locator selects {raw_selector!r}, which is not a pytest-collectable test node: {locator}")
         scope = selected.body if isinstance(selected, ast.ClassDef) else []
+
+
+def _is_pytest_collectable_node(node: ast.stmt) -> bool:
+    if isinstance(node, ast.ClassDef):
+        has_constructor = any(
+            isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name in {"__init__", "__new__"} for member in node.body
+        )
+        has_test_method = any(
+            isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name.startswith("test_") for member in node.body
+        )
+        return node.name.startswith("Test") and not has_constructor and has_test_method
+    return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")
 
 
 def _validate_document_locator(locator: str) -> None:
@@ -238,6 +267,9 @@ def _validate_document_locator(locator: str) -> None:
 
 
 def _validate_case_paths(manifest: ScenarioManifest) -> None:
-    for _scenario, case in iter_harness_cases(manifest):
-        resolve_fixture_path(case.fixture)
-        resolve_fixture_path(case.input_fixture)
+    for scenario, case in iter_harness_cases(manifest):
+        for field_name, relative_path in (("fixture", case.fixture), ("input_fixture", case.input_fixture)):
+            try:
+                resolve_fixture_path(relative_path)
+            except ValueError as exc:
+                raise ValueError(f"DAG scenario case {scenario.id}:{case.id} has invalid {field_name}: {exc}") from exc

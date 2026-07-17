@@ -250,9 +250,9 @@ scenarios:
     title: Linear source → transform → sink
     cases: []
     dimensions:
-      config: &config_pass
+      config:
         status: pass
-        evidence: [core-builder-schema-plural-sources-04]
+        evidence: [yaml-importer-generator, core-builder-schema-plural-sources-05]
       build: &build_pass
         status: pass
         evidence: [core-builder-schema-plural-sources]
@@ -281,7 +281,7 @@ scenarios:
         exit_gate: The scenario corpus contention case passes single-effective-owner and stale-worker fencing assertions.
       freeform: &freeform_pass
         status: pass
-        evidence: [yaml-importer-generator]
+        evidence: [yaml-importer-generator, yaml-importer-generator-02]
       guided: &guided_partial
         status: partial
         reason: Guided authoring has only partial evidence for this scenario.
@@ -303,11 +303,28 @@ scenarios:
     title: Multiple independent sources
     cases: []
     dimensions:
-      config: *config_pass
-      build: *build_pass
+      config:
+        status: pass
+        evidence:
+          - core-builder-schema-plural-sources-04
+          - core-builder-schema-plural-sources-06
+          - core-builder-schema-plural-sources-08
+          - core-builder-schema-plural-sources-10
+      build:
+        status: pass
+        evidence:
+          - core-builder-schema-plural-sources
+          - core-builder-schema-plural-sources-02
+          - core-builder-schema-plural-sources-08
+          - core-builder-schema-plural-sources-11
       contracts: *contracts_pass
       runtime: *runtime_partial
-      audit: *audit_partial
+      audit:
+        status: partial
+        evidence: [core-builder-schema-plural-sources-07]
+        reason: Existing audit evidence does not prove every required durable record and portable export for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes exact durable audit-state and exported-record assertions.
       recovery: *recovery_partial
       concurrency: *concurrency_unknown
       freeform: *freeform_pass
@@ -316,7 +333,12 @@ scenarios:
         reason: Guided authoring cannot express this mandatory non-linear topology.
         owner_issue: elspeth-7e2dd67275
         exit_gate: The guided-authoring corpus case passes canonical graph equality for this scenario.
-      round_trip: *round_trip_partial
+      round_trip:
+        status: partial
+        evidence: [core-builder-schema-plural-sources-06]
+        reason: Import and export helpers exist, but canonical browser-backed round-trip equality is incomplete.
+        owner_issue: elspeth-7cf763da7c
+        exit_gate: The browser-backed corpus round-trip passes canonical graph and traversal-plan equality.
       scale: &scale_unknown
         status: unknown
         reason: No supported scale envelope has been executed for this scenario.
@@ -328,9 +350,22 @@ scenarios:
     title: Multi-source queue fan-in
     cases: []
     dimensions:
-      config: *config_pass
-      build: *build_pass
-      contracts: *contracts_pass
+      config:
+        status: pass
+        evidence: [core-builder-schema-plural-sources-04, core-builder-schema-plural-sources-09]
+      build:
+        status: pass
+        evidence:
+          - core-builder-schema-plural-sources
+          - core-builder-schema-plural-sources-02
+          - core-builder-schema-plural-sources-09
+          - core-builder-schema-plural-sources-12
+      contracts:
+        status: pass
+        evidence:
+          - core-builder-schema-plural-sources-03
+          - core-builder-schema-plural-sources-12
+          - composer-runtime-agreement-08
       runtime: *runtime_partial
       audit: *audit_partial
       recovery: &recovery_unknown
@@ -349,9 +384,13 @@ scenarios:
     title: Conditional routing, including missing and error destinations
     cases: []
     dimensions:
-      config: *config_pass
+      config: &config_pass
+        status: pass
+        evidence: [yaml-importer-generator]
       build: *build_pass
-      contracts: *contracts_pass
+      contracts:
+        status: pass
+        evidence: [core-builder-schema-plural-sources-03, composer-runtime-agreement-07]
       runtime: *runtime_partial
       audit: *audit_partial
       recovery: *recovery_unknown
@@ -368,7 +407,9 @@ scenarios:
     dimensions:
       config: *config_pass
       build: *build_pass
-      contracts: *contracts_pass
+      contracts:
+        status: pass
+        evidence: [core-builder-schema-plural-sources-03, composer-runtime-agreement-03]
       runtime: *runtime_partial
       audit: *audit_partial
       recovery: *recovery_unknown
@@ -389,14 +430,23 @@ scenarios:
     dimensions:
       config: *config_pass
       build: *build_pass
-      contracts: &contracts_partial
+      contracts:
         status: partial
+        evidence:
+          - composer-runtime-agreement-02
+          - composer-runtime-agreement-04
+          - composer-runtime-agreement-05
         reason: Contract evidence does not cover every completion policy and merge strategy composition.
         owner_issue: elspeth-ef29ef6ba4
         exit_gate: The scenario corpus contract matrix passes every declared completion policy and merge strategy assertion.
       runtime: *runtime_partial
       audit: *audit_partial
-      recovery: *recovery_partial
+      recovery:
+        status: partial
+        evidence: [focused-crash-restart-02]
+        reason: Selected restart seams pass, but the complete scenario recovery path is not executable evidence.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes database-reopen and public-resume assertions without duplicate work.
       concurrency: &concurrency_partial
         status: partial
         reason: Selected contention paths pass without the complete registered scenario matrix.
@@ -414,7 +464,11 @@ scenarios:
     dimensions:
       config: *config_pass
       build: *build_pass
-      contracts: *contracts_partial
+      contracts: &contracts_partial
+        status: partial
+        reason: Contract evidence does not cover every completion policy and merge strategy composition.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus contract matrix passes every declared completion policy and merge strategy assertion.
       runtime: &runtime_unknown
         status: unknown
         reason: No complete production runtime case exists for this mandatory composition.
@@ -460,11 +514,48 @@ scenarios:
     dimensions:
       config: *config_pass
       build: *build_pass
-      contracts: *contracts_partial
-      runtime: *runtime_partial
-      audit: *audit_partial
-      recovery: *recovery_partial
-      concurrency: *concurrency_unknown
+      contracts:
+        status: partial
+        evidence: [composer-runtime-agreement-02, composer-runtime-agreement-06, cardinality-identity]
+        reason: Contract evidence does not cover every completion policy and merge strategy composition.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus contract matrix passes every declared completion policy and merge strategy assertion.
+      runtime:
+        status: partial
+        evidence:
+          - cardinality-identity
+          - runtime-disposition-drains-04
+          - focused-crash-restart-03
+          - focused-crash-restart-04
+        reason: Existing runtime evidence does not execute every required production disposition for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes exact production runtime result and disposition assertions.
+      audit:
+        status: partial
+        evidence:
+          - cardinality-identity
+          - runtime-disposition-drains-04
+          - focused-crash-restart-03
+          - focused-crash-restart-04
+        reason: Existing audit evidence does not prove every required durable record and portable export for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes exact durable audit-state and exported-record assertions.
+      recovery:
+        status: partial
+        evidence:
+          - cardinality-identity
+          - runtime-disposition-drains-04
+          - focused-crash-restart-03
+          - focused-crash-restart-04
+        reason: Selected restart seams pass, but the complete scenario recovery path is not executable evidence.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes database-reopen and public-resume assertions without duplicate work.
+      concurrency:
+        status: unknown
+        evidence: [cardinality-identity-08]
+        reason: No complete contention and fencing case exists for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus contention case passes single-effective-owner and stale-worker fencing assertions.
       freeform: *freeform_pass
       guided: *guided_fail
       round_trip: *round_trip_unknown
@@ -479,21 +570,40 @@ scenarios:
       build: *build_pass
       contracts: &expansion_contracts_partial
         status: partial
+        evidence:
+          - cardinality-identity-02
+          - cardinality-identity-03
+          - cardinality-identity-04
+          - cardinality-identity-05
+          - cardinality-identity-06
+          - cardinality-identity-07
         reason: Happy-path cardinality evidence exists while the parent/child replay identity contract remains open.
         owner_issue: elspeth-a25e9c009e
         exit_gate: The expansion corpus contract case passes stable parent/child identity assertions across replay.
       runtime: &expansion_runtime_partial
         status: partial
+        evidence:
+          - cardinality-identity-04
+          - cardinality-identity-05
+          - cardinality-identity-06
+          - cardinality-identity-07
         reason: Happy-path expansion runs, but replay can duplicate or ambiguously remint effective work.
         owner_issue: elspeth-a25e9c009e
         exit_gate: The expansion corpus runtime case passes exact-once effective child work assertions across replay.
       audit: &expansion_audit_partial
         status: partial
+        evidence:
+          - cardinality-identity-02
+          - cardinality-identity-03
+          - cardinality-identity-04
+          - cardinality-identity-05
+          - cardinality-identity-07
         reason: Selected expansion audit facts pass without complete replay-stable parent/child evidence.
         owner_issue: elspeth-a25e9c009e
         exit_gate: The expansion corpus audit case passes stable parent/child outcome and payload assertions across replay.
       recovery: &expansion_recovery_fail
         status: fail
+        evidence: [cardinality-identity-07]
         reason: Expansion recovery can duplicate or ambiguously remint effective child work.
         owner_issue: elspeth-a25e9c009e
         exit_gate: The expansion corpus recovery case passes with the same durable child identities or a clean conflict.
@@ -538,8 +648,18 @@ scenarios:
       config: *config_pass
       build: *build_pass
       contracts: *contracts_partial
-      runtime: *runtime_partial
-      audit: *audit_partial
+      runtime:
+        status: partial
+        evidence: [runtime-disposition-drains-02, runtime-disposition-drains-03]
+        reason: Existing runtime evidence does not execute every required production disposition for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes exact production runtime result and disposition assertions.
+      audit:
+        status: partial
+        evidence: [runtime-disposition-drains-02, runtime-disposition-drains-03]
+        reason: Existing audit evidence does not prove every required durable record and portable export for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes exact durable audit-state and exported-record assertions.
       recovery: *recovery_unknown
       concurrency: *concurrency_unknown
       freeform: *freeform_pass
@@ -555,9 +675,38 @@ scenarios:
       config: *config_pass
       build: *build_pass
       contracts: *contracts_pass
-      runtime: *runtime_partial
-      audit: *audit_partial
-      recovery: *recovery_partial
+      runtime:
+        status: partial
+        evidence:
+          - runtime-disposition-drains
+          - runtime-disposition-drains-02
+          - focused-crash-restart-05
+          - focused-crash-restart-06
+          - focused-crash-restart-07
+        reason: Existing runtime evidence does not execute every required production disposition for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes exact production runtime result and disposition assertions.
+      audit:
+        status: partial
+        evidence:
+          - runtime-disposition-drains
+          - runtime-disposition-drains-02
+          - focused-crash-restart-05
+          - focused-crash-restart-06
+          - focused-crash-restart-07
+        reason: Existing audit evidence does not prove every required durable record and portable export for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes exact durable audit-state and exported-record assertions.
+      recovery:
+        status: partial
+        evidence:
+          - focused-crash-restart-05
+          - focused-crash-restart-06
+          - focused-crash-restart-07
+          - focused-crash-restart-08
+        reason: Selected restart seams pass, but the complete scenario recovery path is not executable evidence.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes database-reopen and public-resume assertions without duplicate work.
       concurrency: *concurrency_partial
       freeform: *freeform_pass
       guided: *guided_partial
@@ -593,10 +742,52 @@ scenarios:
         reason: Worker multiplicity is deployment/runtime configuration, not DAG authoring.
       build: *build_pass
       contracts: *contracts_partial
-      runtime: *runtime_partial
-      audit: *audit_partial
-      recovery: *recovery_partial
-      concurrency: *concurrency_partial
+      runtime:
+        status: partial
+        evidence:
+          - focused-crash-restart
+          - direct-contention-fencing
+          - direct-contention-fencing-02
+          - direct-contention-fencing-03
+          - direct-contention-fencing-04
+          - direct-contention-fencing-05
+        reason: Existing runtime evidence does not execute every required production disposition for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes exact production runtime result and disposition assertions.
+      audit:
+        status: partial
+        evidence:
+          - focused-crash-restart
+          - direct-contention-fencing
+          - direct-contention-fencing-02
+          - direct-contention-fencing-03
+          - direct-contention-fencing-04
+          - direct-contention-fencing-05
+        reason: Existing audit evidence does not prove every required durable record and portable export for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes exact durable audit-state and exported-record assertions.
+      recovery:
+        status: partial
+        evidence:
+          - focused-crash-restart
+          - direct-contention-fencing
+          - direct-contention-fencing-02
+          - direct-contention-fencing-03
+        reason: Selected restart seams pass, but the complete scenario recovery path is not executable evidence.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes database-reopen and public-resume assertions without duplicate work.
+      concurrency:
+        status: partial
+        evidence:
+          - focused-crash-restart
+          - direct-contention-fencing
+          - direct-contention-fencing-02
+          - direct-contention-fencing-03
+          - direct-contention-fencing-04
+          - direct-contention-fencing-05
+        reason: Selected contention paths pass without the complete registered scenario matrix.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus contention case passes single-effective-owner and stale-worker fencing assertions.
       freeform: *worker_authoring_not_applicable
       guided: *worker_authoring_not_applicable
       round_trip: *worker_authoring_not_applicable

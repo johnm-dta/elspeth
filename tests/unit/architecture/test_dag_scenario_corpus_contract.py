@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from copy import deepcopy
 from pathlib import Path
 from typing import cast, get_args
@@ -10,6 +12,7 @@ import yaml
 from pydantic import ValidationError
 from tests.fixtures.dag_scenario_corpus.loader import (
     DEFAULT_MANIFEST_PATH,
+    REPOSITORY_ROOT,
     iter_harness_cases,
     load_manifest,
     resolve_fixture_path,
@@ -815,21 +818,27 @@ def _case_dict(case_id: str = "happy-path") -> dict[str, object]:
     }
 
 
-def _add_harness_evidence(raw: dict[str, object], locator: str) -> None:
+def _add_harness_evidence(raw: dict[str, object], locator: str) -> str:
+    evidence_id = f"harness-{locator.replace(':', '-')}"
     _raw_evidence(raw).append(
         {
-            "id": f"harness-{locator.replace(':', '-')}",
+            "id": evidence_id,
             "kind": "harness",
             "locator": locator,
             "claim": "Exercises a registered DAG scenario case",
             "stages": ["config", "build", "runtime", "audit"],
         }
     )
+    return evidence_id
 
 
 def _register_linear_case(raw: dict[str, object], case: dict[str, object]) -> None:
-    _raw_scenarios(raw)[0]["cases"] = [case]
-    _add_harness_evidence(raw, f"linear:{case['id']}")
+    scenario = _raw_scenarios(raw)[0]
+    scenario["cases"] = [case]
+    evidence_id = _add_harness_evidence(raw, f"linear:{case['id']}")
+    runtime_cell = deepcopy(_raw_dimensions(scenario)["runtime"])
+    runtime_cell["evidence"] = [*cast(list[str], runtime_cell.get("evidence", [])), evidence_id]
+    _raw_dimensions(scenario)["runtime"] = runtime_cell
 
 
 def test_manifest_has_exact_inventory_status_matrix_and_no_task_3_cases() -> None:
@@ -857,6 +866,31 @@ def test_manifest_pins_every_exact_current_assessment_pytest_locator() -> None:
     assert len({evidence_id for evidence_id, _locator in actual_evidence}) == 47
     assert len({locator for _evidence_id, locator in actual_evidence}) == 47
     assert all(reference.kind == "pytest" for reference in manifest.evidence)
+
+
+def test_manifest_pytest_evidence_batch_collects_without_running_suites() -> None:
+    manifest = load_manifest()
+    # Fixed interpreter and repository-owned selectors; no shell is involved.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            "-n",
+            "0",
+            "-p",
+            "no:cacheprovider",
+            *(reference.locator for reference in manifest.evidence if reference.kind == "pytest"),
+        ],
+        cwd=REPOSITORY_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_manifest_gap_ownership_and_not_applicable_reasons_follow_the_approved_rules() -> None:
@@ -1044,6 +1078,21 @@ def test_manifest_rejects_unknown_evidence_reference(tmp_path: Path) -> None:
         load_manifest(write_manifest(tmp_path, raw))
 
 
+def test_manifest_rejects_unreferenced_evidence_record(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    _raw_evidence(raw).append(
+        {
+            "id": "unreferenced-decision",
+            "kind": "decision",
+            "locator": "elspeth-ef29ef6ba4",
+            "claim": "A valid declaration that no scenario cell references",
+        }
+    )
+
+    with pytest.raises(ValueError, match=r"orphan evidence id.*unreferenced-decision"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
 @pytest.mark.parametrize(
     ("kind", "locator"),
     [
@@ -1099,7 +1148,7 @@ def test_manifest_rejects_registered_case_fixture_escape(tmp_path: Path) -> None
     case["fixture"] = "../../outside.yaml"
     _register_linear_case(raw, case)
 
-    with pytest.raises(ValueError, match="escapes DAG scenario fixture root"):
+    with pytest.raises(ValueError, match=r"linear:escape.*escapes DAG scenario fixture root"):
         load_manifest(write_manifest(tmp_path, raw))
 
 
@@ -1127,7 +1176,7 @@ def test_manifest_rejects_registered_case_invalid_input_fixture(
     case["input_fixture"] = input_fixture
     _register_linear_case(raw, case)
 
-    with pytest.raises(ValueError, match=error):
+    with pytest.raises(ValueError, match=rf"linear:invalid-input.*{error}"):
         load_manifest(write_manifest(tmp_path, raw))
 
 
@@ -1140,7 +1189,7 @@ def test_manifest_rejects_malformed_pytest_locator(tmp_path: Path) -> None:
 
 def test_manifest_rejects_missing_pytest_file(tmp_path: Path) -> None:
     raw = valid_manifest_dict()
-    _raw_evidence(raw)[0]["locator"] = "tests/unit/does_not_exist.py"
+    _raw_evidence(raw)[0]["locator"] = "tests/unit/test_does_not_exist.py"
     with pytest.raises(ValueError, match="pytest locator file does not exist"):
         load_manifest(write_manifest(tmp_path, raw))
 
@@ -1149,6 +1198,32 @@ def test_manifest_rejects_missing_pytest_node(tmp_path: Path) -> None:
     raw = valid_manifest_dict()
     _raw_evidence(raw)[0]["locator"] = "tests/unit/core/dag/test_builder_validation.py::test_missing_node"
     with pytest.raises(ValueError, match=r"does not select pytest node.*test_missing_node"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+@pytest.mark.parametrize(
+    "locator",
+    [
+        "tests/unit/architecture/test_dag_scenario_corpus_contract.py::_reference",
+        "tests/unit/core/dag/test_builder_validation.py::_BuilderValidationMockSource",
+    ],
+    ids=("private-helper-function", "private-helper-class"),
+)
+def test_manifest_rejects_non_collectable_pytest_helper(tmp_path: Path, locator: str) -> None:
+    raw = valid_manifest_dict()
+    _raw_evidence(raw)[0]["locator"] = locator
+
+    with pytest.raises(ValueError, match="not a pytest-collectable test node"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_unverified_parameter_specific_pytest_locator(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    _raw_evidence(raw)[0]["locator"] = (
+        "tests/unit/core/test_multi_source_foundation.py::test_plural_sources_are_canonical_and_stable_named[does-not-exist]"
+    )
+
+    with pytest.raises(ValueError, match="parameter-specific pytest locator is not supported"):
         load_manifest(write_manifest(tmp_path, raw))
 
 

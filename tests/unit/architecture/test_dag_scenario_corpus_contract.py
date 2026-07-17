@@ -1,9 +1,19 @@
 from __future__ import annotations
 
-from typing import get_args
+from copy import deepcopy
+from pathlib import Path
+from typing import cast, get_args
 
 import pytest
+import tests.fixtures.dag_scenario_corpus.loader as loader_module
+import yaml
 from pydantic import ValidationError
+from tests.fixtures.dag_scenario_corpus.loader import (
+    DEFAULT_MANIFEST_PATH,
+    iter_harness_cases,
+    load_manifest,
+    resolve_fixture_path,
+)
 from tests.fixtures.dag_scenario_corpus.schema import (
     EXPECTED_DIMENSIONS,
     EXPECTED_SCENARIOS,
@@ -61,6 +71,256 @@ EXPECTED_SCENARIO_VALUES = (
         "Multi-worker execution, lease expiry, reclaim, and late completion",
     ),
 )
+
+EXPECTED_STATUS_MATRIX = {
+    "linear": ("pass", "pass", "pass", "partial", "partial", "partial", "unknown", "pass", "partial", "partial", "partial"),
+    "multiple-independent-sources": (
+        "pass",
+        "pass",
+        "pass",
+        "partial",
+        "partial",
+        "partial",
+        "unknown",
+        "pass",
+        "fail",
+        "partial",
+        "unknown",
+    ),
+    "multi-source-queue-fan-in": (
+        "pass",
+        "pass",
+        "pass",
+        "partial",
+        "partial",
+        "unknown",
+        "unknown",
+        "pass",
+        "fail",
+        "partial",
+        "unknown",
+    ),
+    "conditional-routing": (
+        "pass",
+        "pass",
+        "pass",
+        "partial",
+        "partial",
+        "unknown",
+        "unknown",
+        "pass",
+        "fail",
+        "partial",
+        "unknown",
+    ),
+    "fork-multiple-terminals-partial-failure": (
+        "pass",
+        "pass",
+        "pass",
+        "partial",
+        "partial",
+        "unknown",
+        "unknown",
+        "pass",
+        "fail",
+        "unknown",
+        "unknown",
+    ),
+    "fork-coalesce-policies": (
+        "pass",
+        "pass",
+        "partial",
+        "partial",
+        "partial",
+        "partial",
+        "partial",
+        "pass",
+        "fail",
+        "partial",
+        "unknown",
+    ),
+    "sequential-nested-fork-coalesce": (
+        "pass",
+        "pass",
+        "partial",
+        "unknown",
+        "unknown",
+        "unknown",
+        "unknown",
+        "pass",
+        "fail",
+        "unknown",
+        "unknown",
+    ),
+    "parallel-coalesces": (
+        "pass",
+        "partial",
+        "partial",
+        "unknown",
+        "unknown",
+        "unknown",
+        "unknown",
+        "pass",
+        "fail",
+        "unknown",
+        "unknown",
+    ),
+    "aggregation-immutable-batch": (
+        "pass",
+        "pass",
+        "partial",
+        "partial",
+        "partial",
+        "partial",
+        "unknown",
+        "pass",
+        "fail",
+        "unknown",
+        "unknown",
+    ),
+    "row-expansion-parent-child-recovery": (
+        "pass",
+        "pass",
+        "partial",
+        "partial",
+        "partial",
+        "fail",
+        "unknown",
+        "pass",
+        "fail",
+        "unknown",
+        "unknown",
+    ),
+    "row-union-interleave": (
+        "fail",
+        "fail",
+        "fail",
+        "fail",
+        "not_applicable",
+        "not_applicable",
+        "not_applicable",
+        "fail",
+        "fail",
+        "not_applicable",
+        "not_applicable",
+    ),
+    "retry-quarantine-discard-routed-errors": (
+        "pass",
+        "pass",
+        "partial",
+        "partial",
+        "partial",
+        "unknown",
+        "unknown",
+        "pass",
+        "fail",
+        "partial",
+        "unknown",
+    ),
+    "sink-write-pending-redrive": (
+        "pass",
+        "pass",
+        "pass",
+        "partial",
+        "partial",
+        "partial",
+        "partial",
+        "pass",
+        "partial",
+        "partial",
+        "unknown",
+    ),
+    "checkpoint-deterministic-resume": (
+        "pass",
+        "pass",
+        "partial",
+        "partial",
+        "partial",
+        "partial",
+        "unknown",
+        "not_applicable",
+        "not_applicable",
+        "not_applicable",
+        "unknown",
+    ),
+    "multi-worker-lease-reclaim-late-completion": (
+        "not_applicable",
+        "pass",
+        "partial",
+        "partial",
+        "partial",
+        "partial",
+        "partial",
+        "not_applicable",
+        "not_applicable",
+        "not_applicable",
+        "unknown",
+    ),
+}
+
+EXPECTED_ASSESSMENT_LOCATORS = {
+    "core-builder-schema-plural-sources": (
+        "tests/unit/core/dag/test_builder_validation.py",
+        "tests/unit/core/dag/test_graph_validation.py",
+        "tests/unit/core/test_dag_schema_propagation.py",
+        "tests/unit/core/test_multi_source_foundation.py::test_plural_sources_are_canonical_and_stable_named",
+        "tests/unit/core/test_multi_source_foundation.py::test_legacy_singular_source_yaml_is_rejected",
+        "tests/unit/core/test_multi_source_foundation.py::test_settings_round_trip_plural_only",
+        "tests/unit/core/test_multi_source_foundation.py::test_explicit_named_sources_keep_source_name_in_identity_and_audit_config",
+        "tests/unit/core/test_multi_source_foundation.py::test_plugin_bundle_instantiates_named_sources_via_production_path",
+        "tests/unit/core/test_multi_source_foundation.py::test_from_plugin_instances_builds_declared_queue_fan_in_via_production_path",
+        "tests/unit/core/test_multi_source_foundation.py::test_pipeline_config_assembly_preserves_named_sources",
+        "tests/unit/core/test_multi_source_foundation.py::test_graph_allows_multiple_source_roots_when_reachable",
+        "tests/unit/core/test_multi_source_foundation.py::test_graph_rejects_fan_in_without_queue",
+    ),
+    "yaml-importer-generator": (
+        "tests/unit/web/composer/test_yaml_importer.py",
+        "tests/unit/web/composer/test_yaml_generator.py",
+    ),
+    "composer-runtime-agreement": (
+        "tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_both_reject_missing_required_field",
+        "tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_both_reject_aggregation_nested_required_input_fields_without_upstream_guarantee",
+        "tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_both_reject_direct_fork_to_sink_required_field_mismatch",
+        "tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_both_accept_pass_through_downstream_of_coalesce",
+        "tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_composer_warns_but_runtime_rejects_mixed_coalesce_branch_schemas",
+        "tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_both_accept_aggregation_with_input_fields_and_required_fields",
+        "tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeGateRouteParityAgreement",
+        "tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeQueueAgreement",
+    ),
+    "cardinality-identity": (
+        "tests/unit/engine/test_batch_token_identity.py",
+        "tests/unit/core/landscape/repository_integration/test_recorder_tokens.py::TestAtomicTokenOperations::test_expand_token_records_parent_expanded_outcome",
+        "tests/unit/core/landscape/repository_integration/test_recorder_tokens.py::TestAtomicTokenOperations::test_expand_token_stores_expected_count_contract",
+        "tests/unit/engine/test_processor.py::TestTransformModeOutcomeOrdering::test_cardinality_mismatch_does_not_record_parent_terminal_outcome",
+        "tests/unit/engine/test_processor.py::TestTransformModeOutcomeOrdering::test_expand_token_failure_does_not_record_parent_terminal_outcome",
+        "tests/unit/engine/test_processor.py::TestProcessRowMultiRowOutput",
+        "tests/property/audit/test_fork_join_balance.py::TestForkRecoveryInvariant::test_expand_token_persists_per_child_payload",
+        "tests/integration/core/test_batch_membership_contention.py",
+    ),
+    "runtime-disposition-drains": (
+        "tests/unit/engine/test_scheduler_drain_characterization.py::test_sink_bound_result_parks_pending_sink_with_fenced_owner_and_tags_result",
+        "tests/unit/engine/test_scheduler_drain_characterization.py::test_claimed_token_failure_marks_failed_with_fence",
+        "tests/unit/engine/test_scheduler_drain_characterization.py::test_non_sink_terminal_marks_terminal_and_unregistered_build_is_unfenced",
+        "tests/unit/engine/test_processor.py::TestDurableSchedulerResumeDrain::test_aggregation_buffering_leaves_scheduler_work_blocked",
+    ),
+    "focused-crash-restart": (
+        "tests/unit/core/landscape/test_scheduler_lease_recovery_races.py",
+        "tests/unit/core/landscape/test_scheduler_repository_complete_barrier.py::test_complete_barrier_crash_atomicity",
+        "tests/integration/pipeline/test_aggregation_recovery.py::TestFlushOutputJournalDurability::test_timeout_flush_output_is_journal_durable_before_sink_write",
+        "tests/integration/pipeline/test_aggregation_recovery.py::TestFailedFlushReconcile::test_failed_flush_crash_between_terminal_write_and_release_resumes",
+        "tests/integration/pipeline/test_sink_effect_recovery.py::test_fresh_pipeline_executor_reuses_interrupted_open_state_and_publishes_once",
+        "tests/integration/pipeline/test_sink_effect_recovery.py::test_redrive_after_crash_before_reservation_recovers",
+        "tests/unit/engine/test_processor.py::TestDurableSchedulerResumeDrain::test_pending_sink_resume_repairs_already_outcomed_row_without_reemitting_sink",
+        "tests/unit/engine/test_processor.py::TestDurableSchedulerResumeDrain::test_recovers_expired_lease_then_drains_without_source_replay",
+    ),
+    "direct-contention-fencing": (
+        "tests/integration/engine/test_two_process_scheduler_contention.py",
+        "tests/integration/engine/test_multi_source_chaos.py::test_lease_expiry_mid_transform_peer_reclaim_bumps_attempt_and_fences_stale_owner",
+        "tests/e2e/recovery/test_suspended_winner_fences.py",
+        "tests/unit/engine/test_scheduler_drain_characterization.py::test_immediate_enqueue_routes_registered_worker_to_strict_and_unregistered_to_explicit_legacy",
+        "tests/unit/engine/test_scheduler_drain_characterization.py::test_immediate_enqueue_routing_ast_and_legacy_production_references_are_pinned",
+    ),
+}
 
 
 def _reference(*, kind: EvidenceKind = "harness") -> EvidenceReference:
@@ -506,3 +766,372 @@ def test_manifest_verdict_is_complete_only_for_pass_or_not_applicable_cells() ->
             exit_gate="focused regression passes",
         )
         assert _manifest(gap).verdict == "not_complete"
+
+
+def valid_manifest_dict() -> dict[str, object]:
+    loaded = yaml.safe_load(DEFAULT_MANIFEST_PATH.read_text(encoding="utf-8"))
+    assert isinstance(loaded, dict)
+    return cast(dict[str, object], loaded)
+
+
+def write_manifest(tmp_path: Path, raw: object) -> Path:
+    path = tmp_path / "manifest.yaml"
+    path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def _raw_scenarios(raw: dict[str, object]) -> list[dict[str, object]]:
+    return cast(list[dict[str, object]], raw["scenarios"])
+
+
+def _raw_dimensions(scenario: dict[str, object]) -> dict[str, dict[str, object]]:
+    return cast(dict[str, dict[str, object]], scenario["dimensions"])
+
+
+def _raw_evidence(raw: dict[str, object]) -> list[dict[str, object]]:
+    return cast(list[dict[str, object]], raw["evidence"])
+
+
+def _case_dict(case_id: str = "happy-path") -> dict[str, object]:
+    return {
+        "id": case_id,
+        "workflow": "run",
+        "fixture": "linear/happy-path.yaml",
+        "input_fixture": "linear/input.csv",
+        "expected": {
+            "status": "completed",
+            "output_rows": 3,
+            "required_audit_record_types": ["run"],
+        },
+    }
+
+
+def _add_harness_evidence(raw: dict[str, object], locator: str) -> None:
+    _raw_evidence(raw).append(
+        {
+            "id": f"harness-{locator.replace(':', '-')}",
+            "kind": "harness",
+            "locator": locator,
+            "claim": "Exercises a registered DAG scenario case",
+            "stages": ["config", "build", "runtime", "audit"],
+        }
+    )
+
+
+def test_manifest_has_exact_inventory_status_matrix_and_no_task_3_cases() -> None:
+    manifest = load_manifest()
+
+    assert manifest.schema_version == 1
+    assert manifest.criteria_ref == "docs/architecture/dag/completeness-criteria.md"
+    assert tuple((scenario.id, scenario.title) for scenario in manifest.scenarios) == EXPECTED_SCENARIOS
+    assert tuple(scenario.ordinal for scenario in manifest.scenarios) == tuple(range(1, 16))
+    assert tuple(scenario.id for scenario in manifest.scenarios) == tuple(EXPECTED_STATUS_MATRIX)
+    for scenario in manifest.scenarios:
+        assert tuple(scenario.dimensions) == EXPECTED_DIMENSIONS
+        assert tuple(cell.status for cell in scenario.dimensions.values()) == EXPECTED_STATUS_MATRIX[scenario.id]
+        assert scenario.cases == ()
+    assert iter_harness_cases(manifest) == ()
+    assert manifest.verdict == "not_complete"
+
+
+def test_manifest_pins_every_exact_current_assessment_pytest_locator() -> None:
+    manifest = load_manifest()
+
+    assert all(reference.kind == "pytest" for reference in manifest.evidence)
+    for evidence_group, expected_locators in EXPECTED_ASSESSMENT_LOCATORS.items():
+        actual_locators = tuple(
+            reference.locator
+            for reference in manifest.evidence
+            if reference.id == evidence_group or reference.id.startswith(f"{evidence_group}-")
+        )
+        assert actual_locators == expected_locators
+
+
+def test_manifest_gap_ownership_and_not_applicable_reasons_follow_the_approved_rules() -> None:
+    manifest = load_manifest()
+    expected_not_applicable_reasons = {
+        "row-union-interleave": "Row union has no supported construct, so post-build audit, recovery, and concurrency do not apply after configuration, build, contract, and runtime already fail.",
+        "checkpoint-deterministic-resume": "Checkpoint/resume is a runtime lifecycle, not an authored topology.",
+        "multi-worker-lease-reclaim-late-completion": "Worker multiplicity is deployment/runtime configuration, not DAG authoring.",
+    }
+
+    for scenario in manifest.scenarios:
+        for dimension, cell in scenario.dimensions.items():
+            if cell.status == "not_applicable":
+                assert cell.reason == expected_not_applicable_reasons[scenario.id]
+                continue
+            if cell.status == "pass":
+                continue
+            if scenario.id == "row-union-interleave":
+                expected_owner = "elspeth-a5b86149d4"
+            elif scenario.id == "row-expansion-parent-child-recovery" and dimension in {
+                "contracts",
+                "runtime",
+                "audit",
+                "recovery",
+                "concurrency",
+            }:
+                expected_owner = "elspeth-a25e9c009e"
+            elif dimension == "guided":
+                expected_owner = "elspeth-7e2dd67275"
+            elif dimension == "round_trip":
+                expected_owner = "elspeth-7cf763da7c"
+            else:
+                expected_owner = "elspeth-ef29ef6ba4"
+            assert cell.owner_issue == expected_owner
+            assert cell.exit_gate is not None
+            assert "corpus" in cell.exit_gate.lower()
+            assert "pass" in cell.exit_gate.lower()
+
+
+def test_manifest_rejects_non_mapping_yaml(tmp_path: Path) -> None:
+    path = write_manifest(tmp_path, ["not", "a", "mapping"])
+    with pytest.raises(ValueError, match="must be a YAML mapping"):
+        load_manifest(path)
+
+
+@pytest.mark.parametrize("schema_version", [None, 2])
+def test_manifest_rejects_missing_or_wrong_schema_version(tmp_path: Path, schema_version: int | None) -> None:
+    raw = valid_manifest_dict()
+    if schema_version is None:
+        raw.pop("schema_version")
+    else:
+        raw["schema_version"] = schema_version
+
+    with pytest.raises(ValidationError, match="schema_version"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_extra_keys(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    raw["verdict"] = "complete"
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_duplicate_scenario(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    scenarios = _raw_scenarios(raw)
+    scenarios.append(deepcopy(scenarios[0]))
+    with pytest.raises(ValueError, match=r"duplicate scenario id.*linear"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_missing_scenario(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    _raw_scenarios(raw).pop()
+    with pytest.raises(ValueError, match="scenario IDs/order"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_wrong_scenario_id(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    _raw_scenarios(raw)[0]["id"] = "renamed-linear"
+    with pytest.raises(ValueError, match="scenario IDs/order"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_reordered_scenarios(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    scenarios = _raw_scenarios(raw)
+    scenarios[0], scenarios[1] = scenarios[1], scenarios[0]
+    with pytest.raises(ValueError, match="scenario IDs/order"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_wrong_scenario_title(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    _raw_scenarios(raw)[0]["title"] = "Linear-ish"
+    with pytest.raises(ValueError, match=r"title.*linear"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_wrong_scenario_ordinal(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    _raw_scenarios(raw)[0]["ordinal"] = 2
+    with pytest.raises(ValueError, match=r"ordinal.*linear"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_missing_dimension(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    _raw_dimensions(_raw_scenarios(raw)[0]).pop("scale")
+    with pytest.raises(ValueError, match=r"dimension keys/order.*linear"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_invalid_dimension_key(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    dimensions = _raw_dimensions(_raw_scenarios(raw)[0])
+    dimensions["unsupported"] = dimensions.pop("scale")
+    with pytest.raises(ValidationError, match="unsupported"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_duplicate_evidence_ids(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    evidence = _raw_evidence(raw)
+    evidence.append(deepcopy(evidence[0]))
+    with pytest.raises(ValueError, match="duplicate evidence id"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_unknown_evidence_reference(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    _raw_dimensions(_raw_scenarios(raw)[0])["config"]["evidence"] = ["missing-id"]
+    with pytest.raises(ValueError, match=r"unknown evidence id.*missing-id"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+@pytest.mark.parametrize(
+    ("kind", "locator"),
+    [
+        ("document", "docs/architecture/dag/completeness-criteria.md"),
+        ("decision", "elspeth-ef29ef6ba4"),
+    ],
+)
+def test_manifest_rejects_pass_with_only_documentary_evidence(
+    tmp_path: Path,
+    kind: str,
+    locator: str,
+) -> None:
+    raw = valid_manifest_dict()
+    _raw_evidence(raw).append(
+        {
+            "id": "non-executable",
+            "kind": kind,
+            "locator": locator,
+            "claim": "Documents a claim without executing it",
+        }
+    )
+    _raw_dimensions(_raw_scenarios(raw)[0])["config"]["evidence"] = ["non-executable"]
+    with pytest.raises(ValueError, match=r"pass cell.*only document/decision evidence"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_duplicate_case_ids(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    case = _case_dict()
+    _raw_scenarios(raw)[0]["cases"] = [case, deepcopy(case)]
+    _add_harness_evidence(raw, "linear:happy-path")
+    with pytest.raises(ValueError, match=r"duplicate case id.*linear:happy-path"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_unknown_harness_locator(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    _add_harness_evidence(raw, "linear:unregistered")
+    with pytest.raises(ValueError, match=r"unknown harness locator.*linear:unregistered"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_case_without_matching_harness_locator(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    _raw_scenarios(raw)[0]["cases"] = [_case_dict()]
+    with pytest.raises(ValueError, match=r"harness case.*linear:happy-path.*matching evidence locator"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_malformed_pytest_locator(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    _raw_evidence(raw)[0]["locator"] = "docs/architecture/dag/README.md"
+    with pytest.raises(ValueError, match="repository-relative pytest locator under tests"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_missing_pytest_file(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    _raw_evidence(raw)[0]["locator"] = "tests/unit/does_not_exist.py"
+    with pytest.raises(ValueError, match="pytest locator file does not exist"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_missing_pytest_node(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    _raw_evidence(raw)[0]["locator"] = "tests/unit/core/dag/test_builder_validation.py::test_missing_node"
+    with pytest.raises(ValueError, match=r"does not select pytest node.*test_missing_node"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_resolve_fixture_path_rejects_containment_escape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fixture_root = tmp_path / "fixtures"
+    fixture_root.mkdir()
+    (tmp_path / "outside.yaml").write_text("outside", encoding="utf-8")
+    monkeypatch.setattr(loader_module, "FIXTURE_ROOT", fixture_root)
+
+    with pytest.raises(ValueError, match="escapes DAG scenario fixture root"):
+        resolve_fixture_path("../outside.yaml")
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_resolve_fixture_path_rejects_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    nested: bool,
+) -> None:
+    fixture_root = tmp_path / "fixtures"
+    fixture_root.mkdir()
+    real_directory = fixture_root / "real"
+    real_directory.mkdir()
+    (real_directory / "fixture.yaml").write_text("fixture", encoding="utf-8")
+    monkeypatch.setattr(loader_module, "FIXTURE_ROOT", fixture_root)
+    if nested:
+        (fixture_root / "linked").symlink_to(real_directory, target_is_directory=True)
+        relative_path = "linked/fixture.yaml"
+    else:
+        (fixture_root / "linked.yaml").symlink_to(real_directory / "fixture.yaml")
+        relative_path = "linked.yaml"
+
+    with pytest.raises(ValueError, match="must not be a symlink"):
+        resolve_fixture_path(relative_path)
+
+
+def test_resolve_fixture_path_rejects_missing_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fixture_root = tmp_path / "fixtures"
+    fixture_root.mkdir()
+    monkeypatch.setattr(loader_module, "FIXTURE_ROOT", fixture_root)
+
+    with pytest.raises(ValueError, match="does not exist"):
+        resolve_fixture_path("missing.yaml")
+
+
+def test_resolve_fixture_path_rejects_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fixture_root = tmp_path / "fixtures"
+    fixture_root.mkdir()
+    directory = fixture_root / "directory"
+    directory.mkdir()
+    monkeypatch.setattr(loader_module, "FIXTURE_ROOT", fixture_root)
+
+    with pytest.raises(ValueError, match="must be a regular file"):
+        resolve_fixture_path("directory")
+
+
+def test_resolve_fixture_path_accepts_contained_regular_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fixture_root = tmp_path / "fixtures"
+    fixture_root.mkdir()
+    fixture = fixture_root / "scenario.yaml"
+    fixture.write_text("fixture", encoding="utf-8")
+    monkeypatch.setattr(loader_module, "FIXTURE_ROOT", fixture_root)
+
+    assert resolve_fixture_path("scenario.yaml") == fixture.resolve()
+
+
+def test_iter_harness_cases_flattens_constructed_manifest_in_scenario_order() -> None:
+    first_case = _case()
+    second_case = first_case.model_copy(update={"id": "second"})
+    first_scenario = _scenario(EvidenceCell(status="pass", evidence=("evidence-1",))).model_copy(
+        update={"cases": (first_case, second_case)}
+    )
+    second_scenario = first_scenario.model_copy(update={"id": "second-scenario", "cases": (second_case,)})
+    manifest = ScenarioManifest(
+        schema_version=1,
+        criteria_ref="docs/architecture/dag/completeness-criteria.md",
+        evidence=(_reference(),),
+        scenarios=(first_scenario, second_scenario),
+    )
+
+    assert tuple((scenario.id, case.id) for scenario, case in iter_harness_cases(manifest)) == (
+        ("linear", "happy-path"),
+        ("linear", "second"),
+        ("second-scenario", "second"),
+    )

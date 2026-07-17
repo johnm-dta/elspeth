@@ -1,0 +1,603 @@
+schema_version: 1
+criteria_ref: docs/architecture/dag/completeness-criteria.md
+
+evidence:
+  - id: core-builder-schema-plural-sources
+    kind: pytest
+    locator: tests/unit/core/dag/test_builder_validation.py
+    claim: Production builder validation accepts supported DAG structures and rejects invalid ones.
+    stages: [build]
+  - id: core-builder-schema-plural-sources-02
+    kind: pytest
+    locator: tests/unit/core/dag/test_graph_validation.py
+    claim: Canonical graph validation enforces supported structural invariants.
+    stages: [build]
+  - id: core-builder-schema-plural-sources-03
+    kind: pytest
+    locator: tests/unit/core/test_dag_schema_propagation.py
+    claim: DAG schema propagation enforces declared edge contracts.
+    stages: [build]
+  - id: core-builder-schema-plural-sources-04
+    kind: pytest
+    locator: tests/unit/core/test_multi_source_foundation.py::test_plural_sources_are_canonical_and_stable_named
+    claim: Plural source configuration is canonical and stably named.
+    stages: [config]
+  - id: core-builder-schema-plural-sources-05
+    kind: pytest
+    locator: tests/unit/core/test_multi_source_foundation.py::test_legacy_singular_source_yaml_is_rejected
+    claim: Legacy singular-source YAML is rejected consistently.
+    stages: [config]
+  - id: core-builder-schema-plural-sources-06
+    kind: pytest
+    locator: tests/unit/core/test_multi_source_foundation.py::test_settings_round_trip_plural_only
+    claim: Plural-source settings survive the settings round trip.
+    stages: [config]
+  - id: core-builder-schema-plural-sources-07
+    kind: pytest
+    locator: tests/unit/core/test_multi_source_foundation.py::test_explicit_named_sources_keep_source_name_in_identity_and_audit_config
+    claim: Explicit source names survive graph identity and audit configuration.
+    stages: [build, audit]
+  - id: core-builder-schema-plural-sources-08
+    kind: pytest
+    locator: tests/unit/core/test_multi_source_foundation.py::test_plugin_bundle_instantiates_named_sources_via_production_path
+    claim: The production plugin path instantiates explicitly named sources.
+    stages: [config, build]
+  - id: core-builder-schema-plural-sources-09
+    kind: pytest
+    locator: tests/unit/core/test_multi_source_foundation.py::test_from_plugin_instances_builds_declared_queue_fan_in_via_production_path
+    claim: The production builder constructs declared multi-source queue fan-in.
+    stages: [config, build]
+  - id: core-builder-schema-plural-sources-10
+    kind: pytest
+    locator: tests/unit/core/test_multi_source_foundation.py::test_pipeline_config_assembly_preserves_named_sources
+    claim: Pipeline configuration assembly preserves named sources.
+    stages: [config, build]
+  - id: core-builder-schema-plural-sources-11
+    kind: pytest
+    locator: tests/unit/core/test_multi_source_foundation.py::test_graph_allows_multiple_source_roots_when_reachable
+    claim: Reachable multiple source roots are accepted.
+    stages: [build]
+  - id: core-builder-schema-plural-sources-12
+    kind: pytest
+    locator: tests/unit/core/test_multi_source_foundation.py::test_graph_rejects_fan_in_without_queue
+    claim: Unsupported fan-in without a queue is rejected.
+    stages: [build]
+
+  - id: yaml-importer-generator
+    kind: pytest
+    locator: tests/unit/web/composer/test_yaml_importer.py
+    claim: Freeform YAML imports supported DAG configuration into Composer.
+    stages: [config]
+  - id: yaml-importer-generator-02
+    kind: pytest
+    locator: tests/unit/web/composer/test_yaml_generator.py
+    claim: Composer generates supported DAG configuration as YAML.
+    stages: [config]
+
+  - id: composer-runtime-agreement
+    kind: pytest
+    locator: tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_both_reject_missing_required_field
+    claim: Composer and runtime reject a missing required field consistently.
+    stages: [config, build]
+  - id: composer-runtime-agreement-02
+    kind: pytest
+    locator: tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_both_reject_aggregation_nested_required_input_fields_without_upstream_guarantee
+    claim: Composer and runtime reject unsupported nested aggregation requirements consistently.
+    stages: [config, build]
+  - id: composer-runtime-agreement-03
+    kind: pytest
+    locator: tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_both_reject_direct_fork_to_sink_required_field_mismatch
+    claim: Composer and runtime reject fork-to-sink schema mismatch consistently.
+    stages: [config, build]
+  - id: composer-runtime-agreement-04
+    kind: pytest
+    locator: tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_both_accept_pass_through_downstream_of_coalesce
+    claim: Composer and runtime accept pass-through downstream of coalesce.
+    stages: [config, build]
+  - id: composer-runtime-agreement-05
+    kind: pytest
+    locator: tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_composer_warns_but_runtime_rejects_mixed_coalesce_branch_schemas
+    claim: The known mixed-coalesce Composer/runtime disagreement remains explicitly characterized.
+    stages: [config, build]
+  - id: composer-runtime-agreement-06
+    kind: pytest
+    locator: tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_both_accept_aggregation_with_input_fields_and_required_fields
+    claim: Composer and runtime accept compatible aggregation requirements.
+    stages: [config, build]
+  - id: composer-runtime-agreement-07
+    kind: pytest
+    locator: tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeGateRouteParityAgreement
+    claim: Composer and runtime gate-route behavior is exercised as a parity group.
+    stages: [config, build]
+  - id: composer-runtime-agreement-08
+    kind: pytest
+    locator: tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeQueueAgreement
+    claim: Composer and runtime queue behavior is exercised as a parity group.
+    stages: [config, build]
+
+  - id: cardinality-identity
+    kind: pytest
+    locator: tests/unit/engine/test_batch_token_identity.py
+    claim: Batch token identity and immutable membership rules are exercised.
+    stages: [runtime, audit]
+  - id: cardinality-identity-02
+    kind: pytest
+    locator: tests/unit/core/landscape/repository_integration/test_recorder_tokens.py::TestAtomicTokenOperations::test_expand_token_records_parent_expanded_outcome
+    claim: Expansion records the parent expanded outcome atomically.
+    stages: [runtime, audit]
+  - id: cardinality-identity-03
+    kind: pytest
+    locator: tests/unit/core/landscape/repository_integration/test_recorder_tokens.py::TestAtomicTokenOperations::test_expand_token_stores_expected_count_contract
+    claim: Expansion persists its expected-child-count contract.
+    stages: [runtime, audit]
+  - id: cardinality-identity-04
+    kind: pytest
+    locator: tests/unit/engine/test_processor.py::TestTransformModeOutcomeOrdering::test_cardinality_mismatch_does_not_record_parent_terminal_outcome
+    claim: Cardinality mismatch cannot prematurely terminalize the parent.
+    stages: [runtime, audit]
+  - id: cardinality-identity-05
+    kind: pytest
+    locator: tests/unit/engine/test_processor.py::TestTransformModeOutcomeOrdering::test_expand_token_failure_does_not_record_parent_terminal_outcome
+    claim: Expansion failure cannot prematurely terminalize the parent.
+    stages: [runtime, audit]
+  - id: cardinality-identity-06
+    kind: pytest
+    locator: tests/unit/engine/test_processor.py::TestProcessRowMultiRowOutput
+    claim: Multi-row transform outputs preserve declared cardinality behavior.
+    stages: [runtime]
+  - id: cardinality-identity-07
+    kind: pytest
+    locator: tests/property/audit/test_fork_join_balance.py::TestForkRecoveryInvariant::test_expand_token_persists_per_child_payload
+    claim: Expansion persists a durable payload for every child.
+    stages: [runtime, audit, recovery]
+  - id: cardinality-identity-08
+    kind: pytest
+    locator: tests/integration/core/test_batch_membership_contention.py
+    claim: Batch membership remains stable under selected contention.
+    stages: [runtime, audit, recovery]
+
+  - id: runtime-disposition-drains
+    kind: pytest
+    locator: tests/unit/engine/test_scheduler_drain_characterization.py::test_sink_bound_result_parks_pending_sink_with_fenced_owner_and_tags_result
+    claim: Sink-bound results park as pending-sink work with a fenced owner.
+    stages: [runtime, audit]
+  - id: runtime-disposition-drains-02
+    kind: pytest
+    locator: tests/unit/engine/test_scheduler_drain_characterization.py::test_claimed_token_failure_marks_failed_with_fence
+    claim: Claimed-token failure records a fenced failed disposition.
+    stages: [runtime, audit]
+  - id: runtime-disposition-drains-03
+    kind: pytest
+    locator: tests/unit/engine/test_scheduler_drain_characterization.py::test_non_sink_terminal_marks_terminal_and_unregistered_build_is_unfenced
+    claim: Non-sink terminal work drains and unregistered construction remains explicit.
+    stages: [runtime, audit]
+  - id: runtime-disposition-drains-04
+    kind: pytest
+    locator: tests/unit/engine/test_processor.py::TestDurableSchedulerResumeDrain::test_aggregation_buffering_leaves_scheduler_work_blocked
+    claim: Aggregation buffering retains durable blocked scheduler work.
+    stages: [runtime, audit]
+
+  - id: focused-crash-restart
+    kind: pytest
+    locator: tests/unit/core/landscape/test_scheduler_lease_recovery_races.py
+    claim: Selected scheduler lease recovery races are exercised deterministically.
+    stages: [runtime, audit, recovery]
+  - id: focused-crash-restart-02
+    kind: pytest
+    locator: tests/unit/core/landscape/test_scheduler_repository_complete_barrier.py::test_complete_barrier_crash_atomicity
+    claim: Barrier completion remains atomic across its crash seam.
+    stages: [runtime, audit, recovery]
+  - id: focused-crash-restart-03
+    kind: pytest
+    locator: tests/integration/pipeline/test_aggregation_recovery.py::TestFlushOutputJournalDurability::test_timeout_flush_output_is_journal_durable_before_sink_write
+    claim: Timed aggregation flush output is journaled before sink write.
+    stages: [runtime, audit, recovery]
+  - id: focused-crash-restart-04
+    kind: pytest
+    locator: tests/integration/pipeline/test_aggregation_recovery.py::TestFailedFlushReconcile::test_failed_flush_crash_between_terminal_write_and_release_resumes
+    claim: Failed aggregation flush resumes after a terminal-write/release crash.
+    stages: [runtime, audit, recovery]
+  - id: focused-crash-restart-05
+    kind: pytest
+    locator: tests/integration/pipeline/test_sink_effect_recovery.py::test_fresh_pipeline_executor_reuses_interrupted_open_state_and_publishes_once
+    claim: A fresh executor reuses interrupted sink state and publishes once.
+    stages: [runtime, audit, recovery]
+  - id: focused-crash-restart-06
+    kind: pytest
+    locator: tests/integration/pipeline/test_sink_effect_recovery.py::test_redrive_after_crash_before_reservation_recovers
+    claim: Sink redrive recovers after a crash before reservation.
+    stages: [runtime, audit, recovery]
+  - id: focused-crash-restart-07
+    kind: pytest
+    locator: tests/unit/engine/test_processor.py::TestDurableSchedulerResumeDrain::test_pending_sink_resume_repairs_already_outcomed_row_without_reemitting_sink
+    claim: Pending-sink resume repairs durable state without re-emitting the sink.
+    stages: [runtime, audit, recovery]
+  - id: focused-crash-restart-08
+    kind: pytest
+    locator: tests/unit/engine/test_processor.py::TestDurableSchedulerResumeDrain::test_recovers_expired_lease_then_drains_without_source_replay
+    claim: Expired-lease recovery drains without source replay.
+    stages: [runtime, audit, recovery]
+
+  - id: direct-contention-fencing
+    kind: pytest
+    locator: tests/integration/engine/test_two_process_scheduler_contention.py
+    claim: Direct two-process scheduler contention preserves effective ownership.
+    stages: [runtime, audit, recovery]
+  - id: direct-contention-fencing-02
+    kind: pytest
+    locator: tests/integration/engine/test_multi_source_chaos.py::test_lease_expiry_mid_transform_peer_reclaim_bumps_attempt_and_fences_stale_owner
+    claim: Peer reclaim after lease expiry fences the stale transform owner.
+    stages: [runtime, audit, recovery]
+  - id: direct-contention-fencing-03
+    kind: pytest
+    locator: tests/e2e/recovery/test_suspended_winner_fences.py
+    claim: Suspended winner recovery fences late completion.
+    stages: [runtime, audit, recovery]
+  - id: direct-contention-fencing-04
+    kind: pytest
+    locator: tests/unit/engine/test_scheduler_drain_characterization.py::test_immediate_enqueue_routes_registered_worker_to_strict_and_unregistered_to_explicit_legacy
+    claim: Initial enqueue selects strict registered-worker routing explicitly.
+    stages: [runtime, audit]
+  - id: direct-contention-fencing-05
+    kind: pytest
+    locator: tests/unit/engine/test_scheduler_drain_characterization.py::test_immediate_enqueue_routing_ast_and_legacy_production_references_are_pinned
+    claim: Initial enqueue routing and legacy references remain pinned.
+    stages: [runtime, audit]
+
+scenarios:
+  - id: linear
+    ordinal: 1
+    title: Linear source → transform → sink
+    cases: []
+    dimensions:
+      config: &config_pass
+        status: pass
+        evidence: [core-builder-schema-plural-sources-04]
+      build: &build_pass
+        status: pass
+        evidence: [core-builder-schema-plural-sources]
+      contracts: &contracts_pass
+        status: pass
+        evidence: [core-builder-schema-plural-sources-03, composer-runtime-agreement]
+      runtime: &runtime_partial
+        status: partial
+        reason: Existing runtime evidence does not execute every required production disposition for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes exact production runtime result and disposition assertions.
+      audit: &audit_partial
+        status: partial
+        reason: Existing audit evidence does not prove every required durable record and portable export for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes exact durable audit-state and exported-record assertions.
+      recovery: &recovery_partial
+        status: partial
+        reason: Selected restart seams pass, but the complete scenario recovery path is not executable evidence.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes database-reopen and public-resume assertions without duplicate work.
+      concurrency: &concurrency_unknown
+        status: unknown
+        reason: No complete contention and fencing case exists for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus contention case passes single-effective-owner and stale-worker fencing assertions.
+      freeform: &freeform_pass
+        status: pass
+        evidence: [yaml-importer-generator]
+      guided: &guided_partial
+        status: partial
+        reason: Guided authoring has only partial evidence for this scenario.
+        owner_issue: elspeth-7e2dd67275
+        exit_gate: The guided-authoring corpus case passes canonical graph equality for this scenario.
+      round_trip: &round_trip_partial
+        status: partial
+        reason: Import and export helpers exist, but canonical browser-backed round-trip equality is incomplete.
+        owner_issue: elspeth-7cf763da7c
+        exit_gate: The browser-backed corpus round-trip passes canonical graph and traversal-plan equality.
+      scale: &scale_partial
+        status: partial
+        reason: Functional scale slices pass without a declared supported threshold for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus scale case passes its declared supported threshold in the required CI gate.
+
+  - id: multiple-independent-sources
+    ordinal: 2
+    title: Multiple independent sources
+    cases: []
+    dimensions:
+      config: *config_pass
+      build: *build_pass
+      contracts: *contracts_pass
+      runtime: *runtime_partial
+      audit: *audit_partial
+      recovery: *recovery_partial
+      concurrency: *concurrency_unknown
+      freeform: *freeform_pass
+      guided: &guided_fail
+        status: fail
+        reason: Guided authoring cannot express this mandatory non-linear topology.
+        owner_issue: elspeth-7e2dd67275
+        exit_gate: The guided-authoring corpus case passes canonical graph equality for this scenario.
+      round_trip: *round_trip_partial
+      scale: &scale_unknown
+        status: unknown
+        reason: No supported scale envelope has been executed for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus scale case passes its declared supported threshold in the required CI gate.
+
+  - id: multi-source-queue-fan-in
+    ordinal: 3
+    title: Multi-source queue fan-in
+    cases: []
+    dimensions:
+      config: *config_pass
+      build: *build_pass
+      contracts: *contracts_pass
+      runtime: *runtime_partial
+      audit: *audit_partial
+      recovery: &recovery_unknown
+        status: unknown
+        reason: No complete database-reopen recovery case exists for this scenario.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes database-reopen and public-resume assertions without duplicate work.
+      concurrency: *concurrency_unknown
+      freeform: *freeform_pass
+      guided: *guided_fail
+      round_trip: *round_trip_partial
+      scale: *scale_unknown
+
+  - id: conditional-routing
+    ordinal: 4
+    title: Conditional routing, including missing and error destinations
+    cases: []
+    dimensions:
+      config: *config_pass
+      build: *build_pass
+      contracts: *contracts_pass
+      runtime: *runtime_partial
+      audit: *audit_partial
+      recovery: *recovery_unknown
+      concurrency: *concurrency_unknown
+      freeform: *freeform_pass
+      guided: *guided_fail
+      round_trip: *round_trip_partial
+      scale: *scale_unknown
+
+  - id: fork-multiple-terminals-partial-failure
+    ordinal: 5
+    title: Fork to multiple terminals with partial failure
+    cases: []
+    dimensions:
+      config: *config_pass
+      build: *build_pass
+      contracts: *contracts_pass
+      runtime: *runtime_partial
+      audit: *audit_partial
+      recovery: *recovery_unknown
+      concurrency: *concurrency_unknown
+      freeform: *freeform_pass
+      guided: *guided_fail
+      round_trip: &round_trip_unknown
+        status: unknown
+        reason: No canonical browser-backed round-trip case exists for this scenario.
+        owner_issue: elspeth-7cf763da7c
+        exit_gate: The browser-backed corpus round-trip passes canonical graph and traversal-plan equality.
+      scale: *scale_unknown
+
+  - id: fork-coalesce-policies
+    ordinal: 6
+    title: Fork and coalesce across every completion policy and merge strategy
+    cases: []
+    dimensions:
+      config: *config_pass
+      build: *build_pass
+      contracts: &contracts_partial
+        status: partial
+        reason: Contract evidence does not cover every completion policy and merge strategy composition.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus contract matrix passes every declared completion policy and merge strategy assertion.
+      runtime: *runtime_partial
+      audit: *audit_partial
+      recovery: *recovery_partial
+      concurrency: &concurrency_partial
+        status: partial
+        reason: Selected contention paths pass without the complete registered scenario matrix.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus contention case passes single-effective-owner and stale-worker fencing assertions.
+      freeform: *freeform_pass
+      guided: *guided_fail
+      round_trip: *round_trip_partial
+      scale: *scale_unknown
+
+  - id: sequential-nested-fork-coalesce
+    ordinal: 7
+    title: Sequential or nested forks and coalesces
+    cases: []
+    dimensions:
+      config: *config_pass
+      build: *build_pass
+      contracts: *contracts_partial
+      runtime: &runtime_unknown
+        status: unknown
+        reason: No complete production runtime case exists for this mandatory composition.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes exact production runtime result and disposition assertions.
+      audit: &audit_unknown
+        status: unknown
+        reason: No complete durable audit and export case exists for this mandatory composition.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes exact durable audit-state and exported-record assertions.
+      recovery: *recovery_unknown
+      concurrency: *concurrency_unknown
+      freeform: *freeform_pass
+      guided: *guided_fail
+      round_trip: *round_trip_unknown
+      scale: *scale_unknown
+
+  - id: parallel-coalesces
+    ordinal: 8
+    title: Parallel coalesces
+    cases: []
+    dimensions:
+      config: *config_pass
+      build: &build_partial
+        status: partial
+        reason: Production builder evidence does not cover the complete parallel-coalesce topology.
+        owner_issue: elspeth-ef29ef6ba4
+        exit_gate: The scenario corpus case passes canonical production build and structural validation assertions.
+      contracts: *contracts_partial
+      runtime: *runtime_unknown
+      audit: *audit_unknown
+      recovery: *recovery_unknown
+      concurrency: *concurrency_unknown
+      freeform: *freeform_pass
+      guided: *guided_fail
+      round_trip: *round_trip_unknown
+      scale: *scale_unknown
+
+  - id: aggregation-immutable-batch
+    ordinal: 9
+    title: Aggregation, batch closure, and immutable membership
+    cases: []
+    dimensions:
+      config: *config_pass
+      build: *build_pass
+      contracts: *contracts_partial
+      runtime: *runtime_partial
+      audit: *audit_partial
+      recovery: *recovery_partial
+      concurrency: *concurrency_unknown
+      freeform: *freeform_pass
+      guided: *guided_fail
+      round_trip: *round_trip_unknown
+      scale: *scale_unknown
+
+  - id: row-expansion-parent-child-recovery
+    ordinal: 10
+    title: Row expansion with parent/child identity and recovery
+    cases: []
+    dimensions:
+      config: *config_pass
+      build: *build_pass
+      contracts: &expansion_contracts_partial
+        status: partial
+        reason: Happy-path cardinality evidence exists while the parent/child replay identity contract remains open.
+        owner_issue: elspeth-a25e9c009e
+        exit_gate: The expansion corpus contract case passes stable parent/child identity assertions across replay.
+      runtime: &expansion_runtime_partial
+        status: partial
+        reason: Happy-path expansion runs, but replay can duplicate or ambiguously remint effective work.
+        owner_issue: elspeth-a25e9c009e
+        exit_gate: The expansion corpus runtime case passes exact-once effective child work assertions across replay.
+      audit: &expansion_audit_partial
+        status: partial
+        reason: Selected expansion audit facts pass without complete replay-stable parent/child evidence.
+        owner_issue: elspeth-a25e9c009e
+        exit_gate: The expansion corpus audit case passes stable parent/child outcome and payload assertions across replay.
+      recovery: &expansion_recovery_fail
+        status: fail
+        reason: Expansion recovery can duplicate or ambiguously remint effective child work.
+        owner_issue: elspeth-a25e9c009e
+        exit_gate: The expansion corpus recovery case passes with the same durable child identities or a clean conflict.
+      concurrency: &expansion_concurrency_unknown
+        status: unknown
+        reason: Parent/child replay and contention have no complete effective-ownership proof.
+        owner_issue: elspeth-a25e9c009e
+        exit_gate: The expansion corpus contention case passes single-effective-owner assertions for every child identity.
+      freeform: *freeform_pass
+      guided: *guided_fail
+      round_trip: *round_trip_unknown
+      scale: *scale_unknown
+
+  - id: row-union-interleave
+    ordinal: 11
+    title: Row union or interleave, whether supported or consistently rejected
+    cases: []
+    dimensions:
+      config: &row_union_fail
+        status: fail
+        reason: Row union has neither a supported construct nor one consistent rejection contract.
+        owner_issue: elspeth-a5b86149d4
+        exit_gate: The row-union corpus case passes one explicit support path or exact rejection contract.
+      build: *row_union_fail
+      contracts: *row_union_fail
+      runtime: *row_union_fail
+      audit: &row_union_not_applicable
+        status: not_applicable
+        reason: Row union has no supported construct, so post-build audit, recovery, and concurrency do not apply after configuration, build, contract, and runtime already fail.
+      recovery: *row_union_not_applicable
+      concurrency: *row_union_not_applicable
+      freeform: *row_union_fail
+      guided: *row_union_fail
+      round_trip: *row_union_not_applicable
+      scale: *row_union_not_applicable
+
+  - id: retry-quarantine-discard-routed-errors
+    ordinal: 12
+    title: Retry, quarantine, discard, and routed error handling
+    cases: []
+    dimensions:
+      config: *config_pass
+      build: *build_pass
+      contracts: *contracts_partial
+      runtime: *runtime_partial
+      audit: *audit_partial
+      recovery: *recovery_unknown
+      concurrency: *concurrency_unknown
+      freeform: *freeform_pass
+      guided: *guided_fail
+      round_trip: *round_trip_partial
+      scale: *scale_unknown
+
+  - id: sink-write-pending-redrive
+    ordinal: 13
+    title: Sink write and pending-sink redrive
+    cases: []
+    dimensions:
+      config: *config_pass
+      build: *build_pass
+      contracts: *contracts_pass
+      runtime: *runtime_partial
+      audit: *audit_partial
+      recovery: *recovery_partial
+      concurrency: *concurrency_partial
+      freeform: *freeform_pass
+      guided: *guided_partial
+      round_trip: *round_trip_partial
+      scale: *scale_unknown
+
+  - id: checkpoint-deterministic-resume
+    ordinal: 14
+    title: Checkpoint and deterministic resume
+    cases: []
+    dimensions:
+      config: *config_pass
+      build: *build_pass
+      contracts: *contracts_partial
+      runtime: *runtime_partial
+      audit: *audit_partial
+      recovery: *recovery_partial
+      concurrency: *concurrency_unknown
+      freeform: &checkpoint_authoring_not_applicable
+        status: not_applicable
+        reason: Checkpoint/resume is a runtime lifecycle, not an authored topology.
+      guided: *checkpoint_authoring_not_applicable
+      round_trip: *checkpoint_authoring_not_applicable
+      scale: *scale_unknown
+
+  - id: multi-worker-lease-reclaim-late-completion
+    ordinal: 15
+    title: Multi-worker execution, lease expiry, reclaim, and late completion
+    cases: []
+    dimensions:
+      config: &worker_authoring_not_applicable
+        status: not_applicable
+        reason: Worker multiplicity is deployment/runtime configuration, not DAG authoring.
+      build: *build_pass
+      contracts: *contracts_partial
+      runtime: *runtime_partial
+      audit: *audit_partial
+      recovery: *recovery_partial
+      concurrency: *concurrency_partial
+      freeform: *worker_authoring_not_applicable
+      guided: *worker_authoring_not_applicable
+      round_trip: *worker_authoring_not_applicable
+      scale: *scale_unknown

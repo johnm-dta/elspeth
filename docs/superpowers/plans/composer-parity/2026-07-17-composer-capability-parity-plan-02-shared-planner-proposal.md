@@ -466,29 +466,29 @@ and extract the existing lock-assuming canonical acceptance sequence into one
 route helper used by both review acceptance and auto-commit. This is a code
 reuse boundary, not a new persistence or approval layer.
 
-- [ ] Add a failing `ComposerServiceImpl.compose()` test for an empty
+- [x] Add a failing `ComposerServiceImpl.compose()` test for an empty
   composition and an end-to-end build request. It must traverse request prompt
   assembly, `plan_pipeline()`, candidate validation, and the existing trust-mode
   behavior.
-- [ ] Define new/empty by canonical topology content (no sources, nodes, edges,
+- [x] Define new/empty by canonical topology content (no sources, nodes, edges,
   or outputs), not state version or composer metadata. Route only that
   full-pipeline authoring through `plan_pipeline()`.
-  When `_try_apply_freeform_recipe_intent()` produces a full-pipeline result for
-  an empty/new composition, normalize it into the same durable proposal and
+  When the deterministic recipe router produces a full-pipeline result for an
+  empty/new composition, normalize it into the same durable proposal and
   `PipelineCommitIntent`; it may not save state directly. Preserve the ordinary
   compose loop only for established incremental edits, including the current
   profile-aware transform splice path.
-- [ ] Add a `PipelineCommitIntent` to `ComposerResult`. In `auto_commit`, the
+- [x] Add a `PipelineCommitIntent` to `ComposerResult`. In `auto_commit`, the
   service creates/stages the valid durable proposal and returns a commit intent;
   it does not persist composition state or reacquire the route lock. Both
   `sessions/routes/messages.py` and `sessions/routes/composer/compose.py` pass
   that intent through the lock-assuming preparation and atomic settlement
   instead of their normal state-save arm. In `explicit_approve`, return the
   existing pending proposal response without publishing state.
-- [ ] Keep the current generic acceptance behavior for non-pipeline mutation
+- [x] Keep the current generic acceptance behavior for non-pipeline mutation
   proposals. Select the pipeline coordinator only when the authoritative
   creation event identifies a canonical pipeline proposal.
-- [ ] Prove both trust modes share planner, candidate, proposal, and commit
+- [x] Prove both trust modes share planner, candidate, proposal, and commit
   code; neither duplicates the `set_pipeline` executor or topology schema.
 
 Run:
@@ -504,6 +504,9 @@ git diff --check
 ```
 
 Expected: all commands exit 0.
+
+Completed in `d650e77dc`, `7dfbeef6e`, and `6dadccebf`. The prescribed
+verification passed on 2026-07-18 (189 tests; Ruff and mypy clean).
 
 **Definition of done:** A production freeform new-pipeline request can derive,
 review, and commit a full graph through one custody-safe canonical proposal

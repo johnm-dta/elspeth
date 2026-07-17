@@ -321,6 +321,47 @@ class TestChromaMemberEffects:
 
         assert collection.upsert_count_by_id == {"d1": 1, "d2": 1, "d3": 1}
 
+    def test_successful_member_commits_update_completion_totals(self) -> None:
+        collection = _RecoverableChromaCollection()
+        sink = ChromaSink(_make_config())
+        sink._collection = collection  # type: ignore[assignment]
+        rows = (
+            {"doc_id": "d1", "text": "one", "topic": "alpha"},
+            {"doc_id": "d2", "text": "two", "topic": "beta"},
+        )
+        members = tuple(_chroma_effect_member(index, row) for index, row in enumerate(rows))
+        effect_input = SinkEffectPipelineMembersInput(members, members)
+        ctx = _chroma_effect_context()
+        inspection = sink.inspect_effect(SinkEffectInspectionRequest(effect_id="b" * 64, target="{}", predecessor_descriptor=None), ctx)
+        plan = sink.prepare_effect(SinkEffectPrepareRequest(effect_id="b" * 64, effect_input=effect_input, inspection=inspection), ctx)
+
+        for member in members:
+            sink.commit_member_effect(plan, member, effect_input, ctx)
+        events: list[object] = []
+        sink._telemetry_emit = events.append
+        sink.on_complete(_make_lifecycle_ctx())
+
+        expected_bytes = sum(
+            len(
+                canonical_json(
+                    {
+                        "ids": [row["doc_id"]],
+                        "documents": [row["text"]],
+                        "metadatas": [{"topic": row["topic"]}],
+                    }
+                ).encode("utf-8")
+            )
+            for row in rows
+        )
+        assert events == [
+            {
+                "event": "chroma_sink_complete",
+                "collection": "test-collection",
+                "total_written": 2,
+                "total_bytes": expected_bytes,
+            }
+        ]
+
     @pytest.mark.parametrize(
         ("row", "stored_metadata", "metadata_fields"),
         [

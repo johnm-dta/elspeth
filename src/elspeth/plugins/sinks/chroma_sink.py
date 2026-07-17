@@ -194,7 +194,7 @@ class ChromaSink(BaseSink):
     name = "chroma_sink"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:a707a2e6da7bc1be"
+    source_file_hash: str | None = "sha256:92218f2096f03f38"
     config_model = ChromaSinkConfig
     supports_resume = False
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
@@ -545,6 +545,10 @@ class ChromaSink(BaseSink):
             )
         except ValueError as exc:
             raise _ChromaPayloadRejection(str(exc)) from exc
+        member_metadatas: list[dict[str, Any] | None] | None = None if metadata is None else [metadata]
+        _, payload_size = self._compute_payload_hash([document_id], [document], member_metadatas)
+        self._total_written += 1
+        self._total_bytes += payload_size
         return SinkEffectCommitResult(
             descriptor=descriptor,
             evidence=self._member_group_evidence(plan, "committed"),

@@ -418,3 +418,35 @@ def test_bulk_state_completion_lock_order_is_sorted_across_distinct_postgres_bac
         ("bulk-lock-state-a", NodeStateStatus.COMPLETED.value, stable_hash({"winner": "first-a"})),
         ("bulk-lock-state-b", NodeStateStatus.COMPLETED.value, stable_hash({"winner": "first-b"})),
     ]
+
+
+def test_postgres_outcome_dependency_lock_chunks_large_flushes(
+    postgres_factory: tuple[LandscapeDB, RecorderFactory],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 1200-token composed flush locks in ascending 500-id chunks: every
+    statement stays under the dialect bound-parameter ceilings and the
+    concatenated chunk ids form one globally ascending acquisition order, so
+    chunking cannot reintroduce a lock-order inversion (elspeth-a2e1e511ea)."""
+    db, factory = postgres_factory
+    outcomes = factory.data_flow.outcomes
+    chunks: list[list[str]] = []
+    original = outcomes._execute_lock_query
+
+    def spy(conn: Connection, query: Any, *, operation: str) -> list[Any]:
+        compiled = query.compile(dialect=conn.dialect)
+        # The IN clause rides in one "expanding" bind parameter whose value is
+        # the chunk's id list itself.
+        chunk_ids = [value for value in compiled.params.values() if isinstance(value, (list, tuple))]
+        assert len(chunk_ids) == 1
+        chunks.append([str(token_id) for token_id in chunk_ids[0]])
+        return original(conn, query, operation=operation)
+
+    monkeypatch.setattr(outcomes, "_execute_lock_query", spy)
+    refs = tuple(TokenRef(token_id=f"tok-{index:05d}", run_id="chunk-run") for index in range(1200))
+    with db.engine.begin() as conn:
+        outcomes.lock_token_outcome_dependencies(refs, conn=conn)
+
+    assert [len(chunk) for chunk in chunks] == [500, 500, 200]
+    flattened = [token_id for chunk in chunks for token_id in chunk]
+    assert flattened == sorted(ref.token_id for ref in refs)

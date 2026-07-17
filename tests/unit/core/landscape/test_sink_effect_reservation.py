@@ -10,12 +10,15 @@ from hashlib import sha256
 
 import pytest
 from sqlalchemy import func, select, update
+from sqlalchemy.engine import Connection
 
 from elspeth.contracts import NodeStateStatus, NodeType
+from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.sink_effects import SinkEffectInputKind, SinkEffectMember, SinkEffectMemberCandidate, SinkEffectRole
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.execution.sink_effect_identity import compute_pipeline_effect_identity, resolve_sink_effect_members
 from elspeth.core.landscape.execution.sink_effect_reservation import (
+    _TOKEN_ID_CHUNK_SIZE,
     SinkEffectReservationRequest,
     SinkEffectReservationResult,
 )
@@ -386,3 +389,46 @@ def test_input_kind_membership_xor_fails_before_repository_sql(
         )
     with db.read_only_connection() as conn:
         assert conn.scalar(select(func.count()).select_from(sink_effects_table)) == 0
+
+
+def test_pipeline_reservation_chunks_reads_beyond_parameter_ceiling(db_factory: tuple[LandscapeDB, RecorderFactory]) -> None:
+    """A flush wider than _TOKEN_ID_CHUNK_SIZE must reserve exactly like a
+    small one: the witness reads, current-state resolution, and
+    existing-member bindings all read in ascending-offset chunks so a large
+    batch can never exceed SQLite's default 999 bound-parameter ceiling
+    (elspeth-a2e1e511ea)."""
+    db, factory = db_factory
+    count = _TOKEN_ID_CHUNK_SIZE + 100
+    run_id, sink_id, members = _pipeline_members(factory, count=count)
+
+    first = factory.execution.sink_effects.reserve(_pipeline_request(run_id, sink_id, members))
+    assert first.new_effect is not None
+
+    second = factory.execution.sink_effects.reserve(_pipeline_request(run_id, sink_id, members))
+    assert second.new_effect is None
+    assert second.open_effect_ids == (first.new_effect.effect_id,)
+    with db.read_only_connection() as conn:
+        assert conn.scalar(select(func.count()).select_from(sink_effect_members_table)) == count
+
+
+def test_outcome_dependency_lock_skips_non_postgresql_dialects(
+    db_factory: tuple[LandscapeDB, RecorderFactory], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SQLite's BEGIN IMMEDIATE already owns the file's write slot, so the
+    composed-outcome FOR UPDATE prelock must not execute there: the statement
+    locks nothing, and a >999-token flush would exceed SQLite's default
+    bound-parameter ceiling on that no-op query (elspeth-a2e1e511ea)."""
+    db, factory = db_factory
+    outcomes = factory.data_flow.outcomes
+    executed: list[str] = []
+    original = outcomes._execute_lock_query
+
+    def spy(conn: Connection, query: object, *, operation: str) -> list[object]:
+        executed.append(operation)
+        return original(conn, query, operation=operation)
+
+    monkeypatch.setattr(outcomes, "_execute_lock_query", spy)
+    refs = tuple(TokenRef(token_id=f"tok-{index:04d}", run_id="chunk-run") for index in range(1200))
+    with db.engine.begin() as conn:
+        outcomes.lock_token_outcome_dependencies(refs, conn=conn)
+    assert executed == []

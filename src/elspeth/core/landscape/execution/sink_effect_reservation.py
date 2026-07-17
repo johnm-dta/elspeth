@@ -43,6 +43,11 @@ from elspeth.core.landscape.schema import (
 )
 
 _LOWER_HEX_64: Final = re.compile(r"[0-9a-f]{64}\Z")
+
+# IN-clause chunk size for token-id reads — stays under SQLite's default
+# 999 bound-parameter ceiling with headroom for the fixed predicates
+# (same convention as node_states.py and data_flow/outcomes.py).
+_TOKEN_ID_CHUNK_SIZE = 500
 _EMPTY_TARGET_JSON: Final = "{}"
 
 
@@ -245,16 +250,7 @@ class SinkEffectReservation:
     def _resolve_pipeline_witness(self, request: SinkEffectReservationRequest) -> _PipelineWitness:
         token_ids = tuple(member.token_id for member in request.members)
         with self._db.read_only_connection() as conn:
-            token_rows = conn.execute(
-                select(
-                    tokens_table.c.token_id,
-                    tokens_table.c.row_id,
-                    tokens_table.c.run_id,
-                    rows_table.c.ingest_sequence,
-                )
-                .join(rows_table, rows_table.c.row_id == tokens_table.c.row_id)
-                .where(tokens_table.c.token_id.in_(token_ids))
-            ).fetchall()
+            token_rows = self._token_rows_with_ingest_sequence(conn, token_ids)
             self._validate_token_rows(request, token_rows)
             state_ids = self._current_state_ids(conn, request, token_ids)
         return _PipelineWitness(state_ids_by_token=state_ids)
@@ -274,16 +270,7 @@ class SinkEffectReservation:
             locked_tokens.append(row)
             self._after_token_lock(self._backend_pid(conn), tuple(item.token_id for item in locked_tokens))
 
-        token_rows = conn.execute(
-            select(
-                tokens_table.c.token_id,
-                tokens_table.c.row_id,
-                tokens_table.c.run_id,
-                rows_table.c.ingest_sequence,
-            )
-            .join(rows_table, rows_table.c.row_id == tokens_table.c.row_id)
-            .where(tokens_table.c.token_id.in_(token_ids))
-        ).fetchall()
+        token_rows = self._token_rows_with_ingest_sequence(conn, token_ids)
         self._validate_token_rows(request, token_rows)
 
         state_ids = tuple(sorted(set(witness.state_ids_by_token.values())))
@@ -310,31 +297,58 @@ class SinkEffectReservation:
                 raise ValueError("sink effect current-state witness is divergent")
         self._after_witness_locks(self._backend_pid(conn), token_ids, state_ids)
 
+    @staticmethod
+    def _token_rows_with_ingest_sequence(conn: Connection, token_ids: Sequence[str]) -> list[Row[Any]]:
+        """Read token/row identity in ascending-offset chunks so a large
+        flush cannot exceed a dialect bound-parameter ceiling."""
+        token_rows: list[Row[Any]] = []
+        for offset in range(0, len(token_ids), _TOKEN_ID_CHUNK_SIZE):
+            chunk = tuple(token_ids[offset : offset + _TOKEN_ID_CHUNK_SIZE])
+            token_rows.extend(
+                conn.execute(
+                    select(
+                        tokens_table.c.token_id,
+                        tokens_table.c.row_id,
+                        tokens_table.c.run_id,
+                        rows_table.c.ingest_sequence,
+                    )
+                    .join(rows_table, rows_table.c.row_id == tokens_table.c.row_id)
+                    .where(tokens_table.c.token_id.in_(chunk))
+                ).fetchall()
+            )
+        return token_rows
+
     def _current_state_ids(
         self,
         conn: Connection,
         request: SinkEffectReservationRequest,
         token_ids: Sequence[str],
     ) -> dict[str, str]:
-        rows = conn.execute(
-            select(
-                node_states_table.c.state_id,
-                node_states_table.c.token_id,
-                node_states_table.c.input_hash,
-                node_states_table.c.status,
+        ids = tuple(token_ids)
+        rows: list[Row[Any]] = []
+        for offset in range(0, len(ids), _TOKEN_ID_CHUNK_SIZE):
+            chunk = ids[offset : offset + _TOKEN_ID_CHUNK_SIZE]
+            rows.extend(
+                conn.execute(
+                    select(
+                        node_states_table.c.state_id,
+                        node_states_table.c.token_id,
+                        node_states_table.c.input_hash,
+                        node_states_table.c.status,
+                    )
+                    .where(
+                        node_states_table.c.run_id == request.run_id,
+                        node_states_table.c.node_id == request.sink_node_id,
+                        node_states_table.c.token_id.in_(chunk),
+                    )
+                    .order_by(
+                        node_states_table.c.token_id,
+                        node_states_table.c.attempt.desc(),
+                        node_states_table.c.started_at.desc(),
+                        node_states_table.c.state_id.desc(),
+                    )
+                ).fetchall()
             )
-            .where(
-                node_states_table.c.run_id == request.run_id,
-                node_states_table.c.node_id == request.sink_node_id,
-                node_states_table.c.token_id.in_(tuple(token_ids)),
-            )
-            .order_by(
-                node_states_table.c.token_id,
-                node_states_table.c.attempt.desc(),
-                node_states_table.c.started_at.desc(),
-                node_states_table.c.state_id.desc(),
-            )
-        ).fetchall()
         current: dict[str, str] = {}
         member_by_token = {member.token_id: member for member in request.members}
         for row in rows:
@@ -569,14 +583,20 @@ class SinkEffectReservation:
         request: SinkEffectReservationRequest,
         token_ids: Sequence[str],
     ) -> dict[str, Row[Any]]:
-        rows = conn.execute(
-            select(sink_effect_members_table).where(
-                sink_effect_members_table.c.run_id == request.run_id,
-                sink_effect_members_table.c.sink_node_id == request.sink_node_id,
-                sink_effect_members_table.c.role == request.role.value,
-                sink_effect_members_table.c.token_id.in_(tuple(token_ids)),
+        ids = tuple(token_ids)
+        rows: list[Row[Any]] = []
+        for offset in range(0, len(ids), _TOKEN_ID_CHUNK_SIZE):
+            chunk = ids[offset : offset + _TOKEN_ID_CHUNK_SIZE]
+            rows.extend(
+                conn.execute(
+                    select(sink_effect_members_table).where(
+                        sink_effect_members_table.c.run_id == request.run_id,
+                        sink_effect_members_table.c.sink_node_id == request.sink_node_id,
+                        sink_effect_members_table.c.role == request.role.value,
+                        sink_effect_members_table.c.token_id.in_(chunk),
+                    )
+                ).fetchall()
             )
-        ).fetchall()
         return {row.token_id: row for row in rows}
 
     @staticmethod

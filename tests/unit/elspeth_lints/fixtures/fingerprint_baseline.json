@@ -2272,11 +2272,11 @@
     },
     {
       "file_path": "core/landscape/execution/sink_effect_reservation.py",
-      "fingerprint": "14a5125f3fd198a6"
+      "fingerprint": "354bac26bdea2ab9"
     },
     {
       "file_path": "core/landscape/execution/sink_effect_reservation.py",
-      "fingerprint": "453a7d17cc7f957e"
+      "fingerprint": "3df2ae84f75ea67e"
     },
     {
       "file_path": "core/landscape/export_mappers.py",
@@ -11420,11 +11420,11 @@
     },
     {
       "file_path": "web/composer/tutorial_service.py",
-      "fingerprint": "09bf559084f6f1ea"
+      "fingerprint": "77e8122289bef8ae"
     },
     {
       "file_path": "web/composer/tutorial_service.py",
-      "fingerprint": "c897336fad794f09"
+      "fingerprint": "89277cb902e4b6b0"
     },
     {
       "file_path": "web/composer/yaml_generator.py",

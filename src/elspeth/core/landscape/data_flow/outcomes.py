@@ -45,6 +45,12 @@ from elspeth.core.landscape.schema import (
 
 __all__ = ["TokenOutcomeRepository"]
 
+# IN-clause chunk size for token-id lock queries — stays under SQLite's
+# default 999 bound-parameter ceiling (the node_states.py convention) and
+# keeps each PostgreSQL extended-protocol statement far below its 32767
+# bind cap on large sink flushes.
+_TOKEN_ID_CHUNK_SIZE = 500
+
 
 class TokenOutcomeRepository:
     """Token (outcome, path) terminal recording and outcome read models."""
@@ -91,19 +97,26 @@ class TokenOutcomeRepository:
         compose state/artifact mutations with outcomes must invoke this before
         touching either downstream table. Sorting and de-duplicating here also
         gives overlapping multi-token sink batches one common acquisition
-        order. SQLite ignores ``FOR UPDATE`` because ``BEGIN IMMEDIATE``
-        already owns the file's write slot for the complete boundary.
+        order; ascending chunks keep every statement under the dialect
+        bound-parameter ceilings without changing that order, because chunk
+        N's ids all sort before chunk N+1's. Non-PostgreSQL dialects skip the
+        query entirely: SQLite ignores ``FOR UPDATE`` because
+        ``BEGIN IMMEDIATE`` already owns the file's write slot for the
+        complete boundary, so the statement would lock nothing while a large
+        flush could exceed the default 999-parameter ceiling.
         """
-        token_ids = sorted({ref.token_id for ref in refs})
-        if not token_ids:
+        if conn.dialect.name != "postgresql":
             return
-        query = (
-            select(tokens_table.c.token_id)
-            .where(tokens_table.c.token_id.in_(token_ids))
-            .order_by(tokens_table.c.token_id)
-            .with_for_update(of=tokens_table)
-        )
-        self._execute_lock_query(conn, query, operation="record_token_outcome token lock")
+        token_ids = sorted({ref.token_id for ref in refs})
+        for offset in range(0, len(token_ids), _TOKEN_ID_CHUNK_SIZE):
+            chunk = token_ids[offset : offset + _TOKEN_ID_CHUNK_SIZE]
+            query = (
+                select(tokens_table.c.token_id)
+                .where(tokens_table.c.token_id.in_(chunk))
+                .order_by(tokens_table.c.token_id)
+                .with_for_update(of=tokens_table)
+            )
+            self._execute_lock_query(conn, query, operation="record_token_outcome token lock")
 
     def _lock_cross_table_witnesses(
         self,

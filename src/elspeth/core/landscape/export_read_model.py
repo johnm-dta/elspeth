@@ -178,7 +178,7 @@ class ConnectionBoundExportReadModel:
         rows = self._connection.execute(
             select(secret_resolutions_table)
             .where(secret_resolutions_table.c.run_id == run_id)
-            .order_by(secret_resolutions_table.c.timestamp)
+            .order_by(secret_resolutions_table.c.timestamp, secret_resolutions_table.c.resolution_id)
         ).fetchall()
         return [
             SecretResolution(
@@ -211,7 +211,9 @@ class ConnectionBoundExportReadModel:
 
     def get_operations_for_run(self, run_id: str) -> list[Any]:
         rows = self._connection.execute(
-            select(operations_table).where(operations_table.c.run_id == run_id).order_by(operations_table.c.started_at)
+            select(operations_table)
+            .where(operations_table.c.run_id == run_id)
+            .order_by(operations_table.c.started_at, operations_table.c.operation_id)
         ).fetchall()
         return [self._operation_loader.load(row) for row in rows]
 
@@ -226,13 +228,17 @@ class ConnectionBoundExportReadModel:
 
     def get_validation_errors_for_run(self, run_id: str) -> list[Any]:
         rows = self._connection.execute(
-            select(validation_errors_table).where(validation_errors_table.c.run_id == run_id).order_by(validation_errors_table.c.created_at)
+            select(validation_errors_table)
+            .where(validation_errors_table.c.run_id == run_id)
+            .order_by(validation_errors_table.c.created_at, validation_errors_table.c.error_id)
         ).fetchall()
         return [self._validation_error_loader.load(row) for row in rows]
 
     def get_transform_errors_for_run(self, run_id: str) -> list[Any]:
         rows = self._connection.execute(
-            select(transform_errors_table).where(transform_errors_table.c.run_id == run_id).order_by(transform_errors_table.c.created_at)
+            select(transform_errors_table)
+            .where(transform_errors_table.c.run_id == run_id)
+            .order_by(transform_errors_table.c.created_at, transform_errors_table.c.error_id)
         ).fetchall()
         return [self._transform_error_loader.load(row) for row in rows]
 
@@ -282,7 +288,7 @@ class ConnectionBoundExportReadModel:
             rows = self._connection.execute(
                 select(token_outcomes_table)
                 .where(token_outcomes_table.c.run_id == run_id, token_outcomes_table.c.token_id.in_(chunk))
-                .order_by(token_outcomes_table.c.token_id, token_outcomes_table.c.recorded_at)
+                .order_by(token_outcomes_table.c.token_id, token_outcomes_table.c.recorded_at, token_outcomes_table.c.outcome_id)
             ).fetchall()
             result.extend(self._token_outcome_loader.load(row) for row in rows)
         return result

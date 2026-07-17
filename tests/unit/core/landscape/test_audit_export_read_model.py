@@ -8,10 +8,21 @@ from pathlib import Path
 import pytest
 from sqlalchemy import event
 
+from elspeth.contracts import NodeType
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.export_read_model import ConnectionBoundExportReadModel, open_export_read_transaction
-from elspeth.core.landscape.schema import run_attributions_table, runs_table
+from elspeth.core.landscape.schema import (
+    batches_table,
+    operations_table,
+    run_attributions_table,
+    runs_table,
+    secret_resolutions_table,
+    token_outcomes_table,
+    transform_errors_table,
+    validation_errors_table,
+)
+from tests.fixtures.landscape import make_factory, register_test_node
 
 COMPLETED_AT = datetime(2026, 7, 16, 2, 3, 4, 567890, tzinfo=UTC)
 
@@ -108,5 +119,106 @@ def test_read_transaction_rolls_back_and_closes_on_failure(tmp_path: Path) -> No
             connection = model.connection
             raise RuntimeError("boom")
         assert connection is not None and connection.closed
+    finally:
+        db.close()
+
+
+def test_export_enumerations_break_timestamp_ties_by_primary_key() -> None:
+    """Concurrent same-registry-key exporters must materialize byte-identical
+    snapshots, so every enumeration whose sort key is a non-unique timestamp
+    must end in the primary key. Rows are inserted with identical timestamps
+    in DESCENDING primary-key order: an enumeration that leans on database
+    natural order (insertion order on SQLite, backend-dependent on
+    PostgreSQL) returns them reversed and would trip the spurious
+    'same audit-export registry key produced a divergent snapshot candidate'
+    alarm downstream."""
+    db = LandscapeDB.in_memory()
+    try:
+        factory = make_factory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = register_test_node(factory.data_flow, run.run_id, "tie-source", node_type=NodeType.SOURCE, plugin_name="source")
+        row = factory.data_flow.create_row(
+            run_id=run.run_id,
+            source_node_id=source,
+            row_index=0,
+            data={"value": 1},
+            source_row_index=0,
+            ingest_sequence=0,
+        )
+        token = factory.data_flow.create_token(row.row_id)
+        tie = COMPLETED_AT
+        with db.engine.begin() as writer:
+            writer.execute(
+                batches_table.insert().values(
+                    batch_id="tie-batch",
+                    run_id=run.run_id,
+                    aggregation_node_id=source,
+                    status="open",
+                    created_at=tie,
+                )
+            )
+            for suffix in ("b", "a"):  # descending primary keys, identical timestamps
+                writer.execute(
+                    secret_resolutions_table.insert().values(
+                        resolution_id=f"res-{suffix}",
+                        run_id=run.run_id,
+                        timestamp=1234.5,
+                        env_var_name="TIE_VAR",
+                        source="env",
+                        fingerprint="f" * 64,
+                    )
+                )
+                writer.execute(
+                    operations_table.insert().values(
+                        operation_id=f"op-{suffix}",
+                        run_id=run.run_id,
+                        node_id=source,
+                        operation_type="source_load",
+                        started_at=tie,
+                        status="open",
+                    )
+                )
+                writer.execute(
+                    validation_errors_table.insert().values(
+                        error_id=f"val-{suffix}",
+                        run_id=run.run_id,
+                        row_hash="0" * 64,
+                        error="tie",
+                        schema_mode="strict",
+                        destination="quarantine",
+                        created_at=tie,
+                    )
+                )
+                writer.execute(
+                    transform_errors_table.insert().values(
+                        error_id=f"tra-{suffix}",
+                        run_id=run.run_id,
+                        token_id=token.token_id,
+                        transform_id=source,
+                        row_hash="0" * 64,
+                        destination="discard",
+                        created_at=tie,
+                    )
+                )
+                writer.execute(
+                    token_outcomes_table.insert().values(
+                        outcome_id=f"out-{suffix}",
+                        run_id=run.run_id,
+                        token_id=token.token_id,
+                        outcome=None,
+                        path="buffered",
+                        completed=0,
+                        recorded_at=tie,
+                        batch_id="tie-batch",
+                    )
+                )
+        with db.engine.connect() as connection:
+            model = ConnectionBoundExportReadModel(connection)
+            assert [item.resolution_id for item in model.get_secret_resolutions_for_run(run.run_id)] == ["res-a", "res-b"]
+            assert [item.operation_id for item in model.get_operations_for_run(run.run_id)] == ["op-a", "op-b"]
+            assert [item.error_id for item in model.get_validation_errors_for_run(run.run_id)] == ["val-a", "val-b"]
+            assert [item.error_id for item in model.get_transform_errors_for_run(run.run_id)] == ["tra-a", "tra-b"]
+            outcomes = model.get_token_outcomes_for_tokens(run.run_id, [token.token_id])
+            assert [item.outcome_id for item in outcomes] == ["out-a", "out-b"]
     finally:
         db.close()

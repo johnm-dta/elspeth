@@ -1513,7 +1513,7 @@ probes in all three directories. It emits no paths:
 resolve_bound_task_definition() {
   local variable="$1" container_name="$2" expected_user="${3:-}"
   local reference raw validated resolved expected_image expected_log_group expected_log_prefix expected_arch
-  local -a user_args=()
+  local -a user_args=() image_role_args=()
   if test -n "$expected_user"; then
     user_args=(--expected-user "$expected_user")
   fi
@@ -1521,7 +1521,9 @@ resolve_bound_task_definition() {
   raw=$(aws_capture aws ecs describe-task-definition \
     --task-definition "$reference" --output json)
   case "$variable" in
-    PREVIOUS_TASK_DEFINITION|ROLLBACK_DOCTOR_TASK_DEFINITION) expected_image="$ROLLBACK_BASELINE_IMAGE" ;;
+    PREVIOUS_TASK_DEFINITION|ROLLBACK_DOCTOR_TASK_DEFINITION)
+      expected_image="$ROLLBACK_BASELINE_IMAGE"
+      image_role_args=(--expected-image-role rollback-baseline) ;;
     *) expected_image="$CANDIDATE_IMAGE" ;;
   esac
   case "$variable" in
@@ -1556,7 +1558,7 @@ resolve_bound_task_definition() {
     | uv run --frozen python -m elspeth.web.aws_ecs_acceptance \
         validate-task-definition-policy --file "$CONTROL_MANIFEST" \
         --scenario-id "$ACTIVE_SCENARIO_ID" --container-name "$container_name" \
-        "${user_args[@]}")
+        "${user_args[@]}" "${image_role_args[@]}")
   resolved=$(jq -er '.task_definition_arn | select(length > 0)' <<<"$validated")
   printf -v "$variable" '%s' "$resolved"
 }

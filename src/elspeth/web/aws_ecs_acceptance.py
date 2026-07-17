@@ -4526,7 +4526,7 @@ def _validate_tf_binding_receipt(
     if (
         type(receipt["terraform_version"]) is not str
         or not 1 <= len(receipt["terraform_version"]) <= 64
-        or any(ord(character) < 32 or ord(character) == 127 for character in receipt["terraform_version"])
+        or any(not 32 <= ord(character) <= 126 for character in receipt["terraform_version"])
         or type(receipt["workspace"]) is not str
         or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,89}", receipt["workspace"]) is None
     ):
@@ -6476,10 +6476,15 @@ def validate_task_definition_policy_binding(
     scenario_id: str,
     container_name: str,
     expected_user: str | None = None,
+    expected_image_role: str = "candidate",
 ) -> str:
     """Bind a returned ECS task definition's policy environment to protected inventory."""
 
-    if scenario_id not in {"A", "B"} or re.fullmatch(r"[A-Za-z0-9_-]{1,255}", container_name) is None:
+    if (
+        scenario_id not in {"A", "B"}
+        or re.fullmatch(r"[A-Za-z0-9_-]{1,255}", container_name) is None
+        or expected_image_role not in {"candidate", "rollback-baseline"}
+    ):
         raise AcceptanceCheckError("task_definition_policy_binding")
     manifest = _read_control_manifest(manifest_path)
     inventory = _load_bound_scenario_inventory(manifest, scenario_id, require_resolved=True)
@@ -6509,6 +6514,16 @@ def validate_task_definition_policy_binding(
         raise AcceptanceCheckError("task_definition_policy_binding")
     container = matches[0]
     if container.get("essential") is not True:
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    ecr = manifest["ecr"]
+    if not isinstance(ecr, Mapping):
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    registry = ecr["registry"]
+    repository = ecr["repository"]
+    digest = ecr["candidate_digest"] if expected_image_role == "candidate" else ecr["baseline_digest"]
+    if type(registry) is not str or type(repository) is not str or type(digest) is not str:
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    if container.get("image") != f"{registry}/{repository}@{digest}":
         raise AcceptanceCheckError("task_definition_policy_binding")
     aws = manifest["aws"]
     role_names = orphan.get("iam_role_names")
@@ -9397,6 +9412,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_definition_policy.add_argument("--scenario-id", required=True, choices=("A", "B"))
     task_definition_policy.add_argument("--container-name", required=True)
     task_definition_policy.add_argument("--expected-user", choices=("1000:1000",))
+    task_definition_policy.add_argument("--expected-image-role", choices=("candidate", "rollback-baseline"), default="candidate")
 
     compatibility_record = commands.add_parser("compatibility-record-validate")
     compatibility_record.add_argument("--file", required=True)
@@ -9655,6 +9671,7 @@ def main(argv: list[str] | None = None) -> int:
                 scenario_id=args.scenario_id,
                 container_name=args.container_name,
                 expected_user=args.expected_user,
+                expected_image_role=args.expected_image_role,
             )
             _print_json({"task_definition_arn": task_definition_arn})
         elif args.command == "compatibility-record-validate":

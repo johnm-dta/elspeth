@@ -21,7 +21,7 @@ from typing import Any, ClassVar
 import httpx
 import pytest
 
-from elspeth.contracts import ArtifactDescriptor
+from elspeth.contracts import ArtifactDescriptor, CallType
 from elspeth.contracts.sink_effects import (
     SINK_EFFECT_PROTOCOL_VERSION,
     SinkEffectCommitResult,
@@ -1134,6 +1134,7 @@ class _S3CleanupClient:
 
 
 class _EffectS3SinkBase:
+    effect_call_type = CallType.HTTP
     """Protocol-faithful shared target used by the acceptance controller tests."""
 
     def __init__(
@@ -3699,6 +3700,15 @@ def test_control_manifest_rejects_shared_terraform_state_and_foreign_scenario_re
     with pytest.raises(acceptance.AcceptanceCheckError, match="scenario_inventory_binding"):
         _init_control_manifest(tmp_path / "foreign-resource.json", inventory_mutator=foreign_arn)
 
+
+def test_tf_binding_rejects_non_ascii_terraform_version(tmp_path: Path) -> None:
+    def non_ascii_version(receipt: dict[str, object], scenario: str) -> None:
+        if scenario == "A":
+            receipt["terraform_version"] = "1.9.0-ß"
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="tf_binding_schema"):
+        _init_control_manifest(tmp_path / "non-ascii-version.json", binding_mutator=non_ascii_version)
+
     def drift_policy_binding(inventory: dict[str, object], scenario: str) -> None:
         if scenario == "A":
             values = inventory["values"]
@@ -3765,9 +3775,29 @@ def test_scenario_load_is_exact_shell_round_trippable_and_rejects_inventory_drif
         )
 
 
-def _task_definition_policy_payload(tmp_path: Path) -> tuple[Path, str, dict[str, Any], dict[str, Any]]:
+def _task_definition_policy_payload(
+    tmp_path: Path,
+    *,
+    record_ecr: bool = True,
+) -> tuple[Path, str, dict[str, Any], dict[str, Any]]:
     manifest_path = tmp_path / "control.json"
     _init_control_manifest(manifest_path)
+    if record_ecr:
+        acceptance.control_manifest_update(
+            manifest_path,
+            cleanup_required=True,
+            ecr_baseline_tag="acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-baseline",
+            ecr_candidate_tag="acceptance-4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48-candidate",
+            ecr_registry="123456789012.dkr.ecr.ap-southeast-2.amazonaws.com",
+            ecr_repository="elspeth-acceptance",
+            now=lambda: datetime(2026, 7, 14, 1, 2, tzinfo=UTC),
+        )
+        acceptance.control_manifest_update(
+            manifest_path,
+            ecr_baseline_digest="sha256:" + "b" * 64,
+            ecr_candidate_digest="sha256:" + "d" * 64,
+            now=lambda: datetime(2026, 7, 14, 1, 2, 10, tzinfo=UTC),
+        )
     inventory = json.loads((tmp_path / "scenario-a.json").read_text())
     values = inventory["values"]
     container_name = values["WEB_CONTAINER_NAME"]
@@ -3822,6 +3852,7 @@ def _task_definition_policy_payload(tmp_path: Path) -> tuple[Path, str, dict[str
                 {
                     "name": container_name,
                     "essential": True,
+                    "image": "123456789012.dkr.ecr.ap-southeast-2.amazonaws.com/elspeth-acceptance@sha256:" + "d" * 64,
                     "environment": environment,
                     "secrets": secrets,
                     "mountPoints": [
@@ -4087,6 +4118,92 @@ def test_task_definition_policy_binding_requires_explicit_nonroot_one_shot_entry
             scenario_id="A",
             container_name=container_name,
             expected_user="1000:1000",
+        )
+
+
+def test_task_definition_policy_binding_requires_manifest_pinned_image(tmp_path: Path) -> None:
+    manifest_path, container_name, _inventory, payload = _task_definition_policy_payload(tmp_path)
+    container = payload["taskDefinition"]["containerDefinitions"][0]
+
+    acceptance.validate_task_definition_policy_binding(
+        payload,
+        manifest_path=manifest_path,
+        scenario_id="A",
+        container_name=container_name,
+    )
+
+    reference = "123456789012.dkr.ecr.ap-southeast-2.amazonaws.com/elspeth-acceptance"
+    for image in (
+        f"{reference}:latest",
+        f"{reference}@sha256:{'e' * 64}",
+        f"{reference}@sha256:{'b' * 64}",
+    ):
+        container["image"] = image
+        with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
+            acceptance.validate_task_definition_policy_binding(
+                payload,
+                manifest_path=manifest_path,
+                scenario_id="A",
+                container_name=container_name,
+            )
+
+    del container["image"]
+    with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
+        acceptance.validate_task_definition_policy_binding(
+            payload,
+            manifest_path=manifest_path,
+            scenario_id="A",
+            container_name=container_name,
+        )
+
+
+def test_task_definition_policy_binding_binds_rollback_image_to_baseline_digest(tmp_path: Path) -> None:
+    manifest_path, container_name, _inventory, payload = _task_definition_policy_payload(tmp_path)
+    container = payload["taskDefinition"]["containerDefinitions"][0]
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
+        acceptance.validate_task_definition_policy_binding(
+            payload,
+            manifest_path=manifest_path,
+            scenario_id="A",
+            container_name=container_name,
+            expected_image_role="rollback-baseline",
+        )
+
+    container["image"] = "123456789012.dkr.ecr.ap-southeast-2.amazonaws.com/elspeth-acceptance@sha256:" + "b" * 64
+    acceptance.validate_task_definition_policy_binding(
+        payload,
+        manifest_path=manifest_path,
+        scenario_id="A",
+        container_name=container_name,
+        expected_image_role="rollback-baseline",
+    )
+    with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
+        acceptance.validate_task_definition_policy_binding(
+            payload,
+            manifest_path=manifest_path,
+            scenario_id="A",
+            container_name=container_name,
+        )
+    with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
+        acceptance.validate_task_definition_policy_binding(
+            payload,
+            manifest_path=manifest_path,
+            scenario_id="A",
+            container_name=container_name,
+            expected_image_role="latest",
+        )
+
+
+def test_task_definition_policy_binding_fails_closed_without_recorded_image_identity(tmp_path: Path) -> None:
+    manifest_path, container_name, _inventory, payload = _task_definition_policy_payload(tmp_path, record_ecr=False)
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
+        acceptance.validate_task_definition_policy_binding(
+            payload,
+            manifest_path=manifest_path,
+            scenario_id="A",
+            container_name=container_name,
         )
 
 

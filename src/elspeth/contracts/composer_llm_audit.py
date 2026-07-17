@@ -141,6 +141,9 @@ class ComposerLLMCall:
     thinking_blocks: Any | None = None
     provider_cost: float | None = None
     provider_cost_source: ComposerLLMProviderCostSource = PROVIDER_COST_SOURCE_NOT_AVAILABLE
+    max_completion_tokens_requested: int | None = None
+    planner_policy_hash: str | None = None
+    planner_call_ordinal: int | None = None
 
     def __post_init__(self) -> None:
         if type(self.status) is not ComposerLLMCallStatus:
@@ -176,6 +179,25 @@ class ComposerLLMCall:
         require_int(self.cache_creation_input_tokens, "cache_creation_input_tokens", optional=True, min_value=0)
         require_int(self.cache_read_input_tokens, "cache_read_input_tokens", optional=True, min_value=0)
         require_int(self.reasoning_tokens, "reasoning_tokens", optional=True, min_value=0)
+        require_int(
+            self.max_completion_tokens_requested,
+            "max_completion_tokens_requested",
+            optional=True,
+            min_value=1,
+        )
+        require_int(self.planner_call_ordinal, "planner_call_ordinal", optional=True, min_value=1)
+        _require_non_empty_str(self.planner_policy_hash, "planner_policy_hash", optional=True)
+        if self.planner_policy_hash is not None and (
+            len(self.planner_policy_hash) != 64 or any(character not in "0123456789abcdef" for character in self.planner_policy_hash)
+        ):
+            raise ValueError("planner_policy_hash must be exactly 64 lowercase hexadecimal characters")
+        planner_evidence = (
+            self.max_completion_tokens_requested,
+            self.planner_policy_hash,
+            self.planner_call_ordinal,
+        )
+        if any(value is not None for value in planner_evidence) and not all(value is not None for value in planner_evidence):
+            raise ValueError("planner request evidence fields must be supplied together")
         _require_optional_finite_number(self.temperature, "temperature")
         if self.temperature is not None:
             object.__setattr__(self, "temperature", float(self.temperature))

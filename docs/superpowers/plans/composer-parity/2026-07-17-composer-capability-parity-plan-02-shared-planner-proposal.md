@@ -185,7 +185,23 @@ surfaces contain no raw inline bytes.
 - Create: `src/elspeth/web/composer/tools/schema_contract.py`
 - Create: `tests/unit/web/composer/test_tool_schema_contract.py`
 - Modify: `src/elspeth/web/composer/audit.py`
+- Modify: `src/elspeth/contracts/composer_llm_audit.py`
+- Modify: `src/elspeth/web/composer/llm_response_parsing.py`
+- Modify: `src/elspeth/web/composer/tools/_dispatch.py`
+- Modify: `src/elspeth/web/composer/tools/blobs.py`
+- Modify: `src/elspeth/web/composer/tools/sessions.py`
+- Modify: `src/elspeth/web/composer/redaction.py`
 - Reference: `src/elspeth/web/composer/tools/sessions.py`
+
+**Implementation amendment (2026-07-18):** Live registry inspection found
+that the registered `set_pipeline` declaration rejected explicit nulls which
+the authoritative Pydantic boundary treats as omission-equivalent, and that
+inline MIME declarations duplicated the shared blob allowlist. Align those
+declarations with the typed boundary, derive MIME enums from
+`contracts.blobs.ALLOWED_MIME_TYPES`, and keep the registered declaration as
+the planner's only topology schema. The shared planner also requires injected,
+frozen request budget and route-lifecycle adapters because no existing helper
+owns all ordinary-route controls as one reusable unit.
 
 - [ ] Write failing tests that send canonical fixtures through a deterministic
   fake completion using the real terminal tool-call parser. Do not inject a
@@ -211,13 +227,21 @@ surfaces contain no raw inline bytes.
   the draft hash is computed.
 - [ ] Advertise the current read-only composer discovery tools plus the terminal
   proposal tool. Reject mutation calls and unknown discovery tools.
-- [ ] Reuse the current discovery/composition turn caps, provider deadline,
-  prompt/token limits, anti-repeat/anti-anchor controls, request rate limiter,
-  in-flight accounting, progress settlement, and client-disconnect cancellation
-  used by ordinary compose/guided routes. Bound total provider calls as well as
-  repairs. Test 429, deadline, disconnect, repeated discovery, malformed
-  response, prompt/cost budget exhaustion, and zero residual state/proposal
-  mutation.
+- [ ] Reuse the current discovery/composition turn caps and absolute provider
+  deadline through a required frozen `PlannerBudgetPolicy`: total wire attempts
+  (including each LiteLLM retry), exact canonical UTF-8 bytes of the full
+  post-cache-marker `{messages, tools}` payload, requested completion tokens,
+  and cumulative provider cost represented as `Decimal`. Cost is a post-call
+  continuation cap, not a hard pre-spend cap: record the call first, then fail
+  before parsing/dispatch/custody when cost is missing, malformed, or over cap.
+  Do not describe the advisor's four-characters-per-token estimate as exact or
+  conservative token enforcement. Inject route-owned rate limiting,
+  in-flight/disconnect scope, progress, and settlement through explicit
+  lifecycle adapters; do not clone route machinery in the planner. Preserve an
+  explicit `(tool_name, arguments_hash)` repetition/cycle guard because the
+  ordinary anti-anchor tracker clears on successful discovery. Test 429,
+  deadline, disconnect, repeated discovery, malformed response, exact request
+  byte/completion/cost exhaustion, and zero residual state/proposal mutation.
 - [ ] Strictly parse the terminal payload and build a preliminary,
   side-effect-free candidate using prepared inline content. If it is invalid,
   feed only the existing allowlisted structured validation projection back for
@@ -226,8 +250,12 @@ surfaces contain no raw inline bytes.
   ids, rebuild/revalidate the custody-safe candidate, hash it, and return the
   `PipelineProposal`. Failed drafts create no proposal row and publish no state.
 - [ ] Record hashes of the actual rendered messages and advertised tool schemas
-  using the existing LLM audit path. Do not copy raw provider errors into repair
-  feedback or audit.
+  after cache markers using the existing LLM audit path. Extend the closed
+  durable audit contract with requested completion tokens, planner policy hash,
+  and exact wire-attempt ordinal. Do not copy raw provider or validation errors
+  into repair feedback or audit; discovery audit opens before dispatch and uses
+  a closed safe result projection so blob-content discovery cannot persist raw
+  bytes.
 
 Run:
 

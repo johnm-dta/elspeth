@@ -66,6 +66,7 @@ from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 __all__ = [
     "_inject_prior_validation",
+    "execute_discovery_tool_with_context",
     "execute_tool",
     "get_discovery_tool_definitions",
     "get_tool_definitions",
@@ -670,6 +671,52 @@ def execute_tool(
         catalog=catalog,
         context=context,
         prior_validation=current_validation,
+    )
+
+
+def execute_discovery_tool_with_context(
+    tool_name: str,
+    arguments: Mapping[str, Any],
+    state: CompositionState,
+    context: ToolContext,
+) -> ToolResult:
+    """Execute one declared read-only tool through a frozen request context.
+
+    This is the narrow execution seam for planners that advertise core, blob,
+    and secret discovery together.  Unlike :func:`execute_tool`, callers
+    cannot accidentally reach a mutation registry and the request-scoped
+    catalog/snapshot/context object is not reconstructed between calls.
+    """
+    if context.catalog.snapshot is not context.plugin_snapshot:
+        raise ValueError("plugin_snapshot_catalog_mismatch")
+    discovery_handlers: dict[str, ToolHandler] = {
+        **_DISCOVERY_TOOLS,
+        **_BLOB_DISCOVERY_TOOLS,
+        **_SECRET_DISCOVERY_TOOLS,
+    }
+    handler = discovery_handlers.get(tool_name)
+    if handler is None:
+        raise ToolArgumentError(
+            argument="tool_name",
+            expected="a declared read-only discovery tool",
+            actual_type="mutation_or_unknown",
+            code="DISCOVERY_ONLY",
+        )
+    argument_error = _validate_tool_arguments(tool_name, arguments, state, raise_on_error=True)
+    assert argument_error is None
+    if _requires_secret_context(tool_name) and (context.secret_service is None or context.user_id is None):
+        return normalize_tool_result_validation(
+            _failure_result(state, "Secret tools require secret service context."),
+            context.catalog,
+        )
+    prior_validation = context.current_validation or context.catalog.validate_composition_state(state).validation
+    result = handler(dict(arguments), state, context)
+    return finalize_tool_result(
+        result,
+        tool_name=tool_name,
+        catalog=context.catalog,
+        context=context,
+        prior_validation=prior_validation,
     )
 
 

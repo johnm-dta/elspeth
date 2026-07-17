@@ -10,7 +10,7 @@
     "shape": "declarative"
   },
   "create_blob": {
-    "hash": "6f198f67975af9752789ce05f645fcacbe7c8e567764a1b209915f5b19dca040",
+    "hash": "8508808ab70ef1415657e5e40b61a7f0219af80a2ebcffc63967be55fa9cc2f4",
     "sensitive_path_count": 1,
     "shape": "type_driven"
   },
@@ -165,7 +165,7 @@
     "shape": "declarative"
   },
   "set_pipeline": {
-    "hash": "855973f53321c1193df6bdc54e947777c555419e745f1c3d62f7c058b7d2cdf0",
+    "hash": "f3e254a9bd6f3a8e54b4307b0b831f1f0dc3d37c9d6073963040bf5013a55d5d",
     "sensitive_path_count": 6,
     "shape": "type_driven"
   },

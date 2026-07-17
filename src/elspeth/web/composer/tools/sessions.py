@@ -12,6 +12,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 
+from elspeth.contracts.blobs import ALLOWED_MIME_TYPES
 from elspeth.contracts.composer_interpretation import (
     InterpretationChoice,
     InterpretationEventRecord,
@@ -995,7 +996,7 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
         "type": "object",
         "properties": {
             "source": {
-                "type": "object",
+                "type": ["object", "null"],
                 "description": (
                     "Source configuration: {plugin, on_success, options?, on_validation_failure?, blob_id?, inline_blob?}. "
                     "Use blob_id to bind an already uploaded session blob, or inline_blob to "
@@ -1004,7 +1005,7 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                 "properties": {
                     "plugin": {"type": "string"},
                     "blob_id": {
-                        "type": "string",
+                        "type": ["string", "null"],
                         "description": (
                             "Existing ready session blob ID to bind as this source. "
                             "The tool resolves path/blob_ref authoritatively exactly like set_source_from_blob."
@@ -1028,11 +1029,11 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                         "examples": ["raw_url_rows", "csv_rows", "fetched_text"],
                     },
                     "on_validation_failure": {
-                        "type": "string",
+                        "type": ["string", "null"],
                         "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
                     },
                     "inline_blob": {
-                        "type": "object",
+                        "type": ["object", "null"],
                         "description": (
                             "Optional inline source content to create as a session blob before binding the source. "
                             "Fields mirror create_blob: filename, mime_type, content, and optional description."
@@ -1041,17 +1042,10 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                             "filename": {"type": "string"},
                             "mime_type": {
                                 "type": "string",
-                                "enum": [
-                                    "text/plain",
-                                    "application/json",
-                                    "text/csv",
-                                    "application/x-jsonlines",
-                                    "application/jsonl",
-                                    "text/jsonl",
-                                ],
+                                "enum": sorted(ALLOWED_MIME_TYPES),
                             },
                             "content": {"type": "string"},
-                            "description": {"type": "string"},
+                            "description": {"type": ["string", "null"]},
                         },
                         "required": ["filename", "mime_type", "content"],
                     },
@@ -1059,7 +1053,7 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                 "required": ["plugin", "on_success"],
             },
             "sources": {
-                "type": "object",
+                "type": ["object", "null"],
                 "description": (
                     "Named source roots keyed by stable source name. Use this instead of source for multi-source pipelines. "
                     "Each value has the same shape as source, but blob_id and inline_blob are only supported on the legacy source field in v1."
@@ -1071,7 +1065,7 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                         "options": {"type": "object"},
                         "on_success": {"type": "string"},
                         "on_validation_failure": {
-                            "type": "string",
+                            "type": ["string", "null"],
                             "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
                         },
                     },
@@ -1085,7 +1079,7 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                     "properties": {
                         "id": {"type": "string"},
                         "node_type": {"type": "string"},
-                        "plugin": {"type": "string"},
+                        "plugin": {"type": ["string", "null"]},
                         "input": {
                             "type": "string",
                             "description": (
@@ -1097,7 +1091,7 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                             "examples": ["raw_url_rows", "fetched_text", "scored_rows"],
                         },
                         "on_success": {
-                            "type": "string",
+                            "type": ["string", "null"],
                             "description": (
                                 "Connection-name string this node PUBLISHES (transform/aggregation/"
                                 "coalesce). Some downstream input/sink_name MUST equal this. Omit "
@@ -1105,27 +1099,35 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                             ),
                             "examples": ["fetched_text", "scored_rows", "lines_out"],
                         },
-                        "on_error": {"type": "string"},
+                        "on_error": {"type": ["string", "null"]},
                         "options": {"type": "object"},
-                        "condition": {"type": "string"},
+                        "condition": {"type": ["string", "null"]},
                         "routes": {
-                            "type": "object",
+                            "type": ["object", "null"],
                             "description": (
                                 "Gate route mapping to sink names, downstream connection names, 'fork', or "
                                 "'discard' for an audited terminal drop."
                             ),
                         },
-                        "fork_to": {"type": "array", "items": {"type": "string"}},
+                        "fork_to": {"type": ["array", "null"], "items": {"type": "string"}},
                         "branches": {
-                            "type": ["array", "object"],
+                            "type": ["array", "object", "null"],
                             "items": {"type": "string"},
                             "additionalProperties": {"type": "string"},
                         },
-                        "policy": {"type": "string"},
-                        "merge": {"type": "string"},
-                        "trigger": {"type": "object"},
-                        "output_mode": {"type": "string"},
-                        "expected_output_count": {"type": "integer"},
+                        "policy": {"type": ["string", "null"]},
+                        "merge": {"type": ["string", "null"]},
+                        "trigger": {
+                            "type": ["object", "null"],
+                            "properties": {
+                                "count": {"type": ["integer", "null"]},
+                                "timeout_seconds": {"type": ["number", "null"]},
+                                "condition": {"type": ["string", "null"]},
+                            },
+                            "additionalProperties": False,
+                        },
+                        "output_mode": {"type": ["string", "null"]},
+                        "expected_output_count": {"type": ["integer", "null"]},
                     },
                     "required": ["id", "node_type", "input"],
                 },
@@ -1175,7 +1177,7 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                                 "pipelines, include path, schema, and explicit collision_policy."
                             ),
                         },
-                        "on_write_failure": {"type": "string"},
+                        "on_write_failure": {"type": ["string", "null"]},
                     },
                     "required": ["sink_name", "plugin"],
                     "examples": [
@@ -1199,11 +1201,11 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                 ),
             },
             "metadata": {
-                "type": "object",
+                "type": ["object", "null"],
                 "description": "Pipeline metadata: {name?, description?}",
                 "properties": {
-                    "name": {"type": "string"},
-                    "description": {"type": "string"},
+                    "name": {"type": ["string", "null"]},
+                    "description": {"type": ["string", "null"]},
                 },
             },
         },

@@ -36,6 +36,7 @@ from uuid import UUID, uuid4
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import Engine, delete, func, select, update
 
+from elspeth.contracts.blobs import ALLOWED_MIME_TYPES
 from elspeth.contracts.blobs_inline import (
     ALLOWED_CONTENT_ENCODINGS,
     BlobInlineRef,
@@ -616,16 +617,7 @@ _WIRE_BLOB_INLINE_REF_DECLARATION = ToolDeclaration(
 )
 
 
-_ALLOWED_BLOB_MIME_TYPES: frozenset[str] = frozenset(
-    {
-        "text/plain",
-        "application/json",
-        "text/csv",
-        "application/x-jsonlines",
-        "application/jsonl",
-        "text/jsonl",
-    }
-)
+_ALLOWED_BLOB_MIME_TYPES = ALLOWED_MIME_TYPES
 
 _BLOB_QUOTA_BYTES: int = 500 * 1024 * 1024
 
@@ -1007,6 +999,22 @@ def _execute_create_blob(
     try:
         validated = CreateBlobArgumentsModel.model_validate(arguments)
     except PydanticValidationError as exc:
+        # The shared AllowedMimeType contract is intentionally expressed in
+        # the redaction model as well as the wire schema. Preserve the
+        # historical semantic-error channel for an unsupported string: callers
+        # receive the safe field-specific allowlist diagnostic rather than a
+        # generic model-shape failure. Non-string values remain structural
+        # model errors.
+        raw_mime_type = arguments.get("mime_type")
+        if type(raw_mime_type) is str and any(
+            tuple(error["loc"]) == ("mime_type",) and error["type"] == "literal_error" for error in exc.errors(include_input=False)
+        ):
+            allowed = ", ".join(sorted(_ALLOWED_BLOB_MIME_TYPES))
+            raise ToolArgumentError(
+                argument="mime_type",
+                expected=f"one of: {allowed}",
+                actual_type="str",
+            ) from exc
         raise ToolArgumentError(
             argument="create_blob arguments",
             expected="object conforming to CreateBlobArgumentsModel",
@@ -1062,14 +1070,7 @@ _CREATE_BLOB_DECLARATION = ToolDeclaration(
             },
             "mime_type": {
                 "type": "string",
-                "enum": [
-                    "text/plain",
-                    "application/json",
-                    "text/csv",
-                    "application/x-jsonlines",
-                    "application/jsonl",
-                    "text/jsonl",
-                ],
+                "enum": sorted(ALLOWED_MIME_TYPES),
                 "description": "MIME type of the content.",
             },
             "content": {

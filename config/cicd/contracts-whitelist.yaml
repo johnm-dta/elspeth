@@ -725,6 +725,20 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._try_terminate_no_tools:llm_messages (list)"
   - "src/elspeth/web/composer/guided/chat_solver.py:_bounded_acompletion:kwargs"
 
+  # Shared pipeline planner provider/tool wire shapes. These are ephemeral
+  # JSON contracts fixed by the OpenAI-compatible chat/tool protocol or by
+  # the registered composer JSON Schemas; they are never durable internal
+  # domain records.
+  - "src/elspeth/web/composer/pipeline_planner.py:planner_terminal_tool_definition:return"
+  - "src/elspeth/web/composer/pipeline_planner.py:planner_tool_definitions:return (list)"
+  - "src/elspeth/web/composer/pipeline_planner.py:_assistant_tool_calls_message:return"
+  - "src/elspeth/web/composer/pipeline_planner.py:_allowlisted_candidate_feedback:return"
+  - "src/elspeth/web/composer/pipeline_planner.py:_canonical_schema_feedback:return"
+  - "src/elspeth/web/composer/pipeline_planner.py:_AuditedDiscoveryResult.to_dict:return"
+  # Public accessor returns a defensive copy of the registered dynamic JSON
+  # Schema; a TypedDict would duplicate and drift from that authority.
+  - "src/elspeth/web/composer/tools/schema_contract.py:canonical_set_pipeline_schema:return"
+
   # Azure Document Intelligence forward-invariant probe fake response payload.
   # Mirrors an HTTP JSON body emitted by the local fake client, not an internal
   # durable contract.
@@ -991,4 +1005,3 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/guided/_discovery.py:_execute_discovery_call:return"
   - "src/elspeth/web/composer/tools/_dispatch.py:get_discovery_tool_definitions:return (list)"
   - "src/elspeth/web/composer/tools/_dispatch.py:_closed_root_schema:return"
-  - "src/elspeth/web/composer/tools/_availability.py:_requirements_from_json_schema:schema"

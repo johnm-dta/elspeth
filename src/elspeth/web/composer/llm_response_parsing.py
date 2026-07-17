@@ -410,6 +410,9 @@ def build_llm_call_record(
     response: Any | None = None,
     error_class: str | None = None,
     error_message: str | None = None,
+    max_completion_tokens_requested: int | None = None,
+    planner_policy_hash: str | None = None,
+    planner_call_ordinal: int | None = None,
 ) -> ComposerLLMCall:
     usage = token_usage_from_response(response)
     provider_cost, provider_cost_source = _provider_cost_from_response(response)
@@ -441,6 +444,9 @@ def build_llm_call_record(
         error_message=_safe_llm_error_message(error_message),
         temperature=temperature,
         seed=seed,
+        max_completion_tokens_requested=max_completion_tokens_requested,
+        planner_policy_hash=planner_policy_hash,
+        planner_call_ordinal=planner_call_ordinal,
     )
 
 

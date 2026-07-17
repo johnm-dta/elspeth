@@ -39,6 +39,8 @@ __all__ = [
 
 _ARRAY_ITEM_SEGMENT = "[]"
 
+_JSON_SCHEMA_TYPES = frozenset({"array", "boolean", "integer", "null", "number", "object", "string"})
+
 type RequiredPath = tuple[str, ...]
 
 
@@ -61,6 +63,36 @@ class _CompiledRequiredPath:
     optional_ancestor: RequiredPath = ()
 
 
+def _normalise_schema_types(raw_type: object) -> frozenset[str]:
+    """Return validated JSON-Schema types from exact string-or-list metadata.
+
+    Composer tool schemas are system-owned. Invalid or structurally ambiguous
+    type metadata must therefore fail while the required-path index is built,
+    rather than silently disabling required-path validation.
+    """
+    if type(raw_type) is str:
+        type_items = [raw_type]
+    elif type(raw_type) is list:
+        raw_items = cast(list[object], raw_type)
+        if not raw_items:
+            raise ValueError("schema type list must not be empty")
+        if any(type(item) is not str for item in raw_items):
+            raise TypeError("schema type list must contain only exact strings")
+        type_items = cast(list[str], raw_items)
+    else:
+        raise TypeError("schema type must be an exact string or list of exact strings")
+
+    schema_types = frozenset(type_items)
+    if len(schema_types) != len(type_items):
+        raise ValueError("schema type list must not contain duplicate entries")
+
+    unknown_types = schema_types - _JSON_SCHEMA_TYPES
+    if unknown_types:
+        raise ValueError(f"schema type contains unsupported entries: {sorted(unknown_types)!r}")
+
+    return schema_types
+
+
 def _collect_required_paths(
     schema: Mapping[str, object],
     prefix: RequiredPath = (),
@@ -80,10 +112,11 @@ def _collect_required_paths(
     when the parent is present). Required-at-every-level paths keep an empty
     ``optional_ancestor`` and are enforced unconditionally.
     """
-    schema_type = cast(str, schema["type"])
+    schema_types = _normalise_schema_types(schema["type"])
 
-    if schema_type == "object":
-        compiled: list[_CompiledRequiredPath] = []
+    compiled: list[_CompiledRequiredPath] = []
+
+    if "object" in schema_types:
         required_fields: set[str] = set()
         if "required" in schema:
             raw_required = cast(list[str], schema["required"])
@@ -101,17 +134,19 @@ def _collect_required_paths(
                 # -level path or empty).
                 child_ancestor = optional_ancestor if key in required_fields else child_prefix
                 compiled.extend(_collect_required_paths(child_schema, child_prefix, child_ancestor))
-        return tuple(compiled)
 
-    if schema_type == "array" and "items" in schema:
+    if "array" in schema_types and "items" in schema:
         item_schema = cast(Mapping[str, object], schema["items"])
         # Array items inherit the array's optional_ancestor: required fields
         # inside an item only matter if the array itself is present (and per
         # _find_missing_path_instances semantics, an empty array produces no
         # missing-path entries).
-        return _collect_required_paths(item_schema, (*prefix, _ARRAY_ITEM_SEGMENT), optional_ancestor)
+        compiled.extend(_collect_required_paths(item_schema, (*prefix, _ARRAY_ITEM_SEGMENT), optional_ancestor))
 
-    return ()
+    # A valid JSON-Schema type union may contain both object and array. Walk
+    # both shapes, but do not make downstream validation repeat an identical
+    # path if the two traversals converge on the same compiled record.
+    return tuple(dict.fromkeys(compiled))
 
 
 def _build_tool_required_paths_index() -> dict[str, tuple[_CompiledRequiredPath, ...]]:

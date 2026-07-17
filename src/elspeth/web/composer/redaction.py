@@ -23,6 +23,7 @@ from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
+from elspeth.contracts.blobs import AllowedMimeType
 from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields
@@ -1131,7 +1132,7 @@ class CreateBlobArgumentsModel(BaseModel):
     """
 
     filename: str
-    mime_type: str
+    mime_type: AllowedMimeType
     content: Annotated[str, Sensitive(summarizer=_summarize_inline_blob_content)]
     description: str | None = None
 
@@ -1202,7 +1203,7 @@ class _InlineBlobModel(BaseModel):
     """
 
     filename: str
-    mime_type: str
+    mime_type: AllowedMimeType
     # max_length=262_144 (256 KiB) is the inline-blob payload cap (Phase
     # Inline-blob content policy. The composer is intended for prose-sized inline data
     # — a single CSV with up to a few thousand rows — not for binary

@@ -334,6 +334,28 @@ def test_strict_restore_round_trip_and_hash_reverification() -> None:
         PipelineProposal.from_dict(bad_anchor, reviewed_facts=_reviewed_facts())
 
 
+@pytest.mark.parametrize("field", ["draft_hash", "reviewed_anchor_hash"])
+@pytest.mark.parametrize("corrupt_value", [None, "", 42])
+def test_restore_rejects_null_empty_or_wrong_type_required_hash_before_resealing(
+    field: str,
+    corrupt_value: object,
+) -> None:
+    payload = _create_proposal().to_dict()
+    payload[field] = corrupt_value  # type: ignore[literal-required,typeddict-item]
+
+    with pytest.raises(AuditIntegrityError, match=rf"PipelineProposal {field} must be exactly 64 lowercase hexadecimal characters"):
+        PipelineProposal.from_dict(payload, reviewed_facts=_reviewed_facts())
+
+
+@pytest.mark.parametrize("field", ["draft_hash", "reviewed_anchor_hash"])
+def test_restore_rejects_missing_required_hash(field: str) -> None:
+    payload = _create_proposal().to_dict()
+    del payload[field]  # type: ignore[literal-required,misc]
+
+    with pytest.raises(AuditIntegrityError, match="persisted fields are malformed"):
+        PipelineProposal.from_dict(payload, reviewed_facts=_reviewed_facts())
+
+
 @pytest.mark.parametrize("mutation", ["extra_top_level", "missing_top_level", "unknown_base", "extra_base"])
 def test_restore_rejects_noncanonical_envelope_shapes(mutation: str) -> None:
     payload = _create_proposal().to_dict()

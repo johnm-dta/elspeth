@@ -302,6 +302,8 @@ class PipelineProposal:
         """Strictly restore and reverify an envelope against reviewed facts."""
         if not isinstance(payload, Mapping) or set(payload) != _PROPOSAL_FIELDS:
             raise AuditIntegrityError("PipelineProposal persisted fields are malformed")
+        _require_hash(payload["draft_hash"], "PipelineProposal draft_hash")
+        _require_hash(payload["reviewed_anchor_hash"], "PipelineProposal reviewed_anchor_hash")
 
         raw_base = payload["base"]
         if not isinstance(raw_base, Mapping):

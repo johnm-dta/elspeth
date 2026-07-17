@@ -382,6 +382,8 @@ def _producer_proves_shield(producer: NodeSpec, graph: _OutputStreamGraph, visit
     visited = visited | {producer.id}
     if _is_effective_prompt_shield(producer):
         return True
+    if producer.plugin in _UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS:
+        return False
     if producer.node_type == "queue":
         predecessors = graph.queue_predecessors.get(producer.id, ())
         if not predecessors:

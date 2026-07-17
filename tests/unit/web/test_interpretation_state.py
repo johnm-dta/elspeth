@@ -684,6 +684,23 @@ def _state(nodes: tuple[NodeSpec, ...]) -> CompositionState:
     )
 
 
+def test_prompt_shield_before_web_scrape_does_not_bless_downstream_llm() -> None:
+    """A shield before the untrusted producer cannot sanitize content it has not produced yet."""
+    state = _state(
+        (
+            _shield("premature_shield", input_stream="rows", on_success="shielded_rows"),
+            _web_scrape("scrape", input_stream="shielded_rows", on_success="inbound"),
+            _llm(),
+        )
+    )
+
+    warning_pairs = prompt_shield_recommendation_warning_pairs(state)
+
+    assert warning_pairs
+    message = next(message for component, message in warning_pairs if component == "node:classify")
+    assert "web_scrape upstream without an authorized prompt-injection shield between them" in message
+
+
 def test_queue_fan_in_untrusted_on_any_predecessor_marks_downstream_untrusted() -> None:
     """One untrusted predecessor among many taints the downstream LLM (ANY-path rule)."""
     # Order: the benign transform registers LAST, so the pre-fix single-producer

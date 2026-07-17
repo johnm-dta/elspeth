@@ -178,6 +178,52 @@ async def test_cancelled_live_tutorial_run_returns_409_with_machine_code(tmp_pat
     assert detail["error_type"] == "tutorial_run_cancelled"
 
 
+@pytest.mark.asyncio
+async def test_live_tutorial_wait_uses_transport_ceiling_minus_headroom(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The tutorial POST must outlive one slow LLM call without racing the proxy."""
+    captured_timeout: list[float | None] = []
+
+    class FakeExecutionService:
+        async def execute(self, session_id: Any, *, user_id: str, auth_provider_type: str) -> Any:
+            del session_id, user_id, auth_provider_type
+            return "run-1"
+
+    async def fake_wait_for_terminal_run(
+        session_service: Any,
+        requested_run_id: Any,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> Any:
+        del session_service
+        assert requested_run_id == "run-1"
+        captured_timeout.append(timeout_seconds)
+        return SimpleNamespace(status="cancelled")
+
+    monkeypatch.setattr(tutorial_service_module, "_wait_for_terminal_run", fake_wait_for_terminal_run)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(execution_service=FakeExecutionService())))
+    settings = _make_tutorial_settings(
+        tmp_path,
+        composer_timeout_seconds=120.0,
+        composer_transport_idle_ceiling_seconds=300.0,
+        composer_transport_headroom_seconds=30.0,
+    )
+    user = SimpleNamespace(user_id="tutorial-user")
+
+    with pytest.raises(HTTPException, match="409"):
+        await tutorial_service_module._run_live_tutorial(
+            request=request,
+            user=user,
+            session_id="session-1",
+            settings=settings,
+            session_service=SimpleNamespace(),
+        )
+
+    assert captured_timeout == [270.0]
+
+
 def test_count_calls_for_run_counts_only_llm_calls() -> None:
     db = make_landscape_db()
     factory = make_factory(db)

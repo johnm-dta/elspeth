@@ -72,8 +72,25 @@ _GUARDRAIL_OWNERSHIP = frozenset({"SELF", "CROSS_ACCOUNT"})
 class GuardrailResponseError(ValueError):
     """Raised when provider data cannot prove a safe or blocked decision."""
 
-    def __init__(self) -> None:
-        super().__init__("malformed Bedrock Guardrail response")
+    def __init__(self, message: str = "malformed Bedrock Guardrail response") -> None:
+        super().__init__(message)
+
+
+class GuardrailPartialCoverageError(GuardrailResponseError):
+    """Raised when the guardrail scanned only part of the input (guarded != total).
+
+    Fail-closed but distinctly classified (operator decision 2026-07-17):
+    oversized inputs exceed the guardrail's per-request text-unit capacity
+    and must be recognizable as the coverage gate, not a malformed response.
+    Carried values are ELSPETH-validated integers and the closed coverage-key
+    vocabulary — never provider text.
+    """
+
+    def __init__(self, *, coverage_key: str, guarded: int, total: int) -> None:
+        super().__init__(f"partial Bedrock Guardrail coverage: {guarded}/{total} {coverage_key} units scanned")
+        self.coverage_key = coverage_key
+        self.guarded = guarded
+        self.total = total
 
 
 class GuardrailServiceError(RuntimeError):
@@ -152,7 +169,7 @@ def _validate_coverage(value: object) -> None:
     coverage = _mapping(value)
     if not set(coverage) <= {"textCharacters", "images"}:
         raise GuardrailResponseError
-    for raw_counts in coverage.values():
+    for coverage_key, raw_counts in coverage.items():
         counts = _mapping(raw_counts)
         if not set(counts) <= {"guarded", "total"}:
             raise GuardrailResponseError
@@ -164,7 +181,7 @@ def _validate_coverage(value: object) -> None:
         guarded = counts.get("guarded")
         total = counts.get("total")
         if type(guarded) is int and type(total) is int and guarded != total:
-            raise GuardrailResponseError
+            raise GuardrailPartialCoverageError(coverage_key=coverage_key, guarded=guarded, total=total)
 
 
 def _validate_invocation_metrics(value: object) -> None:
@@ -465,6 +482,21 @@ class BedrockGuardrailsClient(AuditedClientBase):
             )
             call_status = CallStatus.SUCCESS
             error_payload = None
+        except GuardrailPartialCoverageError as error:
+            terminal_error = error
+            response_payload = RawCallPayload(
+                {
+                    "operation": "apply_guardrail",
+                    "status": "partial_coverage",
+                    "attempts": attempts,
+                    "coverage_key": error.coverage_key,
+                    "guarded_units": error.guarded,
+                    "total_units": error.total,
+                }
+            )
+            call_status = CallStatus.ERROR
+            error_payload = RawCallPayload({"type": "partial_coverage", "retryable": False})
+            decision = None
         except GuardrailResponseError as error:
             terminal_error = error
             response_payload = RawCallPayload({"operation": "apply_guardrail", "status": "malformed_response", "attempts": attempts})

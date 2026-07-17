@@ -10,7 +10,12 @@ from elspeth.contracts import Determinism
 from elspeth.contracts.plugin_capabilities import ControlRole, PluginCapability, WebConfigAuthority
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.transforms.aws.bedrock_content_safety import AWSBedrockContentSafety
-from elspeth.plugins.transforms.aws.guardrails_client import BedrockGuardrailsClient, GuardrailDecision, GuardrailUsage
+from elspeth.plugins.transforms.aws.guardrails_client import (
+    BedrockGuardrailsClient,
+    GuardrailDecision,
+    GuardrailPartialCoverageError,
+    GuardrailUsage,
+)
 from elspeth.testing import make_pipeline_row
 
 
@@ -72,6 +77,34 @@ def test_content_safety_uses_explicit_safe_source(monkeypatch: pytest.MonkeyPatc
     assert result.status == "success"
     assert result.row is not None and result.row.to_dict() == row.to_dict()
     assert calls == [{"text": "safe", "source": source, "required_filters": CONTENT_FILTERS}]
+
+
+def test_content_safety_partial_coverage_fails_closed_with_distinct_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Partial guardrail coverage hard-fails the row under its own reason.
+
+    Operator decision 2026-07-17: legitimate oversized inputs stay fail-closed
+    (unscanned content never passes a guardrail gate) but must be recognizable
+    as the coverage gate, not lumped in with malformed-response service errors.
+    """
+    transform, context = _started_transform()
+
+    def raise_partial(_client: BedrockGuardrailsClient, **_kwargs: object) -> GuardrailDecision:
+        raise GuardrailPartialCoverageError(coverage_key="textCharacters", guarded=11, total=12)
+
+    monkeypatch.setattr(BedrockGuardrailsClient, "apply_guardrail", raise_partial)
+
+    result = transform.process(make_pipeline_row({"content": "oversized input"}), context)
+
+    assert result.status == "error"
+    assert result.retryable is False
+    assert result.reason == {
+        "reason": "guardrail_partial_coverage",
+        "field": "content",
+        "error_type": "partial_coverage",
+        "coverage_key": "textCharacters",
+        "guarded_units": 11,
+        "total_units": 12,
+    }
 
 
 def test_content_safety_rejects_unknown_source() -> None:

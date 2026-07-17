@@ -13,6 +13,7 @@ from elspeth.contracts import CallStatus
 from elspeth.plugins.transforms.aws.guardrails_client import (
     ALL_USAGE_KEYS,
     BedrockGuardrailsClient,
+    GuardrailPartialCoverageError,
     GuardrailResponseError,
     parse_guardrail_response,
 )
@@ -267,8 +268,42 @@ def test_partial_guardrail_coverage_fails_closed(location: str) -> None:
     else:
         provider_response["assessments"][0]["invocationMetrics"]["guardrailCoverage"] = partial
 
-    with pytest.raises(GuardrailResponseError):
+    with pytest.raises(GuardrailPartialCoverageError) as exc_info:
         parse_guardrail_response(provider_response, required_filters=PROMPT_FILTERS)
+
+    # Partial coverage is fail-closed but distinctly classified (operator
+    # decision 2026-07-17): still a GuardrailResponseError subclass so every
+    # existing handler keeps failing closed, with counts for diagnosis.
+    assert isinstance(exc_info.value, GuardrailResponseError)
+    assert exc_info.value.coverage_key == "textCharacters"
+    assert exc_info.value.guarded == 11
+    assert exc_info.value.total == 12
+
+
+def test_partial_coverage_audits_distinct_error_payload() -> None:
+    partial_response = response(full_optional_sections=True)
+    partial_response["guardrailCoverage"] = {"textCharacters": {"guarded": 11, "total": 12}}
+
+    class PartialSDK:
+        def apply_guardrail(self, **_kwargs: object) -> dict[str, Any]:
+            return partial_response
+
+    execution = FakeExecution()
+    with pytest.raises(GuardrailPartialCoverageError):
+        _client(PartialSDK(), execution, []).apply_guardrail(
+            text="marker",
+            source="INPUT",
+            required_filters=PROMPT_FILTERS,
+        )
+
+    recorded = execution.calls[0]
+    assert recorded["status"] is CallStatus.ERROR
+    response_data = recorded["response_data"].to_dict()
+    assert response_data["status"] == "partial_coverage"
+    assert response_data["coverage_key"] == "textCharacters"
+    assert response_data["guarded_units"] == 11
+    assert response_data["total_units"] == 12
+    assert recorded["error"].to_dict()["type"] == "partial_coverage"
 
 
 def test_root_usage_accepts_required_six_without_optional_counters() -> None:

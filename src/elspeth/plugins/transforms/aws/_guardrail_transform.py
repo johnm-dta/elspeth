@@ -25,6 +25,7 @@ from elspeth.plugins.transforms.aws.guardrail_profiles import (
 )
 from elspeth.plugins.transforms.aws.guardrails_client import (
     BedrockGuardrailsClient,
+    GuardrailPartialCoverageError,
     GuardrailResponseError,
     GuardrailServiceError,
     GuardrailSource,
@@ -225,6 +226,22 @@ class BedrockGuardrailTransformBase(BaseTransform, ABC):
                     text=value,
                     source=self._guardrail_source,
                     required_filters=self._required_filters,
+                )
+            except GuardrailPartialCoverageError as error:
+                # Fail-closed with a distinct reason (operator decision
+                # 2026-07-17): the guardrail scanned only part of the input,
+                # so the row must not pass — but operators need to see the
+                # coverage gate, not a service error.
+                return TransformResult.error(
+                    {
+                        "reason": "guardrail_partial_coverage",
+                        "field": field_name,
+                        "error_type": "partial_coverage",
+                        "coverage_key": error.coverage_key,
+                        "guarded_units": error.guarded,
+                        "total_units": error.total,
+                    },
+                    retryable=False,
                 )
             except (GuardrailServiceError, GuardrailResponseError, ValueError):
                 return TransformResult.error(

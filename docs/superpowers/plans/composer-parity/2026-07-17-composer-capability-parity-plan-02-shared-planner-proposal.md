@@ -271,6 +271,74 @@ fails closed, and no planner discovery call mutates state.
 
 ## Task 4: Adapt the existing proposal lifecycle and acceptance route
 
+**Implementation amendment (2026-07-18):** Live proposal-service and route
+inspection found that the legacy writer deliberately stores the exact
+`{tool_call_id, tool_name, status}` creation payload, acceptance currently
+persists state and proposal settlement in separate transactions, and the
+planner returns no terminal tool-call identity. Preserve that legacy contract
+unchanged and add a dedicated canonical-pipeline writer/reader/settlement
+protocol instead of optionalising the legacy path. `plan_pipeline()` returns a
+small frozen result wrapper carrying the immutable `PipelineProposal`, its real
+terminal `tool_call_id`, and the honest custody outcome (`not_required` or
+`ready`); transport and custody fields do not enter `PipelineProposal` or its
+draft hash.
+
+The new closed `pipeline_proposal_created.v1` payload binds the exact private
+row arguments, the actually persisted redacted public projection, composer
+provenance, and every `PipelineProposal` hash input: tagged base, surface,
+draft/reviewed-anchor/skill hashes, repair count, ordered covered deferred
+intent ids, nullable superseded draft hash, and any same-session superseded
+proposal id. One domain-separated `audit_payload_hash` covers the exact
+persisted redacted projection (`summary`, `rationale`, ordered `affects`, and
+`arguments_redacted_json`); there is no second public self-checksum. The
+current chat-message audit store does not
+return a durable audit-row id, so dispatch authority is bound honestly by the
+persisted redacted invocation's `tool_call_id`, argument hash, result hash, and
+status; no synthetic audit identifier is introduced.
+
+Authoritative reconstruction performs one proposal-row lookup and one
+`proposal.created` lookup by `(session_id, proposal_id, event_type)`, requires
+exactly one creation event, ignores the mutable `audit_event_id`, validates the
+closed versioned shape and every row/event/public/provenance/hash binding, and
+reconstructs `PipelineProposal`. Freeform and `GUIDED_FULL` reviewed facts are
+the explicit empty mapping. `GUIDED_STAGED` and `TUTORIAL_PROFILE` are rejected
+by the generic route before candidate construction or dispatch; later guided
+checkpoint work supplies the extension seam for non-empty reviewed facts.
+
+Canonical terminal events reuse the existing event/status vocabulary with new
+closed versioned payloads. Accepted proposals bind draft hash, committed state
+id/content hash, final guided-metadata hash, and the durable dispatch audit
+binding. Rejected, failed, and superseded outcomes use closed reason codes and
+never persist request prose, provider text, exception text, or free-form
+reasons. An exact accepted retry succeeds only when the row, sole creation and
+terminal events, state content/metadata, draft, and dispatch bindings all
+agree; any disagreement fails closed. Legacy lifecycle shapes remain
+representable.
+
+`pipeline_commit.py` is lock-assuming: the request route is the only compose
+lock owner. Preparation verifies ownership, surface, echoed draft hash, tagged
+base, current frozen policy snapshot, reviewed anchor, and exact row candidate;
+executes the exact arguments through the audited `set_pipeline` executor in a
+bounded worker; and compares candidate and executor content hashes. It persists
+dispatch audit before settlement and publishes no state itself. One session
+service method then rechecks `AbsentBase` or `PresentBase` (state id plus
+composition-content hash) and atomically inserts the immutable state, writes
+caller-supplied final composer metadata, appends the terminal event, and
+updates proposal status/state/audit pointer. Candidate/executor mismatch
+terminalises with a closed failure code and no state. `AbsentBase` is valid
+only when no state exists, and a same-content state with a different id still
+conflicts.
+
+The generic accept request requires a `draft_hash` echo only when authoritative
+creation metadata marks a canonical pipeline proposal; legacy proposals retain
+their no-body/no-hash behavior. Public list/reload responses expose optional
+safe pipeline metadata (legacy is null), and the Python/TypeScript client and
+store send that hash when present. Planner and dispatch evidence is persisted
+before the corresponding proposal/state write; telemetry, where the existing
+surface can report it without fabrication, is emitted only afterward with
+closed low-cardinality surface/result or stage attributes. Custody telemetry
+reports only `not_required` or `ready` and never guesses created versus reused.
+
 **Files:**
 
 - Create: `src/elspeth/web/composer/pipeline_commit.py`
@@ -287,21 +355,22 @@ fails closed, and no planner discovery call mutates state.
 - Create: `tests/integration/web/composer/test_pipeline_proposal_lifecycle.py`
 - Modify: `tests/unit/web/sessions/test_composer_proposals.py`
 
-- [ ] Write failing tests proving a valid planner draft creates exactly one
+- [x] Write failing tests proving a valid planner draft creates exactly one
   existing `composition_proposals` row with exact custody-safe arguments,
   redacted public arguments, current provenance, and base state id.
-- [ ] Add the surface, draft/base/anchor/audit hashes and repair count to a
+- [x] Add the surface, draft/base/anchor hashes, the single audit-payload hash,
+  and repair count to a
   closed, explicitly versioned `pipeline_proposal_created.v1` payload on the
   allowlisted `proposal.created` event. Extend
   the Python and TypeScript public response with optional safe fields so legacy
   non-pipeline proposals remain representable. Do not add SQL columns for values
   recomputable from exact arguments or already anchored in the state/checkpoint.
-- [ ] Version the event payload explicitly. During Plan 02 readers accept the
+- [x] Version the event payload explicitly. During Plan 02 readers accept the
   exact legacy creation shape or the new pipeline-metadata shape; pipeline
   reconstruction requires the latter. After the epoch-29 recreation, every new
   canonical pipeline proposal must carry the new shape. Do not silently reinterpret
   an old event as current metadata.
-- [ ] Implement a service helper that reconstructs and verifies a
+- [x] Implement a service helper that reconstructs and verifies a
   `PipelineProposal` from the private row and its authoritative immutable
   `proposal.created` event. Load the proposal once and query exactly once by
   `(session_id, proposal_id, event_type="proposal.created")`; require exactly
@@ -312,25 +381,25 @@ fails closed, and no planner discovery call mutates state.
   concurrency tokens, never restore authority. Cross-session ids, wrong tool
   names, altered exact arguments, missing/duplicate events, and hash mismatches
   raise an integrity error before dispatch.
-- [ ] Add an `AcceptProposalRequest` hash echo for pipeline proposals. The HTTP
+- [x] Add an `AcceptProposalRequest` hash echo for pipeline proposals. The HTTP
   route requires `draft_hash` when the creation event marks a pipeline proposal;
   legacy non-pipeline proposals keep their current no-hash behavior. Update the
   frontend client/store and test stale/missing/mismatched echoes.
-- [ ] Split `accept_composition_proposal()` into a lock-assuming
+- [x] Split `accept_composition_proposal()` into a lock-assuming
   `prepare_pipeline_proposal_commit()` and a persistence settlement. The request
   route remains the only compose-lock owner; no shared helper reacquires the
   non-reentrant lock. Preparation preserves ownership, base-state conflict,
   current policy catalog/snapshot, exact replay, candidate revalidation,
   deferred cancellation, and 409/422 semantics, but performs no state/proposal
   database settlement.
-- [ ] Enforce the tagged base under that same lock and again inside settlement.
+- [x] Enforce the tagged base under that same lock and again inside settlement.
   `AbsentBase` is valid only while no current composition state exists;
   creation of a first state before settlement returns 409. `PresentBase`
   requires both the current state id and composition-content hash to match;
   the settlement transaction reloads and compares both, never id alone.
   Add absent-vs-first-state, same-content/new-state, and concurrent-state-change
   regressions; never treat a missing state id as “accept against anything.”
-- [ ] Add one `SessionServiceProtocol` method that, in one session-write
+- [x] Add one `SessionServiceProtocol` method that, in one session-write
   transaction, calls internal `_insert_composition_state()`, appends the
   terminal proposal event, updates proposal status/committed state id, and
   writes caller-supplied final guided composer metadata when present. Acceptance
@@ -339,23 +408,23 @@ fails closed, and no planner discovery call mutates state.
   pending and its base id/content hash are still current. A duplicate retry
   returns the already-bound outcome only when every id/hash matches; otherwise
   it fails closed.
-- [ ] Before publishing, compare candidate content hash with the executor result
+- [x] Before publishing, compare candidate content hash with the executor result
   content hash. A mismatch settles the proposal as failed/rejected with an
   allowlisted reason and publishes no new current state.
-- [ ] Every reject/fail/supersede settlement records a closed allowlisted reason
+- [x] Every reject/fail/supersede settlement records a closed allowlisted reason
   code in its terminal event. Do not persist raw validation, provider, or
   exception text as the reason.
-- [ ] Add interruption/retry cases before/after dispatch and before/after the
+- [x] Add interruption/retry cases before/after dispatch and before/after the
   atomic settlement. Assert there is never a published state with a pending
   proposal, a committed proposal with stale guided metadata, or more than one
   committed state/terminal event. A crash after proposal staging but before
   acceptance may leave one valid pending proposal and is recoverable.
-- [ ] Keep the generic proposal endpoint for legacy proposals and
+- [x] Keep the generic proposal endpoint for legacy proposals and
   `GUIDED_FULL`, but reject a canonical proposal whose authoritative creation
   metadata says `GUIDED_STAGED` or `TUTORIAL_PROFILE`. Those surfaces must use
   the guided transition so proposal settlement, covered-intent consumption,
   and checkpoint advancement cannot be bypassed.
-- [ ] Emit low-cardinality planner, custody, commit, and integrity-conflict
+- [x] Emit low-cardinality planner, custody, commit, and integrity-conflict
   counters only after the corresponding audit write. Use closed surface/result
   enums and never attach hashes, ids, user text, filenames, or exception text.
 

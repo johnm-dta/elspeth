@@ -149,6 +149,7 @@ function makeCompositionProposal(
     base_state_id: "state-1",
     committed_state_id: null,
     audit_event_id: null,
+    pipeline_metadata: null,
     created_at: "2026-05-14T00:00:00Z",
     updated_at: "2026-05-14T00:00:00Z",
     ...overrides,
@@ -1770,6 +1771,43 @@ describe("sessionStore", () => {
 
       expect(useSessionStore.getState().staleProposalIds).toContain(
         "proposal-1",
+      );
+    });
+
+    it("echoes canonical pipeline draft hashes when accepting", async () => {
+      const apiClient = await import("@/api/client");
+      const proposal = makeCompositionProposal({
+        pipeline_metadata: {
+          surface: "freeform",
+          draft_hash: "d".repeat(64),
+          base: { kind: "absent" },
+          reviewed_anchor_hash: "a".repeat(64),
+          repair_count: 0,
+          skill_hash: "s".repeat(64),
+          audit_payload_hash: "p".repeat(64),
+          custody_result: "not_required",
+        },
+      });
+      (
+        apiClient.acceptCompositionProposal as ReturnType<typeof vi.fn>
+      ).mockResolvedValue(proposal);
+      (
+        apiClient.fetchCompositionState as ReturnType<typeof vi.fn>
+      ).mockResolvedValue(null);
+      (
+        apiClient.fetchCompositionProposals as ReturnType<typeof vi.fn>
+      ).mockResolvedValue([]);
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        compositionProposals: [proposal],
+      });
+
+      await useSessionStore.getState().acceptProposal(proposal.id);
+
+      expect(apiClient.acceptCompositionProposal).toHaveBeenCalledWith(
+        "session-1",
+        proposal.id,
+        proposal.pipeline_metadata?.draft_hash,
       );
     });
   });

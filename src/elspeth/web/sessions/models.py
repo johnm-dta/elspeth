@@ -622,21 +622,26 @@ composition_proposals_table = Table(
 # key, its vocabulary, and the owning phase at the same time.
 #
 # Payload contract for event_type="proposal.created":
-#   tool_call_id: str — the OpenAI tool-call id.
-#   tool_name: str — the LLM-supplied tool name.
-#   status: Literal["pending"] — always "pending" for this event_type.
+#   Legacy rows retain the exact historical
+#   {tool_call_id, tool_name, status="pending"} shape.
+#   Canonical set_pipeline rows use closed
+#   schema="pipeline_proposal_created.v1" metadata. It binds the exact
+#   private arguments, manifest-redacted audit projection, provenance,
+#   tagged base, surface, draft/reviewed-anchor/skill hashes, repair count,
+#   deferred-intent ids, optional supersession pair, and custody result.
+#   Readers must never reinterpret malformed canonical metadata as legacy.
 #
 # Payload contract for event_type="proposal.accepted":
-#   tool_call_id: str
-#   tool_name: str
-#   status: Literal["committed"]
-#   committed_state_id: str | None — uuid of the resulting state row.
+#   Legacy rows retain their historical shape. Canonical pipeline rows use
+#   schema="pipeline_proposal_accepted.v1" and bind the draft, committed
+#   state id/content, final composer metadata, and the exact durable redacted
+#   dispatch envelope (including its canonical executor-content hash).
 #
 # Payload contract for event_type="proposal.rejected":
-#   tool_call_id: str
-#   tool_name: str
-#   status: Literal["rejected"]
-#   reason: str — operator-supplied or system-supplied rejection note.
+#   Legacy rows retain their historical shape. Canonical pipeline rows use
+#   schema="pipeline_proposal_rejected.v1" with a closed reason_code and an
+#   optional durable dispatch binding; free-form request/provider/exception
+#   text is never persisted in the canonical terminal event.
 proposal_events_table = Table(
     "proposal_events",
     metadata,

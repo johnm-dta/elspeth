@@ -201,6 +201,17 @@ class UpdateComposerPreferencesRequest(_RequestModel):
     density_default: ComposerDensityDefault
 
 
+class PipelineProposalMetadataResponse(_StrictResponse):
+    surface: Literal["freeform", "guided_full", "guided_staged", "tutorial_profile"]
+    draft_hash: str
+    base: CompositionObject
+    reviewed_anchor_hash: str
+    repair_count: int
+    skill_hash: str
+    audit_payload_hash: str
+    custody_result: Literal["not_required", "ready"]
+
+
 class CompositionProposalResponse(_StrictResponse):
     id: str
     session_id: str
@@ -214,8 +225,13 @@ class CompositionProposalResponse(_StrictResponse):
     base_state_id: str | None = None
     committed_state_id: str | None = None
     audit_event_id: str | None = None
+    pipeline_metadata: PipelineProposalMetadataResponse | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class AcceptProposalRequest(_RequestModel):
+    draft_hash: str | None = None
 
 
 class RejectProposalRequest(_RequestModel):

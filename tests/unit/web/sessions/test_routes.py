@@ -782,6 +782,255 @@ def test_accept_proposal_executes_tool_and_commits_state(tmp_path, monkeypatch) 
     assert provenance == "tool_call"
 
 
+def test_canonical_pipeline_accept_requires_and_echoes_draft_hash(tmp_path, monkeypatch) -> None:
+    from sqlalchemy import select, update
+
+    from elspeth.web.composer.pipeline_planner import PipelinePlanResult
+    from elspeth.web.composer.pipeline_proposal import AbsentBase, PipelineProposal, PlannerSurface
+    from elspeth.web.composer.redaction import redact_tool_call_arguments
+    from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
+    from elspeth.web.sessions.models import chat_messages_table
+
+    app, service = _make_app(tmp_path)
+    monkeypatch.setattr(
+        "elspeth.web.sessions.routes._helpers._runtime_preflight_for_state",
+        _async_return(ValidationResult(is_valid=True, checks=[], errors=[])),
+    )
+    input_path = tmp_path / "blobs" / "canonical.csv"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_text("value\n1\n", encoding="utf-8")
+    pipeline = {
+        "source": {
+            "plugin": "csv",
+            "on_success": "rows",
+            "options": {"path": str(input_path), "schema": {"mode": "observed"}},
+            "on_validation_failure": "discard",
+        },
+        "nodes": [],
+        "edges": [],
+        "outputs": [
+            {
+                "sink_name": "rows",
+                "plugin": "json",
+                "options": {
+                    "path": str(tmp_path / "outputs" / "canonical.jsonl"),
+                    "schema": {"mode": "observed"},
+                    "format": "jsonl",
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            }
+        ],
+    }
+    proposal_envelope = PipelineProposal.create(
+        pipeline=pipeline,
+        base=AbsentBase(),
+        reviewed_facts={},
+        surface=PlannerSurface.FREEFORM,
+        repair_count=0,
+        skill_hash=stable_hash("planner-skill"),
+    )
+    plan = PipelinePlanResult(
+        proposal=proposal_envelope,
+        tool_call_id="canonical-terminal-call",
+        custody_result="not_required",
+    )
+    client = TestClient(app)
+    session = client.post("/api/sessions", json={"title": "Canonical accept"}).json()
+    session_id = uuid.UUID(session["id"])
+    row = asyncio.run(
+        service.create_pipeline_composition_proposal(
+            session_id=session_id,
+            plan=plan,
+            summary="Replace the pipeline.",
+            rationale="Requested by the operator.",
+            affects=("graph", "validation"),
+            arguments_redacted_json=redact_tool_call_arguments(
+                "set_pipeline",
+                pipeline,
+                telemetry=NoopRedactionTelemetry(),
+            ),
+            actor="composer-web:user:alice",
+            composer_model_identifier="planner-model",
+            composer_model_version="planner-model-v1",
+            composer_provider="provider",
+        )
+    )
+    endpoint = f"/api/sessions/{session['id']}/proposals/{row.id}/accept"
+
+    listed = client.get(f"/api/sessions/{session['id']}/proposals").json()
+    assert listed[0]["pipeline_metadata"]["draft_hash"] == proposal_envelope.draft_hash
+    assert client.post(endpoint).status_code == 422
+    assert client.post(endpoint, json={"draft_hash": "0" * 64}).status_code == 409
+
+    settle = service.settle_pipeline_composition_proposal
+
+    async def interrupt_before_settlement(**kwargs: Any):
+        del kwargs
+        raise RuntimeError("interrupted before atomic settlement")
+
+    monkeypatch.setattr(service, "settle_pipeline_composition_proposal", interrupt_before_settlement)
+    with pytest.raises(RuntimeError, match="interrupted before atomic settlement"):
+        client.post(endpoint, json={"draft_hash": proposal_envelope.draft_hash})
+    assert asyncio.run(service.get_current_state(session_id)) is None
+    audit_rows_before_retry = [
+        message for message in asyncio.run(service.get_messages(session_id, limit=None)) if message.role == "audit" and message.tool_calls
+    ]
+    assert len(audit_rows_before_retry) == 1
+    with service._engine.begin() as conn:
+        audit_row = conn.execute(select(chat_messages_table).where(chat_messages_table.c.role == "audit")).one()
+        envelopes = list(audit_row.tool_calls)
+        envelopes[0]["invocation"]["pipeline_content_hash_schema"] = "tampered.unbound"
+        envelopes[0]["invocation"]["pipeline_content_hash"] = "0" * 64
+        conn.execute(update(chat_messages_table).where(chat_messages_table.c.id == audit_row.id).values(tool_calls=envelopes))
+
+    monkeypatch.setattr(service, "settle_pipeline_composition_proposal", settle)
+    accepted = client.post(endpoint, json={"draft_hash": proposal_envelope.draft_hash})
+
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["status"] == "committed"
+    assert accepted.json()["pipeline_metadata"]["draft_hash"] == proposal_envelope.draft_hash
+    committed_state = asyncio.run(service.get_current_state(session_id))
+    assert committed_state is not None
+
+    retried = client.post(endpoint, json={"draft_hash": proposal_envelope.draft_hash})
+
+    assert retried.status_code == 200
+    assert retried.json()["committed_state_id"] == str(committed_state.id)
+    current_after_retry = asyncio.run(service.get_current_state(session_id))
+    assert current_after_retry is not None
+    assert current_after_retry.id == committed_state.id
+    audit_rows_after_retry = [
+        message for message in asyncio.run(service.get_messages(session_id, limit=None)) if message.role == "audit" and message.tool_calls
+    ]
+    assert len(audit_rows_after_retry) == 1
+
+
+@pytest.mark.parametrize("surface_name", ["GUIDED_STAGED", "TUTORIAL_PROFILE"])
+def test_generic_accept_rejects_guided_pipeline_surfaces_before_dispatch(tmp_path, monkeypatch, surface_name) -> None:
+    from elspeth.web.composer.pipeline_planner import PipelinePlanResult
+    from elspeth.web.composer.pipeline_proposal import AbsentBase, PipelineProposal, PlannerSurface
+    from elspeth.web.composer.redaction import redact_tool_call_arguments
+    from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
+
+    app, service = _make_app(tmp_path)
+    pipeline = {"sources": {}, "nodes": [], "edges": [], "outputs": []}
+    proposal_envelope = PipelineProposal.create(
+        pipeline=pipeline,
+        base=AbsentBase(),
+        reviewed_facts={"checkpoint": "server-owned"},
+        surface=getattr(PlannerSurface, surface_name),
+        repair_count=0,
+        skill_hash=stable_hash("planner-skill"),
+    )
+    plan = PipelinePlanResult(
+        proposal=proposal_envelope,
+        tool_call_id=f"{surface_name.lower()}-call",
+        custody_result="not_required",
+    )
+    client = TestClient(app)
+    session = client.post("/api/sessions", json={"title": "Guided pipeline"}).json()
+    session_id = uuid.UUID(session["id"])
+    row = asyncio.run(
+        service.create_pipeline_composition_proposal(
+            session_id=session_id,
+            plan=plan,
+            summary="Replace the pipeline.",
+            rationale="Requested by the guided workflow.",
+            affects=("graph",),
+            arguments_redacted_json=redact_tool_call_arguments(
+                "set_pipeline",
+                pipeline,
+                telemetry=NoopRedactionTelemetry(),
+            ),
+            actor="composer-web:user:alice",
+            composer_model_identifier="planner-model",
+            composer_model_version="planner-model-v1",
+            composer_provider="provider",
+        )
+    )
+    prepare = AsyncMock(side_effect=AssertionError("generic route dispatched guided proposal"))
+    monkeypatch.setattr(
+        "elspeth.web.sessions.routes.composer.proposals.prepare_pipeline_proposal_commit",
+        prepare,
+    )
+
+    response = client.post(
+        f"/api/sessions/{session['id']}/proposals/{row.id}/accept",
+        json={"draft_hash": proposal_envelope.draft_hash},
+    )
+
+    assert response.status_code == 409
+    prepare.assert_not_awaited()
+    assert asyncio.run(service.get_current_state(session_id)) is None
+    assert asyncio.run(service.get_messages(session_id, limit=None)) == []
+    assert (asyncio.run(service.list_composition_proposals(session_id)))[0].status == "pending"
+
+
+def test_malformed_canonical_creation_event_fails_closed_without_legacy_fallback(tmp_path, monkeypatch) -> None:
+    from sqlalchemy import select, update
+
+    from elspeth.contracts.errors import AuditIntegrityError
+    from elspeth.web.composer.pipeline_planner import PipelinePlanResult
+    from elspeth.web.composer.pipeline_proposal import AbsentBase, PipelineProposal, PlannerSurface
+    from elspeth.web.composer.redaction import redact_tool_call_arguments
+    from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
+    from elspeth.web.sessions.models import proposal_events_table
+
+    app, service = _make_app(tmp_path)
+    pipeline = {"sources": {}, "nodes": [], "edges": [], "outputs": []}
+    proposal_envelope = PipelineProposal.create(
+        pipeline=pipeline,
+        base=AbsentBase(),
+        reviewed_facts={},
+        surface=PlannerSurface.FREEFORM,
+        repair_count=0,
+        skill_hash=stable_hash("planner-skill"),
+    )
+    plan = PipelinePlanResult(
+        proposal=proposal_envelope,
+        tool_call_id="malformed-canonical-call",
+        custody_result="not_required",
+    )
+    client = TestClient(app)
+    session = client.post("/api/sessions", json={"title": "Malformed canonical"}).json()
+    session_id = uuid.UUID(session["id"])
+    row = asyncio.run(
+        service.create_pipeline_composition_proposal(
+            session_id=session_id,
+            plan=plan,
+            summary="Replace the pipeline.",
+            rationale="Requested by the operator.",
+            affects=("graph",),
+            arguments_redacted_json=redact_tool_call_arguments(
+                "set_pipeline",
+                pipeline,
+                telemetry=NoopRedactionTelemetry(),
+            ),
+            actor="composer-web:user:alice",
+            composer_model_identifier="planner-model",
+            composer_model_version="planner-model-v1",
+            composer_provider="provider",
+        )
+    )
+    with service._engine.begin() as conn:
+        event = conn.execute(select(proposal_events_table).where(proposal_events_table.c.proposal_id == str(row.id))).one()
+        malformed = ["schema", "pipeline_proposal_created.v1"]
+        conn.execute(update(proposal_events_table).where(proposal_events_table.c.id == event.id).values(payload=malformed))
+    legacy_execute = MagicMock(side_effect=AssertionError("malformed canonical proposal used legacy replay"))
+    monkeypatch.setattr("elspeth.web.sessions.routes.composer.proposals.execute_tool", legacy_execute)
+
+    with pytest.raises(AuditIntegrityError):
+        client.post(
+            f"/api/sessions/{session['id']}/proposals/{row.id}/accept",
+            json={"draft_hash": proposal_envelope.draft_hash},
+        )
+
+    legacy_execute.assert_not_called()
+    assert asyncio.run(service.get_current_state(session_id)) is None
+
+
 def test_accept_proposal_threads_originating_message_id_to_inline_blob(tmp_path, monkeypatch) -> None:
     from sqlalchemy import select
 

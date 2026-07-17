@@ -213,6 +213,25 @@ class PlannerCustodyConfig:
 
 
 PlannerSettlement = Literal["complete", "failed", "cancelled"]
+PipelineCustodyResult = Literal["not_required", "ready"]
+
+
+@dataclass(frozen=True, slots=True)
+class PipelinePlanResult:
+    """Planner result carrying transport/custody facts outside the draft hash."""
+
+    proposal: PipelineProposal
+    tool_call_id: str
+    custody_result: PipelineCustodyResult
+
+    def __post_init__(self) -> None:
+        if type(self.proposal) is not PipelineProposal:
+            raise TypeError("proposal must be an exact PipelineProposal")
+        if type(self.tool_call_id) is not str or not self.tool_call_id.strip():
+            raise ValueError("tool_call_id must be a non-empty exact string")
+        custody_result = cast(Any, self.custody_result)
+        if type(custody_result) is not str or custody_result not in {"not_required", "ready"}:
+            raise ValueError("custody_result must be 'not_required' or 'ready'")
 
 
 @dataclass(frozen=True, slots=True)
@@ -475,7 +494,7 @@ async def plan_pipeline(
     custody_config: PlannerCustodyConfig,
     lifecycle: PlannerRequestLifecycle,
     recorder: BufferingRecorder,
-) -> PipelineProposal:
+) -> PipelinePlanResult:
     """Plan and validate one proposal without publishing state or DB rows."""
     if type(intent) is not str or not intent.strip():
         raise ValueError("intent must be a non-empty exact string")
@@ -541,7 +560,7 @@ async def _plan_pipeline_inner(
     custody_config: PlannerCustodyConfig,
     lifecycle: PlannerRequestLifecycle,
     recorder: BufferingRecorder,
-) -> PipelineProposal:
+) -> PipelinePlanResult:
     skill_hash = hashlib.sha256(rendered_skill.encode("utf-8")).hexdigest()
     deadline = asyncio.get_running_loop().time() + model_config.timeout_seconds
 
@@ -846,6 +865,7 @@ async def _plan_pipeline_inner(
                 continue
 
             safe_pipeline: Mapping[str, Any] = pipeline
+            custody_result: PipelineCustodyResult = "not_required"
             if candidate.prepared_inline_blob is not None:
                 if custody_config.session_engine is None:
                     raise AuditIntegrityError("inline pipeline custody requires session_engine")
@@ -878,14 +898,19 @@ async def _plan_pipeline_inner(
                     # Custody is idempotently retained for session
                     # reconciliation; no proposal or state is published.
                     raise AuditIntegrityError("custody-safe pipeline failed canonical revalidation")
+                custody_result = "ready"
 
-            return PipelineProposal.create(
-                pipeline=safe_pipeline,
-                base=base,
-                reviewed_facts=reviewed_facts,
-                surface=surface,
-                repair_count=repair_count,
-                skill_hash=skill_hash,
+            return PipelinePlanResult(
+                proposal=PipelineProposal.create(
+                    pipeline=safe_pipeline,
+                    base=base,
+                    reviewed_facts=reviewed_facts,
+                    surface=surface,
+                    repair_count=repair_count,
+                    skill_hash=skill_hash,
+                ),
+                tool_call_id=call.call_id,
+                custody_result=custody_result,
             )
 
         if any(call.name not in _PLANNER_DISCOVERY_TOOL_NAME_SET for call in calls):
@@ -944,6 +969,8 @@ async def _plan_pipeline_inner(
 
 __all__ = [
     "PLANNER_DISCOVERY_TOOL_NAMES",
+    "PipelineCustodyResult",
+    "PipelinePlanResult",
     "PipelinePlannerError",
     "PlannerBudgetPolicy",
     "PlannerCustodyConfig",

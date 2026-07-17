@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import InitVar, dataclass
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, Literal, Protocol, get_args, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args, runtime_checkable
 from uuid import UUID
 
 from elspeth.contracts.auth import AuthProviderType
@@ -29,10 +29,24 @@ from elspeth.contracts.composer_interpretation import (
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields, require_int
 
+if TYPE_CHECKING:
+    from elspeth.web.composer.pipeline_commit import PipelineDispatchAuditBinding
+    from elspeth.web.composer.pipeline_planner import PipelinePlanResult
+    from elspeth.web.composer.pipeline_proposal import PipelineProposal
+
 ChatMessageRole = Literal["user", "assistant", "system", "tool", "audit"]
 ComposerTrustMode = Literal["explicit_approve", "auto_commit"]
 ComposerDensityDefault = Literal["high", "medium", "low"]
 ProposalLifecycleStatus = Literal["pending", "committed", "rejected"]
+PipelineProposalRejectionReason = Literal[
+    "operator_rejected",
+    "candidate_executor_mismatch",
+    "validation_failed",
+    "policy_changed",
+    "base_conflict",
+    "superseded",
+]
+PipelineProposalSurface = Literal["freeform", "guided_full", "guided_staged", "tutorial_profile"]
 ProposalEventType = Literal[
     "proposal.created",
     "proposal.accepted",
@@ -259,6 +273,23 @@ class ComposerSessionPreferencesTransition:
 
 
 @dataclass(frozen=True, slots=True)
+class PipelineProposalPublicMetadata:
+    """Safe reload metadata for canonical pipeline proposals."""
+
+    surface: PipelineProposalSurface
+    draft_hash: str
+    base: Mapping[str, Any]
+    reviewed_anchor_hash: str
+    repair_count: int
+    skill_hash: str
+    audit_payload_hash: str
+    custody_result: Literal["not_required", "ready"]
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "base")
+
+
+@dataclass(frozen=True, slots=True)
 class CompositionProposalRecord:
     """Represents a durable pending/committed/rejected composer proposal."""
 
@@ -283,6 +314,7 @@ class CompositionProposalRecord:
     audit_event_id: UUID | None
     created_at: datetime
     updated_at: datetime
+    pipeline_metadata: PipelineProposalPublicMetadata | None = None
 
     def __post_init__(self) -> None:
         if self.status not in PROPOSAL_LIFECYCLE_STATUS_VALUES:
@@ -322,6 +354,41 @@ class ProposalEventRecord:
                 f"Tier 1: proposal_events.event_type is {self.event_type!r}, expected one of {sorted(PROPOSAL_EVENT_TYPE_VALUES)}"
             )
         freeze_fields(self, "payload")
+
+
+@dataclass(frozen=True, slots=True)
+class AuthoritativePipelineProposal:
+    """Verified pipeline authority reconstructed from one row + creation event."""
+
+    row: CompositionProposalRecord
+    proposal: PipelineProposal
+    creation_event_id: UUID
+    custody_result: Literal["not_required", "ready"]
+    supersedes_proposal_id: UUID | None
+
+
+@dataclass(frozen=True, slots=True)
+class AuthoritativeCompositionProposal:
+    """One exact creation-event classification used by generic routes."""
+
+    row: CompositionProposalRecord
+    pipeline: AuthoritativePipelineProposal | None
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineProposalSettlementResult:
+    """Atomic accepted proposal + committed immutable state."""
+
+    proposal: CompositionProposalRecord
+    state: CompositionStateRecord
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineDispatchRecovery:
+    """One durable successful dispatch available to resume settlement."""
+
+    binding: PipelineDispatchAuditBinding
+    executor_content_hash: str
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -754,6 +821,72 @@ class SessionServiceProtocol(Protocol):
         composer_provider: str | None = None,
         composer_skill_hash: str | None = None,
         tool_arguments_hash: str | None = None,
+    ) -> CompositionProposalRecord: ...
+
+    async def create_pipeline_composition_proposal(
+        self,
+        *,
+        session_id: UUID,
+        plan: PipelinePlanResult,
+        summary: str,
+        rationale: str,
+        affects: Sequence[str],
+        arguments_redacted_json: Mapping[str, Any],
+        actor: str,
+        composer_model_identifier: str,
+        composer_model_version: str,
+        composer_provider: str,
+        user_message_id: UUID | None = None,
+        supersedes_proposal_id: UUID | None = None,
+    ) -> CompositionProposalRecord: ...
+
+    async def get_authoritative_pipeline_proposal(
+        self,
+        *,
+        session_id: UUID,
+        proposal_id: UUID,
+        reviewed_facts: Mapping[str, Any],
+    ) -> AuthoritativePipelineProposal: ...
+
+    async def get_authoritative_composition_proposal(
+        self,
+        *,
+        session_id: UUID,
+        proposal_id: UUID,
+        reviewed_facts: Mapping[str, Any] | None,
+    ) -> AuthoritativeCompositionProposal: ...
+
+    async def settle_pipeline_composition_proposal(
+        self,
+        *,
+        session_id: UUID,
+        proposal_id: UUID,
+        draft_hash: str,
+        reviewed_facts: Mapping[str, Any],
+        state: CompositionStateData,
+        candidate_content_hash: str,
+        executor_content_hash: str,
+        final_composer_metadata: Mapping[str, Any] | None,
+        dispatch: PipelineDispatchAuditBinding,
+        actor: str,
+    ) -> PipelineProposalSettlementResult: ...
+
+    async def get_pipeline_dispatch_recovery(
+        self,
+        *,
+        authority: AuthoritativePipelineProposal,
+    ) -> PipelineDispatchRecovery | None: ...
+
+    async def reject_pipeline_composition_proposal(
+        self,
+        *,
+        session_id: UUID,
+        proposal_id: UUID,
+        draft_hash: str,
+        reviewed_facts: Mapping[str, Any] | None,
+        reason: PipelineProposalRejectionReason,
+        dispatch: PipelineDispatchAuditBinding | None,
+        actor: str,
     ) -> CompositionProposalRecord: ...
 
     async def list_composition_proposals(

@@ -199,6 +199,17 @@ export type ComposerTrustMode = "explicit_approve" | "auto_commit";
 export type ComposerDensityDefault = "high" | "medium" | "low";
 export type ProposalLifecycleStatus = "pending" | "committed" | "rejected";
 
+export interface PipelineProposalMetadata {
+  surface: "freeform" | "guided_full" | "guided_staged" | "tutorial_profile";
+  draft_hash: string;
+  base: Record<string, unknown>;
+  reviewed_anchor_hash: string;
+  repair_count: number;
+  skill_hash: string;
+  audit_payload_hash: string;
+  custody_result: "not_required" | "ready";
+}
+
 export interface ComposerPreferences {
   session_id: string;
   trust_mode: ComposerTrustMode;
@@ -220,6 +231,7 @@ export interface CompositionProposal {
   base_state_id: string | null;
   committed_state_id: string | null;
   audit_event_id: string | null;
+  pipeline_metadata?: PipelineProposalMetadata | null;
   created_at: string;
   updated_at: string;
 }

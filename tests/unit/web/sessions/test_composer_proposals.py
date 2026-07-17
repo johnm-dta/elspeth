@@ -7,12 +7,19 @@ from uuid import uuid4
 
 import pytest
 import structlog
-from sqlalchemy import insert, inspect, select
+from sqlalchemy import insert, inspect, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.freeze import deep_thaw
+from elspeth.core.canonical import stable_hash
 from elspeth.web.blobs.protocol import BlobNotFoundError, BlobPendingProposalError
 from elspeth.web.blobs.service import BlobServiceImpl
+from elspeth.web.composer.pipeline_planner import PipelinePlanResult
+from elspeth.web.composer.pipeline_proposal import AbsentBase, PipelineProposal, PlannerSurface
+from elspeth.web.composer.redaction import redact_tool_call_arguments
+from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     composition_proposals_table,
@@ -57,6 +64,30 @@ def _insert_session(conn, session_id: str) -> None:
             created_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),
         )
+    )
+
+
+def _pipeline_plan_result(*, tool_call_id: str = "call_pipeline") -> PipelinePlanResult:
+    proposal = PipelineProposal.create(
+        pipeline={"sources": {}, "nodes": [], "edges": [], "outputs": []},
+        base=AbsentBase(),
+        reviewed_facts={},
+        surface=PlannerSurface.FREEFORM,
+        repair_count=0,
+        skill_hash=stable_hash("planner-skill"),
+    )
+    return PipelinePlanResult(
+        proposal=proposal,
+        tool_call_id=tool_call_id,
+        custody_result="not_required",
+    )
+
+
+def _pipeline_public_arguments() -> dict[str, object]:
+    return redact_tool_call_arguments(
+        "set_pipeline",
+        {"sources": {}, "nodes": [], "edges": [], "outputs": []},
+        telemetry=NoopRedactionTelemetry(),
     )
 
 
@@ -249,6 +280,232 @@ async def test_create_composition_proposal_writes_created_event(service) -> None
     events = await service.list_proposal_events(session_id)
     assert [event.event_type for event in events] == ["proposal.created"]
     assert str(events[0].proposal_id) == str(proposal.id)
+    assert events[0].payload == {
+        "tool_call_id": "call_set_pipeline",
+        "tool_name": "set_pipeline",
+        "status": "pending",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_pipeline_proposal_writes_closed_bound_creation_event_and_restores(service) -> None:
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+    plan = _pipeline_plan_result()
+    public_arguments = _pipeline_public_arguments()
+
+    row = await service.create_pipeline_composition_proposal(
+        session_id=session_id,
+        plan=plan,
+        summary="Replace the pipeline.",
+        rationale="Requested by the user.",
+        affects=("graph",),
+        arguments_redacted_json=public_arguments,
+        actor="composer-web:user-alice",
+        composer_model_identifier="planner-model",
+        composer_model_version="planner-model-v1",
+        composer_provider="provider",
+    )
+
+    assert row.tool_call_id == plan.tool_call_id
+    assert row.arguments_json == plan.proposal.pipeline
+    assert deep_thaw(row.arguments_redacted_json) == public_arguments
+    assert row.tool_arguments_hash == stable_hash(plan.proposal.pipeline)
+    assert row.pipeline_metadata is not None
+    assert row.pipeline_metadata.draft_hash == plan.proposal.draft_hash
+    events = await service.list_proposal_events(session_id)
+    assert len(events) == 1
+    assert set(events[0].payload) == {
+        "schema",
+        "tool_call_id",
+        "tool_name",
+        "status",
+        "surface",
+        "draft_hash",
+        "base",
+        "reviewed_anchor_hash",
+        "repair_count",
+        "skill_hash",
+        "covered_deferred_intent_ids",
+        "supersedes_draft_hash",
+        "supersedes_proposal_id",
+        "custody_result",
+        "private_arguments_hash",
+        "provenance_hash",
+        "audit_payload_hash",
+    }
+    assert events[0].payload["schema"] == "pipeline_proposal_created.v1"
+    assert events[0].payload["base"] == {"kind": "absent"}
+
+    restored = await service.get_authoritative_pipeline_proposal(
+        session_id=session_id,
+        proposal_id=row.id,
+        reviewed_facts={},
+    )
+    assert restored.row == row
+    assert restored.proposal == plan.proposal
+    assert restored.custody_result == "not_required"
+    assert restored.supersedes_proposal_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("target", "replacement"),
+    [
+        ("row_private", {"sources": {"tampered": {}}, "nodes": [], "edges": [], "outputs": []}),
+        ("row_public", {"redacted": "tampered"}),
+        ("row_summary", "tampered summary"),
+        ("row_rationale", "tampered rationale"),
+        ("row_affects", ["tampered"]),
+        ("row_provenance", "tampered-provider"),
+        ("event_surface", "guided_full"),
+        ("event_draft_hash", "0" * 64),
+        ("event_base", {"kind": "present", "state_id": str(uuid4()), "composition_content_hash": "0" * 64}),
+        ("event_anchor", "0" * 64),
+        ("event_repair_count", 1),
+        ("event_skill_hash", "0" * 64),
+        ("event_covered_ids", [str(uuid4())]),
+        ("event_supersedes_hash", "0" * 64),
+        ("event_custody", "created"),
+        ("event_private_hash", "0" * 64),
+        ("event_provenance_hash", "0" * 64),
+        ("event_audit_payload_hash", "0" * 64),
+    ],
+)
+async def test_authoritative_pipeline_restore_rejects_every_tampered_binding(service, target, replacement) -> None:
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+    row = await service.create_pipeline_composition_proposal(
+        session_id=session_id,
+        plan=_pipeline_plan_result(),
+        summary="Replace the pipeline.",
+        rationale="Requested by the user.",
+        affects=("graph",),
+        arguments_redacted_json=_pipeline_public_arguments(),
+        actor="composer-web:user-alice",
+        composer_model_identifier="planner-model",
+        composer_model_version="planner-model-v1",
+        composer_provider="provider",
+    )
+
+    with service._engine.begin() as conn:
+        if target == "row_private":
+            conn.execute(
+                update(composition_proposals_table)
+                .where(composition_proposals_table.c.id == str(row.id))
+                .values(arguments_json=replacement)
+            )
+        elif target == "row_public":
+            conn.execute(
+                update(composition_proposals_table)
+                .where(composition_proposals_table.c.id == str(row.id))
+                .values(arguments_redacted_json=replacement)
+            )
+        elif target == "row_summary":
+            conn.execute(
+                update(composition_proposals_table).where(composition_proposals_table.c.id == str(row.id)).values(summary=replacement)
+            )
+        elif target == "row_rationale":
+            conn.execute(
+                update(composition_proposals_table).where(composition_proposals_table.c.id == str(row.id)).values(rationale=replacement)
+            )
+        elif target == "row_affects":
+            conn.execute(
+                update(composition_proposals_table).where(composition_proposals_table.c.id == str(row.id)).values(affects=replacement)
+            )
+        elif target == "row_provenance":
+            conn.execute(
+                update(composition_proposals_table)
+                .where(composition_proposals_table.c.id == str(row.id))
+                .values(composer_provider=replacement)
+            )
+        else:
+            event = conn.execute(select(proposal_events_table).where(proposal_events_table.c.proposal_id == str(row.id))).one()
+            payload = dict(event.payload)
+            field = {
+                "event_surface": "surface",
+                "event_draft_hash": "draft_hash",
+                "event_base": "base",
+                "event_anchor": "reviewed_anchor_hash",
+                "event_repair_count": "repair_count",
+                "event_skill_hash": "skill_hash",
+                "event_covered_ids": "covered_deferred_intent_ids",
+                "event_supersedes_hash": "supersedes_draft_hash",
+                "event_custody": "custody_result",
+                "event_private_hash": "private_arguments_hash",
+                "event_provenance_hash": "provenance_hash",
+                "event_audit_payload_hash": "audit_payload_hash",
+            }[target]
+            payload[field] = replacement
+            conn.execute(update(proposal_events_table).where(proposal_events_table.c.id == event.id).values(payload=payload))
+
+    with pytest.raises(AuditIntegrityError):
+        await service.get_authoritative_pipeline_proposal(
+            session_id=session_id,
+            proposal_id=row.id,
+            reviewed_facts={},
+        )
+
+
+@pytest.mark.asyncio
+async def test_authoritative_pipeline_restore_requires_one_same_session_creation_event_and_ignores_mutable_pointer(service) -> None:
+    session_id = uuid4()
+    other_session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+        _insert_session(conn, str(other_session_id))
+    row = await service.create_pipeline_composition_proposal(
+        session_id=session_id,
+        plan=_pipeline_plan_result(),
+        summary="Replace the pipeline.",
+        rationale="Requested by the user.",
+        affects=("graph",),
+        arguments_redacted_json=_pipeline_public_arguments(),
+        actor="composer-web:user-alice",
+        composer_model_identifier="planner-model",
+        composer_model_version="planner-model-v1",
+        composer_provider="provider",
+    )
+    with service._engine.begin() as conn:
+        conn.execute(
+            update(composition_proposals_table).where(composition_proposals_table.c.id == str(row.id)).values(audit_event_id=str(uuid4()))
+        )
+
+    restored = await service.get_authoritative_pipeline_proposal(
+        session_id=session_id,
+        proposal_id=row.id,
+        reviewed_facts={},
+    )
+    assert restored.proposal == _pipeline_plan_result().proposal
+    with pytest.raises(KeyError):
+        await service.get_authoritative_pipeline_proposal(
+            session_id=other_session_id,
+            proposal_id=row.id,
+            reviewed_facts={},
+        )
+
+    with service._engine.begin() as conn:
+        created = conn.execute(select(proposal_events_table).where(proposal_events_table.c.proposal_id == str(row.id))).one()
+        conn.execute(
+            insert(proposal_events_table).values(
+                id=str(uuid4()),
+                session_id=str(session_id),
+                proposal_id=str(row.id),
+                event_type="proposal.created",
+                actor="system:tampered",
+                payload=dict(created.payload),
+                created_at=datetime.now(UTC),
+            )
+        )
+
+    with pytest.raises(AuditIntegrityError, match="exactly one"):
+        await service.get_authoritative_pipeline_proposal(
+            session_id=session_id,
+            proposal_id=row.id,
+            reviewed_facts={},
+        )
 
 
 @pytest.mark.asyncio

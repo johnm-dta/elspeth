@@ -643,12 +643,14 @@ export async function fetchCompositionProposals(
 export async function acceptCompositionProposal(
   sessionId: string,
   proposalId: string,
+  draftHash: string | null,
 ): Promise<CompositionProposal> {
   const response = await fetch(
     `/api/sessions/${sessionId}/proposals/${proposalId}/accept`,
     {
       method: "POST",
       headers: authHeaders("application/json"),
+      ...(draftHash === null ? {} : { body: JSON.stringify({ draft_hash: draftHash }) }),
     },
   );
   return parseResponse<CompositionProposal>(response);

@@ -106,6 +106,7 @@ from elspeth.web.composer.guided.steps import (
     handle_step_3_chain_accept,
 )
 from elspeth.web.composer.implicit_decisions import merge_implicit_decisions_meta
+from elspeth.web.composer.pipeline_commit import PipelineDispatchAuditBinding
 from elspeth.web.composer.progress import (
     ComposerProgressRegistry,
     ComposerProgressSnapshot,
@@ -183,6 +184,7 @@ from elspeth.web.sessions.protocol import (
     SessionServiceProtocol,
 )
 from elspeth.web.sessions.schemas import (
+    AcceptProposalRequest,
     ChatMessageResponse,
     ChatTurnResponse,
     ComposerPreferencesResponse,
@@ -204,6 +206,7 @@ from elspeth.web.sessions.schemas import (
     ListInterpretationEventsResponse,
     MessageWithStateResponse,
     OptOutSummaryResponse,
+    PipelineProposalMetadataResponse,
     PluginPolicyFindingResponse,
     ProposalEventResponse,
     RejectProposalRequest,
@@ -379,6 +382,7 @@ def _composer_preferences_response(record: ComposerSessionPreferencesRecord) -> 
 
 
 def _composition_proposal_response(record: CompositionProposalRecord) -> CompositionProposalResponse:
+    pipeline_metadata = record.pipeline_metadata
     return CompositionProposalResponse(
         id=str(record.id),
         session_id=str(record.session_id),
@@ -392,6 +396,20 @@ def _composition_proposal_response(record: CompositionProposalRecord) -> Composi
         base_state_id=str(record.base_state_id) if record.base_state_id else None,
         committed_state_id=str(record.committed_state_id) if record.committed_state_id else None,
         audit_event_id=str(record.audit_event_id) if record.audit_event_id else None,
+        pipeline_metadata=(
+            PipelineProposalMetadataResponse(
+                surface=pipeline_metadata.surface,
+                draft_hash=pipeline_metadata.draft_hash,
+                base=deep_thaw(pipeline_metadata.base),
+                reviewed_anchor_hash=pipeline_metadata.reviewed_anchor_hash,
+                repair_count=pipeline_metadata.repair_count,
+                skill_hash=pipeline_metadata.skill_hash,
+                audit_payload_hash=pipeline_metadata.audit_payload_hash,
+                custody_result=pipeline_metadata.custody_result,
+            )
+            if pipeline_metadata is not None
+            else None
+        ),
         created_at=record.created_at,
         updated_at=record.updated_at,
     )
@@ -1389,6 +1407,20 @@ def _redacted_tool_invocation_content_and_envelope(invocation: ComposerToolInvoc
         invocation,
         telemetry=telemetry,
     )
+    if invocation.tool_name == "set_pipeline" and invocation.status is ComposerToolStatus.SUCCESS:
+        raw_result = _load_canonical_mapping(invocation.result_canonical)
+        if raw_result is not None and ("pipeline_content_hash_schema" in raw_result or "pipeline_content_hash" in raw_result):
+            if raw_result.get("pipeline_content_hash_schema") != "composer.pipeline-dispatch-result.v1":
+                raise AuditIntegrityError("pipeline dispatch executor-content schema is malformed")
+            executor_content_hash = raw_result.get("pipeline_content_hash")
+            if type(executor_content_hash) is not str:
+                raise AuditIntegrityError("pipeline dispatch executor-content hash is malformed")
+            redacted_result = _load_canonical_mapping(result_canonical)
+            if redacted_result is None:
+                raise AuditIntegrityError("pipeline dispatch redacted result is missing")
+            redacted_result["pipeline_content_hash_schema"] = "composer.pipeline-dispatch-result.v1"
+            redacted_result["pipeline_content_hash"] = executor_content_hash
+            result_canonical = canonical_json(redacted_result)
     invocation_payload = invocation.to_dict()
     invocation_payload["arguments_canonical"] = arguments_canonical
     invocation_payload["arguments_hash"] = _hash_canonical_payload(arguments_canonical)
@@ -1423,7 +1455,7 @@ async def _persist_tool_invocations(
     *,
     parent_assistant_id: UUID | None = None,
     plugin_crash_pending: bool,
-) -> None:
+) -> tuple[PipelineDispatchAuditBinding, ...]:
     """Persist per-tool-call audit records, splitting role by parent presence.
 
     Rev-4: when ``parent_assistant_id`` is supplied (success-path callers
@@ -1482,6 +1514,7 @@ async def _persist_tool_invocations(
       tool-trail is observable on read-back via per-message ``tool_calls``
       count vs. ``ComposerResult.tool_invocations`` length.
     """
+    persisted_pipeline_bindings: list[PipelineDispatchAuditBinding] = []
     for invocation in tool_invocations:
         content, envelope = _redacted_tool_invocation_content_and_envelope(invocation)
         role: ChatMessageRole = "tool" if parent_assistant_id is not None else "audit"
@@ -1496,6 +1529,8 @@ async def _persist_tool_invocations(
                 tool_call_id=invocation.tool_call_id if role == "tool" else None,
                 parent_assistant_id=parent_assistant_id if role == "tool" else None,
             )
+            if invocation.tool_name == "set_pipeline" and invocation.status is ComposerToolStatus.SUCCESS:
+                persisted_pipeline_bindings.append(PipelineDispatchAuditBinding.from_persisted_envelope(envelope))
         except SQLAlchemyError as save_err:
             if plugin_crash_pending:
                 # Unwind path: a primary failure is already in flight.
@@ -1527,6 +1562,7 @@ async def _persist_tool_invocations(
                 f"failed for session_id={session_id!r} after assistant row "
                 f"was persisted — Tier-1 audit corruption (no recovery)"
             ) from save_err
+    return tuple(persisted_pipeline_bindings)
 
 
 def _llm_calls_from_exception(exc: BaseException) -> tuple[ComposerLLMCall, ...]:
@@ -4490,6 +4526,7 @@ __all__ = [
     "_RUNTIME_PREFLIGHT_MESSAGE_LIMIT",
     "_SYNTHETIC_UNAVAILABLE_MESSAGE",
     "APIRouter",
+    "AcceptProposalRequest",
     "Any",
     "AuditIntegrityError",
     "AuditStoryIntegrityError",

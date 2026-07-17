@@ -7,6 +7,7 @@ thread pool executor to avoid blocking the async event loop.
 from __future__ import annotations
 
 import contextlib
+import json
 import shutil
 import threading
 import uuid
@@ -19,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 from uuid import UUID
 
 import structlog
+from opentelemetry import metrics
 from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -26,6 +28,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.blobs_inline import ResolvedBlobContent
+from elspeth.contracts.composer_audit import ComposerToolStatus, PipelineDispatchAuditPayload
 from elspeth.contracts.composer_interpretation import (
     INTERPRETATION_HASH_DOMAIN_V2,
     InterpretationChoice,
@@ -37,6 +40,18 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import stable_hash
 from elspeth.web.async_workers import run_sync_in_worker
+from elspeth.web.composer.pipeline_commit import PipelineDispatchAuditBinding
+from elspeth.web.composer.pipeline_planner import PipelinePlanResult
+from elspeth.web.composer.pipeline_proposal import (
+    AbsentBase,
+    PipelineProposal,
+    PlannerSurface,
+    PresentBase,
+    composition_content_hash,
+    reviewed_anchor_hash,
+)
+from elspeth.web.composer.redaction import redact_tool_call_arguments
+from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 
 # Phase 8 cohort-emit helper (Sub-task 7e — B3 cohort b1). The opt-out
 # audit row is committed inside ``record_session_interpretation_opt_out``
@@ -60,6 +75,7 @@ from elspeth.web.interpretation_state import (
     validate_pipeline_decision_node_semantics,
 )
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
+from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.locking import (
     acquire_session_advisory_xact_lock,
     process_session_lock,
@@ -90,6 +106,8 @@ from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
     AuditAccessLogRecord,
     AuditAccessLogWriteError,
+    AuthoritativeCompositionProposal,
+    AuthoritativePipelineProposal,
     ChatMessageRecord,
     ChatMessageRole,
     ChatMessageWriterPrincipal,
@@ -102,6 +120,10 @@ from elspeth.web.sessions.protocol import (
     CompositionStateProvenance,
     CompositionStateRecord,
     IllegalRunTransitionError,
+    PipelineDispatchRecovery,
+    PipelineProposalPublicMetadata,
+    PipelineProposalRejectionReason,
+    PipelineProposalSettlementResult,
     ProposalEventRecord,
     ProposalLifecycleStatus,
     RunAlreadyActiveError,
@@ -165,6 +187,407 @@ _PROPOSAL_COMPOSER_PROVENANCE_FIELDS = (
     "composer_skill_hash",
     "tool_arguments_hash",
 )
+_PIPELINE_CREATED_SCHEMA = "pipeline_proposal_created.v1"
+_PIPELINE_CREATED_FIELDS = frozenset(
+    {
+        "schema",
+        "tool_call_id",
+        "tool_name",
+        "status",
+        "surface",
+        "draft_hash",
+        "base",
+        "reviewed_anchor_hash",
+        "repair_count",
+        "skill_hash",
+        "covered_deferred_intent_ids",
+        "supersedes_draft_hash",
+        "supersedes_proposal_id",
+        "custody_result",
+        "private_arguments_hash",
+        "provenance_hash",
+        "audit_payload_hash",
+    }
+)
+_LEGACY_PROPOSAL_CREATED_FIELDS = frozenset({"tool_call_id", "tool_name", "status"})
+_PIPELINE_METER = metrics.get_meter(__name__)
+_PIPELINE_PLANNER_COUNTER = _PIPELINE_METER.create_counter("composer.pipeline_proposal.created_total")
+_PIPELINE_CUSTODY_COUNTER = _PIPELINE_METER.create_counter("composer.pipeline_proposal.custody_total")
+_PIPELINE_SETTLEMENT_COUNTER = _PIPELINE_METER.create_counter("composer.pipeline_proposal.settled_total")
+
+
+class _PipelineCreatedEventPayload(TypedDict):
+    schema: str
+    tool_call_id: str
+    tool_name: str
+    status: str
+    surface: str
+    draft_hash: str
+    base: dict[str, str]
+    reviewed_anchor_hash: str
+    repair_count: int
+    skill_hash: str
+    covered_deferred_intent_ids: list[str]
+    supersedes_draft_hash: str | None
+    supersedes_proposal_id: str | None
+    custody_result: str
+    private_arguments_hash: str
+    provenance_hash: str
+    audit_payload_hash: str
+
+
+class _PipelineAcceptedEventPayload(TypedDict):
+    schema: str
+    tool_call_id: str
+    tool_name: str
+    status: str
+    outcome: str
+    draft_hash: str
+    committed_state_id: str
+    committed_state_content_hash: str
+    final_composer_metadata_hash: str
+    dispatch: PipelineDispatchAuditPayload
+
+
+class _PipelineRejectedEventPayload(TypedDict):
+    schema: str
+    tool_call_id: str
+    tool_name: str
+    status: str
+    outcome: str
+    reason_code: PipelineProposalRejectionReason
+    draft_hash: str
+    dispatch: PipelineDispatchAuditPayload | None
+
+
+def _pipeline_private_arguments_hash(arguments: Mapping[str, Any]) -> str:
+    return stable_hash(
+        {
+            "schema": "composer.pipeline-proposal-private-arguments.v1",
+            "arguments": deep_thaw(arguments),
+        }
+    )
+
+
+def _pipeline_audit_payload_hash(
+    *,
+    summary: str,
+    rationale: str,
+    affects: Sequence[str],
+    arguments_redacted_json: Mapping[str, Any],
+) -> str:
+    return stable_hash(
+        {
+            "schema": "composer.pipeline-proposal-audit-payload.v1",
+            "summary": summary,
+            "rationale": rationale,
+            "affects": list(affects),
+            "arguments_redacted_json": deep_thaw(arguments_redacted_json),
+        }
+    )
+
+
+def _pipeline_provenance_hash(
+    *,
+    user_message_id: UUID | None,
+    composer_model_identifier: str,
+    composer_model_version: str,
+    composer_provider: str,
+    composer_skill_hash: str,
+    tool_arguments_hash: str,
+) -> str:
+    return stable_hash(
+        {
+            "schema": "composer.pipeline-proposal-provenance.v1",
+            "user_message_id": str(user_message_id) if user_message_id is not None else None,
+            "composer_model_identifier": composer_model_identifier,
+            "composer_model_version": composer_model_version,
+            "composer_provider": composer_provider,
+            "composer_skill_hash": composer_skill_hash,
+            "tool_arguments_hash": tool_arguments_hash,
+        }
+    )
+
+
+def _proposal_base_payload(base: AbsentBase | PresentBase) -> dict[str, str]:
+    if type(base) is AbsentBase:
+        return {"kind": "absent"}
+    if type(base) is PresentBase:
+        return {
+            "kind": "present",
+            "state_id": str(base.state_id),
+            "composition_content_hash": base.composition_content_hash,
+        }
+    raise AuditIntegrityError("pipeline proposal base must be explicitly absent or present")
+
+
+def _pipeline_created_payload(
+    *,
+    plan: PipelinePlanResult,
+    user_message_id: UUID | None,
+    composer_model_identifier: str,
+    composer_model_version: str,
+    composer_provider: str,
+    summary: str,
+    rationale: str,
+    affects: Sequence[str],
+    arguments_redacted_json: Mapping[str, Any],
+    supersedes_proposal_id: UUID | None,
+) -> _PipelineCreatedEventPayload:
+    proposal = plan.proposal
+    tool_arguments_hash = stable_hash(proposal.pipeline)
+    payload: _PipelineCreatedEventPayload = {
+        "schema": _PIPELINE_CREATED_SCHEMA,
+        "tool_call_id": plan.tool_call_id,
+        "tool_name": "set_pipeline",
+        "status": "pending",
+        "surface": proposal.surface.value,
+        "draft_hash": proposal.draft_hash,
+        "base": _proposal_base_payload(proposal.base),
+        "reviewed_anchor_hash": proposal.reviewed_anchor_hash,
+        "repair_count": proposal.repair_count,
+        "skill_hash": proposal.skill_hash,
+        "covered_deferred_intent_ids": list(proposal.covered_deferred_intent_ids),
+        "supersedes_draft_hash": proposal.supersedes_draft_hash,
+        "supersedes_proposal_id": str(supersedes_proposal_id) if supersedes_proposal_id is not None else None,
+        "custody_result": plan.custody_result,
+        "private_arguments_hash": _pipeline_private_arguments_hash(proposal.pipeline),
+        "audit_payload_hash": _pipeline_audit_payload_hash(
+            summary=summary,
+            rationale=rationale,
+            affects=affects,
+            arguments_redacted_json=arguments_redacted_json,
+        ),
+        "provenance_hash": _pipeline_provenance_hash(
+            user_message_id=user_message_id,
+            composer_model_identifier=composer_model_identifier,
+            composer_model_version=composer_model_version,
+            composer_provider=composer_provider,
+            composer_skill_hash=proposal.skill_hash,
+            tool_arguments_hash=tool_arguments_hash,
+        ),
+    }
+    return payload
+
+
+def _composition_state_data_content_hash(state: CompositionStateData) -> str:
+    return stable_hash(
+        {
+            "sources": state.sources,
+            "nodes": state.nodes,
+            "edges": state.edges,
+            "outputs": state.outputs,
+            "metadata": state.metadata_,
+        }
+    )
+
+
+def _final_composer_metadata_hash(metadata: Mapping[str, Any] | None) -> str:
+    return stable_hash(
+        {
+            "schema": "composer.pipeline-final-metadata.v1",
+            "metadata": deep_thaw(metadata),
+        }
+    )
+
+
+def _pipeline_accepted_payload(
+    *,
+    authority: AuthoritativePipelineProposal,
+    state_id: str,
+    state_content_hash: str,
+    final_composer_metadata: Mapping[str, Any] | None,
+    dispatch: PipelineDispatchAuditBinding,
+) -> _PipelineAcceptedEventPayload:
+    return {
+        "schema": "pipeline_proposal_accepted.v1",
+        "tool_call_id": authority.row.tool_call_id,
+        "tool_name": "set_pipeline",
+        "status": "committed",
+        "outcome": "accepted",
+        "draft_hash": authority.proposal.draft_hash,
+        "committed_state_id": state_id,
+        "committed_state_content_hash": state_content_hash,
+        "final_composer_metadata_hash": _final_composer_metadata_hash(final_composer_metadata),
+        "dispatch": dispatch.to_dict(),
+    }
+
+
+_PIPELINE_REJECTION_REASONS = frozenset(
+    {
+        "operator_rejected",
+        "candidate_executor_mismatch",
+        "validation_failed",
+        "policy_changed",
+        "base_conflict",
+        "superseded",
+    }
+)
+
+
+def _validated_pipeline_rejection_reason(value: object) -> PipelineProposalRejectionReason:
+    if type(value) is not str or value not in _PIPELINE_REJECTION_REASONS:
+        raise AuditIntegrityError("pipeline proposal rejection reason is outside the closed vocabulary")
+    return cast(PipelineProposalRejectionReason, value)
+
+
+_PIPELINE_ACCEPTED_FIELDS = frozenset(
+    {
+        "schema",
+        "tool_call_id",
+        "tool_name",
+        "status",
+        "outcome",
+        "draft_hash",
+        "committed_state_id",
+        "committed_state_content_hash",
+        "final_composer_metadata_hash",
+        "dispatch",
+    }
+)
+
+
+def _pipeline_rejected_payload(
+    *,
+    authority: AuthoritativePipelineProposal,
+    reason: PipelineProposalRejectionReason,
+    dispatch: PipelineDispatchAuditBinding | None,
+) -> _PipelineRejectedEventPayload:
+    reason = _validated_pipeline_rejection_reason(reason)
+    outcome = "rejected" if reason == "operator_rejected" else "superseded" if reason == "superseded" else "failed"
+    return {
+        "schema": "pipeline_proposal_rejected.v1",
+        "tool_call_id": authority.row.tool_call_id,
+        "tool_name": "set_pipeline",
+        "status": "rejected",
+        "outcome": outcome,
+        "reason_code": reason,
+        "draft_hash": authority.proposal.draft_hash,
+        "dispatch": dispatch.to_dict() if dispatch is not None else None,
+    }
+
+
+def _persisted_pipeline_dispatch_content_hashes(
+    conn: Connection,
+    *,
+    session_id: str,
+    dispatch: PipelineDispatchAuditBinding,
+) -> tuple[str, ...]:
+    """Return content hashes from exact durable redacted dispatch envelopes."""
+    rows = conn.execute(select(chat_messages_table.c.tool_calls).where(chat_messages_table.c.session_id == session_id)).fetchall()
+    matches: list[str] = []
+    for row in rows:
+        tool_calls = row.tool_calls
+        if type(tool_calls) is not list:
+            continue
+        for envelope in tool_calls:
+            if type(envelope) is not dict or envelope.get("_kind") != "audit":
+                continue
+            invocation = envelope.get("invocation")
+            if type(invocation) is not dict:
+                continue
+            if invocation.get("tool_call_id") != dispatch.tool_call_id:
+                continue
+            if invocation.get("tool_name") != dispatch.tool_name:
+                continue
+            if invocation.get("status") != dispatch.status.value:
+                continue
+            arguments_canonical = invocation.get("arguments_canonical")
+            result_canonical = invocation.get("result_canonical")
+            if type(arguments_canonical) is not str or type(result_canonical) is not str:
+                continue
+            try:
+                arguments_hash = stable_hash(json.loads(arguments_canonical))
+                result_hash = stable_hash(json.loads(result_canonical))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if invocation.get("arguments_hash") != arguments_hash or invocation.get("result_hash") != result_hash:
+                continue
+            if arguments_hash != dispatch.arguments_hash or result_hash != dispatch.result_hash:
+                continue
+            if result_canonical != invocation.get("result_canonical"):
+                raise AuditIntegrityError("pipeline dispatch result canonical binding is malformed")
+            if result_canonical is None or type(result_canonical) is not str:
+                raise AuditIntegrityError("pipeline dispatch result canonical binding is missing")
+            result_payload = json.loads(result_canonical)
+            if type(result_payload) is not dict:
+                raise AuditIntegrityError("pipeline dispatch result payload is malformed")
+            if result_payload.get("pipeline_content_hash_schema") != "composer.pipeline-dispatch-result.v1":
+                raise AuditIntegrityError("pipeline dispatch result content schema is malformed")
+            content_hash = result_payload.get("pipeline_content_hash")
+            if (
+                type(content_hash) is not str
+                or len(content_hash) != 64
+                or any(character not in "0123456789abcdef" for character in content_hash)
+            ):
+                raise AuditIntegrityError("pipeline dispatch result content hash is malformed")
+            matches.append(content_hash)
+    return tuple(matches)
+
+
+def _verify_committed_pipeline_authority(
+    conn: Connection,
+    *,
+    service: SessionServiceImpl,
+    authority: AuthoritativePipelineProposal,
+) -> None:
+    """Verify the complete already-committed outcome used by HTTP retries."""
+    sid = str(authority.row.session_id)
+    pid = str(authority.row.id)
+    terminal_rows = conn.execute(
+        select(proposal_events_table)
+        .where(proposal_events_table.c.session_id == sid)
+        .where(proposal_events_table.c.proposal_id == pid)
+        .where(proposal_events_table.c.event_type.in_(("proposal.accepted", "proposal.rejected")))
+    ).fetchall()
+    if len(terminal_rows) != 1 or terminal_rows[0].event_type != "proposal.accepted":
+        raise AuditIntegrityError("committed pipeline proposal must have one accepted terminal event")
+    terminal = _proposal_event_record_from_row(terminal_rows[0])
+    payload = deep_thaw(terminal.payload)
+    if type(payload) is not dict or set(payload) != _PIPELINE_ACCEPTED_FIELDS:
+        raise AuditIntegrityError("committed pipeline proposal terminal payload is malformed")
+    row = authority.row
+    if row.committed_state_id is None or row.audit_event_id != terminal.id:
+        raise AuditIntegrityError("committed pipeline proposal row terminal binding is malformed")
+    dispatch_payload = payload["dispatch"]
+    if type(dispatch_payload) is not dict or set(dispatch_payload) != {
+        "tool_call_id",
+        "tool_name",
+        "status",
+        "arguments_hash",
+        "result_hash",
+    }:
+        raise AuditIntegrityError("committed pipeline proposal dispatch binding is malformed")
+    try:
+        dispatch = PipelineDispatchAuditBinding(
+            tool_call_id=dispatch_payload["tool_call_id"],
+            tool_name=dispatch_payload["tool_name"],
+            status=ComposerToolStatus(dispatch_payload["status"]),
+            arguments_hash=dispatch_payload["arguments_hash"],
+            result_hash=dispatch_payload["result_hash"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise AuditIntegrityError("committed pipeline proposal dispatch binding is malformed") from exc
+    state_row = conn.execute(
+        select(composition_states_table)
+        .where(composition_states_table.c.session_id == sid)
+        .where(composition_states_table.c.id == str(row.committed_state_id))
+    ).one_or_none()
+    if state_row is None:
+        raise AuditIntegrityError("committed pipeline proposal state is missing")
+    state_record = service._row_to_state_record(state_row)
+    state_hash = composition_content_hash(state_from_record(state_record))
+    expected = _pipeline_accepted_payload(
+        authority=authority,
+        state_id=str(state_record.id),
+        state_content_hash=state_hash,
+        final_composer_metadata=state_record.composer_meta,
+        dispatch=dispatch,
+    )
+    if payload != expected:
+        raise AuditIntegrityError("committed pipeline proposal exact retry binding mismatch")
+    if _persisted_pipeline_dispatch_content_hashes(conn, session_id=sid, dispatch=dispatch) != (state_hash,):
+        raise AuditIntegrityError("committed pipeline proposal dispatch audit is missing or duplicated")
 
 
 def _normalize_optional_provenance_text(value: str | None) -> str | None:
@@ -491,6 +914,208 @@ def _proposal_event_record_from_row(row: Any) -> ProposalEventRecord:
         actor=row.actor,
         payload=row.payload,
         created_at=SessionServiceImpl._ensure_utc(row.created_at),
+    )
+
+
+def _restore_authoritative_pipeline_proposal(
+    *,
+    conn: Connection,
+    row: CompositionProposalRecord,
+    creation_event: ProposalEventRecord,
+    reviewed_facts: Mapping[str, Any] | None,
+) -> AuthoritativePipelineProposal:
+    payload = deep_thaw(creation_event.payload)
+    if type(payload) is not dict:
+        raise AuditIntegrityError("pipeline proposal creation event payload is malformed")
+    if set(payload) != _PIPELINE_CREATED_FIELDS:
+        raise AuditIntegrityError("pipeline proposal creation event fields are malformed")
+    if payload["schema"] != _PIPELINE_CREATED_SCHEMA:
+        raise AuditIntegrityError("pipeline proposal creation event schema is malformed")
+    if creation_event.session_id != row.session_id or creation_event.proposal_id != row.id:
+        raise AuditIntegrityError("pipeline proposal creation event ownership mismatch")
+    if payload["tool_call_id"] != row.tool_call_id or payload["tool_name"] != row.tool_name:
+        raise AuditIntegrityError("pipeline proposal creation event tool binding mismatch")
+    if row.tool_name != "set_pipeline" or payload["status"] != "pending":
+        raise AuditIntegrityError("pipeline proposal creation event status/tool is malformed")
+    if payload["custody_result"] not in {"not_required", "ready"}:
+        raise AuditIntegrityError("pipeline proposal custody result is malformed")
+
+    private_hash = _pipeline_private_arguments_hash(row.arguments_json)
+    if payload["private_arguments_hash"] != private_hash:
+        raise AuditIntegrityError("pipeline proposal private arguments binding mismatch")
+    if payload["audit_payload_hash"] != _pipeline_audit_payload_hash(
+        summary=row.summary,
+        rationale=row.rationale,
+        affects=row.affects,
+        arguments_redacted_json=row.arguments_redacted_json,
+    ):
+        raise AuditIntegrityError("pipeline proposal audit payload binding mismatch")
+    if None in {
+        row.composer_model_identifier,
+        row.composer_model_version,
+        row.composer_provider,
+        row.composer_skill_hash,
+        row.tool_arguments_hash,
+    }:
+        raise AuditIntegrityError("pipeline proposal composer provenance is incomplete")
+    assert row.composer_model_identifier is not None
+    assert row.composer_model_version is not None
+    assert row.composer_provider is not None
+    assert row.composer_skill_hash is not None
+    assert row.tool_arguments_hash is not None
+    expected_provenance_hash = _pipeline_provenance_hash(
+        user_message_id=row.user_message_id,
+        composer_model_identifier=row.composer_model_identifier,
+        composer_model_version=row.composer_model_version,
+        composer_provider=row.composer_provider,
+        composer_skill_hash=row.composer_skill_hash,
+        tool_arguments_hash=row.tool_arguments_hash,
+    )
+    if payload["provenance_hash"] != expected_provenance_hash:
+        raise AuditIntegrityError("pipeline proposal provenance binding mismatch")
+    if row.tool_arguments_hash != stable_hash(row.arguments_json):
+        raise AuditIntegrityError("pipeline proposal row arguments hash mismatch")
+    if row.composer_skill_hash != payload["skill_hash"]:
+        raise AuditIntegrityError("pipeline proposal skill provenance mismatch")
+    raw_base = payload["base"]
+    if type(raw_base) is not dict:
+        raise AuditIntegrityError("pipeline proposal base metadata is malformed")
+    if raw_base.get("kind") == "absent" and set(raw_base) == {"kind"}:
+        base: AbsentBase | PresentBase = AbsentBase()
+    elif raw_base.get("kind") == "present" and set(raw_base) == {"kind", "state_id", "composition_content_hash"}:
+        raw_state_id = raw_base["state_id"]
+        if type(raw_state_id) is not str:
+            raise AuditIntegrityError("pipeline proposal base state id is malformed")
+        try:
+            state_id = UUID(raw_state_id)
+        except ValueError as exc:
+            raise AuditIntegrityError("pipeline proposal base state id is malformed") from exc
+        if str(state_id) != raw_state_id:
+            raise AuditIntegrityError("pipeline proposal base state id is not canonical")
+        base = PresentBase(state_id=state_id, composition_content_hash=raw_base["composition_content_hash"])
+    else:
+        raise AuditIntegrityError("pipeline proposal base metadata is malformed")
+    raw_surface = payload["surface"]
+    if type(raw_surface) is not str:
+        raise AuditIntegrityError("pipeline proposal surface is malformed")
+    try:
+        surface = PlannerSurface(raw_surface)
+    except ValueError as exc:
+        raise AuditIntegrityError("pipeline proposal surface is malformed") from exc
+    covered_ids = payload["covered_deferred_intent_ids"]
+    if type(covered_ids) is not list or any(type(value) is not str for value in covered_ids):
+        raise AuditIntegrityError("pipeline proposal covered intent ids are malformed")
+    proposal = PipelineProposal(
+        pipeline=deep_thaw(row.arguments_json),
+        draft_hash=payload["draft_hash"],
+        base=base,
+        reviewed_anchor_hash=payload["reviewed_anchor_hash"],
+        surface=surface,
+        repair_count=payload["repair_count"],
+        skill_hash=payload["skill_hash"],
+        covered_deferred_intent_ids=tuple(covered_ids),
+        supersedes_draft_hash=payload["supersedes_draft_hash"],
+    )
+    if reviewed_facts is not None and proposal.reviewed_anchor_hash != reviewed_anchor_hash(reviewed_facts):
+        raise AuditIntegrityError("pipeline proposal reviewed anchor does not match current server facts")
+    expected_base_state_id = proposal.base.state_id if type(proposal.base) is PresentBase else None
+    if row.base_state_id != expected_base_state_id:
+        raise AuditIntegrityError("pipeline proposal row/base state binding mismatch")
+    supersedes_raw = payload["supersedes_proposal_id"]
+    if supersedes_raw is not None:
+        if type(supersedes_raw) is not str:
+            raise AuditIntegrityError("pipeline proposal supersedes id is malformed")
+        try:
+            supersedes_proposal_id = UUID(supersedes_raw)
+        except ValueError as exc:
+            raise AuditIntegrityError("pipeline proposal supersedes id is malformed") from exc
+        if str(supersedes_proposal_id) != supersedes_raw:
+            raise AuditIntegrityError("pipeline proposal supersedes id is not canonical")
+    else:
+        supersedes_proposal_id = None
+    if (supersedes_proposal_id is None) != (proposal.supersedes_draft_hash is None):
+        raise AuditIntegrityError("pipeline proposal supersedes id/draft binding is incomplete")
+    if supersedes_proposal_id is not None:
+        referenced_row = conn.execute(
+            select(composition_proposals_table)
+            .where(composition_proposals_table.c.session_id == str(row.session_id))
+            .where(composition_proposals_table.c.id == str(supersedes_proposal_id))
+        ).one_or_none()
+        if referenced_row is None:
+            raise AuditIntegrityError("pipeline proposal supersedes target is missing or cross-session")
+        referenced_events = conn.execute(
+            select(proposal_events_table)
+            .where(proposal_events_table.c.session_id == str(row.session_id))
+            .where(proposal_events_table.c.proposal_id == str(supersedes_proposal_id))
+            .where(proposal_events_table.c.event_type == "proposal.created")
+        ).fetchall()
+        if len(referenced_events) != 1:
+            raise AuditIntegrityError("pipeline proposal supersedes target creation authority is malformed")
+        referenced_payload = referenced_events[0].payload
+        if (
+            type(referenced_payload) is not dict
+            or referenced_payload.get("schema") != _PIPELINE_CREATED_SCHEMA
+            or referenced_payload.get("draft_hash") != proposal.supersedes_draft_hash
+        ):
+            raise AuditIntegrityError("pipeline proposal supersedes target draft binding mismatch")
+    authority = AuthoritativePipelineProposal(
+        row=row,
+        proposal=proposal,
+        creation_event_id=creation_event.id,
+        custody_result=payload["custody_result"],
+        supersedes_proposal_id=supersedes_proposal_id,
+    )
+    return replace(
+        authority,
+        row=replace(row, pipeline_metadata=_pipeline_public_metadata(authority)),
+    )
+
+
+def _classify_authoritative_composition_proposal(
+    *,
+    conn: Connection,
+    row: CompositionProposalRecord,
+    creation_event: ProposalEventRecord,
+    reviewed_facts: Mapping[str, Any] | None,
+) -> AuthoritativeCompositionProposal:
+    """Accept only the exact historical shape or the closed pipeline shape."""
+    payload = creation_event.payload
+    if not isinstance(payload, Mapping):
+        raise AuditIntegrityError("proposal creation event payload must be a mapping")
+    if set(payload) == _LEGACY_PROPOSAL_CREATED_FIELDS:
+        expected = {
+            "tool_call_id": row.tool_call_id,
+            "tool_name": row.tool_name,
+            "status": "pending",
+        }
+        if payload != expected or creation_event.session_id != row.session_id or creation_event.proposal_id != row.id:
+            raise AuditIntegrityError("legacy proposal creation event binding is malformed")
+        return AuthoritativeCompositionProposal(row=row, pipeline=None)
+    pipeline = _restore_authoritative_pipeline_proposal(
+        conn=conn,
+        row=row,
+        creation_event=creation_event,
+        reviewed_facts=reviewed_facts,
+    )
+    return AuthoritativeCompositionProposal(row=pipeline.row, pipeline=pipeline)
+
+
+def _pipeline_public_metadata(authority: AuthoritativePipelineProposal) -> PipelineProposalPublicMetadata:
+    payload = authority.proposal
+    return PipelineProposalPublicMetadata(
+        surface=payload.surface.value,
+        draft_hash=payload.draft_hash,
+        base=_proposal_base_payload(payload.base),
+        reviewed_anchor_hash=payload.reviewed_anchor_hash,
+        repair_count=payload.repair_count,
+        skill_hash=payload.skill_hash,
+        audit_payload_hash=_pipeline_audit_payload_hash(
+            summary=authority.row.summary,
+            rationale=authority.row.rationale,
+            affects=authority.row.affects,
+            arguments_redacted_json=authority.row.arguments_redacted_json,
+        ),
+        custody_result=authority.custody_result,
     )
 
 
@@ -2684,6 +3309,594 @@ class SessionServiceImpl:
 
         return cast(CompositionProposalRecord, await self._run_sync(_sync))
 
+    async def create_pipeline_composition_proposal(
+        self,
+        *,
+        session_id: UUID,
+        plan: PipelinePlanResult,
+        summary: str,
+        rationale: str,
+        affects: Sequence[str],
+        arguments_redacted_json: Mapping[str, Any],
+        actor: str,
+        composer_model_identifier: str,
+        composer_model_version: str,
+        composer_provider: str,
+        user_message_id: UUID | None = None,
+        supersedes_proposal_id: UUID | None = None,
+    ) -> CompositionProposalRecord:
+        """Atomically create one canonical pipeline row + bound event."""
+        if type(plan) is not PipelinePlanResult:
+            raise TypeError("plan must be an exact PipelinePlanResult")
+        expected_redacted_arguments = redact_tool_call_arguments(
+            "set_pipeline",
+            deep_thaw(plan.proposal.pipeline),
+            telemetry=NoopRedactionTelemetry(),
+        )
+        if deep_thaw(arguments_redacted_json) != expected_redacted_arguments:
+            raise AuditIntegrityError("pipeline proposal redacted arguments do not match the manifest projection")
+        proposal = plan.proposal
+        if proposal.surface in {PlannerSurface.FREEFORM, PlannerSurface.GUIDED_FULL} and proposal.reviewed_anchor_hash != stable_hash(
+            {"schema": "guided.reviewed-anchors.v1", "facts": {}}
+        ):
+            raise AuditIntegrityError("freeform and guided-full pipeline proposals require empty reviewed facts")
+        if (supersedes_proposal_id is None) != (proposal.supersedes_draft_hash is None):
+            raise AuditIntegrityError("superseded proposal id and draft hash must be supplied together")
+        normalized = _normalize_proposal_composer_provenance(
+            composer_model_identifier=composer_model_identifier,
+            composer_model_version=composer_model_version,
+            composer_provider=composer_provider,
+            composer_skill_hash=proposal.skill_hash,
+            tool_arguments_hash=stable_hash(proposal.pipeline),
+        )
+        assert all(value is not None for value in normalized.values())
+        payload = _pipeline_created_payload(
+            plan=plan,
+            user_message_id=user_message_id,
+            composer_model_identifier=cast(str, normalized["composer_model_identifier"]),
+            composer_model_version=cast(str, normalized["composer_model_version"]),
+            composer_provider=cast(str, normalized["composer_provider"]),
+            summary=summary,
+            rationale=rationale,
+            affects=affects,
+            arguments_redacted_json=arguments_redacted_json,
+            supersedes_proposal_id=supersedes_proposal_id,
+        )
+        now = self._now()
+        sid = str(session_id)
+        proposal_id = str(uuid.uuid4())
+        event_id = str(uuid.uuid4())
+
+        def _sync() -> CompositionProposalRecord:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                current_row = conn.execute(
+                    select(composition_states_table)
+                    .where(composition_states_table.c.session_id == sid)
+                    .order_by(desc(composition_states_table.c.version))
+                    .limit(1)
+                ).one_or_none()
+                if type(proposal.base) is AbsentBase:
+                    if current_row is not None:
+                        raise StaleComposeStateError("pipeline proposal absent base conflicts with current state")
+                    base_state_id = None
+                elif type(proposal.base) is PresentBase:
+                    if current_row is None or current_row.id != str(proposal.base.state_id):
+                        raise StaleComposeStateError("pipeline proposal present base state changed before creation")
+                    current_record = self._row_to_state_record(current_row)
+                    if composition_content_hash(state_from_record(current_record)) != proposal.base.composition_content_hash:
+                        raise StaleComposeStateError("pipeline proposal present base content changed before creation")
+                    base_state_id = str(proposal.base.state_id)
+                else:
+                    raise AuditIntegrityError("pipeline proposal base is malformed")
+
+                if supersedes_proposal_id is not None:
+                    superseded = conn.execute(
+                        select(composition_proposals_table)
+                        .where(composition_proposals_table.c.id == str(supersedes_proposal_id))
+                        .where(composition_proposals_table.c.session_id == sid)
+                    ).one_or_none()
+                    if superseded is None:
+                        raise AuditIntegrityError("superseded pipeline proposal is not owned by this session")
+                    superseded_events = conn.execute(
+                        select(proposal_events_table)
+                        .where(proposal_events_table.c.session_id == sid)
+                        .where(proposal_events_table.c.proposal_id == str(supersedes_proposal_id))
+                        .where(proposal_events_table.c.event_type == "proposal.created")
+                    ).fetchall()
+                    if len(superseded_events) != 1:
+                        raise AuditIntegrityError("superseded pipeline proposal has invalid creation authority")
+                    superseded_payload = superseded_events[0].payload
+                    if (
+                        not isinstance(superseded_payload, Mapping)
+                        or superseded_payload.get("schema") != _PIPELINE_CREATED_SCHEMA
+                        or superseded_payload.get("draft_hash") != proposal.supersedes_draft_hash
+                    ):
+                        raise AuditIntegrityError("superseded pipeline proposal draft binding mismatch")
+
+                validate_proposal_blob_references(
+                    conn,
+                    session_id=sid,
+                    tool_name="set_pipeline",
+                    arguments=deep_thaw(proposal.pipeline),
+                )
+                conn.execute(
+                    insert(proposal_events_table).values(
+                        id=event_id,
+                        session_id=sid,
+                        proposal_id=proposal_id,
+                        event_type="proposal.created",
+                        actor=actor,
+                        payload=payload,
+                        created_at=now,
+                    )
+                )
+                conn.execute(
+                    insert(composition_proposals_table).values(
+                        id=proposal_id,
+                        session_id=sid,
+                        tool_call_id=plan.tool_call_id,
+                        user_message_id=str(user_message_id) if user_message_id is not None else None,
+                        composer_model_identifier=normalized["composer_model_identifier"],
+                        composer_model_version=normalized["composer_model_version"],
+                        composer_provider=normalized["composer_provider"],
+                        composer_skill_hash=normalized["composer_skill_hash"],
+                        tool_arguments_hash=normalized["tool_arguments_hash"],
+                        tool_name="set_pipeline",
+                        status="pending",
+                        summary=summary,
+                        rationale=rationale,
+                        affects=list(affects),
+                        arguments_json=deep_thaw(proposal.pipeline),
+                        arguments_redacted_json=deep_thaw(arguments_redacted_json),
+                        base_state_id=base_state_id,
+                        committed_state_id=None,
+                        audit_event_id=event_id,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                row = conn.execute(select(composition_proposals_table).where(composition_proposals_table.c.id == proposal_id)).one()
+                record = _proposal_record_from_row(row)
+                authority = AuthoritativePipelineProposal(
+                    row=record,
+                    proposal=proposal,
+                    creation_event_id=UUID(event_id),
+                    custody_result=plan.custody_result,
+                    supersedes_proposal_id=supersedes_proposal_id,
+                )
+                return replace(record, pipeline_metadata=_pipeline_public_metadata(authority))
+
+        record = cast(CompositionProposalRecord, await self._run_sync(_sync))
+        _PIPELINE_PLANNER_COUNTER.add(1, {"surface": proposal.surface.value, "result": "proposal_created"})
+        _PIPELINE_CUSTODY_COUNTER.add(1, {"surface": proposal.surface.value, "result": plan.custody_result})
+        return record
+
+    async def get_authoritative_pipeline_proposal(
+        self,
+        *,
+        session_id: UUID,
+        proposal_id: UUID,
+        reviewed_facts: Mapping[str, Any],
+    ) -> AuthoritativePipelineProposal:
+        """Load one canonical authority, rejecting exact historical proposals."""
+        authority = await self.get_authoritative_composition_proposal(
+            session_id=session_id,
+            proposal_id=proposal_id,
+            reviewed_facts=reviewed_facts,
+        )
+        if authority.pipeline is None:
+            raise ValueError("proposal uses the exact legacy lifecycle contract")
+        return authority.pipeline
+
+    async def get_authoritative_composition_proposal(
+        self,
+        *,
+        session_id: UUID,
+        proposal_id: UUID,
+        reviewed_facts: Mapping[str, Any] | None,
+    ) -> AuthoritativeCompositionProposal:
+        """Load exactly one row and one event, then classify without fallback."""
+        sid = str(session_id)
+        pid = str(proposal_id)
+
+        def _sync() -> AuthoritativeCompositionProposal:
+            with self._engine.begin() as conn:
+                row = conn.execute(
+                    select(composition_proposals_table)
+                    .where(composition_proposals_table.c.session_id == sid)
+                    .where(composition_proposals_table.c.id == pid)
+                ).one_or_none()
+                if row is None:
+                    raise KeyError(pid)
+                creation_rows = conn.execute(
+                    select(proposal_events_table)
+                    .where(proposal_events_table.c.session_id == sid)
+                    .where(proposal_events_table.c.proposal_id == pid)
+                    .where(proposal_events_table.c.event_type == "proposal.created")
+                ).fetchall()
+                if len(creation_rows) != 1:
+                    raise AuditIntegrityError("pipeline proposal must have exactly one authoritative creation event")
+                authority = _classify_authoritative_composition_proposal(
+                    conn=conn,
+                    row=_proposal_record_from_row(row),
+                    creation_event=_proposal_event_record_from_row(creation_rows[0]),
+                    reviewed_facts=reviewed_facts,
+                )
+                if authority.pipeline is not None and authority.row.status == "committed":
+                    _verify_committed_pipeline_authority(
+                        conn,
+                        service=self,
+                        authority=authority.pipeline,
+                    )
+                return authority
+
+        return cast(AuthoritativeCompositionProposal, await self._run_sync(_sync))
+
+    async def settle_pipeline_composition_proposal(
+        self,
+        *,
+        session_id: UUID,
+        proposal_id: UUID,
+        draft_hash: str,
+        reviewed_facts: Mapping[str, Any],
+        state: CompositionStateData,
+        candidate_content_hash: str,
+        executor_content_hash: str,
+        final_composer_metadata: Mapping[str, Any] | None,
+        dispatch: PipelineDispatchAuditBinding,
+        actor: str,
+    ) -> PipelineProposalSettlementResult:
+        """Atomically publish state and settle a verified pipeline proposal."""
+        if type(dispatch) is not PipelineDispatchAuditBinding:
+            raise TypeError("dispatch must be an exact PipelineDispatchAuditBinding")
+        state_content_hash = _composition_state_data_content_hash(state)
+        if candidate_content_hash != executor_content_hash or candidate_content_hash != state_content_hash:
+            raise AuditIntegrityError("pipeline candidate/executor/state content hash mismatch")
+        settled_state = replace(state, composer_meta=final_composer_metadata)
+        sid = str(session_id)
+        pid = str(proposal_id)
+        now = self._now()
+
+        def _sync() -> tuple[PipelineProposalSettlementResult, bool]:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                row = conn.execute(
+                    select(composition_proposals_table)
+                    .where(composition_proposals_table.c.session_id == sid)
+                    .where(composition_proposals_table.c.id == pid)
+                ).one_or_none()
+                if row is None:
+                    raise KeyError(pid)
+                creation_rows = conn.execute(
+                    select(proposal_events_table)
+                    .where(proposal_events_table.c.session_id == sid)
+                    .where(proposal_events_table.c.proposal_id == pid)
+                    .where(proposal_events_table.c.event_type == "proposal.created")
+                ).fetchall()
+                if len(creation_rows) != 1:
+                    raise AuditIntegrityError("pipeline proposal must have exactly one authoritative creation event")
+                authority = _restore_authoritative_pipeline_proposal(
+                    conn=conn,
+                    row=_proposal_record_from_row(row),
+                    creation_event=_proposal_event_record_from_row(creation_rows[0]),
+                    reviewed_facts=reviewed_facts,
+                )
+                if authority.proposal.draft_hash != draft_hash:
+                    raise StaleComposeStateError("pipeline proposal draft hash echo is stale or mismatched")
+                if dispatch.tool_call_id != authority.row.tool_call_id:
+                    raise AuditIntegrityError("pipeline dispatch tool call does not match proposal authority")
+                if dispatch.arguments_hash != stable_hash(authority.row.arguments_redacted_json):
+                    raise AuditIntegrityError("pipeline dispatch arguments do not match persisted redacted proposal")
+                if _persisted_pipeline_dispatch_content_hashes(conn, session_id=sid, dispatch=dispatch) != (state_content_hash,):
+                    raise AuditIntegrityError("pipeline settlement requires one durable dispatch audit bound to the exact state content")
+
+                terminal_rows = conn.execute(
+                    select(proposal_events_table)
+                    .where(proposal_events_table.c.session_id == sid)
+                    .where(proposal_events_table.c.proposal_id == pid)
+                    .where(proposal_events_table.c.event_type.in_(("proposal.accepted", "proposal.rejected")))
+                ).fetchall()
+                if authority.row.status == "committed":
+                    if len(terminal_rows) != 1 or terminal_rows[0].event_type != "proposal.accepted":
+                        raise AuditIntegrityError("committed pipeline proposal terminal event authority is malformed")
+                    if authority.row.committed_state_id is None:
+                        raise AuditIntegrityError("committed pipeline proposal is missing committed state")
+                    committed_row = conn.execute(
+                        select(composition_states_table)
+                        .where(composition_states_table.c.session_id == sid)
+                        .where(composition_states_table.c.id == str(authority.row.committed_state_id))
+                    ).one_or_none()
+                    if committed_row is None:
+                        raise AuditIntegrityError("committed pipeline proposal state is missing")
+                    committed_record = self._row_to_state_record(committed_row)
+                    committed_hash = composition_content_hash(state_from_record(committed_record))
+                    if committed_hash != state_content_hash:
+                        raise AuditIntegrityError("pipeline exact retry state content mismatch")
+                    if deep_thaw(committed_record.composer_meta) != deep_thaw(final_composer_metadata):
+                        raise AuditIntegrityError("pipeline exact retry final metadata mismatch")
+                    expected_terminal = _pipeline_accepted_payload(
+                        authority=authority,
+                        state_id=str(committed_record.id),
+                        state_content_hash=committed_hash,
+                        final_composer_metadata=final_composer_metadata,
+                        dispatch=dispatch,
+                    )
+                    if terminal_rows[0].payload != expected_terminal:
+                        raise AuditIntegrityError("pipeline exact retry terminal binding mismatch")
+                    return (
+                        PipelineProposalSettlementResult(
+                            proposal=replace(authority.row, pipeline_metadata=_pipeline_public_metadata(authority)),
+                            state=committed_record,
+                        ),
+                        False,
+                    )
+                if authority.row.status != "pending":
+                    raise ValueError(f"Proposal {pid} must be pending to commit; got {authority.row.status!r}")
+                if terminal_rows:
+                    raise AuditIntegrityError("pending pipeline proposal already has a terminal event")
+
+                current_row = conn.execute(
+                    select(composition_states_table)
+                    .where(composition_states_table.c.session_id == sid)
+                    .order_by(desc(composition_states_table.c.version))
+                    .limit(1)
+                ).one_or_none()
+                if type(authority.proposal.base) is AbsentBase:
+                    if current_row is not None:
+                        raise StaleComposeStateError("pipeline proposal absent base conflicts with current state")
+                    derived_from_state_id = None
+                elif type(authority.proposal.base) is PresentBase:
+                    if current_row is None or current_row.id != str(authority.proposal.base.state_id):
+                        raise StaleComposeStateError("pipeline proposal present base state changed before settlement")
+                    current_record = self._row_to_state_record(current_row)
+                    current_hash = composition_content_hash(state_from_record(current_record))
+                    if current_hash != authority.proposal.base.composition_content_hash:
+                        raise StaleComposeStateError("pipeline proposal present base content changed before settlement")
+                    derived_from_state_id = str(authority.proposal.base.state_id)
+                else:
+                    raise AuditIntegrityError("pipeline proposal base is malformed")
+
+                state_id = self._insert_composition_state(
+                    conn,
+                    session_id=sid,
+                    payload=StatePayload(data=settled_state, derived_from_state_id=derived_from_state_id),
+                    provenance="tool_call",
+                    created_at=now,
+                )
+                event_id = str(uuid.uuid4())
+                terminal_payload = _pipeline_accepted_payload(
+                    authority=authority,
+                    state_id=state_id,
+                    state_content_hash=state_content_hash,
+                    final_composer_metadata=final_composer_metadata,
+                    dispatch=dispatch,
+                )
+                conn.execute(
+                    insert(proposal_events_table).values(
+                        id=event_id,
+                        session_id=sid,
+                        proposal_id=pid,
+                        event_type="proposal.accepted",
+                        actor=actor,
+                        payload=terminal_payload,
+                        created_at=now,
+                    )
+                )
+                conn.execute(
+                    update(composition_proposals_table)
+                    .where(composition_proposals_table.c.session_id == sid)
+                    .where(composition_proposals_table.c.id == pid)
+                    .where(composition_proposals_table.c.status == "pending")
+                    .values(
+                        status="committed",
+                        committed_state_id=state_id,
+                        audit_event_id=event_id,
+                        updated_at=now,
+                    )
+                )
+                settled_row = conn.execute(
+                    select(composition_proposals_table)
+                    .where(composition_proposals_table.c.session_id == sid)
+                    .where(composition_proposals_table.c.id == pid)
+                ).one()
+                state_row = conn.execute(
+                    select(composition_states_table)
+                    .where(composition_states_table.c.session_id == sid)
+                    .where(composition_states_table.c.id == state_id)
+                ).one()
+                return (
+                    PipelineProposalSettlementResult(
+                        proposal=replace(
+                            _proposal_record_from_row(settled_row),
+                            pipeline_metadata=_pipeline_public_metadata(authority),
+                        ),
+                        state=self._row_to_state_record(state_row),
+                    ),
+                    True,
+                )
+
+        result, transitioned = cast(tuple[PipelineProposalSettlementResult, bool], await self._run_sync(_sync))
+        if transitioned:
+            assert result.proposal.pipeline_metadata is not None
+            _PIPELINE_SETTLEMENT_COUNTER.add(
+                1,
+                {"surface": result.proposal.pipeline_metadata.surface, "result": "accepted"},
+            )
+        return result
+
+    async def get_pipeline_dispatch_recovery(
+        self,
+        *,
+        authority: AuthoritativePipelineProposal,
+    ) -> PipelineDispatchRecovery | None:
+        """Return one content-bound durable dispatch for pending recovery."""
+        if type(authority) is not AuthoritativePipelineProposal:
+            raise TypeError("authority must be an exact AuthoritativePipelineProposal")
+        sid = str(authority.row.session_id)
+        expected_arguments_hash = stable_hash(authority.row.arguments_redacted_json)
+
+        def _sync() -> PipelineDispatchRecovery | None:
+            with self._engine.begin() as conn:
+                rows = conn.execute(select(chat_messages_table.c.tool_calls).where(chat_messages_table.c.session_id == sid)).fetchall()
+                matches: list[PipelineDispatchRecovery] = []
+                for row in rows:
+                    if type(row.tool_calls) is not list:
+                        continue
+                    for envelope in row.tool_calls:
+                        if type(envelope) is not dict or envelope.get("_kind") != "audit":
+                            continue
+                        invocation = envelope.get("invocation")
+                        if type(invocation) is not dict:
+                            continue
+                        if invocation.get("tool_call_id") != authority.row.tool_call_id:
+                            continue
+                        if invocation.get("tool_name") != "set_pipeline" or invocation.get("status") != "success":
+                            continue
+                        binding = PipelineDispatchAuditBinding.from_persisted_envelope(envelope)
+                        if binding.arguments_hash != expected_arguments_hash:
+                            raise AuditIntegrityError("pipeline recovery dispatch arguments do not match authority")
+                        result_canonical = invocation.get("result_canonical")
+                        if type(result_canonical) is not str:
+                            continue
+                        try:
+                            result_payload = json.loads(result_canonical)
+                        except json.JSONDecodeError as exc:
+                            raise AuditIntegrityError("pipeline recovery result canonical is malformed") from exc
+                        if type(result_payload) is not dict:
+                            raise AuditIntegrityError("pipeline recovery result payload is malformed")
+                        if result_payload.get("pipeline_content_hash_schema") != "composer.pipeline-dispatch-result.v1":
+                            continue
+                        executor_content_hash = result_payload.get("pipeline_content_hash")
+                        if (
+                            type(executor_content_hash) is not str
+                            or len(executor_content_hash) != 64
+                            or any(character not in "0123456789abcdef" for character in executor_content_hash)
+                        ):
+                            raise AuditIntegrityError("pipeline recovery executor-content hash is malformed")
+                        matches.append(
+                            PipelineDispatchRecovery(
+                                binding=binding,
+                                executor_content_hash=executor_content_hash,
+                            )
+                        )
+                if len(matches) > 1:
+                    raise AuditIntegrityError("pipeline recovery has duplicate successful content-bound dispatches")
+                return matches[0] if matches else None
+
+        return cast(PipelineDispatchRecovery | None, await self._run_sync(_sync))
+
+    async def reject_pipeline_composition_proposal(
+        self,
+        *,
+        session_id: UUID,
+        proposal_id: UUID,
+        draft_hash: str,
+        reviewed_facts: Mapping[str, Any] | None,
+        reason: PipelineProposalRejectionReason,
+        dispatch: PipelineDispatchAuditBinding | None,
+        actor: str,
+    ) -> CompositionProposalRecord:
+        """Atomically terminalise a pipeline proposal with a closed reason."""
+        reason = _validated_pipeline_rejection_reason(reason)
+        if reason == "candidate_executor_mismatch" and dispatch is None:
+            raise AuditIntegrityError("candidate/executor mismatch rejection requires dispatch evidence")
+        if dispatch is not None and type(dispatch) is not PipelineDispatchAuditBinding:
+            raise TypeError("dispatch must be an exact PipelineDispatchAuditBinding or None")
+        sid = str(session_id)
+        pid = str(proposal_id)
+        now = self._now()
+
+        def _sync() -> tuple[CompositionProposalRecord, bool]:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                row = conn.execute(
+                    select(composition_proposals_table)
+                    .where(composition_proposals_table.c.session_id == sid)
+                    .where(composition_proposals_table.c.id == pid)
+                ).one_or_none()
+                if row is None:
+                    raise KeyError(pid)
+                creation_rows = conn.execute(
+                    select(proposal_events_table)
+                    .where(proposal_events_table.c.session_id == sid)
+                    .where(proposal_events_table.c.proposal_id == pid)
+                    .where(proposal_events_table.c.event_type == "proposal.created")
+                ).fetchall()
+                if len(creation_rows) != 1:
+                    raise AuditIntegrityError("pipeline proposal must have exactly one authoritative creation event")
+                authority = _restore_authoritative_pipeline_proposal(
+                    conn=conn,
+                    row=_proposal_record_from_row(row),
+                    creation_event=_proposal_event_record_from_row(creation_rows[0]),
+                    reviewed_facts=reviewed_facts,
+                )
+                if authority.proposal.draft_hash != draft_hash:
+                    raise StaleComposeStateError("pipeline proposal draft hash echo is stale or mismatched")
+                if dispatch is not None:
+                    if dispatch.tool_call_id != authority.row.tool_call_id:
+                        raise AuditIntegrityError("pipeline rejection dispatch tool call does not match proposal authority")
+                    if dispatch.arguments_hash != stable_hash(authority.row.arguments_redacted_json):
+                        raise AuditIntegrityError("pipeline rejection dispatch arguments do not match persisted redacted proposal")
+                    if len(_persisted_pipeline_dispatch_content_hashes(conn, session_id=sid, dispatch=dispatch)) != 1:
+                        raise AuditIntegrityError("pipeline rejection requires exactly one matching durable dispatch audit")
+                expected_payload = _pipeline_rejected_payload(authority=authority, reason=reason, dispatch=dispatch)
+                terminal_rows = conn.execute(
+                    select(proposal_events_table)
+                    .where(proposal_events_table.c.session_id == sid)
+                    .where(proposal_events_table.c.proposal_id == pid)
+                    .where(proposal_events_table.c.event_type.in_(("proposal.accepted", "proposal.rejected")))
+                ).fetchall()
+                if authority.row.status == "rejected":
+                    if (
+                        len(terminal_rows) != 1
+                        or terminal_rows[0].event_type != "proposal.rejected"
+                        or terminal_rows[0].payload != expected_payload
+                    ):
+                        raise AuditIntegrityError("rejected pipeline proposal terminal binding mismatch")
+                    return replace(authority.row, pipeline_metadata=_pipeline_public_metadata(authority)), False
+                if authority.row.status != "pending":
+                    raise ValueError(f"Proposal {pid} must be pending to reject; got {authority.row.status!r}")
+                if terminal_rows:
+                    raise AuditIntegrityError("pending pipeline proposal already has a terminal event")
+                event_id = str(uuid.uuid4())
+                conn.execute(
+                    insert(proposal_events_table).values(
+                        id=event_id,
+                        session_id=sid,
+                        proposal_id=pid,
+                        event_type="proposal.rejected",
+                        actor=actor,
+                        payload=expected_payload,
+                        created_at=now,
+                    )
+                )
+                conn.execute(
+                    update(composition_proposals_table)
+                    .where(composition_proposals_table.c.session_id == sid)
+                    .where(composition_proposals_table.c.id == pid)
+                    .where(composition_proposals_table.c.status == "pending")
+                    .values(status="rejected", audit_event_id=event_id, updated_at=now)
+                )
+                updated_row = conn.execute(
+                    select(composition_proposals_table)
+                    .where(composition_proposals_table.c.session_id == sid)
+                    .where(composition_proposals_table.c.id == pid)
+                ).one()
+                return (
+                    replace(
+                        _proposal_record_from_row(updated_row),
+                        pipeline_metadata=_pipeline_public_metadata(authority),
+                    ),
+                    True,
+                )
+
+        result, transitioned = cast(tuple[CompositionProposalRecord, bool], await self._run_sync(_sync))
+        if transitioned:
+            assert result.pipeline_metadata is not None
+            _PIPELINE_SETTLEMENT_COUNTER.add(
+                1,
+                {"surface": result.pipeline_metadata.surface, "result": reason},
+            )
+        return result
+
     async def list_composition_proposals(
         self,
         session_id: UUID,
@@ -2700,7 +3913,32 @@ class SessionServiceImpl:
             stmt = stmt.order_by(composition_proposals_table.c.created_at)
             with self._engine.begin() as conn:
                 rows = conn.execute(stmt).fetchall()
-                return [_proposal_record_from_row(row) for row in rows]
+                records = [_proposal_record_from_row(row) for row in rows]
+                if not records:
+                    return records
+                creation_rows = conn.execute(
+                    select(proposal_events_table)
+                    .where(proposal_events_table.c.session_id == sid)
+                    .where(proposal_events_table.c.event_type == "proposal.created")
+                    .where(proposal_events_table.c.proposal_id.in_([str(record.id) for record in records]))
+                ).fetchall()
+                by_proposal: dict[str, list[Any]] = {}
+                for event_row in creation_rows:
+                    by_proposal.setdefault(event_row.proposal_id, []).append(event_row)
+                enriched: list[CompositionProposalRecord] = []
+                for record in records:
+                    events = by_proposal.get(str(record.id), [])
+                    if len(events) != 1:
+                        raise AuditIntegrityError("composition proposal must have exactly one creation event")
+                    authority = _classify_authoritative_composition_proposal(
+                        conn=conn,
+                        row=record,
+                        creation_event=_proposal_event_record_from_row(events[0]),
+                        reviewed_facts=None,
+                    )
+                    metadata = _pipeline_public_metadata(authority.pipeline) if authority.pipeline is not None else None
+                    enriched.append(replace(record, pipeline_metadata=metadata))
+                return enriched
 
         return cast(list[CompositionProposalRecord], await self._run_sync(_sync))
 

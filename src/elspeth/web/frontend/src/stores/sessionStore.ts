@@ -1354,6 +1354,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const proposal = await api.acceptCompositionProposal(
         activeSessionId,
         proposalId,
+        get().compositionProposals.find((item) => item.id === proposalId)
+          ?.pipeline_metadata?.draft_hash ?? null,
       );
       const [compositionState, proposals] = await Promise.all([
         api.fetchCompositionState(activeSessionId),

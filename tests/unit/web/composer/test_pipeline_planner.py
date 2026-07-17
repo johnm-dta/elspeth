@@ -349,9 +349,9 @@ async def test_happy_path_returns_proposal_and_audits_exact_marked_wire_payload(
         lifecycle=_lifecycle(lifecycle_events),
     )
 
-    assert deep_thaw(proposal.pipeline) == pipeline
-    assert proposal.base == AbsentBase()
-    assert proposal.repair_count == 0
+    assert deep_thaw(proposal.proposal.pipeline) == pipeline
+    assert proposal.proposal.base == AbsentBase()
+    assert proposal.proposal.repair_count == 0
     assert lifecycle_events == ["before", "scope-enter", "scope-exit", "settled:complete"]
     assert len(completion.requests) == 1
     sent = completion.requests[0]
@@ -380,7 +380,7 @@ async def test_discovery_round_uses_real_read_only_tool_then_terminal(
 
     proposal = await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion, recorder=recorder)
 
-    assert deep_thaw(proposal.pipeline) == _pipeline(tmp_path)
+    assert deep_thaw(proposal.proposal.pipeline) == _pipeline(tmp_path)
     assert len(completion.requests) == 2
     assert completion.requests[1]["messages"][-1]["role"] == "tool"
     assert len(recorder.invocations) == 1
@@ -425,7 +425,7 @@ async def test_invalid_candidate_gets_allowlisted_feedback_then_repairs(
         repair_budget=1,
     )
 
-    assert proposal.repair_count == 1
+    assert proposal.proposal.repair_count == 1
     feedback = completion.requests[1]["messages"][-1]
     assert feedback["role"] == "tool"
     assert set(json.loads(feedback["content"])) == {"success", "validation"}
@@ -466,7 +466,7 @@ async def test_safe_candidate_argument_error_gets_closed_feedback_then_repairs_w
         ),
     )
 
-    assert proposal.repair_count == 1
+    assert proposal.proposal.repair_count == 1
     feedback = json.loads(completion.requests[1]["messages"][-1]["content"])
     assert set(feedback) == {"success", "validation"}
     assert set(feedback["validation"]) == {"is_valid", "errors"}
@@ -584,7 +584,7 @@ async def test_pydantic_invalid_terminal_draft_gets_bounded_schema_repair(
 
     proposal = await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion)
 
-    assert proposal.repair_count == 1
+    assert proposal.proposal.repair_count == 1
     feedback = json.loads(completion.requests[1]["messages"][-1]["content"])
     assert feedback == {
         "success": False,
@@ -815,7 +815,7 @@ async def test_each_transient_api_retry_consumes_and_audits_a_wire_attempt(
         model_overrides={"max_api_attempts": 2},
     )
 
-    assert deep_thaw(proposal.pipeline) == _pipeline(tmp_path)
+    assert deep_thaw(proposal.proposal.pipeline) == _pipeline(tmp_path)
     assert len(completion.requests) == 2
     assert [request["max_tokens"] for request in completion.requests] == [800, 800]
     assert [request["num_retries"] for request in completion.requests] == [0, 0]
@@ -1020,7 +1020,7 @@ async def test_real_inline_custody_returns_only_blob_id_and_ready_row(
         ),
     )
 
-    public = proposal.to_dict()
+    public = proposal.proposal.to_dict()
     assert "inline_blob" not in canonical_json(public)
     assert raw_content not in canonical_json(public)
     blob_id = public["pipeline"]["source"]["blob_id"]
@@ -1068,7 +1068,7 @@ async def test_inline_custody_provenance_uses_terminal_audited_model_returned_or
         ),
     )
 
-    blob_id = proposal.to_dict()["pipeline"]["source"]["blob_id"]
+    blob_id = proposal.proposal.to_dict()["pipeline"]["source"]["blob_id"]
     with engine.begin() as conn:
         row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id)).mappings().one()
 
@@ -1383,7 +1383,7 @@ async def test_terminal_cannot_replace_server_base_and_proposal_is_created_once(
 
     monkeypatch.setattr(PipelineProposal, "create", classmethod(counted_create))
     proposal = await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion)
-    assert proposal.base == AbsentBase()
+    assert proposal.proposal.base == AbsentBase()
     assert calls == 1
 
 
@@ -1408,7 +1408,7 @@ async def test_blob_content_discovery_audit_projection_never_retains_content(
         originating_message=origin,
         custody_config=custody,
     )
-    blob_id = proposal.to_dict()["pipeline"]["source"]["blob_id"]
+    blob_id = proposal.proposal.to_dict()["pipeline"]["source"]["blob_id"]
     second = _ScriptedCompletion(
         _response(("get_blob_content", {"blob_id": blob_id})),
         _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),

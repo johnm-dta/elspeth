@@ -8,23 +8,24 @@ mature through repeated assessments without erasing earlier conclusions.
 
 | Field | Current value |
 | --- | --- |
-| Assessment | [2026-07-15 14:15 AEST](assessments/2026-07-15-1415/04-dag-completeness-gap-analysis.md) |
-| Baseline | `release/0.7.1` at `0dcd61acaa44082d93ec205683700e798748ee6d` |
+| Assessment | [2026-07-17 17:39 AEST](assessments/2026-07-17-1739/02-scorecard-and-scenario-matrix.md) |
+| Baseline | `release/0.7.1` at `6e8a6bf5f2f8542bf5b95b1669ce3d3df68d93e3` |
 | Verdict | **Not complete** |
-| Legacy maturity indicator | **2.4/5** — not a percentage-complete estimate or a future comparison baseline |
-| Strongest layers | Graph vocabulary and structural validation |
-| Weakest layers | Durable recovery/concurrency, secret-safe graph identity, authoring parity, and maintained cross-surface proof |
+| Normalized maturity indicator | **Not calculated**; mandatory dimensions remain `U`, so the permanent framework forbids an aggregate |
+| Strongest layer | Structural validation |
+| Weakest layers | Guided authoring, secret-safe graph identity/audit, scale, and maintained contracts |
 
 The current assessment concludes that Elspeth's DAG is structurally capable but
-not production-complete as a whole product. Hard-gate failures remain in durable
-subtype handling, fencing, idempotency, atomic evidence, and secret-bearing
-configuration surfaces.
+not production-complete as a whole product. The seed assessment's two subtype
+defects and disposition proof package are closed. Hard gates remain in replay
+identity, output/journal atomicity, crash and registered-process proof,
+secret-bearing graph surfaces, guided/browser parity, scale, and the normative
+contract.
 
-## Post-assessment remediation
+## Change since the seed assessment
 
-The dated assessment remains immutable and its 2.4/5 indicator has not been
-re-scored. The following safety-floor work landed afterward and must be included
-when the next full assessment establishes a new baseline:
+The 2026-07-15 snapshot remains immutable. The current assessment re-executed
+the following post-seed work at a new baseline:
 
 | Date | Assessment gap | Current result | Maintained evidence |
 |---|---|---|---|
@@ -32,10 +33,9 @@ when the next full assessment establishes a new baseline:
 | 2026-07-17 | R2: malformed `PENDING_SINK` rows were claimable (`elspeth-d8e172676c`) | Fixed: TS-04 uses the complete bundle predicate in both diagnosis and CAS admission. | Pending-sink incomplete/legal/atomic-race parameterizations |
 | 2026-07-17 | TS-07–TS-10 effects, guards, and rollback proof (`elspeth-1076e2716a`) | Verified: exact state, payload, lease, event, branch-loss, owner, membership, subtype, and rollback cells are maintained as one matrix. TS-10 also refuses malformed bundles at the writer boundary. | [Disposition follow-up evidence](../token-scheduler-state-engine.md#disposition-follow-up-executed-evidence--2026-07-17) |
 
-This closes the two reproduced subtype defects and their disposition proof
-package. It does **not** change the whole-DAG verdict: fencing, idempotency,
-crash/restart, multi-process, secret-safety, and cross-surface scenario gaps
-remain until a fresh assessment proves otherwise.
+The reassessment confirms these closures. It also confirms selected fencing,
+idempotency, and atomicity improvements, but no mandatory scenario yet passes
+the entire production-support lifecycle.
 
 ## Start here
 
@@ -43,27 +43,25 @@ remain until a fresh assessment proves otherwise.
   mandatory dimensions, hard gates, and scenario corpus.
 - [Assessment framework](assessment-framework.md) — the repeatable workflow,
   evidence rules, scorecards, and templates.
-- [Current gap analysis](assessments/2026-07-15-1415/04-dag-completeness-gap-analysis.md)
+- [Current gap analysis](assessments/2026-07-17-1739/03-gap-analysis-and-remediation.md)
   — the latest verdict and prioritized shore-up sequence.
-- [Current capability evidence](assessments/2026-07-15-1415/02-capability-evidence.md)
-  — consolidated proof, limitations, and tracker reconciliation.
-- [Current completeness model](assessments/2026-07-15-1415/03-completeness-model.md)
-  — the assessment lifecycle, rating scale, and scenario definition used by the
-  current snapshot.
+- [Current scorecard and scenario matrix](assessments/2026-07-17-1739/02-scorecard-and-scenario-matrix.md)
+  — normalized dimension scores, mandatory scenario cells, and hard-gate verdict.
+- [Current executed evidence](assessments/2026-07-17-1739/01-executed-evidence.md)
+  — exact commands, observed results, and limitations.
 
 ## Current hard-gate themes
 
 The current assessment groups the immediate blockers into five themes:
 
-1. Restore valid durable subtype transitions and fail-closed claims.
-2. Require fencing for every protected multi-worker mutation.
-3. Add database-owned idempotency for joins, expansion, batches, and calls.
-4. Commit state and its audit explanation atomically.
-5. Keep raw secrets out of topology identity, metadata, exports, and diagnostics.
+1. Close replay/identity and remaining state/evidence atomicity defects.
+2. Keep raw secrets out of graph identity, metadata, persistence, exports, and diagnostics.
+3. Execute the deterministic crash and registered-process contention matrix.
+4. Deliver guided/freeform/browser parity and an explicit row-union contract.
+5. Repair and CI-bind the normative contract, scenario corpus, and scale envelope.
 
-After that safety floor, the assessment calls for a production-path scenario
-matrix, guided/freeform parity, browser acceptance, an explicit row-union
-decision, and repair of the normative execution-graph contract.
+The maintained 15-scenario corpus (`elspeth-ef29ef6ba4`) is the acceptance spine
+for all five themes.
 
 ## Directory model
 
@@ -74,13 +72,9 @@ docs/architecture/dag/
 ├── assessment-framework.md
 └── assessments/
     └── YYYY-MM-DD-HHMM/
-        ├── 00-coordination.md
-        ├── 01-discovery-findings.md
-        ├── 02-capability-evidence.md
-        ├── 03-completeness-model.md
-        ├── 04-dag-completeness-gap-analysis.md
+        ├── numbered assessment reports
         ├── evidence/
-        └── provenance/
+        └── optional provenance/
 ```
 
 The evergreen files may evolve as the product's quality bar matures. Dated
@@ -92,6 +86,7 @@ code.
 
 | Date | Baseline | Verdict | Evidence |
 | --- | --- | --- | --- |
+| 2026-07-17 | `release/0.7.1` at `6e8a6bf5` | Not complete — no aggregate while mandatory dimensions remain `U`; hard-gate failures are open | [Assessment package](assessments/2026-07-17-1739/02-scorecard-and-scenario-matrix.md) |
 | 2026-07-15 | `release/0.7.1` at `0dcd61ac` | Not complete — 2.4/5 with hard-gate failures | [Assessment package](assessments/2026-07-15-1415/04-dag-completeness-gap-analysis.md) |
 
 The 2026-07-15 package retains all 13 files from the original same-day analysis.
@@ -100,6 +95,10 @@ worker briefs remain under `provenance/` so the analysis can be reconstructed.
 It is the seed assessment: its 2.4 score and broad `Build/contracts` Pass cells
 predate the normalized framework and are not comparison baselines for later
 assessments.
+
+The 2026-07-17 package is the first assessment to use the normalized
+15-dimension framework. It correctly withholds an aggregate because mandatory
+dimensions remain `U`; the seed's legacy 2.4 is not a comparison baseline.
 
 ## How to iterate
 

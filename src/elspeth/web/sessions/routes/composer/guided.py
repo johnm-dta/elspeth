@@ -10,6 +10,7 @@ from elspeth.web.composer.guided.chat_solver import build_step_chat_context_bloc
 from elspeth.web.composer.guided.errors import WireConfirmRejectedError
 from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE, WorkflowProfileKind, profile_for_kind
 from elspeth.web.composer.guided.protocol import Turn
+from elspeth.web.composer.pipeline_proposal import composition_content_hash
 from elspeth.web.composer.protocol import ComposerService
 from elspeth.web.composer.tutorial_sample import (
     resolve_tutorial_sample_urls,
@@ -125,20 +126,6 @@ from .._helpers import (
 
 _COMPLETED_TERMINAL_BEFORE_EXIT_META_KEY = "guided_completed_terminal_before_user_exit"
 _MISSING_COMPLETED_TERMINAL_MARKER = object()
-
-
-def _composition_content_hash(state: Any) -> str:
-    """Hash user-authored pipeline content, excluding persistence version and guided metadata."""
-    state_d = state.to_dict()
-    return stable_hash(
-        {
-            "sources": state_d["sources"],
-            "nodes": state_d["nodes"],
-            "edges": state_d["edges"],
-            "outputs": state_d["outputs"],
-            "metadata": state_d["metadata"],
-        }
-    )
 
 
 def _resolve_shield_available(snapshot: PluginAvailabilitySnapshot) -> bool:
@@ -942,7 +929,7 @@ async def post_guided_reenter(
                 if type(composition_hash) is not str:
                     raise InvariantError("completed terminal re-entry marker composition_hash must be a string")
 
-                if composition_hash == _composition_content_hash(state):
+                if composition_hash == composition_content_hash(state):
                     validation = catalog.validate_composition_state(state).validation
                     if not validation.is_valid:
                         raise InvariantError("unchanged completed pipeline failed validation during guided re-entry")
@@ -1406,7 +1393,7 @@ async def post_guided_respond(
                     **existing_meta_exit,
                     "guided_session": new_guided.to_dict(),
                     _COMPLETED_TERMINAL_BEFORE_EXIT_META_KEY: {
-                        "composition_hash": _composition_content_hash(state),
+                        "composition_hash": composition_content_hash(state),
                     },
                 }
 

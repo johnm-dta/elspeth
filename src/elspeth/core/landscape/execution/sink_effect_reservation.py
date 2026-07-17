@@ -112,6 +112,7 @@ def _pipeline_identity(request: SinkEffectReservationRequest, members: Sequence[
             "ordinal": member.ordinal,
             "payload_hash": member.payload_hash,
             "pending_identity_hash": member.pending_identity_hash,
+            "primary_effect_id": member.primary_effect_id,
             "row_id": member.row_id,
             "token_id": member.token_id,
         }
@@ -616,6 +617,7 @@ class SinkEffectReservation:
                 "lineage_json": member.lineage_json,
                 "lineage_hash": member.lineage_hash,
                 "payload_hash": member.payload_hash,
+                "primary_effect_id": member.primary_effect_id,
             }
             if any(getattr(row, field_name) != value for field_name, value in expected.items()):
                 raise ValueError(f"sink effect member {member.token_id!r} has divergent immutable membership")
@@ -664,6 +666,8 @@ class SinkEffectReservation:
         predecessor_effect_id: str | None,
     ) -> tuple[bool, SinkEffect]:
         timestamp = now()
+        primary_effect_ids = {member.primary_effect_id for member in identity.members if member.primary_effect_id is not None}
+        common_primary_effect_id = next(iter(primary_effect_ids)) if len(primary_effect_ids) == 1 else None
         values: dict[str, object] = {
             "effect_id": identity.effect_id,
             "run_id": request.run_id,
@@ -697,7 +701,7 @@ class SinkEffectReservation:
             "result_descriptor_hash": None,
             "publication_performed": None,
             "publication_evidence_kind": None,
-            "primary_effect_id": request.primary_effect_id,
+            "primary_effect_id": common_primary_effect_id,
             "stream_id": stream_id,
             "stream_sequence": stream_sequence,
             "predecessor_effect_id": predecessor_effect_id,
@@ -724,7 +728,7 @@ class SinkEffectReservation:
             "group_payload_hash": identity.group_payload_hash,
             "artifact_id": identity.artifact_id,
             "artifact_idempotency_key": identity.artifact_idempotency_key,
-            "primary_effect_id": request.primary_effect_id,
+            "primary_effect_id": common_primary_effect_id,
             "stream_id": stream_id,
             "stream_sequence": stream_sequence,
             "predecessor_effect_id": predecessor_effect_id,
@@ -754,6 +758,7 @@ class SinkEffectReservation:
                     "lineage_json": member.lineage_json,
                     "lineage_hash": member.lineage_hash,
                     "payload_hash": member.payload_hash,
+                    "primary_effect_id": member.primary_effect_id,
                     "prepared_disposition": None,
                     "reason_hash": None,
                     "member_effect_id": member.member_effect_id,

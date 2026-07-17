@@ -394,6 +394,7 @@ class SinkEffectMemberExportRecord(TypedDict):
     ingest_sequence: int
     lineage_hash: str
     payload_hash: str
+    primary_effect_id: str | None
     prepared_disposition: str | None
     reason_hash: str | None
     member_effect_id: str | None

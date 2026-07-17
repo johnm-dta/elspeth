@@ -28,6 +28,7 @@ from elspeth.contracts.sink_effects import (
     SinkEffectInspection,
     SinkEffectReconcileKind,
     SinkEffectReconcileResult,
+    SinkEffectRole,
     SinkEffectState,
 )
 from elspeth.core.canonical import canonical_json, stable_hash
@@ -181,19 +182,25 @@ class SinkEffectFinalization:
             state_ids = (
                 self._resolve_current_states(conn, request, effect, members) if effect.state != SinkEffectState.FINALIZED.value else ()
             )
-            linked = conn.execute(
-                select(sink_effects_table.c.effect_id).where(
-                    (sink_effects_table.c.effect_id == request.effect_id)
-                    | (sink_effects_table.c.primary_effect_id == request.effect_id)
-                    | (sink_effects_table.c.effect_id == effect.primary_effect_id)
-                    | (sink_effects_table.c.effect_id == effect.predecessor_effect_id)
-                )
-            ).fetchall()
+            linked_effect_ids = {request.effect_id}
+            linked_effect_ids.update(str(member.primary_effect_id) for member in members if member.primary_effect_id is not None)
+            linked_effect_ids.update(
+                str(row.effect_id)
+                for row in conn.execute(
+                    select(sink_effect_members_table.c.effect_id)
+                    .where(sink_effect_members_table.c.primary_effect_id == request.effect_id)
+                    .distinct()
+                ).fetchall()
+            )
+            if effect.primary_effect_id is not None:
+                linked_effect_ids.add(str(effect.primary_effect_id))
+            if effect.predecessor_effect_id is not None:
+                linked_effect_ids.add(str(effect.predecessor_effect_id))
         return _OptimisticWitness(
             effect_id=request.effect_id,
             token_ids=tuple(sorted(str(member.token_id) for member in members)),
             state_ids_by_ordinal=state_ids,
-            linked_effect_ids=tuple(sorted(str(row.effect_id) for row in linked)),
+            linked_effect_ids=tuple(sorted(linked_effect_ids)),
         )
 
     def _finalize_on(
@@ -240,7 +247,7 @@ class SinkEffectFinalization:
         effect = locked_effect
         if effect.state == SinkEffectState.FINALIZED.value:
             raise _WitnessChanged
-        self._validate_effect_authority(conn, request, effect, locked)
+        self._validate_effect_authority(conn, request, effect, locked, members)
         descriptor_hash = self._validate_plan_and_descriptor(request, effect)
         evidence_hash = sha256(canonical_json(deep_thaw(request.evidence)).encode("utf-8")).hexdigest()
 
@@ -460,6 +467,7 @@ class SinkEffectFinalization:
         request: SinkEffectFinalizeRequest,
         effect: Row[Any],
         linked: Mapping[str, Row[Any]],
+        members: Sequence[Row[Any]],
     ) -> None:
         if effect.descriptor_mode == SinkEffectDescriptorMode.NO_PUBLICATION.value:
             if effect.state != SinkEffectState.PREPARED.value:
@@ -477,10 +485,37 @@ class SinkEffectFinalization:
                 raise LandscapeRecordError("sink effect finalization has stale generation")
             if effect.lease_expires_at is None or _utc(effect.lease_expires_at) < now():
                 raise LandscapeRecordError("sink effect finalization lease has expired")
-        if effect.primary_effect_id is not None:
-            primary = linked.get(str(effect.primary_effect_id))
-            if primary is None or primary.run_id != effect.run_id or primary.state != SinkEffectState.FINALIZED.value:
-                raise LandscapeRecordError("failsink effect requires its same-run primary effect to be finalized")
+        primary_effect_ids = {str(member.primary_effect_id) for member in members if member.primary_effect_id is not None}
+        common_primary_effect_id = next(iter(primary_effect_ids)) if len(primary_effect_ids) == 1 else None
+        if effect.primary_effect_id != common_primary_effect_id:
+            raise LandscapeRecordError("sink effect-level primary linkage disagrees with its members")
+        if effect.role == SinkEffectRole.FAILSINK.value:
+            if len(primary_effect_ids) == 0 or any(member.primary_effect_id is None for member in members):
+                raise LandscapeRecordError("failsink effect requires exact per-member primary linkage")
+            for member in members:
+                primary_effect_id = str(member.primary_effect_id)
+                primary = linked.get(primary_effect_id)
+                if (
+                    primary is None
+                    or primary.run_id != effect.run_id
+                    or primary.role != SinkEffectRole.PRIMARY.value
+                    or primary.state != SinkEffectState.FINALIZED.value
+                ):
+                    raise LandscapeRecordError("failsink effect requires every same-run primary effect to be finalized")
+                primary_member = conn.execute(
+                    select(sink_effect_members_table.c.ordinal).where(
+                        sink_effect_members_table.c.effect_id == primary_effect_id,
+                        sink_effect_members_table.c.run_id == effect.run_id,
+                        sink_effect_members_table.c.role == SinkEffectRole.PRIMARY.value,
+                        sink_effect_members_table.c.token_id == member.token_id,
+                        sink_effect_members_table.c.prepared_disposition == "diverted",
+                        sink_effect_members_table.c.member_state == SinkEffectState.FINALIZED.value,
+                    )
+                ).fetchone()
+                if primary_member is None:
+                    raise LandscapeRecordError("failsink member requires a diverted finalized primary member for the same token")
+        elif primary_effect_ids:
+            raise LandscapeRecordError("primary effect members cannot refer to another primary effect")
         if effect.predecessor_effect_id is not None:
             predecessor = linked.get(str(effect.predecessor_effect_id))
             if predecessor is None or predecessor.state != SinkEffectState.FINALIZED.value:

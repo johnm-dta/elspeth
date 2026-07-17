@@ -42,6 +42,7 @@ from elspeth.core.landscape.schema import (
     node_states_table,
     operations_table,
     sink_effect_attempts_table,
+    sink_effect_members_table,
     sink_effects_table,
     token_outcomes_table,
 )
@@ -559,10 +560,12 @@ def test_finalized_retry_refuses_raw_evidence_attempt_encoding(
         factory.execution.sink_effects.finalize(request)
 
 
+@pytest.mark.parametrize("primary_member_corruption", [None, "accepted", "not_finalized"])
 def test_failsink_finalization_requires_and_uses_exact_primary_linkage(
     db_factory: tuple[LandscapeDB, RecorderFactory],
+    primary_member_corruption: str | None,
 ) -> None:
-    _db, factory = db_factory
+    db, factory = db_factory
     primary, members, primary_lease = _prepared(factory, count=1)
     primary_attempt = factory.execution.sink_effects.begin_attempt(
         SinkEffectAttemptRequest(
@@ -603,6 +606,16 @@ def test_failsink_finalization_requires_and_uses_exact_primary_linkage(
             attempt_id=primary_attempt.attempt_id,
         )
     )
+    if primary_member_corruption is not None:
+        column_values = (
+            {"prepared_disposition": "accepted"}
+            if primary_member_corruption == "accepted"
+            else {"member_state": SinkEffectState.PREPARED.value}
+        )
+        with db.engine.begin() as conn:
+            conn.execute(
+                update(sink_effect_members_table).where(sink_effect_members_table.c.effect_id == primary.effect_id).values(**column_values)
+            )
 
     failsink_id = register_test_node(
         factory.data_flow,
@@ -694,31 +707,36 @@ def test_failsink_finalization_requires_and_uses_exact_primary_linkage(
         )
     )
 
-    result = factory.execution.sink_effects.finalize(
-        SinkEffectFinalizeRequest(
-            effect_id=failsink.effect_id,
-            lease_owner=lease.owner,
-            generation=lease.generation,
-            descriptor=descriptor,
-            publication_performed=True,
-            publication_evidence_kind="returned",
-            accepted_ordinals=(0,),
-            diverted_ordinals=(),
-            evidence={"result": "failsink-exact"},
-            members=(
-                SinkEffectFinalizationMember(
-                    ordinal=0,
-                    output_data={"row": {"ordinal": 0}},
-                    duration_ms=1.0,
-                    outcome=TerminalOutcome.TRANSIENT,
-                    path=TerminalPath.SINK_FALLBACK_TO_FAILSINK,
-                    sink_name="failsink",
-                    error_hash="f" * 64,
-                ),
+    request = SinkEffectFinalizeRequest(
+        effect_id=failsink.effect_id,
+        lease_owner=lease.owner,
+        generation=lease.generation,
+        descriptor=descriptor,
+        publication_performed=True,
+        publication_evidence_kind="returned",
+        accepted_ordinals=(0,),
+        diverted_ordinals=(),
+        evidence={"result": "failsink-exact"},
+        members=(
+            SinkEffectFinalizationMember(
+                ordinal=0,
+                output_data={"row": {"ordinal": 0}},
+                duration_ms=1.0,
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.SINK_FALLBACK_TO_FAILSINK,
+                sink_name="failsink",
+                error_hash="f" * 64,
             ),
-            attempt_id=attempt.attempt_id,
-        )
+        ),
+        attempt_id=attempt.attempt_id,
     )
+
+    if primary_member_corruption is not None:
+        with pytest.raises(LandscapeRecordError, match="diverted finalized primary member"):
+            factory.execution.sink_effects.finalize(request)
+        return
+
+    result = factory.execution.sink_effects.finalize(request)
 
     assert result.effect.primary_effect_id == primary.effect_id
     assert result.artifact.sink_effect_id == failsink.effect_id

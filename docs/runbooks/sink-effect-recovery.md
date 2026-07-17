@@ -2,7 +2,7 @@
 
 Use this runbook when a run has durable sink debt, an effect lease expired, or
 an external call may have completed without its response reaching ELSPETH. It
-applies to Landscape schema epoch 26 and the `sink-effect-v1` protocol.
+applies to Landscape schema epoch 28 and the `sink-effect-v1` protocol.
 
 Sink-effect recovery is fail closed. Do not edit Landscape rows, delete target
 objects, or repeat a sink request by hand. Those actions destroy the evidence

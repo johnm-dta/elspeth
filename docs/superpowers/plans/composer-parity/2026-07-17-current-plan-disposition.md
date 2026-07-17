@@ -16,7 +16,7 @@ Do not execute the seven plans dated 2026-07-13. They are preserved under
 - The reviewed code baseline was `a1b2b5a39`; this review found the release
   branch 140 commits beyond that baseline.
 - The current constants are `SESSION_SCHEMA_EPOCH = 28`,
-  `GUIDED_SESSION_SCHEMA_VERSION = 7`, and `SQLITE_SCHEMA_EPOCH = 27`. The old
+  `GUIDED_SESSION_SCHEMA_VERSION = 7`, and `SQLITE_SCHEMA_EPOCH = 28`. The old
   plans assign epoch numbers that have already been consumed.
 - Durable sink-effect and coalesce-effect ledgers now own recovery and artifact
   identity. Plan 01's proposed parallel operation-parent lifecycle would

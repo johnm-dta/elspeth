@@ -266,7 +266,9 @@ def _optional_enum_in_check(column_name: str, enum_type: type[StrEnum]) -> str:
 #        registry; artifacts/operations gain exclusive effect linkage.
 #   27 → Durable coalesce-effect receipts with normalized parent/state evidence;
 #        sink-effect preparation claims become a legal RESERVED lifecycle state.
-SQLITE_SCHEMA_EPOCH = 27
+#   28 → Failsink provenance moves to each sink-effect member so one recovered
+#        failsink batch can link every token to its exact primary effect.
+SQLITE_SCHEMA_EPOCH = 28
 
 schema_identity_table = create_schema_identity_table(metadata)
 
@@ -1367,6 +1369,7 @@ sink_effects_table = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
     Column("finalized_at", DateTime(timezone=True)),
     UniqueConstraint("effect_id", "input_kind"),
+    UniqueConstraint("effect_id", "run_id"),
     UniqueConstraint("effect_id", "run_id", "sink_node_id"),
     UniqueConstraint("effect_id", "stream_id"),
     CheckConstraint("role IN ('primary','failsink')", name="ck_sink_effects_role"),
@@ -1476,6 +1479,7 @@ sink_effect_members_table = Table(
     Column("lineage_json", Text, nullable=False),
     Column("lineage_hash", String(64), nullable=False),
     Column("payload_hash", String(64), nullable=False),
+    Column("primary_effect_id", String(64)),
     Column("prepared_disposition", String(16)),
     Column("reason_hash", String(64)),
     Column("member_effect_id", String(64)),
@@ -1486,6 +1490,10 @@ sink_effect_members_table = Table(
     UniqueConstraint("effect_id", "input_kind", "ordinal"),
     CheckConstraint("input_kind = 'pipeline_members'", name="ck_sink_effect_members_input_kind"),
     CheckConstraint("ordinal >= 0 AND ingest_sequence >= 0", name="ck_sink_effect_members_order"),
+    CheckConstraint(
+        "(role = 'primary' AND primary_effect_id IS NULL) OR (role = 'failsink' AND primary_effect_id IS NOT NULL)",
+        name="ck_sink_effect_members_primary_linkage",
+    ),
     CheckConstraint(
         "prepared_disposition IS NULL OR prepared_disposition IN ('accepted','diverted')",
         name="ck_sink_effect_members_disposition",
@@ -1498,6 +1506,7 @@ sink_effect_members_table = Table(
     ForeignKeyConstraint(["token_id", "row_id", "run_id"], ["tokens.token_id", "tokens.row_id", "tokens.run_id"]),
     ForeignKeyConstraint(["row_id", "run_id"], ["rows.row_id", "rows.run_id"]),
     ForeignKeyConstraint(["sink_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
+    ForeignKeyConstraint(["primary_effect_id", "run_id"], ["sink_effects.effect_id", "sink_effects.run_id"]),
 )
 Index(
     "uq_sink_effect_member_binding",

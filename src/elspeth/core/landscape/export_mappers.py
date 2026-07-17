@@ -139,6 +139,7 @@ def sink_effect_member_to_export_record(member: SinkEffectMemberRecord) -> SinkE
         "ingest_sequence": member.ingest_sequence,
         "lineage_hash": member.lineage_hash,
         "payload_hash": member.payload_hash,
+        "primary_effect_id": member.primary_effect_id,
         "prepared_disposition": member.prepared_disposition,
         "reason_hash": member.reason_hash,
         "member_effect_id": member.member_effect_id,

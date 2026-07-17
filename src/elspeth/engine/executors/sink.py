@@ -98,14 +98,14 @@ class DiversionCounts:
 @dataclass(frozen=True, slots=True)
 class _EffectPrimaryWrite:
     artifact: Artifact
-    effect_id: str
     diversions: tuple[RowDiversion, ...]
     diversion_error_hashes: Mapping[int, str]
     diversion_reason_hashes: Mapping[int, str]
     accepted_token_ids: frozenset[str]
+    primary_effect_id_by_token: Mapping[str, str]
 
     def __post_init__(self) -> None:
-        freeze_fields(self, "diversion_error_hashes", "diversion_reason_hashes")
+        freeze_fields(self, "diversion_error_hashes", "diversion_reason_hashes", "primary_effect_id_by_token")
 
 
 class SinkExecutor:
@@ -754,11 +754,11 @@ class SinkExecutor:
         accepted_token_ids = frozenset(member.token_id for member in durable_members if member.prepared_disposition == "accepted")
         return _EffectPrimaryWrite(
             artifact=result.artifact,
-            effect_id=result.effect.effect_id,
             diversions=tuple(diversions),
             diversion_error_hashes=diversion_error_hashes,
             diversion_reason_hashes=diversion_reason_hashes,
             accepted_token_ids=accepted_token_ids,
+            primary_effect_id_by_token={member.token_id: member.effect_id for member in durable_members},
         )
 
     def _handle_failsink_effect_diversions(
@@ -768,7 +768,7 @@ class SinkExecutor:
         failsink_name: str,
         failsink_effect_mode: str,
         failsink_edge_id: str,
-        primary_effect_id: str,
+        primary_effect_id_by_token: Mapping[str, str],
         primary_divert_states: list[tuple[TokenInfo, int, NodeState]],
         diversion_by_index: dict[int, RowDiversion],
         diversion_error_hashes: Mapping[int, str],
@@ -778,7 +778,7 @@ class SinkExecutor:
         ctx: PluginContext,
         on_token_written: Callable[[TokenInfo], None] | None,
     ) -> int:
-        """Publish one linked failsink effect and then close its primary anchors."""
+        """Publish one linked failsink effect and then close its per-member primary anchors."""
         if self._factory is None or failsink.node_id is None:
             raise OrchestrationInvariantError("linked failsink effects require an owning factory and sink node")
         failsink_node_id = failsink.node_id
@@ -852,8 +852,9 @@ class SinkExecutor:
                     "error_hash": diversion_error_hashes[index],
                     "outcome": TerminalOutcome.TRANSIENT.value,
                     "path": TerminalPath.SINK_FALLBACK_TO_FAILSINK.value,
-                    "primary_effect_id": primary_effect_id,
+                    "primary_effect_id": primary_effect_id_by_token[token.token_id],
                 },
+                primary_effect_id=primary_effect_id_by_token[token.token_id],
             )
             for token, index, _state in primary_divert_states
         )
@@ -880,7 +881,7 @@ class SinkExecutor:
             audit_export_snapshot_id=None,
             config_hash=identity.config_hash,
             replacing_target=True,
-            primary_effect_id=primary_effect_id,
+            primary_effect_id=None,
         )
         caller_index_by_token = {token.token_id: index for token, index, _state in primary_divert_states}
         finalization_members = tuple(
@@ -1174,7 +1175,7 @@ class SinkExecutor:
                     failsink_name=failsink_name,
                     failsink_effect_mode=failsink_effect_mode,
                     failsink_edge_id=failsink_edge_id,
-                    primary_effect_id=effect_write.effect_id,
+                    primary_effect_id_by_token=effect_write.primary_effect_id_by_token,
                     primary_divert_states=primary_divert_states,
                     diversion_by_index=diversion_by_index,
                     diversion_error_hashes=effect_write.diversion_error_hashes,

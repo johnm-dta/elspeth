@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from types import SimpleNamespace
 
@@ -300,6 +300,29 @@ def test_state_attempt_ids_do_not_change_effect_identity() -> None:
     ):
         assert len(identifier) == 64
         int(identifier, 16)
+
+
+def test_failsink_identity_binds_each_members_primary_effect_id() -> None:
+    source, candidates = _logical_graph()
+    members = resolve_sink_effect_members(source, candidates)
+    first_members = tuple(replace(member, primary_effect_id="a" * 64) for member in members)
+    second_members = tuple(replace(member, primary_effect_id="b" * 64) for member in members)
+
+    def identity(bound_members):
+        return compute_pipeline_effect_identity(
+            run_id="run-1",
+            sink_node_id="failsink-1",
+            role=SinkEffectRole.FAILSINK,
+            sink_config={"format": "json"},
+            target_config={"path": "safe/failsink.json"},
+            members=bound_members,
+        )
+
+    first = identity(first_members)
+    second = identity(second_members)
+
+    assert first.membership_or_manifest_hash != second.membership_or_manifest_hash
+    assert first.effect_id != second.effect_id
 
 
 def test_pipeline_identity_binds_ordered_payload_and_safe_target_without_leaking_values() -> None:

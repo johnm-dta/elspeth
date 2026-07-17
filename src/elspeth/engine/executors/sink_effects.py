@@ -715,6 +715,7 @@ class SinkEffectCoordinator:
             payload_hash=durable.payload_hash,
             row=row,
             member_effect_id=durable.member_effect_id,
+            primary_effect_id=durable.primary_effect_id,
         )
 
     def _prepare(

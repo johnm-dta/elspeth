@@ -524,6 +524,7 @@ _REQUIRED_COMPOSITE_FOREIGN_KEYS: tuple[tuple[str, tuple[str, ...], str, tuple[s
     ("sink_effects", ("sink_node_id", "run_id"), "nodes", ("node_id", "run_id")),
     ("sink_effect_members", ("token_id", "row_id", "run_id"), "tokens", ("token_id", "row_id", "run_id")),
     ("sink_effect_members", ("effect_id", "input_kind"), "sink_effects", ("effect_id", "input_kind")),
+    ("sink_effect_members", ("primary_effect_id", "run_id"), "sink_effects", ("effect_id", "run_id")),
     (
         "audit_export_snapshots",
         ("source_run_id", "source_status", "source_completed_at"),
@@ -608,6 +609,7 @@ _REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
     ("sink_effects", "ck_sink_effects_reconcile_kind"),
     ("sink_effect_members", "ck_sink_effect_members_input_kind"),
     ("sink_effect_members", "ck_sink_effect_members_order"),
+    ("sink_effect_members", "ck_sink_effect_members_primary_linkage"),
     ("sink_effect_members", "ck_sink_effect_members_disposition"),
     ("sink_effect_members", "ck_sink_effect_members_state"),
     ("sink_effect_export_snapshots", "ck_sink_effect_export_snapshots_input_kind"),

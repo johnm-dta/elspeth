@@ -15,20 +15,17 @@ practice. It also adds the supported AWS ECS deployment profile for running
 the web service on Fargate with Aurora PostgreSQL, EFS, S3, Bedrock, Cognito,
 CloudWatch, and X-Ray integrations.
 
-The web session database resets on upgrade: `SESSION_SCHEMA_EPOCH` advances
-from 26 to 27 to persist account-wide dismissal of the new freeform
-introduction. The integrated AWS runtime-readiness candidate also advances the
-Landscape audit schema from `SQLITE_SCHEMA_EPOCH` 22 to 23 for immutable web
-plugin-policy evidence. Database hardening then advances Landscape from 23 to
-24 with `tokens(row_id, run_id) -> rows(row_id, run_id)`, then to 25 with a
-partial unique index over non-null artifact logical-effect keys. An exact
-epoch-23 SQLite Landscape is automatically migrated through both ordered steps;
-an exact epoch-24 database takes only the artifact-index step. Migration occurs
-only during writable schema-managing startup. PostgreSQL requires the approved
-schema-owner migration or recreation path, and older SQLite epochs retain their
-documented destructive boundary. Epoch-23 and epoch-24 code cannot reopen an
-epoch-25 database, so application rollback after migration is forbidden unless
-the matched pre-migration database archive is restored with the old image.
+The 0.7.1 candidate advances `SESSION_SCHEMA_EPOCH` from 26 to 28 for the
+account-wide freeform-introduction preference and the shared SQLite/PostgreSQL
+schema-identity proof. It advances the Landscape audit schema from
+`SQLITE_SCHEMA_EPOCH` 22 to 28: web plugin-policy evidence (23), run-scoped
+token ownership (24), artifact idempotency (25), durable sink effects (26),
+durable coalesce receipts (27), and per-member failsink-to-primary provenance
+(28). ELSPETH is pre-1.0, so predecessor session and Landscape stores are not
+migrated in place: archive or export required evidence, stop and uninstall the
+old service, recreate both databases, then reinstall this version. Rollback
+requires restoring the matching pre-upgrade database archives with the old
+image; old code must never open the recreated epoch-28 stores.
 
 ### Added
 

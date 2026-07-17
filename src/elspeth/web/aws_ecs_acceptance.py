@@ -369,7 +369,9 @@ _ROLLBACK_PACKAGE_VERSION = "0.7.0"
 # test_compatibility_schema_facts_track_current_epochs enforces that.
 _ROLLBACK_BASELINE_SESSION_EPOCH = 27
 _ROLLBACK_BASELINE_LANDSCAPE_EPOCH = 23
-_SCENARIO_B_STRUCTURAL_CHANGES = "landscape_epoch_23_to_27_token_ownership_artifact_idempotency_sink_effect_ledger_and_coalesce_receipts"
+_SCENARIO_B_STRUCTURAL_CHANGES = (
+    "landscape_epoch_23_to_28_token_ownership_artifact_idempotency_sink_effect_ledger_coalesce_receipts_and_per_member_failsink_provenance"
+)
 
 
 def _expected_schema_facts(scenario_id: str) -> dict[str, object]:

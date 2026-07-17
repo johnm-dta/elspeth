@@ -41,7 +41,7 @@ React/TypeScript, Vitest, Playwright, pytest, Hypothesis, LiteLLM.
   transform-only solver for `steps`, and materializes fixed `chain_in` / `main`
   wiring in `handle_step_3_chain_accept()`.
 - Current schema constants are `GUIDED_SESSION_SCHEMA_VERSION = 7`,
-  `SESSION_SCHEMA_EPOCH = 28`, and `SQLITE_SCHEMA_EPOCH = 27`. The guided
+  `SESSION_SCHEMA_EPOCH = 28`, and `SQLITE_SCHEMA_EPOCH = 28`. The guided
   replacement therefore uses guided schema 8 and session epoch 29. It does not
   change the landscape epoch.
 - The repository has live and tutorial workflow profiles; it has no deployed

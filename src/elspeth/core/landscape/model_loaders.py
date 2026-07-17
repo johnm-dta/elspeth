@@ -694,6 +694,7 @@ class SinkEffectMemberLoader:
             lineage_json=row.lineage_json,
             lineage_hash=row.lineage_hash,
             payload_hash=row.payload_hash,
+            primary_effect_id=row.primary_effect_id,
             prepared_disposition=row.prepared_disposition,
             reason_hash=row.reason_hash,
             member_effect_id=row.member_effect_id,

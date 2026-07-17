@@ -2,7 +2,7 @@
 
 Use this runbook when a pre-1.0 schema change requires deleting or archiving stale `sessions.db` and Landscape databases. Any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must coordinate both databases in one service-stop window. Before 1.0, the supported upgrade is uninstall, archive/export when required, recreate, and reinstall; ELSPETH does not migrate either database in place. Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
 
-## Current Cutover: 0.7.1 (session epoch 28 and Landscape epoch 27)
+## Current Cutover: 0.7.1 (session epoch 28 and Landscape epoch 28)
 
 0.7.1 advances `SESSION_SCHEMA_EPOCH` from 26 to 27 so
 `user_preferences.freeform_intro_dismissed_at` can persist the account-wide
@@ -16,7 +16,8 @@ CLI runs receive none. Database hardening then advances Landscape from epoch 23
 to 24 and adds `tokens(row_id, run_id) -> rows(row_id, run_id)`, then advances
 to 25 with a partial unique index over non-null
 `artifacts(run_id, idempotency_key)` pairs. Durable sink effects advance the
-Landscape to epoch 26, and durable coalesce effects advance it to epoch 27.
+Landscape to epoch 26, durable coalesce effects advance it to epoch 27, and
+per-member failsink-to-primary provenance advances it to epoch 28.
 
 Archive and recreate the session database, its sidecars, and every stale
 Landscape database under the service-stop procedure below. Every predecessor
@@ -37,7 +38,7 @@ and epochs; forward and backward compatibility decisions; and an explicit
 `rollback_permitted` decision with evidence. Older code is not compatible with
 the freshly recreated current databases. Rollback is therefore
 `no` unless a later approved record proves otherwise. Plans 10 and 12 must cite
-the session-epoch-28/Landscape-epoch-27 record when binding candidate and
+the session-epoch-28/Landscape-epoch-28 record when binding candidate and
 rollback decisions.
 
 Deployments crossing the 0.7.0 boundary from an older release must also account

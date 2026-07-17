@@ -194,7 +194,7 @@ Expected: PASS, including every negative control.
 
 - [ ] On the exact integrated revision, run the full backend, testcontainer,
   property, frontend, and Playwright gates. Assert session epoch 29, guided
-  schema 8, landscape epoch 27, and no active chain proposal path.
+  schema 8, landscape epoch 28, and no active chain proposal path.
 - [ ] Drain staging and recreate only the pre-release session store using the
   updated runbook. Verify health, schema probe, empty sessions, authentication,
   request-scoped catalog, provider/model availability, frontend build id, and a

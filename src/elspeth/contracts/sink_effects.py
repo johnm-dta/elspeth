@@ -331,9 +331,12 @@ class SinkEffectMemberCandidate:
     token_id: str
     row: Mapping[str, object]
     pending_identity: Mapping[str, object] = field(default_factory=lambda: MappingProxyType({}))
+    primary_effect_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_nonempty_string(self.token_id, "token_id")
+        if self.primary_effect_id is not None:
+            _require_lower_hex_64(self.primary_effect_id, "primary_effect_id")
         frozen_row = _freeze_canonical_row_value(self.row, "row")
         if not isinstance(frozen_row, Mapping):
             raise TypeError("row must be a mapping")
@@ -354,6 +357,7 @@ class SinkEffectMember:
     row: Mapping[str, object]
     pending_identity_hash: str = field(default=_EMPTY_IDENTITY_HASH)
     member_effect_id: str | None = None
+    primary_effect_id: str | None = None
 
     def __post_init__(self) -> None:
         require_int(self.ordinal, "ordinal", min_value=0)
@@ -372,8 +376,10 @@ class SinkEffectMember:
             raise ValueError("lineage_json exceeds the 64 KiB limit")
         if sha256(self.lineage_json.encode("utf-8")).hexdigest() != self.lineage_hash:
             raise ValueError("lineage_hash must bind exact lineage_json")
-        if self.member_effect_id is not None:
-            _require_lower_hex_64(self.member_effect_id, "member_effect_id")
+        for field_name in ("member_effect_id", "primary_effect_id"):
+            value = getattr(self, field_name)
+            if value is not None:
+                _require_lower_hex_64(value, field_name)
         frozen_row = _freeze_canonical_row_value(self.row, "row")
         if not isinstance(frozen_row, Mapping):
             raise TypeError("row must be a mapping")
@@ -423,13 +429,28 @@ class SinkEffectReservationRequest:
             replace(member, ordinal=ordinal, member_effect_id=None)
             for ordinal, member in enumerate(sorted(members, key=lambda member: member.ordinal))
         )
+
+        if self.role is SinkEffectRole.PRIMARY:
+            if self.primary_effect_id is not None or any(member.primary_effect_id is not None for member in members):
+                raise ValueError("primary effects cannot refer to another primary effect")
+        else:
+            if self.primary_effect_id is not None:
+                if any(member.primary_effect_id not in (None, self.primary_effect_id) for member in members):
+                    raise ValueError("failsink effect-level primary linkage disagrees with a member")
+                members = tuple(
+                    replace(member, primary_effect_id=self.primary_effect_id) if member.primary_effect_id is None else member
+                    for member in members
+                )
+            if not members or any(member.primary_effect_id is None for member in members):
+                raise ValueError("failsink effects require primary_effect_id on every member")
+            primary_effect_ids = {member.primary_effect_id for member in members}
+            common_primary_effect_id = next(iter(primary_effect_ids)) if len(primary_effect_ids) == 1 else None
+            if self.primary_effect_id not in (None, common_primary_effect_id):
+                raise ValueError("failsink effect-level primary linkage disagrees with its members")
+            object.__setattr__(self, "primary_effect_id", common_primary_effect_id)
+
         object.__setattr__(self, "members", members)
         freeze_fields(self, "members")
-
-        if self.role is SinkEffectRole.PRIMARY and self.primary_effect_id is not None:
-            raise ValueError("primary effects cannot refer to another primary effect")
-        if self.role is SinkEffectRole.FAILSINK and self.primary_effect_id is None:
-            raise ValueError("failsink effects require primary_effect_id")
 
         if self.input_kind is SinkEffectInputKind.PIPELINE_MEMBERS:
             if not members:

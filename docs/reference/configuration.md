@@ -1035,21 +1035,23 @@ landscape:
 | `dump_to_jsonl_include_payloads` | bool | `false` | Include request/response bodies in journal |
 | `dump_to_jsonl_payload_base_path` | string | (from payload_store) | Payload store path for inlining |
 
-### Landscape schema epoch 27
+### Landscape schema epoch 28
 
 Landscape epoch 26 added durable sink-effect streams, effects, ordered members,
 attempts, and sealed audit-export snapshots. Epoch 27 adds durable coalesce
 effects and normalized parent evidence so materialization and completion can be
-replayed safely after a crash. See the
+replayed safely after a crash. Epoch 28 moves primary-effect provenance onto
+each failsink effect member so recovered batches spanning more than one primary
+effect remain exactly attributable. See the
 [sink-effect recovery runbook](../runbooks/sink-effect-recovery.md).
 
 ELSPETH is pre-1.0. It does not transform an older Landscape schema into epoch
-27, either automatically at startup or through an operator migration command.
+28, either automatically at startup or through an operator migration command.
 Stop and uninstall the old deployment, archive or export evidence when policy
 requires it, delete/recreate the Landscape database, then reinstall and
 initialize this ELSPETH version. PostgreSQL schema-owner and runtime/DML roles
 remain separate; recreation is an operator action. Code that understands only
-an older epoch must not be rolled back over an epoch-27 database.
+an older epoch must not be rolled back over an epoch-28 database.
 
 Data-preserving, version-to-version schema migrations become a first-class
 compatibility obligation at 1.0. They are intentionally not a pre-1.0 promise.

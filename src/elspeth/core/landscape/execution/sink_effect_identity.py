@@ -202,7 +202,7 @@ def resolve_sink_effect_members(
     if len(set(token_ids)) != len(token_ids):
         raise _audit_error("candidate token IDs must be unique")
 
-    ordered_inputs: list[tuple[int, LineageStructure, str, str, str, str, Mapping[str, object], str]] = []
+    ordered_inputs: list[tuple[int, LineageStructure, str, str, str, str, Mapping[str, object], str, str | None]] = []
     for candidate in candidate_tuple:
         root = query.get_token(candidate.token_id)
         if root is None:
@@ -234,6 +234,7 @@ def resolve_sink_effect_members(
                 payload_hash,
                 candidate.row,
                 pending_identity_hash,
+                candidate.primary_effect_id,
             )
         )
 
@@ -249,6 +250,7 @@ def resolve_sink_effect_members(
             payload_hash=item[5],
             row=item[6],
             pending_identity_hash=item[7],
+            primary_effect_id=item[8],
         )
         for ordinal, item in enumerate(ordered_inputs)
     )
@@ -291,6 +293,7 @@ def compute_pipeline_effect_identity(
             "ordinal": member.ordinal,
             "payload_hash": member.payload_hash,
             "pending_identity_hash": member.pending_identity_hash,
+            "primary_effect_id": member.primary_effect_id,
             "row_id": member.row_id,
             "token_id": member.token_id,
         }

@@ -780,6 +780,7 @@ class SinkEffectMemberRecord:
     lineage_json: str
     lineage_hash: str
     payload_hash: str
+    primary_effect_id: str | None
     prepared_disposition: Literal["accepted", "diverted"] | None
     reason_hash: str | None
     member_effect_id: str | None
@@ -799,8 +800,10 @@ class SinkEffectMemberRecord:
         _validate_nonempty_string(self.lineage_json, "lineage_json")
         for field_name in ("lineage_hash", "payload_hash"):
             _validate_hash(getattr(self, field_name), field_name)
-        for field_name in ("reason_hash", "member_effect_id", "descriptor_hash", "evidence_hash"):
+        for field_name in ("primary_effect_id", "reason_hash", "member_effect_id", "descriptor_hash", "evidence_hash"):
             _validate_hash(getattr(self, field_name), field_name, optional=True)
+        if (self.role is SinkEffectRole.PRIMARY) != (self.primary_effect_id is None):
+            raise ValueError("sink effect member primary linkage must match its role")
         if self.prepared_disposition not in (None, "accepted", "diverted"):
             raise ValueError("prepared_disposition must be accepted, diverted, or None")
 

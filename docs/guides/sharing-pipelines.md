@@ -69,7 +69,7 @@ accept this trade-off.
 
 For 0.7.1, shareable-review state is part of the broader web session database
 contract. The release expects `SESSION_SCHEMA_EPOCH=28` and
-`SQLITE_SCHEMA_EPOCH=27`. When upgrading from an older pre-1.0 build, stop and
+`SQLITE_SCHEMA_EPOCH=28`. When upgrading from an older pre-1.0 build, stop and
 uninstall the web service, archive/export evidence when required, recreate the
 configured session and Landscape databases, then reinstall and initialize this
 ELSPETH version. No SQLite or PostgreSQL predecessor schema is transformed in

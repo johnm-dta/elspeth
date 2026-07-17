@@ -287,6 +287,121 @@ def test_primary_finalizes_once_while_diverted_token_waits_for_linked_failsink(t
         db.close()
 
 
+def test_recovered_two_primary_batch_preserves_per_member_failsink_provenance(tmp_path: Path) -> None:
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'two-primary-failsink.db'}")
+    try:
+        factory = make_factory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source_id = register_test_node(factory.data_flow, run.run_id, "source", node_type=NodeType.SOURCE, plugin_name="source")
+        primary_id = register_test_node(
+            factory.data_flow,
+            run.run_id,
+            "primary",
+            node_type=NodeType.SINK,
+            plugin_name="partitioning-primary",
+        )
+        failsink_id = register_test_node(
+            factory.data_flow,
+            run.run_id,
+            "failsink",
+            node_type=NodeType.SINK,
+            plugin_name="partitioning-failsink",
+        )
+        edge = factory.data_flow.register_edge(
+            run.run_id,
+            primary_id,
+            failsink_id,
+            "__failsink__",
+            RoutingMode.DIVERT,
+        )
+        first_token, second_token = _effect_tokens(
+            factory,
+            run_id=run.run_id,
+            source_id=source_id,
+            rows=[{"value": 1, "divert": True}, {"value": 2, "divert": True}],
+        )
+        primary_target = DuplicateObservableTarget()
+        failsink_target = DuplicateObservableTarget()
+        primary = PartitioningObservableSink(primary_target, name="primary")
+        primary.node_id = primary_id
+        failsink = PartitioningObservableSink(failsink_target, name="failsink", divert_rows=False)
+        failsink.node_id = failsink_id
+        ctx = PluginContext(run_id=run.run_id, config={}, landscape=factory.plugin_audit_writer(), node_id=primary_id)
+
+        def stop_after_first_primary(seam: SinkEffectExecutionSeam) -> None:
+            if seam is SinkEffectExecutionSeam.AFTER_FINALIZE_BEFORE_RESPONSE:
+                raise SinkEffectInjectedFault(seam)
+
+        with pytest.raises(SinkEffectInjectedFault):
+            SinkExecutor(
+                factory.execution,
+                factory.data_flow,
+                SpanFactory(),
+                run.run_id,
+                factory=factory,
+                worker_id="worker-a",
+                sink_effect_fault_hook=stop_after_first_primary,
+            ).write(
+                primary,  # type: ignore[arg-type]
+                [first_token],
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW),
+                effect_mode="write",
+                failsink=failsink,  # type: ignore[arg-type]
+                failsink_name="failsink",
+                failsink_effect_mode="write",
+                failsink_edge_id=edge.edge_id,
+            )
+
+        recovered_factory = make_factory(db)
+        recovered_primary = PartitioningObservableSink(primary_target, name="primary")
+        recovered_primary.node_id = primary_id
+        recovered_failsink = PartitioningObservableSink(failsink_target, name="failsink", divert_rows=False)
+        recovered_failsink.node_id = failsink_id
+        _artifact, counts = SinkExecutor(
+            recovered_factory.execution,
+            recovered_factory.data_flow,
+            SpanFactory(),
+            run.run_id,
+            factory=recovered_factory,
+            worker_id="worker-b",
+        ).write(
+            recovered_primary,  # type: ignore[arg-type]
+            [first_token, second_token],
+            ctx,
+            1,
+            sink_name="output",
+            pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW),
+            effect_mode="write",
+            failsink=recovered_failsink,  # type: ignore[arg-type]
+            failsink_name="failsink",
+            failsink_effect_mode="write",
+            failsink_edge_id=edge.edge_id,
+        )
+
+        effects = recovered_factory.execution.sink_effects.get_effects_for_run(run.run_id)
+        primary_effects = tuple(effect for effect in effects if effect.role is SinkEffectRole.PRIMARY)
+        failsink_effects = tuple(effect for effect in effects if effect.role is SinkEffectRole.FAILSINK)
+        assert len(primary_effects) == 2
+        assert len(failsink_effects) == 1
+        primary_by_token = {
+            member.token_id: effect.effect_id
+            for effect in primary_effects
+            for member in recovered_factory.execution.sink_effects.get_members(effect.effect_id)
+        }
+        failsink_effect = failsink_effects[0]
+        failsink_members = recovered_factory.execution.sink_effects.get_members(failsink_effect.effect_id)
+        observed_primary_by_token = {member.token_id: member.primary_effect_id for member in failsink_members}
+
+        assert counts.failsink_mode == 2
+        assert failsink_effect.primary_effect_id is None
+        assert observed_primary_by_token == primary_by_token
+    finally:
+        db.close()
+
+
 class _RejectingFailsink(PartitioningObservableSink):
     """Failsink whose transactional backstop rejects every enriched row."""
 

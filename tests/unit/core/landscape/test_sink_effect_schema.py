@@ -1,4 +1,4 @@
-"""Epoch-26 sink-effect metadata and portable mechanical invariants."""
+"""Sink-effect metadata and portable mechanical invariants through epoch 28."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ def test_effect_tables_and_linkage_columns_exist() -> None:
     assert metadata.tables["artifacts"].c.produced_by_state_id.nullable
     assert metadata.tables["artifacts"].c.publication_performed.nullable is False
     assert metadata.tables["artifacts"].c.publication_evidence_kind.nullable is False
+    assert "primary_effect_id" in metadata.tables["sink_effect_members"].c
 
 
 def test_effect_input_xor_and_lifecycle_checks_are_required() -> None:
@@ -41,6 +42,7 @@ def test_effect_input_xor_and_lifecycle_checks_are_required() -> None:
             "sink_effects" if name.startswith("ck_sink_effects_") else name.removeprefix("ck_").rsplit("_input_kind", 1)[0],
             name,
         ) in required
+    assert ("sink_effect_members", "ck_sink_effect_members_primary_linkage") in required
 
 
 def test_fresh_sqlite_reflects_effect_fks_and_unique_operation_link() -> None:
@@ -53,6 +55,20 @@ def test_fresh_sqlite_reflects_effect_fks_and_unique_operation_link() -> None:
         effect_index = next(item for item in operation_indexes if item["name"] == "uq_operations_sink_effect_id")
         assert effect_index["unique"] == 1
         assert effect_index["column_names"] == ["sink_effect_id"]
+    finally:
+        db.close()
+
+
+def test_fresh_sqlite_reflects_run_scoped_per_member_primary_linkage() -> None:
+    db = LandscapeDB.in_memory()
+    try:
+        member_fks = inspect(db.engine).get_foreign_keys("sink_effect_members")
+        assert any(
+            fk["constrained_columns"] == ["primary_effect_id", "run_id"]
+            and fk["referred_table"] == "sink_effects"
+            and fk["referred_columns"] == ["effect_id", "run_id"]
+            for fk in member_fks
+        )
     finally:
         db.close()
 

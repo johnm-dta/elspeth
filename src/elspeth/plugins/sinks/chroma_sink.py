@@ -194,7 +194,7 @@ class ChromaSink(BaseSink):
     name = "chroma_sink"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:998381796385fde1"
+    source_file_hash: str | None = "sha256:a707a2e6da7bc1be"
     config_model = ChromaSinkConfig
     supports_resume = False
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
@@ -519,6 +519,13 @@ class ChromaSink(BaseSink):
             "schema": "chroma-member-effect-result-v1",
         }
 
+    @staticmethod
+    def _normalize_metadata_for_comparison(metadata: object) -> object:
+        if not isinstance(metadata, Mapping):
+            return metadata
+        normalized = {key: value for key, value in metadata.items() if value is not None}
+        return normalized or None
+
     def commit_member_effect(
         self,
         plan: SinkEffectPlan,
@@ -573,7 +580,9 @@ class ChromaSink(BaseSink):
             or len(metadatas) != 1
         ):
             return SinkEffectReconcileResult.unknown(evidence=self._member_group_evidence(plan, "ambiguous"))
-        if documents[0] != document or metadatas[0] != metadata:
+        actual_metadata = self._normalize_metadata_for_comparison(metadatas[0])
+        expected_metadata = self._normalize_metadata_for_comparison(metadata)
+        if documents[0] != document or actual_metadata != expected_metadata:
             return SinkEffectReconcileResult.unknown(evidence=self._member_group_evidence(plan, "divergent"))
         return SinkEffectReconcileResult.applied(
             descriptor,

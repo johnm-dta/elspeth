@@ -321,6 +321,46 @@ class TestChromaMemberEffects:
 
         assert collection.upsert_count_by_id == {"d1": 1, "d2": 1, "d3": 1}
 
+    @pytest.mark.parametrize(
+        ("row", "stored_metadata", "metadata_fields"),
+        [
+            ({"doc_id": "d1", "text": "one", "topic": None}, None, ["topic"]),
+            (
+                {"doc_id": "d1", "text": "one", "topic": None, "category": "science"},
+                {"category": "science"},
+                ["topic", "category"],
+            ),
+        ],
+    )
+    def test_reconcile_accepts_chroma_normalized_null_metadata(
+        self,
+        row: dict[str, object],
+        stored_metadata: dict[str, object] | None,
+        metadata_fields: list[str],
+    ) -> None:
+        collection = _RecoverableChromaCollection()
+        sink = ChromaSink(
+            _make_config(
+                field_mapping={
+                    "document_field": "text",
+                    "id_field": "doc_id",
+                    "metadata_fields": metadata_fields,
+                },
+                schema={"mode": "observed"},
+            )
+        )
+        sink._collection = collection  # type: ignore[assignment]
+        member = _chroma_effect_member(0, row)
+        effect_input = SinkEffectPipelineMembersInput((member,), (member,))
+        ctx = _chroma_effect_context()
+        inspection = sink.inspect_effect(SinkEffectInspectionRequest(effect_id="b" * 64, target="{}", predecessor_descriptor=None), ctx)
+        plan = sink.prepare_effect(SinkEffectPrepareRequest(effect_id="b" * 64, effect_input=effect_input, inspection=inspection), ctx)
+        collection.documents["d1"] = ("one", stored_metadata)
+
+        result = sink.reconcile_member_effect(plan, member, effect_input, ctx)
+
+        assert result.kind is SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR
+
     def test_reconcile_returns_unknown_for_divergent_document_or_metadata(self) -> None:
         collection = _RecoverableChromaCollection()
         sink = ChromaSink(_make_config())

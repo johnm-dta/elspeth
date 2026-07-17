@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any, Final, cast
@@ -140,6 +140,9 @@ ADVISOR_TRIGGER_DETERMINISTIC_EARLY: Final[str] = "deterministic_early_checkpoin
 
 ADVISOR_TRIGGER_DETERMINISTIC_END: Final[str] = "deterministic_end_checkpoint"
 
+_tool_failure_result = _failure_result
+_tool_plugin_policy_failure = _plugin_policy_failure
+
 
 class _RequestInterpretationReviewArgumentsModel(BaseModel):
     """Tier-3 trust-boundary model for the ``request_interpretation_review`` tool.
@@ -202,21 +205,34 @@ def _options_with_inline_blob_source_review(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class SetPipelineCandidate:
+    """A fully validated pipeline draft plus any unsettled inline blob."""
+
+    result: ToolResult
+    prepared_inline_blob: _PreparedBlobCreate | None
+
+    @property
+    def acceptable(self) -> bool:
+        """Whether the candidate is eligible for commit or proposal publication."""
+        return self.result.success and self.result.validation is not None and self.result.validation.is_valid
+
+
 @trust_boundary(
     tier=3,
     source="LLM composer tool-call arguments",
-    source_param="args",
+    source_param="arguments",
     suppresses=("R1", "R5"),
     invariant="raises ToolArgumentError on SetPipelineArgumentsModel shape mismatch; never coerces",
     test_ref="tests/unit/web/composer/test_promote_set_pipeline.py::TestPromoteSetPipelineArgErrorRouting::test_empty_arguments_raise_tool_argument_error",
     test_fingerprint="02c5bd7c9f9aa90bd1af5d67ac7d60764bfc0306de78c6216ee84a5d905d362b",
 )
-def _execute_set_pipeline(
-    args: dict[str, Any],
+def build_set_pipeline_candidate(
+    arguments: Mapping[str, Any],
     state: CompositionState,
     context: ToolContext,
-) -> ToolResult:
-    """Atomically replace the entire pipeline composition state.
+) -> SetPipelineCandidate:
+    """Validate and construct a pipeline without publishing or persisting it.
 
     Tier-3 boundary: ``args`` is an LLM-supplied dict.  Validated via the
     Pydantic redaction-bearing model :class:`SetPipelineArgumentsModel` —
@@ -232,7 +248,7 @@ def _execute_set_pipeline(
     -----------------------
     The dispatcher at :func:`execute_tool` (``tools.py:5530-5540``) supplies
     ``session_engine`` and ``session_id`` as kwargs.  These are NOT part of
-    the LLM-supplied ``arguments`` dict — they are wired from the composer
+    the LLM-supplied ``arguments`` mapping — they are wired from the composer
     service request context — so they are NOT modelled in
     :class:`SetPipelineArgumentsModel`.  The Pydantic model validates only
     the LLM-supplied dict; the kwargs enter through the function signature.
@@ -248,12 +264,32 @@ def _execute_set_pipeline(
     (type vs semantic) — same pattern as
     :class:`SetSourceArgumentsModel` plugin-not-in-catalog handling.
     """
+    args = dict(arguments)
     catalog = context.catalog
     data_dir = context.data_dir
     session_engine = context.session_engine
     session_id = context.session_id
     user_message_id = context.user_message_id
-    max_blob_storage_per_session_bytes = context.max_blob_storage_per_session_bytes
+    prepared_inline_blob: _PreparedBlobCreate | None = None
+
+    def _candidate(result: ToolResult) -> SetPipelineCandidate:
+        return SetPipelineCandidate(result=result, prepared_inline_blob=prepared_inline_blob)
+
+    def _failure_result(
+        rejected_state: CompositionState,
+        error_msg: str,
+        *,
+        error_code: str | None = None,
+    ) -> SetPipelineCandidate:
+        return _candidate(_tool_failure_result(rejected_state, error_msg, error_code=error_code))
+
+    def _plugin_policy_failure(
+        rejected_state: CompositionState,
+        violation: Any,
+        *,
+        component: str | None = None,
+    ) -> SetPipelineCandidate:
+        return _candidate(_tool_plugin_policy_failure(rejected_state, violation, component=component))
 
     try:
         validated = SetPipelineArgumentsModel.model_validate(args)
@@ -270,7 +306,6 @@ def _execute_set_pipeline(
         return _failure_result(state, "set_pipeline requires source or sources.")
 
     source_specs: dict[str, SourceSpec] = {}
-    prepared_inline_blob: _PreparedBlobCreate | None = None
     resolved_source_blob: _ResolvedSourceBlob | None = None
     single_source_on_vf: str | None = None
 
@@ -312,7 +347,7 @@ def _execute_set_pipeline(
                 options=src_options,
             )
             if credential_error is not None:
-                return credential_error
+                return _candidate(credential_error)
             src_on_vf = source_model.on_validation_failure or _DEFAULT_SOURCE_VALIDATION_FAILURE
             path_error = _validate_source_path(src_options, data_dir)
             if path_error is not None:
@@ -366,7 +401,7 @@ def _execute_set_pipeline(
             options=legacy_src_options,
         )
         if credential_error is not None:
-            return credential_error
+            return _candidate(credential_error)
         source_blob_id = legacy_source_model.blob_id
         inline_blob = legacy_source_model.inline_blob
         src_on_vf = legacy_source_model.on_validation_failure or _DEFAULT_SOURCE_VALIDATION_FAILURE
@@ -386,7 +421,7 @@ def _execute_set_pipeline(
                 tool_name="set_pipeline",
             )
             if isinstance(resolved, ToolResult):
-                return resolved
+                return _candidate(resolved)
             resolved_source_blob = resolved
             src_plugin = resolved.plugin
             legacy_src_options = resolved.options
@@ -490,7 +525,7 @@ def _execute_set_pipeline(
             options=node_options,
         )
         if credential_error is not None:
-            return credential_error
+            return _candidate(credential_error)
         if node_type in ("transform", "aggregation") and node_plugin is not None:
             plugin_error = _validate_plugin_name(context, "transform", node_plugin)
             if plugin_error is not None:
@@ -591,7 +626,7 @@ def _execute_set_pipeline(
             options=out_options,
         )
         if credential_error is not None:
-            return credential_error
+            return _candidate(credential_error)
         out_path_error = _validate_sink_path(out_options, data_dir, session_id=session_id)
         if out_path_error is not None:
             return _failure_result(state, f"Output '{out_name}': {out_path_error}")
@@ -726,32 +761,52 @@ def _execute_set_pipeline(
     if review_contract_error is not None:
         return _failure_result(state, review_contract_error)
 
-    if prepared_inline_blob is not None:
-        if session_engine is None or session_id is None:
-            return _failure_result(state, "set_pipeline source.inline_blob requires session context.")
-        quota_error = _persist_prepared_blob_create(
-            prepared_inline_blob,
-            session_engine=session_engine,
-            session_id=session_id,
-            max_blob_storage_per_session_bytes=max_blob_storage_per_session_bytes,
-        )
-        if quota_error is not None:
-            return _failure_result(state, quota_error)
-
     # 6. Report all nodes + sources + outputs as affected
     affected = (*(_source_component_id(name) for name in source_specs), *(n.id for n in node_specs), *(o.name for o in output_specs))
     data: dict[str, Any] | None = _vf_destination_note(new_state, single_source_on_vf) if single_source_on_vf is not None else None
     if resolved_source_blob is not None:
         source_blob_payload = {"source_blob": resolved_source_blob.payload}
         data = source_blob_payload if data is None else {**data, **source_blob_payload}
-    if prepared_inline_blob is not None:
-        inline_payload = {"inline_blob": _blob_create_payload(prepared_inline_blob)}
-        data = inline_payload if data is None else {**data, **inline_payload}
-    return _mutation_result(
-        new_state,
-        affected,
-        data=data,
+    return _candidate(
+        _mutation_result(
+            new_state,
+            affected,
+            data=data,
+        )
     )
+
+
+def _execute_set_pipeline(
+    args: dict[str, Any],
+    state: CompositionState,
+    context: ToolContext,
+) -> ToolResult:
+    """Build and settle one atomic full-pipeline replacement."""
+    candidate = build_set_pipeline_candidate(args, state, context)
+    result = candidate.result
+    prepared_inline_blob = candidate.prepared_inline_blob
+    if not result.success or prepared_inline_blob is None:
+        return result
+
+    session_engine = context.session_engine
+    session_id = context.session_id
+    if session_engine is None or session_id is None:
+        return _tool_failure_result(state, "set_pipeline source.inline_blob requires session context.")
+    quota_error = _persist_prepared_blob_create(
+        prepared_inline_blob,
+        session_engine=session_engine,
+        session_id=session_id,
+        max_blob_storage_per_session_bytes=context.max_blob_storage_per_session_bytes,
+    )
+    if quota_error is not None:
+        return _tool_failure_result(state, quota_error)
+
+    inline_payload = {"inline_blob": _blob_create_payload(prepared_inline_blob)}
+    if result.data is None:
+        data: dict[str, Any] = inline_payload
+    else:
+        data = {**cast(Mapping[str, Any], result.data), **inline_payload}
+    return replace(result, data=data)
 
 
 def _execute_apply_pipeline_recipe(

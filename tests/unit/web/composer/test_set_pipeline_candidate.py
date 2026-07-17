@@ -8,7 +8,7 @@ inline-blob effects, not private control flow.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -26,7 +26,12 @@ from elspeth.web.blobs.service import content_hash
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder, begin_dispatch, dispatch_with_audit
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
-from elspeth.web.composer.tools import ToolContext, _execute_set_pipeline
+from elspeth.web.composer.tools import (
+    SetPipelineCandidate,
+    ToolContext,
+    _execute_set_pipeline,
+    build_set_pipeline_candidate,
+)
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
 from elspeth.web.plugin_policy.models import (
@@ -54,6 +59,36 @@ def _empty_state() -> CompositionState:
         metadata=PipelineMetadata(),
         version=1,
     )
+
+
+def test_set_pipeline_candidate_contract_is_frozen_and_slots_based() -> None:
+    state = _empty_state()
+    result = _execute_set_pipeline(
+        _linear_args(Path("/tmp/candidate-contract")),
+        state,
+        _trained_context(),
+    )
+    candidate = SetPipelineCandidate(result=result, prepared_inline_blob=None)
+
+    assert candidate.acceptable is True
+    assert not hasattr(candidate, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        candidate.prepared_inline_blob = None  # type: ignore[misc]
+
+
+def test_build_set_pipeline_candidate_constructs_without_publishing(tmp_path: Path) -> None:
+    state = _empty_state()
+
+    candidate = build_set_pipeline_candidate(
+        _linear_args(tmp_path),
+        state,
+        _trained_context(data_dir=tmp_path),
+    )
+
+    assert candidate.acceptable is True
+    assert candidate.prepared_inline_blob is None
+    assert candidate.result.updated_state is not state
+    assert state == _empty_state()
 
 
 def _trained_context(*, data_dir: Path | None = None, **kwargs: Any) -> ToolContext:
@@ -536,6 +571,31 @@ def test_current_executor_normalizes_supported_pipeline_shapes(
     assert result.data is None
 
 
+@pytest.mark.parametrize(
+    "factory",
+    [
+        _linear_args,
+        _named_multi_source_queue_args,
+        _fork_coalesce_args,
+        _gate_args,
+        _aggregation_args,
+        _structured_llm_args,
+        _multi_output_args,
+    ],
+)
+def test_candidate_matches_executor_for_custody_safe_arguments(tmp_path: Path, factory: Any) -> None:
+    state = _empty_state()
+    args = factory(tmp_path)
+    context = _trained_context(data_dir=tmp_path)
+
+    candidate = build_set_pipeline_candidate(args, state, context)
+    executor_result = _execute_set_pipeline(args, state, context)
+
+    assert candidate.acceptable is True
+    assert candidate.prepared_inline_blob is None
+    assert candidate.result == executor_result
+
+
 def _semantic_failure_cases(tmp_path: Path) -> list[tuple[str, dict[str, Any], ToolContext, str, str | None]]:
     unknown = _linear_args(tmp_path)
     unknown["nodes"][0]["plugin"] = "not_installed"
@@ -680,6 +740,21 @@ def test_current_executor_semantic_failures_are_atomic(tmp_path: Path, case_inde
     assert "literal-secret-must-not-leak" not in repr(result.to_dict())
 
 
+@pytest.mark.parametrize("case_index", range(9))
+def test_candidate_matches_executor_semantic_failures_without_side_effects(tmp_path: Path, case_index: int) -> None:
+    case, args, context, _expected_error, _expected_error_code = _semantic_failure_cases(tmp_path)[case_index]
+    state = _empty_state()
+    before = state.to_dict()
+
+    candidate = build_set_pipeline_candidate(args, state, context)
+    executor_result = _execute_set_pipeline(args, state, context)
+
+    assert candidate.acceptable is False, case
+    assert candidate.prepared_inline_blob is None
+    assert candidate.result == executor_result
+    assert state.to_dict() == before
+
+
 def test_current_executor_can_return_success_with_invalid_graph_candidate(tmp_path: Path) -> None:
     """The handler reports constructed state separately from acceptability.
 
@@ -697,6 +772,11 @@ def test_current_executor_can_return_success_with_invalid_graph_candidate(tmp_pa
     assert result.updated_state.version == state.version + 1
     assert result.validation.is_valid is False
     assert result.validation.errors
+
+    candidate = build_set_pipeline_candidate(args, state, _trained_context(data_dir=tmp_path))
+    assert candidate.result == result
+    assert candidate.result.success is True
+    assert candidate.acceptable is False
 
 
 def test_current_executor_reopens_stale_authoritative_review(tmp_path: Path) -> None:
@@ -830,6 +910,26 @@ async def test_current_executor_inline_blob_effects_are_single_settlement(tmp_pa
         user_message_content=f"Use this CSV: {content}",
     )
     recorder = BufferingRecorder()
+
+    candidate = build_set_pipeline_candidate(args, state, context)
+
+    with engine.begin() as conn:
+        candidate_blob_rows = conn.execute(select(func.count()).select_from(blobs_table)).scalar_one()
+        candidate_chat_rows = conn.execute(select(func.count()).select_from(chat_messages_table)).scalar_one()
+        candidate_quota = conn.execute(select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0))).scalar_one()
+    candidate_files = tuple(path for path in (tmp_path / "blobs").rglob("*") if path.is_file())
+
+    assert candidate.acceptable is False  # This intentionally incomplete graph still needs outputs.
+    assert candidate.result.success is True
+    assert candidate.prepared_inline_blob is not None
+    assert candidate.result.data is None
+    assert state.to_dict() == before_state
+    assert candidate_blob_rows == before_blob_rows == 0
+    assert candidate_chat_rows == before_chat_rows == 1
+    assert candidate_quota == before_quota == 0
+    assert candidate_files == before_files == ()
+    assert recorder.invocations == ()
+
     audit = begin_dispatch(
         "candidate-inline-call",
         "set_pipeline",

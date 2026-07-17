@@ -50,7 +50,13 @@ from tests.fixtures.dag_scenario_corpus.schema import (
 from elspeth.contracts import Determinism, PipelineRow, PluginSchema
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.core.config import load_settings_from_yaml_string
+from elspeth.core.dag import ExecutionGraph
+from elspeth.engine.orchestrator.preflight import (
+    assemble_and_validate_pipeline_config,
+    execution_sinks_for_runtime,
+)
 from elspeth.plugins.infrastructure import manager as manager_module
+from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
 
 EXPECTED_DIMENSION_VALUES = (
     "config",
@@ -404,6 +410,7 @@ aggregations:
     trigger: {count: 100}
     output_mode: transform
     options:
+      schema: {mode: observed}
       fault_marker_path: ${fault_marker}
 sinks:
   output:
@@ -1162,7 +1169,60 @@ def test_task_3_fixture_bytes_and_production_config_loading_are_exact(tmp_path: 
     assert recovery.aggregations[0].name == "eof_sum"
     assert recovery.aggregations[0].plugin == "dag_corpus_fail_once_eof_batch"
     assert recovery.aggregations[0].trigger.count == 100
-    assert recovery.aggregations[0].options == {"fault_marker_path": str(tmp_path / "fault.marker")}
+    assert recovery.aggregations[0].options == {
+        "schema": {"mode": "observed"},
+        "fault_marker_path": str(tmp_path / "fault.marker"),
+    }
+
+
+@pytest.mark.parametrize(
+    ("fixture", "input_fixture"),
+    [
+        ("linear/happy-path.yaml", "linear/input.csv"),
+        (
+            "checkpoint-deterministic-resume/reopen-resume.yaml",
+            "checkpoint-deterministic-resume/input.csv",
+        ),
+    ],
+)
+def test_task_3_fixtures_cross_the_real_production_build_boundary(
+    fixture: str,
+    input_fixture: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_corpus_plugin_manager(monkeypatch)
+    rendered = Template(resolve_fixture_path(fixture).read_text(encoding="utf-8")).substitute(
+        input_csv=str(resolve_fixture_path(input_fixture)),
+        output_jsonl=str(tmp_path / "output.jsonl"),
+        fault_marker=str(tmp_path / "fault.marker"),
+    )
+    settings = load_settings_from_yaml_string(rendered)
+    bundle = instantiate_plugins_from_config(settings, preflight_mode=True)
+    execution_sinks = execution_sinks_for_runtime(settings, bundle.sinks)
+    graph = ExecutionGraph.from_plugin_instances(
+        sources=bundle.sources,
+        source_settings_map=bundle.source_settings_map,
+        transforms=bundle.transforms,
+        sinks=execution_sinks,
+        aggregations=bundle.aggregations,
+        gates=list(settings.gates),
+        coalesce_settings=list(settings.coalesce) if settings.coalesce else None,
+        queues=settings.queues,
+    )
+    graph.validate()
+    graph.validate_edge_compatibility()
+
+    config = assemble_and_validate_pipeline_config(
+        sources=bundle.sources,
+        transforms=bundle.transforms,
+        sinks=bundle.sinks,
+        aggregations=bundle.aggregations,
+        settings=settings,
+        graph=graph,
+    )
+
+    assert config.sources == bundle.sources
 
 
 def test_manifest_pytest_evidence_batch_collects_without_running_suites() -> None:

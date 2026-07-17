@@ -118,6 +118,9 @@ def _plan(base: AbsentBase | PresentBase | None = None) -> PipelinePlanResult:
         ),
         tool_call_id="planner-terminal-call",
         custody_result="not_required",
+        model_identifier="planner-model",
+        model_version="planner-model-v1",
+        provider="test",
     )
 
 
@@ -160,6 +163,9 @@ def _runnable_plan(tmp_path) -> PipelinePlanResult:
         ),
         tool_call_id="planner-terminal-call",
         custody_result="not_required",
+        model_identifier="planner-model",
+        model_version="planner-model-v1",
+        provider="test",
     )
 
 

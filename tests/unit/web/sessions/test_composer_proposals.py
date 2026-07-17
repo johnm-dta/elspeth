@@ -80,6 +80,9 @@ def _pipeline_plan_result(*, tool_call_id: str = "call_pipeline") -> PipelinePla
         proposal=proposal,
         tool_call_id=tool_call_id,
         custody_result="not_required",
+        model_identifier="planner-model",
+        model_version="planner-model-v1",
+        provider="test",
     )
 
 

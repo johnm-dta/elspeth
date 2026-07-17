@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import threading
 from dataclasses import dataclass, replace
@@ -21,6 +22,7 @@ from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.composer_progress import ComposerProgressEvent
 from elspeth.contracts.hashing import stable_hash
+from elspeth.core.canonical import canonical_json
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import (
@@ -32,6 +34,7 @@ from elspeth.web.composer.protocol import (
     PipelineCommitIntent,
     ToolArgumentError,
 )
+from elspeth.web.composer.recipes import recipe_catalog_content_hash
 from elspeth.web.composer.service import (
     AdvisorCheckpointVerdict,
     ComposerAvailability,
@@ -426,77 +429,6 @@ class TestComposerTextOnlyResponse:
         assert "set_pipeline failed before mutation" in result.message
         assert "MissingRequiredPaths" in result.message
         assert "source.plugin" in result.message
-
-    @pytest.mark.asyncio
-    async def test_blob_only_success_then_empty_state_reply_returns_no_state_mutation_blocker(self, tmp_path: Path) -> None:
-        """A blob-side success is not a successful CompositionState mutation."""
-        catalog = _mock_catalog()
-        engine, session_id = _session_engine_with_session()
-        user_message_id = str(uuid4())
-        user_message_content = "Build a runnable pipeline from this text."
-        now = datetime.now(UTC)
-        with engine.begin() as conn:
-            conn.execute(
-                chat_messages_table.insert().values(
-                    id=user_message_id,
-                    session_id=session_id,
-                    role="user",
-                    content=user_message_content,
-                    raw_content=None,
-                    tool_calls=None,
-                    tool_call_id=None,
-                    sequence_no=1,
-                    writer_principal="route_user_message",
-                    created_at=now,
-                    composition_state_id=None,
-                    parent_assistant_id=None,
-                )
-            )
-        settings = _make_settings(data_dir=tmp_path)
-        service = ComposerServiceImpl.for_trained_operator(
-            catalog=catalog,
-            settings=settings,
-            sessions_service=_test_sessions_service(engine, tmp_path),
-            session_engine=engine,
-        )
-        state = _empty_state()
-        create_blob_turn = _make_llm_response(
-            tool_calls=[
-                {
-                    "id": "call_create_blob",
-                    "name": "create_blob",
-                    "arguments": {
-                        "filename": "seed.txt",
-                        "mime_type": "text/plain",
-                        "content": "hello",
-                    },
-                }
-            ],
-        )
-        final_prose = "I created the input blob, so the pipeline is ready."
-        text_response = _make_llm_response(content=final_prose)
-
-        with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
-            mock_llm.side_effect = [create_blob_turn, text_response]
-            result = await service.compose(
-                user_message_content,
-                [],
-                state,
-                session_id=session_id,
-                user_message_id=user_message_id,
-            )
-
-        assert result.state.version == state.version
-        assert result.raw_assistant_content == final_prose
-        assert result.runtime_preflight is not None
-        assert result.runtime_preflight.is_valid is False
-        # New contract: model prose preserved + system suffix with blocker.
-        assert result.message.startswith(final_prose)
-        assert "[ELSPETH-SYSTEM]" in result.message
-        assert "still empty" in result.message
-        assert "create_blob succeeded without mutating CompositionState" in result.message
-        assert "state_exists=false" in result.runtime_preflight.checks[0].detail
-        assert mock_llm.call_count == 2
 
 
 class TestComposerSingleToolCall:
@@ -1078,8 +1010,8 @@ class TestComposerSingleToolCall:
         assert "checking available secret references" in progress_text.lower()
 
     @pytest.mark.asyncio
-    async def test_inline_complete_pipeline_replay_uses_atomic_tool_shape(self, tmp_path: Path) -> None:
-        """Fake-model replay for simple inline-data builds stays provider-bounded."""
+    async def test_inline_complete_pipeline_incremental_replay_uses_atomic_tool_shape(self, tmp_path: Path) -> None:
+        """Incremental inline full replacement retains the atomic tool shape."""
         catalog = _mock_catalog()
         engine, session_id = _session_engine_with_session()
         settings = _make_settings(data_dir=tmp_path)
@@ -1098,7 +1030,19 @@ class TestComposerSingleToolCall:
             return AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN")
 
         service._run_advisor_checkpoint = _clean_advisor_checkpoint  # type: ignore[method-assign]
-        state = _empty_state()
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="existing_rows",
+                options={"path": str(tmp_path / "existing.csv"), "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(name="Existing pipeline"),
+            version=1,
+        )
         user_message_content = "I want a pipeline that takes the string 'hello' and appends ' world' to it."
         user_message_id = _insert_user_message(engine, session_id, user_message_content)
         output_path = tmp_path / "outputs" / "append.csv"
@@ -7095,10 +7039,11 @@ class TestComposeLoopFreeformRecipeIntentRouting:
     @pytest.mark.asyncio
     async def test_fork_coalesce_truncate_intent_applies_recipe_before_llm(self, tmp_path: Path) -> None:
         engine, session_id = _session_engine_with_session()
+        sessions_service = _test_sessions_service(engine, tmp_path)
         service = ComposerServiceImpl.for_trained_operator(
             catalog=_mock_catalog(),
             settings=_make_settings(data_dir=tmp_path),
-            sessions_service=_test_sessions_service(engine, tmp_path),
+            sessions_service=sessions_service,
             session_engine=engine,
         )
         prompt = (
@@ -7133,12 +7078,48 @@ class TestComposeLoopFreeformRecipeIntentRouting:
             )
 
         assert mock_llm.call_count == 0
-        assert result.state.validate().is_valid is True
-        assert result.state.sources["source"] is not None
-        assert result.state.sources["source"].plugin == "csv"
-        assert result.state.sources["source"].options["blob_ref"]
-        assert {node.node_type for node in result.state.nodes} >= {"gate", "coalesce"}
-        assert any(node.plugin == "truncate" for node in result.state.nodes)
-        assert result.state.outputs[0].name == "merged_rows"
-        assert result.state.outputs[0].options["path"] == "outputs/merged.jsonl"
-        assert "fork-coalesce-truncate-jsonl" in result.message
+        assert result.state == _empty_state()
+        assert result.llm_calls == ()
+        assert result.pipeline_commit_intent is not None
+
+        proposals = await sessions_service.list_composition_proposals(UUID(session_id))
+        assert len(proposals) == 1
+        proposal = proposals[0]
+        assert proposal.status == "pending"
+        assert proposal.id == result.pipeline_commit_intent.proposal_id
+        assert proposal.pipeline_metadata is not None
+        assert proposal.pipeline_metadata.draft_hash == result.pipeline_commit_intent.draft_hash
+        assert proposal.composer_model_identifier == "composer-server-recipe-router"
+        assert proposal.composer_model_version == "composer.server-recipe-router.v1"
+        assert proposal.composer_provider == "server"
+        recipe_contract = canonical_json(
+            {
+                "schema": "composer.server-recipe-router.v1",
+                "recipe": "fork-coalesce-truncate-jsonl",
+                "recipe_catalog_content_hash": recipe_catalog_content_hash(),
+            }
+        )
+        assert proposal.composer_skill_hash == hashlib.sha256(recipe_contract.encode()).hexdigest()
+
+        pipeline = proposal.arguments_json
+        source = cast(dict[str, Any], pipeline["source"])
+        assert source["plugin"] == "csv"
+        assert UUID(cast(str, source["blob_id"]))
+        assert proposal.pipeline_metadata.custody_result == "ready"
+        assert "inline_blob" not in source
+        assert {cast(dict[str, Any], node)["node_type"] for node in cast(list[Any], pipeline["nodes"])} >= {
+            "gate",
+            "coalesce",
+        }
+        assert any(cast(dict[str, Any], node).get("plugin") == "truncate" for node in cast(list[Any], pipeline["nodes"]))
+        output = cast(dict[str, Any], cast(list[Any], pipeline["outputs"])[0])
+        assert output["sink_name"] == "merged_rows"
+        assert cast(dict[str, Any], output["options"])["path"] == "outputs/merged.jsonl"
+        with engine.connect() as conn:
+            audit_messages = conn.execute(
+                select(chat_messages_table).where(
+                    chat_messages_table.c.session_id == session_id,
+                    chat_messages_table.c.role == "audit",
+                )
+            ).all()
+        assert audit_messages == []

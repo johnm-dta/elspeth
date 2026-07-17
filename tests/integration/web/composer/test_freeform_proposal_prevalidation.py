@@ -103,9 +103,15 @@ class _PreproposalBaseSignal(BaseException):
     """Test-only shutdown-style signal outside the ``Exception`` hierarchy."""
 
 
-def _empty_state() -> CompositionState:
+def _incremental_base_state() -> CompositionState:
+    """Non-empty base keeps these legacy incremental-prevalidation tests scoped."""
     return CompositionState(
-        source=None,
+        source=SourceSpec(
+            plugin="csv",
+            on_success="existing_rows",
+            options={"path": "/tmp/existing.csv", "schema": {"mode": "observed"}},
+            on_validation_failure="discard",
+        ),
         nodes=(),
         edges=(),
         outputs=(),
@@ -254,7 +260,7 @@ def _persisted_tool_content(harness: _Harness, tool_call_id: str) -> str:
 @pytest.mark.asyncio
 async def test_semantic_rejection_reaches_next_model_turn_then_repair_creates_one_proposal(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
-    state = _empty_state()
+    state = _incremental_base_state()
     invalid = _valid_pipeline_args(tmp_path, metadata_name="invalid-plugin")
     invalid["source"]["plugin"] = "not_installed"
     repaired = _valid_pipeline_args(tmp_path, metadata_name="repaired")
@@ -314,7 +320,7 @@ async def test_semantic_rejection_reaches_next_model_turn_then_repair_creates_on
 @pytest.mark.asyncio
 async def test_final_profile_rejection_is_unapplied_audited_and_repairable(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
-    state = _empty_state()
+    state = _incremental_base_state()
     invalid = _valid_pipeline_args(tmp_path, metadata_name="final-profile-reject")
     repaired = _valid_pipeline_args(tmp_path, metadata_name="profile-repaired")
     snapshot = PluginAvailabilitySnapshot.for_trained_operator(harness.service._catalog)
@@ -508,7 +514,7 @@ async def test_inline_candidate_materializes_one_custody_safe_proposal_without_r
 @pytest.mark.asyncio
 async def test_inline_proposal_gap_retry_reuses_one_custody_blob_and_quota_charge(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
-    state = _empty_state()
+    state = _incremental_base_state()
     arguments = _inline_pipeline_args(tmp_path)
     raw_content = "proposal-gap-private-value-2f16\n42\n"
     arguments["source"]["inline_blob"]["content"] = raw_content
@@ -599,7 +605,7 @@ async def test_inline_candidate_argument_error_is_audited_once_and_repairable(
     expected_invalid_builder_calls: int,
 ) -> None:
     harness = _harness(tmp_path)
-    state = _empty_state()
+    state = _incremental_base_state()
     invalid = _inline_pipeline_args(tmp_path)
     inline_blob = invalid["source"]["inline_blob"]
     if case == "disallowed_mime":
@@ -688,7 +694,7 @@ async def test_malformed_inline_blob_never_survives_full_compose_surfaces(
     malformed_shape: str,
 ) -> None:
     harness = _harness(tmp_path)
-    state = _empty_state()
+    state = _incremental_base_state()
     invalid = _inline_pipeline_args(tmp_path)
     private_value = f"private malformed {malformed_shape} value 71b2"
     if malformed_shape == "scalar":
@@ -738,7 +744,7 @@ async def test_malformed_inline_blob_never_survives_full_compose_surfaces(
 @pytest.mark.asyncio
 async def test_surrogate_inline_content_fails_closed_at_canonicalization_and_is_repairable(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
-    state = _empty_state()
+    state = _incremental_base_state()
     invalid = _inline_pipeline_args(tmp_path)
     rejected_content = "bad\udc80private"
     invalid["source"]["inline_blob"]["content"] = rejected_content
@@ -814,7 +820,7 @@ async def test_surrogate_inline_content_fails_closed_at_canonicalization_and_is_
 @pytest.mark.asyncio
 async def test_unexpected_candidate_finalizer_exception_uses_plugin_crash_audit_and_wrapper(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
-    state = _empty_state()
+    state = _incremental_base_state()
     args = _inline_pipeline_args(tmp_path)
     llm = _ScriptedLLM(_tool_turn("call_finalizer_crash", "set_pipeline", args))
     unexpected = RuntimeError("candidate finalizer internal failure with private detail")
@@ -867,7 +873,7 @@ async def test_unexpected_candidate_finalizer_exception_uses_plugin_crash_audit_
 @pytest.mark.asyncio
 async def test_preproposal_base_exception_is_audited_once_and_propagated_unchanged(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
-    state = _empty_state()
+    state = _incremental_base_state()
     args = _inline_pipeline_args(tmp_path)
     llm = _ScriptedLLM(_tool_turn("call_finalizer_base_signal", "set_pipeline", args))
     signal = _PreproposalBaseSignal("shutdown-style private detail")
@@ -920,7 +926,7 @@ async def test_preproposal_base_exception_is_audited_once_and_propagated_unchang
 @pytest.mark.asyncio
 async def test_candidate_prior_validation_runtime_error_uses_plugin_crash_audit_and_wrapper(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
-    state = _empty_state()
+    state = _incremental_base_state()
     response = _tool_turn("call_prior_runtime_crash", "set_pipeline", _inline_pipeline_args(tmp_path))
     failure = RuntimeError("candidate-prior validation private detail")
     snapshot = PluginAvailabilitySnapshot.for_trained_operator(harness.service._catalog)
@@ -989,7 +995,7 @@ async def test_candidate_prior_validation_runtime_error_uses_plugin_crash_audit_
 @pytest.mark.asyncio
 async def test_candidate_prior_validation_base_exception_is_audited_once_and_propagated_unchanged(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
-    state = _empty_state()
+    state = _incremental_base_state()
     response = _tool_turn("call_prior_base_signal", "set_pipeline", _inline_pipeline_args(tmp_path))
     signal = _PreproposalBaseSignal("candidate-prior shutdown-style private detail")
     snapshot = PluginAvailabilitySnapshot.for_trained_operator(harness.service._catalog)
@@ -1070,7 +1076,7 @@ async def test_non_pipeline_explicit_approval_behavior_is_unchanged(
     expected_error_class: str | None,
 ) -> None:
     harness = _harness(tmp_path)
-    state = _empty_state()
+    state = _incremental_base_state()
     llm = _ScriptedLLM(
         _tool_turn("call_metadata", "set_metadata", arguments),
         _fake_llm_response(content="Done."),
@@ -1101,7 +1107,7 @@ async def test_non_pipeline_explicit_approval_behavior_is_unchanged(
 @pytest.mark.asyncio
 async def test_auto_commit_set_pipeline_uses_candidate_builder_once(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
-    state = _empty_state()
+    state = _incremental_base_state()
     await harness.sessions.update_composer_preferences(
         UUID(harness.session_id),
         trust_mode="auto_commit",

@@ -19,7 +19,8 @@ import json
 import re
 import sys
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from types import MappingProxyType, SimpleNamespace
@@ -45,8 +46,11 @@ from elspeth.contracts.composer_llm_audit import (
 )
 from elspeth.contracts.composer_progress import ComposerProgressEvent, ComposerProgressSink
 from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
+from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.contracts.trust_boundary import trust_boundary
+from elspeth.core.canonical import canonical_json
 from elspeth.core.templates import extract_jinja2_fields
 from elspeth.plugins.transforms.llm.model_catalog import OPENROUTER_LITELLM_PREFIX
 from elspeth.web.async_workers import run_sync_in_worker
@@ -68,11 +72,11 @@ from elspeth.web.composer.anti_anchor import AntiAnchorTracker
 from elspeth.web.composer.audit import (
     BufferingRecorder,
     DispatchAudit,
-    begin_dispatch_or_arg_error,
     finish_arg_error,
-    finish_plugin_crash,
     finish_success,
+    llm_call_audit_envelope,
 )
+from elspeth.web.composer.audit_storage import redacted_tool_invocation_content_and_envelope
 from elspeth.web.composer.availability import ComposerAvailability as ComposerAvailability  # re-export; genuine home is availability.py
 from elspeth.web.composer.discovery_cache import (
     CachedDiscoveryPayload as _CachedDiscoveryPayload,
@@ -92,6 +96,17 @@ from elspeth.web.composer.llm_response_parsing import (
     supports_anthropic_prompt_cache_markers,
     token_usage_from_response,
 )
+from elspeth.web.composer.pipeline_planner import (
+    PipelinePlanResult,
+    PlannerBudgetPolicy,
+    PlannerCustodyConfig,
+    PlannerModelConfig,
+    PlannerOriginatingMessage,
+    PlannerRequestLifecycle,
+    plan_pipeline,
+    prepare_pipeline_plan,
+)
+from elspeth.web.composer.pipeline_proposal import AbsentBase, PlannerSurface, PresentBase, composition_content_hash
 from elspeth.web.composer.progress import (
     advisor_checkpoint_progress_event,
     convergence_progress_event,
@@ -99,6 +114,7 @@ from elspeth.web.composer.progress import (
     model_call_progress_event,
 )
 from elspeth.web.composer.prompts import build_messages, build_run_diagnostics_messages, build_system_prompt
+from elspeth.web.composer.proposals import build_tool_proposal_summary
 from elspeth.web.composer.protocol import (
     ComposerConvergenceError,
     ComposerPluginCrashError,
@@ -106,10 +122,19 @@ from elspeth.web.composer.protocol import (
     ComposerRuntimePreflightError,
     ComposerServiceError,
     ComposerSettings,
+    PipelineCommitIntent,
     ToolArgumentError,
 )
 from elspeth.web.composer.recipe_intent_routing import match_freeform_recipe_intent
-from elspeth.web.composer.recipes import RecipeValidationError, get_recipe, unavailable_recipe_plugin
+from elspeth.web.composer.recipes import (
+    RecipeValidationError,
+    apply_recipe,
+    get_recipe,
+    recipe_catalog_content_hash,
+    unavailable_recipe_plugin,
+)
+from elspeth.web.composer.redaction import redact_tool_call_arguments
+from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.skills import assert_skill_hash_unchanged_on_disk, load_skill_with_hash
 from elspeth.web.composer.state import CompositionState, NodeSpec, ValidationSummary
 from elspeth.web.composer.tools import (
@@ -121,7 +146,6 @@ from elspeth.web.composer.tools import (
     ToolResult,
     _sync_list_blobs,
     compute_proof_diagnostics,
-    execute_tool,
     get_tool_definitions,
     normalize_tool_result_validation,
 )
@@ -304,15 +328,6 @@ def _request_interpretation_review_kind_from_arguments(arguments: Mapping[str, A
 _RUNTIME_PREFLIGHT_COUNTER = metrics.get_meter(__name__).create_counter(
     "composer.runtime_preflight.total",
     description="Total runtime-equivalent preflight invocations in the composer service",
-)
-
-# Module-level OTel counter for recipe fast-path blobs orphaned by a partial
-# failure (blob created, then the follow-up step failed or its synthetic audit
-# envelope could not be constructed). Attributes: reason (bounded closed-list
-# of fast-path failure sites), blob_deleted ("true" | "false").
-_RECIPE_FAST_PATH_ORPHAN_BLOB_COUNTER = metrics.get_meter(__name__).create_counter(
-    "composer.recipe_fast_path.orphan_blob.total",
-    description="Recipe fast-path partial failures that orphaned (and then best-effort cleaned up) a session blob",
 )
 
 
@@ -1916,29 +1931,30 @@ class ComposerServiceImpl:
         deadline = asyncio.get_event_loop().time() + self._timeout_seconds
         from litellm.exceptions import APIError as LiteLLMAPIError
 
-        # Shared across the fast-path attempt and the LLM fallback so an
-        # orphaned fast-path side effect (create_blob + best-effort
-        # delete_blob when apply_pipeline_recipe fails — see
-        # ``_try_apply_freeform_recipe_intent``) still lands in the
-        # composer-audit invocation trail even though the ComposerResult
-        # that is ultimately returned comes from ``_compose_loop``, not the
-        # fast path.
+        # One recorder spans planning or the ordinary loop so every provider
+        # and discovery audit for this request is accounted for.
         recorder = BufferingRecorder()
         plugin_snapshot, policy_catalog = self._plugin_policy_context(user_id)
         try:
-            routed_result = await self._try_apply_freeform_recipe_intent(
-                message=message,
-                state=state,
-                session_id=session_id,
-                user_id=user_id,
-                progress=progress,
-                user_message_id=user_message_id,
-                recorder=recorder,
-                plugin_snapshot=plugin_snapshot,
-                policy_catalog=policy_catalog,
-            )
-            if routed_result is not None:
-                return routed_result
+            if (
+                _state_is_structurally_empty(state)
+                and _user_request_expects_pipeline_mutation(message)
+                and self._sessions_service is not None
+                and session_id is not None
+                and user_message_id is not None
+            ):
+                return await self._plan_and_stage_empty_pipeline(
+                    message=message,
+                    state=state,
+                    session_id=session_id,
+                    current_state_id=current_state_id,
+                    user_id=user_id,
+                    progress=progress,
+                    user_message_id=user_message_id,
+                    recorder=recorder,
+                    plugin_snapshot=plugin_snapshot,
+                    policy_catalog=policy_catalog,
+                )
             return await self._compose_loop(
                 message,
                 messages,
@@ -1989,26 +2005,14 @@ class ComposerServiceImpl:
                     # Audit-persistence is best-effort on the crash path —
                     # failure to persist MUST NOT mask the original plugin
                     # bug. Log via slog.error (audit system itself is failing
-                    # here, which is one of the three permitted slog use
-                    # cases per the logging-telemetry-policy skill).
+                    # here, which is one of the permitted slog use cases).
                     #
                     # Catch is narrowed to (SQLAlchemyError, OSError) so that
-                    # programmer-bug exceptions in _persist_crashed_session
-                    # itself — RuntimeError from the engine guard,
-                    # AttributeError from a drifted table column, TypeError
-                    # from a signature change — propagate instead of being
-                    # laundered as "audit failure". Mirrors the cleanup-
-                    # rollback pattern in the ``fork_from_message`` route
-                    # handler (web/sessions/routes.py); see also the
-                    # tier-model enforcer entry for this call site.
+                    # programmer-bug exceptions propagate instead of being
+                    # laundered as "audit failure".
                     #
-                    # exc_info is deliberately omitted: the original plugin
-                    # exception's message / __cause__ chain may carry DB
-                    # URLs, filesystem paths, or secret fragments from
-                    # deeper layers (the response-body redaction in
-                    # routes.py exists for the same reason). The two
-                    # exc_class fields give the operator enough correlation
-                    # to triage from structured logs alone.
+                    # exc_info is deliberately omitted: exception messages
+                    # may carry DB URLs, filesystem paths, or secret fragments.
                     slog.error(
                         "composer_crash_persistence_failed",
                         session_id=session_id,
@@ -2029,9 +2033,8 @@ class ComposerServiceImpl:
         except (ComposerServiceError, LiteLLMAPIError):
             # Generic service-level failure (prompt prep, availability check,
             # or a LiteLLMAPIError surfacing through the inner loop). The
-            # route handlers further narrow LiteLLMAPIError into the
-            # provider_unavailable progress code; here the service emits the
-            # safe catch-all because we may not know which class fired.
+            # route handlers further narrow provider failures; here the
+            # service emits the safe catch-all.
             await emit_progress(
                 progress,
                 ComposerProgressEvent(
@@ -2044,312 +2047,281 @@ class ComposerServiceImpl:
             )
             raise
 
-    async def _try_apply_freeform_recipe_intent(
+    def _planner_request_lifecycle(self, progress: ComposerProgressSink | None) -> PlannerRequestLifecycle:
+        """Adapt the already-established route request envelope to the planner.
+
+        HTTP callers have completed rate limiting and entered their in-flight
+        and disconnect scopes before invoking ``compose``. The planner receives
+        an explicit lifecycle object so it cannot grow an independent route
+        policy; its adapters only delimit work already covered by that outer
+        envelope.
+        """
+
+        async def before_start() -> None:
+            return None
+
+        @asynccontextmanager
+        async def request_scope() -> AsyncIterator[None]:
+            yield
+
+        async def on_settled(_outcome: str) -> None:
+            return None
+
+        return PlannerRequestLifecycle(
+            before_start=before_start,
+            request_scope=request_scope,
+            on_settled=on_settled,
+            progress=progress,
+        )
+
+    async def _persist_pipeline_planner_audit(
+        self,
+        *,
+        session_id: UUID,
+        current_state_id: UUID | None,
+        recorder: BufferingRecorder,
+    ) -> None:
+        """Make planner LLM/discovery evidence durable before proposal authority."""
+
+        sessions = self._require_sessions_service()
+        try:
+            for call in recorder.llm_calls:
+                content = json.dumps(
+                    {
+                        "_kind": "llm_call_audit",
+                        "status": call.status.value,
+                        "model_requested": call.model_requested,
+                        "model_returned": call.model_returned,
+                        "total_tokens": call.total_tokens,
+                        "reasoning_tokens": call.reasoning_tokens,
+                        "provider_cost": call.provider_cost,
+                    }
+                )
+                await sessions.add_message(
+                    session_id,
+                    "audit",
+                    content,
+                    tool_calls=[llm_call_audit_envelope(call)],
+                    composition_state_id=current_state_id,
+                    writer_principal="compose_loop",
+                )
+            for invocation in recorder.invocations:
+                content, envelope = redacted_tool_invocation_content_and_envelope(invocation)
+                await sessions.add_message(
+                    session_id,
+                    "audit",
+                    content,
+                    tool_calls=[envelope],
+                    composition_state_id=current_state_id,
+                    writer_principal="compose_loop",
+                )
+        except SQLAlchemyError as exc:
+            raise AuditIntegrityError("pipeline planner audit persistence failed before proposal creation") from exc
+
+    async def _stage_pipeline_plan(
+        self,
+        *,
+        plan: PipelinePlanResult,
+        state: CompositionState,
+        session_id: UUID,
+        current_state_id: UUID | None,
+        user_message_id: UUID,
+        user_id: str | None,
+        trust_mode: Literal["auto_commit", "explicit_approve"],
+        recorder: BufferingRecorder,
+    ) -> ComposerResult:
+        """Persist planner evidence, then create one reviewable proposal row."""
+
+        await self._persist_pipeline_planner_audit(
+            session_id=session_id,
+            current_state_id=current_state_id,
+            recorder=recorder,
+        )
+        arguments = cast(dict[str, Any], deep_thaw(plan.proposal.pipeline))
+        redacted_arguments = redact_tool_call_arguments(
+            "set_pipeline",
+            arguments,
+            telemetry=NoopRedactionTelemetry(),
+        )
+        summary = build_tool_proposal_summary(
+            tool_name="set_pipeline",
+            arguments=arguments,
+            redacted_arguments=redacted_arguments,
+        )
+        row = await self._require_sessions_service().create_pipeline_composition_proposal(
+            session_id=session_id,
+            plan=plan,
+            summary=summary.summary,
+            rationale=summary.rationale,
+            affects=summary.affects,
+            arguments_redacted_json=summary.arguments_redacted_json,
+            actor=f"composer-web:user:{user_id}" if user_id is not None else "composer-web:anonymous",
+            composer_model_identifier=plan.model_identifier,
+            composer_model_version=plan.model_version,
+            composer_provider=plan.provider,
+            user_message_id=user_message_id,
+        )
+        intent = PipelineCommitIntent(proposal_id=row.id, draft_hash=plan.proposal.draft_hash) if trust_mode == "auto_commit" else None
+        message = (
+            "I prepared and validated the requested pipeline. ELSPETH will commit it atomically."
+            if intent is not None
+            else "I prepared and validated the requested pipeline for your review."
+        )
+        return ComposerResult(
+            message=message,
+            state=state,
+            pipeline_commit_intent=intent,
+        )
+
+    async def _plan_and_stage_empty_pipeline(
         self,
         *,
         message: str,
         state: CompositionState,
-        session_id: str | None,
+        session_id: str,
+        current_state_id: str | None,
         user_id: str | None,
         progress: ComposerProgressSink | None,
-        user_message_id: str | None,
+        user_message_id: str,
         recorder: BufferingRecorder,
         plugin_snapshot: PluginAvailabilitySnapshot,
         policy_catalog: PolicyCatalogView,
-    ) -> ComposerResult | None:
-        """Apply a deterministic registered recipe before invoking the cheap model.
+    ) -> ComposerResult:
+        """Build one canonical full-pipeline proposal for an empty topology."""
 
-        This is intentionally narrow: it only handles empty-state freeform
-        requests that exactly match a server-known recipe and carry inline
-        content that must first be materialised as a session blob. Existing
-        non-empty pipelines and explicit-approval sessions continue through
-        the normal LLM/tool proposal path.
-        """
-        if not _state_is_structurally_empty(state):
-            return None
-        if self._session_engine is None or session_id is None or self._data_dir is None:
-            return None
-
-        match = match_freeform_recipe_intent(message)
-        if match is None or match.inline_blob is None:
-            return None
-        recipe = get_recipe(match.recipe_name)
-        if recipe is None:
-            return None
-        try:
-            if unavailable_recipe_plugin(recipe, plugin_snapshot, raw_slots=match.slots) is not None:
-                return None
-        except RecipeValidationError:
-            return None
-
-        sessions_service = self._sessions_service
-        if sessions_service is not None:
-            preferences = await sessions_service.get_composer_preferences(UUID(session_id))
-            if preferences.trust_mode == "explicit_approve":
-                return None
-
-        await emit_progress(
-            progress,
-            ComposerProgressEvent(
-                phase="using_tools",
-                headline="I found a registered recipe for this request.",
-                evidence=(f"Recipe: {match.recipe_name}",),
-                likely_next="ELSPETH will apply the recipe with the supplied inline data.",
-            ),
+        session_uuid = UUID(session_id)
+        message_uuid = UUID(user_message_id)
+        state_uuid = UUID(current_state_id) if current_state_id is not None else None
+        base = (
+            PresentBase(state_id=state_uuid, composition_content_hash=composition_content_hash(state))
+            if state_uuid is not None
+            else AbsentBase()
         )
-
-        actor = f"composer-web:user-{user_id}" if user_id is not None else "composer-web:anonymous"
-        create_args = {
-            "filename": match.inline_blob.filename,
-            "mime_type": match.inline_blob.mime_type,
-            "content": match.inline_blob.content,
-            "description": f"Inline content materialised for recipe {match.recipe_name}",
-        }
-        create_result = await run_sync_in_worker(
-            execute_tool,
-            "create_blob",
-            create_args,
-            state,
-            policy_catalog,
-            plugin_snapshot=plugin_snapshot,
-            data_dir=self._data_dir,
-            session_engine=self._session_engine,
+        preferences = await self._require_sessions_service().get_composer_preferences(session_uuid)
+        rendered_skill = build_system_prompt(self._data_dir)
+        origin = PlannerOriginatingMessage(
             session_id=session_id,
-            secret_service=self._secret_service,
-            user_id=user_id,
-            user_message_id=user_message_id,
-            user_message_content=message,
-        )
-        if not create_result.success or not isinstance(create_result.data, Mapping):
-            return None
-        blob_id = create_result.data["blob_id"]
-
-        # Record a compact synthetic audit trail for the deterministic server
-        # routing decision. The actual tool handlers still own state
-        # validation and blob persistence; this trail makes the bypass visible.
-        #
-        # ``recorder`` is the SAME BufferingRecorder ``compose()`` also hands
-        # to the fallback ``_compose_loop`` call when this method returns
-        # ``None``. Sharing one recorder (rather than building a local one
-        # here) is what lets an orphaned create_blob + best-effort delete_blob
-        # pair (see the ``apply_pipeline_recipe`` failure branch below) survive
-        # into the composer-audit invocation trail even though the ultimate
-        # ComposerResult comes from the LLM fallback path, not this one.
-        #
-        # Audit doctrine: every fast-path side effect is either audited or
-        # undone. A synthetic audit envelope that cannot be canonicalized for
-        # an action that DID happen is an anomaly — fail loudly
-        # (AuditIntegrityError, mirroring the crash-on-anomaly contract
-        # documented on ``finish_success`` for first-party payloads) after
-        # best-effort cleanup of the fast-path blob, never silently
-        # under-record. The envelope for ``create_blob`` is built BEFORE the
-        # recipe application so an unrecordable creation stops the fast path
-        # while the blob is still the only side effect.
-        create_audit, create_canonicalization_failed = begin_dispatch_or_arg_error(
-            "server_recipe_create_blob",
-            "create_blob",
-            create_args,
-            version_before=state.version,
-            actor=actor,
-        )
-        if create_canonicalization_failed is not None:
-            await self._cleanup_recipe_fast_path_blob(
-                blob_id=blob_id,
-                state=state,
-                session_id=session_id,
-                user_id=user_id,
-                reason="create_blob_audit_unrecordable",
-                actor=actor,
-                recorder=recorder,
-                plugin_snapshot=plugin_snapshot,
-                policy_catalog=policy_catalog,
-            )
-            raise AuditIntegrityError(
-                "Recipe fast path executed create_blob successfully but could not canonicalize "
-                f"its audit envelope ({type(create_canonicalization_failed).__name__}); "
-                "refusing to under-record a successful action."
-            ) from create_canonicalization_failed
-        recorder.record(
-            finish_success(
-                create_audit,
-                result_payload=create_result.to_dict(),
-                version_after=create_result.updated_state.version,
-            )
-        )
-
-        recipe_args = {
-            "recipe_name": match.recipe_name,
-            "slots": {**match.slots, "source_blob_id": blob_id},
-        }
-        recipe_result = await run_sync_in_worker(
-            execute_tool,
-            "apply_pipeline_recipe",
-            recipe_args,
-            state,
-            policy_catalog,
-            plugin_snapshot=plugin_snapshot,
-            data_dir=self._data_dir,
-            session_engine=self._session_engine,
-            session_id=session_id,
-            secret_service=self._secret_service,
+            message_id=user_message_id,
+            content=message,
             user_id=user_id,
         )
-        if not recipe_result.success:
-            # Partial failure: the blob persisted but the recipe did not
-            # apply. Undo the orphaned side effect (best effort) and surface
-            # the event via structured log + counter, then fall through to
-            # the normal LLM path with clean state.
-            await self._cleanup_recipe_fast_path_blob(
-                blob_id=blob_id,
-                state=state,
-                session_id=session_id,
-                user_id=user_id,
-                reason="apply_pipeline_recipe_failed",
-                actor=actor,
-                recorder=recorder,
-                plugin_snapshot=plugin_snapshot,
-                policy_catalog=policy_catalog,
-            )
-            return None
-
-        recipe_audit, recipe_canonicalization_failed = begin_dispatch_or_arg_error(
-            "server_recipe_apply_pipeline_recipe",
-            "apply_pipeline_recipe",
-            recipe_args,
-            version_before=state.version,
-            actor=actor,
-        )
-        if recipe_canonicalization_failed is not None:
-            # The applied state is discarded by this raise (it is only
-            # persisted via the returned ComposerResult), so the blob is the
-            # sole durable side effect left to undo.
-            await self._cleanup_recipe_fast_path_blob(
-                blob_id=blob_id,
-                state=state,
-                session_id=session_id,
-                user_id=user_id,
-                reason="apply_pipeline_recipe_audit_unrecordable",
-                actor=actor,
-                recorder=recorder,
-                plugin_snapshot=plugin_snapshot,
-                policy_catalog=policy_catalog,
-            )
-            raise AuditIntegrityError(
-                "Recipe fast path applied recipe "
-                f"'{match.recipe_name}' successfully but could not canonicalize its audit envelope "
-                f"({type(recipe_canonicalization_failed).__name__}); refusing to under-record a successful action."
-            ) from recipe_canonicalization_failed
-        recorder.record(
-            finish_success(
-                recipe_audit,
-                result_payload=recipe_result.to_dict(),
-                version_after=recipe_result.updated_state.version,
-            )
-        )
-
-        return ComposerResult(
-            message=(
-                f"I built the `{match.recipe_name}` recipe and materialised the inline CSV as a session blob before wiring the pipeline."
-            ),
-            state=recipe_result.updated_state,
+        custody_config = PlannerCustodyConfig(
+            data_dir=self._data_dir,
+            session_engine=self._session_engine,
+            max_storage_per_session=self._settings.max_blob_storage_per_session_bytes,
+            secret_service=self._secret_service,
             runtime_preflight=None,
-            tool_invocations=recorder.invocations,
-            llm_calls=(),
         )
-
-    async def _cleanup_recipe_fast_path_blob(
-        self,
-        *,
-        blob_id: str,
-        state: CompositionState,
-        session_id: str,
-        user_id: str | None,
-        reason: str,
-        actor: str,
-        recorder: BufferingRecorder,
-        plugin_snapshot: PluginAvailabilitySnapshot,
-        policy_catalog: PolicyCatalogView,
-    ) -> None:
-        """Best-effort deletion of a blob created by the recipe fast path.
-
-        Called when a later fast-path step failed (or its synthetic audit
-        envelope could not be constructed) after ``create_blob`` already
-        persisted the blob. Whether or not the deletion succeeds, a
-        structured warning log and a telemetry counter record the orphan
-        event explicitly — silence is the defect under the audit doctrine.
-        Deletion failures are captured into the log/metric rather than
-        raised so cleanup can never mask the primary failure being handled.
-
-        The cleanup attempt is ALSO recorded into ``recorder`` as its own
-        synthetic ``delete_blob`` invocation — SUCCESS when the dispatch
-        completed (a semantic ``success=False`` report is still a completed
-        dispatch, per :func:`finish_success`'s contract) or PLUGIN_CRASH when
-        the call itself raised. This is what lets the orphan create_blob +
-        cleanup delete_blob pair land in the composer-audit invocation trail
-        instead of only the slog/counter side channel. Recording is
-        best-effort like the rest of this helper: a canonicalization failure
-        on the delete_blob envelope is folded into ``delete_error`` and simply
-        skips the recorder append — it never raises, so a secondary
-        audit-bookkeeping failure can never mask the primary failure this
-        cleanup is handling.
-        """
-        delete_args = {"blob_id": blob_id}
-        delete_audit, delete_envelope_failed = begin_dispatch_or_arg_error(
-            "server_recipe_delete_blob",
-            "delete_blob",
-            delete_args,
-            version_before=state.version,
-            actor=actor,
-        )
-        deleted = False
-        delete_error: str | None = None
-        if delete_envelope_failed is not None:
-            delete_error = type(delete_envelope_failed).__name__
-        else:
-            try:
-                delete_result = await run_sync_in_worker(
-                    execute_tool,
-                    "delete_blob",
-                    delete_args,
-                    state,
-                    policy_catalog,
-                    plugin_snapshot=plugin_snapshot,
-                    data_dir=self._data_dir,
-                    session_engine=self._session_engine,
-                    session_id=session_id,
-                    secret_service=self._secret_service,
-                    user_id=user_id,
-                )
-                deleted = bool(delete_result.success)
-                if not deleted:
-                    delete_error = "delete_blob_reported_failure"
-                recorder.record(
-                    finish_success(
-                        delete_audit,
-                        result_payload=delete_result.to_dict(),
-                        version_after=delete_result.updated_state.version,
+        plan: PipelinePlanResult | None = None
+        recipe_match = match_freeform_recipe_intent(message)
+        if recipe_match is not None and recipe_match.inline_blob is not None:
+            recipe = get_recipe(recipe_match.recipe_name)
+            if recipe is not None:
+                try:
+                    unavailable = unavailable_recipe_plugin(
+                        recipe,
+                        plugin_snapshot,
+                        raw_slots=recipe_match.slots,
                     )
-                )
-            except Exception as cleanup_exc:
-                delete_error = type(cleanup_exc).__name__
-                recorder.record(finish_plugin_crash(delete_audit, exc=cleanup_exc))
-        # slog is permitted here: the audit/side-effect bookkeeping itself is
-        # failing (an orphaned side effect with no composer-audit row), which
-        # is exactly the anomaly class the structured operator log exists for.
-        # Only the exception CLASS is logged — never the message, which could
-        # carry DB URLs or filesystem paths (same policy as the
-        # composer_crash_persistence_failed site above).
-        slog.warning(
-            "composer_recipe_fast_path_orphan_blob",
-            session_id=session_id,
-            blob_id=blob_id,
-            reason=reason,
-            blob_deleted=deleted,
-            delete_error=delete_error,
-        )
-        _RECIPE_FAST_PATH_ORPHAN_BLOB_COUNTER.add(
-            1,
-            {"reason": reason, "blob_deleted": "true" if deleted else "false"},
+                    if unavailable is None:
+                        recipe_contract = canonical_json(
+                            {
+                                "schema": "composer.server-recipe-router.v1",
+                                "recipe": recipe_match.recipe_name,
+                                "recipe_catalog_content_hash": recipe_catalog_content_hash(),
+                            }
+                        )
+                        recipe_pipeline = apply_recipe(
+                            recipe_match.recipe_name,
+                            {
+                                **recipe_match.slots,
+                                "source_blob_id": str(UUID(int=0)),
+                            },
+                        )
+                        source = recipe_pipeline.get("source")
+                        if type(source) is not dict or source.get("blob_id") != str(UUID(int=0)):
+                            raise AuditIntegrityError("inline recipe did not produce the expected source blob slot")
+                        source = dict(source)
+                        source.pop("blob_id")
+                        source["inline_blob"] = {
+                            "filename": recipe_match.inline_blob.filename,
+                            "mime_type": recipe_match.inline_blob.mime_type,
+                            "content": recipe_match.inline_blob.content,
+                        }
+                        recipe_pipeline["source"] = source
+                        plan = await prepare_pipeline_plan(
+                            pipeline=recipe_pipeline,
+                            current_state=state,
+                            reviewed_facts={},
+                            surface=PlannerSurface.FREEFORM,
+                            policy_catalog=policy_catalog,
+                            plugin_snapshot=plugin_snapshot,
+                            originating_message=origin,
+                            base=base,
+                            rendered_skill=recipe_contract,
+                            tool_call_id=(
+                                "server-recipe-"
+                                + stable_hash(
+                                    {
+                                        "schema": "composer.server-recipe-tool-call.v1",
+                                        "message_id": user_message_id,
+                                        "recipe": recipe_match.recipe_name,
+                                    }
+                                )
+                            ),
+                            model_identifier="composer-server-recipe-router",
+                            model_version="composer.server-recipe-router.v1",
+                            provider="server",
+                            repair_count=0,
+                            timeout_seconds=self._timeout_seconds,
+                            custody_config=custody_config,
+                        )
+                except RecipeValidationError:
+                    plan = None
+        if plan is None:
+            plan = await plan_pipeline(
+                intent=message,
+                current_state=state,
+                reviewed_facts={},
+                surface=PlannerSurface.FREEFORM,
+                policy_catalog=policy_catalog,
+                plugin_snapshot=plugin_snapshot,
+                originating_message=origin,
+                base=base,
+                model_config=PlannerModelConfig(
+                    completion=_litellm_acompletion,
+                    model_identifier=self._model,
+                    provider=self._availability.provider or "unknown",
+                    temperature=self._settings.composer_temperature,
+                    seed=self._settings.composer_seed,
+                    timeout_seconds=self._timeout_seconds,
+                    max_composition_turns=self._max_composition_turns,
+                    max_discovery_turns=self._max_discovery_turns,
+                    max_tool_calls_per_turn=self._max_tool_calls_per_turn,
+                    max_api_attempts=_LLM_API_MAX_ATTEMPTS,
+                    api_retry_base_seconds=_LLM_API_RETRY_BASE_DELAY_SECONDS,
+                ),
+                rendered_skill=rendered_skill,
+                repair_budget=self._settings.composer_planner_repair_budget,
+                budget_policy=PlannerBudgetPolicy(
+                    max_total_provider_calls=self._settings.composer_planner_max_provider_calls,
+                    max_request_bytes=self._settings.composer_planner_max_request_bytes,
+                    max_completion_tokens=self._settings.composer_planner_max_completion_tokens,
+                    max_cumulative_provider_cost=self._settings.composer_planner_max_cumulative_provider_cost,
+                ),
+                custody_config=custody_config,
+                lifecycle=self._planner_request_lifecycle(progress),
+                recorder=recorder,
+            )
+        return await self._stage_pipeline_plan(
+            plan=plan,
+            state=state,
+            session_id=session_uuid,
+            current_state_id=state_uuid,
+            user_message_id=message_uuid,
+            user_id=user_id,
+            trust_mode=preferences.trust_mode,
+            recorder=recorder,
         )
 
     async def _call_model_turn(
@@ -3326,15 +3298,8 @@ class ComposerServiceImpl:
         Args:
             guided_terminal: When set, this is the first freeform turn after
                 guided-mode exit; the layered transition prompt is used.
-            recorder: When ``compose()`` already ran the recipe fast-path
-                attempt (:meth:`_try_apply_freeform_recipe_intent`) and it
-                fell through to this loop, the caller passes the SAME
-                recorder so any orphaned fast-path invocations it already
-                buffered survive into this call's ComposerResult /
-                exception-carrier ``tool_invocations``. ``None`` (the
-                default) creates a fresh recorder, matching the pre-existing
-                behaviour for every other caller (including the test-only
-                one-turn driver).
+            recorder: Optional request-scoped audit recorder. ``None`` creates
+                a fresh recorder for direct and test-only callers.
         """
         initial_version = state.version
         # F-5c. On the first compose-loop entry of this service instance,

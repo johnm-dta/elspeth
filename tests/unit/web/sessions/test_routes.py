@@ -842,6 +842,9 @@ async def _create_canonical_pipeline_route_proposal(
             proposal=proposal,
             tool_call_id=tool_call_id,
             custody_result="not_required",
+            model_identifier="planner-model",
+            model_version="planner-model-v1",
+            provider="test",
         ),
         summary="Replace the pipeline.",
         rationale="Requested by the operator.",
@@ -1239,6 +1242,9 @@ def test_canonical_pipeline_accept_requires_and_echoes_draft_hash(tmp_path, monk
         proposal=proposal_envelope,
         tool_call_id="canonical-terminal-call",
         custody_result="not_required",
+        model_identifier="planner-model",
+        model_version="planner-model-v1",
+        provider="test",
     )
     client = TestClient(app)
     session = client.post("/api/sessions", json={"title": "Canonical accept"}).json()
@@ -1367,6 +1373,9 @@ def test_generic_accept_rejects_guided_pipeline_surfaces_before_dispatch(tmp_pat
         proposal=proposal_envelope,
         tool_call_id=f"{surface_name.lower()}-call",
         custody_result="not_required",
+        model_identifier="planner-model",
+        model_version="planner-model-v1",
+        provider="test",
     )
     client = TestClient(app)
     session = client.post("/api/sessions", json={"title": "Guided pipeline"}).json()
@@ -1442,6 +1451,9 @@ def test_malformed_canonical_creation_event_fails_closed_without_legacy_fallback
         proposal=proposal_envelope,
         tool_call_id="malformed-canonical-call",
         custody_result="not_required",
+        model_identifier="planner-model",
+        model_version="planner-model-v1",
+        provider="test",
     )
     client = TestClient(app)
     session = client.post("/api/sessions", json={"title": "Malformed canonical"}).json()

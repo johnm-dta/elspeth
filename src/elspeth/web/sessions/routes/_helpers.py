@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import json
 import sys
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -60,6 +59,7 @@ from elspeth.web.composer.audit import (
     chat_turn_audit_envelope,
     llm_call_audit_envelope,
 )
+from elspeth.web.composer.audit_storage import redacted_tool_invocation_content_and_envelope
 from elspeth.web.composer.guided.audit import (
     emit_dropped_to_freeform,
     emit_hidden_field_rejected,
@@ -120,14 +120,7 @@ from elspeth.web.composer.protocol import (
     ComposerService,
     ComposerServiceError,
 )
-from elspeth.web.composer.redaction import (
-    MANIFEST,
-    redact_guided_snapshot_storage_paths,
-    redact_source_storage_path,
-    redact_tool_call_arguments,
-    redact_tool_call_response,
-)
-from elspeth.web.composer.redaction_telemetry import OtelRedactionTelemetry
+from elspeth.web.composer.redaction import redact_guided_snapshot_storage_paths, redact_source_storage_path
 from elspeth.web.composer.service import (
     _ADVISOR_MALFORMED_USER_DETAIL,
     _ADVISOR_UNAVAILABLE_USER_DETAIL,
@@ -253,7 +246,6 @@ def _guided_source_commit_failure_detail(tool_result: object) -> str:
 
 
 _MAX_PROVIDER_DETAIL_CHARS = 1_000
-_INVALID_TOOL_ARGUMENTS_REDACTION_STATUS = "invalid_tool_arguments"
 
 
 class _SessionComposeLockRegistry:
@@ -1297,156 +1289,6 @@ async def _runtime_preflight_for_state(
     )
 
 
-def _hash_canonical_payload(canonical_payload: str) -> str:
-    return hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
-
-
-def _load_canonical_mapping(canonical_payload: str | None) -> dict[str, object] | None:
-    """Decode an audit canonical-JSON payload back into its mapping.
-
-    ``canonical_payload`` is ``ComposerToolInvocation.arguments_canonical``
-    / ``.result_canonical`` — RFC 8785 canonical JSON *we* authored at the
-    dispatch boundary (see :mod:`elspeth.web.composer.audit`, which always
-    emits ``canonical_json`` of a mapping, wrapping even unparseable LLM
-    arguments in a sentinel object). It is therefore Tier-1 audit data on
-    read-back: ``None`` input is the only honest absence (``result_canonical``
-    is nullable for ARG_ERROR / PLUGIN_CRASH), but a *non-None* payload that
-    fails to decode, or decodes to a non-mapping, is corruption of our own
-    audit serialization — we crash rather than return ``None``.
-
-    Returning ``None`` on a decode failure would be doubly wrong: it hides a
-    Tier-1 anomaly, and it makes the redaction callers
-    (``_redacted_{argument,result}_canonical_for_chat_message``) fall back to
-    emitting the *raw, unredacted* canonical payload, defeating the
-    redaction manifest for any row whose canonical text was corrupted.
-    """
-    if canonical_payload is None:
-        return None
-    try:
-        decoded = json.loads(canonical_payload)
-    except json.JSONDecodeError as exc:
-        raise AuditIntegrityError(
-            "Tier 1 audit anomaly: composer tool-invocation canonical payload "
-            "is not valid JSON. arguments_canonical / result_canonical are "
-            "RFC 8785 canonical JSON written by our own dispatch boundary; a "
-            "decode failure is corruption of our audit serialization, not a "
-            "recoverable data-quality issue."
-        ) from exc
-    # ``json.loads`` returns a plain ``dict`` (never a subclass) for a JSON
-    # object, so the exact-type check is correct and lets the tier-model gate
-    # see this is an offensive Tier-1 invariant assertion, not duck-typing.
-    if type(decoded) is not dict:
-        raise AuditIntegrityError(
-            f"Tier 1 audit anomaly: composer tool-invocation canonical payload "
-            f"decoded to {type(decoded).__name__!r}, expected a JSON object. "
-            f"The dispatch boundary always emits canonical_json of a mapping; "
-            f"a non-object payload is corruption of our audit serialization."
-        )
-    return cast(dict[str, object], decoded)
-
-
-def _redacted_argument_canonical_for_chat_message(
-    invocation: ComposerToolInvocation,
-    *,
-    telemetry: OtelRedactionTelemetry,
-) -> str:
-    arguments = _load_canonical_mapping(invocation.arguments_canonical)
-    if invocation.tool_name not in MANIFEST or arguments is None:
-        return invocation.arguments_canonical
-    try:
-        redacted = redact_tool_call_arguments(
-            invocation.tool_name,
-            arguments,
-            telemetry=telemetry,
-        )
-    except PydanticValidationError:
-        if invocation.status != ComposerToolStatus.ARG_ERROR:
-            raise
-        redacted = {
-            "_redaction_status": _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS,
-            "error_class": invocation.error_class,
-        }
-    return canonical_json(redacted)
-
-
-def _redacted_result_canonical_for_chat_message(
-    invocation: ComposerToolInvocation,
-    *,
-    telemetry: OtelRedactionTelemetry,
-) -> str | None:
-    result = _load_canonical_mapping(invocation.result_canonical)
-    if invocation.tool_name not in MANIFEST or result is None:
-        return invocation.result_canonical
-    if invocation.status == ComposerToolStatus.ARG_ERROR:
-        return invocation.result_canonical
-    redacted = redact_tool_call_response(
-        invocation.tool_name,
-        result,
-        telemetry=telemetry,
-    )
-    return canonical_json(redacted)
-
-
-def _redacted_tool_invocation_content_and_envelope(invocation: ComposerToolInvocation) -> tuple[str, dict[str, object]]:
-    """Return chat-message content and tool-call envelope for the legacy drain.
-
-    ``ComposerToolInvocation`` carries the exact arguments/results exchanged
-    inside the compose loop. Some tools intentionally keep raw values there so
-    in-memory convergence logic and dedicated audit buffers can reason about
-    what happened. The legacy route drain writes to ``chat_messages`` instead;
-    that is a persistence boundary, so it stores the redaction-manifest
-    projection rather than mirroring pre-redaction canonical payloads.
-    """
-
-    telemetry = OtelRedactionTelemetry()
-    arguments_canonical = _redacted_argument_canonical_for_chat_message(
-        invocation,
-        telemetry=telemetry,
-    )
-    result_canonical = _redacted_result_canonical_for_chat_message(
-        invocation,
-        telemetry=telemetry,
-    )
-    if invocation.tool_name == "set_pipeline" and invocation.status is ComposerToolStatus.SUCCESS:
-        raw_result = _load_canonical_mapping(invocation.result_canonical)
-        if raw_result is not None and ("pipeline_content_hash_schema" in raw_result or "pipeline_content_hash" in raw_result):
-            if raw_result.get("pipeline_content_hash_schema") != "composer.pipeline-dispatch-result.v1":
-                raise AuditIntegrityError("pipeline dispatch executor-content schema is malformed")
-            executor_content_hash = raw_result.get("pipeline_content_hash")
-            if type(executor_content_hash) is not str:
-                raise AuditIntegrityError("pipeline dispatch executor-content hash is malformed")
-            redacted_result = _load_canonical_mapping(result_canonical)
-            if redacted_result is None:
-                raise AuditIntegrityError("pipeline dispatch redacted result is missing")
-            redacted_result["pipeline_content_hash_schema"] = "composer.pipeline-dispatch-result.v1"
-            redacted_result["pipeline_content_hash"] = executor_content_hash
-            result_canonical = canonical_json(redacted_result)
-    invocation_payload = invocation.to_dict()
-    invocation_payload["arguments_canonical"] = arguments_canonical
-    invocation_payload["arguments_hash"] = _hash_canonical_payload(arguments_canonical)
-    invocation_payload["result_canonical"] = result_canonical
-    invocation_payload["result_hash"] = _hash_canonical_payload(result_canonical) if result_canonical is not None else None
-
-    if invocation.status == ComposerToolStatus.PLUGIN_CRASH:
-        content = json.dumps(
-            {
-                "error_class": invocation.error_class,
-                "error_message": invocation.error_message,
-            }
-        )
-    elif result_canonical is not None:
-        content = result_canonical
-    else:
-        # ARG_ERROR with no captured payload — fall back to error class.
-        content = json.dumps(
-            {
-                "error_class": invocation.error_class,
-                "error_message": invocation.error_message,
-            }
-        )
-    return content, {"_kind": "audit", "invocation": invocation_payload}
-
-
 async def _persist_tool_invocations(
     service: SessionServiceProtocol,
     session_id: UUID,
@@ -1516,7 +1358,7 @@ async def _persist_tool_invocations(
     """
     persisted_pipeline_bindings: list[PipelineDispatchAuditBinding] = []
     for invocation in tool_invocations:
-        content, envelope = _redacted_tool_invocation_content_and_envelope(invocation)
+        content, envelope = redacted_tool_invocation_content_and_envelope(invocation)
         role: ChatMessageRole = "tool" if parent_assistant_id is not None else "audit"
         try:
             await service.add_message(

@@ -102,6 +102,12 @@ class PipelinePlannerError(RuntimeError):
         self.code = code
 
 
+class _PipelineCandidateRejected(RuntimeError):
+    def __init__(self, result: ToolResult) -> None:
+        super().__init__("pipeline candidate was not acceptable")
+        self.result = result
+
+
 @dataclass(frozen=True, slots=True)
 class PlannerBudgetPolicy:
     """Request-wide hard bounds, except cost which is a continuation cap.
@@ -223,6 +229,9 @@ class PipelinePlanResult:
     proposal: PipelineProposal
     tool_call_id: str
     custody_result: PipelineCustodyResult
+    model_identifier: str
+    model_version: str
+    provider: str
 
     def __post_init__(self) -> None:
         if type(self.proposal) is not PipelineProposal:
@@ -232,6 +241,10 @@ class PipelinePlanResult:
         custody_result = cast(Any, self.custody_result)
         if type(custody_result) is not str or custody_result not in {"not_required", "ready"}:
             raise ValueError("custody_result must be 'not_required' or 'ready'")
+        for name in ("model_identifier", "model_version", "provider"):
+            value = getattr(self, name)
+            if type(value) is not str or not value.strip():
+                raise ValueError(f"{name} must be a non-empty exact string")
 
 
 @dataclass(frozen=True, slots=True)
@@ -475,6 +488,166 @@ async def _settle_lifecycle(lifecycle: PlannerRequestLifecycle, outcome: Planner
         with suppress(BaseException):
             task.result()
         raise
+
+
+async def _build_valid_pipeline_plan(
+    *,
+    pipeline: Mapping[str, Any],
+    current_state: CompositionState,
+    base: ProposalBase,
+    reviewed_facts: Mapping[str, Any],
+    surface: PlannerSurface,
+    repair_count: int,
+    skill_hash: str,
+    tool_call_id: str,
+    terminal_context: ToolContext,
+    custody_config: PlannerCustodyConfig,
+    originating_message: PlannerOriginatingMessage,
+    run_sync: Callable[..., Awaitable[Any]],
+    model_identifier: str,
+    model_version: str,
+    provider: str,
+) -> PipelinePlanResult:
+    """Validate, settle custody, revalidate, and seal one exact pipeline."""
+
+    candidate_context = replace(terminal_context, tool_arguments_hash=stable_hash({"pipeline": pipeline}))
+    candidate = await run_sync(
+        build_set_pipeline_candidate,
+        pipeline,
+        current_state,
+        candidate_context,
+    )
+    if not candidate.acceptable:
+        raise _PipelineCandidateRejected(candidate.result)
+
+    safe_pipeline: Mapping[str, Any] = pipeline
+    custody_result: PipelineCustodyResult = "not_required"
+    if candidate.prepared_inline_blob is not None:
+        if custody_config.session_engine is None:
+            raise AuditIntegrityError("inline pipeline custody requires session_engine")
+        preparation = prepare_pipeline_custody(
+            pipeline,
+            candidate.prepared_inline_blob,
+            session_id=originating_message.session_id,
+        )
+        await _await_custody_settlement(
+            finalize_pipeline_custody(
+                preparation,
+                engine=custody_config.session_engine,
+                data_dir=custody_config.data_dir,
+                max_storage_per_session=custody_config.max_storage_per_session,
+            )
+        )
+        safe_pipeline = cast(dict[str, Any], deep_thaw(preparation.arguments))
+        safe_context = replace(terminal_context, tool_arguments_hash=stable_hash({"pipeline": safe_pipeline}))
+        safe_candidate = await run_sync(
+            build_set_pipeline_candidate,
+            safe_pipeline,
+            current_state,
+            safe_context,
+        )
+        if not safe_candidate.acceptable or safe_candidate.prepared_inline_blob is not None:
+            raise AuditIntegrityError("custody-safe pipeline failed canonical revalidation")
+        custody_result = "ready"
+
+    return PipelinePlanResult(
+        proposal=PipelineProposal.create(
+            pipeline=safe_pipeline,
+            base=base,
+            reviewed_facts=reviewed_facts,
+            surface=surface,
+            repair_count=repair_count,
+            skill_hash=skill_hash,
+        ),
+        tool_call_id=tool_call_id,
+        custody_result=custody_result,
+        model_identifier=model_identifier,
+        model_version=model_version,
+        provider=provider,
+    )
+
+
+async def prepare_pipeline_plan(
+    *,
+    pipeline: Mapping[str, Any],
+    current_state: CompositionState,
+    reviewed_facts: Mapping[str, Any],
+    surface: PlannerSurface,
+    policy_catalog: PolicyCatalogView,
+    plugin_snapshot: PluginAvailabilitySnapshot,
+    originating_message: PlannerOriginatingMessage,
+    base: ProposalBase,
+    rendered_skill: str,
+    tool_call_id: str,
+    model_identifier: str,
+    model_version: str,
+    provider: str,
+    repair_count: int,
+    timeout_seconds: float,
+    custody_config: PlannerCustodyConfig,
+) -> PipelinePlanResult:
+    """Prepare a server-derived pipeline through the planner's final gate."""
+
+    if policy_catalog.snapshot is not plugin_snapshot:
+        raise ValueError("plugin_snapshot_catalog_mismatch")
+    if type(rendered_skill) is not str or not rendered_skill.strip():
+        raise ValueError("rendered_skill must be a non-empty exact string")
+    if type(repair_count) is not int or repair_count < 0:
+        raise ValueError("repair_count must be a non-negative exact integer")
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+
+    async def bounded(func: Callable[..., Any], *args: Any) -> Any:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise PipelinePlannerError("pipeline preparation timed out", code="TIMEOUT")
+        try:
+            return await asyncio.wait_for(run_sync_in_worker(func, *args), timeout=remaining)
+        except TimeoutError as exc:
+            raise PipelinePlannerError("pipeline preparation timed out", code="TIMEOUT") from exc
+
+    validation = await bounded(policy_catalog.validate_composition_state, current_state)
+    skill_hash = hashlib.sha256(rendered_skill.encode("utf-8")).hexdigest()
+    context = ToolContext(
+        catalog=policy_catalog,
+        plugin_snapshot=plugin_snapshot,
+        data_dir=custody_config.data_dir,
+        require_data_dir_for_paths=True,
+        session_engine=custody_config.session_engine,
+        session_id=originating_message.session_id,
+        secret_service=custody_config.secret_service,
+        user_id=originating_message.user_id,
+        baseline=current_state,
+        current_validation=validation.validation,
+        runtime_preflight=custody_config.runtime_preflight,
+        max_blob_storage_per_session_bytes=custody_config.max_storage_per_session,
+        user_message_id=originating_message.message_id,
+        user_message_content=originating_message.content,
+        composer_model_identifier=model_identifier,
+        composer_model_version=model_version,
+        composer_provider=provider,
+        composer_skill_hash=skill_hash,
+        tool_arguments_hash=None,
+    )
+    try:
+        return await _build_valid_pipeline_plan(
+            pipeline=pipeline,
+            current_state=current_state,
+            base=base,
+            reviewed_facts=reviewed_facts,
+            surface=surface,
+            repair_count=repair_count,
+            skill_hash=skill_hash,
+            tool_call_id=tool_call_id,
+            terminal_context=context,
+            custody_config=custody_config,
+            originating_message=originating_message,
+            run_sync=bounded,
+            model_identifier=model_identifier,
+            model_version=model_version,
+            provider=provider,
+        )
+    except _PipelineCandidateRejected as exc:
+        raise PipelinePlannerError("server-derived pipeline failed candidate validation", code="VALIDATION_FAILED") from exc
 
 
 async def plan_pipeline(
@@ -814,7 +987,7 @@ async def _plan_pipeline_inner(
             if schema_feedback is not None:
                 repair_count += 1
                 if repair_count > repair_budget:
-                    raise PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED")
+                    raise PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED") from None
                 messages.append(_assistant_tool_calls_message(message, calls))
                 messages.append(
                     {
@@ -829,13 +1002,23 @@ async def _plan_pipeline_inner(
                 request_context,
                 composer_model_version=audited_call.model_returned or audited_call.model_requested,
             )
-            candidate_context = replace(terminal_context, tool_arguments_hash=stable_hash(call.arguments))
             try:
-                candidate = await run_planner_sync(
-                    build_set_pipeline_candidate,
-                    pipeline,
-                    current_state,
-                    candidate_context,
+                return await _build_valid_pipeline_plan(
+                    pipeline=pipeline,
+                    current_state=current_state,
+                    base=base,
+                    reviewed_facts=reviewed_facts,
+                    surface=surface,
+                    repair_count=repair_count,
+                    skill_hash=skill_hash,
+                    tool_call_id=call.call_id,
+                    terminal_context=terminal_context,
+                    custody_config=custody_config,
+                    originating_message=originating_message,
+                    run_sync=run_planner_sync,
+                    model_identifier=audited_call.model_requested,
+                    model_version=audited_call.model_returned or audited_call.model_requested,
+                    provider=model_config.provider,
                 )
             except ToolArgumentError as exc:
                 repair_count += 1
@@ -850,68 +1033,19 @@ async def _plan_pipeline_inner(
                     }
                 )
                 continue
-            if not candidate.acceptable:
+            except _PipelineCandidateRejected as exc:
                 repair_count += 1
                 if repair_count > repair_budget:
-                    raise PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED")
+                    raise PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED") from None
                 messages.append(_assistant_tool_calls_message(message, calls))
                 messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": call.call_id,
-                        "content": canonical_json(_allowlisted_candidate_feedback(candidate.result)),
+                        "content": canonical_json(_allowlisted_candidate_feedback(exc.result)),
                     }
                 )
                 continue
-
-            safe_pipeline: Mapping[str, Any] = pipeline
-            custody_result: PipelineCustodyResult = "not_required"
-            if candidate.prepared_inline_blob is not None:
-                if custody_config.session_engine is None:
-                    raise AuditIntegrityError("inline pipeline custody requires session_engine")
-                preparation = prepare_pipeline_custody(
-                    pipeline,
-                    candidate.prepared_inline_blob,
-                    session_id=originating_message.session_id,
-                )
-                await _await_custody_settlement(
-                    finalize_pipeline_custody(
-                        preparation,
-                        engine=custody_config.session_engine,
-                        data_dir=custody_config.data_dir,
-                        max_storage_per_session=custody_config.max_storage_per_session,
-                    )
-                )
-                # Custody freezes its preparation envelope for hand-off.  The
-                # proposal contract intentionally accepts strict JSON
-                # containers only, so thaw the already-validated safe shape
-                # back to dict/list containers before final validation/hash.
-                safe_pipeline = cast(dict[str, Any], deep_thaw(preparation.arguments))
-                safe_context = replace(terminal_context, tool_arguments_hash=stable_hash({"pipeline": safe_pipeline}))
-                safe_candidate = await run_planner_sync(
-                    build_set_pipeline_candidate,
-                    safe_pipeline,
-                    current_state,
-                    safe_context,
-                )
-                if not safe_candidate.acceptable or safe_candidate.prepared_inline_blob is not None:
-                    # Custody is idempotently retained for session
-                    # reconciliation; no proposal or state is published.
-                    raise AuditIntegrityError("custody-safe pipeline failed canonical revalidation")
-                custody_result = "ready"
-
-            return PipelinePlanResult(
-                proposal=PipelineProposal.create(
-                    pipeline=safe_pipeline,
-                    base=base,
-                    reviewed_facts=reviewed_facts,
-                    surface=surface,
-                    repair_count=repair_count,
-                    skill_hash=skill_hash,
-                ),
-                tool_call_id=call.call_id,
-                custody_result=custody_result,
-            )
 
         if any(call.name not in _PLANNER_DISCOVERY_TOOL_NAME_SET for call in calls):
             raise PipelinePlannerError(
@@ -980,4 +1114,5 @@ __all__ = [
     "plan_pipeline",
     "planner_terminal_tool_definition",
     "planner_tool_definitions",
+    "prepare_pipeline_plan",
 ]

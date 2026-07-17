@@ -272,6 +272,34 @@ def test_unknown_fields_are_rejected_and_models_are_frozen() -> None:
         evidence.loaded = False
 
 
+def test_scenario_dimensions_reject_post_validation_mutation() -> None:
+    scenario = _scenario(EvidenceCell(status="pass", evidence=("evidence-1",)))
+
+    with pytest.raises(TypeError):
+        scenario.dimensions["runtime"] = "not-an-evidence-cell"  # type: ignore[assignment]
+
+
+def test_scenario_dimensions_preserve_mapping_input_access_iteration_and_serialization() -> None:
+    scenario = ScenarioSpec.model_validate(
+        {
+            "id": "linear",
+            "ordinal": 1,
+            "title": "Linear source → transform → sink",
+            "dimensions": {
+                "config": {
+                    "status": "pass",
+                    "evidence": ["evidence-1"],
+                }
+            },
+        }
+    )
+
+    assert scenario.dimensions["config"].status == "pass"
+    assert [(dimension, cell.status) for dimension, cell in scenario.dimensions.items()] == [("config", "pass")]
+    assert scenario.model_dump(mode="json", exclude_none=True)["dimensions"] == {"config": {"status": "pass", "evidence": ["evidence-1"]}}
+    assert ScenarioSpec.model_validate_json(scenario.model_dump_json()).dimensions["config"].status == "pass"
+
+
 def test_strict_scalar_types_reject_coercion() -> None:
     with pytest.raises(ValidationError):
         ConfigEvidence(loaded=1, settings_sha256="abc")  # type: ignore[arg-type]

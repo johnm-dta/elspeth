@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints, field_serializer, field_validator, model_validator
 
 NonEmpty = Annotated[str, StringConstraints(strict=True, strip_whitespace=True, min_length=1)]
 IssueId = Annotated[str, StringConstraints(strict=True, pattern=r"^elspeth-[0-9a-f]{10}$")]
@@ -126,7 +128,16 @@ class ScenarioSpec(ClosedModel):
     ordinal: Annotated[int, Field(strict=True, ge=1, le=15)]
     title: NonEmpty
     cases: tuple[HarnessCaseSpec, ...] = ()
-    dimensions: dict[Dimension, EvidenceCell]
+    dimensions: Mapping[Dimension, EvidenceCell]
+
+    @field_validator("dimensions")
+    @classmethod
+    def _freeze_dimensions(cls, dimensions: Mapping[Dimension, EvidenceCell]) -> Mapping[Dimension, EvidenceCell]:
+        return MappingProxyType(dict(dimensions))
+
+    @field_serializer("dimensions")
+    def _serialize_dimensions(self, dimensions: Mapping[Dimension, EvidenceCell]) -> dict[Dimension, EvidenceCell]:
+        return dict(dimensions)
 
 
 class ScenarioManifest(ClosedModel):

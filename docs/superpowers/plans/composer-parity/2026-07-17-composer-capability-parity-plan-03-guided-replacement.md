@@ -33,8 +33,13 @@ GUIDED_SESSION_SCHEMA_VERSION = 8
 class GuidedProposalRef:
     proposal_id: UUID
     draft_hash: str
+    base_state_id: UUID
     base_composition_content_hash: str
     reviewed_anchor_hash: str
+    covered_deferred_intent_ids: tuple[str, ...]
+    creation_event_schema: Literal["pipeline_proposal_created.v1"]
+    supersedes_proposal_id: UUID | None = None
+    supersedes_draft_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,9 +58,13 @@ constraints),
 same-session `root_intent_message_id` rather than duplicating the raw initial
 request in composer metadata. It does not embed canonical arguments or another
 graph model.
+
 - [ ] Preserve current closed decoding, exact types, non-negative counters,
   terminal-state rules, and workflow-profile validation. Reject every
-  `schema_version != 8`; do not add a converter.
+  `schema_version != 8`; do not add a converter. The entire guided composer
+  metadata object and every guided request/response DTO use strict closed
+  decoding (`extra="forbid"` / exact keys), while unrelated fields in the
+  general session envelope retain their existing compatibility posture.
 - [ ] Cover every guided stage, pending proposal, stable edit target, deferred
   intent, completed/exited state, and process restart.
 - [ ] Include multi-source/multi-output reordering and stable-id retention in
@@ -80,6 +89,13 @@ Expected: PASS.
 - Modify: `src/elspeth/web/sessions/schema.py`
 - Modify: `src/elspeth/web/sessions/protocol.py`
 - Modify: `src/elspeth/web/sessions/service.py`
+- Modify: `src/elspeth/web/sessions/schemas.py`
+- Modify: `src/elspeth/web/sessions/routes/composer/guided.py`
+- Modify: `src/elspeth/web/sessions/routes/composer/state.py`
+- Modify: `src/elspeth/web/sessions/routes/sessions.py`
+- Modify: `src/elspeth/web/frontend/src/types/guided.ts`
+- Modify: `src/elspeth/web/frontend/src/api/client.ts`
+- Modify: `src/elspeth/web/frontend/src/stores/sessionStore.ts`
 - Modify: `docs/runbooks/staging-session-db-recreation.md`
 - Modify: `docs/runbooks/aws-ecs-deployment.md`
 - Modify: `docs/runbooks/ansible-ubuntu-deployment.md`
@@ -103,6 +119,17 @@ Expected: PASS.
   lookup, failure settlement, and audited expired-lease takeover consistently
   on SQLite and PostgreSQL. This table is part of epoch 29, not a later lazy
   migration.
+- [ ] Put the stable client `operation_id` in the actual strict request DTO,
+  route call, frontend API call, and store action for start, respond, chat,
+  convert-to-guided, re-enter-guided, revert, and fork. The frontend creates one
+  id per user action and reuses it for transport retries; it does not generate a
+  fresh id after an ambiguous response.
+- [ ] Define replay/re-entry behavior mechanically: the same operation id and
+  request hash returns the exact stored completed response; an active attempt
+  rejoins/polls the same operation; an expired lease may be taken over with an
+  incremented attempt; a terminal failed operation returns the same safe failure
+  and an intentional new try needs a new id. Reuse with a different request hash
+  or operation kind is a 409 integrity conflict.
 - [ ] Fence every post-provider durable mutation with the current
   `(session_id, operation_id, lease_token, attempt)`. Lease takeover, custody
   reservation/finalization, proposal staging, operation-status update, and
@@ -110,6 +137,10 @@ Expected: PASS.
   in their write transaction. A stale worker performs no durable write after
   losing the lease. Add a race where worker A expires, worker B takes over, and
   A completes last; only B may stage or settle one proposal/result.
+- [ ] Apply the reservation, replay, lease, and stale-worker tests to all seven
+  mutating surfaces, including provider-free revert/fork paths. Revert and fork
+  still take the compose lock and operation fence; idempotency does not weaken
+  their proposal/blob cleanup rules.
 - [ ] Do not change `SQLITE_SCHEMA_EPOCH`; this feature does not alter the
   landscape/audit database.
 - [ ] Update exact epoch assertions in current tests and verify a fresh SQLite
@@ -160,12 +191,15 @@ at epoch 29.
   stable component targets. Never expose model-authored rationale verbatim.
 - [ ] Replace `accepted_step_index` and `edit_step_index` in
   `GuidedRespondRequest` / `TurnResponse` with `proposal_id`, `draft_hash`, and
-  `edit_target`. Accept/reject/revise must echo both proposal id and draft hash.
+  `edit_target`, and add the required stable `operation_id`. Accept/reject/revise
+  must echo both proposal id and draft hash.
 - [ ] Update legal-turn maps, exact payload keys, response validation,
   redaction/summary allowlists, audit emission, GET rebuild, and guided dispatch
   together. Add exhaustive enum tests so a new turn cannot be silently omitted.
 - [ ] Reject stale/mismatched proposal ids or hashes with 409 before mutation.
-  Reject malformed stable ids with 400. Do not fall back to array indices.
+  Reject malformed stable ids with 400. GET rebuild encountering a stale edit
+  target or any legacy edit index returns an integrity conflict; it does not
+  clear, guess, or fall back to an array position.
 
 Run:
 
@@ -209,6 +243,12 @@ Expected: PASS.
   topology. Test that base/draft hash are computed once, predecessor drift
   rejects staging, and acceptance observes the checkpoint named by
   `PresentBase`.
+- [ ] Persist and verify the complete proposal reference/store contract:
+  proposal/draft/base/anchor hashes, ordered covered-deferred ids, creation
+  event schema, predecessor/supersession links, and closed lifecycle events.
+  The private proposal row plus its sole authoritative `proposal.created` event
+  remain reconstruction authority; the guided ref is a verified safe anchor,
+  not an alternate event log.
 - [ ] Rebuild GET responses by loading the same-session pending row and
   recomputing draft/base/anchor hashes. If an expected, same-session row was
   explicitly rejected or superseded, acquire the compose lock, clear the
@@ -230,6 +270,12 @@ Expected: PASS.
   and event surfaces. Add canaries for raw inline content, credentials,
   resolved secrets, raw validation text, and raw provider errors across
   proposed, failed, revised, rejected, accepted, and restored cases.
+- [ ] Preserve the current fail-closed field-mapper guarantee through the shared
+  planner: a secret-bearing structured LLM candidate may advertise typed output
+  fields only when its validation probe constructs successfully. Expected
+  config-probe failure must abstain/warn and block any downstream field mapper
+  that requires unproven fields; it must never infer pass-through guarantees or
+  accept the proposal by fallback.
 
 Run:
 
@@ -262,6 +308,7 @@ guided checkpoint holds only the verified reference.
 - Modify: `src/elspeth/web/frontend/src/test/guided-fixtures.ts`
 - Modify: `src/elspeth/web/frontend/src/api/client.guided.test.ts`
 - Modify: `src/elspeth/web/frontend/src/components/tutorial/TutorialGuidedShell.test.tsx`
+- Modify: `src/elspeth/web/frontend/src/components/chat/ChatPanel.test.tsx`
 - Modify: the colocated tests for every guided response component listed above
 - Delete: `src/elspeth/web/frontend/src/components/chat/guided/ProposeChainTurn.tsx`
 - Delete: `src/elspeth/web/frontend/src/components/chat/guided/ProposeChainTurn.test.tsx`
@@ -271,10 +318,15 @@ guided checkpoint holds only the verified reference.
 - [ ] Submit proposal id and draft hash for every action. Display 409 as a stale
   proposal that must be regenerated; never retry acceptance with old data.
 - [ ] Close the TypeScript union over `propose_pipeline` and add an exhaustive
-  renderer assertion.
+  renderer assertion. `GuidedTurn` is a closed discriminated union decoded from
+  the wire before entering the store; production guided API/store/renderer code
+  may not use `unknown` casts to admit an unvalidated payload.
 - [ ] Test forks, fan-in, multiple sources/outputs, gates, queues,
   aggregations, error routes, revise, reject, stale hash, keyboard navigation,
   focus, and tutorial passive controls.
+- [ ] Add explicit `ChatPanel` tests for active/reloading/stale/error proposal
+  states and tutorial-shell tests proving the passive profile renders the same
+  closed `propose_pipeline` payload without enabling forbidden actions.
 
 Run:
 
@@ -335,6 +387,10 @@ Expected: PASS.
   rewrites reviewed-fact blob ids from the returned `blob_map`, and saves the
   rewritten child state. Do not claim filesystem copies participate in the
   session transaction.
+- [ ] Fence fork's message map, blob map, rewrite, and result settlement with
+  its stable operation id. Replays return the same child; interruption uses the
+  compensating cleanup/archive path and can never expose a second or partially
+  mapped child.
 - [ ] Add an idempotent blob-service cleanup operation for that post-commit
   phase. If blob copy, id rewrite, or rewritten-state persistence fails, clean
   every copied child blob and archive the child using the existing rollback
@@ -348,7 +404,9 @@ Expected: PASS.
   checkpoint, and returns to topology planning; it never retains or rebases an
   old proposal base id. Add accept-vs-revert race tests on SQLite and
   PostgreSQL proving serialization yields one terminal proposal outcome and no
-  executable dangling reference.
+  executable dangling reference. Its operation fence and proposal
+  terminalization occur in the same session-write transaction as the restored
+  checkpoint metadata.
 - [ ] Replace remaining callers with `guided/planning.py`, then delete active
   `ChainProposal`, `PROPOSE_CHAIN`, `solve_chain`,
   `handle_step_3_chain_accept`, `step_3_edit_index`, fixed `chain_in` / `main`
@@ -368,8 +426,14 @@ uv run pytest \
   tests/integration/web/composer/guided/test_schema8_fork_revert.py \
   tests/unit/web/sessions/test_fork.py \
   tests/unit/web/composer/guided/test_no_chain_authoring_path.py -q
-uv run pytest tests/unit/web/composer/guided tests/integration/web/composer/guided -q
-cd src/elspeth/web/frontend && npm test -- --run src/components/chat/guided src/stores/sessionStore.guided.test.ts && npm run typecheck
+uv run pytest \
+  tests/unit/web/composer/guided \
+  tests/integration/web/composer/guided -q
+cd src/elspeth/web/frontend
+npm test -- --run \
+  src/components/chat/guided \
+  src/stores/sessionStore.guided.test.ts
+npm run typecheck
 cd ../../../..
 uv run ruff check src/elspeth/web/composer/guided src/elspeth/web/sessions
 uv run mypy src/elspeth/web/composer/guided src/elspeth/web/sessions

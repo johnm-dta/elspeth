@@ -10,9 +10,57 @@ bounded generated valid DAGs. Staging reuses the repository deployment and
 session-recreation runbooks and retains only evidence needed to verify the
 accepted revision and outputs.
 
-**Prerequisite:** Plans 01-04 pass on one integrated revision.
+**Prerequisite:** Plans 01-04 pass on one integrated revision. Task 1 below is
+required before the parity corpus or staging acceptance is evaluated.
 
-## Task 1: Create the canonical fixture corpus
+## Task 1: Type public structured LLM query discovery
+
+**Files:**
+
+- Modify: `src/elspeth/plugins/transforms/llm/base.py`
+- Modify: `src/elspeth/plugins/transforms/llm/multi_query.py`
+- Modify: `src/elspeth/plugins/transforms/llm/transform.py`
+- Modify: `tests/unit/plugins/llm/test_llm_config.py`
+- Modify: `tests/unit/web/catalog/test_service.py`
+- Modify: `tests/unit/contracts/test_plugin_assistance_coverage.py`
+- Modify: `tests/integration/web/test_catalog_discovery.py`
+
+- [ ] Replace `LLMConfig.queries` untyped nested dictionaries with Pydantic
+  query/output-field configuration models. Preserve both accepted authoring
+  forms—mapping keyed by query name and list entries carrying `name`—and
+  normalize them to the same runtime query specs without changing execution.
+- [ ] Adapt `resolve_queries()` and every LLM config/template/required-field
+  validator to consume the typed models. Preserve duplicate-name, reserved
+  suffix, output collision, enum/type, template, and pass-through guarantees;
+  malformed input must still fail closed with safe configuration errors.
+- [ ] Assert the generated catalog schema and lowered discovery response expose
+  query `name`, `input_fields`, `template`, `response_format`, `output_fields`,
+  field `suffix`/`type`, and applicable pass-through/collision behavior. A
+  generic `additionalProperties: true` object does not satisfy this gate.
+- [ ] Add one concise structured multi-query example to the shared LLM plugin
+  assistance. Catalog, freeform, guided-full, guided-staged, and tutorial all
+  consume that same assistance; do not copy the example into a guided prompt.
+- [ ] Keep the already-landed section 5.3 probe prerequisite intact: commit
+  `a718a39ff` prepares detached validation options in the exact order
+  `deep_thaw` → `strip_authoring_options` →
+  `redact_secret_refs_for_validation`. Expected configuration-probe failures
+  remain in the existing redacted safe failure category and unexpected
+  framework failures still propagate.
+
+Run:
+
+```bash
+uv run pytest \
+  tests/unit/plugins/llm/test_llm_config.py \
+  tests/unit/web/catalog/test_service.py \
+  tests/unit/contracts/test_plugin_assistance_coverage.py \
+  tests/integration/web/test_catalog_discovery.py -q
+```
+
+Expected: both query input forms validate and normalize identically, and public
+catalog discovery advertises the complete typed structured-output contract.
+
+## Task 2: Create the canonical fixture corpus
 
 **Files:**
 
@@ -44,7 +92,7 @@ accepted revision and outputs.
   `SetPipelineArgumentsModel` and the current policy catalog.
 - [ ] Add narrow `.gitignore` negations for `/evals/composer-parity/` and its
   committed contents. Verify `git check-ignore` reports the corpus as included
-  and `git ls-files` contains every Task-1 fixture; generated run evidence
+  and `git ls-files` contains every Task-2 fixture; generated run evidence
   remains ignored under `output/playwright/composer-parity/`.
 
 Run:
@@ -58,7 +106,7 @@ uv run pytest tests/unit/evals/composer_parity/test_fixtures.py -q
 Expected: hashes match the values committed in the eval README and all nine
 fixtures validate.
 
-## Task 2: Build the three-surface real-path matrix
+## Task 3: Build the three-surface real-path matrix
 
 **Files:**
 
@@ -96,7 +144,7 @@ uv run pytest tests/integration/web/composer/parity -q
 Expected: at least 27 positive surface/fixture cases pass independently, plus
 the repair/deferral negatives.
 
-## Task 3: Add generated-DAG and mutation controls
+## Task 4: Add generated-DAG and mutation controls
 
 **Files:**
 
@@ -127,7 +175,7 @@ uv run pytest \
 Expected: 50 deterministic generated examples pass and every deliberate
 surface narrowing is detected.
 
-## Task 4: Add the live acceptance oracle and frontend journey
+## Task 5: Add the live acceptance oracle and frontend journey
 
 **Files:**
 
@@ -184,7 +232,7 @@ npm run typecheck
 
 Expected: PASS, including every negative control.
 
-## Task 5: Recreate staging, deploy, and run all three proofs
+## Task 6: Recreate staging, deploy, and run all three proofs
 
 **Authoritative docs:**
 

@@ -31,14 +31,14 @@ class PortableSQLiteInsertRule:
 
 def find_portable_sqlite_insert_findings(tree: ast.AST, file_path: str) -> list[Finding]:
     """Return findings for unpaired SQLite insert usage and misbound dialect branches."""
-    bindings = _import_bindings(tree)
+    bindings_by_call = _import_bindings(tree)
     sqlite_imports = _insert_imports(tree, module=_SQLITE_INSERT_MODULE)
-    sqlite_module_calls = _insert_module_calls(tree, bindings, module=_SQLITE_INSERT_MODULE)
+    sqlite_module_calls = _insert_module_calls(tree, bindings_by_call, module=_SQLITE_INSERT_MODULE)
     if not sqlite_imports and not sqlite_module_calls:
         return []
 
     postgresql_imports = _insert_imports(tree, module=_POSTGRESQL_INSERT_MODULE)
-    postgresql_module_calls = _insert_module_calls(tree, bindings, module=_POSTGRESQL_INSERT_MODULE)
+    postgresql_module_calls = _insert_module_calls(tree, bindings_by_call, module=_POSTGRESQL_INSERT_MODULE)
     compared_dialects = _compared_dialect_names(tree)
     if (not postgresql_imports and not postgresql_module_calls) or not _SUPPORTED_DIALECTS.issubset(compared_dialects):
         findings = [_import_finding(file_path=file_path, node=node) for node in sqlite_imports]
@@ -55,7 +55,9 @@ def find_portable_sqlite_insert_findings(tree: ast.AST, file_path: str) -> list[
             builder_name=builder_name,
             builder_dialect=builder_dialect,
         )
-        for call, branch_dialect, builder_name, builder_dialect in _misbound_builder_calls(tree, aliases, builder_dialects, bindings)
+        for call, branch_dialect, builder_name, builder_dialect in _misbound_builder_calls(
+            tree, aliases, builder_dialects, bindings_by_call
+        )
     ]
 
 
@@ -67,40 +69,150 @@ def _insert_imports(tree: ast.AST, *, module: str) -> list[ast.ImportFrom]:
     ]
 
 
-def _import_bindings(tree: ast.AST) -> dict[str, str]:
-    """Map each import-bound local name to its dotted target; conflicting rebinds are dropped."""
-    bindings: dict[str, str] = {}
-    conflicted: set[str] = set()
-
-    def bind(name: str, target: str) -> None:
-        if bindings.get(name, target) != target:
-            conflicted.add(name)
-        bindings[name] = target
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.asname is not None:
-                    bind(alias.asname, alias.name)
-                else:
-                    root = alias.name.partition(".")[0]
-                    bind(root, root)
-        elif isinstance(node, ast.ImportFrom) and node.module is not None and node.level == 0:
-            for alias in node.names:
-                if alias.name != "*":
-                    bind(alias.asname or alias.name, f"{node.module}.{alias.name}")
-    for name in conflicted:
-        del bindings[name]
-    return bindings
+def _import_bindings(tree: ast.AST) -> dict[ast.Call, dict[str, str]]:
+    """Map each call to the import bindings visible in its lexical scope."""
+    visitor = _ImportBindingVisitor()
+    visitor.visit(tree)
+    return visitor.bindings_by_call
 
 
-def _insert_module_calls(tree: ast.AST, bindings: dict[str, str], *, module: str) -> list[ast.Call]:
+class _ScopeImportCollector(ast.NodeVisitor):
+    """Collect import bindings owned by one lexical scope."""
+
+    def __init__(self) -> None:
+        self.bindings: dict[str, str] = {}
+        self.conflicted: set[str] = set()
+
+    def _bind(self, name: str, target: str) -> None:
+        if self.bindings.get(name, target) != target:
+            self.conflicted.add(name)
+        self.bindings[name] = target
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            if alias.asname is not None:
+                self._bind(alias.asname, alias.name)
+            else:
+                root = alias.name.partition(".")[0]
+                self._bind(root, root)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module is None or node.level != 0:
+            return
+        for alias in node.names:
+            if alias.name != "*":
+                self._bind(alias.asname or alias.name, f"{node.module}.{alias.name}")
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return
+
+
+@dataclass(frozen=True, slots=True)
+class _BindingScope:
+    kind: str
+    inherited: dict[str, str]
+    resolved: dict[str, str]
+
+
+class _ImportBindingVisitor(ast.NodeVisitor):
+    """Record import bindings at calls while preserving lexical-scope ownership."""
+
+    def __init__(self) -> None:
+        self.bindings_by_call: dict[ast.Call, dict[str, str]] = {}
+        self._scopes: list[_BindingScope] = []
+
+    def visit_Module(self, node: ast.Module) -> None:
+        self._visit_scope(node.body, kind="module")
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function_definition(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function_definition(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self._visit_arguments(node.args)
+        self._visit_scope([node.body], kind="function")
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for keyword in node.keywords:
+            self.visit(keyword)
+        for type_param in getattr(node, "type_params", ()):
+            self.visit(type_param)
+        self._visit_scope(node.body, kind="class")
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if self._scopes:
+            self.bindings_by_call[node] = self._scopes[-1].resolved
+        self.generic_visit(node)
+
+    def _visit_function_definition(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        self._visit_arguments(node.args)
+        if node.returns is not None:
+            self.visit(node.returns)
+        for type_param in getattr(node, "type_params", ()):
+            self.visit(type_param)
+        self._visit_scope(node.body, kind="function")
+
+    def _visit_arguments(self, arguments: ast.arguments) -> None:
+        for argument in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs):
+            if argument.annotation is not None:
+                self.visit(argument.annotation)
+        for optional_argument in (arguments.vararg, arguments.kwarg):
+            if optional_argument is not None and optional_argument.annotation is not None:
+                self.visit(optional_argument.annotation)
+        for default in (*arguments.defaults, *(default for default in arguments.kw_defaults if default is not None)):
+            self.visit(default)
+
+    def _visit_scope(self, body: list[ast.stmt] | list[ast.expr], *, kind: str) -> None:
+        inherited = self._child_scope_bindings()
+        collector = _ScopeImportCollector()
+        for node in body:
+            collector.visit(node)
+
+        resolved = dict(inherited)
+        resolved.update(collector.bindings)
+        for name in collector.conflicted:
+            resolved.pop(name, None)
+
+        self._scopes.append(_BindingScope(kind=kind, inherited=inherited, resolved=resolved))
+        for node in body:
+            self.visit(node)
+        self._scopes.pop()
+
+    def _child_scope_bindings(self) -> dict[str, str]:
+        if not self._scopes:
+            return {}
+        parent = self._scopes[-1]
+        # Class bodies execute in their enclosing scope, but class-local names
+        # are not closure bindings inherited by methods or nested classes.
+        return dict(parent.inherited if parent.kind == "class" else parent.resolved)
+
+
+def _insert_module_calls(tree: ast.AST, bindings_by_call: dict[ast.Call, dict[str, str]], *, module: str) -> list[ast.Call]:
     """Return calls that reach ``<module>.insert`` through an imported module binding."""
     target = f"{module}.insert"
     return [
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and _dotted_call_target(node.func, bindings) == target
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and _dotted_call_target(node.func, bindings_by_call.get(node, {})) == target
     ]
 
 
@@ -177,7 +289,10 @@ def _builder_dialects(sqlite_imports: list[ast.ImportFrom], postgresql_imports: 
 
 
 def _misbound_builder_calls(
-    tree: ast.AST, aliases: frozenset[str], builder_dialects: dict[str, str], bindings: dict[str, str]
+    tree: ast.AST,
+    aliases: frozenset[str],
+    builder_dialects: dict[str, str],
+    bindings_by_call: dict[ast.Call, dict[str, str]],
 ) -> list[tuple[ast.Call, str, str, str]]:
     """Return builder calls bound to a dialect branch that executes the other dialect's builder.
 
@@ -197,7 +312,7 @@ def _misbound_builder_calls(
                 visit(stmt, branch_dialect)
             return
         if branch_dialect is not None and isinstance(node, ast.Call):
-            builder = _call_builder(node, bindings, builder_dialects)
+            builder = _call_builder(node, bindings_by_call.get(node, {}), builder_dialects)
             if builder is not None:
                 builder_name, builder_dialect = builder
                 if builder_dialect != branch_dialect:

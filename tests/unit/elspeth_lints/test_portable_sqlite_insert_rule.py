@@ -228,6 +228,23 @@ def test_aliased_dialects_module_import_insert_call_is_rejected() -> None:
     assert findings[0].line == 5
 
 
+def test_same_module_alias_in_sibling_functions_resolves_per_lexical_scope() -> None:
+    findings = _analyze(
+        """
+        def write_sqlite(table):
+            from sqlalchemy.dialects import sqlite as dialect
+            return dialect.insert(table)
+
+        def write_postgresql(table):
+            from sqlalchemy.dialects import postgresql as dialect
+            return dialect.insert(table)
+        """
+    )
+
+    assert len(findings) == 1
+    assert findings[0].line == 4
+
+
 def test_dotted_module_import_insert_call_is_rejected() -> None:
     findings = _analyze(
         """

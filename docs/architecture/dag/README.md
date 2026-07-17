@@ -39,6 +39,9 @@ the entire production-support lifecycle.
 
 ## Start here
 
+- [Live scenario corpus](scenario-corpus/README.md) — the authoritative
+  15-scenario inventory, common evidence contract, executable cases, owned
+  gaps, and promotion workflow.
 - [Completeness criteria](completeness-criteria.md) — the stable definition,
   mandatory dimensions, hard gates, and scenario corpus.
 - [Assessment framework](assessment-framework.md) — the repeatable workflow,
@@ -70,6 +73,10 @@ docs/architecture/dag/
 ├── README.md
 ├── completeness-criteria.md
 ├── assessment-framework.md
+├── scenario-corpus/
+│   ├── README.md
+│   └── v1/
+│       └── manifest.yaml
 └── assessments/
     └── YYYY-MM-DD-HHMM/
         ├── numbered assessment reports
@@ -122,6 +129,9 @@ dimensions remain `U`; the seed's legacy 2.4 is not a comparison baseline.
   records the durable scheduler state/evidence model.
 - [`completeness-criteria.md`](completeness-criteria.md) defines the bar for a
   completeness claim.
+- [`scenario-corpus/v1/manifest.yaml`](scenario-corpus/v1/manifest.yaml) is the
+  evergreen status, evidence, ownership, exit-gate, and executable-case
+  inventory for that bar.
 - Dated assessments report whether the current implementation meets that bar.
 
 When these surfaces disagree, the assessment records the contradiction as a

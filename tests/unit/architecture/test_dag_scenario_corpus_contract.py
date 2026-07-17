@@ -6,10 +6,12 @@ from copy import deepcopy
 from pathlib import Path
 from string import Template
 from typing import cast, get_args
+from urllib.parse import unquote, urlsplit
 
 import pytest
 import tests.fixtures.dag_scenario_corpus.loader as loader_module
 import yaml
+from markdown_it import MarkdownIt
 from pydantic import ValidationError
 from tests.fixtures.dag_scenario_corpus.loader import (
     DEFAULT_MANIFEST_PATH,
@@ -367,6 +369,10 @@ EXPECTED_HARNESS_EVIDENCE = (
 
 EXPECTED_INPUT_CSV = b"id,value\n1,10\n2,20\n3,30\n"
 
+DAG_HUB_PATH = REPOSITORY_ROOT / "docs/architecture/dag/README.md"
+CORPUS_README_PATH = REPOSITORY_ROOT / "docs/architecture/dag/scenario-corpus/README.md"
+ACTIVE_CORPUS_ISSUE = "elspeth-ef29ef6ba4"
+
 EXPECTED_HAPPY_PATH_YAML = b"""sources:
   primary:
     plugin: csv
@@ -421,6 +427,89 @@ sinks:
       format: jsonl
       schema: {mode: observed}
 """
+
+
+def _markdown_link_targets(path: Path) -> tuple[str, ...]:
+    targets: list[str] = []
+    # Textual is a runtime dependency and guarantees markdown-it-py. Parsing
+    # CommonMark avoids silently missing reference links, images, or titles.
+    for token in MarkdownIt("commonmark").parse(path.read_text(encoding="utf-8")):
+        for child in token.children or ():
+            attribute = "href" if child.type == "link_open" else "src" if child.type == "image" else None
+            if attribute is not None:
+                target = child.attrGet(attribute)
+                if not isinstance(target, str):
+                    raise AssertionError(f"CommonMark {child.type} token lacks a string {attribute}: {target!r}")
+                targets.append(target)
+    return tuple(targets)
+
+
+def _repository_relative_link_targets(path: Path) -> tuple[str, ...]:
+    relative_targets: list[str] = []
+    for target in _markdown_link_targets(path):
+        parsed = urlsplit(target)
+        if parsed.scheme or parsed.netloc or not parsed.path or parsed.path.startswith("/"):
+            continue
+        relative_targets.append(unquote(parsed.path))
+    return tuple(relative_targets)
+
+
+def _missing_repository_relative_link_targets(path: Path) -> tuple[str, ...]:
+    return tuple(target for target in _repository_relative_link_targets(path) if not (path.parent / target).resolve().exists())
+
+
+@pytest.mark.parametrize(
+    ("markdown", "expected_targets", "expected_relative_targets"),
+    [
+        ("[inline](relative.md#section)", ("relative.md#section",), ("relative.md",)),
+        ("![image](images/diagram.png?raw=1)", ("images/diagram.png?raw=1",), ("images/diagram.png",)),
+        ("[reference][ref]\n\n[ref]: reference.md 'title'", ("reference.md",), ("reference.md",)),
+        ('[space](<dir/file name.md> "title")', ("dir/file%20name.md",), ("dir/file name.md",)),
+        ("[external](https://example.test/docs)", ("https://example.test/docs",), ()),
+        ("[anchor](#status-vocabulary)", ("#status-vocabulary",), ()),
+        ("[root absolute](/docs/index.md)", ("/docs/index.md",), ()),
+        ("[malformed](<unterminated.md)", (), ()),
+    ],
+    ids=("inline", "image-query", "reference", "angle-space-title", "external", "fragment", "absolute", "malformed"),
+)
+def test_markdown_link_target_parser_covers_supported_commonmark_forms(
+    tmp_path: Path,
+    markdown: str,
+    expected_targets: tuple[str, ...],
+    expected_relative_targets: tuple[str, ...],
+) -> None:
+    document = tmp_path / "document.md"
+    document.write_text(markdown, encoding="utf-8")
+
+    assert _markdown_link_targets(document) == expected_targets
+    assert _repository_relative_link_targets(document) == expected_relative_targets
+
+
+def test_missing_repository_relative_link_target_is_reported(tmp_path: Path) -> None:
+    document = tmp_path / "document.md"
+    (tmp_path / "present.md").touch()
+    document.write_text("[present](present.md) [missing][target]\n\n[target]: missing.md\n", encoding="utf-8")
+
+    assert _missing_repository_relative_link_targets(document) == ("missing.md",)
+
+
+def test_dag_hub_links_the_live_scenario_corpus() -> None:
+    assert "scenario-corpus/README.md" in _markdown_link_targets(DAG_HUB_PATH)
+
+
+def test_scenario_corpus_readme_links_manifest_criteria_and_active_issue() -> None:
+    targets = _markdown_link_targets(CORPUS_README_PATH)
+    content = CORPUS_README_PATH.read_text(encoding="utf-8")
+
+    assert "v1/manifest.yaml" in targets
+    assert "../completeness-criteria.md" in targets
+    assert ACTIVE_CORPUS_ISSUE in content
+    assert f"filigree show {ACTIVE_CORPUS_ISSUE} --json" in content
+
+
+@pytest.mark.parametrize("document", [DAG_HUB_PATH, CORPUS_README_PATH])
+def test_dag_corpus_document_repository_relative_links_resolve(document: Path) -> None:
+    assert _missing_repository_relative_link_targets(document) == ()
 
 
 def _reference(*, kind: EvidenceKind = "harness") -> EvidenceReference:

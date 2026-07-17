@@ -10,11 +10,17 @@ from pathlib import Path
 from string import Template
 from typing import Any
 
+from sqlalchemy import select
+
+from elspeth.contracts import RunStatus
+from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
 from elspeth.contracts.sink_effects import SinkEffectExecutionPurpose, SinkEffectInputKind
+from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
 from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
 from elspeth.core.config import ElspethSettings, load_settings_from_yaml_string
 from elspeth.core.dag import ExecutionGraph
-from elspeth.core.landscape import LandscapeDB, LandscapeExporter
+from elspeth.core.landscape import LandscapeDB, LandscapeExporter, RecorderFactory
+from elspeth.core.landscape.schema import node_states_table, token_work_items_table
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from elspeth.engine.orchestrator.preflight import (
@@ -85,13 +91,21 @@ def render_settings(case: HarnessCaseSpec, tmp_path: Path) -> RenderedScenario:
     )
 
 
-def build_scenario(rendered: RenderedScenario) -> BuiltScenario:
+def build_scenario(
+    rendered: RenderedScenario,
+    *,
+    purpose: SinkEffectExecutionPurpose = SinkEffectExecutionPurpose.FRESH,
+) -> BuiltScenario:
     """Build and validate a scenario through the production assembly sequence."""
 
     settings = rendered.settings
-    purpose = SinkEffectExecutionPurpose.FRESH
     bundle = instantiate_plugins_from_config(settings, preflight_mode=True, sink_effect_purpose=purpose)
     execution_sinks = execution_sinks_for_runtime(settings, bundle.sinks)
+    if purpose is SinkEffectExecutionPurpose.RESUME:
+        for sink_name, sink in execution_sinks.items():
+            if not sink.supports_resume:
+                raise ValueError(f"DAG scenario sink {sink_name!r} does not support resume")
+            sink.configure_for_resume()
     execution_bindings = execution_sink_bindings_for_runtime(settings, bundle.sink_effect_bindings)
     sink_effect_modes = sink_effect_modes_from_runtime_bindings(
         execution_sinks,
@@ -194,9 +208,215 @@ def _run_case(scenario: ScenarioSpec, case: HarnessCaseSpec, tmp_path: Path) -> 
         db.close()
 
 
+def _require_exact_eof_crash(orchestrator: Orchestrator, built: BuiltScenario, payload_store: FilesystemPayloadStore) -> None:
+    catalog_sha256, catalog_source = read_openrouter_catalog_snapshot_id()
+    try:
+        orchestrator.run(
+            built.config,
+            graph=built.graph,
+            settings=built.rendered.settings,
+            payload_store=payload_store,
+            openrouter_catalog_sha256=catalog_sha256,
+            openrouter_catalog_source=catalog_source,
+        )
+    except RuntimeError as exc:
+        if str(exc) != "injected DAG corpus EOF flush crash":
+            raise
+    else:
+        raise AssertionError("DAG recovery corpus run did not inject the EOF flush crash")
+
+
+def _assert_terminal_recovery_state(
+    db: LandscapeDB,
+    *,
+    run_id: str,
+    checkpoint_id: str,
+    payload_store: FilesystemPayloadStore,
+) -> None:
+    repositories = RecorderFactory.read_only(db, payload_store=payload_store)
+    run = repositories.run_lifecycle.get_run(run_id)
+    if run is None or run.status is not RunStatus.COMPLETED:
+        raise AssertionError(f"DAG recovery corpus did not persist a completed run: {run!r}")
+    source_records = repositories.run_lifecycle.get_run_source_lifecycle_records(run_id)
+    if not source_records or any(record.lifecycle_state != "exhausted" for record in source_records.values()):
+        raise AssertionError(f"DAG recovery corpus sources lost their exhausted state: {source_records!r}")
+
+    tokens = repositories.query.get_all_tokens_for_run(run_id)
+    outcomes = repositories.query.get_all_token_outcomes_for_run(run_id)
+    latest_outcomes = {outcome.token_id: outcome for outcome in outcomes}
+    token_ids = {token.token_id for token in tokens}
+    if (
+        not token_ids
+        or set(latest_outcomes) != token_ids
+        or not all(outcome.completed and outcome.outcome is not None for outcome in latest_outcomes.values())
+    ):
+        raise AssertionError(
+            "DAG recovery corpus requires every token's latest exported outcome to be terminal: "
+            f"tokens={sorted(token_ids)!r}, latest_outcomes={latest_outcomes!r}"
+        )
+
+    node_states = repositories.query.get_all_node_states_for_run(run_id)
+    if not any(state.attempt > 0 for state in node_states):
+        raise AssertionError("DAG recovery corpus requires a resumed node-state attempt")
+
+    with db.connection() as conn:
+        work_statuses = (
+            conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == run_id)).scalars().all()
+        )
+        resumed_markers = (
+            conn.execute(
+                select(node_states_table.c.resume_checkpoint_id).where(
+                    node_states_table.c.run_id == run_id,
+                    node_states_table.c.resume_checkpoint_id == checkpoint_id,
+                )
+            )
+            .scalars()
+            .all()
+        )
+    if not work_statuses or set(work_statuses) != {"terminal"}:
+        raise AssertionError(f"DAG recovery corpus left non-terminal scheduler work: {work_statuses!r}")
+    if not resumed_markers:
+        raise AssertionError("DAG recovery corpus requires durable node-state resume checkpoint evidence")
+
+
+def _recovery_case(scenario: ScenarioSpec, case: HarnessCaseSpec, tmp_path: Path) -> ScenarioRunEvidence:
+    db_url = f"sqlite:///{tmp_path / 'audit.db'}"
+    payload_root = tmp_path / "payloads"
+    initial_rendered = render_settings(case, tmp_path)
+    initial_built = build_scenario(initial_rendered)
+    initial_store = FilesystemPayloadStore(payload_root)
+    initial_db = LandscapeDB(db_url)
+    initial_checkpoint_manager = CheckpointManager(initial_db)
+    checkpoint_config = RuntimeCheckpointConfig.from_settings(initial_rendered.settings.checkpoint)
+    initial_orchestrator = Orchestrator(
+        initial_db,
+        checkpoint_manager=initial_checkpoint_manager,
+        checkpoint_config=checkpoint_config,
+    )
+
+    try:
+        _require_exact_eof_crash(initial_orchestrator, initial_built, initial_store)
+        initial_repositories = RecorderFactory.read_only(initial_db, payload_store=initial_store)
+        runs = initial_repositories.run_lifecycle.list_runs()
+        if len(runs) != 1:
+            raise AssertionError(f"DAG recovery corpus expected exactly one failed run, got {len(runs)}")
+        failed_run = runs[0]
+        if failed_run.status is not RunStatus.FAILED:
+            raise AssertionError(f"DAG recovery corpus expected failed run, got {failed_run.status.value!r}")
+        run_id = failed_run.run_id
+        source_records = initial_repositories.run_lifecycle.get_run_source_lifecycle_records(run_id)
+        if not source_records or any(record.lifecycle_state != "exhausted" for record in source_records.values()):
+            raise AssertionError(f"DAG recovery corpus sources were not exhausted before the crash: {source_records!r}")
+        checkpoint = initial_checkpoint_manager.get_latest_checkpoint(run_id)
+        if checkpoint is None:
+            raise AssertionError("DAG recovery corpus crash did not preserve a checkpoint")
+        if checkpoint.upstream_topology_hash != initial_built.graph_evidence.topology_hash:
+            raise AssertionError("DAG recovery corpus checkpoint topology does not match the initial graph")
+        checkpoint_id = checkpoint.checkpoint_id
+        checkpoint_sequence = checkpoint.sequence_number
+        checkpoint_topology_hash = checkpoint.upstream_topology_hash
+    finally:
+        initial_db.close()
+
+    del initial_orchestrator, initial_checkpoint_manager, initial_repositories
+    del initial_built, initial_rendered, initial_store, failed_run, source_records, checkpoint, runs
+
+    reopened_db = LandscapeDB.from_url(db_url, create_tables=False)
+    try:
+        reopened_store = FilesystemPayloadStore(payload_root)
+        reopened_checkpoint_manager = CheckpointManager(reopened_db)
+        reopened_checkpoint = reopened_checkpoint_manager.get_latest_checkpoint(run_id)
+        if reopened_checkpoint is None:
+            raise AssertionError("DAG recovery corpus checkpoint disappeared across database reopen")
+        if (
+            reopened_checkpoint.checkpoint_id,
+            reopened_checkpoint.sequence_number,
+            reopened_checkpoint.upstream_topology_hash,
+        ) != (checkpoint_id, checkpoint_sequence, checkpoint_topology_hash):
+            raise AssertionError("DAG recovery corpus checkpoint changed across database reopen")
+
+        fresh_rendered = render_settings(case, tmp_path)
+        fresh_built = build_scenario(fresh_rendered, purpose=SinkEffectExecutionPurpose.RESUME)
+        if fresh_built.graph_evidence.topology_hash != checkpoint_topology_hash:
+            raise AssertionError("DAG recovery corpus fresh graph does not match the persisted checkpoint topology")
+        recovery = RecoveryManager(reopened_db, reopened_checkpoint_manager)
+        resume_check = recovery.can_resume(run_id, fresh_built.graph)
+        if not resume_check.can_resume:
+            raise AssertionError(f"DAG recovery corpus run is not resumable: {resume_check.reason}")
+        resume_point = recovery.get_resume_point(run_id, fresh_built.graph)
+        if resume_point is None:
+            raise AssertionError("DAG recovery corpus did not produce a public resume point")
+        if resume_point.checkpoint.checkpoint_id != checkpoint_id:
+            raise AssertionError("DAG recovery corpus resume point does not use the reopened checkpoint")
+
+        result = Orchestrator(
+            reopened_db,
+            checkpoint_manager=reopened_checkpoint_manager,
+            checkpoint_config=checkpoint_config,
+        ).resume(
+            resume_point,
+            fresh_built.config,
+            fresh_built.graph,
+            payload_store=reopened_store,
+            settings=fresh_rendered.settings,
+        )
+        if result.run_id != run_id:
+            raise AssertionError(f"DAG recovery corpus resumed the wrong run: expected {run_id!r}, got {result.run_id!r}")
+        output_rows = [json.loads(line) for line in fresh_rendered.output_path.read_text(encoding="utf-8").splitlines()]
+        if output_rows != [{"value": 60, "count": 3}]:
+            raise AssertionError(f"DAG recovery corpus emitted unexpected output: {output_rows!r}")
+
+        records = list(LandscapeExporter(reopened_db).export_run(run_id))
+        audit = _audit_evidence(records)
+        if audit.source_operation_count != 1:
+            raise AssertionError(f"DAG recovery corpus replayed its source: source_load count={audit.source_operation_count}")
+        _assert_terminal_recovery_state(
+            reopened_db,
+            run_id=run_id,
+            checkpoint_id=checkpoint_id,
+            payload_store=reopened_store,
+        )
+        if reopened_checkpoint_manager.get_latest_checkpoint(run_id) is not None:
+            raise AssertionError("DAG recovery corpus retained a checkpoint after successful resume")
+        if not fresh_rendered.fault_marker.is_file():
+            raise AssertionError("DAG recovery corpus fault marker is missing after resume")
+
+        result_data = result.to_dict()
+        return ScenarioRunEvidence(
+            schema_version=1,
+            scenario_id=scenario.id,
+            case_id=case.id,
+            fixture_sha256=fresh_rendered.fixture_sha256,
+            config=ConfigEvidence(loaded=True, settings_sha256=fresh_rendered.settings_sha256),
+            graph=fresh_built.graph_evidence,
+            runtime=RuntimeEvidence(
+                attempted=True,
+                run_id=result.run_id,
+                status=str(result_data["status"]),
+                rows_processed=result_data["rows_processed"],
+                rows_succeeded=result_data["rows_succeeded"],
+                rows_failed=result_data["rows_failed"],
+                output_rows=len(output_rows),
+            ),
+            audit=audit,
+            recovery=RecoveryEvidence(
+                attempted=True,
+                database_reopened=True,
+                checkpoint_id=checkpoint_id,
+                checkpoint_sequence=checkpoint_sequence,
+                can_resume=True,
+                source_replayed=False,
+                checkpoint_removed=True,
+            ),
+            completed_stages=("config", "build", "runtime", "audit", "recovery"),
+        )
+    finally:
+        reopened_db.close()
+
+
 def run_scenario_case(scenario: ScenarioSpec, case: HarnessCaseSpec, tmp_path: Path) -> ScenarioRunEvidence:
     """Execute a declared case through the workflow implemented for this task."""
 
     if case.workflow == "run":
         return _run_case(scenario, case, tmp_path)
-    raise NotImplementedError("DAG scenario recovery workflow is implemented in Task 5")
+    return _recovery_case(scenario, case, tmp_path)

@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Final, cast
 from uuid import UUID
 
@@ -85,8 +85,11 @@ from elspeth.web.composer.state import CompositionState, ValidationSummary
 from elspeth.web.composer.tool_error_payloads import arg_error_payload as _arg_error_payload
 from elspeth.web.composer.tools import (
     RuntimePreflight,
+    ToolContext,
     ToolResult,
+    build_set_pipeline_candidate,
     execute_tool,
+    finalize_tool_result,
     is_approval_required_blob_store_only_mutation_tool,
     is_blob_store_only_mutation_tool,
     is_cacheable_discovery_tool,
@@ -544,6 +547,7 @@ async def run_tool_batch(
             )
             continue
 
+        prevalidated_unapplied_result: ToolResult | None = None
         if (
             turn_sessions_service is not None
             and turn_session_uuid is not None
@@ -593,6 +597,70 @@ async def run_tool_batch(
             else:
                 redacted_arguments = arguments
 
+            candidate_prior_validation: ValidationSummary | None = None
+            if redacted_arguments is not None and tool_name == "set_pipeline":
+                candidate_prior_validation = (
+                    last_validation if last_validation is not None else ctx.policy_catalog.validate_composition_state(state).validation
+                )
+                candidate_context = ToolContext(
+                    catalog=ctx.policy_catalog,
+                    plugin_snapshot=ctx.plugin_snapshot,
+                    data_dir=ctx.service._data_dir,
+                    require_data_dir_for_paths=True,
+                    session_engine=ctx.service._session_engine,
+                    session_id=session_id,
+                    secret_service=ctx.service._secret_service,
+                    user_id=user_id,
+                    current_validation=candidate_prior_validation,
+                    max_blob_storage_per_session_bytes=ctx.service._settings.max_blob_storage_per_session_bytes,
+                    user_message_id=user_message_id,
+                    user_message_content=user_message_content,
+                    composer_model_identifier=ctx.service._model,
+                    composer_model_version=safe_response_model(response) or ctx.service._model,
+                    composer_provider=ctx.service._availability.provider or "unknown",
+                    composer_skill_hash=ctx.service._composer_skill_hash,
+                    tool_arguments_hash=audit.arguments_hash,
+                )
+                candidate = await run_sync_in_worker(
+                    build_set_pipeline_candidate,
+                    arguments,
+                    state,
+                    candidate_context,
+                )
+                finalized_candidate_result = finalize_tool_result(
+                    candidate.result,
+                    tool_name=tool_name,
+                    catalog=ctx.policy_catalog,
+                    context=candidate_context,
+                    prior_validation=candidate_prior_validation,
+                )
+                if not candidate.acceptable:
+                    if isinstance(finalized_candidate_result.data, Mapping):
+                        feedback_data = dict(finalized_candidate_result.data)
+                    elif finalized_candidate_result.data is None:
+                        feedback_data = {}
+                    else:
+                        feedback_data = {"candidate_data": finalized_candidate_result.data}
+                    feedback_data.update(
+                        {
+                            "status": "PREVALIDATION_REJECTED",
+                            "applied": False,
+                            "applied_version": state.version,
+                            "candidate_version": finalized_candidate_result.updated_state.version,
+                            "message": (
+                                "The candidate pipeline failed prevalidation, was not applied, and was not "
+                                "submitted for approval. Repair the reported validation errors and retry."
+                            ),
+                        }
+                    )
+                    prevalidated_unapplied_result = replace(
+                        finalized_candidate_result,
+                        data=feedback_data,
+                    )
+                    # Skip proposal creation, then route the rejected result
+                    # through the canonical dispatch/outcome path below.
+                    redacted_arguments = None
+
             if redacted_arguments is not None:
                 proposal_summary = build_tool_proposal_summary(
                     tool_name=tool_name,
@@ -630,7 +698,13 @@ async def run_tool_batch(
                     success=True,
                     updated_state=state,
                     validation=(
-                        last_validation if last_validation is not None else ctx.policy_catalog.validate_composition_state(state).validation
+                        candidate_prior_validation
+                        if candidate_prior_validation is not None
+                        else (
+                            last_validation
+                            if last_validation is not None
+                            else ctx.policy_catalog.validate_composition_state(state).validation
+                        )
                     ),
                     affected_nodes=(),
                     data=proposal_payload,
@@ -658,9 +732,10 @@ async def run_tool_batch(
                 )
                 turn_has_mutation = True
                 continue
-            # redacted_arguments is None → invalid LLM arguments;
-            # fall through to normal dispatch, which will emit a
-            # ToolArgumentError through the standard arg-error path.
+            # ``None`` means either invalid LLM arguments or an unacceptable
+            # prevalidated set_pipeline candidate. Both fall through to the
+            # canonical dispatch/outcome path; only the former executes the
+            # tool and may raise ToolArgumentError.
 
         await emit_progress(progress, tool_started_progress_event(tool_name))
 
@@ -1151,7 +1226,10 @@ async def run_tool_batch(
             _composer_provider: str = ctx.service._availability.provider or "unknown",
             _composer_skill_hash: str = ctx.service._composer_skill_hash,
             _tool_arguments_hash: str = audit.arguments_hash,
+            _prevalidated_unapplied_result: ToolResult | None = prevalidated_unapplied_result,
         ) -> Any:
+            if _prevalidated_unapplied_result is not None:
+                return _prevalidated_unapplied_result
             return await run_sync_in_worker(
                 execute_tool,
                 _tool_name,
@@ -1188,10 +1266,16 @@ async def run_tool_batch(
         ) -> Mapping[str, Any]:
             return _arg_error_payload(_exc, _tool_name)
 
-        def _version_after(_result: Any) -> int:
+        def _version_after(
+            _result: Any,
+            _prevalidated_unapplied_result: ToolResult | None = prevalidated_unapplied_result,
+            _state: CompositionState = state,
+        ) -> int:
             # The handler's ToolResult carries the new state on
             # ``updated_state``. Read here so the helper records
             # the post-mutation version inside the recorder call.
+            if _prevalidated_unapplied_result is not None:
+                return _state.version
             return cast(int, _result.updated_state.version)
 
         try:
@@ -1359,9 +1443,10 @@ async def run_tool_batch(
         # append.
         version_before_tool = state.version
         result = outcome.result
-        state = result.updated_state
-        last_validation = result.validation
-        last_runtime_preflight = result.runtime_preflight or last_runtime_preflight
+        if prevalidated_unapplied_result is None:
+            state = result.updated_state
+            last_validation = result.validation
+            last_runtime_preflight = result.runtime_preflight or last_runtime_preflight
         # Mark the (plugin_type, plugin_name) pair as
         # schema-loaded for this session when a get_plugin_schema
         # call returned a discovery success. The per-turn system
@@ -1405,7 +1490,9 @@ async def run_tool_batch(
         # Mutation means a CompositionState version advance here.
         # Blob-store side effects such as create_blob/update_blob are
         # useful work, but they do not make an empty pipeline exist.
-        if result.success:
+        if prevalidated_unapplied_result is not None:
+            anti_anchor.record_failure(tool_name, audit.arguments_hash)
+        elif result.success:
             if _tool_result_mutated_composition_state(version_before=version_before_tool, result=result):
                 mutation_success_observed = True
                 anti_anchor.record_success()

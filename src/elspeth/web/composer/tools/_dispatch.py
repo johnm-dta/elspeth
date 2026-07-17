@@ -501,6 +501,21 @@ def _augment_with_plugin_schemas(
     return replace(result, plugin_schemas=schemas)
 
 
+def finalize_tool_result(
+    result: ToolResult,
+    *,
+    tool_name: str,
+    catalog: PolicyCatalogView,
+    context: ToolContext,
+    prior_validation: ValidationSummary,
+) -> ToolResult:
+    """Apply canonical prior-validation, repair-schema, and profile enrichment."""
+    if tool_name in _ALL_MUTATION_TOOL_NAMES:
+        result = _inject_prior_validation(result, prior_validation)
+    result = _augment_with_plugin_schemas(result, tool_name, catalog, context)
+    return normalize_tool_result_validation(result, catalog)
+
+
 def execute_tool(
     tool_name: str,
     arguments: dict[str, Any],
@@ -647,20 +662,15 @@ def execute_tool(
         tool_arguments_hash=tool_arguments_hash,
     )
 
-    if tool_name in _ALL_MUTATION_TOOL_NAMES:
-        prior = current_validation
-        result = handler(arguments, state, context)
-        result = _inject_prior_validation(result, prior)
-    else:
-        result = handler(arguments, state, context)
+    result = handler(arguments, state, context)
 
-    # Failure-response augmentation: when an option-shape mutation rejects,
-    # embed the get_plugin_schema payloads for every plugin named in the
-    # validation errors so the LLM avoids a follow-up discovery round-trip.
-    # No-op for non-augmentation-eligible tools or successful results
-    # (gated inside ``_augment_with_plugin_schemas``).
-    result = _augment_with_plugin_schemas(result, tool_name, catalog, context)
-    return normalize_tool_result_validation(result, catalog)
+    return finalize_tool_result(
+        result,
+        tool_name=tool_name,
+        catalog=catalog,
+        context=context,
+        prior_validation=current_validation,
+    )
 
 
 # ---------------------------------------------------------------------------

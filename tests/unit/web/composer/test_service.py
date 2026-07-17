@@ -792,8 +792,7 @@ class TestComposerSingleToolCall:
         proposals = await sessions_service.list_composition_proposals(session_uuid)
         proposal_tools = sorted(p.tool_name for p in proposals)
         # create_blob is NOT intercepted — it executes immediately and the
-        # resulting blob is available to set_pipeline at proposal-creation
-        # time.
+        # set_pipeline is independently prevalidated before proposal creation.
         assert "create_blob" not in proposal_tools
         # set_pipeline IS still intercepted — it advances composition state
         # and represents the meaningful operator approval.

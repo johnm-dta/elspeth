@@ -62,6 +62,7 @@ from elspeth.web.composer.tools._common import (
 from elspeth.web.composer.tools._dispatch import (
     _inject_prior_validation,
     execute_tool,
+    finalize_tool_result,
     get_tool_definitions,
 )
 from elspeth.web.composer.tools._registry import (
@@ -189,6 +190,7 @@ __all__ = [
     "compute_proof_diagnostics",
     "diff_states",
     "execute_tool",
+    "finalize_tool_result",
     "get_expression_grammar",
     "get_tool_definitions",
     "is_approval_required_blob_store_only_mutation_tool",

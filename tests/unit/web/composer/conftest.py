@@ -757,11 +757,17 @@ def fake_llm_create_blob_then_set_pipeline(tmp_path: Path) -> _FakeComposeLLM:
     which create_blob does not).
 
     The corrected behaviour: create_blob executes immediately (blob is
-    written to the session store, a fresh UUID is allocated); only
-    set_pipeline becomes a pending proposal awaiting operator approval.
+    written to the session store, a fresh UUID is allocated); the independently
+    valid set_pipeline becomes a pending proposal awaiting operator approval.
     """
 
-    output_path = tmp_path / "outputs" / "review.json"
+    input_path = tmp_path / "blobs" / "agency_urls.csv"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_text(
+        "url\nhttps://www.example.gov\nhttps://www.example2.gov\n",
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "outputs" / "review.csv"
 
     return _FakeComposeLLM(
         (
@@ -782,11 +788,10 @@ def fake_llm_create_blob_then_set_pipeline(tmp_path: Path) -> _FakeComposeLLM:
                         "name": "set_pipeline",
                         "arguments": {
                             "source": {
-                                "plugin": "text",
+                                "plugin": "csv",
                                 "on_success": "url_rows",
                                 "options": {
-                                    "column": "url",
-                                    "path": "/tmp/agency_urls.txt",
+                                    "path": str(input_path),
                                     "schema": {"mode": "observed"},
                                 },
                                 "on_validation_failure": "discard",
@@ -814,7 +819,7 @@ def fake_llm_create_blob_then_set_pipeline(tmp_path: Path) -> _FakeComposeLLM:
                             "outputs": [
                                 {
                                     "sink_name": "main",
-                                    "plugin": "json",
+                                    "plugin": "csv",
                                     "options": {
                                         "path": str(output_path),
                                         "schema": {"mode": "observed"},

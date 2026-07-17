@@ -1,0 +1,818 @@
+"""Characterization for the ``set_pipeline`` candidate/settlement boundary.
+
+These tests deliberately exercise the current executor before the candidate
+builder is extracted.  They assert public state/result behavior and durable
+inline-blob effects, not private control flow.
+"""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import func, insert, select
+from sqlalchemy.pool import StaticPool
+
+from elspeth.contracts.enums import CreationModality
+from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.hashing import stable_hash
+from elspeth.web.blobs.service import content_hash
+from elspeth.web.catalog.policy_view import PolicyCatalogView
+from elspeth.web.composer.audit import BufferingRecorder, begin_dispatch, dispatch_with_audit
+from elspeth.web.composer.state import CompositionState, PipelineMetadata
+from elspeth.web.composer.tools import ToolContext, _execute_set_pipeline
+from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
+from elspeth.web.plugin_policy.models import (
+    PluginAvailability,
+    PluginAvailabilitySnapshot,
+    PluginId,
+    PluginUnavailableReason,
+)
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
+from elspeth.web.plugin_policy.validation import (
+    PluginPolicyFinding,
+    ProfileAwareValidationResult,
+)
+from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
+from elspeth.web.sessions.schema import initialize_session_schema
+
+
+def _empty_state() -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _trained_context(*, data_dir: Path | None = None, **kwargs: Any) -> ToolContext:
+    catalog = create_catalog_service()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return ToolContext(
+        catalog=PolicyCatalogView.for_trained_operator(catalog, snapshot),
+        plugin_snapshot=snapshot,
+        data_dir=None if data_dir is None else str(data_dir),
+        **kwargs,
+    )
+
+
+def _blocked_context(plugin_id: PluginId, *, data_dir: Path) -> ToolContext:
+    catalog = create_catalog_service()
+    unrestricted = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash="candidate-characterization-restricted",
+        principal_scope="local:candidate-characterization",
+        available=unrestricted.available - {plugin_id},
+        unavailable=(PluginAvailability(plugin_id, PluginUnavailableReason.NOT_AUTHORIZED),),
+        selected=unrestricted.selected,
+        usable_profile_aliases=(),
+        selected_profile_aliases=(),
+        binding_generation_fingerprint="candidate-characterization-generation",
+    )
+    return ToolContext(
+        catalog=PolicyCatalogView(catalog, snapshot, MagicMock(spec=OperatorProfileRegistry)),
+        plugin_snapshot=snapshot,
+        data_dir=str(data_dir),
+    )
+
+
+class _ProfileRejectingCatalog(PolicyCatalogView):
+    """Real catalog projection with one deterministic profile finding."""
+
+    def validate_composition_state(self, state: CompositionState) -> ProfileAwareValidationResult:
+        finding = PluginPolicyFinding(
+            stage="operator_profile_options",
+            component_id="profile_prevalidation",
+            component_type="transform",
+            error_code="profile_unavailable",
+            message="The requested operator profile is unavailable.",
+        )
+        return ProfileAwareValidationResult(
+            authored_state=state,
+            executable_state=state,
+            policy_findings=(finding,),
+            validation=state.validate(),
+        )
+
+
+def _profile_rejecting_context(*, data_dir: Path) -> ToolContext:
+    full = create_catalog_service()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(full)
+    catalog = _ProfileRejectingCatalog(full, snapshot, MagicMock(spec=OperatorProfileRegistry))
+    return ToolContext(catalog=catalog, plugin_snapshot=snapshot, data_dir=str(data_dir))
+
+
+def _file_options(path: Path) -> dict[str, Any]:
+    return {
+        "path": str(path),
+        "schema": {"mode": "observed"},
+        "mode": "write",
+        "collision_policy": "auto_increment",
+    }
+
+
+def _linear_args(tmp_path: Path) -> dict[str, Any]:
+    return {
+        "source": {
+            "plugin": "csv",
+            "on_success": "rows",
+            "options": {
+                "path": str(tmp_path / "blobs" / "input.csv"),
+                "schema": {"mode": "observed"},
+            },
+            "on_validation_failure": "discard",
+        },
+        "nodes": [
+            {
+                "id": "copy",
+                "node_type": "transform",
+                "plugin": "passthrough",
+                "input": "rows",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": {"schema": {"mode": "observed"}},
+            }
+        ],
+        "edges": [
+            {
+                "id": "source_to_copy",
+                "from_node": "source",
+                "to_node": "copy",
+                "edge_type": "on_success",
+                "label": None,
+            }
+        ],
+        "outputs": [
+            {
+                "sink_name": "main",
+                "plugin": "json",
+                "options": _file_options(tmp_path / "outputs" / "result.jsonl") | {"format": "jsonl"},
+                "on_write_failure": "discard",
+            }
+        ],
+        "metadata": {"name": "linear"},
+    }
+
+
+def _named_multi_source_queue_args(tmp_path: Path) -> dict[str, Any]:
+    return {
+        "sources": {
+            "orders": {
+                "plugin": "csv",
+                "on_success": "inbound",
+                "options": {
+                    "path": str(tmp_path / "blobs" / "orders.csv"),
+                    "schema": {"mode": "observed"},
+                },
+            },
+            "refunds": {
+                "plugin": "csv",
+                "on_success": "inbound",
+                "options": {
+                    "path": str(tmp_path / "blobs" / "refunds.csv"),
+                    "schema": {"mode": "observed"},
+                },
+            },
+        },
+        "nodes": [
+            {
+                "id": "inbound",
+                "node_type": "queue",
+                "input": "inbound",
+                "options": {"description": "Orders and refunds interleave here"},
+            },
+            {
+                "id": "consume_inbound",
+                "node_type": "transform",
+                "plugin": "passthrough",
+                "input": "inbound",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": {"schema": {"mode": "observed"}},
+            },
+        ],
+        "edges": [],
+        "outputs": [
+            {
+                "sink_name": "main",
+                "plugin": "json",
+                "options": _file_options(tmp_path / "outputs" / "queued.jsonl") | {"format": "jsonl"},
+                "on_write_failure": "discard",
+            }
+        ],
+        "metadata": {"name": "named-multi-source-queue"},
+    }
+
+
+def _fork_coalesce_args(tmp_path: Path) -> dict[str, Any]:
+    args = _linear_args(tmp_path)
+    args["source"]["on_success"] = "rows"
+    args["nodes"] = [
+        {
+            "id": "fork",
+            "node_type": "gate",
+            "input": "rows",
+            "condition": "'all'",
+            "routes": {"all": "fork"},
+            "fork_to": ["original", "copy"],
+        },
+        {
+            "id": "original_path",
+            "node_type": "transform",
+            "plugin": "passthrough",
+            "input": "original",
+            "on_success": "original_out",
+            "on_error": "discard",
+            "options": {"schema": {"mode": "observed"}},
+        },
+        {
+            "id": "copy_path",
+            "node_type": "transform",
+            "plugin": "passthrough",
+            "input": "copy",
+            "on_success": "copy_out",
+            "on_error": "discard",
+            "options": {"schema": {"mode": "observed"}},
+        },
+        {
+            "id": "merge",
+            "node_type": "coalesce",
+            "input": "branches",
+            "branches": {"original": "original_out", "copy": "copy_out"},
+            "policy": "require_all",
+            "merge": "nested",
+            "on_success": "main",
+            "on_error": "discard",
+            "options": {"schema": {"mode": "observed"}},
+        },
+    ]
+    args["edges"] = []
+    args["metadata"] = {"name": "fork-coalesce"}
+    return args
+
+
+def _gate_args(tmp_path: Path) -> dict[str, Any]:
+    args = _linear_args(tmp_path)
+    args["nodes"] = [
+        {
+            "id": "threshold",
+            "node_type": "gate",
+            "input": "rows",
+            "condition": "row['score'] >= 0.5",
+            "routes": {"true": "high", "false": "low"},
+        }
+    ]
+    args["edges"] = []
+    args["outputs"] = [
+        {
+            "sink_name": name,
+            "plugin": "json",
+            "options": _file_options(tmp_path / "outputs" / f"{name}.jsonl") | {"format": "jsonl"},
+            "on_write_failure": "discard",
+        }
+        for name in ("high", "low")
+    ]
+    args["metadata"] = {"name": "gate"}
+    return args
+
+
+def _aggregation_args(tmp_path: Path) -> dict[str, Any]:
+    args = _linear_args(tmp_path)
+    args["nodes"] = [
+        {
+            "id": "stats",
+            "node_type": "aggregation",
+            "plugin": "batch_stats",
+            "input": "rows",
+            "on_success": "main",
+            "on_error": "discard",
+            "options": {"schema": {"mode": "observed"}, "value_field": "score"},
+        }
+    ]
+    args["edges"] = []
+    args["metadata"] = {"name": "aggregation"}
+    return args
+
+
+def _structured_llm_args(tmp_path: Path) -> dict[str, Any]:
+    args = _linear_args(tmp_path)
+    args["nodes"] = [
+        {
+            "id": "classify",
+            "node_type": "transform",
+            "plugin": "llm",
+            "input": "rows",
+            "on_success": "main",
+            "on_error": "discard",
+            "options": {
+                "provider": "azure",
+                "deployment_name": "candidate-test",
+                "endpoint": "https://candidate-test.openai.azure.com",
+                "api_key": {"secret_ref": "AZURE_OPENAI_API_KEY"},
+                "prompt_template": "Classify {{ text }}",
+                # Multi-query execution must use the pooled path so capacity
+                # retries are bounded by the configured pool controller.
+                "pool_size": 2,
+                "queries": [
+                    {
+                        "name": "colour",
+                        "input_fields": {"text": "text"},
+                        "template": "Classify {{ text }}",
+                        "response_format": "structured",
+                        "output_fields": [
+                            {"suffix": "label", "type": "string"},
+                            {"suffix": "score", "type": "number"},
+                        ],
+                    }
+                ],
+                "schema": {"mode": "observed"},
+            },
+        }
+    ]
+    args["edges"] = []
+    args["metadata"] = {"name": "structured-llm"}
+    return args
+
+
+def _multi_output_args(tmp_path: Path) -> dict[str, Any]:
+    args = _linear_args(tmp_path)
+    args["outputs"] = [
+        {
+            "sink_name": "main",
+            "plugin": "json",
+            "options": _file_options(tmp_path / "outputs" / "main.jsonl") | {"format": "jsonl"},
+            "on_write_failure": "discard",
+        },
+        {
+            "sink_name": "quarantine",
+            "plugin": "csv",
+            "options": _file_options(tmp_path / "outputs" / "quarantine.csv"),
+            "on_write_failure": "discard",
+        },
+    ]
+    args["source"]["on_validation_failure"] = "quarantine"
+    args["metadata"] = {"name": "multi-output"}
+    return args
+
+
+_EXPECTED_STATE_HASHES = {
+    "linear": "7a9e54170c34e1e4672d7b2969860b35fedb35a73fc437d8e25f527712b322b9",
+    "named_multi_source_queue": "bebdc72124a73cd5ebb5ddd1c7660345004c4276b289b4651980131d133ff61b",
+    "fork_coalesce": "b1383d953ab65ab7339daf6223be072c8084ab7d59af4713bc9f8dfc85a52727",
+    "gate": "4c8954595ad404c45adcf43cdaf7ce1a5c6e1154afa7e5f64b21e44d7fc19cb5",
+    "aggregation": "ef2ecf5c7f1d7ff9f00709175102e4777563b43cc3d06edaac29b9d87d06073b",
+    "structured_llm": "3815378a23c396501b91809644b330c423367ea26d20ec63bb0d64caed39a1ee",
+    "multi_output": "50e5c9c2b421bdaa2db73585d569ae9b1f21d2f79c6a8d9adfb184420a8a0065",
+}
+
+_EXPECTED_WARNINGS = {
+    "named_multi_source_queue": (
+        {
+            "component": "node:inbound",
+            "message": "Node 'inbound' has no outgoing edges — its output is not connected to any downstream node or sink.",
+            "severity": "medium",
+        },
+    ),
+    "structured_llm": (
+        {
+            "component": "node:classify",
+            "message": (
+                "LLM node 'classify' has no authorized prompt-injection shield in front of it. Recommend inserting "
+                "azure_prompt_shield (or the deployment equivalent prompt-injection shield) between the external-content "
+                "fetch step and this LLM. The current draft routes internet-controlled text directly into the LLM without "
+                "that shield, which is a prompt-injection exposure on untrusted remote content, but continuing without it "
+                "is allowed. [user_term: prompt_injection_shield_recommendation]"
+            ),
+            "severity": "medium",
+        },
+    ),
+}
+
+
+def _portable_state_content(value: Any, *, data_dir: Path) -> Any:
+    if isinstance(value, dict):
+        return {key: _portable_state_content(item, data_dir=data_dir) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_portable_state_content(item, data_dir=data_dir) for item in value]
+    if isinstance(value, str):
+        return value.replace(str(data_dir), "<DATA_DIR>")
+    return value
+
+
+@pytest.mark.parametrize(
+    ("case", "factory", "expected_sources", "expected_node_kinds", "expected_outputs"),
+    [
+        ("linear", _linear_args, {"source"}, {"transform"}, {"main"}),
+        (
+            "named_multi_source_queue",
+            _named_multi_source_queue_args,
+            {"orders", "refunds"},
+            {"queue", "transform"},
+            {"main"},
+        ),
+        ("fork_coalesce", _fork_coalesce_args, {"source"}, {"gate", "transform", "coalesce"}, {"main"}),
+        ("gate", _gate_args, {"source"}, {"gate"}, {"high", "low"}),
+        ("aggregation", _aggregation_args, {"source"}, {"aggregation"}, {"main"}),
+        ("structured_llm", _structured_llm_args, {"source"}, {"transform"}, {"main"}),
+        ("multi_output", _multi_output_args, {"source"}, {"transform"}, {"main", "quarantine"}),
+    ],
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+def test_current_executor_normalizes_supported_pipeline_shapes(
+    tmp_path: Path,
+    case: str,
+    factory: Any,
+    expected_sources: set[str],
+    expected_node_kinds: set[str],
+    expected_outputs: set[str],
+) -> None:
+    state = _empty_state()
+    args = factory(tmp_path)
+
+    result = _execute_set_pipeline(args, state, _trained_context(data_dir=tmp_path))
+
+    assert result.success is True, (case, result.to_dict())
+    assert result.updated_state.version == state.version + 1
+    assert set(result.updated_state.sources) == expected_sources
+    assert {node.node_type for node in result.updated_state.nodes} == expected_node_kinds
+    assert {output.name for output in result.updated_state.outputs} == expected_outputs
+    expected_affected_sources = {"source" if source_name == "source" else f"source:{source_name}" for source_name in expected_sources}
+    assert set(result.affected_nodes) == expected_affected_sources | {node.id for node in result.updated_state.nodes} | expected_outputs
+    assert result.validation.is_valid is True
+    assert result.validation.errors == ()
+    assert tuple(item.to_dict() for item in result.validation.warnings) == _EXPECTED_WARNINGS.get(case, ())
+    assert result.validation.suggestions == ()
+    assert result.validation.semantic_contracts == ()
+    assert result.to_dict()["validation"]["is_valid"] is True
+    assert result.to_dict()["validation"]["graph_repair_suggestions"] == []
+    normalized = result.updated_state.to_dict()
+    assert normalized["metadata"]["name"] == args["metadata"]["name"]
+    assert set(normalized["sources"]) == expected_sources
+    assert {node["id"] for node in normalized["nodes"]} == {node["id"] for node in args["nodes"]}
+    assert normalized["edges"] == args["edges"]
+    assert {output["name"] for output in normalized["outputs"]} == expected_outputs
+    assert stable_hash(_portable_state_content(normalized, data_dir=tmp_path)) == _EXPECTED_STATE_HASHES[case]
+    assert result.data is None
+
+
+def _semantic_failure_cases(tmp_path: Path) -> list[tuple[str, dict[str, Any], ToolContext, str, str | None]]:
+    unknown = _linear_args(tmp_path)
+    unknown["nodes"][0]["plugin"] = "not_installed"
+
+    blocked = _linear_args(tmp_path)
+
+    invalid_profile = _linear_args(tmp_path)
+
+    invalid_options = _linear_args(tmp_path)
+    invalid_options["nodes"][0]["options"] = {}
+
+    escaping_path = _linear_args(tmp_path)
+    escaping_path["outputs"][0]["options"]["path"] = "/etc/candidate-escape.json"
+
+    invalid_gate = _gate_args(tmp_path)
+    invalid_gate["nodes"][0]["condition"] = "row["
+
+    manual_blob_ref = _linear_args(tmp_path)
+    manual_blob_ref["source"]["options"]["blob_ref"] = str(uuid4())
+
+    literal_credential = _structured_llm_args(tmp_path)
+    literal_credential["nodes"][0]["options"]["api_key"] = "literal-secret-must-not-leak"
+
+    stale_review = _structured_llm_args(tmp_path)
+    stale_review["nodes"][0]["options"][INTERPRETATION_REQUIREMENTS_KEY] = [
+        {
+            "id": "prompt_template_review:classify",
+            "kind": "llm_prompt_template",
+            "user_term": "llm_prompt_template:classify",
+            "status": "resolved",
+            "draft": "Old prompt",
+            "event_id": "stale-event",
+            "accepted_value": "Old prompt",
+            "accepted_artifact_hash": None,
+            "resolved_prompt_template_hash": stable_hash("Old prompt"),
+        }
+    ]
+
+    credential_error = (
+        "Credential field(s) contain literal value(s): classify:api_key. Literal credential values were not stored. "
+        "Set `<field>: {secret_ref: NAME}` directly in the node's options when calling set_pipeline / upsert_node. "
+        "(The marker is stripped before option validation and resolved at execution time.) This rejection left pipeline "
+        "state unchanged: repair by re-issuing only the rejected call with the marker substituted for the literal value "
+        "— do not rebuild the pipeline from scratch. For a component already in state, patching just that component "
+        "(patch_source_options / patch_node_options / patch_output_options) with the marker is the minimal correction. "
+        "Alternatively, after the node already exists in state, call list_secret_refs -> validate_secret_ref -> "
+        "wire_secret_ref to attach the marker post-hoc."
+    )
+    return [
+        (
+            "unknown_plugin",
+            unknown,
+            _trained_context(data_dir=tmp_path),
+            "Node 'copy': transform plugin selection is unavailable (plugin_not_installed)",
+            "plugin_not_installed",
+        ),
+        (
+            "blocked_plugin",
+            blocked,
+            _blocked_context(PluginId("transform", "passthrough"), data_dir=tmp_path),
+            "Node 'copy': transform plugin selection is unavailable (plugin_not_enabled)",
+            "plugin_not_enabled",
+        ),
+        (
+            "profile_validation",
+            invalid_profile,
+            _profile_rejecting_context(data_dir=tmp_path),
+            "Node 'copy': Invalid options for transform 'passthrough': profile_unavailable",
+            None,
+        ),
+        (
+            "invalid_options",
+            invalid_options,
+            _trained_context(data_dir=tmp_path),
+            "Node 'copy': Invalid options for transform 'passthrough': schema: Field required. Use 'schema: {mode: "
+            "observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+            None,
+        ),
+        (
+            "escaping_path",
+            escaping_path,
+            _trained_context(data_dir=tmp_path),
+            "Output 'main': Path violation (S2): 'path' value '/etc/candidate-escape.json' is outside the allowed "
+            f"directories. Sink output paths must be under {tmp_path / 'outputs'}/ or this session's own "
+            f"{tmp_path / 'blobs'}/<session>/ subtree.",
+            None,
+        ),
+        (
+            "invalid_gate",
+            invalid_gate,
+            _trained_context(data_dir=tmp_path),
+            "Node 'threshold': Invalid gate condition syntax: Invalid syntax: '[' was never closed",
+            None,
+        ),
+        (
+            "manual_blob_ref",
+            manual_blob_ref,
+            _trained_context(data_dir=tmp_path),
+            "Use set_source_from_blob, source.blob_id, or source.inline_blob to bind a blob to the source. set_pipeline "
+            "must not be called with 'blob_ref' in source.options because it cannot enforce that 'path' equals the "
+            "blob's canonical storage_path.",
+            None,
+        ),
+        (
+            "credential_policy",
+            literal_credential,
+            _trained_context(data_dir=tmp_path),
+            credential_error,
+            None,
+        ),
+        (
+            "resolver_owned_interpretation_review",
+            stale_review,
+            _trained_context(data_dir=tmp_path),
+            "Node 'classify': set_pipeline options.interpretation_requirements[0] includes resolver-owned status "
+            "'resolved'. Composer tool input may stage pending review requirements only; resolved review metadata may "
+            "only be written by resolve_interpretation_event.",
+            None,
+        ),
+    ]
+
+
+@pytest.mark.parametrize("case_index", range(9))
+def test_current_executor_semantic_failures_are_atomic(tmp_path: Path, case_index: int) -> None:
+    case, args, context, expected_error, expected_error_code = _semantic_failure_cases(tmp_path)[case_index]
+    state = _empty_state()
+    before = state.to_dict()
+
+    result = _execute_set_pipeline(args, state, context)
+
+    assert result.success is False, (case, result.to_dict())
+    assert result.updated_state is state
+    assert result.updated_state.to_dict() == before
+    assert result.affected_nodes == ()
+    assert result.validation.is_valid is False
+    assert result.validation.errors[0].component == "rejected_mutation"
+    assert result.data["error"] == expected_error
+    assert result.data.get("error_code") == expected_error_code
+    assert result.validation.errors[0].message == expected_error
+    assert result.validation.errors[0].error_code == expected_error_code
+    assert result.to_dict()["version"] == state.version
+    assert "literal-secret-must-not-leak" not in repr(result.to_dict())
+
+
+def test_current_executor_can_return_success_with_invalid_graph_candidate(tmp_path: Path) -> None:
+    """The handler reports constructed state separately from acceptability.
+
+    A missing output leaves a structurally constructed draft whose validation
+    is invalid.  The extracted candidate boundary must retain both facts so
+    explicit approval can refuse publication without rewriting the result.
+    """
+    args = _linear_args(tmp_path)
+    args["outputs"] = []
+    state = _empty_state()
+
+    result = _execute_set_pipeline(args, state, _trained_context(data_dir=tmp_path))
+
+    assert result.success is True
+    assert result.updated_state.version == state.version + 1
+    assert result.validation.is_valid is False
+    assert result.validation.errors
+
+
+def test_current_executor_reopens_stale_authoritative_review(tmp_path: Path) -> None:
+    """Changed reviewed content must not inherit a stale approval event."""
+    original_args = _structured_llm_args(tmp_path)
+    first = _execute_set_pipeline(original_args, _empty_state(), _trained_context(data_dir=tmp_path))
+    assert first.success and first.validation.is_valid
+    original_node = first.updated_state.nodes[0]
+    original_options = deep_thaw(original_node.options)
+    requirements = original_options[INTERPRETATION_REQUIREMENTS_KEY]
+    prompt_requirement = next(item for item in requirements if item["kind"] == "llm_prompt_template")
+    prompt = original_options["prompt_template"]
+    resolved = {
+        **prompt_requirement,
+        "status": "resolved",
+        "event_id": "authoritative-prompt-review",
+        "accepted_value": prompt,
+        "accepted_artifact_hash": None,
+        "resolved_prompt_template_hash": stable_hash(prompt),
+    }
+    previous = replace(
+        first.updated_state,
+        nodes=(replace(original_node, options={**original_options, INTERPRETATION_REQUIREMENTS_KEY: [resolved]}),),
+    )
+    changed_args = _structured_llm_args(tmp_path)
+    changed_args["nodes"][0]["options"]["prompt_template"] = "Reclassify {{ text }}"
+
+    result = _execute_set_pipeline(changed_args, previous, _trained_context(data_dir=tmp_path))
+
+    assert result.success and result.validation.is_valid
+    reconciled = result.updated_state.nodes[0].options[INTERPRETATION_REQUIREMENTS_KEY]
+    current = next(item for item in reconciled if item["kind"] == "llm_prompt_template")
+    assert current["draft"] == "Reclassify {{ text }}"
+    assert current["status"] == "pending"
+    assert current["event_id"] is None
+    assert current["accepted_value"] is None
+    assert current["resolved_prompt_template_hash"] is None
+
+
+def _session_with_user_message() -> tuple[Any, str, str]:
+    engine = create_session_engine(
+        "sqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    initialize_session_schema(engine)
+    session_id = str(uuid4())
+    message_id = str(uuid4())
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        conn.execute(
+            insert(sessions_table).values(
+                id=session_id,
+                user_id="candidate-user",
+                auth_provider_type="local",
+                title="candidate characterization",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        conn.execute(
+            insert(chat_messages_table).values(
+                id=message_id,
+                session_id=session_id,
+                role="user",
+                content="Use this CSV: name,score\nada,42\n",
+                raw_content=None,
+                tool_calls=None,
+                tool_call_id=None,
+                sequence_no=1,
+                writer_principal="route_user_message",
+                created_at=now,
+                composition_state_id=None,
+                parent_assistant_id=None,
+            )
+        )
+    return engine, session_id, message_id
+
+
+@pytest.mark.asyncio
+async def test_current_executor_inline_blob_effects_are_single_settlement(tmp_path: Path) -> None:
+    engine, session_id, message_id = _session_with_user_message()
+    content = "name,score\nada,42\n"
+    args = {
+        "source": {
+            "plugin": "csv",
+            "on_success": "rows",
+            "options": {"schema": {"mode": "observed"}},
+            "inline_blob": {
+                "filename": "ada.csv",
+                "mime_type": "text/csv",
+                "content": content,
+            },
+        },
+        "nodes": [],
+        "edges": [],
+        "outputs": [],
+        "metadata": {"name": "inline"},
+    }
+    state = _empty_state()
+    before_state = deepcopy(state.to_dict())
+    before_files = tuple((tmp_path / "blobs").rglob("*")) if (tmp_path / "blobs").exists() else ()
+    with engine.begin() as conn:
+        before_blob_rows = conn.execute(select(func.count()).select_from(blobs_table)).scalar_one()
+        before_chat_rows = conn.execute(select(func.count()).select_from(chat_messages_table)).scalar_one()
+        before_quota = conn.execute(select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0))).scalar_one()
+
+    context = _trained_context(
+        data_dir=tmp_path,
+        session_engine=engine,
+        session_id=session_id,
+        user_message_id=message_id,
+        user_message_content=f"Use this CSV: {content}",
+    )
+    recorder = BufferingRecorder()
+    audit = begin_dispatch(
+        "candidate-inline-call",
+        "set_pipeline",
+        args,
+        version_before=state.version,
+        actor="candidate-characterization",
+    )
+
+    async def _dispatch() -> Any:
+        return _execute_set_pipeline(args, state, context)
+
+    outcome = await dispatch_with_audit(
+        recorder=recorder,
+        audit=audit,
+        do_dispatch=_dispatch,
+        version_after_provider=lambda value: value.updated_state.version,
+        arg_error_payload_factory=lambda exc: {"error": exc.args[0]},
+    )
+    result = outcome.result
+
+    with engine.begin() as conn:
+        rows = conn.execute(select(blobs_table).where(blobs_table.c.session_id == session_id)).mappings().all()
+        after_chat_rows = conn.execute(select(func.count()).select_from(chat_messages_table)).scalar_one()
+        after_quota = conn.execute(select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0))).scalar_one()
+    after_files = tuple(path for path in (tmp_path / "blobs").rglob("*") if path.is_file())
+
+    assert result.success is True, result.to_dict()
+    assert state.to_dict() == before_state
+    assert result.updated_state.version == state.version + 1
+    assert before_blob_rows == 0
+    assert len(rows) == 1
+    assert rows[0]["size_bytes"] == len(content.encode("utf-8"))
+    assert rows[0]["session_id"] == session_id
+    assert rows[0]["filename"] == "ada.csv"
+    assert rows[0]["mime_type"] == "text/csv"
+    assert rows[0]["content_hash"] == content_hash(content.encode("utf-8"))
+    assert rows[0]["storage_path"] == str(after_files[0])
+    assert rows[0]["created_by"] == "assistant"
+    assert rows[0]["source_description"] is None
+    assert rows[0]["status"] == "ready"
+    assert rows[0]["creation_modality"] == CreationModality.VERBATIM.value
+    assert rows[0]["created_from_message_id"] == message_id
+    assert rows[0]["creating_model_identifier"] is None
+    assert rows[0]["creating_model_version"] is None
+    assert rows[0]["creating_provider"] is None
+    assert rows[0]["creating_composer_skill_hash"] is None
+    assert rows[0]["creating_arguments_hash"] is None
+    assert before_files == ()
+    assert len(after_files) == 1
+    assert after_files[0].read_text(encoding="utf-8") == content
+    assert before_quota == 0
+    assert after_quota == len(content.encode("utf-8"))
+    assert after_chat_rows == before_chat_rows == 1
+    assert len(recorder.invocations) == 1
+    assert recorder.invocations[0].tool_name == "set_pipeline"
+    assert recorder.invocations[0].status.value == "success"
+    expected_inline_payload = {
+        "blob_id": rows[0]["id"],
+        "filename": "ada.csv",
+        "mime_type": "text/csv",
+        "size_bytes": len(content.encode("utf-8")),
+        "content_hash": content_hash(content.encode("utf-8")),
+    }
+    assert deep_thaw(result.data) == {"inline_blob": expected_inline_payload}
+    assert result.updated_state.to_dict()["sources"]["source"] == {
+        "plugin": "csv",
+        "on_success": "rows",
+        "options": {
+            "schema": {"mode": "observed"},
+            "path": rows[0]["storage_path"],
+            "blob_ref": rows[0]["id"],
+        },
+        "on_validation_failure": "discard",
+    }

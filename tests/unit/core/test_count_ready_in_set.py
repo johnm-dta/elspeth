@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from elspeth.contracts import TerminalOutcome, TerminalPath
 from elspeth.contracts.scheduler import TokenWorkStatus
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
@@ -412,8 +413,8 @@ def test_has_peer_owned_work_true_for_peer_pending_sink_even_after_lease_lapses(
         work_item_id=wid,
         row_payload_json=_PAYLOAD,
         sink_name="sink-a",
-        outcome="success",
-        path="default",
+        outcome=TerminalOutcome.SUCCESS.value,
+        path=TerminalPath.DEFAULT_FLOW.value,
         error_hash=None,
         error_message=None,
         now=NOW + timedelta(seconds=1),

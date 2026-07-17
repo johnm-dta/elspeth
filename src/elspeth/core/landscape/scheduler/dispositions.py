@@ -26,6 +26,7 @@ from elspeth.core.landscape.scheduler.payload_codec import scrubbed_row_payload_
 from elspeth.core.landscape.scheduler.work_items import item_from_mapping
 from elspeth.core.landscape.schema import (
     claim_verb_fence_clause,
+    pending_sink_bundle_clause,
     run_workers_table,
     token_outcomes_table,
     token_work_items_table,
@@ -186,6 +187,7 @@ class SchedulerDispositionRepository:
             expected_lease_owner=expected_lease_owner,
             branch_loss=branch_loss,
             fenced_worker_id=worker_id,
+            require_complete_pending_sink_bundle=True,
             row_payload_json=row_payload_json,
             pending_sink_name=sink_name,
             pending_outcome=outcome,
@@ -520,6 +522,7 @@ class SchedulerDispositionRepository:
         expected_lease_owner: str | None = None,
         branch_loss: BranchLossSpec | None = None,
         fenced_worker_id: str | None = None,
+        require_complete_pending_sink_bundle: bool = False,
         **values: object,
     ) -> TokenWorkItem:
         update_values = {"status": status.value, "updated_at": now, **values}
@@ -597,6 +600,19 @@ class SchedulerDispositionRepository:
                     f"{expected_owner_message}{fence_message}. Caller assumed ownership but the row is missing or in an "
                     f"unexpected state ({actual_message})."
                 )
+            after = (
+                conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id)).mappings().one()
+            )
+            if require_complete_pending_sink_bundle:
+                bundle_complete = conn.execute(
+                    select(pending_sink_bundle_clause()).where(token_work_items_table.c.work_item_id == work_item_id)
+                ).scalar_one()
+                if not bundle_complete:
+                    raise AuditIntegrityError(
+                        f"Scheduler transition to PENDING_SINK for work_item_id={work_item_id!r} refused an incomplete "
+                        "durable sink bundle. Required: non-empty row payload and sink name; legal outcome/path pair; "
+                        "pair-specific error evidence; and a join group for COALESCED."
+                    )
             if before is None:
                 raise AuditIntegrityError(
                     f"Scheduler transition to {status.name!r} for work_item_id={work_item_id!r} "
@@ -652,5 +668,4 @@ class SchedulerDispositionRepository:
                     recorded_by=branch_loss.recorded_by,
                     now=now,
                 )
-            row = conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id)).mappings().one()
-        return item_from_mapping(row)
+        return item_from_mapping(after)

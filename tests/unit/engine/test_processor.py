@@ -3832,19 +3832,31 @@ class TestDurableSchedulerResumeDrain:
         _register_test_worker(factory, "crashed-worker")
         claimed = factory.scheduler.claim_ready(run_id="test-run", lease_owner="crashed-worker", lease_seconds=300, now=datetime.now(UTC))
         assert claimed is not None
+        persisted_error_hash = error_hash if error_hash is not None else "valid-before-corruption"
         factory.scheduler.mark_pending_sink(
             work_item_id=claimed.work_item_id,
             row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
             sink_name="error_sink",
             outcome=TerminalOutcome.FAILURE.value,
             path=TerminalPath.ON_ERROR_ROUTED.value,
-            error_hash=error_hash,
+            error_hash=persisted_error_hash,
             # EMPTY original message: the class where a recomputed replay
             # hash diverges from the originally-audited one.
             error_message="",
             now=datetime.now(UTC),
             expected_lease_owner="crashed-worker",
         )
+        if error_hash is None:
+            from sqlalchemy import update
+
+            from elspeth.core.landscape.schema import token_work_items_table
+
+            with db.engine.begin() as conn:
+                conn.execute(
+                    update(token_work_items_table)
+                    .where(token_work_items_table.c.work_item_id == claimed.work_item_id)
+                    .values(pending_error_hash=None)
+                )
         processor = _make_processor(
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},

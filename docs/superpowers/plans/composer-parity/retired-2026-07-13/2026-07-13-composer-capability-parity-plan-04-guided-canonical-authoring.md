@@ -1,10 +1,7 @@
 # Composer Capability Parity Plan 04: Guided Canonical Authoring
 
 > **RETIRED (2026-07-17): DO NOT EXECUTE.** See
-> [the current disposition](2026-07-17-current-plan-disposition.md).
-
-> **For implementers:** Use `superpowers:subagent-driven-development` or
-> `superpowers:executing-plans`; apply test-driven development to each task.
+> [the current disposition](../2026-07-17-current-plan-disposition.md).
 
 **Goal:** Wire guided-full, guided-staged, and tutorial-profile to the same
 canonical planner and commit path as freeform, with complete DAG authoring and

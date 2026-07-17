@@ -1,10 +1,7 @@
 # Composer Capability Parity Plan 03: Guided State and Protocol Replacement
 
 > **RETIRED (2026-07-17): DO NOT EXECUTE.** See
-> [the current disposition](2026-07-17-current-plan-disposition.md).
-
-> **For implementers:** Use `superpowers:subagent-driven-development` or
-> `superpowers:executing-plans`; apply test-driven development to each task.
+> [the current disposition](../2026-07-17-current-plan-disposition.md).
 
 **Goal:** Replace the tutorial-era linear guided checkpoint, proposal turn, and
 frontend renderer with one strict current-schema model for complete canonical

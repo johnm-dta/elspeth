@@ -1,9 +1,7 @@
 # Composer Capability Parity Plan 01: Contract Foundation Implementation Plan
 
 > **RETIRED (2026-07-17): DO NOT EXECUTE.** See
-> [the current disposition](2026-07-17-current-plan-disposition.md).
-
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> [the current disposition](../2026-07-17-current-plan-disposition.md).
 
 **Goal:** Close the canonical coalesce failure-routing gap, fix secret-reference construction probes, and make drift between the LLM-facing `set_pipeline` declaration and the typed validation boundary fail deterministically.
 

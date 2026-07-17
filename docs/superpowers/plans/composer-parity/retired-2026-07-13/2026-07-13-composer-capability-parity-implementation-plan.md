@@ -1,13 +1,8 @@
 # Composer Guided/Freeform Capability Parity Implementation Plan Set
 
-> **RETIRED EXECUTION PACKAGE (2026-07-17): DO NOT EXECUTE.** Preserve this as
+> **RETIRED PLAN (2026-07-17): DO NOT EXECUTE.** Preserve this as
 > historical design input only; re-plan from the live release as directed by
-> [the current disposition](2026-07-17-current-plan-disposition.md).
-
-> **For implementers:** Use `superpowers:subagent-driven-development` or
-> `superpowers:executing-plans`. Use `superpowers:test-driven-development` for
-> behavior changes and `superpowers:verification-before-completion` before each
-> slice is handed off.
+> [the current disposition](../2026-07-17-current-plan-disposition.md).
 
 **Goal:** Make freeform, guided-full, guided-staged, and tutorial-profile use one
 complete pipeline language, one planner, and one audited commit path.
@@ -18,9 +13,8 @@ one coherent implementation, and fix defects in that implementation. Do not
 build a legacy reader, dual protocol, runtime architecture switch, or downgrade
 path.
 
-## Source of truth
+## Related documents
 
-- Implementation handoff: `docs/superpowers/plans/composer-parity/00-implementation-prompt.md`
 - Design: `docs/superpowers/plans/composer-parity/2026-07-13-composer-guided-freeform-capability-parity-design.md`
 - Live example design: `docs/superpowers/specs/2026-07-13-two-llm-colour-hybrid-pipeline-design.md`
 - Live example run sheet: `docs/superpowers/plans/2026-07-13-two-llm-colour-hybrid-demo-run-sheet.md`

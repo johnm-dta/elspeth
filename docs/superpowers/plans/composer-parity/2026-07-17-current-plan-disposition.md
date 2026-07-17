@@ -1,18 +1,15 @@
 # Composer Capability Parity — Current Plan Disposition
 
-**Status:** Product gap remains; 2026-07-13 execution package retired
-**Checked against:** `release/0.7.1` at `16017e9fe898702c8c6f23f013f266c31a4c14fb`
+**Status:** Product gap remains; 2026-07-13 plans archived and replaced
+**Checked against:** `release/0.7.1` at `cc593f3a7ae29cc52d94bd82661fbdfb04e5fd81`
 **Controlling issue:** `elspeth-7e2dd67275`
+**Current plan:** [2026-07-17 implementation plan set](2026-07-17-composer-capability-parity-implementation-plan.md)
 
 ## Decision
 
-Do not execute the seven-plan package dated 2026-07-13. Its review was valid
-for an older code baseline, but its implementation mechanics are no longer
-valid for the release branch. The package remains as historical design input;
-it is not approved work.
-
-The discarded `plans/composer-parity-review-fixes` worktree contained plan
-edits only. It contained no implementation or test suite to merge.
+Do not execute the seven plans dated 2026-07-13. They are preserved under
+`retired-2026-07-13/` as historical input. The replacement plan set dated
+2026-07-17 is current.
 
 ## Why it was retired
 
@@ -20,7 +17,7 @@ edits only. It contained no implementation or test suite to merge.
   branch 140 commits beyond that baseline.
 - The current constants are `SESSION_SCHEMA_EPOCH = 28`,
   `GUIDED_SESSION_SCHEMA_VERSION = 7`, and `SQLITE_SCHEMA_EPOCH = 27`. The old
-  package assigns epoch numbers that have already been consumed.
+  plans assign epoch numbers that have already been consumed.
 - Durable sink-effect and coalesce-effect ledgers now own recovery and artifact
   identity. Plan 01's proposed parallel operation-parent lifecycle would
   duplicate or bypass that machinery.
@@ -48,9 +45,9 @@ The following invariants survive re-planning:
   reinstalled; no in-place migration, compatibility reader, or backfill is
   built.
 
-## Required re-plan
+## Replacement plan
 
-When the feature is started, write a new plan from the then-current release:
+The current plan implements the required re-plan in this dependency order:
 
 1. Re-characterize current proposal persistence, splice/reconciliation seams,
    policy/profile contracts, and the guided chain path.
@@ -61,8 +58,14 @@ When the feature is started, write a new plan from the then-current release:
    live constant and recreate state rather than migrating it.
 4. Add the real-path parity corpus, wrong-stage intent tests, tutorial identity
    tests, and a refreshed colour-pipeline proof.
-5. Merge the green work back into the active release branch. Branch signing is
-   the final release action, not a prerequisite for planning or implementation.
+5. Run deterministic, generated, frontend, and live staging proofs before
+   closing the controlling issue.
+
+The replacement deliberately reuses the current proposal lifecycle and omits
+signed plan packages, plan hashes, review receipts, approval choreography, and
+release-programme machinery. Runtime argument hashes, proposal/audit bindings,
+schema sentinels, and test evidence remain because they protect code, data, and
+execution integrity.
 
 Coalesce failure routing, empty-output artifact evidence, and public typed LLM
 query configuration remain useful findings, but they must be assessed against

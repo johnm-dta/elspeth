@@ -1,10 +1,12 @@
 # Composer Guided/Freeform Capability Parity
 
-> **REVALIDATION REQUIRED (2026-07-17).** The product invariants remain useful,
-> but the implementation mechanics are no longer approved. See
-> [the current disposition](2026-07-17-current-plan-disposition.md).
+> **IMPLEMENTATION REPLANNED (2026-07-17).** The product invariants remain
+> current; implementation follows the
+> [replacement plan set](2026-07-17-composer-capability-parity-implementation-plan.md).
+> Historical mechanics and consumed epoch numbers in this design are superseded
+> by that plan and the [current disposition](2026-07-17-current-plan-disposition.md).
 
-**Status:** Design input retained; implementation package retired
+**Status:** Design input retained; old implementation plans retired
 **Date:** 2026-07-13
 **Priority:** High
 **Scope:** Composer authoring architecture, freeform and guided skill packs, guided session replacement, validation feedback, and cross-surface evaluation
@@ -1056,11 +1058,10 @@ The design is implemented only when all of the following are true:
     stage" response, preserves and consumes them there, uses stable-id back/edit
     for an already reviewed stage, and never misreports a plugin as unsupported.
 
-## 13. Implementation decomposition
+## 13. Implementation order
 
 This architecture spans multiple persistence, planner, protocol, frontend, and
-evaluation boundaries. Implementation planning must produce an ordered plan set
-rather than one monolithic change:
+evaluation boundaries. Implement it in this dependency order:
 
 1. Fix the secret-reference construction probe and lock the existing canonical
    authoring schema with structural compatibility tests.
@@ -1081,9 +1082,9 @@ rather than one monolithic change:
    acceptance on all required surfaces; fix forward until every criterion
    passes.
 
-Each slice must leave the repository valid for continued development. No
-individual slice may close the capability-parity work before the full
-acceptance criteria pass, and no slice may add a compatibility implementation
+Each step must leave the repository valid for continued development. No
+individual step may close the capability-parity work before the full
+acceptance criteria pass, and no step may add a compatibility implementation
 that preserves the removed linear-chain authoring model.
 
 ## 14. References

@@ -64,7 +64,7 @@ This proves the narrow queue import/export claim. It does **not** prove guided p
 
 **Status:** confirmed evidence gap.
 **Surface:** Composer evaluation and integration tests.
-**Evidence:** `docs/superpowers/plans/composer-parity/2026-07-13-composer-capability-parity-plan-06-parity-verification.md` specifies nine fixtures—linear transform, conditional gate, multi-output, fork/coalesce, multi-source/queue, aggregation, row expansion, error routing, and structured LLM—across three authoring surfaces, for 27 cases. The planned `evals/composer-parity/` and `tests/integration/web/composer/parity/` suites were absent in the live repository inspection.
+**Evidence:** `docs/superpowers/plans/composer-parity/2026-07-17-composer-capability-parity-plan-05-verification-acceptance.md` specifies nine fixtures—linear transform, conditional gate, multi-output, fork/coalesce, multi-source/queue, aggregation, row expansion, error routing, and structured LLM—across three authoring surfaces, for 27 cases. The planned `evals/composer-parity/` and `tests/integration/web/composer/parity/` suites were absent in the live repository inspection.
 
 **Why it matters:** unit coverage of import/export helpers cannot detect semantic drift between surfaces or between the web model and execution builder.
 

@@ -580,17 +580,23 @@ async def test_inline_proposal_gap_retry_reuses_one_custody_blob_and_quota_charg
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("case", "expected_argument", "rejected_fragment"),
+    ("case", "expected_error_fragment", "rejected_fragment", "expected_invalid_builder_calls"),
     [
-        ("disallowed_mime", "mime_type", "application/octet-stream"),
-        ("unsanitizable_filename", "filename", ".."),
+        (
+            "disallowed_mime",
+            "arguments.source.inline_blob.mime_type must be one of the declared values",
+            "application/octet-stream",
+            0,
+        ),
+        ("unsanitizable_filename", "'filename' must be", "..", 1),
     ],
 )
 async def test_inline_candidate_argument_error_is_audited_once_and_repairable(
     tmp_path: Path,
     case: str,
-    expected_argument: str,
+    expected_error_fragment: str,
     rejected_fragment: str,
+    expected_invalid_builder_calls: int,
 ) -> None:
     harness = _harness(tmp_path)
     state = _empty_state()
@@ -616,7 +622,7 @@ async def test_inline_candidate_argument_error_is_audited_once_and_repairable(
         message_snapshots.append(deepcopy(messages))
         if len(message_snapshots) == 2:
             invalid_turn_outcomes.extend(harness.service._phase3_last_tool_outcomes)
-            assert builder.call_count == 1
+            assert builder.call_count == expected_invalid_builder_calls
             assert _count_rows(harness.engine, composition_proposals_table) == 0
             assert _count_rows(harness.engine, blobs_table) == 0
             assert _count_rows(harness.engine, composition_states_table) == 0
@@ -642,7 +648,7 @@ async def test_inline_candidate_argument_error_is_audited_once_and_repairable(
     assert len(proposals) == 1
     assert proposals[0].tool_call_id == f"call_{case}_repaired"
     assert result.state is state
-    assert builder.call_count == 3
+    assert builder.call_count == expected_invalid_builder_calls + 2
     assert _count_rows(harness.engine, blobs_table) == 1
     assert _count_rows(harness.engine, composition_states_table) == 0
 
@@ -665,7 +671,7 @@ async def test_inline_candidate_argument_error_is_audited_once_and_repairable(
 
     feedback = next(message for message in message_snapshots[1] if message.get("tool_call_id") == f"call_{case}")
     feedback_payload = json.loads(feedback["content"])
-    assert f"'{expected_argument}' must be" in feedback_payload["error"]
+    assert expected_error_fragment in feedback_payload["error"]
     assert rejected_fragment not in feedback["content"]
     assert "caused by" not in feedback["content"]
 

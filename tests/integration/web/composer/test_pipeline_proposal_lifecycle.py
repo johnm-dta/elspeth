@@ -602,6 +602,85 @@ async def test_settlement_rejects_malformed_or_mismatched_success_for_same_call_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind_corruption", ["missing", "wrong"])
+@pytest.mark.parametrize("operation", ["settlement", "recovery", "committed_reload", "rejected_reload"])
+async def test_same_call_success_with_corrupt_audit_kind_fails_closed(
+    service: SessionServiceImpl,
+    kind_corruption: str,
+    operation: str,
+) -> None:
+    session_id = uuid4()
+    _insert_session(service, session_id)
+    plan = _plan()
+    row = await _create(service, session_id, plan)
+    binding = await _persist_dispatch(service, session_id)
+    malformed = _latest_audit_envelope(service)
+    if kind_corruption == "missing":
+        malformed.pop("_kind")
+    else:
+        malformed["_kind"] = "assistant_tool_call"
+
+    if operation == "settlement":
+        await _persist_cloned_audit_envelope(service, session_id, malformed)
+        with pytest.raises(AuditIntegrityError):
+            await service.settle_pipeline_composition_proposal(**_settlement_kwargs(session_id, row.id, plan, binding))
+    elif operation == "recovery":
+        await _persist_cloned_audit_envelope(service, session_id, malformed)
+        authority = await service.get_authoritative_pipeline_proposal(
+            session_id=session_id,
+            proposal_id=row.id,
+            reviewed_facts={},
+        )
+        with pytest.raises(AuditIntegrityError):
+            await service.get_pipeline_dispatch_recovery(authority=authority)
+    elif operation == "committed_reload":
+        await service.settle_pipeline_composition_proposal(**_settlement_kwargs(session_id, row.id, plan, binding))
+        await _persist_cloned_audit_envelope(service, session_id, malformed)
+        with pytest.raises(AuditIntegrityError):
+            await service.get_authoritative_pipeline_proposal(
+                session_id=session_id,
+                proposal_id=row.id,
+                reviewed_facts={},
+            )
+    else:
+        await service.reject_pipeline_composition_proposal(
+            session_id=session_id,
+            proposal_id=row.id,
+            draft_hash=plan.proposal.draft_hash,
+            reviewed_facts={},
+            reason="candidate_executor_mismatch",
+            dispatch=binding,
+            actor="system:pipeline-commit",
+        )
+        await _persist_cloned_audit_envelope(service, session_id, malformed)
+        with pytest.raises(AuditIntegrityError):
+            await service.get_authoritative_pipeline_proposal(
+                session_id=session_id,
+                proposal_id=row.id,
+                reviewed_facts={},
+            )
+
+
+@pytest.mark.asyncio
+async def test_unrelated_non_audit_envelope_remains_ignored_for_settlement(service: SessionServiceImpl) -> None:
+    session_id = uuid4()
+    _insert_session(service, session_id)
+    plan = _plan()
+    row = await _create(service, session_id, plan)
+    binding = await _persist_dispatch(service, session_id)
+    unrelated = _latest_audit_envelope(service)
+    unrelated["_kind"] = "assistant_tool_call"
+    invocation = unrelated["invocation"]
+    assert type(invocation) is dict
+    invocation["tool_call_id"] = "unrelated-call"
+    await _persist_cloned_audit_envelope(service, session_id, unrelated)
+
+    settled = await service.settle_pipeline_composition_proposal(**_settlement_kwargs(session_id, row.id, plan, binding))
+
+    assert settled.proposal.status == "committed"
+
+
+@pytest.mark.asyncio
 async def test_failed_dispatch_then_one_success_remains_recoverable(service: SessionServiceImpl) -> None:
     session_id = uuid4()
     _insert_session(service, session_id)

@@ -515,11 +515,13 @@ def _pipeline_dispatch_recovery_from_envelope(
     expected_tool_call_id: str,
 ) -> PipelineDispatchRecovery | None:
     """Restore one successful same-call dispatch; ignore unrelated and failed attempts."""
-    if type(envelope) is not dict or envelope.get("_kind") != "audit":
+    if type(envelope) is not dict:
         return None
     invocation = envelope.get("invocation")
     if type(invocation) is not dict or invocation.get("tool_call_id") != expected_tool_call_id:
         return None
+    if envelope.get("_kind") != "audit":
+        raise AuditIntegrityError("pipeline dispatch envelope kind is malformed")
     if invocation.get("tool_name") != "set_pipeline":
         raise AuditIntegrityError("pipeline dispatch call id is bound to a different tool")
     raw_status = invocation.get("status")

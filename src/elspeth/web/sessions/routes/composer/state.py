@@ -186,7 +186,10 @@ def _reject_unbound_blob_storage_sources(state: CompositionState, *, data_dir: s
     invariant=(
         "raises HTTPException 400 for any string source path outside the source allowlist; missing or non-string path values are skipped"
     ),
-    test_ref="tests/unit/web/sessions/test_routes.py::TestYamlEndpoint::test_post_state_yaml_rejects_source_path_outside_allowed_directories",
+    test_ref=(
+        "tests/unit/web/sessions/routes/composer/test_state_boundaries.py::test_reject_disallowed_source_paths_raises_400_outside_allowlist"
+    ),
+    test_fingerprint="ee81505482c502b3bed9e0ce1ccb6fa1e94983ce0e147ebf6e6461bf61038ca1",
 )
 def _reject_disallowed_source_paths(state: CompositionState, *, data_dir: str) -> None:
     allowed_dirs = allowed_source_directories(data_dir)

@@ -49,6 +49,37 @@ def test_reject_unbound_blob_storage_sources_raises_400_on_unbound_blob_path(tmp
     assert exc_info.value.status_code == 400
 
 
+def test_reject_disallowed_source_paths_raises_400_outside_allowlist(tmp_path) -> None:
+    """A direct boundary witness pins the fail-closed source-path contract."""
+    from fastapi import HTTPException
+
+    from elspeth.web.composer.state import CompositionState, PipelineMetadata, SourceSpec
+    from elspeth.web.sessions.routes.composer.state import _reject_disallowed_source_paths
+
+    data_dir = tmp_path / "data"
+    state = CompositionState(
+        sources={
+            "source": SourceSpec(
+                plugin="csv",
+                on_success="main",
+                options={"path": str(tmp_path / "outside.csv")},
+                on_validation_failure="discard",
+            )
+        },
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        _reject_disallowed_source_paths(state, data_dir=str(data_dir))
+    assert exc_info.value.status_code == 400
+    assert _reject_disallowed_source_paths.__trust_boundary__.test_ref == (  # type: ignore[attr-defined]
+        "tests/unit/web/sessions/routes/composer/test_state_boundaries.py::test_reject_disallowed_source_paths_raises_400_outside_allowlist"
+    )
+
+
 def _llm_node_state_with_requirements(requirements: list) -> object:
     from elspeth.web.composer.state import CompositionState, NodeSpec, PipelineMetadata
 

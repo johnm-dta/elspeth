@@ -892,6 +892,9 @@ def test_postgres_sqlite_sequence_is_foreign_and_nonmutating(postgres_engine: En
 
     assert probe_session_schema(postgres_engine) is SchemaState.STALE
     with pytest.raises(SessionSchemaError):
+        initialize_session_schema(postgres_engine)
+    assert inspect(postgres_engine).get_table_names() == before
+    with pytest.raises(SessionSchemaError):
         init_session_schema(postgres_engine)
     assert inspect(postgres_engine).get_table_names() == before
 

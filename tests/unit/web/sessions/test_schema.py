@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_mock_engine, insert, inspect, text
@@ -15,10 +16,30 @@ from elspeth.web.sessions.models import SESSION_SCHEMA_EPOCH, blobs_table, metad
 from elspeth.web.sessions.schema import (
     SessionSchemaError,
     _stamp_schema_sentinels,
+    _user_tables,
     _validate_current_schema,
     initialize_session_schema,
     probe_current_schema,
 )
+
+
+@pytest.mark.parametrize(
+    ("dialect", "expected"),
+    [
+        ("sqlite", frozenset()),
+        ("postgresql", frozenset({"sqlite_sequence"})),
+    ],
+)
+def test_user_tables_only_excludes_sqlite_internal_names_on_sqlite(
+    dialect: str,
+    expected: frozenset[str],
+) -> None:
+    inspector = SimpleNamespace(
+        bind=SimpleNamespace(dialect=SimpleNamespace(name=dialect)),
+        get_table_names=lambda: ["sqlite_sequence"],
+    )
+
+    assert _user_tables(inspector) == expected  # type: ignore[arg-type]
 
 
 def _create_all_on_mock_engine(engine) -> None:

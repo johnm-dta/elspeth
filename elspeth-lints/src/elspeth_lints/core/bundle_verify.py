@@ -74,8 +74,13 @@ def verify_bundle_against_tree(
     allowlist_dir: Path,
 ) -> BundleVerificationReport:
     """Re-derive every bundle action's binding from the tree (pure read)."""
-    root = Path(root)
-    allowlist_dir = Path(allowlist_dir)
+    # CLI callers use repository-relative defaults (``src/elspeth`` and
+    # ``config/cicd/enforce_tier_model``).  The scanners resolve each target
+    # file before comparing it with ``root``; keep both sides in the same
+    # absolute coordinate system or every new-judgment action is falsely
+    # reported as unscannable.
+    root = Path(root).resolve()
+    allowlist_dir = Path(allowlist_dir).resolve()
 
     diagnosis = diagnose_judge_signatures(root=root, allowlist_dir=allowlist_dir)
     index: dict[str, Any] = {item.key: item for item in diagnosis.items}
@@ -93,11 +98,21 @@ def verify_bundle_against_tree(
         )
 
     mismatches: list[str] = []
+    # One source file can account for hundreds of new judgments.  Re-scan it
+    # once and share the immutable key set across those actions; otherwise
+    # verification cost grows with findings-per-file rather than files.
+    new_judgment_keys_by_file: dict[str, frozenset[str] | None] = {}
     for action in bundle.actions:
         if action.kind == "drift_repair":
             mismatches.extend(_verify_drift_repair(action, index))
         elif action.kind == "justify":
-            mismatches.extend(_verify_new_judgment(action, root=root))
+            mismatches.extend(
+                _verify_new_judgment(
+                    action,
+                    root=root,
+                    live_keys_by_file=new_judgment_keys_by_file,
+                )
+            )
         elif action.kind == "stale_delete":
             mismatches.extend(_verify_stale_delete(action, index))
         elif action.kind == "rotation":
@@ -123,15 +138,25 @@ def _verify_drift_repair(action: BundleAction, index: dict[str, Any]) -> list[st
     return []
 
 
-def _verify_new_judgment(action: BundleAction, *, root: Path) -> list[str]:
+def _verify_new_judgment(
+    action: BundleAction,
+    *,
+    root: Path,
+    live_keys_by_file: dict[str, frozenset[str] | None],
+) -> list[str]:
     if not action.file_path:  # pragma: no cover - enforced by BundleAction.__post_init__
         return [f"new_judgment {action.key!r}: missing file_path"]
-    target_file = (root / action.file_path).resolve()
-    try:
-        findings = scan_single_file_findings(target_file=target_file, root=root)
-    except (OSError, ValueError):
+    if action.file_path not in live_keys_by_file:
+        target_file = (root / action.file_path).resolve()
+        try:
+            findings = scan_single_file_findings(target_file=target_file, root=root)
+        except (OSError, ValueError):
+            live_keys_by_file[action.file_path] = None
+        else:
+            live_keys_by_file[action.file_path] = frozenset(_finding_canonical_key(finding) for finding in findings)
+    live_keys = live_keys_by_file[action.file_path]
+    if live_keys is None:
         return [f"new_judgment {action.key!r}: source {action.file_path} could not be scanned"]
-    live_keys = {_finding_canonical_key(finding) for finding in findings}
     if action.key not in live_keys:
         return [
             f"new_judgment {action.key!r}: no live finding at the staged fingerprint in "

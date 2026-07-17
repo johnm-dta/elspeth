@@ -116,7 +116,7 @@ def test_create_checkpoint_persists_precomputed_topology_hash_without_graph(
     db: LandscapeDB,
     checkpoint_manager: CheckpointManager,
 ) -> None:
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_checkpoint_prereqs(conn, run_id="run-draft")
 
     draft = _draft(
@@ -146,7 +146,7 @@ def test_validate_barrier_scalars_json_size_rejects_large_payload() -> None:
 
 def test_create_checkpoint_persists_barrier_scalars(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
     """F1 Task 1.2: the checkpoint row carries BarrierScalars only (format_version 5)."""
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_checkpoint_prereqs(conn)
 
     scalars = BarrierScalars(
@@ -167,7 +167,7 @@ def test_create_checkpoint_persists_barrier_scalars(db: LandscapeDB, checkpoint_
 
 def test_create_checkpoint_empty_scalars_persist_null(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
     """Empty BarrierScalars (has_state=False) persists NULL, same as None."""
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_checkpoint_prereqs(conn)
 
     cp_none = checkpoint_manager.create_checkpoint(draft=_draft(sequence_number=1, barrier_scalars=None))
@@ -182,7 +182,7 @@ def test_create_checkpoint_empty_scalars_persist_null(db: LandscapeDB, checkpoin
 
 
 def test_get_checkpoints_returns_ascending_sequence_order(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_checkpoint_prereqs(conn)
 
     checkpoint_manager.create_checkpoint(draft=_draft(sequence_number=5))
@@ -195,7 +195,7 @@ def test_get_checkpoints_returns_ascending_sequence_order(db: LandscapeDB, check
 
 def test_create_checkpoint_rejects_duplicate_sequence_for_run(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
     """Duplicate per-run checkpoint sequence numbers would make resume order ambiguous."""
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_checkpoint_prereqs(conn)
 
     checkpoint_manager.create_checkpoint(draft=_draft(sequence_number=1))
@@ -206,7 +206,7 @@ def test_create_checkpoint_rejects_duplicate_sequence_for_run(db: LandscapeDB, c
 
 def test_create_checkpoint_round_trips_coalesce_scalars(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
     """Coalesce lost-branch scalars round-trip through persistence unchanged."""
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_checkpoint_prereqs(conn)
 
     checkpoint = checkpoint_manager.create_checkpoint(
@@ -237,7 +237,7 @@ def test_get_latest_checkpoint_loads_raw_format_versions(
 ) -> None:
     """Repository reads expose stored checkpoint rows; resume policy lives elsewhere."""
     run_id = f"run-format-{format_version}"
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_checkpoint_prereqs(conn, run_id=run_id)
 
     created = checkpoint_manager.create_checkpoint(
@@ -258,7 +258,7 @@ def test_get_latest_checkpoint_rejects_non_string_barrier_scalars_json(
     checkpoint_manager: CheckpointManager,
 ) -> None:
     run_id = "run-tampered-type"
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_checkpoint_prereqs(conn, run_id=run_id)
 
     checkpoint_manager.create_checkpoint(draft=_draft(run_id=run_id, sequence_number=1, barrier_scalars=None))
@@ -282,7 +282,7 @@ def test_checkpoint_reads_reject_oversized_persisted_barrier_scalars_json(
     read_all: bool,
 ) -> None:
     run_id = "run-tampered-size"
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_checkpoint_prereqs(conn, run_id=run_id)
 
     checkpoint_manager.create_checkpoint(draft=_draft(run_id=run_id, sequence_number=1, barrier_scalars=None))
@@ -302,7 +302,7 @@ def test_checkpoint_reads_reject_oversized_persisted_barrier_scalars_json(
 
 
 def test_delete_checkpoints_removes_all_for_run(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_checkpoint_prereqs(conn)
 
     checkpoint_manager.create_checkpoint(draft=_draft(sequence_number=1))

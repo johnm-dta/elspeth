@@ -164,7 +164,7 @@ class TestTransformErrorPersistence:
 
         from elspeth.core.landscape.schema import tokens_table
 
-        with landscape_db.connection() as conn:
+        with landscape_db.write_connection() as conn:
             conn.execute(
                 tokens_table.insert().values(
                     token_id="token-123",
@@ -251,7 +251,7 @@ class TestTransformErrorPersistence:
 
         from elspeth.core.landscape.schema import tokens_table
 
-        with landscape_db.connection() as conn:
+        with landscape_db.write_connection() as conn:
             conn.execute(
                 tokens_table.insert().values(
                     token_id="token-456",

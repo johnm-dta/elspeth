@@ -360,7 +360,8 @@ describe("subscriptions — validation result side effects", () => {
       } as never,
     } as never);
 
-    const lastCall = injectSystemMessage.mock.calls.at(-1) as [string, string];
+    const calls = injectSystemMessage.mock.calls;
+    const lastCall = calls[calls.length - 1] as [string, string];
     expect(lastCall[0]).toContain("ready");
     expect(lastCall[0]).toContain("Run pipeline");
     expect(lastCall[1]).toBe("system-validation-current");

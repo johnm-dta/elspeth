@@ -267,6 +267,9 @@ test.describe("modal flows — Graph, YAML, Catalog", () => {
         await composer.goto(sessionId);
         await composer.waitForChatReady();
 
+        // State hydration is asynchronous. The shortcut uses the same
+        // composition-content gate as this button, so wait for that gate.
+        await expect(page.getByRole("button", { name: /export yaml/i })).toBeEnabled();
         await page.keyboard.press("Control+Shift+Y");
 
         await expect(

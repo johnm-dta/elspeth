@@ -1549,7 +1549,7 @@ class TestListCollisions:
 
         # Use raw SQL to update context_after_json with collision data
         # (the complete_node_state API doesn't directly support arbitrary JSON)
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 text(
                     """
@@ -1565,7 +1565,6 @@ class TestListCollisions:
                     "context_after": '{"union_field_collision_values": {"status": [["branch1", "active"], ["branch2", "inactive"]]}}',
                 },
             )
-            conn.commit()
 
         results = list_collisions(db, factory, "plain-coalesce")
 
@@ -1616,7 +1615,7 @@ class TestListCollisions:
             }
         )
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 text(
                     """
@@ -1629,7 +1628,6 @@ class TestListCollisions:
                 ),
                 {"state_id": ns.state_id, "context_after": context_json},
             )
-            conn.commit()
 
         results = list_collisions(db, factory, "overlap-only")
 
@@ -1675,7 +1673,7 @@ class TestListCollisions:
             }
         )
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 text(
                     """
@@ -1688,7 +1686,6 @@ class TestListCollisions:
                 ),
                 {"state_id": ns.state_id, "context_after": context_json},
             )
-            conn.commit()
 
         results = list_collisions(db, factory, "first-wins")
 
@@ -1756,7 +1753,7 @@ class TestListCollisions:
             }
         )
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 text(
                     """
@@ -1773,7 +1770,6 @@ class TestListCollisions:
                     "context_after": context_json,
                 },
             )
-            conn.commit()
 
         results = list_collisions(db, factory, "failed-merge")
 
@@ -1838,7 +1834,7 @@ class TestListCollisions:
         ns1 = factory.execution.begin_node_state(token1.token_id, "coalesce-node", "no-dedup-test", step_index=1, input_data={"x": 1})
         ns2 = factory.execution.begin_node_state(token2.token_id, "coalesce-node", "no-dedup-test", step_index=1, input_data={"x": 2})
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             for ns in [ns1, ns2]:
                 conn.execute(
                     text(
@@ -1852,7 +1848,6 @@ class TestListCollisions:
                     ),
                     {"state_id": ns.state_id, "context_after": context_json},
                 )
-            conn.commit()
 
         results = list_collisions(db, factory, "no-dedup-test")
 
@@ -1898,13 +1893,13 @@ class TestListCollisions:
         # Create node_states: first 2 with overlap-only data (more recent), third with real collision (older).
         # begin_node_state opens its own write transaction — it must run BEFORE
         # the db.connection() block (nesting a repo write inside an open
-        # connection on the in-memory StaticPool nests transactions under the
+        # write connection on the in-memory StaticPool nests transactions under the
         # write-intent begin discipline).
         node_states = [
             factory.execution.begin_node_state(token.token_id, "coalesce-node", "limit-after-filter", step_index=1, input_data={"x": i})
             for i, (_row, token) in enumerate(rows_and_tokens)
         ]
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             for i, ns in enumerate(node_states):
                 if i < 2:
                     # Overlap-only: same value on both branches (NOT a real collision)
@@ -1943,7 +1938,6 @@ class TestListCollisions:
                     ),
                     {"state_id": ns.state_id, "context_after": context},
                 )
-            conn.commit()
 
         # With limit=2, if LIMIT was in SQL, we'd only get the 2 overlap-only rows
         # and filter them out, returning 0 results. With limit after filter, we
@@ -2001,7 +1995,7 @@ class TestListCollisions:
             }
         )
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 text(
                     """
@@ -2014,7 +2008,6 @@ class TestListCollisions:
                 ),
                 {"state_id": ns.state_id, "context_after": context_json},
             )
-            conn.commit()
 
         results = list_collisions(db, factory, "canonical-test")
 
@@ -2073,7 +2066,7 @@ class TestListCollisions:
                 }
             )
 
-            with db.connection() as conn:
+            with db.write_connection() as conn:
                 conn.execute(
                     text(
                         """
@@ -2086,7 +2079,6 @@ class TestListCollisions:
                     ),
                     {"state_id": ns.state_id, "timestamp": fixed_timestamp, "context_after": context_json},
                 )
-                conn.commit()
 
         # Fetch with limit=5 — with unstable ordering, rows can shift between
         # batches causing skips/duplicates when the internal batch_size kicks in

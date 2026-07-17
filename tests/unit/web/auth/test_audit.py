@@ -68,6 +68,14 @@ def _request() -> Request:
 
 def _writer_kwargs(method_name: str) -> dict[str, object]:
     common: dict[str, object] = {"provider": "local"}
+    if method_name == "record_login_success_and_token_issued":
+        token = jwt.encode({"iat": 1, "exp": 2}, "bounded-test-key-that-is-at-least-32-bytes", algorithm="HS256")
+        return {
+            **common,
+            "user_id": "user-1",
+            "username": "alice",
+            "access_token": token,
+        }
     if method_name == "record_login_success":
         return {**common, "user_id": "user-1", "username": "alice"}
     if method_name == "record_login_failure":
@@ -96,6 +104,7 @@ def _writer_kwargs(method_name: str) -> dict[str, object]:
 @pytest.mark.parametrize(
     ("method_name", "repository_method"),
     [
+        ("record_login_success_and_token_issued", "record_login_success_and_token_issued"),
         ("record_login_success", "record_login_outcome"),
         ("record_token_issued", "record_token_issued"),
         ("record_auth_failure", "record_auth_failure"),
@@ -149,6 +158,7 @@ def test_every_writer_forwards_required_create_tables_policy(
 
 
 _OPERATION_NAMES = {
+    "record_login_success_and_token_issued": "login_success_and_token_issued",
     "record_login_success": "login_success",
     "record_token_issued": "token_issued",
     "record_auth_failure": "auth_failure",
@@ -159,6 +169,7 @@ _OPERATION_NAMES = {
 @pytest.mark.parametrize(
     ("method_name", "repository_method"),
     [
+        ("record_login_success_and_token_issued", "record_login_success_and_token_issued"),
         ("record_login_success", "record_login_outcome"),
         ("record_token_issued", "record_token_issued"),
         ("record_auth_failure", "record_auth_failure"),

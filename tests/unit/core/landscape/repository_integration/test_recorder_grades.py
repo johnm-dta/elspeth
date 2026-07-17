@@ -46,7 +46,7 @@ def _insert_purged_call(
     row_id = f"row-{node_id}"
     token_id = f"tok-{node_id}"
 
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             rows_table.insert().values(
                 row_id=row_id,

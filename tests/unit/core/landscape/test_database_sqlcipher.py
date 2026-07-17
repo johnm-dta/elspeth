@@ -27,7 +27,7 @@ class TestSQLCipherCreateAndRead:
         db = LandscapeDB.from_url(f"sqlite:///{db_path}", passphrase=passphrase)
         try:
             # Insert a run record with all NOT NULL columns
-            with db.connection() as conn:
+            with db.write_connection() as conn:
                 conn.execute(
                     runs_table.insert().values(
                         run_id="test-run-001",
@@ -245,7 +245,7 @@ class TestSQLCipherForeignKeys:
             # Note: sqlcipher3.dbapi2.IntegrityError may not be wrapped by
             # sqlalchemy.exc.IntegrityError when using the creator pattern,
             # so we catch both via Exception and verify the message.
-            with pytest.raises(Exception, match="FOREIGN KEY constraint failed"), db.connection() as conn:
+            with pytest.raises(Exception, match="FOREIGN KEY constraint failed"), db.write_connection() as conn:
                 conn.execute(
                     text(
                         "INSERT INTO nodes (node_id, run_id, plugin_name, node_type, "
@@ -406,7 +406,7 @@ class TestSQLCipherPassphraseEscaping:
         db = LandscapeDB.from_url(f"sqlite:///{db_path}", passphrase=passphrase)
         try:
             # Insert and read back to verify the connection works
-            with db.connection() as conn:
+            with db.write_connection() as conn:
                 conn.execute(
                     runs_table.insert().values(
                         run_id="test-escape",

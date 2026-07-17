@@ -288,6 +288,8 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("tokens", "expand_group_id"),
     # Added for run ownership — prevents cross-run contamination of token-linked records
     ("tokens", "run_id"),
+    # Token ancestry belongs to exactly one run; both endpoints are composite-FK scoped.
+    ("token_parents", "run_id"),
     # Added for composite FK to nodes (node_id, run_id) - enables run-isolated queries
     ("node_states", "run_id"),
     # Source schema persists typed resume metadata; runtime always writes this on new runs
@@ -303,6 +305,14 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     # Phase 5: Plugin contract audit trail - captures input/output contracts per node
     ("nodes", "input_contract_json"),
     ("nodes", "output_contract_json"),
+    ("nodes", "output_contract_hash"),
+    # Durable JSONL publication: committed batches remain recoverable until
+    # their fsynced sidecar append is acknowledged in a later transaction.
+    ("sidecar_journal_outbox", "sequence"),
+    ("sidecar_journal_outbox", "batch_id"),
+    ("sidecar_journal_outbox", "journal_owner"),
+    ("sidecar_journal_outbox", "created_at"),
+    ("sidecar_journal_outbox", "records_json"),
     # Operation I/O hashes - survive payload purge for integrity verification
     ("operations", "input_data_hash"),
     ("operations", "output_data_hash"),
@@ -326,6 +336,8 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("routing_events", "run_id"),
     # Retry lineage exactness - retry_batch() must deduplicate per failed batch.
     ("batches", "retry_of_batch_id"),
+    # Epoch 29: durable one-expansion-per-batch effect claim.
+    ("batches", "expansion_group_id"),
     # ADR-019 two-axis terminal model: old is_terminal DBs must fail fast.
     ("token_outcomes", "completed"),
     ("token_outcomes", "path"),
@@ -497,6 +509,8 @@ _REQUIRED_FOREIGN_KEYS: tuple[tuple[str, str, str], ...] = (
 _REQUIRED_COMPOSITE_FOREIGN_KEYS: tuple[tuple[str, tuple[str, ...], str, tuple[str, ...]], ...] = (
     # Epoch 24: a token's run is derived from, and must match, its row.
     _EPOCH_24_TOKEN_ROW_RUN_FK,
+    ("token_parents", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
+    ("token_parents", ("parent_token_id", "run_id"), "tokens", ("token_id", "run_id")),
     ("token_outcomes", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
     ("token_outcomes", ("batch_id", "run_id"), "batches", ("batch_id", "run_id")),
     ("node_states", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
@@ -871,7 +885,7 @@ class LandscapeDB:
                 The passphrase is never stored in the URL or audit trail.
             dump_to_jsonl: Enable JSONL change journal for emergency backups
             dump_to_jsonl_path: Optional override path for JSONL journal
-            dump_to_jsonl_fail_on_error: Fail if journal write fails
+            dump_to_jsonl_fail_on_error: Fail startup if committed journal backlog cannot be published
             dump_to_jsonl_include_payloads: Inline payloads in journal records
             dump_to_jsonl_payload_base_path: Payload store base path for inlining
         """
@@ -903,6 +917,8 @@ class LandscapeDB:
         self._create_additive_indexes()
         self._sync_schema_identity()
         self._sync_sqlite_schema_epoch()
+        if self._journal is not None:
+            self._journal.recover_pending(self.engine)
 
     def _setup_engine(self, **engine_kwargs: Any) -> None:
         """Create and configure the database engine."""
@@ -1748,7 +1764,7 @@ class LandscapeDB:
                 When set alongside ``dump_to_jsonl_worker_suffix``, it is the
                 operator's responsibility to ensure distinct paths for each
                 worker (explicit-path-at-N-over-1 is unsupported).
-            dump_to_jsonl_fail_on_error: Fail if journal write fails
+            dump_to_jsonl_fail_on_error: Fail startup if committed journal backlog cannot be published
             dump_to_jsonl_include_payloads: Inline payloads in journal records
             dump_to_jsonl_payload_base_path: Payload store base path for inlining
             dump_to_jsonl_worker_suffix: Per-worker hex suffix (the uuid4 hex
@@ -1816,6 +1832,8 @@ class LandscapeDB:
             instance._create_additive_indexes()
             instance._sync_schema_identity()
             instance._sync_sqlite_schema_epoch()
+        if journal is not None:
+            journal.recover_pending(engine)
         return instance
 
     @staticmethod
@@ -1910,23 +1928,14 @@ class LandscapeDB:
 
     @contextmanager
     def connection(self) -> Iterator[Connection]:
-        """Get a database connection with automatic transaction handling.
+        """Get a transaction-scoped connection for read queries.
 
-        Uses engine.begin() for proper transaction semantics:
-        - Auto-commits on successful block exit
-        - Auto-rolls back on exception
-
-        Usage:
-            with db.connection() as conn:
-                conn.execute(runs_table.insert().values(...))
-            # Committed automatically if no exception raised
+        This is a convenience alias for :meth:`read_only_connection` on both
+        writable and read-only database handles.  Use :meth:`write_connection`
+        for INSERT, UPDATE, or DELETE statements so SQLite transactions carry
+        write intent from ``BEGIN`` and PostgreSQL call sites remain explicit.
         """
-        if self._read_only:
-            with self.read_only_connection() as conn:
-                yield conn
-            return
-
-        with _maybe_serialize_shared_connection(self.engine), self.engine.begin() as conn:
+        with self.read_only_connection() as conn:
             yield conn
 
     @contextmanager

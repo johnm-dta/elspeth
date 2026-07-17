@@ -144,7 +144,7 @@ def _create_failed_run(
         contract = _make_schema_contract()
         audit_record = ContractAuditRecord.from_contract(contract)
         now = datetime.now(UTC)
-        with factory.run_lifecycle._db.connection() as conn:
+        with factory.run_lifecycle._db.write_connection() as conn:
             conn.execute(
                 nodes_table.insert().values(
                     node_id="source-node",

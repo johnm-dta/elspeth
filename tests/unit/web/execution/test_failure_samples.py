@@ -66,7 +66,7 @@ def _record_error(
         source_row_index=row_index,
         ingest_sequence=row_index,
     )
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             tokens_table.insert().values(
                 token_id=token_id,
@@ -110,7 +110,7 @@ def _record_messageless_error(
         source_row_index=row_index,
         ingest_sequence=row_index,
     )
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             tokens_table.insert().values(
                 token_id=token_id,

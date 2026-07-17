@@ -2,8 +2,13 @@
 
 Multi-worker ordering doctrine (ADR-030 §C.4 row 13, design line 284 / 501)
 ---------------------------------------------------------------------------
-At N=1 the journal is a reliable backup stream: a single writer means
-statement-time and WAL commit order are the same.
+At N=1 the journal is a reliable backup stream. Each transaction persists a
+batch in ``sidecar_journal_outbox`` before DBAPI commit. Only a successful
+commit makes that batch recoverable; publication fsyncs the JSONL file before
+acknowledging the outbox row. Durable batch IDs make recovery idempotent if a
+process stops between append and acknowledgement. Each batch is bound to a
+canonical sidecar owner; drains for that owner are serialized across database
+connections and never claim another sidecar's backlog.
 
 At N>1 (leader + followers) each worker writes its own
 ``db.journal.{worker_hex}.jsonl`` file (derived from the uuid4 hex tail of
@@ -11,11 +16,10 @@ its ``worker_id``; see :meth:`LandscapeDB._derive_journal_path`).  Per-worker
 files fix the file-corruption half of the shared-file problem but NOT the
 ordering half.
 
-**The per-worker journal is FORENSIC-ONLY at N>1.**  Records carry
-per-statement timestamps (:class:`JournalRecord` key ``"timestamp"``, buffered
-to commit in :meth:`LandscapeJournal._after_commit`) which reflect
-*statement-time*, not cross-process WAL commit order.  Two workers writing to
-two files produce no shared total order.
+**The per-worker journal is FORENSIC-ONLY at N>1.** Records carry
+per-statement timestamps (:class:`JournalRecord` key ``"timestamp"``) plus
+transaction-local batch identity, but two workers writing to two files still
+produce no shared total order.
 
 The **authoritative replay order** is ``run_coordination_events.seq``
 (``AUTOINCREMENT`` — design G line 409): every coordination write is fenced
@@ -33,10 +37,12 @@ from __future__ import annotations
 import json
 import os
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from hashlib import sha256
 from pathlib import Path
 from threading import Lock
-from typing import Any, NotRequired, Protocol, TextIO, TypedDict, cast
+from typing import Any, BinaryIO, NotRequired, Protocol, TextIO, TypedDict, cast
+from uuid import uuid4
 
 import structlog
 from sqlalchemy import event
@@ -45,12 +51,15 @@ from sqlalchemy.engine import Connection, Engine
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.payload_store import IntegrityError, PayloadNotFoundError
 from elspeth.core.landscape._helpers import now
+from elspeth.core.landscape.schema import sidecar_journal_outbox_table
 from elspeth.core.landscape.serialization import serialize_datetime
 from elspeth.core.payload_store import FilesystemPayloadStore
 
 logger = structlog.get_logger(__name__)
 
 _BUFFER_STACK_KEY = "landscape_journal_buffer_stack"
+_OUTBOX_WRITE_KEY = "landscape_journal_outbox_write"
+_PENDING_BATCH_IDS_KEY = "landscape_journal_pending_batch_ids"
 _JOURNAL_DIRECTORY_MODE = 0o700
 _JOURNAL_FILE_MODE = 0o600
 _NON_OWNER_PERMISSION_BITS = stat.S_IRWXG | stat.S_IRWXO
@@ -102,13 +111,19 @@ class JournalRecord(TypedDict):
     request_payload_error: NotRequired[str]
     response_payload_error: NotRequired[str]
     _payload_ref_columns: NotRequired[list[str]]
+    journal_batch_id: NotRequired[str]
+    journal_batch_ordinal: NotRequired[int]
+    journal_batch_size: NotRequired[int]
 
 
 class LandscapeJournal:
     """Append-only JSONL journal of committed database writes.
 
-    Records SQL statements and parameters after a transaction commits.
-    This is an emergency backup stream, not the canonical audit record.
+    Captured statements are inserted into ``sidecar_journal_outbox`` inside
+    the transaction being committed. After DBAPI commit succeeds, committed
+    batches are fsynced to this file and acknowledged in a new transaction.
+    Startup recovery drains any committed-but-unacknowledged batches. This is
+    an emergency backup stream, not the canonical audit record.
 
     At N=1 (single worker) the journal is a reliable ordered stream.
     At N>1 each worker writes its own per-worker file
@@ -127,7 +142,10 @@ class LandscapeJournal:
         include_payloads: bool = False,
         payload_base_path: str | None = None,
     ) -> None:
-        self._path = Path(path)
+        self._path = Path(path).resolve(strict=False)
+        canonical_path = os.path.normcase(str(self._path))
+        self._owner_key = sha256(canonical_path.encode("utf-8")).hexdigest()
+        self._owner_lock_key = int.from_bytes(bytes.fromhex(self._owner_key)[:8], byteorder="big", signed=True)
         self._fail_on_error = fail_on_error
         self._include_payloads = include_payloads
         self._payload_store: FilesystemPayloadStore | None = None
@@ -139,18 +157,45 @@ class LandscapeJournal:
         self._disabled = False
         self._consecutive_failures = 0
         self._total_dropped = 0
+        self._engine: Engine | None = None
+        self._dialect_do_commit: Callable[[Any], None] | None = None
+        self._dialect_name: str | None = None
 
         self._ensure_owner_only_parent(self._path)
 
     def attach(self, engine: Engine) -> None:
         """Attach journal listeners to a SQLAlchemy engine.
 
+        The engine's schema must already define ``sidecar_journal_outbox``
+        before any captured write commits. ``LandscapeDB`` provisions the
+        table through its ordinary schema lifecycle; direct test/tool callers
+        must provision the same metadata explicitly. ``attach`` never creates
+        schema on an arbitrary engine.
+
         Listens to savepoint events in addition to commit/rollback so that
         writes inside rolled-back savepoints are discarded from the buffer
-        rather than flushed on the outer commit.
+        rather than included in the outer transaction's outbox batch.
         """
+        if self._engine is not None:
+            raise RuntimeError("LandscapeJournal is already attached to an engine")
+        self._engine = engine
+        self._dialect_name = engine.dialect.name
+        original_do_commit = engine.dialect.do_commit
+        self._dialect_do_commit = original_do_commit
+
+        def committed_do_commit(dbapi_connection: Any) -> None:
+            try:
+                original_do_commit(dbapi_connection)
+            except BaseException:
+                dbapi_connection.info.pop(_PENDING_BATCH_IDS_KEY, None)
+                raise
+            pending_batch_ids = tuple(dbapi_connection.info.pop(_PENDING_BATCH_IDS_KEY, ()))
+            if pending_batch_ids:
+                self._drain_committed_outbox(dbapi_connection, original_do_commit)
+
+        engine.dialect.do_commit = committed_do_commit  # type: ignore[method-assign]
         event.listen(engine, "after_cursor_execute", self._after_cursor_execute)
-        event.listen(engine, "commit", self._after_commit)
+        event.listen(engine, "commit", self._before_commit)
         event.listen(engine, "rollback", self._after_rollback)
         event.listen(engine, "savepoint", self._after_savepoint)
         event.listen(engine, "rollback_savepoint", self._after_rollback_savepoint)
@@ -176,6 +221,8 @@ class LandscapeJournal:
         context: _JournalExecutionContext,
         executemany: bool,
     ) -> None:
+        if conn.info.get(_OUTBOX_WRITE_KEY, False):
+            return
         if not self._is_write_statement(statement):
             return
 
@@ -211,23 +258,48 @@ class LandscapeJournal:
             released = stack.pop()
             stack[-1].extend(released)
 
-    def _after_commit(self, conn: Connection) -> None:
+    def _take_buffered_records(self, conn: Connection) -> list[JournalRecord]:
         if _BUFFER_STACK_KEY not in conn.info:
-            return
+            return []
 
         stack: list[list[JournalRecord]] = conn.info[_BUFFER_STACK_KEY]
-        # Flatten the entire stack (shouldn't have depth > 1 at commit,
-        # but be safe) and flush all committed records.
         all_records: list[JournalRecord] = []
         for buffer in stack:
             all_records.extend(buffer)
         stack.clear()
-        stack.append([])  # Reset to single root buffer
+        stack.append([])
+        return all_records
 
-        if all_records:
-            if self._include_payloads:
-                self._enrich_committed_records(all_records)
-            self._append_records(all_records)
+    def _before_commit(self, conn: Connection) -> None:
+        """Persist one journal batch inside the transaction being committed."""
+        all_records = self._take_buffered_records(conn)
+        if not all_records:
+            return
+        if self._include_payloads:
+            self._enrich_committed_records(all_records)
+
+        batch_id = uuid4().hex
+        batch_size = len(all_records)
+        for ordinal, record in enumerate(all_records):
+            record["journal_batch_id"] = batch_id
+            record["journal_batch_ordinal"] = ordinal
+            record["journal_batch_size"] = batch_size
+        records_json = "[" + ",".join(self._serialize_record(record) for record in all_records) + "]"
+
+        conn.info[_OUTBOX_WRITE_KEY] = True
+        try:
+            conn.execute(
+                sidecar_journal_outbox_table.insert().values(
+                    batch_id=batch_id,
+                    journal_owner=self._owner_key,
+                    created_at=now(),
+                    records_json=records_json,
+                )
+            )
+        finally:
+            conn.info.pop(_OUTBOX_WRITE_KEY, None)
+        pending: list[str] = conn.info.setdefault(_PENDING_BATCH_IDS_KEY, [])
+        pending.append(batch_id)
 
     def _enrich_committed_records(self, records: list[JournalRecord]) -> None:
         for record in records:
@@ -239,60 +311,295 @@ class LandscapeJournal:
             stack: list[list[JournalRecord]] = conn.info[_BUFFER_STACK_KEY]
             stack.clear()
             stack.append([])  # Reset to single root buffer
+        conn.info.pop(_PENDING_BATCH_IDS_KEY, None)
 
     # After this many consecutive failures, disable until next success
     _MAX_CONSECUTIVE_FAILURES = 5
 
-    def _append_records(self, records: list[JournalRecord]) -> None:
-        payload = "\n".join(self._serialize_record(record) for record in records) + "\n"
-        with self._lock:
-            if self._disabled:
-                self._total_dropped += len(records)
-                attempt_recovery = self._total_dropped % 100 == 0
-                logger.warning(
-                    "journal_recovery_attempt" if attempt_recovery else "journal_records_dropped",
-                    event_type="journal_records_dropped",
-                    consecutive_failures=self._consecutive_failures,
-                    total_dropped=self._total_dropped,
-                    batch_size=len(records),
-                )
-                if attempt_recovery:
-                    self._disabled = False
-                else:
-                    return
+    def recover_pending(self, engine: Engine) -> None:
+        """Publish committed outbox batches left by a prior failed drain."""
+        if engine is not self._engine or self._dialect_do_commit is None:
+            raise RuntimeError("LandscapeJournal must be attached to this engine before recovery")
+        dbapi_connection = engine.raw_connection()
+        try:
+            self._drain_committed_outbox(
+                dbapi_connection,
+                self._dialect_do_commit,
+                raise_on_publish_error=self._fail_on_error,
+            )
+        finally:
+            dbapi_connection.close()
 
-            try:
-                with self._open_owner_only_append() as handle:
-                    handle.write(payload)
-                if self._consecutive_failures > 0:
-                    logger.info(
-                        "journal_recovered",
-                        consecutive_failures=self._consecutive_failures,
-                        total_dropped=self._total_dropped,
+    def _drain_committed_outbox(
+        self,
+        dbapi_connection: Any,
+        do_commit: Callable[[Any], None],
+        *,
+        raise_on_publish_error: bool = False,
+    ) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            if self._dialect_name == "sqlite":
+                # Acquire write ownership before the read snapshot. A deferred
+                # SELECT followed by DELETE can otherwise fail with
+                # SQLITE_BUSY_SNAPSHOT when another drain commits first.
+                cursor.execute("BEGIN IMMEDIATE")
+                placeholder = "?"
+            elif self._dialect_name == "postgresql":
+                # Serialize the complete select -> fsync -> acknowledge cycle
+                # for one durable sidecar destination. SKIP LOCKED is not
+                # sufficient: two drains could claim different batches and
+                # append to the same file concurrently.
+                cursor.execute("SELECT pg_advisory_xact_lock(%s)", (self._owner_lock_key,))
+                placeholder = "%s"
+            else:
+                raise RuntimeError(f"Unsupported journal outbox dialect: {self._dialect_name!r}")
+
+            cursor.execute(
+                f"SELECT sequence, batch_id, records_json FROM sidecar_journal_outbox "
+                f"WHERE journal_owner = {placeholder} ORDER BY sequence",
+                (self._owner_key,),
+            )
+            rows = cursor.fetchall()
+            acknowledged: list[int] = []
+            for row_index, (raw_sequence, raw_batch_id, raw_records_json) in enumerate(rows):
+                sequence = int(raw_sequence)
+                batch_id = str(raw_batch_id)
+                records = self._deserialize_outbox_records(batch_id, str(raw_records_json))
+                try:
+                    published = self._append_committed_batch(
+                        batch_id,
+                        records,
+                        allow_later_torn_tail=row_index < len(rows) - 1,
                     )
-                self._consecutive_failures = 0
-            except OSError as exc:
-                self._consecutive_failures += 1
-                self._total_dropped += len(records)
+                except OSError as exc:
+                    if raise_on_publish_error:
+                        raise
+                    logger.error(
+                        "journal_outbox_publish_deferred",
+                        event_type="journal_outbox_publish_deferred",
+                        batch_id=batch_id,
+                        error=str(exc),
+                    )
+                    break
+                if not published:
+                    break
+                acknowledged.append(sequence)
+
+            for sequence in acknowledged:
+                cursor.execute(
+                    f"DELETE FROM sidecar_journal_outbox WHERE sequence = {placeholder} AND journal_owner = {placeholder}",
+                    (sequence, self._owner_key),
+                )
+                if cursor.rowcount != 1:
+                    raise AuditIntegrityError(f"sidecar journal outbox batch sequence {sequence} lost drain ownership")
+            try:
+                do_commit(dbapi_connection)
+            except BaseException as exc:
+                dbapi_connection.rollback()
                 logger.error(
-                    "journal_write_failed",
-                    event_type="journal_records_dropped",
-                    consecutive_failures=self._consecutive_failures,
-                    max_failures=self._MAX_CONSECUTIVE_FAILURES,
-                    records_dropped=len(records),
-                    total_dropped=self._total_dropped,
+                    "journal_outbox_ack_deferred",
+                    event_type="journal_outbox_ack_deferred",
+                    batch_count=len(acknowledged),
                     error=str(exc),
                 )
-                if self._fail_on_error:
+                if raise_on_publish_error:
                     raise
-                if self._consecutive_failures >= self._MAX_CONSECUTIVE_FAILURES:
-                    logger.error(
-                        "journal_disabled",
-                        event_type="journal_records_dropped",
-                        consecutive_failures=self._consecutive_failures,
-                        total_dropped=self._total_dropped,
-                    )
-                    self._disabled = True
+        except BaseException:
+            dbapi_connection.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    @staticmethod
+    def _deserialize_outbox_records(batch_id: str, records_json: str) -> list[JournalRecord]:
+        try:
+            raw_records = json.loads(records_json)
+        except json.JSONDecodeError as exc:
+            raise AuditIntegrityError(f"sidecar journal outbox batch {batch_id!r} is corrupt") from exc
+        if type(raw_records) is not list or not raw_records:
+            raise AuditIntegrityError(f"sidecar journal outbox batch {batch_id!r} has invalid records")
+        records: list[JournalRecord] = []
+        expected_size = len(raw_records)
+        for ordinal, raw_record in enumerate(raw_records):
+            if type(raw_record) is not dict:
+                raise AuditIntegrityError(f"sidecar journal outbox batch {batch_id!r} has an invalid record")
+            if (
+                raw_record.get("journal_batch_id") != batch_id
+                or raw_record.get("journal_batch_ordinal") != ordinal
+                or raw_record.get("journal_batch_size") != expected_size
+            ):
+                raise AuditIntegrityError(f"sidecar journal outbox batch {batch_id!r} metadata is inconsistent")
+            records.append(cast(JournalRecord, raw_record))
+        return records
+
+    def _append_committed_batch(
+        self,
+        batch_id: str,
+        records: list[JournalRecord],
+        *,
+        allow_later_torn_tail: bool = False,
+    ) -> bool:
+        payload = "\n".join(self._serialize_record(record) for record in records) + "\n"
+        with self._lock:
+            if self._batch_is_fully_published(batch_id, records, allow_later_torn_tail=allow_later_torn_tail):
+                # A previous attempt may have fsynced the file but failed while
+                # publishing its directory entry. Retry that durability step
+                # before the outbox row can be acknowledged.
+                self._fsync_parent_directory()
+                return True
+            return self._append_payload_locked(payload, len(records))
+
+    def _batch_is_fully_published(
+        self,
+        batch_id: str,
+        records: list[JournalRecord],
+        *,
+        allow_later_torn_tail: bool = False,
+    ) -> bool:
+        """Return true for a complete batch, repairing only its torn tail.
+
+        A recoverable tear must be an exact prefix of the expected outbox
+        payload at EOF. Corrupt JSON elsewhere, changed record contents, and
+        incomplete batches followed by other data remain integrity failures.
+        """
+        if not self._path.exists():
+            return False
+
+        expected_lines = [(self._serialize_record(record) + "\n").encode("utf-8") for record in records]
+        expected_size = len(expected_lines)
+        with self._open_owner_only_read_write() as handle:
+            data = handle.read()
+            offset = 0
+            batch_start: int | None = None
+            next_ordinal = 0
+            batch_complete = False
+            tail: tuple[int, bytes] | None = None
+            for line_number, line in enumerate(data.splitlines(keepends=True), start=1):
+                if not line.endswith(b"\n"):
+                    tail = (offset, line)
+                    break
+                content = line[:-1]
+                if not content.strip():
+                    offset += len(line)
+                    continue
+                try:
+                    record = json.loads(content)
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise AuditIntegrityError(f"Landscape journal contains corrupt JSON at line {line_number}") from exc
+                if type(record) is not dict or record.get("journal_batch_id") != batch_id:
+                    if batch_start is not None and not batch_complete:
+                        raise AuditIntegrityError(f"Landscape journal batch {batch_id!r} is partial before end of file")
+                    offset += len(line)
+                    continue
+                ordinal = record.get("journal_batch_ordinal")
+                if record.get("journal_batch_size") != expected_size or type(ordinal) is not int:
+                    raise AuditIntegrityError(f"Landscape journal batch {batch_id!r} has inconsistent metadata")
+                if batch_complete or ordinal != next_ordinal or ordinal >= expected_size or line != expected_lines[ordinal]:
+                    raise AuditIntegrityError(f"Landscape journal batch {batch_id!r} has inconsistent content")
+                if batch_start is None:
+                    batch_start = offset
+                next_ordinal += 1
+                batch_complete = next_ordinal == expected_size
+                offset += len(line)
+
+            if batch_complete:
+                if tail is not None and not allow_later_torn_tail:
+                    raise AuditIntegrityError("Landscape journal contains corrupt JSON at final line")
+                return True
+
+            if batch_start is None:
+                if tail is None:
+                    return False
+                tail_offset, tail_content = tail
+                first_record = expected_lines[0][:-1]
+                if not tail_content or not first_record.startswith(tail_content):
+                    raise AuditIntegrityError("Landscape journal contains corrupt JSON at final line")
+                batch_start = tail_offset
+            elif tail is not None:
+                _, tail_content = tail
+                expected_tail = expected_lines[next_ordinal][:-1]
+                if not tail_content or not expected_tail.startswith(tail_content):
+                    raise AuditIntegrityError(f"Landscape journal batch {batch_id!r} has inconsistent torn tail")
+
+            # The only incomplete content is an exact prefix of this batch at
+            # EOF. Remove the whole attempted batch so replay can append it
+            # atomically from the durable outbox payload.
+            handle.seek(batch_start)
+            handle.truncate()
+            handle.flush()
+            os.fsync(handle.fileno())
+            return False
+
+    def _append_records(self, records: list[JournalRecord]) -> bool:
+        payload = "\n".join(self._serialize_record(record) for record in records) + "\n"
+        with self._lock:
+            return self._append_payload_locked(payload, len(records))
+
+    def _append_payload_locked(self, payload: str, record_count: int) -> bool:
+        """Append one prepared payload while ``self._lock`` is held."""
+        if self._disabled:
+            self._total_dropped += record_count
+            attempt_recovery = self._total_dropped % 100 == 0
+            logger.warning(
+                "journal_recovery_attempt" if attempt_recovery else "journal_records_dropped",
+                event_type="journal_records_dropped",
+                consecutive_failures=self._consecutive_failures,
+                total_dropped=self._total_dropped,
+                batch_size=record_count,
+            )
+            if attempt_recovery:
+                self._disabled = False
+            else:
+                return False
+
+        try:
+            with self._open_owner_only_append() as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._fsync_parent_directory()
+            if self._consecutive_failures > 0:
+                logger.info(
+                    "journal_recovered",
+                    consecutive_failures=self._consecutive_failures,
+                    total_dropped=self._total_dropped,
+                )
+            self._consecutive_failures = 0
+            return True
+        except OSError as exc:
+            self._consecutive_failures += 1
+            self._total_dropped += record_count
+            logger.error(
+                "journal_write_failed",
+                event_type="journal_records_dropped",
+                consecutive_failures=self._consecutive_failures,
+                max_failures=self._MAX_CONSECUTIVE_FAILURES,
+                records_dropped=record_count,
+                total_dropped=self._total_dropped,
+                error=str(exc),
+            )
+            if self._fail_on_error:
+                raise
+            if self._consecutive_failures >= self._MAX_CONSECUTIVE_FAILURES:
+                logger.error(
+                    "journal_disabled",
+                    event_type="journal_records_dropped",
+                    consecutive_failures=self._consecutive_failures,
+                    total_dropped=self._total_dropped,
+                )
+                self._disabled = True
+            return False
+
+    def _fsync_parent_directory(self) -> None:
+        """Durably publish a newly-created journal directory entry on POSIX."""
+        if os.name == "nt":
+            return
+        directory_fd = os.open(self._path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
     @staticmethod
     def _ensure_owner_only_parent(path: Path) -> None:
@@ -330,6 +637,29 @@ class LandscapeJournal:
         try:
             self._verify_owner_only_file(fd)
             return os.fdopen(fd, "a", encoding="utf-8")
+        except Exception:
+            os.close(fd)
+            raise
+
+    def _open_owner_only_read(self) -> TextIO:
+        flags = os.O_RDONLY | _JOURNAL_OPEN_SECURITY_FLAGS
+        fd = os.open(self._path, flags)
+        try:
+            self._verify_owner_only_file(fd)
+            return os.fdopen(fd, "r", encoding="utf-8")
+        except Exception:
+            os.close(fd)
+            raise
+
+    def _open_owner_only_read_write(self) -> BinaryIO:
+        flags = os.O_RDWR | _JOURNAL_OPEN_SECURITY_FLAGS
+        try:
+            fd = os.open(self._path, flags)
+        except IsADirectoryError as exc:
+            raise OSError("Landscape journal path must be a regular file") from exc
+        try:
+            self._verify_owner_only_file(fd)
+            return os.fdopen(fd, "r+b")
         except Exception:
             os.close(fd)
             raise

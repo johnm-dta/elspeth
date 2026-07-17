@@ -27,7 +27,8 @@ from hypothesis import strategies as st
 from elspeth.contracts.audit_export import AuditExportDerivationConfig
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape import LandscapeDB
-from elspeth.core.landscape.exporter import LandscapeExporter
+from elspeth.core.landscape.exporter import LandscapeExporter, RecorderFactoryExportReadModel
+from elspeth.core.landscape.factory import RecorderFactory
 from tests.fixtures.landscape import make_landscape_db
 from tests.strategies.json import json_primitives
 
@@ -289,6 +290,11 @@ def _make_exporter_with_data(
     signing_mode = "hmac_sha256" if signing_key is not None else "unsigned"
     exporter = LandscapeExporter(
         _shared_landscape_db(),
+        # The records and terminal witness are synthetic in this property
+        # test.  Supplying the read model explicitly keeps snapshot ownership
+        # with the test fixture instead of asking the default exporter to look
+        # up the non-existent ``run-1`` fixture row.
+        read_model=RecorderFactoryExportReadModel(RecorderFactory(_shared_landscape_db())),
         signing_key=signing_key,
         signer_key_id="property-signer-v1" if signing_key is not None else None,
         derivation_config=AuditExportDerivationConfig(

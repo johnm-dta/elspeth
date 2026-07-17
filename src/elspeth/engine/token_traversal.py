@@ -158,7 +158,7 @@ class TokenTraversalEngine:
             # Notify coalesce if this is a forked branch
             sibling_results = self._processor._notify_coalesce_of_lost_branch(
                 current_token,
-                f"max_retries_exceeded:{e}",
+                "max_retries_exceeded",
                 child_items,
             )
             current_result = RowResult(

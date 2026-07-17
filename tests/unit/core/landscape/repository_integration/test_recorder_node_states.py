@@ -547,7 +547,7 @@ class TestNodeStateIntegrityValidation:
         assert len(retrieved) == 1
 
         # Now corrupt the database - set completed_at to NULL
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 text("UPDATE node_states SET completed_at = NULL WHERE state_id = :sid"),
                 {"sid": state.state_id},
@@ -612,7 +612,7 @@ class TestNodeStateIntegrityValidation:
         assert len(retrieved) == 1
 
         # Now corrupt the database - set completed_at to NULL
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 text("UPDATE node_states SET completed_at = NULL WHERE state_id = :sid"),
                 {"sid": state.state_id},

@@ -114,10 +114,12 @@ class GraphAuditRepository:
         # Convert schema contracts to audit records if provided
         input_contract_json: str | None = None
         output_contract_json: str | None = None
+        output_contract_hash: str | None = None
         if input_contract is not None:
             input_contract_json = ContractAuditRecord.from_contract(input_contract).to_json()
         if output_contract is not None:
             output_contract_json = ContractAuditRecord.from_contract(output_contract).to_json()
+            output_contract_hash = output_contract.version_hash()
 
         node = Node(
             node_id=node_id,
@@ -154,6 +156,7 @@ class GraphAuditRepository:
                 schema_fields_json=schema_fields_json,
                 input_contract_json=input_contract_json,
                 output_contract_json=output_contract_json,
+                output_contract_hash=output_contract_hash,
             )
         )
 
@@ -397,12 +400,54 @@ class GraphAuditRepository:
             node-level contracts (the per-source ``run_sources`` writer that
             superseded the deleted run-level singleton ``update_run_contract``).
             Used for dynamic schema discovery and transform schema evolution.
+            The write transaction takes SQLite write intent before reading and
+            a PostgreSQL row lock at the read. Identical versions are no-ops;
+            compatible versions merge deterministically; incompatible versions
+            fail before mutation. The final UPDATE also compares the version
+            read under the lock so a violated locking assumption fails closed.
         """
-        audit_record = ContractAuditRecord.from_contract(contract)
-        output_contract_json = audit_record.to_json()
+        candidate_hash = contract.version_hash()
+        with self._ops.write_connection() as conn:
+            row = conn.execute(
+                select(nodes_table.c.output_contract_json, nodes_table.c.output_contract_hash)
+                .where((nodes_table.c.run_id == run_id) & (nodes_table.c.node_id == node_id))
+                .with_for_update()
+            ).fetchone()
+            if row is None:
+                raise AuditIntegrityError(f"Cannot update output contract: node {node_id!r} does not exist in run {run_id!r}.")
+            if row.output_contract_json is None and row.output_contract_hash is not None:
+                raise AuditIntegrityError(
+                    f"Existing output contract hash exists without JSON for node {node_id!r} in run {run_id!r}: "
+                    f"stored={row.output_contract_hash!r}."
+                )
 
-        self._ops.execute_update(
-            nodes_table.update()
-            .where((nodes_table.c.run_id == run_id) & (nodes_table.c.node_id == node_id))
-            .values(output_contract_json=output_contract_json)
-        )
+            merged_contract = contract
+            if row.output_contract_json is not None:
+                current_contract = ContractAuditRecord.from_json(row.output_contract_json).to_schema_contract()
+                current_hash = current_contract.version_hash()
+                if row.output_contract_hash != current_hash:
+                    raise AuditIntegrityError(
+                        f"Existing output contract hash mismatch for node {node_id!r} in run {run_id!r}: "
+                        f"stored={row.output_contract_hash!r}, recomputed={current_hash!r}."
+                    )
+                if current_hash == candidate_hash:
+                    return
+                merged_contract = current_contract.merge_for_batch(contract)
+
+            merged_hash = merged_contract.version_hash()
+            update_stmt = nodes_table.update().where((nodes_table.c.run_id == run_id) & (nodes_table.c.node_id == node_id))
+            if row.output_contract_hash is None:
+                update_stmt = update_stmt.where(nodes_table.c.output_contract_hash.is_(None))
+            else:
+                update_stmt = update_stmt.where(nodes_table.c.output_contract_hash == row.output_contract_hash)
+            result = conn.execute(
+                update_stmt.values(
+                    output_contract_json=ContractAuditRecord.from_contract(merged_contract).to_json(),
+                    output_contract_hash=merged_hash,
+                )
+            )
+            if result.rowcount != 1:
+                raise AuditIntegrityError(
+                    f"Output contract compare-and-swap failed for node {node_id!r} in run {run_id!r}: "
+                    f"expected hash {row.output_contract_hash!r}, affected {result.rowcount} rows."
+                )

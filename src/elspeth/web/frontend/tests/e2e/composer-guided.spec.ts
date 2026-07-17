@@ -35,12 +35,6 @@ const E2E_DATA_DIR = process.env.PLAYWRIGHT_E2E_DATA_DIR
   ? resolve(process.env.PLAYWRIGHT_E2E_DATA_DIR)
   : resolve(FRONTEND_ROOT, ".e2e-data");
 
-// Construct the blob storage path.
-// service.py:207-211: data_dir/blobs/{session_id}/{blob_id}_{filename}
-function blobStoragePath(sessionId: string, blobId: string): string {
-  return resolve(E2E_DATA_DIR, "blobs", sessionId, `${blobId}_${BLOB_FILENAME}`);
-}
-
 // Sink output path — must be under data_dir/outputs/ (paths.py:44).
 const SINK_OUTPUT_PATH = resolve(E2E_DATA_DIR, "outputs", "playwright-guided-output.jsonl");
 
@@ -164,11 +158,12 @@ test.describe("composer-guided — source/output live walk", () => {
         await page.getByRole("button", { name: "CSV", exact: true }).click();
 
         // ── Step 1 source: SCHEMA_FORM — schema, path, on_validation_failure
-        const sourcePath = blobStoragePath(sessionId, blob.id);
         await page.getByRole("button", { name: "Edit", exact: true }).click();
         await expect(page.getByLabel(/^schema/i)).toBeVisible();
         await page.getByLabel(/^schema/i).fill('{"mode":"observed"}');
-        await page.getByLabel(/^path/i).fill(sourcePath);
+        // Uploaded sources are intentionally blob-bound and read-only in the
+        // editor. Assert the binding instead of trying to overwrite its path.
+        await expect(page.getByText(`blob:${blob.id}`, { exact: true })).toBeVisible();
         await page.getByLabel(/on\s+validation\s+failure/i).fill("discard");
         await expect(
           page.getByRole("button", { name: "Continue", exact: true }),

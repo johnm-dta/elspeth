@@ -268,9 +268,30 @@ def _optional_enum_in_check(column_name: str, enum_type: type[StrEnum]) -> str:
 #        sink-effect preparation claims become a legal RESERVED lifecycle state.
 #   28 → Failsink provenance moves to each sink-effect member so one recovered
 #        failsink batch can link every token to its exact primary effect.
-SQLITE_SCHEMA_EPOCH = 28
+#   29 → Node output-contract evolution stores its canonical contract hash;
+#        validation-error row links and token ancestry become run-scoped;
+#        batch expansion has one durable effect claim per batch; committed
+#        sidecar-journal batches use a transaction-owned outbox bound to their
+#        canonical sidecar destination.
+SQLITE_SCHEMA_EPOCH = 29
 
 schema_identity_table = create_schema_identity_table(metadata)
+
+sidecar_journal_outbox_table = Table(
+    "sidecar_journal_outbox",
+    metadata,
+    Column("sequence", Integer, primary_key=True, autoincrement=True),
+    Column("batch_id", String(32), nullable=False, unique=True),
+    Column("journal_owner", String(64), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("records_json", Text, nullable=False),
+    sqlite_autoincrement=True,
+)
+Index(
+    "ix_sidecar_journal_outbox_owner_sequence",
+    sidecar_journal_outbox_table.c.journal_owner,
+    sidecar_journal_outbox_table.c.sequence,
+)
 
 # Column width for node_id across all tables. The cross-layer identifier limit
 # lives in contracts.types; changing this value requires an Alembic migration.
@@ -432,6 +453,7 @@ nodes_table = Table(
     Column("input_contract_json", Text),
     # Output contract: what the node guarantees (field names and types)
     Column("output_contract_json", Text),
+    Column("output_contract_hash", String(32)),
     # Composite PK: same node config can exist in multiple runs
     # This allows running the same pipeline multiple times against the same database
     PrimaryKeyConstraint("node_id", "run_id"),
@@ -1027,15 +1049,13 @@ def claim_verb_fence_clause(*, worker_id: ColumnElement[str] | str, run_id: Colu
 token_parents_table = Table(
     "token_parents",
     metadata,
-    Column("token_id", String(64), ForeignKey("tokens.token_id"), primary_key=True),
-    Column(
-        "parent_token_id",
-        String(64),
-        ForeignKey("tokens.token_id"),
-        primary_key=True,
-    ),
+    Column("token_id", String(64), primary_key=True),
+    Column("parent_token_id", String(64), primary_key=True),
+    Column("run_id", String(64), nullable=False),
     Column("ordinal", Integer, nullable=False),
     UniqueConstraint("token_id", "ordinal"),
+    ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
+    ForeignKeyConstraint(["parent_token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
 )
 
 # === Node States ===
@@ -1920,6 +1940,10 @@ batches_table = Table(
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
     Column("aggregation_node_id", String(NODE_ID_COLUMN_LENGTH), nullable=False),
     Column("aggregation_state_id", String(64)),
+    # Epoch 29: one batch may materialize exactly one deaggregation child set.
+    # The expansion writer claims this slot by CAS in the same transaction as
+    # the child tokens and selected-parent terminal outcome.
+    Column("expansion_group_id", String(32)),
     Column("retry_of_batch_id", String(64)),
     Column("trigger_reason", String(128)),
     Column("trigger_type", String(32)),  # TriggerType enum value
@@ -2007,7 +2031,7 @@ validation_errors_table = Table(
     Column("error_id", String(32), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
     Column("node_id", String(NODE_ID_COLUMN_LENGTH)),  # Source node where validation failed (nullable)
-    Column("row_id", String(64), ForeignKey("rows.row_id")),  # Persisted quarantine row when one exists
+    Column("row_id", String(64)),  # Persisted quarantine row when one exists
     Column("row_hash", String(64), nullable=False),
     Column("row_data_json", Text),  # Store the row for debugging
     Column("error", Text, nullable=False),
@@ -2025,6 +2049,11 @@ validation_errors_table = Table(
     ForeignKeyConstraint(
         ["node_id", "run_id"],
         ["nodes.node_id", "nodes.run_id"],
+        ondelete="RESTRICT",
+    ),
+    ForeignKeyConstraint(
+        ["row_id", "run_id"],
+        ["rows.row_id", "rows.run_id"],
         ondelete="RESTRICT",
     ),
 )

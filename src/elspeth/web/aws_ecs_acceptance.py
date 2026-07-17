@@ -370,7 +370,9 @@ _ROLLBACK_PACKAGE_VERSION = "0.7.0"
 _ROLLBACK_BASELINE_SESSION_EPOCH = 27
 _ROLLBACK_BASELINE_LANDSCAPE_EPOCH = 23
 _SCENARIO_B_STRUCTURAL_CHANGES = (
-    "landscape_epoch_23_to_28_token_ownership_artifact_idempotency_sink_effect_ledger_coalesce_receipts_and_per_member_failsink_provenance"
+    "landscape_epoch_23_to_29_token_ownership_artifact_idempotency_sink_effect_ledger_coalesce_receipts_"
+    "per_member_failsink_provenance_output_contract_hash_run_scoped_validation_errors_and_token_ancestry_"
+    "batch_expansion_claim_and_sidecar_journal_outbox"
 )
 
 

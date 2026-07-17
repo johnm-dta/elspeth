@@ -35,6 +35,16 @@ MAX_AUTH_AUDIT_TEXT_LENGTH = 512
 class AuthAuditWriter(Protocol):
     """Interface consumed by auth routes for must-fire auth audit writes."""
 
+    def record_login_success_and_token_issued(
+        self,
+        request: Request,
+        *,
+        provider: AuthProviderType,
+        user_id: str,
+        username: str,
+        access_token: str,
+    ) -> None: ...
+
     def record_login_success(
         self,
         request: Request,
@@ -78,6 +88,7 @@ class AuthAuditWriter(Protocol):
 
 
 class AuthAuditOperation(StrEnum):
+    LOGIN_SUCCESS_AND_TOKEN_ISSUED = "login_success_and_token_issued"
     LOGIN_SUCCESS = "login_success"
     TOKEN_ISSUED = "token_issued"
     AUTH_FAILURE = "auth_failure"
@@ -218,6 +229,32 @@ class AuthAuditRecorder:
                 client_host=_client_host(request),
                 user_agent=_bounded_text(_optional_header(request, "user-agent")),
                 metadata=_request_metadata(request),
+            )
+
+    def record_login_success_and_token_issued(
+        self,
+        request: Request,
+        *,
+        provider: AuthProviderType,
+        user_id: str,
+        username: str,
+        access_token: str,
+    ) -> None:
+        """Persist the two required login-success events atomically."""
+        with self._open_landscape(AuthAuditOperation.LOGIN_SUCCESS_AND_TOKEN_ISSUED) as db:
+            RecorderFactory(db).auth_audit.record_login_success_and_token_issued(
+                provider=provider,
+                user_id=user_id,
+                username=username,
+                request_id=_request_id(request),
+                client_host=_client_host(request),
+                user_agent=_bounded_text(_optional_header(request, "user-agent")),
+                login_metadata=_request_metadata(request),
+                token_metadata=_token_issued_metadata(
+                    request,
+                    access_token=access_token,
+                    issuance_path="login",
+                ),
             )
 
     def record_token_issued(

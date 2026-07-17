@@ -30,7 +30,8 @@ from elspeth.core.landscape.execution.audit_export_snapshots import (
     AuditExportSnapshotRepository,
 )
 from elspeth.core.landscape.export_read_model import open_export_read_transaction
-from elspeth.core.landscape.schema import audit_export_snapshots_table, run_attributions_table, runs_table
+from elspeth.core.landscape.exporter import LandscapeExporter
+from elspeth.core.landscape.schema import audit_export_snapshots_table, run_attributions_table, runs_table, secret_resolutions_table
 
 pytestmark = pytest.mark.testcontainer
 COMPLETED_AT = datetime(2026, 7, 16, 3, 4, 5, 678901, tzinfo=UTC)
@@ -236,3 +237,37 @@ def test_postgres_export_read_model_is_repeatable_read_and_excludes_later_insert
             )
         assert reader_pid != writer_pid
         assert model.get_run_attribution("pg-export") is None
+
+
+def test_postgres_public_signed_export_uses_one_repeatable_read_snapshot(postgres_db: LandscapeDB) -> None:
+    _seed_run(postgres_db)
+    with postgres_db.engine.begin() as writer:
+        writer.execute(runs_table.update().where(runs_table.c.run_id == "pg-export").values(settings_json='{"version": 1}'))
+
+    records = LandscapeExporter(
+        postgres_db,
+        signing_key=b"snapshot-signing-key",
+        signer_key_id="snapshot-signer-v1",
+    ).export_run("pg-export", sign=True)
+    first = next(records)
+    assert first["record_type"] == "run"
+    assert first["settings"] == {"version": 1}
+
+    with postgres_db.engine.begin() as writer:
+        writer.execute(runs_table.update().where(runs_table.c.run_id == "pg-export").values(settings_json='{"version": 2}'))
+        writer.execute(
+            secret_resolutions_table.insert().values(
+                resolution_id="later-secret",
+                run_id="pg-export",
+                timestamp=1234.5,
+                env_var_name="LATER_SECRET",
+                source="env",
+                fingerprint="f" * 64,
+            )
+        )
+
+    remaining = list(records)
+    assert not [record for record in remaining if record["record_type"] == "secret_resolution"]
+    with postgres_db.engine.connect() as connection:
+        assert connection.scalar(select(runs_table.c.settings_json).where(runs_table.c.run_id == "pg-export")) == '{"version": 2}'
+        assert connection.scalar(select(secret_resolutions_table.c.resolution_id)) == "later-secret"

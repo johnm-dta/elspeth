@@ -19,7 +19,7 @@ _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
 
 def _set_run_started_at(db: LandscapeDB, run_id: str, started_at: datetime) -> None:
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(runs_table.update().where(runs_table.c.run_id == run_id).values(started_at=started_at))
 
 

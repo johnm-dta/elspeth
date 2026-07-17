@@ -19,6 +19,7 @@ import pytest
 import respx
 
 from elspeth.contracts import CallStatus, CallType
+from elspeth.contracts.call_data import HTTPCallError, HTTPCallRequest, HTTPCallResponse
 from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient, HTTPResponseBodyTooLargeError
 
 
@@ -490,6 +491,114 @@ def test_get_body_cap_streams_and_aborts_without_trusting_response_headers(
         "_observed_body_size": 6,
         "_max_body_bytes": 5,
     }
+
+
+def test_body_cap_error_audit_sanitizes_url_without_changing_raised_error(
+    http_client: AuditedHTTPClient,
+    mock_execution: _ExecutionRepositoryFake,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit errors must not persist URL credentials, fragments, or sensitive query values."""
+    monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key-for-http-error-audit")
+    monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+    raw_url = "https://o'connor:password@api.example.com/huge?token=!!!!&view=summary#access_token=FRAGMENT_SECRET"
+    response_payload = HTTPCallResponse(
+        status_code=200,
+        headers={},
+        body_size=6,
+        body={"_truncated": True, "_reason": "body_too_large"},
+    )
+    failure = HTTPResponseBodyTooLargeError(
+        url=raw_url,
+        body_size=6,
+        max_body_bytes=5,
+        response_payload=response_payload,
+    )
+
+    def raise_body_cap(*_args: object, **_kwargs: object) -> httpx.Response:
+        raise failure
+
+    monkeypatch.setattr(http_client, "_request_with_optional_body_cap", raise_body_cap)
+
+    with pytest.raises(HTTPResponseBodyTooLargeError) as exc_info:
+        http_client.get(raw_url)
+
+    assert exc_info.value is failure
+    mock_execution.record_call.assert_called_once()
+    call_args = mock_execution.record_call.call_args
+    assert call_args is not None
+    recorded_message = call_args.kwargs["error"].message
+    assert "response body 6 bytes exceeds max_response_body_bytes 5" in recorded_message
+    assert "api.example.com/huge" in recorded_message
+    assert "view=summary" in recorded_message
+    assert "token=" in recorded_message
+    assert "o'connor" not in recorded_message
+    assert "password" not in recorded_message
+    assert "!!!!" not in recorded_message
+    assert "FRAGMENT_SECRET" not in recorded_message
+
+
+def test_http_error_audit_redacts_url_when_fingerprinting_is_unavailable(
+    http_client: AuditedHTTPClient,
+    mock_execution: _ExecutionRepositoryFake,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit sanitization failures redact the URL instead of aborting persistence."""
+    monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+    monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+
+    http_client._record_call(
+        call_index=0,
+        call_type=CallType.HTTP,
+        status=CallStatus.ERROR,
+        request_data=HTTPCallRequest(method="GET", url="https://api.example.com/huge", headers={}),
+        error=HTTPCallError(
+            type="ConnectError",
+            message="connection failed for https://api.example.com/huge?token=!!!!",
+        ),
+    )
+
+    mock_execution.record_call.assert_called_once()
+    call_args = mock_execution.record_call.call_args
+    assert call_args is not None
+    recorded_message = call_args.kwargs["error"].message
+    assert recorded_message == "connection failed for <redacted-http-url>"
+    assert "token" not in recorded_message
+    assert "!!!!" not in recorded_message
+
+
+@pytest.mark.parametrize(
+    "raw_url",
+    [
+        "https://api.example.com/huge?token=<RAW_SECRET>",
+        "https://alice:pass<word>@api.example.com/huge",
+    ],
+)
+def test_http_error_audit_redacts_full_non_whitespace_url_token_on_ambiguous_delimiters(
+    raw_url: str,
+    http_client: AuditedHTTPClient,
+    mock_execution: _ExecutionRepositoryFake,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Angle brackets inside an attacker URL cannot split off raw credentials."""
+    monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+    monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+
+    http_client._record_call(
+        call_index=0,
+        call_type=CallType.HTTP,
+        status=CallStatus.ERROR,
+        request_data=HTTPCallRequest(method="GET", url="https://api.example.com/huge", headers={}),
+        error=HTTPCallError(type="ConnectError", message=f"connection failed for {raw_url}"),
+    )
+
+    call_args = mock_execution.record_call.call_args
+    assert call_args is not None
+    persisted = call_args.kwargs["error"].message
+    assert persisted.startswith("connection failed for ")
+    assert "RAW_SECRET" not in persisted
+    assert "alice" not in persisted
+    assert "pass<word>" not in persisted
 
 
 # ============================================================================

@@ -4399,8 +4399,29 @@ class TestRecordTransformErrorWithRouting:
         assert api_key not in repr(routing_reason)
 
     def test_divert_without_state_id_raises_invariant(self) -> None:
+        from elspeth.engine.executors.transform import record_transform_error_with_routing
+
+        factory = _make_factory()
+        transform = _make_transform(on_error="error_sink")
+        token = _make_token()
+        ctx = make_context()
+        ctx.record_transform_error = MagicMock()  # type: ignore[method-assign]
+
         with pytest.raises(OrchestrationInvariantError, match="state_id is required"):
-            self._call(on_error="error_sink", state_id=None)
+            record_transform_error_with_routing(
+                ctx=ctx,
+                execution=factory.execution,
+                error_edge_ids={NodeID("node_1"): "edge-err-1"},
+                state_id=None,
+                token=token,
+                transform=transform,
+                row={"field": "value"},
+                error_details={"reason": "shutdown_requested", "error": "shutdown requested"},
+                on_error="error_sink",
+            )
+
+        ctx.record_transform_error.assert_not_called()
+        factory.execution.record_routing_event.assert_not_called()
 
 
 class TestTransformExecutorTerminality:

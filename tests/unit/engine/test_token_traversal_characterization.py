@@ -35,6 +35,8 @@ queueing) lives in test_processor.py and is exercised by the full-suite gate.
 
 from __future__ import annotations
 
+import logging
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -44,7 +46,7 @@ from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import MaxRetriesExceeded, OrchestrationInvariantError
 from elspeth.contracts.results import GateResult
 from elspeth.contracts.routing import RoutingAction
-from elspeth.contracts.types import BranchName, NodeID
+from elspeth.contracts.types import BranchName, CoalesceName, NodeID
 from elspeth.core.config import GateSettings
 from elspeth.engine.executors import GateOutcome
 from elspeth.engine.processor import (
@@ -58,6 +60,7 @@ from tests.unit.engine.test_processor import (
     _make_factory,
     _make_mock_transform,
     _make_processor,
+    _persist_token_for_scheduler,
 )
 
 # =============================================================================
@@ -397,6 +400,84 @@ class TestHandleTransformNode:
         assert isinstance(outcome.result, RowResult)
         assert (outcome.result.outcome, outcome.result.path) == (TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
         assert len(recorded) == 1
+
+    def test_retry_exhaustion_keeps_branch_loss_audit_reason_bounded(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Secret-bearing retry failures must not reach branch-loss audit text."""
+        from elspeth.core.landscape.scheduler.branch_losses import record_coalesce_branch_loss
+
+        db, factory = _make_factory()
+        coalesce_name = CoalesceName("merge")
+        processor = _make_processor(
+            factory,
+            coalesce_node_ids={coalesce_name: NodeID("coalesce::merge")},
+            branch_to_coalesce={BranchName("path_a"): coalesce_name},
+        )
+        transform = _make_mock_transform(node_id="t-1", name="flaky")
+        token = TokenInfo(
+            row_id="row-1",
+            token_id="tok-1",
+            row_data=make_row({"value": 1}),
+            branch_name="path_a",
+        )
+        _persist_token_for_scheduler(factory, token)
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        raw_secret = "https://blob.example/path?sig=ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+
+        def _exec(transform, token, ctx, attempt_offset=0):
+            raise MaxRetriesExceeded(3, ConnectionError(f"provider failed: {raw_secret}"))
+
+        processor._execute_transform_with_retry = _exec  # type: ignore[method-assign]
+        outcome = processor._handle_transform_node(
+            transform=transform,
+            current_token=token,
+            ctx=ctx,
+            node_id=NodeID("t-1"),
+            child_items=[],
+            coalesce_node_id=NodeID("coalesce::merge"),
+            coalesce_name=coalesce_name,
+            current_on_success_sink="default",
+        )
+
+        assert isinstance(outcome, _TransformTerminal)
+        assert isinstance(outcome.result, RowResult)
+        assert outcome.result.error is not None
+        branch_loss = processor._pending_branch_losses.pop()
+        with db.write_connection() as conn:
+            assert record_coalesce_branch_loss(
+                conn,
+                run_id="test-run",
+                coalesce_name=branch_loss.coalesce_name,
+                row_id=branch_loss.row_id,
+                branch_name=branch_loss.branch_name,
+                token_id=branch_loss.token_id,
+                reason=branch_loss.reason,
+                recorded_by=branch_loss.recorded_by,
+                now=datetime.now(UTC),
+            )
+        with (
+            caplog.at_level(logging.WARNING, logger="elspeth.core.landscape.scheduler.branch_losses"),
+            db.write_connection() as conn,
+        ):
+            assert not record_coalesce_branch_loss(
+                conn,
+                run_id="test-run",
+                coalesce_name=branch_loss.coalesce_name,
+                row_id=branch_loss.row_id,
+                branch_name=branch_loss.branch_name,
+                token_id=branch_loss.token_id,
+                reason="max_retries_exceeded_replay",
+                recorded_by=branch_loss.recorded_by,
+                now=datetime.now(UTC),
+            )
+
+        [durable_loss] = factory.scheduler.list_coalesce_branch_losses(run_id="test-run")
+        assert outcome.result.error.message == "<redacted-secret>"
+        assert outcome.result.error.last_error == "<redacted-secret>"
+        assert durable_loss.reason == "max_retries_exceeded"
+        assert raw_secret not in caplog.text
 
 
 # =============================================================================

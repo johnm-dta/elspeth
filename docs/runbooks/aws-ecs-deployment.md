@@ -114,7 +114,7 @@ then sets `landscape_evidence` true only after the atomic
 - AWS authentication comes only from the ECS task role/default credential
   chain. Do not add keys, profiles, credential headers, role overrides, or
   AWS service endpoint overrides to either container.
-- AWS CLI v2, `jq`, `curl`, Docker, the Session Manager plugin, Node 22/npm,
+- AWS CLI v2, `jq`, `curl`, Docker, the Session Manager plugin, Node 24/npm 11,
   and Playwright Chromium are installed from reviewed locks before mutation.
 - Every web, doctor, payload-verifier, and local-auth-verifier task definition
   uses Linux Fargate 1.4.0 or `LATEST`, declares `runtimePlatform`, and uses
@@ -1463,9 +1463,9 @@ countersigns it. Set `SCENARIO_A_COMPATIBILITY_RECORD_FILE` and
   "rollback_doctor_task_definition": "exact-rollback-doctor-task-definition-arn",
   "previous_package_version": "0.7.0",
   "schema_facts": {
-    "candidate": {"session_epoch": 28, "landscape_epoch": 28, "run_web_plugin_policy_present": true},
+    "candidate": {"session_epoch": 28, "landscape_epoch": 29, "run_web_plugin_policy_present": true},
     "previous": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": true},
-    "structural_changes": "landscape_epoch_23_to_28_token_ownership_artifact_idempotency_sink_effect_ledger_coalesce_receipts_and_per_member_failsink_provenance",
+    "structural_changes": "landscape_epoch_23_to_29_token_ownership_artifact_idempotency_sink_effect_ledger_coalesce_receipts_per_member_failsink_provenance_output_contract_hash_run_scoped_validation_errors_and_token_ancestry_batch_expansion_claim_and_sidecar_journal_outbox",
     "semantics_only_changes": "none",
     "archive_export_decision": "required_before_forward_migration",
     "destructive_reset_required": false

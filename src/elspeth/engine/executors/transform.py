@@ -95,16 +95,10 @@ def record_transform_error_with_routing(
 
     scrubbed_error_details = _scrub_transform_error_details(error_details)
 
-    ctx.record_transform_error(
-        token_id=token.token_id,
-        transform_id=node_id,
-        row=row,
-        error_details=scrubbed_error_details,
-        destination=on_error,
-    )
-
-    # Record DIVERT routing_event for audit trail (AUD-002), co-located with
-    # the transform_error record. 'discard' has no destination edge.
+    # Validate the complete DIVERT envelope before writing either half. A
+    # transform_error without its required routing_event is contradictory
+    # audit evidence and cannot be repaired after the first insert commits.
+    divert: tuple[str, str] | None = None
     if on_error != "discard":
         if state_id is None:
             # The executor passes guard.state_id (never None); the processor
@@ -123,8 +117,22 @@ def record_transform_error_with_routing(
                 f"DIVERT edge registered. DAG construction should have created an "
                 f"__error_{{name}}__ edge in from_plugin_instances()."
             ) from exc
+        divert = (state_id, error_edge_id)
+
+    ctx.record_transform_error(
+        token_id=token.token_id,
+        transform_id=node_id,
+        row=row,
+        error_details=scrubbed_error_details,
+        destination=on_error,
+    )
+
+    # Record DIVERT routing_event for audit trail (AUD-002), co-located with
+    # the transform_error record. 'discard' has no destination edge.
+    if divert is not None:
+        divert_state_id, error_edge_id = divert
         execution.record_routing_event(
-            state_id=state_id,
+            state_id=divert_state_id,
             edge_id=error_edge_id,
             mode=RoutingMode.DIVERT,
             reason=scrubbed_error_details,

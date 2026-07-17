@@ -2668,7 +2668,7 @@ class TestAggregationFailureMatrix:
             patch.object(factory.data_flow, "record_token_outcome") as record_outcome,
             patch.object(processor, "_emit_transform_completed"),
             patch.object(processor, "_emit_token_completed"),
-            patch.object(processor._token_manager, "expand_token", return_value=([], "expand-group-1")),
+            patch.object(processor._token_manager, "expand_token", return_value=([], "expand-group-1")) as expand_token,
         ):
             results = processor.process_row(
                 row_index=0,
@@ -2686,10 +2686,15 @@ class TestAggregationFailureMatrix:
         # consumption lives in the audit trail.
         assert [(r.outcome, r.path) for r in results] == [(None, TerminalPath.BUFFERED)]
 
-        # Recorder should have CONSUMED_IN_BATCH, not QUARANTINED.
+        # The expansion operation owns the selected parent's terminal outcome
+        # atomically, so the processor must not issue a second recorder call.
         recorded_pairs = [(call.kwargs["outcome"], call.kwargs["path"]) for call in record_outcome.call_args_list]
-        assert (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED) in recorded_pairs
+        assert (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED) not in recorded_pairs
         assert (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE) not in recorded_pairs
+        assert expand_token.call_args is not None
+        assert expand_token.call_args.kwargs["parent_token"] == captured["token"]
+        assert expand_token.call_args.kwargs["parent_path"] == TerminalPath.BATCH_CONSUMED
+        assert expand_token.call_args.kwargs["parent_batch_id"] == "batch-1"
 
     def test_transform_mode_count_flush_expands_from_non_quarantined_parent(self) -> None:
         """Count-triggered batch output children must not use a quarantined triggering token as parent."""
@@ -3008,7 +3013,7 @@ class TestTransformModeOutcomeOrdering:
             patch.object(
                 factory.data_flow,
                 "record_token_outcome",
-                side_effect=[None, LandscapeRecordError("audit DB down")],
+                side_effect=LandscapeRecordError("audit DB down"),
             ),
             patch.object(processor, "_emit_token_completed"),
             pytest.raises(AuditIntegrityError, match="Failed to record batch parent terminal outcome") as exc_info,
@@ -6797,6 +6802,68 @@ class TestExecuteTransformWithRetry:
         assert error_sink == "error-sink"
         record_event.assert_called_once()
         assert record_event.call_args.kwargs["state_id"] == "state-attempt-0"
+
+    def test_pre_attempt_shutdown_records_state_backed_divert_without_partial_audit(self) -> None:
+        """A pre-set shutdown must not write transform_error without its DIVERT."""
+        from elspeth.contracts.config import RuntimeRetryConfig
+
+        _, factory = _make_factory()
+        retry_manager = RetryManager(RuntimeRetryConfig(max_attempts=3, base_delay=0.01, max_delay=0.1, jitter=0.0, exponential_base=2.0))
+        transform = _make_mock_transform(node_id="t1", on_error="error-sink")
+        processor = _make_processor(
+            factory,
+            retry_manager=retry_manager,
+            node_step_map={NodeID("t1"): 1},
+            node_to_plugin={NodeID("t1"): transform},
+        )
+        processor._error_edge_ids = {NodeID("t1"): "error-edge-1"}
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="csv",
+            node_type=NodeType.SINK,
+            plugin_version="1.0",
+            config={},
+            node_id="error-sink",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        factory.data_flow.register_edge(
+            run_id="test-run",
+            from_node_id="t1",
+            to_node_id="error-sink",
+            label="__error_0__",
+            mode=RoutingMode.DIVERT,
+            edge_id="error-edge-1",
+        )
+        token = make_token_info(data={"value": 42})
+        _persist_token_for_scheduler(factory, token)
+        shutdown_event = threading.Event()
+        shutdown_event.set()
+        ctx = make_context(run_id="test-run", token=token, landscape=factory.plugin_audit_writer())
+        ctx.shutdown_event = shutdown_event
+
+        with patch.object(processor._transform_executor, "execute_transform") as execute_transform:
+            result, _out_token, error_sink = processor._execute_transform_with_retry(
+                transform=transform,
+                token=token,
+                ctx=ctx,
+            )
+
+        execute_transform.assert_not_called()
+        assert result.status == "error"
+        assert result.reason == {"reason": "shutdown_requested", "error": "shutdown requested before retry attempt"}
+        assert result.retryable is False
+        assert error_sink == "error-sink"
+
+        transform_errors = factory.data_flow.get_transform_errors_for_run("test-run")
+        routing_events = factory.query.get_all_routing_events_for_run("test-run")
+        assert len(transform_errors) == 1
+        assert len(routing_events) == 1
+        assert routing_events[0].state_id is not None
+        state = factory.execution.get_node_state(routing_events[0].state_id)
+        assert state is not None
+        assert state.status is NodeStateStatus.FAILED
+        assert state.node_id == "t1"
+        assert state.attempt == 0
 
 
 # =============================================================================

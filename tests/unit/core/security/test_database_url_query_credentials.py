@@ -113,6 +113,25 @@ def test_database_url_odbc_connect_stray_brace_after_escaped_braced_value_does_n
     assert result.fingerprint == secret_fingerprint("SuperSecret123")
 
 
+@pytest.mark.parametrize("password_key", ["PWD", "Password"])
+def test_database_url_odbc_connect_unterminated_braced_value_does_not_hide_password(
+    monkeypatch: pytest.MonkeyPatch,
+    password_key: str,
+) -> None:
+    """An unterminated braced value must not swallow later password attributes."""
+    monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+    connect = f"DRIVER={{ODBC Driver 17;SERVER=db;{password_key}=SuperSecret123;UID=sa"
+    url = f"mssql+pyodbc:///?odbc_connect={quote_plus(connect)}"
+
+    result = SanitizedDatabaseUrl.from_raw_url(url)
+
+    assert "SuperSecret123" not in result.sanitized_url
+    assert f"{password_key}=" not in result.sanitized_url
+    parsed_query = parse_qs(urlparse(result.sanitized_url).query)
+    assert parsed_query["odbc_connect"] == ["DRIVER={ODBC Driver 17;SERVER=db;UID=sa"]
+    assert result.fingerprint == secret_fingerprint("SuperSecret123")
+
+
 def test_database_url_odbc_connect_preserves_non_password_attribute_names() -> None:
     """Only PWD/Password attributes are secret; longer attribute names are preserved."""
     url = "mssql+pyodbc:///?odbc_connect=DRIVER%3D%7BSQL+Server%7D%3BAPWD%3Dkeep%3BNotPassword%3Dalso_keep"
@@ -235,6 +254,17 @@ def test_database_url_direct_construction_rejects_braced_odbc_connect_password()
 def test_database_url_direct_construction_rejects_stray_brace_odbc_connect_password() -> None:
     """The sanitized URL invariant catches passwords hidden after stray braces."""
     connect = "DRIVER={ODBC Driver 17};SERVER=db;A{B=c;PWD=SuperSecret123;UID=sa"
+    with pytest.raises(ValueError, match="sensitive query parameters"):
+        SanitizedDatabaseUrl(
+            sanitized_url=f"mssql+pyodbc:///?odbc_connect={quote_plus(connect)}",
+            fingerprint=None,
+        )
+
+
+def test_database_url_direct_construction_rejects_unterminated_braced_odbc_connect_password() -> None:
+    """Direct construction must fail closed when malformed braces hide PWD."""
+    connect = "DRIVER={ODBC Driver 17;SERVER=db;PWD=SuperSecret123;UID=sa"
+
     with pytest.raises(ValueError, match="sensitive query parameters"):
         SanitizedDatabaseUrl(
             sanitized_url=f"mssql+pyodbc:///?odbc_connect={quote_plus(connect)}",

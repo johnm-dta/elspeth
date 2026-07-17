@@ -54,7 +54,7 @@ def db() -> LandscapeDB:
 
 
 def _insert_run(db: LandscapeDB, run_id: str, *, status: RunStatus | str) -> None:
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             runs_table.insert().values(
                 run_id=run_id,
@@ -361,7 +361,7 @@ class TestResumeEntryGuard:
             now=datetime.now(UTC),
             window_seconds=80.0,
         )
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 sa_update(run_coordination_table)
                 .where(run_coordination_table.c.run_id == "run-dead-leader")

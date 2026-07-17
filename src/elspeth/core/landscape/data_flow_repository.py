@@ -38,6 +38,7 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.coordination import CoordinationToken
+from elspeth.contracts.engine import CoalesceParentCompletion
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape._database_ops import DatabaseOps
@@ -54,7 +55,6 @@ from elspeth.core.landscape.data_flow.serialization import (
     canonical_or_recorded_json,
     canonical_or_recorded_repr_payload,
 )
-from elspeth.core.landscape.data_flow.tokens import CoalesceParentCompletion
 from elspeth.core.landscape.model_loaders import (
     EdgeLoader,
     NodeLoader,
@@ -82,8 +82,8 @@ class DataFlowRepository:
     connection provider and :class:`DatabaseOps` instances, so test seams
     that patch ``repo._db`` / ``repo._ops`` attributes remain effective.
 
-    Atomic transactions in fork/coalesce/expand preserved via direct
-    LandscapeDB.connection() usage.
+    Atomic transactions in fork/coalesce/expand use the connection provider's
+    explicit write-transaction boundary.
 
     NOTE: nodes table has composite PK (node_id, run_id). Always filter
     by both columns when querying individual nodes.
@@ -344,7 +344,8 @@ class DataFlowRepository:
         *,
         output_contract: SchemaContract,
         step_in_pipeline: int | None = None,
-        record_parent_outcome: bool = True,
+        parent_path: TerminalPath = TerminalPath.EXPAND_PARENT,
+        parent_batch_id: str | None = None,
     ) -> tuple[list[Token], str]:
         """Expand a token into multiple child tokens (deaggregation)."""
         return self.tokens.expand_token(
@@ -353,7 +354,8 @@ class DataFlowRepository:
             child_payloads,
             output_contract=output_contract,
             step_in_pipeline=step_in_pipeline,
-            record_parent_outcome=record_parent_outcome,
+            parent_path=parent_path,
+            parent_batch_id=parent_batch_id,
         )
 
     # ── Token outcome recording (TokenOutcomeRepository) ───────────────────

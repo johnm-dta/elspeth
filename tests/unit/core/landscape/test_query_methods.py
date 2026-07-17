@@ -459,7 +459,7 @@ class TestGetRowDataReprFallback:
 
         from elspeth.core.landscape.schema import rows_table
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(update(rows_table).where(rows_table.c.row_id == "row-1").values(source_data_ref=ref))
 
         ops = DatabaseOps(db)
@@ -502,7 +502,7 @@ class TestGetRowDataReprFallback:
 
         from elspeth.core.landscape.schema import rows_table
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(update(rows_table).where(rows_table.c.row_id == "row-1").values(source_data_ref=ref))
 
         ops = DatabaseOps(db)

@@ -286,7 +286,10 @@ def _assert_schema_sentinels_on_connection(connection: Connection) -> None:
 
 
 def _user_tables(inspector: Inspector) -> frozenset[str]:
-    return frozenset(name for name in inspector.get_table_names() if name not in _SQLITE_INTERNAL_TABLES)
+    tables = frozenset(inspector.get_table_names())
+    if inspector.bind.dialect.name == "sqlite":
+        return tables - _SQLITE_INTERNAL_TABLES
+    return tables
 
 
 def _validate_current_schema(bind: Engine | Connection) -> None:

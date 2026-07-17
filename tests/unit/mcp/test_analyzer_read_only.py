@@ -27,7 +27,7 @@ from elspeth.mcp.analyzer import LandscapeAnalyzer
 def _create_file_backed_audit_db(db_path: Path) -> None:
     db = LandscapeDB.from_url(f"sqlite:///{db_path}")
     try:
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 insert(runs_table).values(
                     run_id="run-read-only",

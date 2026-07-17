@@ -16,15 +16,18 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.sql import Executable
 from testcontainers.postgres import PostgresContainer  # type: ignore[import-untyped]
 from tests.fixtures.landscape import register_test_node
+from tests.fixtures.stores import MockPayloadStore
 
 from elspeth.contracts import ExecutionError, NodeStateStatus, NodeType
 from elspeth.contracts.audit import DISCARD_SINK_NAME, TokenRef
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
+from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.core.landscape.schema import artifacts_table, node_states_table, token_outcomes_table
+from elspeth.core.landscape.schema import artifacts_table, node_states_table, token_outcomes_table, tokens_table
 
 pytestmark = pytest.mark.testcontainer
 
@@ -58,6 +61,89 @@ def _build_token(factory: RecorderFactory) -> tuple[str, str, str]:
     )
     token = factory.data_flow.create_token(row.row_id)
     return run.run_id, token.token_id, sink_id
+
+
+def test_postgres_batch_expansion_claims_batch_once_under_contention(
+    postgres_factory: tuple[LandscapeDB, RecorderFactory],
+    postgres_url: str,
+) -> None:
+    """Different parent members racing one batch produce one child set."""
+    first_db, _ = postgres_factory
+    first_factory = RecorderFactory(first_db, payload_store=MockPayloadStore())
+    run = first_factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+    source_id = register_test_node(
+        first_factory.data_flow,
+        run.run_id,
+        "expand-source",
+        node_type=NodeType.SOURCE,
+        plugin_name="source",
+    )
+    aggregation_id = register_test_node(
+        first_factory.data_flow,
+        run.run_id,
+        "expand-aggregation",
+        node_type=NodeType.AGGREGATION,
+        plugin_name="aggregation",
+    )
+    rows = [
+        first_factory.data_flow.create_row(
+            run_id=run.run_id,
+            source_node_id=source_id,
+            row_index=index,
+            data={"value": index},
+            source_row_index=index,
+            ingest_sequence=index,
+        )
+        for index in range(2)
+    ]
+    parents = [first_factory.data_flow.create_token(row.row_id) for row in rows]
+    batch = first_factory.execution.create_batch(
+        run_id=run.run_id,
+        aggregation_node_id=aggregation_id,
+        batch_id="expand-batch",
+    )
+    for ordinal, parent in enumerate(parents):
+        first_factory.execution.add_batch_member(batch.batch_id, parent.token_id, ordinal)
+
+    second_db = LandscapeDB(postgres_url)
+    second_factory = RecorderFactory(second_db, payload_store=MockPayloadStore())
+    start = threading.Barrier(2)
+    contract = SchemaContract(mode="OBSERVED", fields=(), locked=True)
+
+    def attempt(candidate: tuple[RecorderFactory, int]) -> str:
+        factory, index = candidate
+        start.wait(timeout=5)
+        try:
+            factory.data_flow.expand_token(
+                parent_ref=TokenRef(token_id=parents[index].token_id, run_id=run.run_id),
+                row_id=rows[index].row_id,
+                child_payloads=[{"item": 1}, {"item": 2}],
+                output_contract=contract,
+                parent_path=TerminalPath.BATCH_CONSUMED,
+                parent_batch_id=batch.batch_id,
+            )
+        except AuditIntegrityError as exc:
+            assert "already claimed an expansion" in str(exc)
+            return "rejected"
+        return "committed"
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(attempt, ((first_factory, 0), (second_factory, 1))))
+    finally:
+        second_db.close()
+
+    assert sorted(results) == ["committed", "rejected"]
+    with first_db.read_only_connection() as conn:
+        children = conn.execute(select(tokens_table.c.token_id).where(tokens_table.c.expand_group_id.is_not(None))).all()
+        outcomes = conn.execute(
+            select(token_outcomes_table.c.path, token_outcomes_table.c.batch_id).where(
+                token_outcomes_table.c.batch_id == batch.batch_id,
+                token_outcomes_table.c.completed == 1,
+            )
+        ).all()
+    assert len(children) == 2
+    assert outcomes == [(TerminalPath.BATCH_CONSUMED.value, batch.batch_id)]
 
 
 def _lock_timeout_result(db: LandscapeDB, start: threading.Event, statement: Executable) -> str:

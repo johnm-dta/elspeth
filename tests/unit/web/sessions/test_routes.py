@@ -1033,7 +1033,7 @@ def _insert_discard_audit_records(settings: WebSettings, run_id: str) -> None:
     now = datetime.now(UTC)
     with (
         LandscapeDB.from_url(settings.get_landscape_url()) as db,
-        db.connection() as conn,
+        db.write_connection() as conn,
     ):
         conn.execute(
             runs_table.insert().values(

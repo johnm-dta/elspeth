@@ -1449,7 +1449,7 @@ def vague_term_wiring_count(options: Mapping[str, Any], *, user_term: str) -> in
     return 0
 
 
-def _pending_authoring_shell(requirement: InterpretationRequirement) -> dict[str, Any]:
+def _pending_authoring_shell(requirement: InterpretationRequirement) -> InterpretationRequirement:
     """Return the canonical persisted pending row without resolver evidence."""
     return {
         "id": requirement["id"],
@@ -1630,7 +1630,7 @@ def _reconcile_node_options(
     options = dict(proposed.options)
     if "resolved_prompt_template_hash" in options:
         del options["resolved_prompt_template_hash"]
-    reconciled: list[dict[str, Any]] = []
+    reconciled: list[Mapping[str, Any]] = []
     carried_prompt_review = False
 
     for identity, proposed_requirement in proposed_index.items():
@@ -1697,7 +1697,7 @@ def _reconcile_source_options(
     proposed_index = _validated_review_index(proposed.options)
     previous_index = _validated_review_index(previous.options) if previous is not None and previous.plugin == proposed.plugin else {}
     options = dict(proposed.options)
-    reconciled: list[dict[str, Any]] = []
+    reconciled: list[Mapping[str, Any]] = []
     for identity, proposed_requirement in proposed_index.items():
         requirement_id, kind, _user_term = identity
         shell = _pending_authoring_shell(proposed_requirement)

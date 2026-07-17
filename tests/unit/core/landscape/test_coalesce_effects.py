@@ -10,10 +10,10 @@ from sqlalchemy.exc import IntegrityError
 
 from elspeth.contracts import NodeStateStatus, NodeType
 from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.engine import CoalesceParentCompletion
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema_contract import SchemaContract
-from elspeth.core.landscape.data_flow.tokens import CoalesceParentCompletion
 from elspeth.core.landscape.schema import (
     coalesce_effect_members_table,
     coalesce_effects_table,

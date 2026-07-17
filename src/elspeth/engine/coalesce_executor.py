@@ -17,6 +17,7 @@ from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.barrier_scalars import CoalescePendingScalars
 from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
 from elspeth.contracts.coalesce_metadata import ArrivalOrderEntry, CoalesceMetadata
+from elspeth.contracts.engine import CoalesceParentCompletion
 from elspeth.contracts.enums import NodeStateStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import (
     AuditIntegrityError,
@@ -31,7 +32,6 @@ from elspeth.contracts.schema_contract import FieldContract, PipelineRow, Schema
 from elspeth.contracts.types import NodeID, StepResolver
 from elspeth.contracts.union_merge import merge_union_contracts
 from elspeth.core.config import CoalesceSettings
-from elspeth.core.landscape.data_flow.tokens import CoalesceParentCompletion
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.engine._error_hash import compute_error_hash

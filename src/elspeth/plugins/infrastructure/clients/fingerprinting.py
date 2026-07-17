@@ -72,6 +72,7 @@ MAX_AUDIT_QUERY_CHARS = 4096
 MAX_AUDIT_QUERY_FINGERPRINTS = 64
 _QUERY_REDACTION_SENTINEL_KEY = "__elspeth_query_redacted"
 _QUERY_REDACTION_SENTINEL_VALUE = "too_many_fields"
+_URL_BEARING_RESPONSE_HEADERS = frozenset({"content-location", "location"})
 
 
 def _query_redaction_sentinel() -> dict[str, str | int | float]:
@@ -191,7 +192,21 @@ def filter_response_headers(headers: dict[str, str]) -> dict[str, str]:
     Returns:
         Headers dict with sensitive headers removed
     """
-    return {k: v for k, v in headers.items() if not is_sensitive_header(k)}
+    result: dict[str, str] = {}
+    for key, value in headers.items():
+        if is_sensitive_header(key):
+            continue
+        if key.lower() in _URL_BEARING_RESPONSE_HEADERS:
+            try:
+                result[key] = fingerprint_url(value)
+            except (ValueError, UnicodeError, FrameworkBugError):
+                # A remote response cannot force raw URL material into audit
+                # evidence or mask the transport outcome when fingerprinting
+                # configuration/parsing is unavailable.
+                result[key] = "<redacted-http-url>"
+            continue
+        result[key] = value
+    return result
 
 
 def is_sensitive_query_param(param_name: str) -> bool:
@@ -256,10 +271,21 @@ def fingerprint_params(
 
 
 def fingerprint_url(url: str) -> str:
-    """Fingerprint sensitive query parameters inside a URL for audit recording."""
+    """Return a persistence-safe URL with sensitive query values fingerprinted.
+
+    Userinfo and fragments are never required to identify an HTTP resource in
+    audit/output metadata.  Both can carry credentials, so remove them before
+    handling the query string.
+    """
     parsed = urlsplit(url)
+    # urlsplit().netloc includes ``userinfo@`` while hostname/port parsing can
+    # raise for malformed external input.  The last ``@`` is the RFC 3986
+    # authority delimiter, so removing the prefix is both bounded and preserves
+    # the original host/port spelling (including bracketed IPv6 literals).
+    safe_netloc = parsed.netloc.rsplit("@", 1)[-1]
+    parsed = parsed._replace(netloc=safe_netloc, fragment="")
     if not parsed.query:
-        return url
+        return urlunsplit(parsed)
     if len(parsed.query) > MAX_AUDIT_QUERY_CHARS:
         return urlunsplit(parsed._replace(query=_query_redaction_sentinel_string()))
 

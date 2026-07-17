@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from elspeth.contracts.auth import AuthProviderType
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.landscape.auth_audit_repository import AUTH_AUDIT_PRINCIPAL_MAX_LENGTH
 from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
@@ -254,19 +255,12 @@ def create_auth_router() -> APIRouter:
             raise HTTPException(status_code=401, detail=exc.detail) from exc
 
         recorder = _auth_audit_recorder(request)
-        recorder.record_login_success(
-            request,
-            provider=settings.auth_provider,
-            user_id=body.username,
-            username=body.username,
-        )
-        recorder.record_token_issued(
+        recorder.record_login_success_and_token_issued(
             request,
             provider=settings.auth_provider,
             user_id=body.username,
             username=body.username,
             access_token=token,
-            issuance_path="login",
         )
         _mark_sensitive_auth_response_uncacheable(response)
         return TokenResponse(access_token=token)
@@ -342,14 +336,20 @@ def create_auth_router() -> APIRouter:
 
         token = await provider.login(body.username, body.password)
         recorder = _auth_audit_recorder(request)
-        recorder.record_token_issued(
-            request,
-            provider=settings.auth_provider,
-            user_id=body.username,
-            username=body.username,
-            access_token=token,
-            issuance_path="register",
-        )
+        try:
+            recorder.record_token_issued(
+                request,
+                provider=settings.auth_provider,
+                user_id=body.username,
+                username=body.username,
+                access_token=token,
+                issuance_path="register",
+            )
+        except Exception as audit_exc:
+            deleted = await run_sync_in_worker(provider.delete_user, body.username)
+            if not deleted:
+                raise AuditIntegrityError("Registration audit failed and user creation could not be compensated") from audit_exc
+            raise
         _mark_sensitive_auth_response_uncacheable(response)
         return TokenResponse(access_token=token)
 
@@ -373,14 +373,24 @@ def create_auth_router() -> APIRouter:
 
         token = provider.issue_token_for_user(identity.user_id, identity.username)
         recorder = _auth_audit_recorder(request)
-        recorder.record_token_issued(
-            request,
-            provider=settings.auth_provider,
-            user_id=identity.user_id,
-            username=identity.username,
-            access_token=token,
-            issuance_path="email_verification",
-        )
+        try:
+            recorder.record_token_issued(
+                request,
+                provider=settings.auth_provider,
+                user_id=identity.user_id,
+                username=identity.username,
+                access_token=token,
+                issuance_path="email_verification",
+            )
+        except Exception as audit_exc:
+            restored = await run_sync_in_worker(
+                provider.restore_email_verification_token,
+                body.token,
+                identity.user_id,
+            )
+            if not restored:
+                raise AuditIntegrityError("Email verification audit failed and verification state could not be compensated") from audit_exc
+            raise
         _mark_sensitive_auth_response_uncacheable(response)
         return TokenResponse(access_token=token)
 

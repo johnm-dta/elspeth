@@ -144,7 +144,7 @@ from elspeth.engine.executors import (
     TransformExecutor,
 )
 from elspeth.engine.executors.declaration_dispatch import run_batch_flush_checks, run_boundary_checks
-from elspeth.engine.executors.state_guard import stamped_node_state_id
+from elspeth.engine.executors.state_guard import NodeStateGuard, stamped_node_state_id
 from elspeth.engine.executors.transform import record_transform_error_with_routing
 from elspeth.engine.retry import RetryManager
 from elspeth.engine.spans import SpanFactory
@@ -1497,7 +1497,8 @@ class RowProcessor:
                 output_contract=output_contract,
                 node_id=fctx.node_id,
                 run_id=self._run_id,
-                record_parent_outcome=False,
+                parent_path=TerminalPath.BATCH_CONSUMED,
+                parent_batch_id=fctx.batch_id,
             )
 
             # Record terminal outcomes for ALL buffered tokens AFTER expand_token
@@ -1515,14 +1516,16 @@ class RowProcessor:
                     batch_id = fctx.batch_id
                     outcome = TerminalOutcome.TRANSIENT
                     path = TerminalPath.BATCH_CONSUMED
+                parent_outcome_was_recorded_atomically = token.token_id == expand_parent_token.token_id and i not in quarantined_index_set
                 try:
-                    self._data_flow.record_token_outcome(
-                        ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                        outcome=outcome,
-                        path=path,
-                        error_hash=error_hash,
-                        batch_id=batch_id,
-                    )
+                    if not parent_outcome_was_recorded_atomically:
+                        self._data_flow.record_token_outcome(
+                            ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
+                            outcome=outcome,
+                            path=path,
+                            error_hash=error_hash,
+                            batch_id=batch_id,
+                        )
                 except LandscapeRecordError as record_failure:
                     raise AuditIntegrityError(
                         f"Failed to record batch parent terminal outcome for token {token.token_id!r} "
@@ -1818,6 +1821,39 @@ class RowProcessor:
             on_error,
         )
 
+    def _record_pre_attempt_shutdown_state(
+        self,
+        *,
+        exc: InterruptedError,
+        transform: TransformProtocol,
+        token: TokenInfo,
+        attempt: int,
+    ) -> str:
+        """Record the failed node visit for shutdown before plugin invocation."""
+        node_id = transform.node_id
+        if node_id is None:
+            raise OrchestrationInvariantError(f"Transform '{transform.name}' executed without node_id - orchestrator bug")
+        with NodeStateGuard(
+            self._execution,
+            token_id=token.token_id,
+            node_id=node_id,
+            run_id=self._run_id,
+            step_index=self.resolve_node_step(NodeID(node_id)),
+            input_data=token.row_data.to_dict(),
+            attempt=token.resume_attempt_offset + attempt,
+            resume_checkpoint_id=token.resume_checkpoint_id,
+        ) as guard:
+            guard.complete(
+                NodeStateStatus.FAILED,
+                duration_ms=0.0,
+                error=ExecutionError(
+                    exception=scrub_text_for_audit(str(exc)),
+                    exception_type=type(exc).__name__,
+                    phase="retry_pre_attempt_shutdown",
+                ),
+            )
+            return guard.state_id
+
     def _execute_transform_with_retry(
         self,
         transform: Any,
@@ -1928,6 +1964,14 @@ class RowProcessor:
                 shutdown_event=ctx.shutdown_event,
             )
         except InterruptedError as e:
+            state_id = stamped_node_state_id(e) or state_tracker["last_failed_state_id"]
+            if state_id is None:
+                state_id = self._record_pre_attempt_shutdown_state(
+                    exc=e,
+                    transform=transform,
+                    token=token,
+                    attempt=attempt_tracker["current"],
+                )
             return self._convert_retryable_to_error_result(
                 e,
                 transform,
@@ -1937,7 +1981,7 @@ class RowProcessor:
                 # Stamped when the shutdown fired inside execute_transform
                 # (batch waiter); otherwise the RetryManager raised it and the
                 # last failed attempt's state is the divert attribution point.
-                state_id=stamped_node_state_id(e) or state_tracker["last_failed_state_id"],
+                state_id=state_id,
                 retryable=False,
             )
 

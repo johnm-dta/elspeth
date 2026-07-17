@@ -15,7 +15,7 @@ from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.core.landscape.schema import node_states_table, token_outcomes_table
+from elspeth.core.landscape.schema import node_states_table, token_outcomes_table, tokens_table
 from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run, register_test_node
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
@@ -535,18 +535,93 @@ class TestExpandToken:
                 output_contract=_MINIMAL_CONTRACT,
             )
 
-    def test_record_parent_outcome_false_skips_outcome(self):
+    def test_batch_expansion_consumes_parent_atomically_and_rejects_replay(self):
         _db, factory = _setup()
+        batch_id = _make_batch(factory, batch_id="batch-expand")
         row, token = _make_row(factory)
-        _children, _eg = factory.data_flow.expand_token(
+        factory.execution.add_batch_member(batch_id, token.token_id, 0)
+        children, expand_group_id = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
             child_payloads=[{"item": 1}, {"item": 2}],
-            record_parent_outcome=False,
             output_contract=_MINIMAL_CONTRACT,
+            parent_path=TerminalPath.BATCH_CONSUMED,
+            parent_batch_id=batch_id,
         )
+
         outcome = factory.data_flow.get_token_outcome(token.token_id)
-        assert outcome is None
+        assert outcome is not None
+        assert outcome.outcome == TerminalOutcome.TRANSIENT
+        assert outcome.path == TerminalPath.BATCH_CONSUMED
+        assert outcome.batch_id == batch_id
+
+        with pytest.raises(AuditIntegrityError, match="already has a terminal outcome"):
+            factory.data_flow.expand_token(
+                parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                row_id=row.row_id,
+                child_payloads=[{"item": 1}, {"item": 2}],
+                output_contract=_MINIMAL_CONTRACT,
+                parent_path=TerminalPath.BATCH_CONSUMED,
+                parent_batch_id=batch_id,
+            )
+
+        with _db.connection() as conn:
+            persisted_children = conn.execute(
+                select(tokens_table.c.token_id).where(tokens_table.c.expand_group_id == expand_group_id)
+            ).all()
+        assert len(children) == 2
+        assert len(persisted_children) == 2
+
+    def test_batch_expansion_claim_is_scoped_to_batch_not_selected_parent(self):
+        """A different member cannot replay an already materialized batch expansion."""
+        _db, factory = _setup()
+        batch_id = _make_batch(factory, batch_id="batch-expand-once")
+        first_row, first_parent = _make_row(factory, row_index=0)
+        second_row, second_parent = _make_row(factory, row_index=1)
+        factory.execution.add_batch_member(batch_id, first_parent.token_id, 0)
+        factory.execution.add_batch_member(batch_id, second_parent.token_id, 1)
+
+        children, expand_group_id = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=first_parent.token_id, run_id="run-1"),
+            row_id=first_row.row_id,
+            child_payloads=[{"item": 1}, {"item": 2}],
+            output_contract=_MINIMAL_CONTRACT,
+            parent_path=TerminalPath.BATCH_CONSUMED,
+            parent_batch_id=batch_id,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="already claimed an expansion"):
+            factory.data_flow.expand_token(
+                parent_ref=TokenRef(token_id=second_parent.token_id, run_id="run-1"),
+                row_id=second_row.row_id,
+                child_payloads=[{"item": 3}, {"item": 4}],
+                output_contract=_MINIMAL_CONTRACT,
+                parent_path=TerminalPath.BATCH_CONSUMED,
+                parent_batch_id=batch_id,
+            )
+
+        with _db.connection() as conn:
+            persisted_children = conn.execute(
+                select(tokens_table.c.token_id).where(tokens_table.c.expand_group_id == expand_group_id)
+            ).all()
+        assert len(children) == 2
+        assert len(persisted_children) == 2
+
+    def test_batch_expansion_rejects_parent_outside_batch(self):
+        """BATCH_CONSUMED expansion must be claimed by an actual batch member."""
+        _db, factory = _setup()
+        batch_id = _make_batch(factory, batch_id="batch-expand-membership")
+        row, parent = _make_row(factory)
+
+        with pytest.raises(AuditIntegrityError, match="is not a member"):
+            factory.data_flow.expand_token(
+                parent_ref=TokenRef(token_id=parent.token_id, run_id="run-1"),
+                row_id=row.row_id,
+                child_payloads=[{"item": 1}],
+                output_contract=_MINIMAL_CONTRACT,
+                parent_path=TerminalPath.BATCH_CONSUMED,
+                parent_batch_id=batch_id,
+            )
 
     def test_children_have_unique_token_ids(self):
         _db, factory = _setup()
@@ -1960,7 +2035,7 @@ class TestTokenRunIdConsistency:
         # Try to insert directly into token_outcomes with mismatched (token_id, run_id)
         # token_a belongs to run-A, but we try to record under run-B
         # The composite FK should reject this
-        with pytest.raises(IntegrityError), db.connection() as conn:
+        with pytest.raises(IntegrityError), db.write_connection() as conn:
             conn.execute(
                 token_outcomes_table.insert().values(
                     outcome_id=f"out_{generate_id()[:12]}",
@@ -2024,7 +2099,7 @@ class TestTokenRunIdConsistency:
 
         # Try to insert a node_state with token_id from run-A but run_id from run-B
         # The composite FK should reject this
-        with pytest.raises(IntegrityError), db.connection() as conn:
+        with pytest.raises(IntegrityError), db.write_connection() as conn:
             conn.execute(
                 node_states_table.insert().values(
                     state_id=f"state_{generate_id()[:12]}",

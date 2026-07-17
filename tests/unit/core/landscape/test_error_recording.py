@@ -194,6 +194,88 @@ class TestRecordValidationError:
         assert row.expected_type is None
         assert row.actual_type is None
 
+    def test_rejects_row_owned_by_another_run(self):
+        """A supplied quarantine row must belong to the error's run."""
+        db = make_landscape_db()
+        factory = make_factory(db)
+        for run_id in ("run-A", "run-B"):
+            factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=run_id)
+            factory.data_flow.register_node(
+                run_id=run_id,
+                plugin_name="csv",
+                node_type=NodeType.SOURCE,
+                plugin_version="1.0",
+                config={},
+                node_id="source-0",
+                schema_config=_DYNAMIC_SCHEMA,
+            )
+        factory.data_flow.create_row(
+            "run-A",
+            "source-0",
+            0,
+            {"name": "test"},
+            row_id="row-A",
+            source_row_index=0,
+            ingest_sequence=0,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="cross-run contamination"):
+            factory.data_flow.record_validation_error(
+                run_id="run-B",
+                node_id="source-0",
+                row_id="row-A",
+                row_data={"name": "test"},
+                error="invalid row",
+                schema_mode="strict",
+                destination="quarantine",
+            )
+
+    def test_schema_composite_fk_rejects_cross_run_row(self):
+        """Raw writes cannot pair a validation error with a foreign-run row."""
+        from sqlalchemy.exc import IntegrityError as SAIntegrityError
+
+        from elspeth.core.landscape._helpers import now
+        from elspeth.core.landscape.schema import validation_errors_table
+
+        db = make_landscape_db()
+        factory = make_factory(db)
+        for run_id in ("run-A", "run-B"):
+            factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=run_id)
+            factory.data_flow.register_node(
+                run_id=run_id,
+                plugin_name="csv",
+                node_type=NodeType.SOURCE,
+                plugin_version="1.0",
+                config={},
+                node_id="source-0",
+                schema_config=_DYNAMIC_SCHEMA,
+            )
+        factory.data_flow.create_row(
+            "run-A",
+            "source-0",
+            0,
+            {"name": "test"},
+            row_id="row-A",
+            source_row_index=0,
+            ingest_sequence=0,
+        )
+
+        with pytest.raises(SAIntegrityError), db.write_connection() as conn:
+            conn.execute(
+                validation_errors_table.insert().values(
+                    error_id="verr_crossrun",
+                    run_id="run-B",
+                    node_id="source-0",
+                    row_id="row-A",
+                    row_hash=stable_hash({"name": "test"}),
+                    row_data_json='{"name":"test"}',
+                    error="invalid row",
+                    schema_mode="strict",
+                    destination="quarantine",
+                    created_at=now(),
+                )
+            )
+
 
 class TestRecordValidationErrorNonCanonicalData:
     """Tests for record_validation_error with non-canonical row data (repr fallback)."""
@@ -915,7 +997,7 @@ class TestRecordTransformErrorCrossRunPrevention:
         # tok-A belongs to run-A, but we try to record under run-B
         # The composite FK should reject this
         row_data = {"name": "test"}
-        with pytest.raises(SAIntegrityError), _db.connection() as conn:
+        with pytest.raises(SAIntegrityError), _db.write_connection() as conn:
             conn.execute(
                 transform_errors_table.insert().values(
                     error_id=f"terr_{generate_id()[:12]}",

@@ -92,7 +92,7 @@ def _insert_failed_run(db: LandscapeDB, run_id: str) -> None:
     """
     from elspeth.core.landscape.schema import runs_table
 
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             runs_table.insert().values(
                 run_id=run_id,

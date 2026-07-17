@@ -79,7 +79,7 @@ def _create_completed_run(
     run_id = f"run-{next(_RUN_COUNTER):06d}"
     now = _REFERENCE_TIME
     config = {"node_id": SOURCE_NODE_ID}
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             runs_table.insert().values(
                 run_id=run_id,
@@ -108,7 +108,7 @@ def _create_completed_run(
             )
         )
     # Set reproducibility grade (required by purge_payloads -> update_grade_after_purge)
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             runs_table.update()
             .where(runs_table.c.run_id == run_id)
@@ -126,7 +126,7 @@ def _insert_rows_with_refs(
 ) -> list[str]:
     """Insert rows with source_data_ref into the database. Returns refs."""
     refs = []
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         for i in range(num_rows):
             row_id = f"row-{next(_ROW_COUNTER):06d}"
             ref = f"sha256-{next(_REF_COUNTER):064x}"

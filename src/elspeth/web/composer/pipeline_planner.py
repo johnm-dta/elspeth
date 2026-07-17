@@ -25,12 +25,13 @@ from uuid import UUID
 
 from sqlalchemy import Engine
 
-from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
+from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallStatus
 from elspeth.contracts.composer_progress import ComposerProgressSink
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.core.canonical import canonical_json, stable_hash
+from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder, begin_dispatch, dispatch_with_audit
 from elspeth.web.composer.discovery_cache import serialize_tool_result
@@ -145,7 +146,6 @@ class PlannerBudgetPolicy:
 class PlannerModelConfig:
     completion: _Completion
     model_identifier: str
-    model_version: str
     provider: str
     temperature: float | None
     seed: int | None
@@ -157,7 +157,7 @@ class PlannerModelConfig:
     api_retry_base_seconds: float
 
     def __post_init__(self) -> None:
-        for name in ("model_identifier", "model_version", "provider"):
+        for name in ("model_identifier", "provider"):
             value = getattr(self, name)
             if type(value) is not str or not value.strip():
                 raise ValueError(f"{name} must be a non-empty exact string")
@@ -447,10 +447,14 @@ async def _settle_lifecycle(lifecycle: PlannerRequestLifecycle, outcome: Planner
         await asyncio.shield(task)
     except asyncio.CancelledError:
         # Settlement is operator/UI bookkeeping.  Let it finish even while the
-        # request task is being torn down, then preserve the original cancel.
+        # request task is being torn down, observe its result, then preserve
+        # the original cancel. A second cancellation cannot turn a settlement
+        # failure into an unobserved task exception.
         while not task.done():
-            with suppress(asyncio.CancelledError):
+            with suppress(BaseException):
                 await asyncio.shield(task)
+        with suppress(BaseException):
+            task.result()
         raise
 
 
@@ -483,6 +487,7 @@ async def plan_pipeline(
         raise ValueError("plugin_snapshot_catalog_mismatch")
 
     outcome: PlannerSettlement = "failed"
+    primary_error: BaseException | None = None
     try:
         await lifecycle.before_start()
         async with lifecycle.request_scope():
@@ -505,11 +510,18 @@ async def plan_pipeline(
             )
         outcome = "complete"
         return proposal
-    except asyncio.CancelledError:
-        outcome = "cancelled"
+    except BaseException as exc:
+        primary_error = exc
+        if isinstance(exc, asyncio.CancelledError):
+            outcome = "cancelled"
         raise
     finally:
-        await _settle_lifecycle(lifecycle, outcome)
+        try:
+            await _settle_lifecycle(lifecycle, outcome)
+        except BaseException as settlement_error:
+            if primary_error is None:
+                raise
+            primary_error.add_note(f"planner lifecycle settlement also failed ({type(settlement_error).__name__})")
 
 
 async def _plan_pipeline_inner(
@@ -531,6 +543,18 @@ async def _plan_pipeline_inner(
     recorder: BufferingRecorder,
 ) -> PipelineProposal:
     skill_hash = hashlib.sha256(rendered_skill.encode("utf-8")).hexdigest()
+    deadline = asyncio.get_running_loop().time() + model_config.timeout_seconds
+
+    async def run_planner_sync(func: Callable[..., Any], *args: Any) -> Any:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise PipelinePlannerError("planner wall-clock budget exhausted", code="TIMEOUT")
+        try:
+            return await asyncio.wait_for(run_sync_in_worker(func, *args), timeout=remaining)
+        except TimeoutError as exc:
+            raise PipelinePlannerError("planner wall-clock budget exhausted", code="TIMEOUT") from exc
+
+    current_validation = await run_planner_sync(policy_catalog.validate_composition_state, current_state)
     request_context = ToolContext(
         catalog=policy_catalog,
         plugin_snapshot=plugin_snapshot,
@@ -541,13 +565,13 @@ async def _plan_pipeline_inner(
         secret_service=custody_config.secret_service,
         user_id=originating_message.user_id,
         baseline=current_state,
-        current_validation=policy_catalog.validate_composition_state(current_state).validation,
+        current_validation=current_validation.validation,
         runtime_preflight=custody_config.runtime_preflight,
         max_blob_storage_per_session_bytes=custody_config.max_storage_per_session,
         user_message_id=originating_message.message_id,
         user_message_content=originating_message.content,
         composer_model_identifier=model_config.model_identifier,
-        composer_model_version=model_config.model_version,
+        composer_model_version=model_config.model_identifier,
         composer_provider=model_config.provider,
         composer_skill_hash=skill_hash,
         tool_arguments_hash=None,
@@ -571,7 +595,6 @@ async def _plan_pipeline_inner(
             ),
         },
     ]
-    deadline = asyncio.get_running_loop().time() + model_config.timeout_seconds
     total_calls = 0
     total_cost = Decimal("0")
     discovery_turns = 0
@@ -579,7 +602,7 @@ async def _plan_pipeline_inner(
     repair_count = 0
     seen_discovery: set[tuple[str, str]] = set()
 
-    async def call_model() -> tuple[Any, tuple[_ParsedToolCall, ...]]:
+    async def call_model() -> tuple[Any, tuple[_ParsedToolCall, ...], ComposerLLMCall]:
         nonlocal total_calls, total_cost
         marked_messages, marked_tools = (
             apply_anthropic_cache_markers(messages, tools)
@@ -744,11 +767,12 @@ async def _plan_pipeline_inner(
                 )
                 raise
             recorder.record_llm_call(call)
-            return parsed_response
+            message, calls = parsed_response
+            return message, calls, call
         raise AssertionError("provider attempt loop exited without return or exception")
 
     while True:
-        message, calls = await call_model()
+        message, calls, audited_call = await call_model()
         if len(calls) > model_config.max_tool_calls_per_turn:
             raise PipelinePlannerError("planner per-turn tool call budget exhausted", code="TOOL_CALLS_EXHAUSTED")
 
@@ -782,9 +806,18 @@ async def _plan_pipeline_inner(
                 )
                 continue
             assert pipeline is not None
-            candidate_context = replace(request_context, tool_arguments_hash=stable_hash(call.arguments))
+            terminal_context = replace(
+                request_context,
+                composer_model_version=audited_call.model_returned or audited_call.model_requested,
+            )
+            candidate_context = replace(terminal_context, tool_arguments_hash=stable_hash(call.arguments))
             try:
-                candidate = build_set_pipeline_candidate(pipeline, current_state, candidate_context)
+                candidate = await run_planner_sync(
+                    build_set_pipeline_candidate,
+                    pipeline,
+                    current_state,
+                    candidate_context,
+                )
             except ToolArgumentError as exc:
                 repair_count += 1
                 if repair_count > repair_budget:
@@ -834,8 +867,13 @@ async def _plan_pipeline_inner(
                 # containers only, so thaw the already-validated safe shape
                 # back to dict/list containers before final validation/hash.
                 safe_pipeline = cast(dict[str, Any], deep_thaw(preparation.arguments))
-                safe_context = replace(request_context, tool_arguments_hash=stable_hash({"pipeline": safe_pipeline}))
-                safe_candidate = build_set_pipeline_candidate(safe_pipeline, current_state, safe_context)
+                safe_context = replace(terminal_context, tool_arguments_hash=stable_hash({"pipeline": safe_pipeline}))
+                safe_candidate = await run_planner_sync(
+                    build_set_pipeline_candidate,
+                    safe_pipeline,
+                    current_state,
+                    safe_context,
+                )
                 if not safe_candidate.acceptable or safe_candidate.prepared_inline_blob is not None:
                     # Custody is idempotently retained for session
                     # reconciliation; no proposal or state is published.
@@ -875,14 +913,19 @@ async def _plan_pipeline_inner(
             )
 
             async def execute_discovery(call_to_execute: _ParsedToolCall = call) -> _AuditedDiscoveryResult:
-                return _AuditedDiscoveryResult(
-                    execute_discovery_tool_with_context(
+                result = cast(
+                    ToolResult,
+                    await run_planner_sync(
+                        execute_discovery_tool_with_context,
                         call_to_execute.name,
                         call_to_execute.arguments,
                         current_state,
                         request_context,
-                    )
+                    ),
                 )
+                if result.updated_state != current_state:
+                    raise AuditIntegrityError("read-only planner discovery changed composition state")
+                return _AuditedDiscoveryResult(result)
 
             audited = await dispatch_with_audit(
                 recorder=recorder,
@@ -895,8 +938,6 @@ async def _plan_pipeline_inner(
                 },
             )
             result = cast(_AuditedDiscoveryResult, audited.result).result
-            if result.updated_state != current_state:
-                raise AuditIntegrityError("read-only planner discovery changed composition state")
             messages.append({"role": "tool", "tool_call_id": call.call_id, "content": serialize_tool_result(result)})
             await emit_progress(lifecycle.progress, tool_completed_progress_event(call.name, result.success))
 

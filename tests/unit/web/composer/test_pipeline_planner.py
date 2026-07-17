@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from litellm.exceptions import APIError as LiteLLMAPIError
 from sqlalchemy import func, insert, select
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.catalog.policy_view import PolicyCatalogView
@@ -76,7 +78,7 @@ class _Choice:
 class _Response:
     choices: list[_Choice]
     usage: Mapping[str, object]
-    model: str = "provider/planner-v1"
+    model: str | None = "provider/planner-v1"
     id: str = "request-1"
 
 
@@ -188,7 +190,6 @@ def _model(completion: _ScriptedCompletion, **overrides: object) -> PlannerModel
     values: dict[str, object] = {
         "completion": completion,
         "model_identifier": "anthropic/claude-planner",
-        "model_version": "claude-planner",
         "provider": "test-provider",
         "temperature": 0.0,
         "seed": 7,
@@ -668,6 +669,127 @@ async def test_discovery_crash_is_audited_from_preopened_envelope(
 
 
 @pytest.mark.asyncio
+async def test_discovery_state_change_is_classified_inside_audit_envelope(
+    tmp_path: Path,
+    tool_context: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import elspeth.web.composer.pipeline_planner as planner_module
+
+    original = planner_module.execute_discovery_tool_with_context
+
+    def return_changed_state(*args: Any, **kwargs: Any) -> Any:
+        result = original(*args, **kwargs)
+        return replace(result, updated_state=replace(result.updated_state, version=result.updated_state.version + 1))
+
+    monkeypatch.setattr(planner_module, "execute_discovery_tool_with_context", return_changed_state)
+    recorder = BufferingRecorder()
+    completion = _ScriptedCompletion(_response(("list_sources", {})))
+
+    with pytest.raises(AuditIntegrityError, match="read-only planner discovery changed composition state"):
+        await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion, recorder=recorder)
+
+    assert len(recorder.invocations) == 1
+    assert recorder.invocations[0].status.value == "plugin_crash"
+    assert recorder.invocations[0].error_class == "AuditIntegrityError"
+    assert recorder.invocations[0].error_message == "AuditIntegrityError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_phase", ["policy", "candidate", "discovery"])
+@pytest.mark.parametrize("termination", ["deadline", "cancellation"])
+async def test_sync_planner_phases_run_off_loop_and_terminate_responsively(
+    tmp_path: Path,
+    tool_context: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+    blocked_phase: str,
+    termination: str,
+) -> None:
+    import elspeth.web.composer.pipeline_planner as planner_module
+
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    entered = asyncio.Event()
+    release = threading.Event()
+    worker_finished = threading.Event()
+    worker_threads: list[int] = []
+
+    def block_then_call(delegate: Any, *args: Any, **kwargs: Any) -> Any:
+        worker_threads.append(threading.get_ident())
+        loop.call_soon_threadsafe(entered.set)
+        release.wait(timeout=3.0)
+        try:
+            return delegate(*args, **kwargs)
+        finally:
+            worker_finished.set()
+
+    if blocked_phase == "policy":
+        original_policy = PolicyCatalogView.validate_composition_state
+
+        def blocking_policy(self: PolicyCatalogView, *args: Any, **kwargs: Any) -> Any:
+            return block_then_call(original_policy, self, *args, **kwargs)
+
+        monkeypatch.setattr(PolicyCatalogView, "validate_composition_state", blocking_policy)
+        completion = _ScriptedCompletion(_response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})))
+    elif blocked_phase == "candidate":
+        original_candidate = planner_module.build_set_pipeline_candidate
+
+        def blocking_candidate(*args: Any, **kwargs: Any) -> Any:
+            return block_then_call(original_candidate, *args, **kwargs)
+
+        monkeypatch.setattr(planner_module, "build_set_pipeline_candidate", blocking_candidate)
+        completion = _ScriptedCompletion(_response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})))
+    else:
+        original_discovery = planner_module.execute_discovery_tool_with_context
+
+        def blocking_discovery(*args: Any, **kwargs: Any) -> Any:
+            return block_then_call(original_discovery, *args, **kwargs)
+
+        monkeypatch.setattr(planner_module, "execute_discovery_tool_with_context", blocking_discovery)
+        completion = _ScriptedCompletion(_response(("list_sources", {})))
+
+    unobserved: list[Mapping[str, Any]] = []
+    prior_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unobserved.append(context))
+    plan_task = asyncio.create_task(
+        _plan(
+            tmp_path=tmp_path,
+            tool_context=tool_context,
+            completion=completion,
+            model_overrides={"timeout_seconds": 0.2 if termination == "deadline" else 5.0},
+        )
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1.5)
+        await asyncio.sleep(0)
+        assert not worker_finished.is_set()
+        if termination == "deadline":
+            with pytest.raises(PipelinePlannerError, match="wall-clock"):
+                await asyncio.wait_for(plan_task, timeout=2.0)
+        else:
+            plan_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(plan_task, timeout=2.0)
+        assert not worker_finished.is_set()
+    finally:
+        release.set()
+        if not plan_task.done():
+            plan_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await plan_task
+        for _attempt in range(200):
+            if worker_finished.is_set():
+                break
+            await asyncio.sleep(0.01)
+        loop.set_exception_handler(prior_handler)
+
+    assert worker_finished.is_set()
+    assert unobserved == []
+    assert worker_threads
+    assert all(thread_id != loop_thread for thread_id in worker_threads)
+
+
+@pytest.mark.asyncio
 async def test_each_transient_api_retry_consumes_and_audits_a_wire_attempt(
     tmp_path: Path,
     tool_context: ToolContext,
@@ -742,7 +864,7 @@ async def test_repeated_discovery_call_hits_explicit_cycle_guard_before_redispat
     assert len(recorder.invocations) == 1
 
 
-def _session_context() -> tuple[Any, PlannerOriginatingMessage]:
+def _session_context(*, content: str = "Use this CSV: name,score\nada,42\n") -> tuple[Any, PlannerOriginatingMessage]:
     engine = create_session_engine(
         "sqlite:///:memory:",
         poolclass=StaticPool,
@@ -754,7 +876,6 @@ def _session_context() -> tuple[Any, PlannerOriginatingMessage]:
     from datetime import UTC, datetime
 
     now = datetime.now(UTC)
-    content = "Use this CSV: name,score\nada,42\n"
     with engine.begin() as conn:
         conn.execute(
             insert(sessions_table).values(
@@ -913,6 +1034,50 @@ async def test_real_inline_custody_returns_only_blob_id_and_ready_row(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_returned", "expected_model_version"),
+    [
+        ("provider/resolved-planner-2026-07-18", "provider/resolved-planner-2026-07-18"),
+        (None, "anthropic/claude-planner"),
+    ],
+    ids=["provider-returned-alias", "requested-model-fallback"],
+)
+async def test_inline_custody_provenance_uses_terminal_audited_model_returned_or_requested_fallback(
+    tmp_path: Path,
+    tool_context: ToolContext,
+    model_returned: str | None,
+    expected_model_version: str,
+) -> None:
+    engine, origin = _session_context(content="Generate a fresh CSV for this pipeline.")
+    response = _response(("emit_pipeline_proposal", {"pipeline": _inline_pipeline(tmp_path)}))
+    response.model = model_returned
+    recorder = BufferingRecorder()
+
+    proposal = await _plan(
+        tmp_path=tmp_path,
+        tool_context=tool_context,
+        completion=_ScriptedCompletion(response),
+        recorder=recorder,
+        originating_message=origin,
+        custody_config=PlannerCustodyConfig(
+            data_dir=str(tmp_path),
+            session_engine=engine,
+            max_storage_per_session=1_000_000,
+            secret_service=None,
+            runtime_preflight=None,
+        ),
+    )
+
+    blob_id = proposal.to_dict()["pipeline"]["source"]["blob_id"]
+    with engine.begin() as conn:
+        row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id)).mappings().one()
+
+    assert recorder.llm_calls[-1].model_returned == model_returned
+    assert row["creating_model_identifier"] == "anthropic/claude-planner"
+    assert row["creating_model_version"] == expected_model_version
+
+
+@pytest.mark.asyncio
 async def test_route_lifecycle_rate_rejection_happens_before_provider_attempt(
     tmp_path: Path,
     tool_context: ToolContext,
@@ -970,7 +1135,11 @@ async def test_absolute_deadline_audits_slow_provider_timeout_and_settles(
             tool_context=tool_context,
             completion=completion,
             recorder=recorder,
-            model_overrides={"timeout_seconds": 0.01},
+            # The absolute deadline now includes the worker-offloaded initial
+            # policy validation. Leave enough time to reach the deliberately
+            # hanging provider so this test remains specifically about its
+            # audited timeout path under xdist load.
+            model_overrides={"timeout_seconds": 1.0},
             lifecycle=_lifecycle(events),
         )
     assert recorder.llm_calls[0].status.value == "timeout"
@@ -1009,6 +1178,118 @@ async def test_disconnect_cancellation_during_provider_call_audits_and_settles(
         await task
     assert recorder.llm_calls[0].status.value == "cancelled"
     assert events[-1] == "settled:cancelled"
+
+
+@pytest.mark.asyncio
+async def test_settlement_failure_does_not_replace_primary_provider_failure(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    raw_provider_canary = "RAW_PRIMARY_PROVIDER_FAILURE_CANARY"
+    provider_failure = LiteLLMAPIError(
+        status_code=503,
+        message=raw_provider_canary,
+        llm_provider="test-provider",
+        model="anthropic/claude-planner",
+    )
+    completion = _ScriptedCompletion(provider_failure)
+
+    class SettlementFailure(RuntimeError):
+        pass
+
+    async def fail_settlement(_outcome: str) -> None:
+        raise SettlementFailure("secondary settlement failure")
+
+    lifecycle = replace(_lifecycle(), on_settled=fail_settlement)
+
+    with pytest.raises(PipelinePlannerError) as caught:
+        await _plan(
+            tmp_path=tmp_path,
+            tool_context=tool_context,
+            completion=completion,
+            lifecycle=lifecycle,
+        )
+
+    assert caught.value.code == "PROVIDER_ERROR"
+    assert raw_provider_canary not in str(caught.value)
+    assert any("SettlementFailure" in note for note in getattr(caught.value, "__notes__", ()))
+
+
+@pytest.mark.asyncio
+async def test_secondary_cancellation_observes_failing_settlement_and_preserves_cancelled_error(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    provider_entered = asyncio.Event()
+    settlement_entered = asyncio.Event()
+    settlement_release = asyncio.Event()
+
+    class HangingCompletion(_ScriptedCompletion):
+        async def __call__(self, **kwargs: Any) -> _Response:
+            self.requests.append(deepcopy(kwargs))
+            provider_entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    class SettlementFailure(RuntimeError):
+        pass
+
+    async def fail_settlement(_outcome: str) -> None:
+        settlement_entered.set()
+        await settlement_release.wait()
+        raise SettlementFailure("secondary settlement failure")
+
+    loop = asyncio.get_running_loop()
+    unobserved: list[Mapping[str, Any]] = []
+    prior_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unobserved.append(context))
+    task = asyncio.create_task(
+        _plan(
+            tmp_path=tmp_path,
+            tool_context=tool_context,
+            completion=HangingCompletion(),
+            lifecycle=replace(_lifecycle(), on_settled=fail_settlement),
+        )
+    )
+    try:
+        await provider_entered.wait()
+        task.cancel()
+        await settlement_entered.wait()
+        task.cancel()
+        settlement_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(prior_handler)
+
+    assert unobserved == []
+
+
+@pytest.mark.asyncio
+async def test_settlement_failure_after_success_fails_the_request(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    completion = _ScriptedCompletion(_response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})))
+
+    class SettlementFailure(RuntimeError):
+        pass
+
+    settlement_failure = SettlementFailure("required bookkeeping failed")
+
+    async def fail_settlement(_outcome: str) -> None:
+        raise settlement_failure
+
+    with pytest.raises(SettlementFailure) as caught:
+        await _plan(
+            tmp_path=tmp_path,
+            tool_context=tool_context,
+            completion=completion,
+            lifecycle=replace(_lifecycle(), on_settled=fail_settlement),
+        )
+
+    assert caught.value is settlement_failure
 
 
 @pytest.mark.asyncio

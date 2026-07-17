@@ -26,6 +26,7 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
+from elspeth.contracts import CallType
 from elspeth.contracts.audit_export import AuditExportContentStoreResolver
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import stable_hash
@@ -81,6 +82,7 @@ class _CallRecorder:
 
 
 class _SinkDouble:
+    effect_call_type = CallType.FILESYSTEM
     name = "export_sink"
     plugin_version = "test"
     source_file_hash = "0" * 64
@@ -140,10 +142,6 @@ class _AuditContentStoreDouble:
 
     def mark_candidate_orphans(self, candidate_id: str, descriptors: tuple[object, ...]) -> None:
         del candidate_id, descriptors
-
-    def garbage_collect_candidate(self, request: object) -> bool:
-        del request
-        return False
 
 
 _TEST_PAYLOAD_STORE = object()

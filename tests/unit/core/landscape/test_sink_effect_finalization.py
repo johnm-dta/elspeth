@@ -9,11 +9,12 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import delete, func, select, update
 
-from elspeth.contracts import NodeStateStatus, NodeType, TerminalOutcome, TerminalPath
+from elspeth.contracts import CallType, NodeStateStatus, NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.contracts.sink_effects import (
     SINK_EFFECT_PROTOCOL_VERSION,
     SinkEffectAttemptAction,
+    SinkEffectCommitResult,
     SinkEffectDescriptorMode,
     SinkEffectInputKind,
     SinkEffectInspectionMode,
@@ -40,6 +41,7 @@ from elspeth.core.landscape.schema import (
     artifacts_table,
     node_states_table,
     operations_table,
+    sink_effect_attempts_table,
     sink_effects_table,
     token_outcomes_table,
 )
@@ -114,6 +116,7 @@ def _request(
     lease: object,
     *,
     evidence: dict[str, object] | None = None,
+    attempt_evidence: dict[str, object] | None = None,
 ) -> SinkEffectFinalizeRequest:
     exact_evidence = {"result": "exact"} if evidence is None else evidence
     attempt = factory.execution.sink_effects.begin_attempt(
@@ -122,11 +125,24 @@ def _request(
             member_ordinal=None,
             generation=lease.generation,
             action=SinkEffectAttemptAction.COMMIT,
+            call_kind=CallType.FILESYSTEM,
             request_hash="a" * 64,
         )
     )
+    recorded_evidence = (
+        encode_sink_effect_returned_result(
+            SinkEffectCommitResult(
+                descriptor=_descriptor(),
+                evidence=exact_evidence,
+                accepted_ordinals=tuple(range(len(members))),
+                diverted_ordinals=(),
+            )
+        )
+        if attempt_evidence is None
+        else attempt_evidence
+    )
     factory.execution.sink_effects.record_attempt_result(
-        SinkEffectAttemptResult(attempt_id=attempt.attempt_id, evidence=exact_evidence, latency_ms=1.0)
+        SinkEffectAttemptResult(attempt_id=attempt.attempt_id, evidence=recorded_evidence, latency_ms=1.0)
     )
     return SinkEffectFinalizeRequest(
         effect_id=effect.effect_id,
@@ -347,6 +363,7 @@ def test_result_derived_reconciled_retry_preserves_ordinals_and_returns_winner(
             member_ordinal=None,
             generation=lease.generation,
             action=SinkEffectAttemptAction.RECONCILE,
+            call_kind=CallType.FILESYSTEM,
             request_hash="a" * 64,
         )
     )
@@ -502,6 +519,46 @@ def test_finalized_retry_refuses_a_divergent_descriptor(
         factory.execution.sink_effects.finalize(replace(request, descriptor=_descriptor(content_hash="f" * 64)))
 
 
+def test_finalization_refuses_raw_evidence_attempt_encoding(
+    db_factory: tuple[LandscapeDB, RecorderFactory],
+) -> None:
+    _db, factory = db_factory
+    effect, members, lease = _prepared(factory, count=1)
+
+    with pytest.raises(LandscapeRecordError, match="exact evidence"):
+        _request(factory, effect, members, lease, attempt_evidence={"result": "exact"})
+
+    divergent_envelope = encode_sink_effect_returned_result(
+        SinkEffectCommitResult(
+            descriptor=_descriptor(),
+            evidence={"result": "divergent"},
+            accepted_ordinals=tuple(range(len(members))),
+            diverted_ordinals=(),
+        )
+    )
+    request = _request(factory, effect, members, lease, attempt_evidence=divergent_envelope)
+    with pytest.raises(LandscapeRecordError, match="finalization evidence differs"):
+        factory.execution.sink_effects.finalize(request)
+
+
+def test_finalized_retry_refuses_raw_evidence_attempt_encoding(
+    db_factory: tuple[LandscapeDB, RecorderFactory],
+) -> None:
+    db, factory = db_factory
+    effect, members, lease = _prepared(factory, count=1)
+    request = _request(factory, effect, members, lease)
+    factory.execution.sink_effects.finalize(request)
+    with db.engine.begin() as conn:
+        conn.execute(
+            update(sink_effect_attempts_table)
+            .where(sink_effect_attempts_table.c.attempt_id == request.attempt_id)
+            .values(evidence_json=canonical_json({"result": "exact"}))
+        )
+
+    with pytest.raises(LandscapeRecordError, match="finalized retry attempt/evidence differs"):
+        factory.execution.sink_effects.finalize(request)
+
+
 def test_failsink_finalization_requires_and_uses_exact_primary_linkage(
     db_factory: tuple[LandscapeDB, RecorderFactory],
 ) -> None:
@@ -513,11 +570,23 @@ def test_failsink_finalization_requires_and_uses_exact_primary_linkage(
             member_ordinal=None,
             generation=primary_lease.generation,
             action=SinkEffectAttemptAction.COMMIT,
+            call_kind=CallType.FILESYSTEM,
             request_hash="a" * 64,
         )
     )
     factory.execution.sink_effects.record_attempt_result(
-        SinkEffectAttemptResult(attempt_id=primary_attempt.attempt_id, evidence={"result": "primary-exact"}, latency_ms=1.0)
+        SinkEffectAttemptResult(
+            attempt_id=primary_attempt.attempt_id,
+            evidence=encode_sink_effect_returned_result(
+                SinkEffectCommitResult(
+                    descriptor=_descriptor(),
+                    evidence={"result": "primary-exact"},
+                    accepted_ordinals=(),
+                    diverted_ordinals=(0,),
+                )
+            ),
+            latency_ms=1.0,
+        )
     )
     factory.execution.sink_effects.finalize(
         SinkEffectFinalizeRequest(
@@ -606,11 +675,23 @@ def test_failsink_finalization_requires_and_uses_exact_primary_linkage(
             member_ordinal=None,
             generation=lease.generation,
             action=SinkEffectAttemptAction.COMMIT,
+            call_kind=CallType.FILESYSTEM,
             request_hash="1" * 64,
         )
     )
     factory.execution.sink_effects.record_attempt_result(
-        SinkEffectAttemptResult(attempt_id=attempt.attempt_id, evidence={"result": "failsink-exact"}, latency_ms=1.0)
+        SinkEffectAttemptResult(
+            attempt_id=attempt.attempt_id,
+            evidence=encode_sink_effect_returned_result(
+                SinkEffectCommitResult(
+                    descriptor=descriptor,
+                    evidence={"result": "failsink-exact"},
+                    accepted_ordinals=(0,),
+                    diverted_ordinals=(),
+                )
+            ),
+            latency_ms=1.0,
+        )
     )
 
     result = factory.execution.sink_effects.finalize(

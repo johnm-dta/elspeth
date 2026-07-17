@@ -6,6 +6,7 @@ from collections.abc import Iterator
 
 import pytest
 
+from elspeth.contracts import CallType
 from elspeth.contracts.sink_effects import SinkEffectAttemptAction, SinkEffectAttemptRequest
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.exporter import LandscapeExporter
@@ -34,6 +35,7 @@ def test_export_preserves_abandoned_intent_and_safe_effect_history(
             member_ordinal=None,
             generation=lease.generation,
             action=SinkEffectAttemptAction.COMMIT,
+            call_kind=CallType.FILESYSTEM,
             request_hash="c" * 64,
         )
     )
@@ -57,7 +59,7 @@ def test_export_preserves_abandoned_intent_and_safe_effect_history(
             "member_ordinal": None,
             "generation": lease.generation,
             "action": "commit",
-            "call_kind": "commit",
+            "call_kind": "filesystem",
             "request_hash": "c" * 64,
             "state": "intent",
             "evidence_hash": None,
@@ -82,6 +84,7 @@ def test_attempt_export_uses_stable_per_effect_call_indexes(
             member_ordinal=None,
             generation=lease.generation,
             action=SinkEffectAttemptAction.COMMIT,
+            call_kind=CallType.FILESYSTEM,
             request_hash="d" * 64,
         )
     )
@@ -91,6 +94,7 @@ def test_attempt_export_uses_stable_per_effect_call_indexes(
             member_ordinal=0,
             generation=lease.generation,
             action=SinkEffectAttemptAction.COMMIT,
+            call_kind=CallType.FILESYSTEM,
             request_hash="e" * 64,
         )
     )

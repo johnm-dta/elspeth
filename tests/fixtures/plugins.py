@@ -15,6 +15,7 @@ from pydantic import ConfigDict
 from elspeth.contracts import (
     SINK_EFFECT_PROTOCOL_VERSION,
     ArtifactDescriptor,
+    CallType,
     Determinism,
     PluginSchema,
     ResolvedSinkEffectMode,
@@ -83,6 +84,7 @@ class CollectSink(_TestSinkBase):
     """
 
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    effect_call_type = CallType.FILESYSTEM
     supported_effect_modes = frozenset({"write"})
     supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
 

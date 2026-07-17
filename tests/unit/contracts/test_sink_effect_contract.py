@@ -277,6 +277,7 @@ def test_public_enums_are_exact_closed_wire_vocabularies() -> None:
 def test_sink_effect_protocol_has_independent_kind_capability_and_exact_methods() -> None:
     annotations = SinkEffectProtocol.__annotations__
     assert "effect_protocol_version" in annotations
+    assert "effect_call_type" in annotations
     assert "supported_effect_modes" in annotations
     assert "supported_effect_input_kinds" in annotations
     assert {

@@ -249,6 +249,7 @@ def test_get_sink_effect_history_exposes_recovery_state_without_provider_bodies(
                 member_ordinal=None,
                 generation=lease.generation,
                 action=SinkEffectAttemptAction.COMMIT,
+                call_kind=CallType.FILESYSTEM,
                 request_hash="f" * 64,
             )
         )

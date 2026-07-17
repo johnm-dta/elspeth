@@ -15,7 +15,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import func, select
 
-from elspeth.contracts import NodeType
+from elspeth.contracts import CallType, NodeType
 from elspeth.contracts.audit_export import (
     AuditExportContentDescriptor,
     AuditExportContentStoreResolver,
@@ -79,10 +79,6 @@ class _MemoryContentStore:
     ) -> None:
         self.orphans.append((candidate_id, descriptors))
 
-    def garbage_collect_candidate(self, request: object) -> bool:
-        del request
-        return False
-
 
 @dataclass(slots=True)
 class _Target:
@@ -93,6 +89,8 @@ class _Target:
 
 
 class _AuditExportSink:
+    effect_call_type = CallType.FILESYSTEM
+
     def __init__(self, target: _Target) -> None:
         self.target = target
 
@@ -197,9 +195,6 @@ def _config(**overrides: object) -> LandscapeExportSettings:
         per_chunk_record_limit=100,
         per_chunk_byte_limit=1024 * 1024,
         spool_root=Path(".elspeth/audit-export-spool/recovery"),
-        spool_cleanup_age_seconds=3600,
-        spool_cleanup_byte_budget=10 * 1024 * 1024,
-        spool_cleanup_count_budget=100,
         content_store=AuditExportContentStoreSettings(
             content_store_id="audit-store-v1",
             namespace="audit/export",
@@ -207,7 +202,6 @@ def _config(**overrides: object) -> LandscapeExportSettings:
             policy_version="v1",
             retention_days=30,
             durability="fsync",
-            orphan_grace_period_seconds=3600,
         ),
     )
     return config.model_copy(update=overrides)
@@ -871,7 +865,7 @@ def test_resume_audit_export_recovers_lost_publication_response_end_to_end(
 
         # The crashed worker never released its effect lease; model the
         # production recovery window by letting the lease lapse (a live lease
-        # correctly refuses takeover — SinkEffectPredecessorPending).
+        # correctly refuses takeover — SinkEffectLeaseHeld).
         with db.engine.begin() as connection:
             connection.execute(
                 sink_effects_table.update()

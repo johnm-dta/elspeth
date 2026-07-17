@@ -14,7 +14,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, NoReturn, final
 from urllib.parse import parse_qsl, urlsplit
 
-from elspeth.contracts.enums import TerminalOutcome, TerminalPath
+from elspeth.contracts.enums import CallType, TerminalOutcome, TerminalPath
 from elspeth.contracts.freeze import deep_freeze, deep_thaw, freeze_fields, require_int
 from elspeth.contracts.hashing import canonical_json
 from elspeth.contracts.results import ArtifactDescriptor, require_no_artifact_uri_credentials
@@ -450,6 +450,7 @@ class SinkEffectAttemptRequest:
     member_ordinal: int | None
     generation: int
     action: SinkEffectAttemptAction
+    call_kind: CallType
     request_hash: str
 
     def __post_init__(self) -> None:
@@ -461,6 +462,8 @@ class SinkEffectAttemptRequest:
             raise ValueError("generation must be a non-negative exact int")
         if type(self.action) is not SinkEffectAttemptAction:
             raise TypeError("action must be exact SinkEffectAttemptAction")
+        if type(self.call_kind) is not CallType:
+            raise TypeError("call_kind must be exact CallType")
 
 
 @dataclass(frozen=True, slots=True)

@@ -609,10 +609,9 @@ class SinkEffectFinalization:
                 accepted_ordinals=request.accepted_ordinals,
                 diverted_ordinals=request.diverted_ordinals,
             )
-        typed_evidence_json = canonical_json(deep_thaw(encode_sink_effect_returned_result(returned_result)))
-        legacy_evidence_json = canonical_json(deep_thaw(request.evidence))
+        expected_evidence_json = canonical_json(deep_thaw(encode_sink_effect_returned_result(returned_result)))
         if (
-            attempt.evidence_json not in {typed_evidence_json, legacy_evidence_json}
+            attempt.evidence_json != expected_evidence_json
             or attempt.evidence_hash != sha256(attempt.evidence_json.encode("utf-8")).hexdigest()
         ):
             raise LandscapeRecordError("finalization evidence differs from the returned attempt winner")
@@ -754,14 +753,13 @@ class SinkEffectFinalization:
                 accepted_ordinals=request.accepted_ordinals,
                 diverted_ordinals=request.diverted_ordinals,
             )
-        typed_evidence_json = canonical_json(deep_thaw(encode_sink_effect_returned_result(returned_result)))
-        legacy_evidence_json = canonical_json(deep_thaw(request.evidence))
+        expected_evidence_json = canonical_json(deep_thaw(encode_sink_effect_returned_result(returned_result)))
         if (
             attempt is None
             or attempt.effect_id != request.effect_id
             or attempt.generation > request.generation
             or attempt.state != SinkEffectAttemptState.RETURNED.value
-            or attempt.evidence_json not in {typed_evidence_json, legacy_evidence_json}
+            or attempt.evidence_json != expected_evidence_json
         ):
             raise LandscapeRecordError("finalized retry attempt/evidence differs from the durable winner")
 

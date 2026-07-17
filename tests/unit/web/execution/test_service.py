@@ -32,6 +32,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
+from elspeth.contracts import CallType
 from elspeth.contracts.enums import CreationModality, RunStatus
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import stable_hash
@@ -199,6 +200,7 @@ def _blob_record_stub(
 
 
 class _EffectCapableSinkStub:
+    effect_call_type = CallType.FILESYSTEM
     name = "effect-capable"
     _on_write_failure = "discard"
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
@@ -1540,9 +1542,6 @@ landscape:
     per_chunk_record_limit: 5
     per_chunk_byte_limit: 500
     spool_root: .elspeth/audit-export-spool/web-test
-    spool_cleanup_age_seconds: 3600
-    spool_cleanup_byte_budget: 1000
-    spool_cleanup_count_budget: 2
     content_store:
       content_store_id: web-test
       namespace: web-test
@@ -1550,7 +1549,6 @@ landscape:
       policy_version: v1
       retention_days: 30
       durability: fsync
-      orphan_grace_period_seconds: 3600
 """
         secret_service = MagicMock(spec=["list_refs"])
         secret_service.list_refs.return_value = []

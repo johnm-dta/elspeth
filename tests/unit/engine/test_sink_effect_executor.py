@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import update
 
-from elspeth.contracts import NodeStateStatus, TerminalOutcome, TerminalPath
+from elspeth.contracts import CallType, NodeStateStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.results import ArtifactDescriptor
@@ -39,7 +39,7 @@ from elspeth.engine.executors.sink_effects import (
     SinkEffectExecutionRequest,
     SinkEffectExecutionSeam,
     SinkEffectInjectedFault,
-    SinkEffectPredecessorPending,
+    SinkEffectLeaseHeld,
 )
 from elspeth.plugins.sinks.csv_sink import CSVSink
 from tests.fixtures.landscape import make_factory, make_landscape_db
@@ -58,6 +58,8 @@ class _CumulativeTarget:
 
 
 class _CumulativeObservableSink:
+    effect_call_type = CallType.FILESYSTEM
+
     def __init__(self, target: _CumulativeTarget) -> None:
         self._target = target
         self._rows_by_effect: dict[str, list[dict[str, object]]] = {}
@@ -410,7 +412,7 @@ def test_second_preparer_refuses_while_preparation_claim_is_live() -> None:
                 if self.prepare_calls == 0:
                     # Simulate a concurrent worker arriving mid-preparation:
                     # it must refuse before invoking any adapter method.
-                    with pytest.raises(SinkEffectPredecessorPending, match="preparation"):
+                    with pytest.raises(SinkEffectLeaseHeld, match="preparation"):
                         SinkEffectCoordinator(factory=rival_factory, worker_id="worker-b").execute(request, rival_sink)
                 return super().prepare_effect(inner_request, ctx)
 
@@ -445,7 +447,7 @@ def test_mixed_overlap_waits_for_live_open_partition_before_executing_new() -> N
             ).execute(_execution_request(run_id, sink_id, members[:1]), sink)
         calls_before_wait = (sink.inspect_calls, sink.prepare_calls, sink.reconcile_calls, sink.commit_calls)
 
-        with pytest.raises(SinkEffectPredecessorPending, match="live lease"):
+        with pytest.raises(SinkEffectLeaseHeld, match="live lease"):
             SinkEffectCoordinator(factory=factory, worker_id="worker-b").execute(_execution_request(run_id, sink_id, members), sink)
 
         assert (sink.inspect_calls, sink.prepare_calls, sink.reconcile_calls, sink.commit_calls) == calls_before_wait
@@ -661,6 +663,7 @@ def test_retry_consumes_returned_reconcile_before_commit(takeover: bool) -> None
                 member_ordinal=None,
                 generation=lease.generation,
                 action=SinkEffectAttemptAction.RECONCILE,
+                call_kind=CallType.FILESYSTEM,
                 request_hash=SinkEffectCoordinator._reconcile_request_hash(plan),
             )
         )

@@ -16,6 +16,7 @@ from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 from elspeth.contracts.enums import (
+    CallType,
     DeclaredAuditCharacteristics,
     Determinism,
 )
@@ -883,6 +884,7 @@ class SinkEffectProtocol(SinkProtocol, Protocol):
     """Explicit opt-in contract for recoverable sink publication effects."""
 
     effect_protocol_version: ClassVar[str]
+    effect_call_type: ClassVar[CallType]
     supported_effect_modes: ClassVar[frozenset[str]]
     supported_effect_input_kinds: ClassVar[frozenset["SinkEffectInputKind"]]
 

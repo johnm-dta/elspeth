@@ -14,9 +14,10 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Literal, Protocol, cast
+from typing import ClassVar, Literal, Protocol, cast
 
 from elspeth.contracts.audit import SinkEffect, SinkEffectAttempt, SinkEffectMemberRecord
+from elspeth.contracts.enums import CallType
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.hashing import canonical_json, stable_hash
 from elspeth.contracts.results import ArtifactDescriptor
@@ -80,10 +81,21 @@ class SinkEffectUnknownError(RuntimeError):
 
 
 class SinkEffectPredecessorPending(RuntimeError):
-    """Raised when a replacing-target predecessor has not finalized yet."""
+    """Raised when the effect's stream predecessor has not finalized yet."""
+
+
+class SinkEffectLeaseHeld(RuntimeError):
+    """Raised when another worker's live lease or preparation claim covers the effect.
+
+    The holder must be left alone (see the sink-effect recovery runbook); the
+    contended effect becomes actionable again once the holder finalizes or its
+    lease expires and takeover fences the generation.
+    """
 
 
 class _SinkEffectAdapter(Protocol):
+    effect_call_type: ClassVar[CallType]
+
     def inspect_effect(
         self,
         request: SinkEffectInspectionRequest,
@@ -479,6 +491,7 @@ class SinkEffectCoordinator:
                 member_ordinal=member.ordinal,
                 generation=lease.generation,
                 action=SinkEffectAttemptAction.RECONCILE,
+                call_kind=sink.effect_call_type,
                 request_hash=self._member_reconcile_request_hash(plan, member),
             )
         )
@@ -512,6 +525,7 @@ class SinkEffectCoordinator:
                 member_ordinal=member.ordinal,
                 generation=lease.generation,
                 action=SinkEffectAttemptAction.COMMIT,
+                call_kind=sink.effect_call_type,
                 request_hash=self._member_commit_request_hash(plan, member),
             )
         )
@@ -723,7 +737,7 @@ class SinkEffectCoordinator:
             and effect.lease_expires_at is not None
             and self._utc(effect.lease_expires_at) >= datetime.now(UTC)
         ):
-            raise SinkEffectPredecessorPending(f"sink effect {effect.effect_id} preparation is claimed by another worker")
+            raise SinkEffectLeaseHeld(f"sink effect {effect.effect_id} preparation is claimed by another worker")
         self._close_abandoned_attempts(effect.effect_id, actions=(SinkEffectAttemptAction.INSPECT,))
         claim = self._effects.claim_preparation(effect.effect_id, owner=self._worker_id, ttl=self._lease_ttl)
         effect = self._require_effect(effect.effect_id)
@@ -761,6 +775,7 @@ class SinkEffectCoordinator:
                     member_ordinal=None,
                     generation=effect.generation,
                     action=SinkEffectAttemptAction.INSPECT,
+                    call_kind=sink.effect_call_type,
                     request_hash=request_hash,
                 )
             )
@@ -841,7 +856,7 @@ class SinkEffectCoordinator:
             return self._effects.acquire_lease(effect.effect_id, owner=self._worker_id, ttl=self._lease_ttl)
         if expires_at < datetime.now(UTC):
             return self._effects.takeover_expired(effect.effect_id, owner=self._worker_id, ttl=self._lease_ttl)
-        raise SinkEffectPredecessorPending(f"sink effect {effect.effect_id} has a live lease owned by another worker")
+        raise SinkEffectLeaseHeld(f"sink effect {effect.effect_id} has a live lease owned by another worker")
 
     def _reconcile(
         self,
@@ -873,6 +888,7 @@ class SinkEffectCoordinator:
                 member_ordinal=None,
                 generation=lease.generation,
                 action=SinkEffectAttemptAction.RECONCILE,
+                call_kind=sink.effect_call_type,
                 request_hash=request_hash,
             )
         )
@@ -905,6 +921,7 @@ class SinkEffectCoordinator:
                 member_ordinal=None,
                 generation=lease.generation,
                 action=SinkEffectAttemptAction.COMMIT,
+                call_kind=sink.effect_call_type,
                 request_hash=request_hash,
             )
         )
@@ -1165,6 +1182,7 @@ __all__ = [
     "SinkEffectExecutionRequest",
     "SinkEffectExecutionSeam",
     "SinkEffectInjectedFault",
+    "SinkEffectLeaseHeld",
     "SinkEffectPredecessorPending",
     "SinkEffectUnknownError",
 ]

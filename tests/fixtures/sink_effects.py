@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from types import MappingProxyType
 
+from elspeth.contracts import CallType
 from elspeth.contracts.diversion import RowDiversion
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import stable_hash
@@ -36,6 +37,7 @@ class DuplicateObservableSink:
     """Naive publisher whose coordinator must prevent duplicate calls."""
 
     name = "duplicate-observable"
+    effect_call_type = CallType.FILESYSTEM
     declared_required_fields = frozenset()
     _on_write_failure = None
 

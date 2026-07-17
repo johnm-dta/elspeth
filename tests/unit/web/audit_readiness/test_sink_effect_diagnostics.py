@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from elspeth.contracts import CallType
 from elspeth.contracts.sink_effects import SinkEffectAttemptAction, SinkEffectAttemptRequest
 from elspeth.web.audit_readiness.service import load_sink_effect_diagnostic
 from tests.fixtures.landscape import make_factory, make_landscape_db
@@ -19,6 +20,7 @@ def test_web_diagnostic_exposes_no_publication_and_response_loss_without_raw_bod
                 member_ordinal=None,
                 generation=lease.generation,
                 action=SinkEffectAttemptAction.COMMIT,
+                call_kind=CallType.FILESYSTEM,
                 request_hash="f" * 64,
             )
         )

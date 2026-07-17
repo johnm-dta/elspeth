@@ -10,21 +10,25 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from elspeth.contracts import CallType
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.sink_effects import (
     SINK_EFFECT_PROTOCOL_VERSION,
     SinkEffectAttemptAction,
     SinkEffectAttemptState,
+    SinkEffectCommitResult,
     SinkEffectDescriptorMode,
     SinkEffectInputKind,
     SinkEffectInspectionMode,
     SinkEffectLease,
     SinkEffectPlan,
     SinkEffectReconcileKind,
+    SinkEffectReconcileResult,
     SinkEffectState,
 )
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
+from elspeth.core.landscape.execution.sink_effect_attempt_results import encode_sink_effect_returned_result
 from elspeth.core.landscape.execution.sink_effect_lifecycle import (
     SinkEffectAttemptRequest,
     SinkEffectAttemptResult,
@@ -32,6 +36,7 @@ from elspeth.core.landscape.execution.sink_effect_lifecycle import (
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import calls_table, operations_table, sink_effects_table
 from tests.fixtures.landscape import make_factory, make_landscape_db
+from tests.unit.core.landscape.test_sink_effect_finalization import _descriptor, _prepared
 from tests.unit.core.landscape.test_sink_effect_reservation import _pipeline_members, _pipeline_request
 
 
@@ -218,6 +223,7 @@ def test_lease_takeover_increments_generation_and_fences_stale_results(db_factor
             member_ordinal=None,
             generation=first.generation,
             action=SinkEffectAttemptAction.COMMIT,
+            call_kind=CallType.FILESYSTEM,
             request_hash="c" * 64,
         )
     )
@@ -236,6 +242,7 @@ def test_lease_takeover_increments_generation_and_fences_stale_results(db_factor
                 member_ordinal=None,
                 generation=first.generation,
                 action=SinkEffectAttemptAction.COMMIT,
+                call_kind=CallType.FILESYSTEM,
                 request_hash="d" * 64,
             )
         )
@@ -255,6 +262,7 @@ def test_abandoned_commit_intent_becomes_response_lost_with_stable_call_index(
             member_ordinal=None,
             generation=lease.generation,
             action=SinkEffectAttemptAction.COMMIT,
+            call_kind=CallType.FILESYSTEM,
             request_hash="e" * 64,
         )
     )
@@ -285,10 +293,14 @@ def test_attempt_return_records_one_success_call_and_is_idempotent(db_factory: t
             member_ordinal=None,
             generation=lease.generation,
             action=SinkEffectAttemptAction.COMMIT,
+            call_kind=CallType.FILESYSTEM,
             request_hash="f" * 64,
         )
     )
-    result = SinkEffectAttemptResult(attempt_id=attempt.attempt_id, evidence={"descriptor": "exact"}, latency_ms=2.5)
+    envelope = encode_sink_effect_returned_result(
+        SinkEffectCommitResult(descriptor=_descriptor(), evidence={"result": "exact"}, accepted_ordinals=(0,), diverted_ordinals=())
+    )
+    result = SinkEffectAttemptResult(attempt_id=attempt.attempt_id, evidence=envelope, latency_ms=2.5)
 
     first = repo.record_attempt_result(result)
     second = repo.record_attempt_result(result)
@@ -298,3 +310,150 @@ def test_attempt_return_records_one_success_call_and_is_idempotent(db_factory: t
     with db.read_only_connection() as conn:
         operation_id = conn.scalar(select(operations_table.c.operation_id).where(operations_table.c.sink_effect_id == effect.effect_id))
         assert conn.scalar(select(calls_table.c.call_index).where(calls_table.c.operation_id == operation_id)) == 0
+
+
+def test_attempt_calls_record_adapter_declared_transport(db_factory: tuple[LandscapeDB, RecorderFactory]) -> None:
+    db, factory = db_factory
+    effect = _reserved(factory)
+    repo = factory.execution.sink_effects
+    claim = _claim(factory, effect.effect_id)
+    repo.complete_plan(effect.effect_id, _plan(effect.effect_id), claim=claim)
+    inspect = repo.begin_attempt(
+        SinkEffectAttemptRequest(
+            effect_id=effect.effect_id,
+            member_ordinal=None,
+            generation=claim.generation,
+            action=SinkEffectAttemptAction.INSPECT,
+            call_kind=CallType.FILESYSTEM,
+            request_hash="c" * 64,
+        )
+    )
+    assert inspect.call_kind == "filesystem"
+    repo.mark_response_lost(inspect.attempt_id)
+    lease = repo.acquire_lease(effect.effect_id, owner="worker-a", ttl=timedelta(seconds=30))
+    commit = repo.begin_attempt(
+        SinkEffectAttemptRequest(
+            effect_id=effect.effect_id,
+            member_ordinal=None,
+            generation=lease.generation,
+            action=SinkEffectAttemptAction.COMMIT,
+            call_kind=CallType.HTTP,
+            request_hash="d" * 64,
+        )
+    )
+    commit_envelope = encode_sink_effect_returned_result(
+        SinkEffectCommitResult(descriptor=_descriptor(), evidence={"result": "exact"}, accepted_ordinals=(0,), diverted_ordinals=())
+    )
+    repo.record_attempt_result(SinkEffectAttemptResult(attempt_id=commit.attempt_id, evidence=commit_envelope, latency_ms=1.0))
+
+    with db.read_only_connection() as conn:
+        operation_id = conn.scalar(select(operations_table.c.operation_id).where(operations_table.c.sink_effect_id == effect.effect_id))
+        calls = conn.execute(
+            select(calls_table.c.call_type, calls_table.c.status)
+            .where(calls_table.c.operation_id == operation_id)
+            .order_by(calls_table.c.call_index)
+        ).fetchall()
+    assert [(row.call_type, row.status) for row in calls] == [("filesystem", "error"), ("http", "success")]
+
+
+def test_attempt_result_refuses_non_envelope_evidence(db_factory: tuple[LandscapeDB, RecorderFactory]) -> None:
+    _db, factory = db_factory
+    effect = _reserved(factory)
+    repo = factory.execution.sink_effects
+    repo.complete_plan(effect.effect_id, _plan(effect.effect_id), claim=_claim(factory, effect.effect_id))
+    lease = repo.acquire_lease(effect.effect_id, owner="worker-a", ttl=timedelta(seconds=30))
+    attempt = repo.begin_attempt(
+        SinkEffectAttemptRequest(
+            effect_id=effect.effect_id,
+            member_ordinal=None,
+            generation=lease.generation,
+            action=SinkEffectAttemptAction.COMMIT,
+            call_kind=CallType.FILESYSTEM,
+            request_hash="f" * 64,
+        )
+    )
+
+    with pytest.raises(LandscapeRecordError, match="exact evidence"):
+        repo.record_attempt_result(SinkEffectAttemptResult(attempt_id=attempt.attempt_id, evidence={"result": "raw"}, latency_ms=1.0))
+
+    reloaded = next(item for item in repo.get_attempts(effect.effect_id) if item.attempt_id == attempt.attempt_id)
+    assert reloaded.state is SinkEffectAttemptState.INTENT
+
+
+def _returned_member_attempt(
+    factory: RecorderFactory,
+    effect,
+    lease,
+    result,
+    *,
+    action: SinkEffectAttemptAction,
+    request_hash: str,
+):
+    repo = factory.execution.sink_effects
+    attempt = repo.begin_attempt(
+        SinkEffectAttemptRequest(
+            effect_id=effect.effect_id,
+            member_ordinal=0,
+            generation=lease.generation,
+            action=action,
+            call_kind=CallType.FILESYSTEM,
+            request_hash=request_hash,
+        )
+    )
+    repo.record_attempt_result(
+        SinkEffectAttemptResult(
+            attempt_id=attempt.attempt_id,
+            evidence=encode_sink_effect_returned_result(result),
+            latency_ms=1.0,
+        )
+    )
+    return attempt
+
+
+def test_finalized_member_replay_rejects_divergent_evidence(db_factory: tuple[LandscapeDB, RecorderFactory]) -> None:
+    _db, factory = db_factory
+    effect, _members, lease = _prepared(factory, count=1)
+    repo = factory.execution.sink_effects
+    winner = SinkEffectCommitResult(descriptor=_descriptor(), evidence={"marker": "winner"}, accepted_ordinals=(0,), diverted_ordinals=())
+    first = _returned_member_attempt(factory, effect, lease, winner, action=SinkEffectAttemptAction.COMMIT, request_hash="c" * 64)
+    repo.complete_member_result(first.attempt_id, winner, lease=lease)
+    repo.complete_member_result(first.attempt_id, winner, lease=lease)
+
+    divergent = SinkEffectCommitResult(
+        descriptor=_descriptor(), evidence={"marker": "divergent"}, accepted_ordinals=(0,), diverted_ordinals=()
+    )
+    second = _returned_member_attempt(factory, effect, lease, divergent, action=SinkEffectAttemptAction.COMMIT, request_hash="e" * 64)
+    with pytest.raises(LandscapeRecordError, match="evidence is divergent"):
+        repo.complete_member_result(second.attempt_id, divergent, lease=lease)
+
+
+def test_finalized_member_replay_rejects_divergent_descriptor(db_factory: tuple[LandscapeDB, RecorderFactory]) -> None:
+    _db, factory = db_factory
+    effect, _members, lease = _prepared(factory, count=1)
+    repo = factory.execution.sink_effects
+    winner = SinkEffectCommitResult(descriptor=_descriptor(), evidence={"marker": "winner"}, accepted_ordinals=(0,), diverted_ordinals=())
+    first = _returned_member_attempt(factory, effect, lease, winner, action=SinkEffectAttemptAction.COMMIT, request_hash="c" * 64)
+    repo.complete_member_result(first.attempt_id, winner, lease=lease)
+
+    divergent = SinkEffectCommitResult(
+        descriptor=_descriptor(content_hash="e" * 64), evidence={"marker": "winner"}, accepted_ordinals=(0,), diverted_ordinals=()
+    )
+    second = _returned_member_attempt(factory, effect, lease, divergent, action=SinkEffectAttemptAction.COMMIT, request_hash="e" * 64)
+    with pytest.raises(LandscapeRecordError, match="descriptor is divergent"):
+        repo.complete_member_result(second.attempt_id, divergent, lease=lease)
+
+
+def test_finalized_member_replay_fails_closed_without_descriptor(db_factory: tuple[LandscapeDB, RecorderFactory]) -> None:
+    _db, factory = db_factory
+    effect, _members, lease = _prepared(factory, count=1)
+    repo = factory.execution.sink_effects
+    winner = SinkEffectCommitResult(descriptor=_descriptor(), evidence={"marker": "winner"}, accepted_ordinals=(0,), diverted_ordinals=())
+    first = _returned_member_attempt(factory, effect, lease, winner, action=SinkEffectAttemptAction.COMMIT, request_hash="c" * 64)
+    repo.complete_member_result(first.attempt_id, winner, lease=lease)
+
+    not_applied = SinkEffectReconcileResult.not_applied(evidence={"probe": "target-absent"})
+    reconcile = _returned_member_attempt(
+        factory, effect, lease, not_applied, action=SinkEffectAttemptAction.RECONCILE, request_hash="f" * 64
+    )
+    with pytest.raises(LandscapeRecordError, match="descriptor"):
+        repo.complete_member_result(reconcile.attempt_id, not_applied, lease=lease)

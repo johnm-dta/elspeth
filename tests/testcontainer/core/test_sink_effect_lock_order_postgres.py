@@ -14,12 +14,13 @@ from sqlalchemy.engine import Connection
 from testcontainers.postgres import PostgresContainer  # type: ignore[import-untyped]
 from tests.fixtures.landscape import make_factory, register_test_node
 
-from elspeth.contracts import NodeStateStatus, NodeType, TerminalOutcome, TerminalPath
+from elspeth.contracts import CallType, NodeStateStatus, NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.audit import DISCARD_SINK_NAME, TokenRef
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.contracts.sink_effects import (
     SINK_EFFECT_PROTOCOL_VERSION,
     SinkEffectAttemptAction,
+    SinkEffectCommitResult,
     SinkEffectDescriptorMode,
     SinkEffectFinalizationResult,
     SinkEffectInputKind,
@@ -30,6 +31,7 @@ from elspeth.contracts.sink_effects import (
 )
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
+from elspeth.core.landscape.execution.sink_effect_attempt_results import encode_sink_effect_returned_result
 from elspeth.core.landscape.execution.sink_effect_finalization import SinkEffectFinalizationMember, SinkEffectFinalizeRequest
 from elspeth.core.landscape.execution.sink_effect_identity import compute_pipeline_effect_identity, resolve_sink_effect_members
 from elspeth.core.landscape.execution.sink_effect_lifecycle import SinkEffectAttemptRequest, SinkEffectAttemptResult
@@ -227,11 +229,23 @@ def test_finalization_vs_outcome_mutation_uses_distinct_backends_and_token_first
             member_ordinal=None,
             generation=lease.generation,
             action=SinkEffectAttemptAction.COMMIT,
+            call_kind=CallType.FILESYSTEM,
             request_hash="a" * 64,
         )
     )
     finalizer_factory.execution.sink_effects.record_attempt_result(
-        SinkEffectAttemptResult(attempt_id=attempt.attempt_id, evidence={"result": "exact"}, latency_ms=1.0)
+        SinkEffectAttemptResult(
+            attempt_id=attempt.attempt_id,
+            evidence=encode_sink_effect_returned_result(
+                SinkEffectCommitResult(
+                    descriptor=descriptor,
+                    evidence={"result": "exact"},
+                    accepted_ordinals=(0,),
+                    diverted_ordinals=(),
+                )
+            ),
+            latency_ms=1.0,
+        )
     )
     request = SinkEffectFinalizeRequest(
         effect_id=effect.effect_id,
@@ -629,11 +643,23 @@ def _build_in_flight_effect(factory: RecorderFactory, *, name_prefix: str, owner
             member_ordinal=None,
             generation=lease.generation,
             action=SinkEffectAttemptAction.COMMIT,
+            call_kind=CallType.FILESYSTEM,
             request_hash="a" * 64,
         )
     )
     factory.execution.sink_effects.record_attempt_result(
-        SinkEffectAttemptResult(attempt_id=attempt.attempt_id, evidence={"result": "exact"}, latency_ms=1.0)
+        SinkEffectAttemptResult(
+            attempt_id=attempt.attempt_id,
+            evidence=encode_sink_effect_returned_result(
+                SinkEffectCommitResult(
+                    descriptor=descriptor,
+                    evidence={"result": "exact"},
+                    accepted_ordinals=(0,),
+                    diverted_ordinals=(),
+                )
+            ),
+            latency_ms=1.0,
+        )
     )
     request = SinkEffectFinalizeRequest(
         effect_id=effect.effect_id,

@@ -32,7 +32,10 @@ from elspeth.contracts.sink_effects import (
 from elspeth.core.landscape._helpers import now
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
-from elspeth.core.landscape.execution.sink_effect_attempt_results import encode_sink_effect_returned_result
+from elspeth.core.landscape.execution.sink_effect_attempt_results import (
+    decode_sink_effect_returned_result,
+    encode_sink_effect_returned_result,
+)
 from elspeth.core.landscape.model_loaders import SinkEffectAttemptLoader, SinkEffectLoader
 from elspeth.core.landscape.schema import (
     calls_table,
@@ -460,7 +463,7 @@ class SinkEffectLifecycle:
                     member_ordinal=request.member_ordinal,
                     generation=request.generation,
                     action=request.action.value,
-                    call_kind=request.action.value,
+                    call_kind=request.call_kind.value,
                     request_hash=request.request_hash,
                     state=SinkEffectAttemptState.INTENT.value,
                     evidence_json=None,
@@ -523,6 +526,7 @@ class SinkEffectLifecycle:
                 raise LandscapeRecordError(f"attempt cannot return from state {attempt.state!r}")
             if effect.generation != attempt.generation:
                 raise LandscapeRecordError("attempt result has stale generation")
+            decode_sink_effect_returned_result(SinkEffectAttemptAction(attempt.action), evidence_json)
             timestamp = now()
             conn.execute(
                 sink_effect_attempts_table.update()
@@ -541,7 +545,7 @@ class SinkEffectLifecycle:
             self._insert_call(
                 conn,
                 operation_id=operation.operation_id,
-                call_type=self._call_type(attempt.action),
+                call_type=self._call_type(attempt.call_kind),
                 status=CallStatus.SUCCESS,
                 request_hash=attempt.request_hash,
                 response_hash=evidence_hash,
@@ -630,8 +634,12 @@ class SinkEffectLifecycle:
             if member is None:
                 raise LandscapeRecordError("member result references a missing member")
             if member.member_state == SinkEffectState.FINALIZED.value:
-                if descriptor_hash is not None and member.descriptor_hash != descriptor_hash:
+                if descriptor_hash is None:
+                    raise LandscapeRecordError("finalized member result is missing the winning descriptor")
+                if member.descriptor_hash != descriptor_hash:
                     raise LandscapeRecordError("finalized member result descriptor is divergent")
+                if member.evidence_hash != evidence_hash:
+                    raise LandscapeRecordError("finalized member result evidence is divergent")
                 return
             disposition, reason_hash = self._member_result_disposition(result, member_ordinal=int(attempt.member_ordinal))
             values: dict[str, object] = {
@@ -739,7 +747,7 @@ class SinkEffectLifecycle:
             self._insert_call(
                 conn,
                 operation_id=operation.operation_id,
-                call_type=self._call_type(attempt.action),
+                call_type=self._call_type(attempt.call_kind),
                 status=CallStatus.ERROR,
                 request_hash=attempt.request_hash,
                 response_hash=None,
@@ -847,12 +855,11 @@ class SinkEffectLifecycle:
         )
 
     @staticmethod
-    def _call_type(action: str) -> CallType:
-        return (
-            CallType.HTTP
-            if action in {SinkEffectAttemptAction.INSPECT.value, SinkEffectAttemptAction.RECONCILE.value}
-            else CallType.FILESYSTEM
-        )
+    def _call_type(call_kind: str) -> CallType:
+        try:
+            return CallType(call_kind)
+        except ValueError as exc:
+            raise LandscapeRecordError(f"sink effect attempt has unknown call kind {call_kind!r}") from exc
 
     @staticmethod
     def _validate_owner(owner: str) -> None:

@@ -18,6 +18,7 @@ import pytest
 from typer.testing import CliRunner
 
 from elspeth.cli import _preflight_follower_sink_effects, _preflight_raw_settings_sink_effects, app
+from elspeth.contracts import CallType
 from elspeth.contracts.preflight import DependencyRunResult, PreflightResult
 from elspeth.contracts.sink_effects import SINK_EFFECT_PROTOCOL_VERSION, SinkEffectInputKind
 
@@ -45,6 +46,7 @@ class _FakeGraph:
 
 
 class _EffectCapableSink:
+    effect_call_type = CallType.FILESYSTEM
     name = "effect-capable"
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"write"})
@@ -153,9 +155,6 @@ def _explicit_audit_export_settings(*, enabled: bool | str | int, sink: str = "a
         "per_chunk_record_limit": 100,
         "per_chunk_byte_limit": 100_000,
         "spool_root": ".elspeth/audit-export-spool/cli-preflight",
-        "spool_cleanup_age_seconds": 3_600,
-        "spool_cleanup_byte_budget": 1_000_000,
-        "spool_cleanup_count_budget": 10,
         "content_store": {
             "content_store_id": "cli-preflight-store-v1",
             "namespace": "audit/export",
@@ -163,7 +162,6 @@ def _explicit_audit_export_settings(*, enabled: bool | str | int, sink: str = "a
             "policy_version": "v1",
             "retention_days": 30,
             "durability": "fsync",
-            "orphan_grace_period_seconds": 3_600,
         },
     }
 

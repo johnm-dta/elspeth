@@ -21,6 +21,7 @@ from elspeth.cli import (
     _preflight_follower_sink_effects,
     _start_follower_plugin_lifecycle,
 )
+from elspeth.contracts import CallType
 from elspeth.contracts.audit_export import AuditExportContentStoreResolver
 from elspeth.contracts.sink_effects import (
     SINK_EFFECT_PROTOCOL_VERSION,
@@ -57,6 +58,7 @@ class LegacyObservableSink:
 
 
 class EffectCapableSink(LegacyObservableSink):
+    effect_call_type = CallType.FILESYSTEM
     effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
     supported_effect_modes = frozenset({"write", "append", "overwrite", "conditional_put", "etag_guarded_upload"})
     supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS, SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT})
@@ -121,10 +123,6 @@ class _DurableAuditContentStore:
 
     def mark_candidate_orphans(self, candidate_id: str, descriptors: tuple[object, ...]) -> None:
         del candidate_id, descriptors
-
-    def garbage_collect_candidate(self, request: object) -> bool:
-        del request
-        return False
 
 
 _AUDIT_CONTENT_STORE = _DurableAuditContentStore()
@@ -1047,6 +1045,7 @@ def test_raw_sink_eligibility_defaults_omitted_options_before_mode_resolution(mo
         name = "capable"
         determinism = Determinism.IO_WRITE
         effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+        effect_call_type = CallType.FILESYSTEM
         supported_effect_modes = frozenset({"write"})
         supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
 

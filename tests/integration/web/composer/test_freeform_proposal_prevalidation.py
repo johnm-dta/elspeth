@@ -706,6 +706,143 @@ async def test_preproposal_base_exception_is_audited_once_and_propagated_unchang
 
 
 @pytest.mark.asyncio
+async def test_candidate_prior_validation_runtime_error_uses_plugin_crash_audit_and_wrapper(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    state = _empty_state()
+    response = _tool_turn("call_prior_runtime_crash", "set_pipeline", _inline_pipeline_args(tmp_path))
+    failure = RuntimeError("candidate-prior validation private detail")
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(harness.service._catalog)
+    catalog = PolicyCatalogView.for_trained_operator(harness.service._catalog, snapshot)
+    original_validate = catalog.validate_composition_state
+    armed = False
+    llm_calls = 0
+    recorded: list[Any] = []
+    original_record = BufferingRecorder.record
+
+    def _validate(candidate_state: CompositionState) -> Any:
+        if armed:
+            raise failure
+        return original_validate(candidate_state)
+
+    async def _llm(messages: list[dict[str, Any]], _tools: Any) -> Any:
+        nonlocal armed, llm_calls
+        assert messages
+        llm_calls += 1
+        armed = True
+        return response
+
+    def _record(recorder: BufferingRecorder, invocation: Any) -> None:
+        recorded.append(invocation)
+        original_record(recorder, invocation)
+
+    with (
+        patch.object(harness.service, "_plugin_policy_context", return_value=(snapshot, catalog)),
+        patch.object(harness.service, "_call_llm", new=_llm),
+        patch.object(catalog, "validate_composition_state", side_effect=_validate) as validation,
+        patch("elspeth.web.composer.tool_batch.build_set_pipeline_candidate") as builder,
+        patch("elspeth.web.composer.tool_batch.finalize_tool_result") as finalizer,
+        patch.object(BufferingRecorder, "record", new=_record),
+        pytest.raises(ComposerPluginCrashError) as exc_info,
+    ):
+        await harness.service.compose(
+            "Build a reviewed inline pipeline.",
+            [],
+            state,
+            session_id=harness.session_id,
+            user_id="proposal-prevalidation-user",
+            user_message_id=harness.user_message_id,
+        )
+
+    assert llm_calls == 1
+    assert validation.call_count >= 1
+    assert builder.call_count == 0
+    assert finalizer.call_count == 0
+    assert exc_info.value.original_exc is failure
+    assert exc_info.value.__cause__ is failure
+    assert exc_info.value.partial_state is None
+    assert await harness.sessions.list_composition_proposals(UUID(harness.session_id)) == []
+    assert _count_rows(harness.engine, blobs_table) == 0
+    assert _count_rows(harness.engine, composition_states_table) == 0
+
+    assert len(recorded) == 1
+    invocation = recorded[0]
+    assert invocation.tool_call_id == "call_prior_runtime_crash"
+    assert invocation.status is ComposerToolStatus.PLUGIN_CRASH
+    assert invocation.error_class == "RuntimeError"
+    assert invocation.error_message == "RuntimeError"
+    assert invocation.version_before == state.version
+    assert invocation.version_after is None
+
+
+@pytest.mark.asyncio
+async def test_candidate_prior_validation_base_exception_is_audited_once_and_propagated_unchanged(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    state = _empty_state()
+    response = _tool_turn("call_prior_base_signal", "set_pipeline", _inline_pipeline_args(tmp_path))
+    signal = _PreproposalBaseSignal("candidate-prior shutdown-style private detail")
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(harness.service._catalog)
+    catalog = PolicyCatalogView.for_trained_operator(harness.service._catalog, snapshot)
+    original_validate = catalog.validate_composition_state
+    armed = False
+    llm_calls = 0
+    recorded: list[Any] = []
+    original_record = BufferingRecorder.record
+
+    def _validate(candidate_state: CompositionState) -> Any:
+        if armed:
+            raise signal
+        return original_validate(candidate_state)
+
+    async def _llm(messages: list[dict[str, Any]], _tools: Any) -> Any:
+        nonlocal armed, llm_calls
+        assert messages
+        llm_calls += 1
+        armed = True
+        return response
+
+    def _record(recorder: BufferingRecorder, invocation: Any) -> None:
+        recorded.append(invocation)
+        original_record(recorder, invocation)
+
+    with (
+        patch.object(harness.service, "_plugin_policy_context", return_value=(snapshot, catalog)),
+        patch.object(harness.service, "_call_llm", new=_llm),
+        patch.object(catalog, "validate_composition_state", side_effect=_validate) as validation,
+        patch("elspeth.web.composer.tool_batch.build_set_pipeline_candidate") as builder,
+        patch("elspeth.web.composer.tool_batch.finalize_tool_result") as finalizer,
+        patch.object(BufferingRecorder, "record", new=_record),
+        pytest.raises(_PreproposalBaseSignal) as exc_info,
+    ):
+        await harness.service.compose(
+            "Build a reviewed inline pipeline.",
+            [],
+            state,
+            session_id=harness.session_id,
+            user_id="proposal-prevalidation-user",
+            user_message_id=harness.user_message_id,
+        )
+
+    assert llm_calls == 1
+    assert validation.call_count >= 1
+    assert builder.call_count == 0
+    assert finalizer.call_count == 0
+    assert exc_info.value is signal
+    assert not isinstance(exc_info.value, ComposerPluginCrashError)
+    assert await harness.sessions.list_composition_proposals(UUID(harness.session_id)) == []
+    assert _count_rows(harness.engine, blobs_table) == 0
+    assert _count_rows(harness.engine, composition_states_table) == 0
+
+    assert len(recorded) == 1
+    invocation = recorded[0]
+    assert invocation.tool_call_id == "call_prior_base_signal"
+    assert invocation.status is ComposerToolStatus.PLUGIN_CRASH
+    assert invocation.error_class == "_PreproposalBaseSignal"
+    assert invocation.error_message == "_PreproposalBaseSignal"
+    assert invocation.version_before == state.version
+    assert invocation.version_after is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("arguments", "expected_proposals", "expected_error_class"),
     [

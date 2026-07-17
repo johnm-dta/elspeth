@@ -600,29 +600,29 @@ async def run_tool_batch(
 
             candidate_prior_validation: ValidationSummary | None = None
             if redacted_arguments is not None and tool_name == "set_pipeline":
-                candidate_prior_validation = (
-                    last_validation if last_validation is not None else ctx.policy_catalog.validate_composition_state(state).validation
-                )
-                candidate_context = ToolContext(
-                    catalog=ctx.policy_catalog,
-                    plugin_snapshot=ctx.plugin_snapshot,
-                    data_dir=ctx.service._data_dir,
-                    require_data_dir_for_paths=True,
-                    session_engine=ctx.service._session_engine,
-                    session_id=session_id,
-                    secret_service=ctx.service._secret_service,
-                    user_id=user_id,
-                    current_validation=candidate_prior_validation,
-                    max_blob_storage_per_session_bytes=ctx.service._settings.max_blob_storage_per_session_bytes,
-                    user_message_id=user_message_id,
-                    user_message_content=user_message_content,
-                    composer_model_identifier=ctx.service._model,
-                    composer_model_version=safe_response_model(response) or ctx.service._model,
-                    composer_provider=ctx.service._availability.provider or "unknown",
-                    composer_skill_hash=ctx.service._composer_skill_hash,
-                    tool_arguments_hash=audit.arguments_hash,
-                )
                 try:
+                    candidate_prior_validation = (
+                        last_validation if last_validation is not None else ctx.policy_catalog.validate_composition_state(state).validation
+                    )
+                    candidate_context = ToolContext(
+                        catalog=ctx.policy_catalog,
+                        plugin_snapshot=ctx.plugin_snapshot,
+                        data_dir=ctx.service._data_dir,
+                        require_data_dir_for_paths=True,
+                        session_engine=ctx.service._session_engine,
+                        session_id=session_id,
+                        secret_service=ctx.service._secret_service,
+                        user_id=user_id,
+                        current_validation=candidate_prior_validation,
+                        max_blob_storage_per_session_bytes=ctx.service._settings.max_blob_storage_per_session_bytes,
+                        user_message_id=user_message_id,
+                        user_message_content=user_message_content,
+                        composer_model_identifier=ctx.service._model,
+                        composer_model_version=safe_response_model(response) or ctx.service._model,
+                        composer_provider=ctx.service._availability.provider or "unknown",
+                        composer_skill_hash=ctx.service._composer_skill_hash,
+                        tool_arguments_hash=audit.arguments_hash,
+                    )
                     candidate = await run_sync_in_worker(
                         build_set_pipeline_candidate,
                         arguments,

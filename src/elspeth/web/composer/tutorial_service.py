@@ -57,7 +57,6 @@ from elspeth.web.sessions.protocol import (
 )
 from elspeth.web.sessions.titles import abandoned_tutorial_session_title
 
-_TUTORIAL_RUN_TIMEOUT_SECONDS = 120.0
 _TUTORIAL_RUN_POLL_SECONDS = 0.25
 # Mirrors HELLO_WORLD_PENDING_SESSION_TITLE in the frontend tutorial copy
 # (src/elspeth/web/frontend/src/components/tutorial/copy.ts). Sessions carry
@@ -262,7 +261,12 @@ async def _run_live_tutorial(
         user_id=user.user_id,
         auth_provider_type=settings.auth_provider,
     )
-    run_record = await _wait_for_terminal_run(session_service, run_id)
+    run_timeout_seconds = settings.composer_transport_idle_ceiling_seconds - settings.composer_transport_headroom_seconds
+    run_record = await _wait_for_terminal_run(
+        session_service,
+        run_id,
+        timeout_seconds=run_timeout_seconds,
+    )
     if run_record.status == "cancelled":
         # Cancellation is a deliberate user action (POST /api/tutorial/cancel),
         # not a failure: 409 with a stable machine code the frontend switches
@@ -300,8 +304,13 @@ async def _run_live_tutorial(
     return _LiveTutorialRun(response=response, run_record=run_record, projection=projection)
 
 
-async def _wait_for_terminal_run(session_service: SessionServiceProtocol, run_id: Any) -> RunRecord:
-    deadline = time.monotonic() + _TUTORIAL_RUN_TIMEOUT_SECONDS
+async def _wait_for_terminal_run(
+    session_service: SessionServiceProtocol,
+    run_id: Any,
+    *,
+    timeout_seconds: float,
+) -> RunRecord:
+    deadline = time.monotonic() + timeout_seconds
     while True:
         run_record = await session_service.get_run(run_id)
         if run_record.status in SESSION_TERMINAL_RUN_STATUS_VALUES:

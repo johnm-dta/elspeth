@@ -623,12 +623,9 @@ class QueryRepository:
         Returns:
             List of TokenParent models, ordered by token_id then ordinal
         """
-        # JOIN through tokens and rows to filter by run_id
         query = (
             select(token_parents_table)
-            .join(tokens_table, token_parents_table.c.token_id == tokens_table.c.token_id)
-            .join(rows_table, tokens_table.c.row_id == rows_table.c.row_id)
-            .where(rows_table.c.run_id == run_id)
+            .where(token_parents_table.c.run_id == run_id)
             .order_by(token_parents_table.c.token_id, token_parents_table.c.ordinal)
         )
         db_rows = self._ops.execute_fetchall(query)

@@ -1420,7 +1420,7 @@ class LandscapeSettings(BaseModel):
     )
     dump_to_jsonl_fail_on_error: bool = Field(
         default=False,
-        description="Fail the run if the JSONL journal cannot be written",
+        description="Fail database startup if committed JSONL journal backlog cannot be published",
     )
     dump_to_jsonl_include_payloads: bool = Field(
         default=False,

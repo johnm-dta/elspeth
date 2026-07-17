@@ -632,7 +632,7 @@ def test_run_lifecycle_records_per_source_contract_and_resolution() -> None:
     run = factory.run_lifecycle.begin_run(config={}, canonical_version="test")
     now = datetime.now(UTC)
 
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         for source_node_id in ("source_orders", "source_refunds"):
             conn.execute(
                 insert(nodes_table).values(
@@ -712,7 +712,7 @@ def test_data_flow_create_row_accepts_source_row_index_and_ingest_sequence() -> 
     run = factory.run_lifecycle.begin_run(config={}, canonical_version="test")
     now = datetime.now(UTC)
 
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         for source_node_id in ("source_orders", "source_refunds"):
             conn.execute(
                 insert(nodes_table).values(
@@ -2764,7 +2764,7 @@ def test_scheduler_schema_rejects_cross_run_token_reference() -> None:
     )
     now = datetime.now(UTC)
 
-    with pytest.raises(IntegrityError), db.connection() as conn:
+    with pytest.raises(IntegrityError), db.write_connection() as conn:
         conn.execute(
             token_work_items_table.insert().values(
                 **_scheduler_work_values(
@@ -2820,7 +2820,7 @@ def test_scheduler_schema_rejects_cross_run_node_reference() -> None:
     token_b = factory.data_flow.create_token(row_b.row_id)
     now = datetime.now(UTC)
 
-    with pytest.raises(IntegrityError), db.connection() as conn:
+    with pytest.raises(IntegrityError), db.write_connection() as conn:
         conn.execute(
             token_work_items_table.insert().values(
                 **_scheduler_work_values(
@@ -2864,7 +2864,7 @@ def test_scheduler_schema_allows_null_node_for_terminal_cursor() -> None:
     token = factory.data_flow.create_token(row.row_id)
     now = datetime.now(UTC)
 
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             token_work_items_table.insert().values(
                 **_scheduler_work_values(
@@ -2908,7 +2908,7 @@ def test_scheduler_schema_rejects_duplicate_null_node_terminal_identity() -> Non
     token = factory.data_flow.create_token(row.row_id)
     now = datetime.now(UTC)
 
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             token_work_items_table.insert().values(
                 **_scheduler_work_values(

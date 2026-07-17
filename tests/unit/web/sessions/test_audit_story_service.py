@@ -74,7 +74,7 @@ def test_audit_story_aggregates_multiple_row_source_hashes() -> None:
         openrouter_catalog_source="bundled",
     )
     hashes = ("a" * 64, "b" * 64)
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         for row_index, source_hash in enumerate(hashes):
             conn.execute(
                 update(rows_table)
@@ -117,7 +117,7 @@ def test_audit_story_null_llm_call_count_raises_not_recorded_error() -> None:
     an integrity violation (500)."""
     db = make_landscape_db()
     run_id = _record_run(db)
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(update(runs_table).where(runs_table.c.run_id == run_id).values(llm_call_count=None))
 
     with pytest.raises(AuditStoryNotRecordedError):
@@ -141,7 +141,7 @@ def test_audit_story_corrupt_recorded_row_still_raises_integrity_error() -> None
     genuine Tier-1 integrity violation (500), not the absent-state 404."""
     db = make_landscape_db()
     run_id = _record_run(db)
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(update(runs_table).where(runs_table.c.run_id == run_id).values(seeded_from_cache=True, cache_key=None))
 
     with pytest.raises(AuditStoryIntegrityError, match="NULL cache_key"):

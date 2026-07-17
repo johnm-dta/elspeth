@@ -552,6 +552,7 @@ class TokenOutcomeRepository:
                 )
             )
             .where(token_parents_table.c.parent_token_id == token_outcomes_table.c.token_id)
+            .where(token_parents_table.c.run_id == run_id)
         )
         query = (
             select(token_outcomes_table.c.token_id, token_outcomes_table.c.path)

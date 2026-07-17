@@ -297,7 +297,7 @@ def _create_failed_run_with_checkpoint(
 ) -> ExecutionGraph:
     active_graph = graph or _create_graph(node_id=checkpoint_node_id)
 
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, run_id, status=status, with_contract=with_contract)
         # _insert_run auto-creates "source-node" + run_sources when with_contract=True
         # (per ADR-025 §3 Decision 5). Only insert explicitly when no contract is set.
@@ -324,7 +324,7 @@ def test_can_resume_returns_false_for_missing_run(recovery_manager: RecoveryMana
 
 
 def test_can_resume_rejects_completed_run(db: LandscapeDB, recovery_manager: RecoveryManager) -> None:
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, "run-completed", status=RunStatus.COMPLETED)
 
     check = recovery_manager.can_resume("run-completed", _create_graph())
@@ -342,7 +342,7 @@ def test_can_resume_rejects_running_run_with_live_seat(db: LandscapeDB, recovery
     from elspeth.contracts.coordination import mint_worker_id
     from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
 
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, "run-running", status=RunStatus.RUNNING)
     # Register a live leader seat so the guard fires the refusal.
     leader_id = mint_worker_id("run-running")
@@ -391,7 +391,7 @@ def test_can_resume_rejects_corrupt_stored_run_status(
 
 
 def test_can_resume_rejects_failed_run_without_checkpoint(db: LandscapeDB, recovery_manager: RecoveryManager) -> None:
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, "run-no-checkpoint", status=RunStatus.FAILED)
 
     check = recovery_manager.can_resume("run-no-checkpoint", _create_graph())
@@ -407,7 +407,7 @@ def test_can_resume_reason_for_missing_baseline_is_journal_flavoured(db: Landsca
     refuse reason must not present the checkpoint as the recovery store —
     if it mentions checkpointing at all, it is in the baseline framing.
     """
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, "run-no-baseline", status=RunStatus.FAILED)
 
     check = recovery_manager.can_resume("run-no-baseline", _create_graph())
@@ -419,7 +419,7 @@ def test_can_resume_reason_for_missing_baseline_is_journal_flavoured(db: Landsca
 def test_can_resume_returns_reason_when_checkpoint_format_is_incompatible(
     db: LandscapeDB, recovery_manager: RecoveryManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, "run-incompatible", status=RunStatus.FAILED)
 
     def _raise_incompatible(_run_id: str) -> None:
@@ -485,7 +485,7 @@ def test_get_resume_point_returns_none_if_checkpoint_missing_after_can_resume(
     recovery_manager: RecoveryManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, "run-race", status=RunStatus.FAILED, with_contract=True)
 
     monkeypatch.setattr(recovery_manager, "can_resume", lambda _run_id, _graph: type("Check", (), {"can_resume": True})())
@@ -570,7 +570,7 @@ def test_get_unprocessed_rows_orders_by_ingest_sequence(
     """Resume replay order is global ingest order, not source-local row_index."""
     run_id = "run-ingest-order"
     graph = _create_graph(node_id="checkpoint-node")
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_node(conn, run_id, "checkpoint-node")
         _insert_row(conn, run_id, "row-a", row_index=0, source_data_ref=None)
@@ -605,7 +605,7 @@ def test_get_unprocessed_rows_uses_terminal_path_delegation_set(
     assert expected_delegation_paths == _DELEGATION_PATHS
     run_id = f"run-resume-{delegation_path.value}"
     graph = _create_graph(node_id="checkpoint-node")
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_node(conn, run_id, "checkpoint-node")
         _insert_row(conn, run_id, "row-resume-delegation", row_index=0, source_data_ref=None)
@@ -638,7 +638,7 @@ def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
     """F1: buffered = journal BLOCKED rows with a barrier_key, not checkpoint blobs."""
     run_id = "run-unprocessed-complex"
     graph = _create_graph(node_id="checkpoint-node")
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_node(conn, run_id, "checkpoint-node")
 
@@ -691,7 +691,7 @@ def test_get_resume_workset_shares_row_and_token_recovery_queries(
     """The resume path should compute row and token continuation work together."""
     run_id = "run-resume-workset"
     graph = _create_graph(node_id="checkpoint-node")
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_node(conn, run_id, "checkpoint-node")
 
@@ -749,7 +749,7 @@ def test_get_unprocessed_rows_chunks_buffered_token_query(
 
     run_id = "run-chunk-buffered"
     graph = _create_graph(node_id="checkpoint-node")
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_node(conn, run_id, "checkpoint-node")
 
@@ -788,7 +788,7 @@ def test_get_unprocessed_rows_excludes_coalesce_buffered_rows(
     """Rows whose only incomplete tokens are held at a coalesce barrier are excluded."""
     run_id = "run-coalesce-buffered"
     graph = _create_graph(node_id="checkpoint-node")
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_node(conn, run_id, "checkpoint-node")
 
@@ -822,7 +822,7 @@ def test_get_unprocessed_rows_combines_aggregation_and_coalesce_buffered(
     """BLOCKED barrier holds for aggregation nodes and coalesce names both exclude."""
     run_id = "run-combined-buffered"
     graph = _create_graph(node_id="checkpoint-node")
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_node(conn, run_id, "checkpoint-node")
 
@@ -860,7 +860,7 @@ def test_get_unprocessed_rows_coalesce_multi_branch_collects_all_tokens(
     """All branch tokens held at the same coalesce barrier are recognized as buffered."""
     run_id = "run-coalesce-multi"
     graph = _create_graph(node_id="checkpoint-node")
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_node(conn, run_id, "checkpoint-node")
 
@@ -897,7 +897,7 @@ def test_buffered_exclusion_reads_journal_not_blob(
     """
     run_id = "run-journal-exclusion"
     graph = _create_graph(node_id="checkpoint-node")
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_node(conn, run_id, "checkpoint-node")
         _insert_row(conn, run_id, "r1", row_index=0, source_data_ref=None)
@@ -928,7 +928,7 @@ def test_queue_held_token_stays_in_redrive_work_set(
     """
     run_id = "run-queue-hold"
     graph = _create_graph(node_id="checkpoint-node")
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_node(conn, run_id, "checkpoint-node")
         _insert_row(conn, run_id, "row-queued", row_index=0, source_data_ref=None)
@@ -961,7 +961,7 @@ def test_post_checkpoint_buffered_token_is_restored_not_redriven(
     """
     run_id = "run-post-checkpoint-buffer"
     graph = _create_graph(node_id="checkpoint-node")
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_node(conn, run_id, "checkpoint-node")
         _insert_row(conn, run_id, "row-late-buffer", row_index=0, source_data_ref=None)
@@ -979,7 +979,7 @@ def test_post_checkpoint_buffered_token_is_restored_not_redriven(
         graph=graph,
     )
 
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_blocked_work_item(conn, run_id, "tok-late-buffer", "row-late-buffer", barrier_key="agg-node")
 
     assert recovery_manager.get_unprocessed_rows(run_id) == []
@@ -994,7 +994,7 @@ def test_get_incomplete_tokens_by_row_excludes_journal_blocked_tokens(
     """The mid-DAG continuation index must not re-drive barrier-held tokens."""
     run_id = "run-incomplete-journal"
     graph = _create_graph(node_id="checkpoint-node")
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_node(conn, run_id, "checkpoint-node")
         _insert_row(conn, run_id, "row-mixed", row_index=0, source_data_ref=None)
@@ -1026,7 +1026,7 @@ def test_count_blocked_barrier_items_counts_only_barrier_holds(
     preflight (the inline CLI query was absorbed here in F1 Task 3.2).
     """
     run_id = "run-blocked-count"
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_row(conn, run_id, "row-1", row_index=0, source_data_ref=None)
         _insert_token(conn, run_id, "tok-barrier-1", "row-1")
@@ -1073,7 +1073,7 @@ def test_recovery_barrier_resume_boundary_supports_read_only_handles(tmp_path: P
     writable = LandscapeDB.from_url(f"sqlite:///{db_path}")
     try:
         run_id = "run-read-only-boundary"
-        with writable.connection() as conn:
+        with writable.write_connection() as conn:
             _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
             _insert_row(conn, run_id, "row-1", row_index=0, source_data_ref=None)
             _insert_token(conn, run_id, "tok-barrier", "row-1")
@@ -1128,7 +1128,7 @@ def test_get_unprocessed_row_data_errors_on_missing_source_data_ref(
     payload_store: PayloadStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, "run-meta", status=RunStatus.FAILED)
         _insert_node(conn, "run-meta", "source-node", node_type=NodeType.SOURCE)
         _insert_row(conn, "run-meta", "row-1", row_index=1, source_data_ref=None)
@@ -1145,7 +1145,7 @@ def test_get_unprocessed_row_data_errors_when_payload_purged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     missing_ref = "f" * 64
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, "run-purged", status=RunStatus.FAILED)
         _insert_node(conn, "run-purged", "source-node", node_type=NodeType.SOURCE)
         _insert_row(conn, "run-purged", "row-1", row_index=1, source_data_ref=missing_ref)
@@ -1162,7 +1162,7 @@ def test_get_unprocessed_row_data_errors_when_schema_discards_all_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload_ref = payload_store.store(b'{"id": 123}')
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, "run-empty-schema", status=RunStatus.FAILED)
         _insert_node(conn, "run-empty-schema", "source-node", node_type=NodeType.SOURCE)
         _insert_row(conn, "run-empty-schema", "row-1", row_index=1, source_data_ref=payload_ref)
@@ -1180,7 +1180,7 @@ def test_get_unprocessed_row_data_chunked_lookup_and_type_restoration(
 ) -> None:
     payload_ref_a = payload_store.store(b'{"id": "1"}')
     payload_ref_b = payload_store.store(b'{"id": "2"}')
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, "run-chunked", status=RunStatus.FAILED)
         _insert_node(conn, "run-chunked", "source-node", node_type=NodeType.SOURCE)
         _insert_row(conn, "run-chunked", "row-a", row_index=2, source_data_ref=payload_ref_a)
@@ -1202,7 +1202,7 @@ def test_unprocessed_row_data_paths_share_payload_restoration_helper(
     payload_store: PayloadStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, "run-shared-restore", status=RunStatus.FAILED)
         _insert_node(conn, "run-shared-restore", "source-node", node_type=NodeType.SOURCE)
         _insert_row(conn, "run-shared-restore", "row-1", row_index=3, source_data_ref="payload-ref")
@@ -1244,7 +1244,7 @@ def test_verify_contract_integrity_returns_contract(
     db: LandscapeDB,
     recovery_manager: RecoveryManager,
 ) -> None:
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, "run-contract-ok", status=RunStatus.FAILED, with_contract=True)
 
     contract = recovery_manager.verify_contract_integrity("run-contract-ok")
@@ -1264,7 +1264,7 @@ def test_verify_contract_integrity_raises_empty_resume_state_when_no_sources_rec
     bubble an unhandled traceback for what should be a clean exit-1
     "this run is not resumable" message.
     """
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, "run-contract-missing", status=RunStatus.FAILED, with_contract=False)
 
     with pytest.raises(EmptyResumeStateError) as exc_info:
@@ -1282,7 +1282,7 @@ def test_verify_contract_integrity_raises_on_hash_mismatch(
 ) -> None:
     valid_contract_json, _ = _create_contract()
     tampered = valid_contract_json.replace('"version_hash":"', '"version_hash":"deadbeef')
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(
             conn,
             "run-contract-bad-hash",
@@ -1305,7 +1305,7 @@ def test_verify_contract_integrity_raises_on_malformed_json(
     verify_contract_integrity must catch this and wrap it as CheckpointCorruptionError
     for consistent corruption handling.
     """
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(
             conn,
             "run-contract-malformed",
@@ -1326,7 +1326,7 @@ def test_verify_contract_integrity_raises_on_missing_keys(
     If the stored JSON is valid but missing 'mode' or 'fields', the KeyError
     from ContractAuditRecord.from_json must be wrapped as CheckpointCorruptionError.
     """
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(
             conn,
             "run-contract-missing-keys",
@@ -1346,7 +1346,7 @@ def test_get_run_private_helper_returns_row_for_existing_run(
     db: LandscapeDB,
     recovery_manager: RecoveryManager,
 ) -> None:
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, "run-present", status=RunStatus.FAILED)
 
     row = recovery_manager._get_run("run-present")
@@ -1358,7 +1358,7 @@ def test_get_unprocessed_rows_returns_empty_when_checkpoint_manager_returns_none
     db: LandscapeDB,
     recovery_manager: RecoveryManager,
 ) -> None:
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, "run-without-cp", status=RunStatus.FAILED)
 
     assert recovery_manager.get_unprocessed_rows("run-without-cp") == []
@@ -1371,7 +1371,7 @@ def test_get_unprocessed_rows_handles_delegation_token_with_completed_leaf(
 ) -> None:
     run_id = "run-fork-complete"
     graph = _create_graph(node_id="checkpoint-node")
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_node(conn, run_id, "checkpoint-node")
         _insert_row(conn, run_id, "row-forked-complete", row_index=1, source_data_ref=None)
@@ -1405,7 +1405,7 @@ def test_get_unprocessed_row_data_corrupt_utf8_raises_audit_integrity(
     """
     corrupt_bytes = b"\xff\xfe invalid"
     payload_ref = payload_store.store(corrupt_bytes)
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, "run-corrupt-utf8", status=RunStatus.FAILED)
         _insert_node(conn, "run-corrupt-utf8", "source-node", node_type=NodeType.SOURCE)
         _insert_row(conn, "run-corrupt-utf8", "row-1", row_index=0, source_data_ref=payload_ref)
@@ -1429,7 +1429,7 @@ def test_get_unprocessed_row_data_non_dict_json_raises_audit_integrity(
     """
     non_dict_bytes = b"[1, 2, 3]"
     payload_ref = payload_store.store(non_dict_bytes)
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, "run-non-dict", status=RunStatus.FAILED)
         _insert_node(conn, "run-non-dict", "source-node", node_type=NodeType.SOURCE)
         _insert_row(conn, "run-non-dict", "row-1", row_index=0, source_data_ref=payload_ref)
@@ -1448,7 +1448,7 @@ def test_get_unprocessed_row_data_rejects_non_finite_json_constant(
     constant: str,
 ) -> None:
     payload_ref = payload_store.store(f'{{"id": {constant}}}'.encode())
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, f"run-non-finite-{constant}", status=RunStatus.FAILED)
         _insert_node(conn, f"run-non-finite-{constant}", "source-node", node_type=NodeType.SOURCE)
         _insert_row(conn, f"run-non-finite-{constant}", "row-1", row_index=0, source_data_ref=payload_ref)
@@ -1471,7 +1471,7 @@ def test_get_unprocessed_row_data_by_source_rejects_non_finite_json_constant(
     constant: str,
 ) -> None:
     payload_ref = payload_store.store(f'{{"id": {constant}}}'.encode())
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, f"run-by-source-non-finite-{constant}", status=RunStatus.FAILED)
         _insert_node(conn, f"run-by-source-non-finite-{constant}", "source-node", node_type=NodeType.SOURCE)
         _insert_row(conn, f"run-by-source-non-finite-{constant}", "row-1", row_index=0, source_data_ref=payload_ref)
@@ -1517,7 +1517,7 @@ def test_get_resume_point_revalidates_checkpoint_loaded_after_can_resume(
 ) -> None:
     run_id = "run-latest-checkpoint-revalidate"
     graph = _create_failed_run_with_checkpoint(db, checkpoint_manager, run_id)
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             checkpoints_table.insert().values(
                 checkpoint_id="cp-later-incompatible",
@@ -1549,7 +1549,7 @@ def test_get_unprocessed_rows_excludes_diverted_rows(
     """
     run_id = "run-diverted-terminal"
     graph = _create_graph(node_id="checkpoint-node")
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
         _insert_node(conn, run_id, "checkpoint-node")
 

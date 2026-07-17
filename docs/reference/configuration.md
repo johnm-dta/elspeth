@@ -1022,6 +1022,12 @@ landscape:
   dump_to_jsonl_include_payloads: false
 ```
 
+Committed journal batches are bound to the canonical sidecar path that
+created them. Startup recovery only drains that path's backlog; changing a
+worker's journal path does not move or acknowledge batches owned by the old
+path. Reopen the database with the original path to recover that backlog.
+Concurrent drains for one path are serialized across processes.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | Enable audit trail recording |
@@ -1031,27 +1037,32 @@ landscape:
 | `export` | object | (disabled) | Post-run audit export configuration |
 | `dump_to_jsonl` | bool | `false` | Write append-only JSONL change journal |
 | `dump_to_jsonl_path` | string | (derived from url) | Path for JSONL journal file |
-| `dump_to_jsonl_fail_on_error` | bool | `false` | Fail the run if journal write fails |
+| `dump_to_jsonl_fail_on_error` | bool | `false` | Fail database startup if a committed outbox batch cannot be published during recovery |
 | `dump_to_jsonl_include_payloads` | bool | `false` | Include request/response bodies in journal |
 | `dump_to_jsonl_payload_base_path` | string | (from payload_store) | Payload store path for inlining |
 
-### Landscape schema epoch 28
+### Landscape schema epoch 29
 
 Landscape epoch 26 added durable sink-effect streams, effects, ordered members,
 attempts, and sealed audit-export snapshots. Epoch 27 adds durable coalesce
 effects and normalized parent evidence so materialization and completion can be
 replayed safely after a crash. Epoch 28 moves primary-effect provenance onto
 each failsink effect member so recovered batches spanning more than one primary
-effect remain exactly attributable. See the
+effect remain exactly attributable. Epoch 29 adds run-scoped token ancestry and
+validation-error links, canonical node output-contract hashes, durable batch
+expansion claims, and a transaction-owned sidecar-journal outbox. Each outbox
+batch records its
+canonical sidecar owner so another worker or path cannot publish or acknowledge
+it. See the
 [sink-effect recovery runbook](../runbooks/sink-effect-recovery.md).
 
 ELSPETH is pre-1.0. It does not transform an older Landscape schema into epoch
-28, either automatically at startup or through an operator migration command.
+29, either automatically at startup or through an operator migration command.
 Stop and uninstall the old deployment, archive or export evidence when policy
 requires it, delete/recreate the Landscape database, then reinstall and
 initialize this ELSPETH version. PostgreSQL schema-owner and runtime/DML roles
 remain separate; recreation is an operator action. Code that understands only
-an older epoch must not be rolled back over an epoch-28 database.
+an older epoch must not be rolled back over an epoch-29 database.
 
 Data-preserving, version-to-version schema migrations become a first-class
 compatibility obligation at 1.0. They are intentionally not a pre-1.0 promise.
@@ -1190,7 +1201,7 @@ landscape:
   # Include LLM/HTTP request and response bodies
   dump_to_jsonl_include_payloads: true
 
-  # Fail the pipeline if journal writes fail (strict mode)
+  # Fail startup if committed journal backlog cannot be published (strict mode)
   dump_to_jsonl_fail_on_error: false
 ```
 
@@ -1203,9 +1214,20 @@ landscape:
 | Production (minimal I/O) | `dump_to_jsonl: false` (default) |
 
 **Notes:**
-- Journal is append-only (never modified after write)
-- Each line is a self-contained JSON record
-- Includes all database commits: rows, transforms, calls, outcomes
+- Complete published records are append-only. Recovery may truncate only a
+  recognized torn batch at EOF before replaying that batch from the outbox;
+  unrelated or mid-file corruption fails closed
+- Each line is a self-contained JSON record with durable `journal_batch_id`,
+  `journal_batch_ordinal`, and `journal_batch_size` fields
+- A transaction first stores its batch in `sidecar_journal_outbox`; only a
+  successful database commit makes it publishable
+- Publication fsyncs the sidecar before acknowledging the outbox row; startup
+  drains committed backlog and batch IDs prevent duplicate publication after
+  an append/ack crash window
+- Failed database commits publish no records. A live sidecar I/O failure does
+  not reverse an already successful database commit: the committed outbox row
+  remains recoverable. With `fail_on_error: true`, an unrecoverable backlog
+  fails the next database open instead of being silently skipped
 - With `include_payloads: true`, LLM prompts and responses are embedded
 
 ### PostgreSQL Example

@@ -61,7 +61,7 @@ def test_discard_summary_carries_stage_attribution_for_validation_and_transform_
     )
     token = setup.data_flow.create_token(row.row_id)
     now = datetime.now(tz=UTC)
-    with setup.db.connection() as conn:
+    with setup.db.write_connection() as conn:
         conn.execute(
             validation_errors_table.insert(),
             [

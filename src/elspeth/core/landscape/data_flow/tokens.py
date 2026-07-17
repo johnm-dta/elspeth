@@ -6,8 +6,8 @@ writes. Fork and expand record the parent's TRANSIENT outcome inside the same
 transaction as the child inserts — that atomicity is why those
 ``token_outcomes`` writes live here rather than in the outcome component.
 
-Atomic transactions in fork/coalesce/expand preserved via direct
-LandscapeDB.connection() usage.
+Atomic transactions in fork/coalesce/expand use the connection provider's
+explicit write-transaction boundary.
 """
 
 from __future__ import annotations
@@ -15,14 +15,13 @@ from __future__ import annotations
 import json
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from hashlib import sha256
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.engine import Connection, RowMapping
 
-from elspeth.contracts import Row, Token
+from elspeth.contracts import CoalesceParentCompletion, Row, Token
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS, CoordinationToken
 from elspeth.contracts.enums import NodeStateStatus, TerminalOutcome, TerminalPath
@@ -41,6 +40,8 @@ from elspeth.core.landscape.data_flow.serialization import (
 from elspeth.core.landscape.ports import LandscapeConnectionProvider
 from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
 from elspeth.core.landscape.schema import (
+    batch_members_table,
+    batches_table,
     coalesce_effect_members_table,
     coalesce_effects_table,
     node_states_table,
@@ -51,29 +52,18 @@ from elspeth.core.landscape.schema import (
 )
 
 if TYPE_CHECKING:
-    from elspeth.contracts.node_state_context import NodeStateContext
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.core.landscape.data_flow.outcomes import TokenOutcomeRepository
     from elspeth.core.landscape.execution.node_states import NodeStateRepository
 
-__all__ = ["CoalesceParentCompletion", "RowTokenRepository"]
-
-
-@dataclass(frozen=True, slots=True)
-class CoalesceParentCompletion:
-    """One parent state's terminal evidence for a durable coalesce effect."""
-
-    parent_ref: TokenRef
-    state_id: str
-    duration_ms: float
-    context_after: NodeStateContext | None
+__all__ = ["RowTokenRepository"]
 
 
 class RowTokenRepository:
     """Source row and token lifecycle writes: create, fork, coalesce, expand.
 
-    Atomic transactions in fork/coalesce/expand preserved via direct
-    LandscapeDB.connection() usage.
+    Atomic transactions in fork/coalesce/expand use the connection provider's
+    explicit write-transaction boundary.
     """
 
     def __init__(
@@ -486,6 +476,7 @@ class RowTokenRepository:
                     token_parents_table.insert().values(
                         token_id=child_id,
                         parent_token_id=parent_ref.token_id,
+                        run_id=parent_ref.run_id,
                         ordinal=ordinal,
                     )
                 )
@@ -699,6 +690,7 @@ class RowTokenRepository:
                     token_parents_table.insert().values(
                         token_id=token_id,
                         parent_token_id=ref.token_id,
+                        run_id=run_id,
                         ordinal=ordinal,
                     )
                 )
@@ -947,6 +939,7 @@ class RowTokenRepository:
             conn.execute(
                 select(token_parents_table.c.parent_token_id)
                 .where(token_parents_table.c.token_id == token_row["token_id"])
+                .where(token_parents_table.c.run_id == token_row["run_id"])
                 .order_by(token_parents_table.c.ordinal)
             )
             .scalars()
@@ -1004,12 +997,13 @@ class RowTokenRepository:
         *,
         output_contract: SchemaContract,
         step_in_pipeline: int | None = None,
-        record_parent_outcome: bool = True,
+        parent_path: TerminalPath = TerminalPath.EXPAND_PARENT,
+        parent_batch_id: str | None = None,
     ) -> tuple[list[Token], str]:
         """Expand a token into multiple child tokens (deaggregation).
 
-        ATOMIC: Creates children AND optionally records parent EXPANDED outcome
-        in single transaction.
+        ATOMIC: Creates children and records the parent's explicit terminal
+        disposition in one transaction.
 
         Validates that parent token belongs to the specified row_id and run_id
         before any writes. Cross-run/cross-row contamination crashes immediately
@@ -1038,8 +1032,10 @@ class RowTokenRepository:
                 TransformResult.contract, locked before expansion). Serialised into each
                 child's envelope so recovery can restore a faithful PipelineRow.
             step_in_pipeline: Step where expansion occurs (optional)
-            record_parent_outcome: If True (default), record EXPANDED outcome for parent.
-                Set to False for batch aggregation where parent gets CONSUMED_IN_BATCH.
+            parent_path: Parent terminal path. Normal deaggregation uses
+                EXPAND_PARENT; batch aggregation uses BATCH_CONSUMED.
+            parent_batch_id: Required when parent_path is BATCH_CONSUMED and
+                forbidden for EXPAND_PARENT.
 
         Returns:
             Tuple of (child Token list, expand_group_id)
@@ -1052,6 +1048,15 @@ class RowTokenRepository:
         count = len(child_payloads)
         if count < 1:
             raise ValueError("expand_token requires at least 1 child payload")
+
+        if parent_path == TerminalPath.EXPAND_PARENT:
+            if parent_batch_id is not None:
+                raise ValueError("expand_token EXPAND_PARENT forbids parent_batch_id")
+        elif parent_path == TerminalPath.BATCH_CONSUMED:
+            if parent_batch_id is None:
+                raise ValueError("expand_token BATCH_CONSUMED requires parent_batch_id")
+        else:
+            raise ValueError(f"expand_token parent_path must be EXPAND_PARENT or BATCH_CONSUMED, got {parent_path.value!r}")
 
         if self._payload_store is None:
             raise AuditIntegrityError(
@@ -1082,7 +1087,63 @@ class RowTokenRepository:
             for payload in child_payloads
         ]
 
+        if self._outcomes is None:
+            raise RuntimeError("expand_token requires the token-outcome repository capability")
+
         with self._db.write_connection() as conn:
+            # Serialize expansion contenders on PostgreSQL before child inserts;
+            # SQLite's write_connection() already holds BEGIN IMMEDIATE.  The
+            # completed-outcome check is the durable claim shared by normal and
+            # batch expansion paths.
+            self._outcomes.lock_token_outcome_dependencies((parent_ref,), conn=conn)
+            existing_terminal = conn.execute(
+                select(token_outcomes_table.c.outcome_id, token_outcomes_table.c.path)
+                .where(token_outcomes_table.c.token_id == parent_ref.token_id)
+                .where(token_outcomes_table.c.run_id == parent_ref.run_id)
+                .where(token_outcomes_table.c.completed == 1)
+            ).one_or_none()
+            if existing_terminal is not None:
+                raise AuditIntegrityError(
+                    f"expand_token: parent token {parent_ref.token_id!r} already has a terminal outcome ({existing_terminal.path!r})"
+                )
+
+            if parent_path == TerminalPath.BATCH_CONSUMED:
+                assert parent_batch_id is not None  # validated above
+                membership = conn.execute(
+                    select(batch_members_table.c.token_id)
+                    .where(batch_members_table.c.batch_id == parent_batch_id)
+                    .where(batch_members_table.c.run_id == parent_ref.run_id)
+                    .where(batch_members_table.c.token_id == parent_ref.token_id)
+                ).one_or_none()
+                if membership is None:
+                    raise AuditIntegrityError(
+                        f"expand_token: parent token {parent_ref.token_id!r} is not a member of batch {parent_batch_id!r} "
+                        f"in run {parent_ref.run_id!r}"
+                    )
+
+                claim = conn.execute(
+                    batches_table.update()
+                    .where(batches_table.c.batch_id == parent_batch_id)
+                    .where(batches_table.c.run_id == parent_ref.run_id)
+                    .where(batches_table.c.expansion_group_id.is_(None))
+                    .values(expansion_group_id=expand_group_id)
+                )
+                if claim.rowcount != 1:
+                    existing_claim = conn.execute(
+                        select(batches_table.c.run_id, batches_table.c.expansion_group_id).where(
+                            batches_table.c.batch_id == parent_batch_id
+                        )
+                    ).one_or_none()
+                    if existing_claim is None:
+                        raise AuditIntegrityError(f"expand_token: batch {parent_batch_id!r} does not exist")
+                    if existing_claim.run_id != parent_ref.run_id:
+                        raise AuditIntegrityError(
+                            f"expand_token: batch {parent_batch_id!r} belongs to run {existing_claim.run_id!r}, not {parent_ref.run_id!r}"
+                        )
+                    raise AuditIntegrityError(
+                        f"expand_token: batch {parent_batch_id!r} already claimed an expansion ({existing_claim.expansion_group_id!r})"
+                    )
+
             for ordinal, payload_ref in enumerate(child_data_refs):
                 child_id = generate_id()
                 timestamp = now()
@@ -1109,6 +1170,7 @@ class RowTokenRepository:
                     token_parents_table.insert().values(
                         token_id=child_id,
                         parent_token_id=parent_ref.token_id,
+                        run_id=parent_ref.run_id,
                         ordinal=ordinal,
                     )
                 )
@@ -1129,13 +1191,9 @@ class RowTokenRepository:
                     )
                 )
 
-            # Optionally record parent EXPANDED outcome in SAME transaction (atomic)
-            # This eliminates the crash window where children exist but parent
-            # outcome is not yet recorded.
-            #
-            # Set record_parent_outcome=False for batch aggregation where the
-            # parent token gets CONSUMED_IN_BATCH instead of EXPANDED.
-            if record_parent_outcome:
+            # Record the explicit parent disposition in the SAME transaction.
+            # No successful expansion path may leave a reprocessable parent.
+            if parent_path == TerminalPath.EXPAND_PARENT:
                 outcome_id = f"out_{generate_id()[:12]}"
                 result = conn.execute(
                     token_outcomes_table.insert().values(
@@ -1155,5 +1213,14 @@ class RowTokenRepository:
                     raise AuditIntegrityError(
                         f"expand_token: EXPANDED outcome INSERT affected zero rows (parent={parent_ref.token_id}, outcome_id={outcome_id})"
                     )
+            else:
+                self._outcomes.record_token_outcome(
+                    ref=parent_ref,
+                    outcome=TerminalOutcome.TRANSIENT,
+                    path=TerminalPath.BATCH_CONSUMED,
+                    batch_id=parent_batch_id,
+                    conn=conn,
+                    dependencies_prelocked=True,
+                )
 
         return children, expand_group_id

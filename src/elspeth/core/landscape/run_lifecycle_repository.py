@@ -1368,8 +1368,7 @@ class RunLifecycleRepository:
         Called by orchestrator after run is created. Pre-flight results were
         captured during bootstrap_and_run() before the run existed.
 
-        All inserts are batched in a single connection (db.connection() is a
-        transaction context manager).
+        All inserts are batched in one explicit write transaction.
 
         Args:
             run_id: The run ID to associate results with

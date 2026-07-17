@@ -56,7 +56,7 @@ class TestTransformErrorRecording:
 
         from elspeth.core.landscape.schema import tokens_table
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 tokens_table.insert().values(
                     token_id=token_id,

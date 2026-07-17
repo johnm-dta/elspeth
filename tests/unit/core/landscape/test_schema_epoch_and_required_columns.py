@@ -1,4 +1,4 @@
-"""Schema epoch + required-shape + provenance-write guards (epoch 28)."""
+"""Schema epoch + required-shape + provenance-write guards (epoch 29)."""
 
 from __future__ import annotations
 
@@ -9,23 +9,54 @@ from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.schema import CreateIndex
 
 from elspeth.contracts.scheduler import SchedulerEventType
-from elspeth.core.landscape.database import _REQUIRED_COLUMNS, _REQUIRED_INDEXES, LandscapeDB
+from elspeth.core.landscape.database import _REQUIRED_COLUMNS, _REQUIRED_COMPOSITE_FOREIGN_KEYS, _REQUIRED_INDEXES, LandscapeDB
 from elspeth.core.landscape.schema import (
     SQLITE_SCHEMA_EPOCH,
     artifacts_table,
+    batches_table,
     checkpoints_table,
     metadata,
     node_states_table,
+    nodes_table,
     routing_events_table,
     run_web_plugin_policy_table,
+    token_parents_table,
     token_work_items_table,
     tokens_table,
 )
 from tests.fixtures.landscape import make_recorder_with_run
 
 
-def test_epoch_is_twenty_eight() -> None:
-    assert SQLITE_SCHEMA_EPOCH == 28
+def test_epoch_is_twenty_nine() -> None:
+    assert SQLITE_SCHEMA_EPOCH == 29
+
+
+def test_epoch_29_requires_node_output_contract_hash() -> None:
+    assert "output_contract_hash" in nodes_table.c
+    assert ("nodes", "output_contract_hash") in set(_REQUIRED_COLUMNS)
+
+
+def test_epoch_29_requires_batch_expansion_effect_claim() -> None:
+    assert "expansion_group_id" in batches_table.c
+    assert ("batches", "expansion_group_id") in set(_REQUIRED_COLUMNS)
+
+
+def test_epoch_29_run_scopes_token_ancestry() -> None:
+    assert "run_id" in token_parents_table.c
+    assert ("token_parents", "run_id") in set(_REQUIRED_COLUMNS)
+    required_foreign_keys = set(_REQUIRED_COMPOSITE_FOREIGN_KEYS)
+    assert (
+        "token_parents",
+        ("token_id", "run_id"),
+        "tokens",
+        ("token_id", "run_id"),
+    ) in required_foreign_keys
+    assert (
+        "token_parents",
+        ("parent_token_id", "run_id"),
+        "tokens",
+        ("token_id", "run_id"),
+    ) in required_foreign_keys
 
 
 def test_epoch_25_artifact_idempotency_index_is_partial_and_cross_dialect() -> None:

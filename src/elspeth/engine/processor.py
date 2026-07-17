@@ -1497,7 +1497,8 @@ class RowProcessor:
                 output_contract=output_contract,
                 node_id=fctx.node_id,
                 run_id=self._run_id,
-                record_parent_outcome=False,
+                parent_path=TerminalPath.BATCH_CONSUMED,
+                parent_batch_id=fctx.batch_id,
             )
 
             # Record terminal outcomes for ALL buffered tokens AFTER expand_token
@@ -1515,14 +1516,16 @@ class RowProcessor:
                     batch_id = fctx.batch_id
                     outcome = TerminalOutcome.TRANSIENT
                     path = TerminalPath.BATCH_CONSUMED
+                parent_outcome_was_recorded_atomically = token.token_id == expand_parent_token.token_id and i not in quarantined_index_set
                 try:
-                    self._data_flow.record_token_outcome(
-                        ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                        outcome=outcome,
-                        path=path,
-                        error_hash=error_hash,
-                        batch_id=batch_id,
-                    )
+                    if not parent_outcome_was_recorded_atomically:
+                        self._data_flow.record_token_outcome(
+                            ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
+                            outcome=outcome,
+                            path=path,
+                            error_hash=error_hash,
+                            batch_id=batch_id,
+                        )
                 except LandscapeRecordError as record_failure:
                     raise AuditIntegrityError(
                         f"Failed to record batch parent terminal outcome for token {token.token_id!r} "

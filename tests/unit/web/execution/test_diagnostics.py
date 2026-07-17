@@ -264,7 +264,7 @@ def test_diagnostics_rejects_corrupt_landscape_types(tmp_path) -> None:
         web_run_id = "web-run-1"
         _seed_diagnostics_run(db, tmp_path, web_run_id=web_run_id)
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(text("UPDATE node_states SET step_index = 1.5 WHERE state_id = 'state-token-0'"))
 
         with pytest.raises(ValidationError, match="step_index"):

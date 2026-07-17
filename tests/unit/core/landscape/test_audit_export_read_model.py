@@ -6,12 +6,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, select
 
 from elspeth.contracts import NodeType
+from elspeth.contracts.audit_export import AUDIT_EXPORT_SERIALIZATION_VERSION, AuditExportDerivationConfig
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.export_read_model import ConnectionBoundExportReadModel, open_export_read_transaction
+from elspeth.core.landscape.exporter import LandscapeExporter
 from elspeth.core.landscape.schema import (
     batches_table,
     operations_table,
@@ -107,6 +109,95 @@ def test_sqlite_open_read_transaction_excludes_later_committed_rows(tmp_path: Pa
                     )
                 )
             assert model.get_run_attribution("completed") is None
+    finally:
+        db.close()
+
+
+def test_public_signed_export_uses_one_snapshot_for_terminal_witness_and_records(tmp_path: Path) -> None:
+    db = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'public-export.db'}")
+    try:
+        _insert_run(db, run_id="completed", status="completed", completed_at=COMPLETED_AT)
+        with db.engine.begin() as writer:
+            writer.execute(runs_table.update().where(runs_table.c.run_id == "completed").values(settings_json='{"version": 1}'))
+
+        records = LandscapeExporter(
+            db,
+            signing_key=b"snapshot-signing-key",
+            signer_key_id="snapshot-signer-v1",
+        ).export_run("completed", sign=True)
+        first = next(records)
+        assert first["record_type"] == "run"
+        assert first["settings"] == {"version": 1}
+
+        with db.engine.begin() as writer:
+            writer.execute(runs_table.update().where(runs_table.c.run_id == "completed").values(settings_json='{"version": 2}'))
+            writer.execute(
+                secret_resolutions_table.insert().values(
+                    resolution_id="later-secret",
+                    run_id="completed",
+                    timestamp=1234.5,
+                    env_var_name="LATER_SECRET",
+                    source="env",
+                    fingerprint="f" * 64,
+                )
+            )
+
+        remaining = list(records)
+        assert not [record for record in remaining if record["record_type"] == "secret_resolution"]
+        with db.engine.connect() as connection:
+            assert connection.scalar(select(runs_table.c.settings_json).where(runs_table.c.run_id == "completed")) == '{"version": 2}'
+            assert connection.scalar(select(secret_resolutions_table.c.resolution_id)) == "later-secret"
+    finally:
+        db.close()
+
+
+def test_public_unsigned_record_iterator_uses_one_snapshot(tmp_path: Path) -> None:
+    db = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'public-unsigned-records.db'}")
+    try:
+        _insert_run(db, run_id="completed", status="completed", completed_at=COMPLETED_AT)
+        records = LandscapeExporter(db).iter_unsigned_run_records("completed")
+        assert next(records)["record_type"] == "run"
+
+        with db.engine.begin() as writer:
+            writer.execute(
+                secret_resolutions_table.insert().values(
+                    resolution_id="later-secret",
+                    run_id="completed",
+                    timestamp=1234.5,
+                    env_var_name="LATER_SECRET",
+                    source="env",
+                    fingerprint="f" * 64,
+                )
+            )
+
+        remaining = list(records)
+        assert not [record for record in remaining if record["record_type"] == "secret_resolution"]
+    finally:
+        db.close()
+
+
+def test_public_export_rejects_derivation_config_that_disagrees_with_snapshot_witness(tmp_path: Path) -> None:
+    db = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'witness-mismatch.db'}")
+    try:
+        _insert_run(db, run_id="completed", status="completed", completed_at=COMPLETED_AT)
+        config = AuditExportDerivationConfig(
+            source_run_id="completed",
+            source_status="completed",
+            source_completed_at="2026-07-16T02:03:05.567890Z",
+            export_format="json",
+            exporter_version="landscape-exporter-v1",
+            serialization_version=AUDIT_EXPORT_SERIALIZATION_VERSION,
+            chunking_algorithm_version="record-framing-v1",
+            include_raw_error_rows=False,
+            per_chunk_byte_limit=64 * 1024 * 1024,
+            per_chunk_record_limit=1_000_000,
+            signing_mode="unsigned",
+            signer_key_id="UNSIGNED",
+            signing_key=None,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="snapshot-bound terminal witness"):
+            LandscapeExporter(db).derive_run_bundle("completed", derivation_config=config)
     finally:
         db.close()
 

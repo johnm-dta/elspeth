@@ -12,13 +12,13 @@ import copy
 from collections.abc import Sequence
 from typing import Any
 
-from elspeth.contracts import SourceRow, TokenInfo
+from elspeth.contracts import CoalesceParentCompletion, SourceRow, TokenInfo
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.coordination import CoordinationToken
+from elspeth.contracts.enums import TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID, StepResolver
-from elspeth.core.landscape.data_flow.tokens import CoalesceParentCompletion
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 
 
@@ -381,12 +381,13 @@ class TokenManager:
         output_contract: SchemaContract,
         node_id: NodeID,
         run_id: str,
-        record_parent_outcome: bool = True,
+        parent_path: TerminalPath = TerminalPath.EXPAND_PARENT,
+        parent_batch_id: str | None = None,
     ) -> tuple[list[TokenInfo], str]:
         """Create child tokens for deaggregation (1 input -> N outputs).
 
-        ATOMIC: Creates children AND optionally records parent EXPANDED outcome
-        in single transaction.
+        ATOMIC: Creates children and records the parent's explicit terminal
+        disposition in one transaction.
 
         Unlike fork_token (which creates parallel paths through the same DAG),
         expand_token creates sequential children that all continue down the
@@ -399,8 +400,10 @@ class TokenManager:
             node_id: NodeID of the transform performing the expansion (resolved to
                 audit step position internally via step_resolver)
             run_id: Run ID (required for atomic outcome recording)
-            record_parent_outcome: If True (default), record EXPANDED outcome for parent.
-                Set to False for batch aggregation where parent gets CONSUMED_IN_BATCH.
+            parent_path: EXPAND_PARENT for ordinary deaggregation or
+                BATCH_CONSUMED for transform-mode aggregation.
+            parent_batch_id: Required for BATCH_CONSUMED and forbidden for
+                EXPAND_PARENT.
 
         Returns:
             Tuple of (child TokenInfo list, expand_group_id)
@@ -431,7 +434,8 @@ class TokenManager:
             child_payloads=expanded_rows,
             output_contract=output_contract,
             step_in_pipeline=step,
-            record_parent_outcome=record_parent_outcome,
+            parent_path=parent_path,
+            parent_batch_id=parent_batch_id,
         )
 
         # Use output_contract (post-transform schema) for all expanded children

@@ -9,11 +9,12 @@ coerce-and-record serialization helpers. The ``DataFlowRepository`` facade in
 compatibility surface for existing call sites (filigree elspeth-b194136580).
 """
 
+from elspeth.contracts.engine import CoalesceParentCompletion
 from elspeth.core.landscape.data_flow.errors import ErrorAuditRepository
 from elspeth.core.landscape.data_flow.graph import GraphAuditRepository
 from elspeth.core.landscape.data_flow.outcomes import TokenOutcomeRepository
 from elspeth.core.landscape.data_flow.ownership import RowTokenOwnership
-from elspeth.core.landscape.data_flow.tokens import CoalesceParentCompletion, RowTokenRepository
+from elspeth.core.landscape.data_flow.tokens import RowTokenRepository
 
 __all__ = [
     "CoalesceParentCompletion",

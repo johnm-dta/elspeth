@@ -369,7 +369,7 @@ class TestFindExpiredPayloadRefs:
         """Retention must crash on corrupt Tier-1 run lifecycle data."""
         manager = PurgeManager(db, MockPayloadStore())
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             _create_run(conn, "run-corrupt-lifecycle", status=status, completed_at=completed_at)
             _create_node(conn, "run-corrupt-lifecycle", "node-corrupt-lifecycle")
             _create_row(
@@ -390,7 +390,7 @@ class TestFindExpiredPayloadRefs:
         old = now - timedelta(days=365)
         recent = now - timedelta(days=1)
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             _create_run(conn, "run-old-default-now-all-refs", status=RunStatus.COMPLETED, completed_at=old)
             _create_node(conn, "run-old-default-now-all-refs", "node-old-default-now-all-refs")
             _create_row(
@@ -423,7 +423,7 @@ class TestFindExpiredPayloadRefs:
         old = now - timedelta(days=45)
         recent = now - timedelta(days=2)
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             _create_run(conn, "run-old-completed", status=RunStatus.COMPLETED, completed_at=old)
             _create_node(conn, "run-old-completed", "node-old-completed")
             _create_row(
@@ -512,7 +512,7 @@ class TestFindExpiredPayloadRefs:
         old = now - timedelta(days=40)
         recent = now - timedelta(days=1)
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             # Expired run with row/call/routing refs
             _create_run(conn, "expired-run", status=RunStatus.COMPLETED, completed_at=old)
             _create_node(conn, "expired-run", "expired-node-a")
@@ -607,7 +607,7 @@ class TestFindExpiredPayloadRefs:
         old = now - timedelta(days=40)
         recent = now - timedelta(days=1)
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             _create_run(conn, "expired-token-run", status=RunStatus.COMPLETED, completed_at=old)
             _create_node(conn, "expired-token-run", "expired-token-node")
             _create_row(conn, "expired-token-run", "expired-token-node", "expired-token-row", row_index=0, source_data_ref=None)
@@ -654,7 +654,7 @@ class TestFindExpiredPayloadRefs:
         now = datetime(2026, 2, 8, tzinfo=UTC)
         old = now - timedelta(days=40)
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             # Row ref run
             _create_run(conn, "run-row", status=RunStatus.COMPLETED, completed_at=old)
             _create_node(conn, "run-row", "node-row")
@@ -761,7 +761,7 @@ class TestFindExpiredPayloadRefs:
         manager = PurgeManager(db, MockPayloadStore())
         old = datetime(2026, 2, 8, tzinfo=UTC) - timedelta(days=40)
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             _create_run(conn, "run-token-ref", status=RunStatus.COMPLETED, completed_at=old)
             _create_node(conn, "run-token-ref", "node-token-ref")
             _create_row(conn, "run-token-ref", "node-token-ref", "row-token-ref", row_index=0, source_data_ref=None)
@@ -778,7 +778,7 @@ class TestPurgePayloads:
         manager = PurgeManager(db, store)
         old = datetime(2026, 1, 1, tzinfo=UTC)
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             _create_run(
                 conn,
                 "run-replay-critical-purge",
@@ -1027,7 +1027,7 @@ class TestInterruptedRunNotPurgeEligible:
         now = datetime(2026, 2, 14, tzinfo=UTC)
         old = now - timedelta(days=60)
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             _create_run(conn, "run-interrupted-all", status=RunStatus.INTERRUPTED, completed_at=old)
             _create_node(conn, "run-interrupted-all", "node-interrupted-all")
             _create_row(
@@ -1053,7 +1053,7 @@ class TestInterruptedRunNotPurgeEligible:
         now = datetime(2026, 2, 14, tzinfo=UTC)
         old = now - timedelta(days=60)
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             # Expired completed run with a shared blob
             _create_run(conn, "run-completed-old", status=RunStatus.COMPLETED, completed_at=old)
             _create_node(conn, "run-completed-old", "node-completed-old")
@@ -1278,7 +1278,7 @@ class TestPurgeUnboundedIN:
         now = datetime(2026, 2, 14, tzinfo=UTC)
         old = now - timedelta(days=60)
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             _create_run(conn, "run-chunk-test", status=RunStatus.COMPLETED, completed_at=old)
             _create_node(conn, "run-chunk-test", "node-chunk-test")
 

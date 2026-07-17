@@ -4,8 +4,20 @@ import math
 from dataclasses import dataclass
 from typing import ClassVar, TypedDict
 
+from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.enums import _LEGAL_TERMINAL_PAIRS, TerminalOutcome, TerminalPath
 from elspeth.contracts.freeze import require_int
+from elspeth.contracts.node_state_context import NodeStateContext
+
+
+@dataclass(frozen=True, slots=True)
+class CoalesceParentCompletion:
+    """One parent state's terminal evidence for a durable coalesce effect."""
+
+    parent_ref: TokenRef
+    state_id: str
+    duration_ms: float
+    context_after: NodeStateContext | None
 
 
 @dataclass(frozen=True, slots=True)

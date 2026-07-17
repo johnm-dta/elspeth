@@ -30,6 +30,11 @@ allowed_external_types:
   # Runtime preflight coordination types - shared between web execution and composer MCP
   - "web/execution/runtime_preflight:RuntimePreflightKey"
   - "web/execution/runtime_preflight:RuntimePreflightFailure"
+  # Delivery-specific diagnostic/policy/storage-probe records. These are
+  # converted at their consumer boundaries rather than persisted as domain DTOs.
+  - "web/deployment_contract:ContractCheck"
+  - "web/plugin_policy/models:PluginAvailabilitySnapshot"
+  - "core/landscape/database:LandscapeSchemaShape"
 
 # dict[str, Any] patterns that are intentional
 # Format: "file_path:context:param_name"
@@ -988,4 +993,33 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/guided/_discovery.py:_execute_discovery_call:return"
   - "src/elspeth/web/composer/tools/_dispatch.py:get_discovery_tool_definitions:return (list)"
   - "src/elspeth/web/composer/tools/_dispatch.py:_closed_root_schema:return"
-  - "src/elspeth/web/composer/tools/_availability.py:_requirements_from_json_schema:schema"
+  # Current branch reconciliation: intentional heterogeneous telemetry,
+  # framework kwargs, Tier-3 payloads, plugin config, and pipeline-row shapes.
+  - "src/elspeth/telemetry/serialization.py:serialize_otlp_event_attributes:return"
+  - "src/elspeth/web/interpretation_state.py:serialize_authoring_review_options:return"
+  - "src/elspeth/web/readiness.py:_readiness_engine_kwargs:return"
+  - "src/elspeth/web/auth/oidc.py:_validate_cognito_access_claims:payload"
+  - "src/elspeth/web/execution/preflight.py:_authored_options:return"
+  - "src/elspeth/web/execution/preflight.py:audit_safe_resolved_config:return"
+  - "src/elspeth/web/execution/preflight.py:restore_options:component"
+  - "src/elspeth/web/execution/service.py:_trained_operator_catalog_and_snapshot:kwargs"
+  - "src/elspeth/web/execution/validation.py:_trained_operator_validation_context:kwargs"
+  - "src/elspeth/web/sessions/routes/_helpers.py:merge_composer_meta_updates:return"
+  - "src/elspeth/web/composer/tools/_common.py:_serialize_authoring_options:return"
+  - "src/elspeth/web/composer/tools/_common.py:_serialize_set_pipeline_node:return"
+  - "src/elspeth/web/composer/tools/transforms.py:_normalized_splice_node_projection:return"
+  - "src/elspeth/web/composer/tools/transforms.py:_execute_splice_transform:args"
+  - "src/elspeth/web/composer/tools/transforms.py:_handle_splice_transform:arguments"
+  - "src/elspeth/plugins/sinks/text_sink.py:TextSink.__init__:config"
+  - "src/elspeth/plugins/sinks/text_sink.py:TextSink.write:rows (list)"
+  - "src/elspeth/plugins/sinks/aws_s3_sink.py:AWSS3Sink.__init__:config"
+  - "src/elspeth/plugins/sinks/aws_s3_sink.py:AWSS3Sink.write:rows (list)"
+  - "src/elspeth/plugins/sources/aws_s3_source.py:_new_json_object:return"
+  - "src/elspeth/plugins/sources/aws_s3_source.py:_record_download_call:response_data"
+  - "src/elspeth/plugins/sources/aws_s3_source.py:_record_download_call:error_data"
+  - "src/elspeth/plugins/sources/aws_s3_source.py:AWSS3Source.__init__:config"
+  - "src/elspeth/plugins/transforms/aws/_guardrail_transform.py:BedrockGuardrailTransformBase.__init__:config"
+  - "src/elspeth/plugins/transforms/aws/_guardrail_transform.py:BedrockGuardrailTransformBase.probe_config:return"
+  - "src/elspeth/plugins/transforms/aws/bedrock_prompt_shield.py:AWSBedrockPromptShield.__init__:config"
+  - "src/elspeth/plugins/transforms/aws/bedrock_content_safety.py:AWSBedrockContentSafety.__init__:config"
+  - "src/elspeth/plugins/transforms/llm/providers/bedrock.py:BedrockLLMProvider.execute_query:response_format"

@@ -5437,8 +5437,9 @@ def test_compatibility_record_is_bound_to_resolved_scenario_and_stored_by_hash(t
                 "run_web_plugin_policy_present": True,
             },
             "structural_changes": (
-                "landscape_epoch_23_to_28_token_ownership_artifact_idempotency_sink_effect_ledger_"
-                "coalesce_receipts_and_per_member_failsink_provenance"
+                "landscape_epoch_23_to_29_token_ownership_artifact_idempotency_sink_effect_ledger_coalesce_receipts_"
+                "per_member_failsink_provenance_output_contract_hash_run_scoped_validation_errors_and_token_ancestry_"
+                "batch_expansion_claim_and_sidecar_journal_outbox"
             ),
             "semantics_only_changes": "none",
             "archive_export_decision": "required_before_forward_migration",

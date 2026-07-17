@@ -10,11 +10,13 @@ from typing import Any
 
 import pytest
 from sqlalchemy import event
+from sqlalchemy.exc import OperationalError
 
 from elspeth.contracts import BatchStatus, NodeType
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape import LandscapeDB
+from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.factory import RecorderFactory
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
@@ -198,16 +200,15 @@ def test_batch_transition_wins_cross_process_race_without_post_closure_membershi
 
 
 @pytest.mark.timeout(30)
-def test_caller_deferred_transaction_refuses_concurrent_closure_without_busy_snapshot(tmp_path: Path) -> None:
-    """The guarded insert is SQLite's first snapshot-establishing statement.
+def test_public_read_connection_cannot_bypass_write_transaction_policy_during_closure(tmp_path: Path) -> None:
+    """A caller-owned public read connection cannot become a deferred writer.
 
-    The event pair makes this test discriminate both statement shapes.  On
-    the former read-then-write implementation, the peer commits immediately
-    after the batch predicate SELECT, leaving the caller with a stale WAL
-    snapshot before its INSERT.  On the insert-first implementation, the peer
-    commits immediately before that INSERT.  Both interleavings must resolve
-    as the same policy refusal, never SQLITE_BUSY_SNAPSHOT wrapped as a
-    LandscapeRecordError.
+    The peer closes the batch immediately before the guarded insert.  The
+    caller then attempts to pass ``LandscapeDB.connection()`` into the write
+    repository directly, reproducing the former escape hatch.  The read-only
+    connection must reject the write at the database boundary and leave no
+    membership row; callers that need to compose writes must explicitly use
+    ``write_connection()`` and its eager SQLite write intent.
     """
     db_url, batch_id, token_id = _seed_file_database(tmp_path / "deferred.db")
     caller_db = LandscapeDB.from_url(db_url, create_tables=False)
@@ -256,7 +257,10 @@ def test_caller_deferred_transaction_refuses_concurrent_closure_without_busy_sna
     try:
         with (
             caller_db.connection() as conn,
-            pytest.raises(AuditIntegrityError, match=r"status 'executing'.*immutable"),
+            pytest.raises(
+                LandscapeRecordError,
+                match=r"database rejected audit write: OperationalError",
+            ) as exc_info,
         ):
             caller.execution.add_batch_member(batch_id, token_id, ordinal=0, conn=conn)
     finally:
@@ -265,6 +269,8 @@ def test_caller_deferred_transaction_refuses_concurrent_closure_without_busy_sna
         event.remove(caller_db.engine, "before_cursor_execute", before_caller_statement)
         event.remove(caller_db.engine, "after_cursor_execute", after_caller_statement)
 
+    assert isinstance(exc_info.value.__cause__, OperationalError)
+    assert "attempt to write a readonly database" in str(exc_info.value.__cause__)
     assert not worker.is_alive()
     assert peer_errors == []
     assert coordinated.is_set(), "test did not exercise the synchronized closure window"

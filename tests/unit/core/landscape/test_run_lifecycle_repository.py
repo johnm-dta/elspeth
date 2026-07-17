@@ -53,7 +53,7 @@ def _make_repo(*, run_id: str = "run-1") -> tuple[LandscapeDB, RunLifecycleRepos
 
 def _corrupt_column(db: LandscapeDB, run_id: str, **values: object) -> None:
     """Directly update a column in the runs table to simulate corruption."""
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(update(runs_table).where(runs_table.c.run_id == run_id).values(**values))
 
 

@@ -5,7 +5,7 @@ Tests cover:
 - Parameter normalization (_normalize_parameters)
 - Record serialization (_serialize_record)
 - Column-to-values mapping (_columns_to_values)
-- SQLAlchemy event lifecycle (buffer → commit/rollback)
+- SQLAlchemy event lifecycle (buffer → transactional outbox → commit/rollback)
 - Failure circuit breaker with periodic recovery
 - Payload enrichment for calls table
 """
@@ -15,14 +15,18 @@ from __future__ import annotations
 import json
 import os
 import stat
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Barrier, BrokenBarrierError, Lock, Thread
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import Column, MetaData, String, Table, create_engine, insert, update
+from sqlalchemy import Column, ForeignKey, Integer, MetaData, String, Table, create_engine, event, insert, select, update
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError as SQLAlchemyIntegrityError
 
 from elspeth.contracts import CallStatus, CallType, NodeType
 from elspeth.contracts.call_data import RawCallPayload
@@ -31,6 +35,7 @@ from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.journal import JournalRecord, LandscapeJournal
+from elspeth.core.landscape.schema import sidecar_journal_outbox_table
 from elspeth.core.payload_store import FilesystemPayloadStore
 
 # ---------------------------------------------------------------------------
@@ -91,6 +96,55 @@ def _make_conn(buffer: list[Any] | None = None) -> _ConnectionDouble:
     When buffer is provided, it becomes the root buffer in the stack.
     """
     return _ConnectionDouble(buffer)
+
+
+def _outbox_records(batch_id: str, *, size: int = 1) -> list[JournalRecord]:
+    return [
+        cast(
+            JournalRecord,
+            {
+                "timestamp": "2026-01-15T12:00:00+00:00",
+                "statement": "INSERT INTO rows (id) VALUES (?)",
+                "parameters": [f"row-{ordinal}"],
+                "executemany": False,
+                "journal_batch_id": batch_id,
+                "journal_batch_ordinal": ordinal,
+                "journal_batch_size": size,
+            },
+        )
+        for ordinal in range(size)
+    ]
+
+
+def _insert_outbox_batch(engine: Engine, journal: LandscapeJournal, batch_id: str, records: list[JournalRecord]) -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            sidecar_journal_outbox_table.insert().values(
+                batch_id=batch_id,
+                journal_owner=journal._owner_key,
+                created_at=datetime.now(UTC),
+                records_json=json.dumps(records),
+            )
+        )
+
+
+class _ConcurrentProbeJournal(LandscapeJournal):
+    """Force unfenced drains past their publication checks together."""
+
+    def __init__(self, path: str, barrier: Barrier) -> None:
+        super().__init__(path, fail_on_error=True)
+        self._barrier = barrier
+        self._probe_lock = Lock()
+        self._probe_used = False
+
+    def _append_payload_locked(self, payload: str, record_count: int) -> bool:
+        with self._probe_lock:
+            probe = not self._probe_used
+            self._probe_used = True
+        if probe:
+            with suppress(BrokenBarrierError):
+                self._barrier.wait(timeout=1)
+        return super()._append_payload_locked(payload, record_count)
 
 
 # ===========================================================================
@@ -375,6 +429,7 @@ class TestAfterCursorExecute:
             Column("response_ref", String),
         )
         metadata.create_all(engine)
+        sidecar_journal_outbox_table.create(engine)
         journal.attach(engine)
 
         with engine.connect() as conn:
@@ -411,6 +466,7 @@ class TestAfterCursorExecute:
             Column("response_ref", String),
         )
         metadata.create_all(engine)
+        sidecar_journal_outbox_table.create(engine)
 
         journal.attach(engine)
         with engine.begin() as conn:
@@ -423,10 +479,10 @@ class TestAfterCursorExecute:
         assert call_updates[0]["request_payload"] == "payload content"
 
 
-class TestAfterCommit:
-    """Tests for _after_commit — flushes buffer to disk."""
+class TestBeforeCommitOutbox:
+    """Tests for the transaction-owned batch prepared before DBAPI commit."""
 
-    def test_flushes_buffer_to_file(self, tmp_path: Path) -> None:
+    def test_persists_buffer_as_outbox_batch(self, tmp_path: Path) -> None:
         journal = _make_journal(tmp_path)
         record = {
             "timestamp": "2026-01-15T12:00:00",
@@ -434,33 +490,35 @@ class TestAfterCommit:
             "parameters": {"id": "r1"},
             "executemany": False,
         }
-        conn = _make_conn(buffer=[record])
+        engine = create_engine("sqlite:///:memory:")
+        sidecar_journal_outbox_table.create(engine)
+        with engine.begin() as conn:
+            conn.info["landscape_journal_buffer_stack"] = [[record]]
+            journal._before_commit(conn)
+            row = conn.execute(select(sidecar_journal_outbox_table)).one()
+            persisted = json.loads(row.records_json)
+            assert persisted[0]["statement"] == "INSERT INTO rows (id) VALUES (?)"
+            assert persisted[0]["journal_batch_id"] == row.batch_id
+            assert persisted[0]["journal_batch_ordinal"] == 0
+            assert persisted[0]["journal_batch_size"] == 1
+        engine.dispose()
 
-        journal._after_commit(conn)
-
-        journal_path = tmp_path / "journal.jsonl"
-        assert journal_path.exists()
-        lines = journal_path.read_text().strip().split("\n")
-        assert len(lines) == 1
-        parsed = json.loads(lines[0])
-        assert parsed["statement"] == "INSERT INTO rows (id) VALUES (?)"
-
-    def test_clears_buffer_after_flush(self, tmp_path: Path) -> None:
+    def test_clears_buffer_after_outbox_prepare(self, tmp_path: Path) -> None:
         journal = _make_journal(tmp_path)
         buffer: list[Any] = [{"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": False}]
-        conn = _make_conn(buffer=buffer)
-
-        journal._after_commit(conn)
-
-        # After commit the stack is reset to a single empty root buffer
-        stack = conn.info["landscape_journal_buffer_stack"]
-        assert stack == [[]]
+        engine = create_engine("sqlite:///:memory:")
+        sidecar_journal_outbox_table.create(engine)
+        with engine.begin() as conn:
+            conn.info["landscape_journal_buffer_stack"] = [buffer]
+            journal._before_commit(conn)
+            assert conn.info["landscape_journal_buffer_stack"] == [[]]
+        engine.dispose()
 
     def test_no_buffer_is_noop(self, tmp_path: Path) -> None:
         journal = _make_journal(tmp_path)
         conn = _make_conn()
 
-        journal._after_commit(conn)  # Should not raise
+        journal._before_commit(cast(Any, conn))
 
         journal_path = tmp_path / "journal.jsonl"
         assert not journal_path.exists()
@@ -469,25 +527,23 @@ class TestAfterCommit:
         journal = _make_journal(tmp_path)
         conn = _make_conn(buffer=[])
 
-        journal._after_commit(conn)
+        journal._before_commit(cast(Any, conn))
 
         journal_path = tmp_path / "journal.jsonl"
         assert not journal_path.exists()
 
-    def test_disabled_journal_routes_through_append_records(self, tmp_path: Path) -> None:
-        """When disabled, _after_commit routes records through _append_records for recovery tracking."""
+    def test_disabled_sidecar_still_persists_transactional_outbox(self, tmp_path: Path) -> None:
         journal = _make_journal(tmp_path)
         journal._disabled = True
         buffer = [{"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": False}]
-        conn = _make_conn(buffer=buffer)
-
-        journal._after_commit(conn)
-
-        # Records are counted as dropped (recovery attempts every 100 drops)
-        assert journal._total_dropped == 1
-        # Stack is reset after commit processes it
-        stack = conn.info["landscape_journal_buffer_stack"]
-        assert stack == [[]]
+        engine = create_engine("sqlite:///:memory:")
+        sidecar_journal_outbox_table.create(engine)
+        with engine.begin() as conn:
+            conn.info["landscape_journal_buffer_stack"] = [buffer]
+            journal._before_commit(conn)
+            assert len(conn.execute(select(sidecar_journal_outbox_table)).all()) == 1
+        assert journal._total_dropped == 0
+        engine.dispose()
 
 
 class TestAfterRollback:
@@ -538,6 +594,24 @@ class TestAppendRecordsFailureHandling:
         journal_path = tmp_path / "journal.jsonl"
         mode = stat.S_IMODE(journal_path.stat().st_mode)
         assert mode & 0o077 == 0
+
+    @pytest.mark.skipif(os.name == "nt", reason="directory fsync is a POSIX durability boundary")
+    def test_append_fsyncs_file_and_parent_directory(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        journal = _make_journal(tmp_path, fail_on_error=True)
+        record = cast(JournalRecord, {"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": False})
+        real_fsync = os.fsync
+        fsync_targets: list[str] = []
+
+        def recording_fsync(fd: int) -> None:
+            mode = os.fstat(fd).st_mode
+            fsync_targets.append("directory" if stat.S_ISDIR(mode) else "file")
+            real_fsync(fd)
+
+        monkeypatch.setattr(os, "fsync", recording_fsync)
+
+        journal._append_records([record])
+
+        assert fsync_targets == ["file", "directory"]
 
     def test_rejects_existing_group_readable_journal_file(self, tmp_path: Path) -> None:
         journal_path = tmp_path / "journal.jsonl"
@@ -634,7 +708,7 @@ class TestAttach:
 
     def test_registers_six_listeners(self, tmp_path: Path) -> None:
         journal = _make_journal(tmp_path)
-        engine = _EngineSentinel()
+        engine = create_engine("sqlite:///:memory:")
 
         with patch("elspeth.core.landscape.journal.event") as mock_event:
             journal.attach(engine)
@@ -650,6 +724,7 @@ class TestAttach:
                 "rollback_savepoint",
                 "release_savepoint",
             }
+        engine.dispose()
 
 
 # ===========================================================================
@@ -963,25 +1038,27 @@ class TestEndToEnd:
     """Integration-style tests for the full event lifecycle."""
 
     def test_cursor_then_commit_writes_file(self, tmp_path: Path) -> None:
-        """Full flow: cursor_execute → buffer → commit → JSONL file."""
+        """Full flow: cursor → transactional outbox → DBAPI commit → JSONL."""
         journal = _make_journal(tmp_path)
-        conn = _make_conn()
-
-        journal._after_cursor_execute(
-            conn,
-            cursor=None,
-            statement="INSERT INTO rows (id) VALUES (?)",
-            parameters={"id": "row-1"},
-            context=None,
-            executemany=False,
-        )
-        journal._after_commit(conn)
+        engine = create_engine("sqlite:///:memory:")
+        metadata = MetaData()
+        rows = Table("rows", metadata, Column("id", String, primary_key=True))
+        metadata.create_all(engine)
+        sidecar_journal_outbox_table.create(engine)
+        journal.attach(engine)
+        with engine.begin() as conn:
+            conn.execute(rows.insert().values(id="row-1"))
 
         journal_path = tmp_path / "journal.jsonl"
         lines = journal_path.read_text().strip().split("\n")
         assert len(lines) == 1
         parsed = json.loads(lines[0])
-        assert parsed["parameters"] == {"id": "row-1"}
+        assert parsed["parameters"] == ["row-1"]
+        assert parsed["journal_batch_ordinal"] == 0
+        assert parsed["journal_batch_size"] == 1
+        with engine.connect() as conn:
+            assert conn.execute(select(sidecar_journal_outbox_table)).all() == []
+        engine.dispose()
 
     def test_cursor_then_rollback_discards(self, tmp_path: Path) -> None:
         """Rollback discards buffered records."""
@@ -1004,22 +1081,345 @@ class TestEndToEnd:
     def test_multiple_statements_single_commit(self, tmp_path: Path) -> None:
         """Multiple buffered statements flush as separate JSONL lines."""
         journal = _make_journal(tmp_path)
-        conn = _make_conn()
-
-        for i in range(3):
-            journal._after_cursor_execute(
-                conn,
-                cursor=None,
-                statement="INSERT INTO rows (id) VALUES (?)",
-                parameters={"id": f"row-{i}"},
-                context=None,
-                executemany=False,
-            )
-        journal._after_commit(conn)
+        engine = create_engine("sqlite:///:memory:")
+        metadata = MetaData()
+        rows = Table("rows", metadata, Column("id", String, primary_key=True))
+        metadata.create_all(engine)
+        sidecar_journal_outbox_table.create(engine)
+        journal.attach(engine)
+        with engine.begin() as conn:
+            for i in range(3):
+                conn.execute(rows.insert().values(id=f"row-{i}"))
 
         journal_path = tmp_path / "journal.jsonl"
         lines = journal_path.read_text().strip().split("\n")
         assert len(lines) == 3
+        batch_ids = {json.loads(line)["journal_batch_id"] for line in lines}
+        assert len(batch_ids) == 1
+        engine.dispose()
+
+
+class TestCommitFailureDurability:
+    """The recovery-visible sidecar must never get ahead of the database."""
+
+    def test_sidecar_owner_key_is_stable_for_equivalent_paths(self, tmp_path: Path) -> None:
+        canonical = LandscapeJournal(str(tmp_path / "journal.jsonl"), fail_on_error=True)
+        equivalent = LandscapeJournal(str(tmp_path / "missing" / ".." / "journal.jsonl"), fail_on_error=True)
+
+        assert canonical._owner_key == equivalent._owner_key
+
+    def test_sqlite_deferred_constraint_commit_failure_publishes_no_records(self, tmp_path: Path) -> None:
+        journal_path = tmp_path / "journal.jsonl"
+        engine = create_engine(f"sqlite:///{tmp_path / 'commit-failure.db'}")
+
+        @event.listens_for(engine, "connect")
+        def _enable_foreign_keys(dbapi_connection: Any, _connection_record: object) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys = ON")
+            cursor.close()
+
+        metadata = MetaData()
+        parent = Table("journal_parent", metadata, Column("id", Integer, primary_key=True))
+        child = Table(
+            "journal_child",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column(
+                "parent_id",
+                Integer,
+                ForeignKey(parent.c.id, deferrable=True, initially="DEFERRED"),
+                nullable=False,
+            ),
+        )
+        metadata.create_all(engine)
+        sidecar_journal_outbox_table.create(engine)
+        journal = LandscapeJournal(str(journal_path), fail_on_error=True)
+        journal.attach(engine)
+
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            connection.execute(child.insert().values(id=1, parent_id=999))
+            with pytest.raises(SQLAlchemyIntegrityError):
+                transaction.commit()
+            connection.rollback()
+
+        assert not journal_path.exists() or journal_path.read_text(encoding="utf-8") == ""
+        with engine.connect() as connection:
+            assert connection.scalar(select(child.c.id)) is None
+        engine.dispose()
+
+    def test_committed_batch_survives_sidecar_failure_and_is_published_on_reopen(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "recoverable.db"
+        journal_path = tmp_path / "journal.jsonl"
+        journal_path.mkdir()
+
+        db = LandscapeDB.from_url(
+            f"sqlite:///{db_path}",
+            dump_to_jsonl=True,
+            dump_to_jsonl_path=str(journal_path),
+        )
+        try:
+            RecorderFactory(db).run_lifecycle.begin_run(config={"recoverable": True}, canonical_version="v1")
+        finally:
+            db.close()
+
+        journal_path.rmdir()
+        reopened = LandscapeDB.from_url(
+            f"sqlite:///{db_path}",
+            create_tables=False,
+            dump_to_jsonl=True,
+            dump_to_jsonl_path=str(journal_path),
+        )
+        reopened.close()
+
+        records = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+        assert any(record["statement"].lstrip().upper().startswith("INSERT INTO RUNS") for record in records)
+
+    def test_recovery_does_not_duplicate_batch_published_before_outbox_ack(self, tmp_path: Path) -> None:
+        journal_path = tmp_path / "journal.jsonl"
+        engine = create_engine("sqlite:///:memory:")
+        sidecar_journal_outbox_table.create(engine)
+        journal = LandscapeJournal(str(journal_path), fail_on_error=True)
+        batch_id = "a" * 32
+        record = cast(
+            JournalRecord,
+            {
+                "timestamp": "2026-01-15T12:00:00+00:00",
+                "statement": "INSERT INTO rows (id) VALUES (?)",
+                "parameters": ["row-1"],
+                "executemany": False,
+                "journal_batch_id": batch_id,
+                "journal_batch_ordinal": 0,
+                "journal_batch_size": 1,
+            },
+        )
+        with engine.begin() as connection:
+            connection.execute(
+                sidecar_journal_outbox_table.insert().values(
+                    batch_id=batch_id,
+                    journal_owner=journal._owner_key,
+                    created_at=datetime.now(UTC),
+                    records_json=json.dumps([record]),
+                )
+            )
+
+        journal._append_records([record])
+        journal.attach(engine)
+        journal.recover_pending(engine)
+
+        lines = journal_path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        with engine.connect() as connection:
+            assert connection.execute(select(sidecar_journal_outbox_table)).all() == []
+        engine.dispose()
+
+    def test_recovery_retries_parent_directory_fsync_before_acknowledging_published_batch(self, tmp_path: Path) -> None:
+        journal_path = tmp_path / "journal.jsonl"
+        engine = create_engine("sqlite:///:memory:")
+        sidecar_journal_outbox_table.create(engine)
+        journal = LandscapeJournal(str(journal_path), fail_on_error=True)
+        batch_id = "9" * 32
+        records = _outbox_records(batch_id)
+        _insert_outbox_batch(engine, journal, batch_id, records)
+        journal.attach(engine)
+
+        with patch.object(journal, "_fsync_parent_directory", side_effect=[OSError("dir fsync failed"), None]) as fsync_parent:
+            with pytest.raises(OSError, match="dir fsync failed"):
+                journal.recover_pending(engine)
+            with engine.connect() as connection:
+                assert connection.scalar(select(sidecar_journal_outbox_table.c.batch_id)) == batch_id
+
+            journal.recover_pending(engine)
+
+        assert fsync_parent.call_count == 2
+        assert len(journal_path.read_text(encoding="utf-8").splitlines()) == 1
+        with engine.connect() as connection:
+            assert connection.execute(select(sidecar_journal_outbox_table)).all() == []
+        engine.dispose()
+
+    def test_recovery_only_publishes_and_acknowledges_its_sidecar_owner(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "owned-outbox.db"
+        engine_a = create_engine(f"sqlite:///{db_path}")
+        engine_b = create_engine(f"sqlite:///{db_path}")
+        sidecar_journal_outbox_table.create(engine_a)
+        journal_a = LandscapeJournal(str(tmp_path / "worker-a.jsonl"), fail_on_error=True)
+        journal_b = LandscapeJournal(str(tmp_path / "worker-b.jsonl"), fail_on_error=True)
+        records = _outbox_records("a" * 32)
+        _insert_outbox_batch(engine_a, journal_a, "a" * 32, records)
+        journal_a.attach(engine_a)
+        journal_b.attach(engine_b)
+
+        journal_b.recover_pending(engine_b)
+
+        assert not (tmp_path / "worker-b.jsonl").exists()
+        with engine_b.connect() as connection:
+            assert connection.scalar(select(sidecar_journal_outbox_table.c.batch_id)) == "a" * 32
+
+        journal_a.recover_pending(engine_a)
+
+        assert len((tmp_path / "worker-a.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+        with engine_a.connect() as connection:
+            assert connection.execute(select(sidecar_journal_outbox_table)).all() == []
+        engine_a.dispose()
+        engine_b.dispose()
+
+    def test_sqlite_concurrent_same_owner_recovery_serializes_before_snapshot(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "concurrent-outbox.db"
+        journal_path = tmp_path / "shared.jsonl"
+        setup_engine = create_engine(f"sqlite:///{db_path}")
+        sidecar_journal_outbox_table.create(setup_engine)
+        barrier = Barrier(2)
+        journal_a = _ConcurrentProbeJournal(str(journal_path), barrier)
+        records = _outbox_records("c" * 32)
+        _insert_outbox_batch(setup_engine, journal_a, "c" * 32, records)
+        setup_engine.dispose()
+
+        engine_a = create_engine(f"sqlite:///{db_path}")
+        engine_b = create_engine(f"sqlite:///{db_path}")
+        journal_b = _ConcurrentProbeJournal(str(journal_path), barrier)
+        journal_a.attach(engine_a)
+        journal_b.attach(engine_b)
+        errors: list[BaseException] = []
+
+        def recover(journal: LandscapeJournal, engine: Engine) -> None:
+            try:
+                journal.recover_pending(engine)
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [
+            Thread(target=recover, args=(journal_a, engine_a)),
+            Thread(target=recover, args=(journal_b, engine_b)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert errors == []
+        assert len(journal_path.read_text(encoding="utf-8").splitlines()) == 1
+        with engine_a.connect() as connection:
+            assert connection.execute(select(sidecar_journal_outbox_table)).all() == []
+        engine_a.dispose()
+        engine_b.dispose()
+
+    def test_recovery_repairs_recognized_torn_batch_tail(self, tmp_path: Path) -> None:
+        journal_path = tmp_path / "journal.jsonl"
+        engine = create_engine("sqlite:///:memory:")
+        sidecar_journal_outbox_table.create(engine)
+        journal = LandscapeJournal(str(journal_path), fail_on_error=True)
+        batch_id = "d" * 32
+        records = _outbox_records(batch_id, size=2)
+        _insert_outbox_batch(engine, journal, batch_id, records)
+        first_line = journal._serialize_record(records[0])
+        owner_marker_start = first_line.index(batch_id)
+        journal_path.write_text(first_line[: max(1, owner_marker_start // 2)], encoding="utf-8")
+        journal_path.chmod(0o600)
+        journal.attach(engine)
+
+        journal.recover_pending(engine)
+
+        assert journal_path.read_text(encoding="utf-8").splitlines() == [journal._serialize_record(record) for record in records]
+        with engine.connect() as connection:
+            assert connection.execute(select(sidecar_journal_outbox_table)).all() == []
+        engine.dispose()
+
+    def test_recovery_repairs_later_torn_batch_after_complete_pending_batch(self, tmp_path: Path) -> None:
+        journal_path = tmp_path / "journal.jsonl"
+        engine = create_engine("sqlite:///:memory:")
+        sidecar_journal_outbox_table.create(engine)
+        journal = LandscapeJournal(str(journal_path), fail_on_error=True)
+        first_batch_id = "f" * 32
+        second_batch_id = "a" * 32
+        first_records = _outbox_records(first_batch_id)
+        second_records = _outbox_records(second_batch_id, size=2)
+        _insert_outbox_batch(engine, journal, first_batch_id, first_records)
+        _insert_outbox_batch(engine, journal, second_batch_id, second_records)
+        second_line = journal._serialize_record(second_records[0])
+        journal_path.write_text(
+            journal._serialize_record(first_records[0]) + "\n" + second_line[: len(second_line) // 2],
+            encoding="utf-8",
+        )
+        journal_path.chmod(0o600)
+        journal.attach(engine)
+
+        journal.recover_pending(engine)
+
+        expected = [journal._serialize_record(record) for record in first_records + second_records]
+        assert journal_path.read_text(encoding="utf-8").splitlines() == expected
+        with engine.connect() as connection:
+            assert connection.execute(select(sidecar_journal_outbox_table)).all() == []
+        engine.dispose()
+
+    def test_recovery_rejects_unrelated_mid_file_corruption(self, tmp_path: Path) -> None:
+        journal_path = tmp_path / "journal.jsonl"
+        engine = create_engine("sqlite:///:memory:")
+        sidecar_journal_outbox_table.create(engine)
+        journal = LandscapeJournal(str(journal_path), fail_on_error=True)
+        batch_id = "e" * 32
+        records = _outbox_records(batch_id)
+        _insert_outbox_batch(engine, journal, batch_id, records)
+        journal_path.write_text('{"unrelated":\n' + journal._serialize_record(records[0]) + "\n", encoding="utf-8")
+        journal_path.chmod(0o600)
+        journal.attach(engine)
+
+        with pytest.raises(AuditIntegrityError, match="corrupt JSON"):
+            journal.recover_pending(engine)
+
+        with engine.connect() as connection:
+            assert connection.scalar(select(sidecar_journal_outbox_table.c.batch_id)) == batch_id
+        engine.dispose()
+
+    def test_explicit_fail_on_error_makes_startup_recovery_fail_closed(self, tmp_path: Path) -> None:
+        journal_path = tmp_path / "journal.jsonl"
+        journal_path.mkdir()
+        engine = create_engine("sqlite:///:memory:")
+        sidecar_journal_outbox_table.create(engine)
+        journal = LandscapeJournal(str(journal_path), fail_on_error=True)
+        batch_id = "b" * 32
+        record = {
+            "timestamp": "2026-01-15T12:00:00+00:00",
+            "statement": "INSERT INTO rows (id) VALUES (?)",
+            "parameters": ["row-1"],
+            "executemany": False,
+            "journal_batch_id": batch_id,
+            "journal_batch_ordinal": 0,
+            "journal_batch_size": 1,
+        }
+        with engine.begin() as connection:
+            connection.execute(
+                sidecar_journal_outbox_table.insert().values(
+                    batch_id=batch_id,
+                    journal_owner=journal._owner_key,
+                    created_at=datetime.now(UTC),
+                    records_json=json.dumps([record]),
+                )
+            )
+
+        journal.attach(engine)
+        with pytest.raises(OSError, match="regular file"):
+            journal.recover_pending(engine)
+        engine.dispose()
+
+    def test_live_strict_sidecar_failure_preserves_committed_db_and_outbox(self, tmp_path: Path) -> None:
+        journal_path = tmp_path / "journal.jsonl"
+        journal_path.mkdir()
+        engine = create_engine("sqlite:///:memory:")
+        metadata = MetaData()
+        rows = Table("journal_rows", metadata, Column("id", Integer, primary_key=True))
+        metadata.create_all(engine)
+        sidecar_journal_outbox_table.create(engine)
+        journal = LandscapeJournal(str(journal_path), fail_on_error=True)
+        journal.attach(engine)
+
+        with engine.begin() as connection:
+            connection.execute(rows.insert().values(id=1))
+
+        with engine.connect() as connection:
+            assert connection.scalar(select(rows.c.id)) == 1
+            assert len(connection.execute(select(sidecar_journal_outbox_table)).all()) == 1
+        engine.dispose()
 
 
 # ===========================================================================
@@ -1091,28 +1491,22 @@ class TestDeriveJournalPath:
         journal_a = LandscapeJournal(path_a, fail_on_error=True)
         journal_b = LandscapeJournal(path_b, fail_on_error=True)
 
-        conn_a = _make_conn()
-        conn_b = _make_conn()
-
-        journal_a._after_cursor_execute(
-            conn_a,
-            cursor=None,
-            statement="INSERT INTO rows (id) VALUES (?)",
-            parameters={"id": "row-from-a"},
-            context=None,
-            executemany=False,
+        journal_a._append_records(
+            [
+                cast(
+                    JournalRecord,
+                    {"timestamp": "t", "statement": "INSERT", "parameters": {"id": "row-from-a"}, "executemany": False},
+                )
+            ]
         )
-        journal_a._after_commit(conn_a)
-
-        journal_b._after_cursor_execute(
-            conn_b,
-            cursor=None,
-            statement="INSERT INTO rows (id) VALUES (?)",
-            parameters={"id": "row-from-b"},
-            context=None,
-            executemany=False,
+        journal_b._append_records(
+            [
+                cast(
+                    JournalRecord,
+                    {"timestamp": "t", "statement": "INSERT", "parameters": {"id": "row-from-b"}, "executemany": False},
+                )
+            ]
         )
-        journal_b._after_commit(conn_b)
 
         # Both files exist and contain only their own record.
         lines_a = Path(path_a).read_text().strip().split("\n")

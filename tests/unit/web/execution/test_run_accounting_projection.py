@@ -54,7 +54,7 @@ def _setup_empty_run(db: LandscapeDB, *, run_id: str) -> None:
 
 
 def _insert_tokens(db: LandscapeDB, *, run_id: str, row_id: str, token_ids: list[str]) -> None:
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             tokens_table.insert(),
             [
@@ -82,7 +82,7 @@ def _insert_completed_outcomes(
     outcome: TerminalOutcome,
     path: TerminalPath,
 ) -> None:
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             token_outcomes_table.insert(),
             [
@@ -117,7 +117,7 @@ def _insert_outcome(
     path: TerminalPath,
     completed: int,
 ) -> None:
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             token_outcomes_table.insert().values(
                 outcome_id=f"outcome-{token_id}-{path.value}-{completed}",
@@ -191,7 +191,7 @@ def test_source_accounting_projects_named_sources_and_aggregate_total() -> None:
                 config={},
                 schema_config=_OBSERVED_SCHEMA,
             )
-            with db.connection() as conn:
+            with db.write_connection() as conn:
                 conn.execute(
                     run_sources_table.insert().values(
                         run_id="run-multi",
@@ -390,7 +390,7 @@ def test_duplicate_completed_outcomes_raise_clear_integrity_error() -> None:
     try:
         _setup_run_with_row(db, run_id="run-6")
         _insert_tokens(db, run_id="run-6", row_id="row-1", token_ids=["duplicate-token", "missing-token"])
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(text("DROP INDEX ix_token_outcomes_terminal_unique"))
         _insert_completed_outcomes(
             db,

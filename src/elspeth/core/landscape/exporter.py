@@ -14,6 +14,8 @@ import hmac
 import json
 from collections import defaultdict
 from collections.abc import Iterator
+from contextlib import contextmanager
+from copy import copy
 from datetime import UTC
 from typing import Any, BinaryIO, Protocol, cast
 
@@ -34,6 +36,7 @@ from elspeth.contracts.audit_export import (
     AUDIT_EXPORT_SERIALIZATION_VERSION,
     AuditExportDerivationConfig,
     AuditExportDerivedBundle,
+    AuditExportTerminalWitness,
     derive_audit_export_bundle,
     stream_audit_export_bundle_to_spool,
 )
@@ -69,6 +72,7 @@ from elspeth.core.landscape.export_mappers import (
     sink_effect_stream_to_export_record,
     sink_effect_to_export_record,
 )
+from elspeth.core.landscape.export_read_model import open_export_read_transaction
 from elspeth.core.landscape.factory import RecorderFactory
 
 
@@ -317,7 +321,9 @@ class LandscapeExporter:
                 states, and related child records — are resident at once.
                 The exported record sequence is identical for every value.
             read_model: Optional narrow read surface for export queries.
-                Defaults to a read-model adapter over ``RecorderFactory(db)``.
+                When supplied, its transaction lifetime remains caller-owned.
+                Otherwise, each public export operation binds a dedicated
+                connection-bound snapshot for its full lifetime.
 
         Raises:
             ValueError: If row_batch_size < 1
@@ -326,6 +332,7 @@ class LandscapeExporter:
             raise ValueError(f"row_batch_size must be >= 1, got {row_batch_size}")
         self._db = db
         self._read_model = read_model if read_model is not None else RecorderFactoryExportReadModel(RecorderFactory(db))
+        self._read_model_is_caller_owned = read_model is not None
         self._signing_key = signing_key
         self._include_raw_error_rows = include_raw_error_rows
         self._row_batch_size = row_batch_size
@@ -337,6 +344,37 @@ class LandscapeExporter:
         self._per_chunk_byte_limit = per_chunk_byte_limit
         self._per_chunk_record_limit = per_chunk_record_limit
         self._derivation_config = derivation_config
+
+    @contextmanager
+    def _public_export_scope(
+        self,
+        run_id: str,
+    ) -> Iterator[tuple["LandscapeExporter", AuditExportTerminalWitness | None]]:
+        """Bind a default public export to one immutable database snapshot.
+
+        Explicitly injected read models remain caller-owned. The production
+        orchestrator already opens and owns its snapshot before constructing
+        the exporter; opening a nested transaction here would split that
+        authority. The default public constructor instead owns a snapshot for
+        the full generator lifetime and binds a shallow exporter copy to it so
+        concurrent calls cannot replace each other's read model.
+        """
+        if self._read_model_is_caller_owned:
+            yield self, None
+            return
+
+        with open_export_read_transaction(self._db.engine) as read_model:
+            try:
+                witness = read_model.get_export_terminal_witness(run_id)
+            except AuditIntegrityError as exc:
+                # Preserve the public exporter's established validation
+                # contract while deriving the result from the snapshot-bound
+                # terminal witness.
+                raise ValueError("Audit export requires an immutable export-terminal run") from exc
+            scoped = copy(self)
+            scoped._read_model = read_model
+            scoped._read_model_is_caller_owned = True
+            yield scoped, witness
 
     @staticmethod
     def _parse_tier1_json(raw_json: str, field_name: str, context: str) -> Any:
@@ -399,23 +437,30 @@ class LandscapeExporter:
         Raises:
             ValueError: If run_id is not found, or sign=True without signing_key
         """
-        derivation_config = self._resolve_derivation_config(run_id, sign=sign)
-        stream = stream_audit_export_bundle_to_spool(
-            self._iter_records(run_id),
-            derivation_config,
-            cast(BinaryIO, _DiscardSpool()),
-            max_total_records=AUDIT_EXPORT_MAX_TOTAL_RECORDS,
-            max_total_bytes=AUDIT_EXPORT_MAX_TOTAL_BYTES,
-            max_chunks=AUDIT_EXPORT_MAX_CHUNKS,
-        )
-        while True:
-            try:
-                record = next(stream)
-            except StopIteration as stop:
-                bundle = stop.value
-                break
-            yield deep_thaw(record)
-        yield deep_thaw(bundle.final_manifest)
+        if sign and self._signing_key is None:
+            raise ValueError("Signing requested but no signing_key provided")
+        with self._public_export_scope(run_id) as (exporter, terminal_witness):
+            derivation_config = exporter._resolve_derivation_config(
+                run_id,
+                sign=sign,
+                terminal_witness=terminal_witness,
+            )
+            stream = stream_audit_export_bundle_to_spool(
+                exporter._iter_records(run_id),
+                derivation_config,
+                cast(BinaryIO, _DiscardSpool()),
+                max_total_records=AUDIT_EXPORT_MAX_TOTAL_RECORDS,
+                max_total_bytes=AUDIT_EXPORT_MAX_TOTAL_BYTES,
+                max_chunks=AUDIT_EXPORT_MAX_CHUNKS,
+            )
+            while True:
+                try:
+                    record = next(stream)
+                except StopIteration as stop:
+                    bundle = stop.value
+                    break
+                yield deep_thaw(record)
+            yield deep_thaw(bundle.final_manifest)
 
     def derive_run_bundle(
         self,
@@ -425,8 +470,16 @@ class LandscapeExporter:
         derivation_config: AuditExportDerivationConfig | None = None,
     ) -> AuditExportDerivedBundle:
         """Return the exact v2 byte graph for one immutable terminal run."""
-        derivation_config = self._resolve_derivation_config(run_id, sign=sign, derivation_config=derivation_config)
-        return derive_audit_export_bundle(self._iter_records(run_id), derivation_config)
+        if sign and self._signing_key is None:
+            raise ValueError("Signing requested but no signing_key provided")
+        with self._public_export_scope(run_id) as (exporter, terminal_witness):
+            derivation_config = exporter._resolve_derivation_config(
+                run_id,
+                sign=sign,
+                derivation_config=derivation_config,
+                terminal_witness=terminal_witness,
+            )
+            return derive_audit_export_bundle(exporter._iter_records(run_id), derivation_config)
 
     def _resolve_derivation_config(
         self,
@@ -434,6 +487,7 @@ class LandscapeExporter:
         *,
         sign: bool,
         derivation_config: AuditExportDerivationConfig | None = None,
+        terminal_witness: AuditExportTerminalWitness | None = None,
     ) -> AuditExportDerivationConfig:
         """Resolve and validate the derivation authority for one export request."""
         if sign and self._signing_key is None:
@@ -441,12 +495,17 @@ class LandscapeExporter:
         if derivation_config is None:
             derivation_config = self._derivation_config
         if derivation_config is None:
-            run = self._read_model.get_run(run_id)
-            if run is None:
-                raise ValueError(f"Run not found: {run_id}")
-            completed_at = run.completed_at
-            if completed_at is None or run.status.value not in {"completed", "completed_with_failures", "empty"}:
-                raise ValueError("Audit export requires an immutable export-terminal run")
+            if terminal_witness is None:
+                run = self._read_model.get_run(run_id)
+                if run is None:
+                    raise ValueError(f"Run not found: {run_id}")
+                completed_at = run.completed_at
+                source_status = run.status.value
+                if completed_at is None or source_status not in {"completed", "completed_with_failures", "empty"}:
+                    raise ValueError("Audit export requires an immutable export-terminal run")
+            else:
+                completed_at = terminal_witness.source_completed_at
+                source_status = terminal_witness.source_status.value
             # SQLite drops timezone metadata when round-tripping SQLAlchemy
             # DateTime values. Landscape timestamps are UTC by contract, so
             # restore that storage-boundary metadata before canonicalization.
@@ -465,7 +524,7 @@ class LandscapeExporter:
                 signing_key = None
             derivation_config = AuditExportDerivationConfig(
                 source_run_id=run_id,
-                source_status=run.status.value,
+                source_status=source_status,
                 source_completed_at=completed_text,
                 export_format=self._export_format,  # type: ignore[arg-type]
                 exporter_version=self._exporter_version,
@@ -486,6 +545,13 @@ class LandscapeExporter:
             # a sign=False export. Publication integrity fails closed.
             if derivation_config.source_run_id != run_id:
                 raise ValueError("derivation config source_run_id does not match requested run")
+            if terminal_witness is not None:
+                completed_text = terminal_witness.source_completed_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                if (
+                    derivation_config.source_status != terminal_witness.source_status.value
+                    or derivation_config.source_completed_at != completed_text
+                ):
+                    raise AuditIntegrityError("derivation config does not match the snapshot-bound terminal witness")
             expected_signing_mode = "hmac_sha256" if sign else "unsigned"
             if derivation_config.signing_mode != expected_signing_mode:
                 raise ValueError(
@@ -496,8 +562,8 @@ class LandscapeExporter:
 
     def iter_unsigned_run_records(self, run_id: str) -> Iterator[ExportRecord]:
         """Yield the deterministic unsigned record stream for bounded derivation."""
-
-        yield from self._iter_records(run_id)
+        with self._public_export_scope(run_id) as (exporter, _terminal_witness):
+            yield from exporter._iter_records(run_id)
 
     def iter_run_records_by_type(
         self,

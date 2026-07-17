@@ -152,7 +152,7 @@ def test_load_run_outputs_rejects_corrupt_artifact_types(tmp_path: Path) -> None
             [("art-1", str(output_path), "a" * 64, output_path.stat().st_size, "sink_r")],
         )
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(text("UPDATE artifacts SET size_bytes = 7.5 WHERE artifact_id = 'art-1'"))
 
         with pytest.raises(ValidationError, match="size_bytes"):

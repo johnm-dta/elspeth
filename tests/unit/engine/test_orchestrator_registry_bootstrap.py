@@ -464,7 +464,7 @@ def test_resume_calls_prepare_for_run() -> None:
         from elspeth.contracts import RunStatus
         from elspeth.core.landscape.schema import runs_table
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 runs_table.insert().values(
                     run_id="run-resume-bootstrap",

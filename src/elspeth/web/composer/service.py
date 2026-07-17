@@ -1939,6 +1939,7 @@ class ComposerServiceImpl:
             if (
                 _state_is_structurally_empty(state)
                 and _user_request_expects_pipeline_mutation(message)
+                and guided_terminal is None
                 and self._sessions_service is not None
                 and session_id is not None
                 and user_message_id is not None

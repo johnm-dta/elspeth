@@ -105,6 +105,7 @@ def _record_while_mutation_contends(
             sink_node_id: str | None,
             artifact_id: str | None,
             conn: Connection | None = None,
+            lock_witnesses: bool = True,
         ) -> None:
             original_invariants(
                 checked_ref,
@@ -114,6 +115,7 @@ def _record_while_mutation_contends(
                 sink_node_id=sink_node_id,
                 artifact_id=artifact_id,
                 conn=conn,
+                lock_witnesses=lock_witnesses,
             )
             start.set()
             assert future.result(timeout=5) == "blocked"

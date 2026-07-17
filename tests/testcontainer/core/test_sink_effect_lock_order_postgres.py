@@ -5,22 +5,23 @@ from __future__ import annotations
 import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
-from datetime import timedelta
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.engine import Connection
 from testcontainers.postgres import PostgresContainer  # type: ignore[import-untyped]
 from tests.fixtures.landscape import make_factory, register_test_node
 
-from elspeth.contracts import NodeType, TerminalOutcome, TerminalPath
+from elspeth.contracts import NodeStateStatus, NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.audit import DISCARD_SINK_NAME, TokenRef
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.contracts.sink_effects import (
     SINK_EFFECT_PROTOCOL_VERSION,
     SinkEffectAttemptAction,
     SinkEffectDescriptorMode,
+    SinkEffectFinalizationResult,
     SinkEffectInputKind,
     SinkEffectInspectionMode,
     SinkEffectMemberCandidate,
@@ -33,7 +34,14 @@ from elspeth.core.landscape.execution.sink_effect_finalization import SinkEffect
 from elspeth.core.landscape.execution.sink_effect_identity import compute_pipeline_effect_identity, resolve_sink_effect_members
 from elspeth.core.landscape.execution.sink_effect_lifecycle import SinkEffectAttemptRequest, SinkEffectAttemptResult
 from elspeth.core.landscape.execution.sink_effect_reservation import SinkEffectReservationRequest
-from elspeth.core.landscape.schema import sink_effect_members_table, sink_effects_table, token_outcomes_table
+from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.schema import (
+    artifacts_table,
+    node_states_table,
+    sink_effect_members_table,
+    sink_effects_table,
+    token_outcomes_table,
+)
 
 pytestmark = pytest.mark.testcontainer
 
@@ -521,7 +529,6 @@ def test_reservation_vs_outcome_uses_token_first_order_without_deadlock(postgres
 
 def request_witness_state_ids(db: LandscapeDB, run_id: str, sink_node_id: str) -> tuple[str, ...]:
     """Read the race's complete state set after both transactions finish."""
-    from elspeth.core.landscape.schema import node_states_table
 
     with db.read_only_connection() as conn:
         return tuple(
@@ -532,3 +539,440 @@ def request_witness_state_ids(db: LandscapeDB, run_id: str, sink_node_id: str) -
                 )
             ).scalars()
         )
+
+
+@dataclass(frozen=True)
+class _InFlightEffect:
+    """A leased effect with a returned commit attempt, ready to finalize."""
+
+    run_id: str
+    token_id: str
+    sink_node_id: str
+    effect_id: str
+    lease_owner: str
+    generation: int
+    request: SinkEffectFinalizeRequest
+
+
+def _build_in_flight_effect(factory: RecorderFactory, *, name_prefix: str, owner: str = "worker-a") -> _InFlightEffect:
+    run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+    source = register_test_node(factory.data_flow, run.run_id, f"{name_prefix}-source", node_type=NodeType.SOURCE, plugin_name="source")
+    sink = register_test_node(factory.data_flow, run.run_id, f"{name_prefix}-sink", node_type=NodeType.SINK, plugin_name="sink")
+    payload = {"ordinal": 0}
+    row = factory.data_flow.create_row(
+        run_id=run.run_id,
+        source_node_id=source,
+        row_index=0,
+        data=payload,
+        source_row_index=0,
+        ingest_sequence=0,
+    )
+    token = factory.data_flow.create_token(row.row_id)
+    factory.execution.begin_node_state(
+        token_id=token.token_id,
+        node_id=sink,
+        run_id=run.run_id,
+        step_index=0,
+        input_data=payload,
+    )
+    members = resolve_sink_effect_members(factory, [SinkEffectMemberCandidate(token_id=token.token_id, row=payload)])
+    identity = compute_pipeline_effect_identity(
+        run_id=run.run_id,
+        sink_node_id=sink,
+        role=SinkEffectRole.PRIMARY,
+        sink_config={"name": "sink"},
+        target_config={"path": f"{name_prefix}.jsonl"},
+        members=members,
+    )
+    effect = factory.execution.sink_effects.reserve(
+        SinkEffectReservationRequest(
+            run_id=run.run_id,
+            sink_node_id=sink,
+            role=SinkEffectRole.PRIMARY,
+            input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            requested_target_hash=identity.requested_target_hash,
+            members=members,
+            audit_export_snapshot_id=None,
+            config_hash=identity.config_hash,
+            replacing_target=False,
+            primary_effect_id=None,
+        )
+    ).new_effect
+    assert effect is not None
+    descriptor = ArtifactDescriptor(
+        artifact_type="file",
+        path_or_uri=f"file:///tmp/{name_prefix}.jsonl",
+        content_hash="d" * 64,
+        size_bytes=12,
+    )
+    claim = factory.execution.sink_effects.claim_preparation(effect.effect_id, owner=owner, ttl=timedelta(seconds=30))
+    factory.execution.sink_effects.complete_plan(
+        effect.effect_id,
+        SinkEffectPlan(
+            effect_id=effect.effect_id,
+            protocol_version=SINK_EFFECT_PROTOCOL_VERSION,
+            input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            descriptor_mode=SinkEffectDescriptorMode.PRECOMPUTED,
+            inspection_mode=SinkEffectInspectionMode.NO_INSPECTION_REQUIRED,
+            target=descriptor.path_or_uri,
+            plan_hash="a" * 64,
+            payload_hash="b" * 64,
+            expected_descriptor=descriptor,
+            safe_evidence={"inspection_reference": "no-inspection-required:v1"},
+        ),
+        claim=claim,
+    )
+    lease = factory.execution.sink_effects.acquire_lease(effect.effect_id, owner=owner, ttl=timedelta(seconds=30))
+    attempt = factory.execution.sink_effects.begin_attempt(
+        SinkEffectAttemptRequest(
+            effect_id=effect.effect_id,
+            member_ordinal=None,
+            generation=lease.generation,
+            action=SinkEffectAttemptAction.COMMIT,
+            request_hash="a" * 64,
+        )
+    )
+    factory.execution.sink_effects.record_attempt_result(
+        SinkEffectAttemptResult(attempt_id=attempt.attempt_id, evidence={"result": "exact"}, latency_ms=1.0)
+    )
+    request = SinkEffectFinalizeRequest(
+        effect_id=effect.effect_id,
+        lease_owner=lease.owner,
+        generation=lease.generation,
+        descriptor=descriptor,
+        publication_performed=True,
+        publication_evidence_kind="returned",
+        accepted_ordinals=(0,),
+        diverted_ordinals=(),
+        evidence={"result": "exact"},
+        members=(
+            SinkEffectFinalizationMember(
+                ordinal=0,
+                output_data={"row": payload},
+                duration_ms=1.0,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="sink",
+            ),
+        ),
+        attempt_id=attempt.attempt_id,
+    )
+    return _InFlightEffect(
+        run_id=run.run_id,
+        token_id=token.token_id,
+        sink_node_id=sink,
+        effect_id=effect.effect_id,
+        lease_owner=lease.owner,
+        generation=lease.generation,
+        request=request,
+    )
+
+
+def test_takeover_vs_finalization_generation_fences_stale_finalizer(postgres_db: LandscapeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Takeover paused after its effect lock beats a stale finalizer approaching
+    through sorted token/state locks: the generation fence rejects the stale
+    finalization, both transactions complete bounded, and no artifact or
+    outcome from the loser survives (design scenario: takeover versus
+    finalization/head CAS)."""
+    db = postgres_db
+    finalizer_factory = make_factory(db)
+    takeover_factory = make_factory(db)
+    built = _build_in_flight_effect(finalizer_factory, name_prefix="takeover-fence")
+
+    # Expire the lease directly so takeover is legal while the original owner
+    # still believes it holds the effect — the crash-recovery race the design
+    # fences with generation CAS. A sleep-based expiry would be flaky here.
+    with db.engine.begin() as conn:
+        conn.execute(
+            update(sink_effects_table)
+            .where(sink_effects_table.c.effect_id == built.effect_id)
+            .values(
+                lease_heartbeat_at=datetime.now(UTC) - timedelta(hours=2),
+                lease_expires_at=datetime.now(UTC) - timedelta(hours=1),
+            )
+        )
+
+    takeover_locked = threading.Event()
+    release_takeover = threading.Event()
+    finalizer_states_locked = threading.Event()
+    backend_pids: dict[str, int] = {}
+
+    def pause_after_effect_lock(pid: int, effect_id: str) -> None:
+        assert effect_id == built.effect_id
+        backend_pids["takeover"] = pid
+        takeover_locked.set()
+        assert release_takeover.wait(timeout=5)
+
+    def capture_token_locks(pid: int, token_ids: tuple[str, ...]) -> None:
+        assert token_ids == tuple(sorted(token_ids))
+        backend_pids["finalizer"] = pid
+
+    def signal_state_locks(_pid: int, state_ids: tuple[str, ...]) -> None:
+        assert state_ids == tuple(sorted(state_ids))
+        finalizer_states_locked.set()
+
+    monkeypatch.setattr(takeover_factory.execution.sink_effects._lifecycle, "_after_effect_lock", pause_after_effect_lock)
+    monkeypatch.setattr(finalizer_factory.execution.sink_effects._finalization, "_after_token_locks", capture_token_locks)
+    monkeypatch.setattr(finalizer_factory.execution.sink_effects._finalization, "_after_state_locks", signal_state_locks)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        takeover = pool.submit(
+            takeover_factory.execution.sink_effects.takeover_expired,
+            built.effect_id,
+            owner="worker-b",
+            ttl=timedelta(seconds=30),
+        )
+        assert takeover_locked.wait(timeout=5)
+        finalization = pool.submit(finalizer_factory.execution.sink_effects.finalize, built.request)
+        assert finalizer_states_locked.wait(timeout=5)
+        release_takeover.set()
+        new_lease = takeover.result(timeout=10)
+        with pytest.raises(LandscapeRecordError, match="stale lease owner"):
+            finalization.result(timeout=10)
+
+    assert new_lease.owner == "worker-b"
+    assert new_lease.generation == built.generation + 1
+    assert backend_pids["takeover"] != backend_pids["finalizer"]
+    with db.read_only_connection() as conn:
+        effect_row = conn.execute(select(sink_effects_table).where(sink_effects_table.c.effect_id == built.effect_id)).one()
+        assert effect_row.state == "in_flight"
+        assert effect_row.lease_owner == "worker-b"
+        assert int(effect_row.generation) == built.generation + 1
+        assert (
+            conn.scalar(select(func.count()).select_from(artifacts_table).where(artifacts_table.c.sink_effect_id == built.effect_id)) == 0
+        )
+        assert (
+            conn.scalar(select(func.count()).select_from(token_outcomes_table).where(token_outcomes_table.c.token_id == built.token_id))
+            == 0
+        )
+        statuses = list(conn.execute(select(node_states_table.c.status).where(node_states_table.c.token_id == built.token_id)).scalars())
+        assert statuses == [NodeStateStatus.OPEN.value]
+
+
+def test_takeover_blocked_by_finalization_observes_finalized_effect(postgres_db: LandscapeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other legal winner: a finalizer paused holding its effect locks
+    commits first, and the concurrent takeover — blocked on the same effect
+    row — must observe FINALIZED and be rejected instead of stealing the
+    lease of a completed effect."""
+    db = postgres_db
+    finalizer_factory = make_factory(db)
+    takeover_factory = make_factory(db)
+    built = _build_in_flight_effect(finalizer_factory, name_prefix="takeover-loses")
+
+    finalizer_holds_effect = threading.Event()
+    release_finalizer = threading.Event()
+    takeover_approached = threading.Event()
+    backend_pids: dict[str, int] = {}
+
+    def pause_after_effect_locks(pid: int, effect_ids: tuple[str, ...]) -> None:
+        assert effect_ids == tuple(sorted(effect_ids))
+        backend_pids["finalizer"] = pid
+        finalizer_holds_effect.set()
+        assert release_finalizer.wait(timeout=5)
+
+    def capture_takeover_pid(pid: int, _effect_id: str) -> None:
+        backend_pids["takeover"] = pid
+
+    lifecycle = takeover_factory.execution.sink_effects._lifecycle
+    original_lock_effect = lifecycle._lock_effect
+
+    def approaching_lock_effect(conn: Connection, effect_id: str, *, include_stream: bool) -> object:
+        takeover_approached.set()
+        return original_lock_effect(conn, effect_id, include_stream=include_stream)
+
+    monkeypatch.setattr(finalizer_factory.execution.sink_effects._finalization, "_after_effect_locks", pause_after_effect_locks)
+    monkeypatch.setattr(lifecycle, "_after_effect_lock", capture_takeover_pid)
+    monkeypatch.setattr(lifecycle, "_lock_effect", approaching_lock_effect)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        finalization = pool.submit(finalizer_factory.execution.sink_effects.finalize, built.request)
+        assert finalizer_holds_effect.wait(timeout=5)
+        takeover = pool.submit(
+            takeover_factory.execution.sink_effects.takeover_expired,
+            built.effect_id,
+            owner="worker-b",
+            ttl=timedelta(seconds=30),
+        )
+        assert takeover_approached.wait(timeout=5)
+        release_finalizer.set()
+        winner = finalization.result(timeout=10)
+        with pytest.raises(LandscapeRecordError, match="finalized sink effect cannot be taken over"):
+            takeover.result(timeout=10)
+
+    assert winner.effect.state.value == "finalized"
+    assert backend_pids["takeover"] != backend_pids["finalizer"]
+    with db.read_only_connection() as conn:
+        effect_row = conn.execute(select(sink_effects_table).where(sink_effects_table.c.effect_id == built.effect_id)).one()
+        assert effect_row.state == "finalized"
+        assert effect_row.lease_owner is None
+        assert int(effect_row.generation) == built.generation
+        assert (
+            conn.scalar(select(func.count()).select_from(artifacts_table).where(artifacts_table.c.sink_effect_id == built.effect_id)) == 1
+        )
+
+
+def test_concurrent_finalization_retries_converge_on_winner_under_effect_lock(
+    postgres_db: LandscapeDB, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Effect-linked artifact path: two crash-recovery retries of an already
+    finalized effect serialize on the effect row and only then take the
+    artifact FOR UPDATE — effect before artifact, never the reverse — and
+    both converge on the identical winner with exactly one artifact row."""
+    db = postgres_db
+    setup_factory = make_factory(db)
+    built = _build_in_flight_effect(setup_factory, name_prefix="retry-converge")
+    first = setup_factory.execution.sink_effects.finalize(built.request)
+    assert first.effect.state.value == "finalized"
+
+    retry_a_factory = make_factory(db)
+    retry_b_factory = make_factory(db)
+
+    a_holds_effect = threading.Event()
+    release_a = threading.Event()
+    b_approached = threading.Event()
+    backend_pids: dict[str, int] = {}
+
+    def pause_a_after_effect_locks(pid: int, effect_ids: tuple[str, ...]) -> None:
+        assert effect_ids == tuple(sorted(effect_ids))
+        backend_pids["retry_a"] = pid
+        a_holds_effect.set()
+        assert release_a.wait(timeout=5)
+
+    def capture_b_effect_locks(pid: int, _effect_ids: tuple[str, ...]) -> None:
+        backend_pids["retry_b"] = pid
+
+    b_finalization = retry_b_factory.execution.sink_effects._finalization
+    original_b_lock = b_finalization._lock_stream_and_effects
+
+    def approaching_b_lock(conn: Connection, optimistic_effect: object, linked_effect_ids: tuple[str, ...]) -> dict[str, object]:
+        b_approached.set()
+        return original_b_lock(conn, optimistic_effect, linked_effect_ids)
+
+    monkeypatch.setattr(retry_a_factory.execution.sink_effects._finalization, "_after_effect_locks", pause_a_after_effect_locks)
+    monkeypatch.setattr(b_finalization, "_after_effect_locks", capture_b_effect_locks)
+    monkeypatch.setattr(b_finalization, "_lock_stream_and_effects", approaching_b_lock)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        retry_a = pool.submit(retry_a_factory.execution.sink_effects.finalize, built.request)
+        assert a_holds_effect.wait(timeout=5)
+        retry_b = pool.submit(retry_b_factory.execution.sink_effects.finalize, built.request)
+        assert b_approached.wait(timeout=5)
+        # Retry B cannot finish while retry A holds the effect row lock: the
+        # artifact winner is only readable behind the effect lock class.
+        assert not retry_b.done()
+        release_a.set()
+        winners: list[SinkEffectFinalizationResult] = [retry_a.result(timeout=10), retry_b.result(timeout=10)]
+
+    assert backend_pids["retry_a"] != backend_pids["retry_b"]
+    assert {winner.effect.effect_id for winner in winners} == {built.effect_id}
+    assert {winner.artifact.artifact_id for winner in winners} == {first.artifact.artifact_id}
+    assert all(winner.effect.state.value == "finalized" for winner in winners)
+    assert all(winner.artifact.content_hash == built.request.descriptor.content_hash for winner in winners)
+    with db.read_only_connection() as conn:
+        assert (
+            conn.scalar(select(func.count()).select_from(artifacts_table).where(artifacts_table.c.sink_effect_id == built.effect_id)) == 1
+        )
+
+
+def test_legacy_state_linked_artifact_outcome_contention_single_winner(postgres_db: LandscapeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy state-linked artifact path: two composed outcome writers for the
+    same token follow token, state, artifact lock order; they serialize at the
+    token class, exactly one outcome wins, the loser is rejected without
+    deadlock, and the artifact witness row survives untouched."""
+    db = postgres_db
+    winner_factory = make_factory(db)
+    loser_factory = make_factory(db)
+    run = winner_factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+    source = register_test_node(
+        winner_factory.data_flow, run.run_id, "legacy-artifact-source", node_type=NodeType.SOURCE, plugin_name="source"
+    )
+    failsink = register_test_node(
+        winner_factory.data_flow, run.run_id, "legacy-artifact-failsink", node_type=NodeType.SINK, plugin_name="failsink"
+    )
+    payload = {"value": 1}
+    row = winner_factory.data_flow.create_row(
+        run_id=run.run_id,
+        source_node_id=source,
+        row_index=0,
+        data=payload,
+        source_row_index=0,
+        ingest_sequence=0,
+    )
+    token = winner_factory.data_flow.create_token(row.row_id)
+    state = winner_factory.execution.begin_node_state(
+        token_id=token.token_id,
+        node_id=failsink,
+        run_id=run.run_id,
+        step_index=0,
+        input_data=payload,
+    )
+    winner_factory.execution.complete_node_state(
+        state_id=state.state_id,
+        status=NodeStateStatus.COMPLETED,
+        output_data={"written": True},
+        duration_ms=1.0,
+    )
+    artifact = winner_factory.execution.register_artifact(
+        run_id=run.run_id,
+        state_id=state.state_id,
+        sink_node_id=failsink,
+        artifact_type="test",
+        path="memory://legacy/fallback-artifact",
+        content_hash="ab" * 32,
+        size_bytes=0,
+    )
+
+    winner_locked = threading.Event()
+    release_winner = threading.Event()
+    loser_approached = threading.Event()
+    backend_pids: dict[str, int] = {}
+
+    original_winner_lock = winner_factory.data_flow.outcomes.lock_token_outcome_dependencies
+
+    def winner_lock(refs: tuple[TokenRef, ...], *, conn: Connection) -> None:
+        original_winner_lock(refs, conn=conn)
+        backend_pids["winner"] = int(conn.exec_driver_sql("SELECT pg_backend_pid()").scalar_one())
+        winner_locked.set()
+        assert release_winner.wait(timeout=5)
+
+    original_loser_lock = loser_factory.data_flow.outcomes.lock_token_outcome_dependencies
+
+    def loser_lock(refs: tuple[TokenRef, ...], *, conn: Connection) -> None:
+        backend_pids["loser"] = int(conn.exec_driver_sql("SELECT pg_backend_pid()").scalar_one())
+        loser_approached.set()
+        original_loser_lock(refs, conn=conn)
+
+    monkeypatch.setattr(winner_factory.data_flow.outcomes, "lock_token_outcome_dependencies", winner_lock)
+    monkeypatch.setattr(loser_factory.data_flow.outcomes, "lock_token_outcome_dependencies", loser_lock)
+
+    def record_fallback(factory: RecorderFactory) -> str:
+        return factory.data_flow.record_token_outcome(
+            TokenRef(token_id=token.token_id, run_id=run.run_id),
+            TerminalOutcome.TRANSIENT,
+            TerminalPath.SINK_FALLBACK_TO_FAILSINK,
+            sink_name="failsink",
+            sink_node_id=failsink,
+            artifact_id=artifact.artifact_id,
+            error_hash="fallback-error",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        winner = pool.submit(record_fallback, winner_factory)
+        assert winner_locked.wait(timeout=5)
+        loser = pool.submit(record_fallback, loser_factory)
+        assert loser_approached.wait(timeout=5)
+        release_winner.set()
+        outcome_id = winner.result(timeout=10)
+        with pytest.raises(LandscapeRecordError, match="database rejected audit write"):
+            loser.result(timeout=10)
+
+    assert outcome_id
+    assert backend_pids["winner"] != backend_pids["loser"]
+    with db.read_only_connection() as conn:
+        outcomes = conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.token_id == token.token_id)).fetchall()
+        assert len(outcomes) == 1
+        assert outcomes[0].outcome == TerminalOutcome.TRANSIENT.value
+        assert outcomes[0].path == TerminalPath.SINK_FALLBACK_TO_FAILSINK.value
+        artifact_row = conn.execute(select(artifacts_table).where(artifacts_table.c.artifact_id == artifact.artifact_id)).one()
+        assert artifact_row.produced_by_state_id == state.state_id
+        assert artifact_row.content_hash == "ab" * 32

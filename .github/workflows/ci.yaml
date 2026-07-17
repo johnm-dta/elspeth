@@ -571,6 +571,40 @@ jobs:
           exit "$status"
 
   # ===========================================================================
+  # Stage 5b: Testcontainer proofs (real PostgreSQL contention via Docker)
+  # ===========================================================================
+  testcontainer:
+    name: Testcontainer (PostgreSQL contention proofs)
+    # Always GitHub-hosted: testcontainers-python needs a Docker daemon, which
+    # neither the self-hosted container jobs nor the python:*-bookworm images
+    # expose. ubuntu-24.04 ships Docker preinstalled for both push and PR runs.
+    runs-on: ubuntu-24.04
+    needs: [static-analysis]
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libsqlcipher-dev
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Run testcontainer suite
+        run: |
+          uv run pytest tests/testcontainer/ \
+            -v \
+            -m testcontainer
+
+  # ===========================================================================
   # Stage 3c: Dependency and License Audit
   # ===========================================================================
   supply-chain-audit:
@@ -795,6 +829,7 @@ jobs:
     needs:
       - static-analysis
       - test
+      - testcontainer
       - supply-chain-audit
       - e2e-frontend
       - frontend-unit
@@ -808,6 +843,10 @@ jobs:
           fi
           if [[ "${{ needs.test.result }}" != "success" ]]; then
             echo "Test job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.testcontainer.result }}" != "success" ]]; then
+            echo "Testcontainer (PostgreSQL contention proofs) job failed"
             exit 1
           fi
           if [[ "${{ needs.supply-chain-audit.result }}" != "success" ]]; then

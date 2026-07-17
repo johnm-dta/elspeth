@@ -445,12 +445,26 @@ boundary.
 
 **Files:**
 
+- Modify: `src/elspeth/web/config.py`
+- Modify: `src/elspeth/web/composer/no_tool_policy.py`
 - Modify: `src/elspeth/web/composer/service.py`
 - Modify: `src/elspeth/web/composer/protocol.py`
 - Modify: `src/elspeth/web/composer/tool_batch.py`
+- Create: `src/elspeth/web/sessions/routes/composer/pipeline_settlement.py`
 - Modify: `src/elspeth/web/sessions/routes/messages.py`
 - Modify: `src/elspeth/web/sessions/routes/composer/compose.py`
+- Modify: `src/elspeth/web/sessions/routes/composer/proposals.py`
 - Create: `tests/integration/web/composer/test_freeform_pipeline_planner.py`
+
+**Implementation amendment (2026-07-18):** Live-code reconciliation found
+that the shared structural-emptiness policy omitted edges, the production web
+settings had no explicit planner request/cost/repair budgets, and the canonical
+acceptance transaction was route-local. Extend the existing policy helper to
+cover all four topology collections, add frozen operator configuration for the
+planner's request bytes, completion tokens, cumulative cost, and repair count,
+and extract the existing lock-assuming canonical acceptance sequence into one
+route helper used by both review acceptance and auto-commit. This is a code
+reuse boundary, not a new persistence or approval layer.
 
 - [ ] Add a failing `ComposerServiceImpl.compose()` test for an empty
   composition and an end-to-end build request. It must traverse request prompt

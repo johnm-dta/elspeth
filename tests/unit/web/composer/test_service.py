@@ -29,6 +29,7 @@ from elspeth.web.composer.protocol import (
     ComposerResult,
     ComposerRuntimePreflightError,
     ComposerServiceError,
+    PipelineCommitIntent,
     ToolArgumentError,
 )
 from elspeth.web.composer.service import (
@@ -39,6 +40,7 @@ from elspeth.web.composer.service import (
 )
 from elspeth.web.composer.state import (
     CompositionState,
+    EdgeSpec,
     OutputSpec,
     PipelineMetadata,
     SourceSpec,
@@ -5114,6 +5116,18 @@ class TestComposerRuntimePreflightFinalGate:
             error.original_exc = RuntimeError("replacement")
 
 
+def test_pipeline_commit_intent_is_frozen_and_hash_bound() -> None:
+    proposal_id = uuid4()
+    intent = PipelineCommitIntent(proposal_id=proposal_id, draft_hash="a" * 64)
+
+    assert intent.proposal_id == proposal_id
+    assert intent.draft_hash == "a" * 64
+    with pytest.raises(AttributeError):
+        intent.draft_hash = "b" * 64  # type: ignore[misc]
+    with pytest.raises(ValueError, match="SHA-256"):
+        PipelineCommitIntent(proposal_id=proposal_id, draft_hash="not-a-hash")
+
+
 class TestEmptyStateFinalizePassthrough:
     """Tier 1.5 §7.6 followup — empty-state finalize-time passthrough.
 
@@ -5160,6 +5174,21 @@ class TestEmptyStateFinalizePassthrough:
                 name="main", plugin="csv", options={"path": "/tmp/y.csv", "schema": {"mode": "observed"}}, on_write_failure="discard"
             )
         )
+        assert _state_is_structurally_empty(state) is False
+
+    def test_state_is_structurally_empty_false_with_edge(self) -> None:
+        from elspeth.web.composer.service import _state_is_structurally_empty
+
+        state = _empty_state().with_edge(
+            EdgeSpec(
+                id="orphan-edge",
+                from_node="source",
+                to_node="out",
+                edge_type="on_success",
+                label=None,
+            )
+        )
+
         assert _state_is_structurally_empty(state) is False
 
     def test_compose_empty_state_message_appends_system_suffix(self) -> None:

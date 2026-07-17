@@ -6,10 +6,13 @@ pipeline composition.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
+from uuid import UUID
 
 if TYPE_CHECKING:
     from elspeth.web.composer.audit import BufferingRecorder
@@ -22,6 +25,22 @@ from elspeth.contracts.composer_progress import ComposerProgressReason, Composer
 from elspeth.contracts.errors import FailedTurnMetadata
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.execution.schemas import ValidationResult
+
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineCommitIntent:
+    """Authority pointer for route-owned canonical pipeline settlement."""
+
+    proposal_id: UUID
+    draft_hash: str
+
+    def __post_init__(self) -> None:
+        if type(self.proposal_id) is not UUID:
+            raise TypeError("proposal_id must be an exact UUID")
+        if type(self.draft_hash) is not str or _SHA256_HEX.fullmatch(self.draft_hash) is None:
+            raise ValueError("draft_hash must be a lowercase SHA-256 hash")
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +123,7 @@ class ComposerResult:
     state: CompositionState
     runtime_preflight: ValidationResult | None = None
     raw_assistant_content: str | None = None
+    pipeline_commit_intent: PipelineCommitIntent | None = None
     # Per-tool-call audit trail produced during this compose() invocation.
     # Populated by ComposerServiceImpl._compose_loop via a BufferingRecorder.
     # The route handler persists each entry as a role=tool chat message row.
@@ -667,6 +687,21 @@ class ComposerSettings(Protocol):
 
     @property
     def composer_timeout_seconds(self) -> float: ...
+
+    @property
+    def composer_planner_max_provider_calls(self) -> int: ...
+
+    @property
+    def composer_planner_max_request_bytes(self) -> int: ...
+
+    @property
+    def composer_planner_max_completion_tokens(self) -> int: ...
+
+    @property
+    def composer_planner_max_cumulative_provider_cost(self) -> Decimal: ...
+
+    @property
+    def composer_planner_repair_budget(self) -> int: ...
 
     @property
     def composer_runtime_preflight_timeout_seconds(self) -> float: ...

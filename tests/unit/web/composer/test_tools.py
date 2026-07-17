@@ -1228,7 +1228,7 @@ class TestSetSource:
         assert result.data["error_code"] == "plugin_not_installed"
 
     def test_set_source_rejects_manual_blob_ref_in_options(self) -> None:
-        """Closes elspeth-07089fbaa3 (write defense, branch a).
+        """Reject manual blob_ref injection through set_source.
 
         set_source must not accept ``blob_ref`` in options because it
         cannot enforce that the supplied ``path`` equals the bound blob's
@@ -6733,7 +6733,7 @@ class TestPatchSourceOptions:
         """Build a state with a blob-backed source directly.
 
         Bypasses ``set_source`` (which now rejects manual ``blob_ref``
-        injection per elspeth-07089fbaa3) by constructing the
+        injection) by constructing the
         ``CompositionState`` and ``SourceSpec`` from the dataclass
         primitives.  This is the post-fix shape produced by
         ``set_source_from_blob`` at runtime.
@@ -6757,7 +6757,7 @@ class TestPatchSourceOptions:
         )
 
     def test_patch_source_options_rejects_path_patch_on_blob_backed_source(self) -> None:
-        """Closes elspeth-07089fbaa3 (write defense, branch b).
+        """Reject path patches on a blob-backed source.
 
         Once a source is bound to a blob via ``set_source_from_blob``, the
         ``path`` is the blob's canonical ``storage_path`` and is not
@@ -6804,7 +6804,7 @@ class TestPatchSourceOptions:
         assert opts["path"] == "/a.csv"
 
     def test_patch_source_options_rejects_blob_ref_patch_on_blob_backed_source(self) -> None:
-        """Closes elspeth-07089fbaa3 (write defense, blob_ref re-bind via patch).
+        """Reject blob_ref re-binding through a patch.
 
         ``blob_ref`` is part of the immutable binding; replacing it via a
         patch would silently re-target the source to a different blob
@@ -6823,7 +6823,7 @@ class TestPatchSourceOptions:
         assert "Cannot patch 'blob_ref'" in result.data["error"]
 
     def test_patch_source_options_allows_unrelated_keys_on_blob_backed_source(self) -> None:
-        """Closes elspeth-07089fbaa3 (write defense — narrow rejection).
+        """Allow unrelated option patches on a blob-backed source.
 
         The (path, blob_ref) lock must not over-reach: patches that touch
         only schema/encoding/etc. on a blob-backed source remain valid,

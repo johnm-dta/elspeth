@@ -854,7 +854,7 @@ class ExecutionServiceImpl:
                 # Offensive-programming pattern: membership check +
                 # indexing instead of .get() so the absence case raises
                 # the structured BlobSourcePathMismatchError rather than
-                # an opaque KeyError.  See elspeth-07089fbaa3.
+                # an opaque KeyError.
                 source_options = source.options
                 canonical_path = blob_record.storage_path
                 stored_path = source_options["path"] if "path" in source_options else None

@@ -3264,7 +3264,7 @@ class TestCancelMechanism:
         # Set up state record with a source containing a blob_ref.
         # Use a real dict so state_from_record → deep_thaw works correctly.
         # path must equal blob.storage_path to satisfy the Tier 1 read
-        # guard for blob-backed sources (elspeth-07089fbaa3).
+        # guard for blob-backed sources.
         state = mock_session_service.get_current_state.return_value
         state.source = {
             "plugin": "csv",
@@ -3297,7 +3297,7 @@ class TestCancelMechanism:
 
         # Use a real dict so state_from_record → deep_thaw works correctly.
         # path must equal blob.storage_path to satisfy the Tier 1 read
-        # guard for blob-backed sources (elspeth-07089fbaa3).
+        # guard for blob-backed sources.
         state = mock_session_service.get_current_state.return_value
         state.source = {
             "plugin": "csv",
@@ -4416,7 +4416,7 @@ class TestBlobRefPreValidation:
         cast(Any, service)._blob_service = blob_service
 
         # path must equal blob.storage_path to satisfy the Tier 1 read
-        # guard for blob-backed sources (elspeth-07089fbaa3).
+        # guard for blob-backed sources.
         state = mock_session_service.get_current_state.return_value
         state.source = {
             "plugin": "csv",
@@ -4636,7 +4636,7 @@ class TestBlobOwnership:
         cast(Any, service)._blob_service = blob_service
 
         # path must equal blob.storage_path to satisfy the Tier 1 read
-        # guard for blob-backed sources (elspeth-07089fbaa3).
+        # guard for blob-backed sources.
         state = mock_session_service.get_current_state.return_value
         state.source = {
             "plugin": "csv",
@@ -4650,11 +4650,11 @@ class TestBlobOwnership:
         assert isinstance(run_id, UUID)
 
 
-# ── Blob Source Path Read Guard (Tier 1, elspeth-07089fbaa3) ─────────
+# ── Blob Source Path Read Guard (Tier 1) ─────────────────────────────
 
 
 class TestBlobSourcePathReadGuard:
-    """Closes elspeth-07089fbaa3 (runtime read guard).
+    """Runtime read guard for composer-stored blob source paths.
 
     The composer's write-side defenses make wrong-shape blob source paths
     impossible to persist going forward, but the audit-integrity contract
@@ -4719,7 +4719,7 @@ class TestBlobSourcePathReadGuard:
         assert exc_info.value.stored_path == diverging_path
         assert exc_info.value.canonical_path == canonical_path
         assert exc_info.value.blob_id == blob_ref
-        assert "elspeth-07089fbaa3" in str(exc_info.value)
+        assert "bug in composer persistence" in str(exc_info.value)
 
         # Critical: create_run was never called — the session is not
         # poisoned with a pending run that the operator must clean up.

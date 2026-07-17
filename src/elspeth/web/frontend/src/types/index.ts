@@ -923,7 +923,8 @@ export interface ExecutionFanoutAck {
  * - `detail`: Human-readable error message (always present)
  * - `error_type`: Machine-readable discriminator (present on domain errors,
  *   absent on generic HTTP errors)
- * - `validation_errors`: Per-component errors (present on validation failures)
+ * - `validation_errors`: Per-component errors from established composer flows
+ * - `errors`: Structured entries from execution preflight failures
  *
  * The frontend checks error_type first (if present), falls back to HTTP
  * status code, then falls back to detail text.
@@ -942,7 +943,23 @@ export interface ApiError {
   provider_detail?: string;
   provider_status_code?: number;
   validation_errors?: ValidationError[];
+  errors?: ApiStructuredError[];
   snapshot_fingerprint?: string;
+}
+
+/**
+ * Shared message-bearing shape for structured execution errors. Semantic
+ * contract entries use `component`; pipeline validation entries use the
+ * Stage-2 `component_id` / `component_type` fields.
+ */
+export interface ApiStructuredError {
+  message: string;
+  component?: string;
+  component_id?: string | null;
+  component_type?: string | null;
+  severity?: string;
+  suggestion?: string | null;
+  error_code?: string | null;
 }
 
 export interface SystemStatus {

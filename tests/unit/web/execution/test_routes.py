@@ -494,6 +494,32 @@ class TestExecuteEndpoint:
             assert "detail" in body
 
     @pytest.mark.asyncio
+    async def test_execute_returns_canonical_blob_source_path_error(self) -> None:
+        from elspeth.web.execution.errors import BlobSourcePathMismatchError
+
+        exc = BlobSourcePathMismatchError(
+            stored_path="/internal/stored.csv",
+            canonical_path="/internal/canonical.csv",
+            blob_id=str(uuid4()),
+            session_id=str(uuid4()),
+        )
+        svc = _execution_service()
+        svc.execute = AsyncMock(spec=ExecutionService.execute, side_effect=exc)
+        app = _create_test_app(execution_service=svc)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(f"/api/sessions/{uuid4()}/execute")
+
+        assert resp.status_code == 500
+        detail = resp.json()["detail"]
+        assert detail["error_type"] == "blob_source_path_mismatch"
+        assert detail["kind"] == "blob_source_path_mismatch"
+        assert "structurally valid" in detail["detail"]
+        assert detail["message"] == detail["detail"]
+        assert "issue" not in detail
+        assert "/internal/" not in detail["detail"]
+
+    @pytest.mark.asyncio
     async def test_execute_forwards_fanout_ack_token_to_service(self) -> None:
         expected_run_id = uuid4()
         svc = _execution_service()
@@ -611,7 +637,9 @@ class TestExecuteEndpoint:
         assert resp.status_code == 422
         body = resp.json()
         detail = body["detail"]
+        assert detail["error_type"] == "semantic_contract_violation"
         assert detail["kind"] == "semantic_contract_violation"
+        assert detail["detail"] == str(exc)
         assert detail["errors"][0]["component"] == "node:explode"
         assert detail["errors"][0]["severity"] == "high"
         assert detail["semantic_contracts"][0]["outcome"] == "conflict"
@@ -666,7 +694,9 @@ class TestExecuteEndpoint:
             resp = await client.post(f"/api/sessions/{uuid4()}/execute")
         assert resp.status_code == 422
         detail = resp.json()["detail"]
+        assert detail["error_type"] == "pipeline_validation_failure"
         assert detail["kind"] == "pipeline_validation_failure"
+        assert detail["detail"] == str(exc)
         assert detail["errors"][0]["component_id"] == "rate"
         assert detail["errors"][0]["message"].startswith("Graph validation failed")
         assert detail["errors"][0]["suggestion"] == "Wire an upstream node that emits 'content'."
@@ -696,13 +726,15 @@ class TestExecuteEndpoint:
         assert resp.status_code == 422
         body = resp.json()
         detail = body["detail"]
+        assert detail["error_type"] == "interpretation_placeholder_unresolved"
         assert detail["kind"] == "interpretation_placeholder_unresolved"
         # Message names every unresolved site so the operator sees them
         # without needing to expand the banner.
-        assert "{{interpretation:cool}}" in detail["message"]
-        assert "rate_node" in detail["message"]
-        assert "{{interpretation:important}}" in detail["message"]
-        assert "summarise_node" in detail["message"]
+        assert "{{interpretation:cool}}" in detail["detail"]
+        assert "rate_node" in detail["detail"]
+        assert "{{interpretation:important}}" in detail["detail"]
+        assert "summarise_node" in detail["detail"]
+        assert detail["message"] == detail["detail"]
         # Structured placeholder list — the frontend renders per-site
         # entries from this without parsing the message string.
         assert detail["placeholders"] == [

@@ -856,8 +856,8 @@ def test_scenario_1b_blob_service_storage_path_validates_through_runtime_path_al
 
     Originally characterized that a relative ``data/blobs/<sid>/<bid>_<filename>``
     path would resolve via the legacy CWD branch in ``web/paths.py`` and pass
-    the runtime path allowlist.  After elspeth-07089fbaa3 closed the
-    composer-stored blob source path defect, the canonical contract is that
+    the runtime path allowlist.  After the composer-stored blob source path
+    defect was closed, the canonical contract is that
     blob-backed source paths are absolute (``BlobRecord.storage_path``); the
     legacy relative form is no longer accepted.  This test now pins the
     *post-fix* contract: an absolute canonical path under the configured
@@ -1040,8 +1040,8 @@ def test_scenario_3_get_pipeline_state_preserves_redacted_patched_blob_path_that
     """Characterizes elspeth-0380d5119f redaction across get_pipeline_state and YAML.
 
     Originally exercised ``patch_source_options`` to set the blob source
-    path; after elspeth-07089fbaa3 closed the composer-stored blob source
-    path defect, that flow is forbidden — patches against a blob-backed
+    path; after the composer-stored blob source path defect was closed, that
+    flow is forbidden — patches against a blob-backed
     source may not touch ``path`` or ``blob_ref`` because the binding is
     immutable.  The redaction contract (LLM/HTTP surfaces see the sentinel;
     YAML emission preserves the real path for the runtime) is now pinned
@@ -1074,8 +1074,8 @@ def test_scenario_3_get_pipeline_state_preserves_redacted_patched_blob_path_that
     catalog = _trained_operator_catalog()
 
     # patch_source_options against a blob-backed source must reject any
-    # patch that touches the immutable (path, blob_ref) binding — see
-    # elspeth-07089fbaa3.  Re-binding requires set_source_from_blob.
+    # patch that touches the immutable (path, blob_ref) binding.
+    # Re-binding requires set_source_from_blob.
     rejected = execute_tool(
         "patch_source_options",
         {"patch": {"path": str(source_path)}},

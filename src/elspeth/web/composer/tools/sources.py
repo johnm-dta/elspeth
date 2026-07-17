@@ -479,7 +479,7 @@ def _execute_set_source(
     # the blob's authoritative storage_path.  set_source with a hand-crafted
     # blob_ref + path lets the caller persist a path that disagrees with the
     # blob's canonical storage_path, breaking runtime resolution and
-    # composer/runtime agreement.  See elspeth-07089fbaa3.
+    # composer/runtime agreement.
     manual_blob_ref_error = _reject_manual_source_blob_ref(options, tool_name="set_source")
     if manual_blob_ref_error is not None:
         return _failure_result(state, manual_blob_ref_error)
@@ -895,7 +895,7 @@ def _execute_patch_source_options(
     # blob's canonical storage_path and is not patchable: any divergence
     # breaks runtime path resolution and composer/runtime agreement.
     # Replace the binding via a fresh set_source_from_blob (or
-    # clear_source) instead of patching it.  See elspeth-07089fbaa3.
+    # clear_source) instead of patching it.
     if "blob_ref" in current_source.options:
         forbidden_keys = {"path"} & patch.keys()
         if forbidden_keys:

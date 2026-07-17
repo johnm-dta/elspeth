@@ -30,8 +30,8 @@ def resolve_data_path(value: str, data_dir: str) -> Path:
     ``BlobRecord.storage_path``) and are pinned to that exact value by
     ``set_source_from_blob`` and the runtime read guard in
     ``ExecutionService.start_run``.  No legacy relative-path handling is
-    needed for blob sources; see elspeth-07089fbaa3 for the audit-integrity
-    contract.
+    needed for blob sources; the runtime read guard enforces the
+    audit-integrity contract.
     """
     raw = Path(value)
     if raw.is_absolute():

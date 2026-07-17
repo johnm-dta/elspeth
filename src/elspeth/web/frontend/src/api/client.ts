@@ -107,6 +107,21 @@ function firstDefined<T>(primary: T | undefined, secondary: T | undefined): T | 
   return primary !== undefined ? primary : secondary;
 }
 
+function firstStringField(
+  sources: readonly unknown[],
+  fields: readonly string[],
+): string | undefined {
+  for (const field of fields) {
+    for (const source of sources) {
+      const value = ownField(source, field);
+      if (typeof value === "string") {
+        return value;
+      }
+    }
+  }
+  return undefined;
+}
+
 function optionalResponseHeader(response: Response, name: string): string | undefined {
   const headers = (response as unknown as { headers?: unknown }).headers;
   if (typeof headers !== "object" || headers === null) {
@@ -159,9 +174,10 @@ export async function parseResponse<T>(
       }
     }
 
-    // Parse the error envelope. All backend errors use `detail` (not
-    // `message`) as the human-readable field, matching FastAPI's default
-    // HTTPException format.
+    // Parse the error envelope into one ApiError contract. Canonical backend
+    // fields are `error_type`, `detail`, and optional `errors`; `kind` and
+    // `message` remain accepted as compatibility aliases for older execution
+    // responses.
     let detail = response.statusText;
     let errorType: string | undefined;
     let componentId: string | undefined;
@@ -171,6 +187,7 @@ export async function parseResponse<T>(
     let providerStatusCode: number | undefined;
     let fanoutGuard: ExecutionFanoutGuard | undefined;
     let validationErrors: ApiError["validation_errors"];
+    let errors: ApiError["errors"];
     let partialState: ApiError["partial_state"];
     let failedTurn: ApiError["failed_turn"];
     let partialStateSaveFailed: ApiError["partial_state_save_failed"];
@@ -182,18 +199,10 @@ export async function parseResponse<T>(
           ? body.detail
           : null;
 
-      errorType =
-        typeof body.error_type === "string"
-          ? body.error_type
-          : typeof nestedDetail?.error_type === "string"
-            ? nestedDetail.error_type
-            : typeof body.error_code === "string"
-              ? body.error_code
-              : typeof nestedDetail?.error_code === "string"
-                ? nestedDetail.error_code
-                : typeof nestedDetail?.code === "string"
-                  ? nestedDetail.code
-                  : undefined;
+      errorType = firstStringField(
+        [body, nestedDetail],
+        ["error_type", "error_code", "code", "kind"],
+      );
 
       const rawComponentId = firstDefined(
         ownField(body, "component_id"),
@@ -215,12 +224,6 @@ export async function parseResponse<T>(
         typeof rawSnapshotFingerprint === "string"
           ? rawSnapshotFingerprint
           : undefined;
-
-      if (typeof nestedDetail?.detail === "string") {
-        detail = nestedDetail.detail;
-      } else if (typeof body.detail === "string") {
-        detail = body.detail;
-      }
 
       providerDetail =
         typeof body.provider_detail === "string"
@@ -244,6 +247,29 @@ export async function parseResponse<T>(
 
       validationErrors =
         body.validation_errors ?? nestedDetail?.validation_errors;
+
+      const rawErrors = firstDefined(
+        ownField(body, "errors"),
+        ownField(nestedDetail, "errors"),
+      );
+      errors = Array.isArray(rawErrors)
+        ? rawErrors.filter(
+            (entry): entry is NonNullable<ApiError["errors"]>[number] =>
+              typeof entry === "object" &&
+              entry !== null &&
+              !Array.isArray(entry) &&
+              typeof ownField(entry, "message") === "string",
+          )
+        : undefined;
+
+      const explicitDetail = firstStringField(
+        [nestedDetail, body],
+        ["detail", "message"],
+      );
+      const firstErrorMessage = errors
+        ?.map((entry) => ownField(entry, "message"))
+        .find((message): message is string => typeof message === "string");
+      detail = explicitDetail ?? firstErrorMessage ?? detail;
 
       const rawPartialState =
         firstDefined(
@@ -297,6 +323,7 @@ export async function parseResponse<T>(
       provider_detail: providerDetail,
       provider_status_code: providerStatusCode,
       validation_errors: validationErrors,
+      errors,
       snapshot_fingerprint:
         optionalResponseHeader(response, "X-ELSPETH-Plugin-Snapshot") ??
         nestedSnapshotFingerprint,

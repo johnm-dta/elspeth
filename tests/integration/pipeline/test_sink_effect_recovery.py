@@ -2,18 +2,37 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
 from elspeth.contracts import NodeStateStatus, NodeType, PendingOutcome, RoutingMode, TerminalOutcome, TerminalPath, TokenInfo
-from elspeth.contracts.errors import SinkTransactionalInvariantError
+from elspeth.contracts.audit import SinkEffect, SinkEffectMemberRecord, TokenRef
+from elspeth.contracts.diversion import RowDiversion
+from elspeth.contracts.errors import (
+    AuditIntegrityError,
+    FrameworkBugError,
+    OrchestrationInvariantError,
+    SinkTransactionalInvariantError,
+)
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema_contract import PipelineRow
-from elspeth.contracts.sink_effects import SinkEffectReconcileResult, SinkEffectRole
+from elspeth.contracts.sink_effects import (
+    RestrictedSinkEffectContext,
+    SinkEffectCommitResult,
+    SinkEffectPlan,
+    SinkEffectPrepareRequest,
+    SinkEffectReconcileResult,
+    SinkEffectRole,
+)
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.execution.sink_effect_reservation import SinkEffectReservation
+from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.schema import node_states_table, routing_events_table, sink_effect_members_table
 from elspeth.engine.executors.sink import SinkExecutor
 from elspeth.engine.executors.sink_effects import SinkEffectExecutionSeam, SinkEffectInjectedFault
 from elspeth.engine.spans import SpanFactory
@@ -731,5 +750,862 @@ def test_all_diverted_primary_finalizes_virtual_no_publication_before_discard(tm
         assert outcome is not None
         assert outcome.outcome is TerminalOutcome.FAILURE
         assert outcome.path is TerminalPath.SINK_DISCARDED
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Effect-safety guards, the diverted-token checkpoint contract, and the
+# primary-sink Layer 2 backstop (elspeth-c98e2afa53). Each guard test
+# constructs the exact corrupted or divergent durable precondition its guard
+# defends against and pins the fail-closed error contract.
+# ---------------------------------------------------------------------------
+
+_PENDING_SUCCESS = PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
+
+
+def _fail_once(seam: SinkEffectExecutionSeam) -> Callable[[SinkEffectExecutionSeam], None]:
+    """Fault hook that crashes at ``seam`` on its first traversal only."""
+    calls = 0
+
+    def hook(observed: SinkEffectExecutionSeam) -> None:
+        nonlocal calls
+        if observed is seam and calls == 0:
+            calls += 1
+            raise SinkEffectInjectedFault(observed)
+
+    return hook
+
+
+def _executor_for(
+    factory: RecorderFactory,
+    run_id: str,
+    *,
+    fault_hook: Callable[[SinkEffectExecutionSeam], None] | None = None,
+) -> SinkExecutor:
+    return SinkExecutor(
+        factory.execution,
+        factory.data_flow,
+        SpanFactory(),
+        run_id,
+        factory=factory,
+        worker_id="worker-a",
+        sink_effect_fault_hook=fault_hook,
+    )
+
+
+def _primary_setup(
+    db: LandscapeDB,
+    rows: list[dict[str, object]],
+) -> tuple[RecorderFactory, str, str, list[TokenInfo], PluginContext]:
+    """One run with a source, one primary sink node, and one token per row."""
+    factory = make_factory(db)
+    run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+    source_id = register_test_node(factory.data_flow, run.run_id, "source", node_type=NodeType.SOURCE, plugin_name="source")
+    sink_id = register_test_node(factory.data_flow, run.run_id, "primary", node_type=NodeType.SINK, plugin_name="partitioning")
+    tokens = _effect_tokens(factory, run_id=run.run_id, source_id=source_id, rows=rows)
+    ctx = PluginContext(run_id=run.run_id, config={}, landscape=factory.plugin_audit_writer(), node_id=sink_id)
+    return factory, run.run_id, sink_id, tokens, ctx
+
+
+def _failsink_setup(
+    db: LandscapeDB,
+    rows: list[dict[str, object]],
+) -> tuple[RecorderFactory, str, str, str, str, list[TokenInfo], PluginContext]:
+    """Like ``_primary_setup`` plus a linked failsink node and DIVERT edge."""
+    factory = make_factory(db)
+    run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+    source_id = register_test_node(factory.data_flow, run.run_id, "source", node_type=NodeType.SOURCE, plugin_name="source")
+    primary_id = register_test_node(factory.data_flow, run.run_id, "primary", node_type=NodeType.SINK, plugin_name="partitioning")
+    failsink_id = register_test_node(factory.data_flow, run.run_id, "failsink", node_type=NodeType.SINK, plugin_name="failsink")
+    edge = factory.data_flow.register_edge(run.run_id, primary_id, failsink_id, "__failsink__", RoutingMode.DIVERT)
+    tokens = _effect_tokens(factory, run_id=run.run_id, source_id=source_id, rows=rows)
+    ctx = PluginContext(run_id=run.run_id, config={}, landscape=factory.plugin_audit_writer(), node_id=primary_id)
+    return factory, run.run_id, primary_id, failsink_id, edge.edge_id, tokens, ctx
+
+
+def test_redrive_with_missing_node_state_witness_fails_closed(tmp_path: Path) -> None:
+    """A durable member whose current node-state witness has disappeared must
+    fail closed on re-drive instead of fabricating a replacement state
+    (``_open_or_reuse_effect_states`` recovery witness guard)."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'witness.db'}")
+    try:
+        factory, run_id, sink_id, tokens, ctx = _primary_setup(db, [{"value": 1}])
+        target = DuplicateObservableTarget()
+        first_sink = PartitioningObservableSink(target, name="primary")
+        first_sink.node_id = sink_id
+        with pytest.raises(SinkEffectInjectedFault):
+            _executor_for(factory, run_id, fault_hook=_fail_once(SinkEffectExecutionSeam.BEFORE_EFFECT)).write(
+                first_sink,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+            )
+
+        # Corrupt the durable image: the interrupted member row survives while
+        # its node state vanishes (a partially restored audit database). The
+        # opened state has no dependent rows yet, so FK enforcement allows it.
+        with db.engine.begin() as conn:
+            conn.execute(node_states_table.delete().where(node_states_table.c.token_id == tokens[0].token_id))
+
+        recovered_factory = make_factory(db)
+        recovered_sink = PartitioningObservableSink(target, name="primary")
+        recovered_sink.node_id = sink_id
+        with pytest.raises(AuditIntegrityError, match="current node-state witness is divergent"):
+            _executor_for(recovered_factory, run_id).write(
+                recovered_sink,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+            )
+        assert target.publication_count == 0
+    finally:
+        db.close()
+
+
+def test_durable_partition_dropping_a_requested_token_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """INVARIANT: once effect execution returns, every requested primary token
+    has a durable member row; finalizing from a partition that lost one would
+    leak an unaccounted token. The coordinator persists that partition inside
+    the same ``write()`` call, so the divergence is unreachable through the
+    public API — the corrupted read is simulated by shearing the post-execution
+    member query, armed only after the last coordinator seam."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'partition.db'}")
+    try:
+        factory, run_id, sink_id, tokens, ctx = _primary_setup(db, [{"value": 1}, {"value": 2}])
+        armed = False
+
+        def arm(observed: SinkEffectExecutionSeam) -> None:
+            nonlocal armed
+            if observed is SinkEffectExecutionSeam.AFTER_FINALIZE_BEFORE_RESPONSE:
+                armed = True
+
+        original_get_members = factory.execution.sink_effects.get_members_for_tokens
+
+        def shear(
+            *,
+            run_id: str,
+            sink_node_id: str,
+            role: SinkEffectRole,
+            token_ids: tuple[str, ...],
+        ) -> tuple[SinkEffectMemberRecord, ...]:
+            members = original_get_members(run_id=run_id, sink_node_id=sink_node_id, role=role, token_ids=token_ids)
+            return members[:-1] if armed else members
+
+        monkeypatch.setattr(factory.execution.sink_effects, "get_members_for_tokens", shear)
+        sink = PartitioningObservableSink(DuplicateObservableTarget(), name="primary")
+        sink.node_id = sink_id
+
+        with pytest.raises(AuditIntegrityError, match="does not cover every requested primary token"):
+            _executor_for(factory, run_id, fault_hook=arm).write(
+                sink,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+            )
+    finally:
+        db.close()
+
+
+def test_finalized_member_stripped_of_disposition_fails_accepted_checkpoint(tmp_path: Path) -> None:
+    """A durable member whose accepted disposition was lost must stop the
+    Phase 2 checkpoint: checkpointing a token the durable partition no longer
+    vouches for would permit a duplicate publication on resume."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'disposition.db'}")
+    try:
+        factory, run_id, sink_id, tokens, ctx = _primary_setup(db, [{"value": 1}, {"value": 2}])
+        target = DuplicateObservableTarget()
+        first_sink = PartitioningObservableSink(target, name="primary")
+        first_sink.node_id = sink_id
+        artifact, _counts = _executor_for(factory, run_id).write(
+            first_sink,  # type: ignore[arg-type]
+            tokens,
+            ctx,
+            1,
+            sink_name="output",
+            pending_outcome=_PENDING_SUCCESS,
+            effect_mode="write",
+        )
+        assert artifact is not None
+
+        # Strip ordinal 0's accepted disposition. NULL passes the schema CHECK
+        # (unlike any non-vocabulary string), modelling a lost disposition
+        # write rather than a corrupted one.
+        effect = factory.execution.sink_effects.get_effects_for_run(run_id)[0]
+        with db.engine.begin() as conn:
+            conn.execute(
+                sink_effect_members_table.update()
+                .where(
+                    sink_effect_members_table.c.effect_id == effect.effect_id,
+                    sink_effect_members_table.c.ordinal == 0,
+                )
+                .values(prepared_disposition=None)
+            )
+
+        recovered_factory = make_factory(db)
+        recovered_sink = PartitioningObservableSink(target, name="primary")
+        recovered_sink.node_id = sink_id
+        with pytest.raises(AuditIntegrityError, match="disagrees with accepted primary tokens"):
+            _executor_for(recovered_factory, run_id).write(
+                recovered_sink,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+                on_token_written=lambda token: None,
+            )
+    finally:
+        db.close()
+
+
+def test_durable_partition_referencing_missing_effect_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """INVARIANT: every effect id carried by durable members resolves to a
+    ledger row when diversion evidence is recovered. A member row referencing
+    a missing effect requires ledger corruption (FK enforcement forbids
+    producing it through any repository write), so the guard is pinned by
+    blanking the effect lookup after the last coordinator seam — the
+    coordinator itself must keep seeing the real row."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'missing-effect.db'}")
+    try:
+        factory, run_id, sink_id, tokens, ctx = _primary_setup(db, [{"value": 1}, {"value": 2}])
+        armed = False
+
+        def arm(observed: SinkEffectExecutionSeam) -> None:
+            nonlocal armed
+            if observed is SinkEffectExecutionSeam.AFTER_FINALIZE_BEFORE_RESPONSE:
+                armed = True
+
+        original_get_effect = factory.execution.sink_effects.get_effect
+
+        def vanish(effect_id: str) -> SinkEffect | None:
+            return None if armed else original_get_effect(effect_id)
+
+        monkeypatch.setattr(factory.execution.sink_effects, "get_effect", vanish)
+        sink = PartitioningObservableSink(DuplicateObservableTarget(), name="primary")
+        sink.node_id = sink_id
+
+        with pytest.raises(AuditIntegrityError, match="references a missing effect"):
+            _executor_for(factory, run_id, fault_hook=arm).write(
+                sink,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+            )
+    finally:
+        db.close()
+
+
+class _TaintedCommitEvidenceSink(PartitioningObservableSink):
+    """Partitioning double whose commit result carries caller-chosen
+    diversion-attribution evidence (the durable evidence the executor
+    recovers commit-time diversions from)."""
+
+    def __init__(self, target: DuplicateObservableTarget, *, name: str, attribution: tuple[object, ...]) -> None:
+        super().__init__(target, name=name)
+        self._attribution = attribution
+
+    def commit_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectCommitResult:
+        result = super().commit_effect(plan, ctx)
+        return SinkEffectCommitResult(
+            descriptor=result.descriptor,
+            evidence={"diversion_attribution": list(self._attribution), "effect_id": plan.effect_id},
+            accepted_ordinals=result.accepted_ordinals,
+            diverted_ordinals=result.diverted_ordinals,
+        )
+
+
+@pytest.mark.parametrize(
+    ("attribution", "match"),
+    (
+        pytest.param(
+            ("not-a-mapping",),
+            "effect diversion attribution is not a mapping",
+            id="non-mapping-entry",
+        ),
+        pytest.param(
+            ({"ordinal": "0", "reason_hash": "a" * 64, "error_hash": "a" * 16},),
+            "effect diversion attribution is incomplete",
+            id="mistyped-ordinal",
+        ),
+        pytest.param(
+            ({"ordinal": 0, "reason_hash": "b" * 64, "error_hash": "b" * 16},),
+            "effect diversion attribution sources diverge for one durable member",
+            id="divergent-sources",
+        ),
+    ),
+)
+def test_malformed_commit_diversion_attribution_fails_closed(
+    tmp_path: Path,
+    attribution: tuple[object, ...],
+    match: str,
+) -> None:
+    """Commit-returned diversion attribution is durable audit evidence: a
+    non-mapping entry, an incompletely typed entry, or an entry disagreeing
+    with the plan's attribution for the same durable member must fail closed
+    rather than silently re-attribute a diversion."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'attribution.db'}")
+    try:
+        factory, run_id, sink_id, tokens, ctx = _primary_setup(db, [{"value": 1, "divert": True}, {"value": 2}])
+        sink = _TaintedCommitEvidenceSink(DuplicateObservableTarget(), name="primary", attribution=attribution)
+        sink.node_id = sink_id
+
+        with pytest.raises(AuditIntegrityError, match=match):
+            _executor_for(factory, run_id).write(
+                sink,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+            )
+    finally:
+        db.close()
+
+
+class _PhantomDiversionLogSink(PartitioningObservableSink):
+    """Durably accepts every member while its in-memory log claims a diversion."""
+
+    def prepare_effect(self, request: SinkEffectPrepareRequest, ctx: RestrictedSinkEffectContext) -> SinkEffectPlan:
+        plan = super().prepare_effect(request, ctx)
+        self._diversions = (RowDiversion(row_index=0, reason="phantom diversion", row_data={"value": 1}),)
+        return plan
+
+
+def test_in_memory_diversion_log_disagreeing_with_durable_partition_fails_closed(tmp_path: Path) -> None:
+    """The sink's returned in-memory diversion log must exactly match the
+    durable member partition; a phantom diversion the ledger never recorded
+    must fail closed instead of failing a token the effect accepted."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'phantom.db'}")
+    try:
+        factory, run_id, sink_id, tokens, ctx = _primary_setup(db, [{"value": 1}, {"value": 2}])
+        sink = _PhantomDiversionLogSink(DuplicateObservableTarget(), name="primary")
+        sink.node_id = sink_id
+
+        with pytest.raises(AuditIntegrityError, match="does not match the durable member partition"):
+            _executor_for(factory, run_id).write(
+                sink,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+            )
+    finally:
+        db.close()
+
+
+class _UnattributedDivertingSink(PartitioningObservableSink):
+    """Diverting double whose plan omits its durable diversion attribution."""
+
+    def prepare_effect(self, request: SinkEffectPrepareRequest, ctx: RestrictedSinkEffectContext) -> SinkEffectPlan:
+        plan = super().prepare_effect(request, ctx)
+        evidence = {key: value for key, value in deep_thaw(plan.safe_evidence).items() if key != "diversion_attribution"}
+        return replace(plan, safe_evidence=evidence)
+
+
+def test_recovered_diversion_without_durable_attribution_fails_closed(tmp_path: Path) -> None:
+    """A recovered effect (no in-memory diversion log — its plan was durably
+    bound before the crash, so ``prepare_effect`` never re-runs) must find its
+    diversion attribution in the durable plan or attempt evidence; when the
+    plan was bound without it, the re-drive must fail closed instead of
+    inventing diversion reasons."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'unattributed.db'}")
+    try:
+        factory, run_id, sink_id, tokens, ctx = _primary_setup(db, [{"value": 1}, {"value": 2, "divert": True}])
+        target = DuplicateObservableTarget()
+        first_sink = _UnattributedDivertingSink(target, name="primary")
+        first_sink.node_id = sink_id
+        with pytest.raises(SinkEffectInjectedFault):
+            _executor_for(factory, run_id, fault_hook=_fail_once(SinkEffectExecutionSeam.BEFORE_EFFECT)).write(
+                first_sink,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+            )
+
+        recovered_factory = make_factory(db)
+        recovered_sink = _UnattributedDivertingSink(target, name="primary")
+        recovered_sink.node_id = sink_id
+        with pytest.raises(AuditIntegrityError, match="recovered effect is missing durable diversion attribution"):
+            _executor_for(recovered_factory, run_id).write(
+                recovered_sink,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+            )
+    finally:
+        db.close()
+
+
+def test_failsink_diverting_a_linked_member_is_a_framework_bug(tmp_path: Path) -> None:
+    """A linked failsink is the terminal quarantine for already-diverted rows:
+    it must accept every member. One that diverts again is a framework bug,
+    not a routable diversion."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'requarantine.db'}")
+    try:
+        factory, run_id, primary_id, failsink_id, edge_id, tokens, ctx = _failsink_setup(
+            db,
+            [{"value": 1}, {"value": 2, "divert": True}],
+        )
+        primary = PartitioningObservableSink(DuplicateObservableTarget(), name="primary")
+        primary.node_id = primary_id
+        # divert_rows stays True: the enriched quarantine row still carries the
+        # original ``divert`` marker, so the failsink re-diverts its member.
+        failsink = PartitioningObservableSink(DuplicateObservableTarget(), name="failsink")
+        failsink.node_id = failsink_id
+
+        with pytest.raises(FrameworkBugError, match="diverted a linked failsink member"):
+            _executor_for(factory, run_id).write(
+                primary,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+                failsink=failsink,  # type: ignore[arg-type]
+                failsink_name="failsink",
+                failsink_effect_mode="write",
+                failsink_edge_id=edge_id,
+            )
+    finally:
+        db.close()
+
+
+def test_redrive_with_missing_divert_routing_event_fails_closed(tmp_path: Path) -> None:
+    """A finalized diverted anchor must still carry exactly its one DIVERT
+    routing event on re-drive; missing or divergent routing evidence means the
+    audit trail no longer proves where the row went, and must fail closed."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'routing.db'}")
+    try:
+        factory, run_id, primary_id, failsink_id, edge_id, tokens, ctx = _failsink_setup(
+            db,
+            [{"value": 1}, {"value": 2, "divert": True}],
+        )
+        diverted = tokens[1]
+        primary_target = DuplicateObservableTarget()
+        failsink_target = DuplicateObservableTarget()
+        primary = PartitioningObservableSink(primary_target, name="primary")
+        primary.node_id = primary_id
+        failsink = PartitioningObservableSink(failsink_target, name="failsink", divert_rows=False)
+        failsink.node_id = failsink_id
+        _artifact, counts = _executor_for(factory, run_id).write(
+            primary,  # type: ignore[arg-type]
+            tokens,
+            ctx,
+            1,
+            sink_name="output",
+            pending_outcome=_PENDING_SUCCESS,
+            effect_mode="write",
+            failsink=failsink,  # type: ignore[arg-type]
+            failsink_name="failsink",
+            failsink_effect_mode="write",
+            failsink_edge_id=edge_id,
+        )
+        assert counts.failsink_mode == 1
+
+        primary_state = next(state for state in factory.query.get_node_states_for_token(diverted.token_id) if state.node_id == primary_id)
+        assert len(factory.query.get_routing_events(primary_state.state_id)) == 1
+        # Corrupt the durable image: erase the DIVERT routing event while the
+        # FAILED anchor and the finalized failsink effect survive.
+        with db.engine.begin() as conn:
+            conn.execute(routing_events_table.delete().where(routing_events_table.c.state_id == primary_state.state_id))
+
+        recovered_factory = make_factory(db)
+        recovered_primary = PartitioningObservableSink(primary_target, name="primary")
+        recovered_primary.node_id = primary_id
+        recovered_failsink = PartitioningObservableSink(failsink_target, name="failsink", divert_rows=False)
+        recovered_failsink.node_id = failsink_id
+        with pytest.raises(AuditIntegrityError, match="divergent primary routing evidence"):
+            _executor_for(recovered_factory, run_id).write(
+                recovered_primary,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+                failsink=recovered_failsink,  # type: ignore[arg-type]
+                failsink_name="failsink",
+                failsink_effect_mode="write",
+                failsink_edge_id=edge_id,
+            )
+    finally:
+        db.close()
+
+
+def test_redrive_with_completed_failsink_primary_anchor_fails_closed(tmp_path: Path) -> None:
+    """A diverted token's primary anchor may only be OPEN (first drive) or
+    FAILED (already finalized); a COMPLETED anchor claims the row reached the
+    primary sink and re-driving its diversion would double-account the row."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'anchor-failsink.db'}")
+    try:
+        factory, run_id, primary_id, failsink_id, edge_id, tokens, ctx = _failsink_setup(
+            db,
+            [{"value": 1}, {"value": 2, "divert": True}],
+        )
+        diverted = tokens[1]
+        primary_target = DuplicateObservableTarget()
+        failsink_target = DuplicateObservableTarget()
+        primary = PartitioningObservableSink(primary_target, name="primary")
+        primary.node_id = primary_id
+        failsink = PartitioningObservableSink(failsink_target, name="failsink", fail_prepare_once=True, divert_rows=False)
+        failsink.node_id = failsink_id
+        with pytest.raises(RuntimeError, match="between primary and failsink"):
+            _executor_for(factory, run_id).write(
+                primary,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+                failsink=failsink,  # type: ignore[arg-type]
+                failsink_name="failsink",
+                failsink_effect_mode="write",
+                failsink_edge_id=edge_id,
+            )
+
+        # Corrupt the interrupted image through the repository itself: close
+        # the still-open divert anchor as COMPLETED, as a buggy rival caller
+        # could have done.
+        open_ids = factory.execution.get_open_node_state_ids(run_id, node_ids=(primary_id,), token_ids=(diverted.token_id,))
+        factory.execution.complete_node_state(
+            state_id=open_ids[diverted.token_id],
+            status=NodeStateStatus.COMPLETED,
+            output_data={"rival": True},
+            duration_ms=0.0,
+        )
+
+        recovered_factory = make_factory(db)
+        recovered_primary = PartitioningObservableSink(primary_target, name="primary")
+        recovered_primary.node_id = primary_id
+        recovered_failsink = PartitioningObservableSink(failsink_target, name="failsink", divert_rows=False)
+        recovered_failsink.node_id = failsink_id
+        with pytest.raises(AuditIntegrityError, match="primary anchor is not OPEN or FAILED"):
+            _executor_for(recovered_factory, run_id).write(
+                recovered_primary,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+                failsink=recovered_failsink,  # type: ignore[arg-type]
+                failsink_name="failsink",
+                failsink_effect_mode="write",
+                failsink_edge_id=edge_id,
+            )
+    finally:
+        db.close()
+
+
+def test_redrive_with_completed_discard_primary_anchor_fails_closed(tmp_path: Path) -> None:
+    """Discard-mode mirror of the failsink anchor guard: a COMPLETED anchor
+    for a durably diverted token contradicts the discard evidence."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'anchor-discard.db'}")
+    try:
+        factory, run_id, sink_id, tokens, ctx = _primary_setup(db, [{"value": 1}, {"value": 2, "divert": True}])
+        diverted = tokens[1]
+        target = DuplicateObservableTarget()
+        first_sink = PartitioningObservableSink(target, name="primary")
+        first_sink.node_id = sink_id
+        # Crash after the primary effect finalizes but before Phase 3 records
+        # the discard, leaving the diverted token's anchor OPEN.
+        with pytest.raises(SinkEffectInjectedFault):
+            _executor_for(
+                factory,
+                run_id,
+                fault_hook=_fail_once(SinkEffectExecutionSeam.AFTER_FINALIZE_BEFORE_RESPONSE),
+            ).write(
+                first_sink,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+            )
+
+        open_ids = factory.execution.get_open_node_state_ids(run_id, node_ids=(sink_id,), token_ids=(diverted.token_id,))
+        factory.execution.complete_node_state(
+            state_id=open_ids[diverted.token_id],
+            status=NodeStateStatus.COMPLETED,
+            output_data={"rival": True},
+            duration_ms=0.0,
+        )
+
+        recovered_factory = make_factory(db)
+        recovered_sink = PartitioningObservableSink(target, name="primary")
+        recovered_sink.node_id = sink_id
+        with pytest.raises(AuditIntegrityError, match="discard primary anchor is not OPEN or FAILED"):
+            _executor_for(recovered_factory, run_id).write(
+                recovered_sink,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+            )
+    finally:
+        db.close()
+
+
+def test_redrive_with_divergent_discard_outcome_fails_closed(tmp_path: Path) -> None:
+    """Discard recovery must verify an existing terminal outcome is the exact
+    discard it would have recorded; any divergence (here the error hash) means
+    two irreconcilable accounts of the same token and must fail closed."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'discard-outcome.db'}")
+    try:
+        factory, run_id, sink_id, tokens, ctx = _primary_setup(db, [{"value": 1}, {"value": 2, "divert": True}])
+        diverted = tokens[1]
+        target = DuplicateObservableTarget()
+        first_sink = PartitioningObservableSink(target, name="primary")
+        first_sink.node_id = sink_id
+        with pytest.raises(SinkEffectInjectedFault):
+            _executor_for(
+                factory,
+                run_id,
+                fault_hook=_fail_once(SinkEffectExecutionSeam.AFTER_FINALIZE_BEFORE_RESPONSE),
+            ).write(
+                first_sink,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+            )
+
+        # A rival recorded a discard outcome that disagrees with the durable
+        # diversion attribution (wrong error hash).
+        factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id=diverted.token_id, run_id=run_id),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.SINK_DISCARDED,
+            error_hash="0" * 16,
+            sink_name="__discard__",
+        )
+
+        recovered_factory = make_factory(db)
+        recovered_sink = PartitioningObservableSink(target, name="primary")
+        recovered_sink.node_id = sink_id
+        with pytest.raises(AuditIntegrityError, match="recovered sink discard outcome is divergent"):
+            _executor_for(recovered_factory, run_id).write(
+                recovered_sink,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+            )
+    finally:
+        db.close()
+
+
+def test_failsink_execution_requires_name_mode_and_routing_edge(tmp_path: Path) -> None:
+    """A configured failsink without its name, mode, and routing edge is an
+    orchestrator wiring bug the diversion phase must refuse to route through."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'failsink-wiring.db'}")
+    try:
+        factory, run_id, primary_id, failsink_id, edge_id, tokens, ctx = _failsink_setup(
+            db,
+            [{"value": 1}, {"value": 2, "divert": True}],
+        )
+        primary = PartitioningObservableSink(DuplicateObservableTarget(), name="primary")
+        primary.node_id = primary_id
+        failsink = PartitioningObservableSink(DuplicateObservableTarget(), name="failsink", divert_rows=False)
+        failsink.node_id = failsink_id
+
+        with pytest.raises(OrchestrationInvariantError, match="requires its name, mode, and routing edge"):
+            _executor_for(factory, run_id).write(
+                primary,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+                failsink=failsink,  # type: ignore[arg-type]
+                failsink_name=None,
+                failsink_effect_mode="write",
+                failsink_edge_id=edge_id,
+            )
+    finally:
+        db.close()
+
+
+# --- Diverted-token checkpoint contract (SinkExecutor.write docstring):
+# primary tokens are checkpointed after Phase 2, diverted tokens after
+# Phase 3, and every token exactly once — a diverted token missing its
+# checkpoint would be re-driven (duplicate write) on resume.
+
+
+def test_on_token_written_checkpoints_every_token_exactly_once_discard_mode(tmp_path: Path) -> None:
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'checkpoint-discard.db'}")
+    try:
+        factory, run_id, sink_id, tokens, ctx = _primary_setup(db, [{"value": 1}, {"value": 2, "divert": True}])
+        sink = PartitioningObservableSink(DuplicateObservableTarget(), name="primary")
+        sink.node_id = sink_id
+        checkpointed: list[str] = []
+
+        artifact, counts = _executor_for(factory, run_id).write(
+            sink,  # type: ignore[arg-type]
+            tokens,
+            ctx,
+            1,
+            sink_name="output",
+            pending_outcome=_PENDING_SUCCESS,
+            effect_mode="write",
+            on_token_written=lambda token: checkpointed.append(token.token_id),
+        )
+
+        assert artifact is not None
+        assert counts.discard_mode == 1
+        # Accepted AND diverted tokens each checkpoint exactly once.
+        assert sorted(checkpointed) == sorted(token.token_id for token in tokens)
+    finally:
+        db.close()
+
+
+def test_on_token_written_checkpoints_every_token_exactly_once_failsink_mode(tmp_path: Path) -> None:
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'checkpoint-failsink.db'}")
+    try:
+        factory, run_id, primary_id, failsink_id, edge_id, tokens, ctx = _failsink_setup(
+            db,
+            [{"value": 1}, {"value": 2, "divert": True}],
+        )
+        primary = PartitioningObservableSink(DuplicateObservableTarget(), name="primary")
+        primary.node_id = primary_id
+        failsink = PartitioningObservableSink(DuplicateObservableTarget(), name="failsink", divert_rows=False)
+        failsink.node_id = failsink_id
+        checkpointed: list[str] = []
+
+        artifact, counts = _executor_for(factory, run_id).write(
+            primary,  # type: ignore[arg-type]
+            tokens,
+            ctx,
+            1,
+            sink_name="output",
+            pending_outcome=_PENDING_SUCCESS,
+            effect_mode="write",
+            failsink=failsink,  # type: ignore[arg-type]
+            failsink_name="failsink",
+            failsink_effect_mode="write",
+            failsink_edge_id=edge_id,
+            on_token_written=lambda token: checkpointed.append(token.token_id),
+        )
+
+        assert artifact is not None
+        assert counts.failsink_mode == 1
+        assert sorted(checkpointed) == sorted(token.token_id for token in tokens)
+    finally:
+        db.close()
+
+
+def test_primary_tokens_checkpointed_before_diverted_tokens(tmp_path: Path) -> None:
+    """All accepted tokens checkpoint (Phase 2) before any diverted token
+    (Phase 3): a checkpoint order inversion would let a resume skip a diverted
+    token whose terminal path is not durable yet."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'checkpoint-order.db'}")
+    try:
+        factory, run_id, sink_id, tokens, ctx = _primary_setup(
+            db,
+            [
+                {"value": 1, "divert": True},
+                {"value": 2},
+                {"value": 3, "divert": True},
+                {"value": 4},
+            ],
+        )
+        sink = PartitioningObservableSink(DuplicateObservableTarget(), name="primary")
+        sink.node_id = sink_id
+        checkpointed: list[str] = []
+
+        _artifact, counts = _executor_for(factory, run_id).write(
+            sink,  # type: ignore[arg-type]
+            tokens,
+            ctx,
+            1,
+            sink_name="output",
+            pending_outcome=_PENDING_SUCCESS,
+            effect_mode="write",
+            on_token_written=lambda token: checkpointed.append(token.token_id),
+        )
+
+        assert counts.discard_mode == 2
+        accepted_ids = [tokens[1].token_id, tokens[3].token_id]
+        diverted_ids = [tokens[0].token_id, tokens[2].token_id]
+        assert checkpointed == accepted_ids + diverted_ids
+    finally:
+        db.close()
+
+
+class _RequiredFieldsPrimarySink(PartitioningObservableSink):
+    """Primary sink whose transactional backstop requires ``must_exist``."""
+
+    declared_required_fields = frozenset({"must_exist"})
+
+
+def test_primary_validation_rejection_terminalizes_states_and_outcomes(tmp_path: Path) -> None:
+    """PRIMARY-sink mirror of the failsink Layer 2 backstop test above
+    (ADR-010 F3): a row missing a declared required field at the transactional
+    commit boundary must raise SinkTransactionalInvariantError (Tier 1 — never
+    absorbed into diversion), terminalize every opened node state as FAILED,
+    and record FAILED token outcomes for the whole batch."""
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'primary-reject.db'}")
+    try:
+        factory, run_id, sink_id, tokens, ctx = _primary_setup(db, [{"value": 1, "must_exist": True}, {"value": 2}])
+        target = DuplicateObservableTarget()
+        sink = _RequiredFieldsPrimarySink(target, name="primary")
+        sink.node_id = sink_id
+
+        with pytest.raises(SinkTransactionalInvariantError, match="must_exist"):
+            _executor_for(factory, run_id).write(
+                sink,  # type: ignore[arg-type]
+                tokens,
+                ctx,
+                1,
+                sink_name="output",
+                pending_outcome=_PENDING_SUCCESS,
+                effect_mode="write",
+            )
+
+        # The rejection happened before any effect was reserved or published.
+        assert target.publication_count == 0
+        assert not factory.execution.sink_effects.get_effects_for_run(run_id)
+        for token in tokens:
+            # No opened state is leaked OPEN — all are terminalized FAILED.
+            states = [state for state in factory.query.get_node_states_for_token(token.token_id) if state.node_id == sink_id]
+            assert states
+            assert all(state.status is NodeStateStatus.FAILED for state in states)
+            outcome = factory.data_flow.get_token_outcome(token.token_id)
+            assert outcome is not None
+            assert outcome.outcome is TerminalOutcome.FAILURE
+            assert outcome.path is TerminalPath.UNROUTED
     finally:
         db.close()

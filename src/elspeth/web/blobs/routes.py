@@ -23,6 +23,7 @@ from elspeth.web.blobs.protocol import (
     BlobContentMissingError,
     BlobIntegrityError,
     BlobNotFoundError,
+    BlobPendingProposalError,
     BlobQuotaExceededError,
     BlobRecord,
     BlobStateError,
@@ -350,7 +351,7 @@ def create_blobs_router() -> APIRouter:
             await blob_service.delete_blob(blob_id)
         except BlobNotFoundError:
             raise HTTPException(status_code=404, detail="Blob not found") from None
-        except BlobActiveRunError as exc:
+        except (BlobActiveRunError, BlobPendingProposalError) as exc:
             raise HTTPException(
                 status_code=409,
                 detail=str(exc),

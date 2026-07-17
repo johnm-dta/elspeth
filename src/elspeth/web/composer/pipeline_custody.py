@@ -21,6 +21,7 @@ from sqlalchemy import Engine
 from elspeth.contracts.blobs import AllowedMimeType, BlobRecord, InlineCustodyRequest
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.core.canonical import stable_hash
 from elspeth.web.blobs.service import (
     BlobServiceImpl,
@@ -60,17 +61,48 @@ def inline_custody_audit_projection(arguments: Mapping[str, Any]) -> Mapping[str
 
     def _redact(value: Any) -> None:
         if type(value) is dict:
-            inline_blob = value.get("inline_blob")
-            if type(inline_blob) is dict and "content" in inline_blob:
-                inline_blob["content"] = _AUDIT_REDACTION_MARKER
-            for child in value.values():
-                _redact(child)
+            for key, child in value.items():
+                if key == "inline_blob":
+                    value[key] = _AUDIT_REDACTION_MARKER
+                else:
+                    _redact(child)
         elif type(value) is list:
             for child in value:
                 _redact(child)
 
     _redact(projected)
     return projected
+
+
+def inline_custody_manifest_redaction_input(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Restore a schema-valid shell solely for manifest redaction.
+
+    Dispatch auditing removes the whole untrusted ``inline_blob`` value before
+    validation. The manifest still needs a structurally valid value so it can
+    redact other sensitive pipeline fields; this shell contains no user bytes
+    and is projected back to the whole-value marker before persistence.
+    """
+    restored = _detached_json(dict(arguments))
+    if type(restored) is not dict:
+        raise AuditIntegrityError("Pipeline custody manifest input must remain an object")
+
+    def _restore(value: Any) -> None:
+        if type(value) is dict:
+            for key, child in value.items():
+                if key == "inline_blob" and child == _AUDIT_REDACTION_MARKER:
+                    value[key] = {
+                        "filename": "redacted-inline-content",
+                        "mime_type": "text/plain",
+                        "content": _AUDIT_REDACTION_MARKER,
+                    }
+                else:
+                    _restore(child)
+        elif type(value) is list:
+            for child in value:
+                _restore(child)
+
+    _restore(restored)
+    return restored
 
 
 def _contains_inline_blob(value: Any) -> bool:
@@ -89,16 +121,19 @@ class PipelineCustodyPreparation:
     request: InlineCustodyRequest
     blob_id: UUID
 
+    def __post_init__(self) -> None:
+        freeze_fields(self, "arguments")
+
 
 def _validate_prepared_inline_blob(
     inline_blob: Mapping[str, Any],
     prepared: _PreparedBlobCreate,
 ) -> None:
     """Fail closed unless candidate bytes exactly match removed arguments."""
-    inline_content = inline_blob.get("content")
-    inline_mime_type = inline_blob.get("mime_type")
-    inline_filename = inline_blob.get("filename")
-    inline_description = inline_blob.get("description")
+    inline_content = inline_blob["content"] if "content" in inline_blob else None
+    inline_mime_type = inline_blob["mime_type"] if "mime_type" in inline_blob else None
+    inline_filename = inline_blob["filename"] if "filename" in inline_blob else None
+    inline_description = inline_blob["description"] if "description" in inline_blob else None
     if type(inline_content) is not str:
         raise AuditIntegrityError("Pipeline custody inline content must be a string")
     if type(inline_mime_type) is not str:
@@ -147,16 +182,16 @@ def prepare_pipeline_custody(
         raise AuditIntegrityError("Pipeline custody session_id must be a canonical UUID string")
 
     safe_arguments = _detached_json(dict(arguments))
-    source = safe_arguments.get("source")
+    source = safe_arguments["source"] if "source" in safe_arguments else None
     if type(source) is not dict:
         raise AuditIntegrityError("Pipeline custody requires canonical set_pipeline source arguments")
-    inline_blob = source.get("inline_blob")
+    inline_blob = source["inline_blob"] if "inline_blob" in source else None
     if type(inline_blob) is not dict:
         raise AuditIntegrityError("Pipeline custody requires canonical source.inline_blob arguments")
     _validate_prepared_inline_blob(inline_blob, prepared)
     if "blob_id" in source:
         raise AuditIntegrityError("Pipeline custody refuses source arguments containing both blob_id and inline_blob")
-    options = source.get("options")
+    options = source["options"] if "options" in source else None
     if options is not None and type(options) is not dict:
         raise AuditIntegrityError("Pipeline custody requires canonical source.options arguments")
     if type(options) is dict and "blob_ref" in options:

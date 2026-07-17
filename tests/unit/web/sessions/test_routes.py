@@ -848,7 +848,7 @@ def test_accept_proposal_threads_originating_message_id_to_inline_blob(tmp_path,
             composer_model_identifier="openai/gpt-5-mini",
             composer_model_version="gpt-5-mini-2026-05-01",
             composer_provider="openai",
-            composer_skill_hash="sha256:composer-skill",
+            composer_skill_hash="a" * 64,
             tool_arguments_hash=arguments_hash,
         )
     )
@@ -863,7 +863,7 @@ def test_accept_proposal_threads_originating_message_id_to_inline_blob(tmp_path,
     assert row.creating_model_identifier == "openai/gpt-5-mini"
     assert row.creating_model_version == "gpt-5-mini-2026-05-01"
     assert row.creating_provider == "openai"
-    assert row.creating_composer_skill_hash == "sha256:composer-skill"
+    assert row.creating_composer_skill_hash == "a" * 64
     assert row.creating_arguments_hash == arguments_hash
 
     persisted = asyncio.run(service.get_current_state(session_id))

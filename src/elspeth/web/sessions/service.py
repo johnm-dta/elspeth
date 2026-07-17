@@ -19,12 +19,11 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 from uuid import UUID
 
 import structlog
-from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, event, func, insert, select, update
+from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 
-from elspeth.contracts.advisory_locks import ELSPETH_SESSIONS_LOCK_CLASSID
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.blobs_inline import ResolvedBlobContent
 from elspeth.contracts.composer_interpretation import (
@@ -61,6 +60,11 @@ from elspeth.web.interpretation_state import (
     validate_pipeline_decision_node_semantics,
 )
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
+from elspeth.web.sessions.locking import (
+    acquire_session_advisory_xact_lock,
+    sqlite_session_mutex,
+    sqlite_transaction_session_lock,
+)
 from elspeth.web.sessions.models import (
     audit_access_log_table,
     blob_inline_resolutions_table,
@@ -75,6 +79,7 @@ from elspeth.web.sessions.models import (
     sessions_table,
     skill_markdown_history_table,
 )
+from elspeth.web.sessions.proposal_blob_refs import validate_proposal_blob_references
 from elspeth.web.sessions.protocol import (
     AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST,
     AUDIT_GRADE_VIEW_WRITER_PRINCIPAL,
@@ -148,8 +153,6 @@ if TYPE_CHECKING:
 # disk) is itself process-scoped. Refactoring to instance state would
 # break the multi-instance correctness invariant the comment above
 # describes.
-_SQLITE_SESSION_LOCKS_GUARD = threading.RLock()
-_SQLITE_SESSION_LOCKS: dict[tuple[str, str], threading.RLock] = {}
 _SESSION_WRITE_LOCK_HELD: ContextVar[frozenset[tuple[int, str]]] = ContextVar(
     "_SESSION_WRITE_LOCK_HELD",
     default=frozenset(),
@@ -1622,22 +1625,13 @@ class SessionServiceImpl:
         if dialect == "sqlite":
             return  # SQLite serialization is owned by _session_write_lock
         if dialect == "postgresql":
-            conn.exec_driver_sql(
-                "SELECT pg_catalog.pg_advisory_xact_lock(%s, pg_catalog.hashtext(%s))",
-                (ELSPETH_SESSIONS_LOCK_CLASSID, session_id),
-            )
+            acquire_session_advisory_xact_lock(conn, session_id)
             return
         raise NotImplementedError(f"_acquire_session_advisory_lock not implemented for dialect {dialect}")
 
     def _sqlite_lock_for_session(self, session_id: str) -> threading.RLock:
         """Return the process-wide SQLite write lock for one DB/session pair."""
-        key = (str(self._engine.url), session_id)
-        with _SQLITE_SESSION_LOCKS_GUARD:
-            if key in _SQLITE_SESSION_LOCKS:
-                return _SQLITE_SESSION_LOCKS[key]
-            lock = threading.RLock()
-            _SQLITE_SESSION_LOCKS[key] = lock
-            return lock
+        return sqlite_session_mutex(self._engine, session_id)
 
     def _assert_session_write_lock_held(
         self,
@@ -1677,39 +1671,8 @@ class SessionServiceImpl:
         dialect = self._engine.dialect.name
         try:
             if dialect == "sqlite":
-                lock = self._sqlite_lock_for_session(session_id)
-                lock.acquire()
-                release_state = {"released": False}
-
-                def _release_sqlite_session_lock(_conn: Connection) -> None:
-                    if release_state["released"]:
-                        return
-                    release_state["released"] = True
-                    lock.release()
-
-                def _remove_sqlite_session_lock_listener(
-                    identifier: Literal["commit", "rollback"],
-                    fn: Any,
-                ) -> None:
-                    if event.contains(conn, identifier, fn):
-                        event.remove(conn, identifier, fn)
-
-                def _release_sqlite_session_lock_on_commit(_conn: Connection) -> None:
-                    _release_sqlite_session_lock(_conn)
-                    _remove_sqlite_session_lock_listener("rollback", _release_sqlite_session_lock_on_rollback)
-
-                def _release_sqlite_session_lock_on_rollback(_conn: Connection) -> None:
-                    _release_sqlite_session_lock(_conn)
-                    _remove_sqlite_session_lock_listener("commit", _release_sqlite_session_lock_on_commit)
-
-                if conn.in_transaction():
-                    event.listen(conn, "commit", _release_sqlite_session_lock_on_commit, once=True)
-                    event.listen(conn, "rollback", _release_sqlite_session_lock_on_rollback, once=True)
-                try:
+                with sqlite_transaction_session_lock(conn, self._engine, session_id):
                     yield
-                finally:
-                    if not conn.in_transaction():
-                        _release_sqlite_session_lock(conn)
                 return
             if dialect == "postgresql":
                 self._acquire_session_advisory_lock(conn, session_id)
@@ -2663,6 +2626,12 @@ class SessionServiceImpl:
 
         def _sync() -> CompositionProposalRecord:
             with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+                validate_proposal_blob_references(
+                    conn,
+                    session_id=sid,
+                    tool_name=tool_name,
+                    arguments=arguments_json,
+                )
                 conn.execute(
                     insert(proposal_events_table).values(
                         id=event_id,

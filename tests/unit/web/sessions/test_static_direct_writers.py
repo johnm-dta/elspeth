@@ -779,6 +779,38 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
     # "do not leave stale promises" rule in the Task 10 handover (pitfall §5)
     # and the test-file's "Do not delete reviewed allowlist entries without
     # removing the corresponding writer in the same commit" symmetry.
+    # ------ composer custody test fixtures ------
+    ReviewedWriter(
+        path="tests/integration/web/composer/test_freeform_proposal_prevalidation.py",
+        enclosing_symbol="_harness",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Custody integration harness seeds the exact originating user-message row "
+            "needed to exercise the blob provenance FK and full proposal loop; no "
+            "production sequence allocation is under test in this fixture"
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/blobs/test_service.py",
+        enclosing_symbol="_seed_custody_message",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Blob custody unit fixtures require a real same-session message anchor so "
+            "the composite provenance FK and deterministic identity are exercised"
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/composer/test_set_pipeline_candidate.py",
+        enclosing_symbol="_session_with_user_message",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Candidate settlement fixture seeds one originating user message to verify "
+            "inline-blob provenance without routing setup through the behavior under test"
+        ),
+    ),
     # ------ tests/unit/web/sessions/test_models.py — schema test direct rows (7 sites) ------
     ReviewedWriter(
         path="tests/unit/web/sessions/test_models.py",

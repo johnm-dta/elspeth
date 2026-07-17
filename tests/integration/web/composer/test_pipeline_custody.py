@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
@@ -69,7 +70,7 @@ def test_prepare_pipeline_custody_is_pure_and_hashes_only_safe_arguments(tmp_pat
     custody = prepare_pipeline_custody(arguments, prepared, session_id=session_id)
 
     source = custody.arguments["source"]
-    assert isinstance(source, dict)
+    assert isinstance(source, Mapping)
     assert "inline_blob" not in source
     assert source["blob_id"] == str(custody.blob_id)
     assert custody.request.creating_arguments_hash == stable_hash(custody.arguments)
@@ -95,8 +96,30 @@ def test_audit_projection_recursively_removes_inline_content_from_malformed_and_
     projected = inline_custody_audit_projection(arguments)
 
     assert secret not in repr(projected)
-    assert projected["source"]["inline_blob"]["content"] == "[redacted inline content held for custody]"
-    assert projected["sources"]["named"]["inline_blob"]["content"] == "[redacted inline content held for custody]"
+    assert projected["source"]["inline_blob"] == "[redacted inline content held for custody]"
+    assert projected["sources"]["named"]["inline_blob"] == "[redacted inline content held for custody]"
+
+
+@pytest.mark.parametrize(
+    "inline_value",
+    [
+        "private scalar value",
+        ["private list value", {"nested": "private nested list value"}],
+        {"content": "private content value", "unknown": {"payload": "private unknown value"}},
+    ],
+)
+def test_audit_projection_replaces_every_inline_blob_value_wholesale(inline_value: object) -> None:
+    arguments = {
+        "source": {"inline_blob": inline_value},
+        "sources": {"named": {"inline_blob": inline_value}},
+    }
+
+    projected = inline_custody_audit_projection(arguments)
+
+    marker = "[redacted inline content held for custody]"
+    assert projected["source"]["inline_blob"] == marker
+    assert projected["sources"]["named"]["inline_blob"] == marker
+    assert "private" not in repr(projected)
 
 
 @pytest.mark.parametrize(

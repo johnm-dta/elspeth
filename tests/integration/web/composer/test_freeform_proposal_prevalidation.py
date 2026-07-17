@@ -675,6 +675,61 @@ async def test_inline_candidate_argument_error_is_audited_once_and_repairable(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("malformed_shape", ["scalar", "list", "unknown", "named"])
+async def test_malformed_inline_blob_never_survives_full_compose_surfaces(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    malformed_shape: str,
+) -> None:
+    harness = _harness(tmp_path)
+    state = _empty_state()
+    invalid = _inline_pipeline_args(tmp_path)
+    private_value = f"private malformed {malformed_shape} value 71b2"
+    if malformed_shape == "scalar":
+        invalid["source"]["inline_blob"] = private_value
+    elif malformed_shape == "list":
+        invalid["source"]["inline_blob"] = [private_value, {"nested": private_value}]
+    elif malformed_shape == "unknown":
+        invalid["source"]["inline_blob"]["unknown"] = {"payload": private_value}
+    elif malformed_shape == "named":
+        invalid["sources"] = {"named": {"inline_blob": {"unknown": private_value}}}
+    else:  # pragma: no cover - closed parametrization
+        raise AssertionError(malformed_shape)
+
+    repaired = _inline_pipeline_args(tmp_path)
+    llm = _ScriptedLLM(
+        _tool_turn(f"call_malformed_{malformed_shape}", "set_pipeline", invalid),
+        _tool_turn(f"call_repaired_{malformed_shape}", "set_pipeline", repaired),
+        _fake_llm_response(content="The repaired inline proposal is pending approval."),
+    )
+    with patch.object(harness.service, "_call_llm", new=llm):
+        result = await harness.service.compose(
+            "Build a reviewed inline pipeline.",
+            [],
+            state,
+            session_id=harness.session_id,
+            user_id="proposal-prevalidation-user",
+            user_message_id=harness.user_message_id,
+        )
+
+    proposals = await harness.sessions.list_composition_proposals(UUID(harness.session_id))
+    assert len(proposals) == 1
+    assert private_value not in json.dumps(llm.message_snapshots)
+    assert private_value not in json.dumps([deep_thaw(proposal.arguments_json) for proposal in proposals])
+    assert private_value not in json.dumps([invocation.arguments_canonical for invocation in result.tool_invocations])
+    assert private_value not in caplog.text
+    with harness.engine.connect() as conn:
+        persisted = tuple(
+            conn.execute(
+                select(chat_messages_table.c.content, chat_messages_table.c.raw_content, chat_messages_table.c.tool_calls).where(
+                    chat_messages_table.c.session_id == harness.session_id
+                )
+            )
+        )
+    assert private_value not in json.dumps(tuple(tuple(row) for row in persisted))
+
+
+@pytest.mark.asyncio
 async def test_surrogate_inline_content_fails_closed_at_canonicalization_and_is_repairable(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
     state = _empty_state()

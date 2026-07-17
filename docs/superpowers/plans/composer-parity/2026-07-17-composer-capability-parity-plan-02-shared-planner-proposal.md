@@ -125,6 +125,13 @@ Expected: PASS.
   validate every field before reuse. Test concurrent callers on SQLite and
   PostgreSQL, orphan recovery after file write, mismatch rejection, and quota
   charged exactly once.
+- [ ] Identity uses only stable pre-custody provenance. In particular,
+  `creating_arguments_hash` is deliberately excluded from the UUID input:
+  the final tool-arguments hash is computed only after custody replaces inline
+  bytes with `blob_id`, so including it would make identity circular. Persist
+  that hash on the row and compare it exactly whenever an existing UUID is
+  reused; it is post-identity reuse evidence, and a mismatch is an integrity
+  conflict rather than a second blob identity.
 - [ ] Derive the blob primary key as a domain-separated UUID5 (128-bit,
   UUID-column-compatible) from that custody key; never store an arbitrary hash
   in `blobs.id`. Rely on existing primary-key uniqueness. On a concurrent

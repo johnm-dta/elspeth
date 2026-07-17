@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib
+import multiprocessing
 import os
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -298,7 +299,23 @@ class TestDeleteBlob:
             await blob_service.get_blob(record.id)
 
     @pytest.mark.asyncio
-    async def test_delete_blob_rejects_blob_referenced_by_pending_proposal(self, blob_service, session_id, db_engine) -> None:
+    @pytest.mark.parametrize(
+        ("tool_name", "arguments"),
+        [
+            ("set_pipeline", lambda blob_id: {"source": {"blob_id": blob_id}}),
+            ("set_source_from_blob", lambda blob_id: {"blob_id": blob_id}),
+            ("update_blob", lambda blob_id: {"blob_id": blob_id}),
+            ("wire_blob_inline_ref", lambda blob_id: {"blob_id": blob_id}),
+        ],
+    )
+    async def test_delete_blob_rejects_blob_referenced_by_pending_proposal(
+        self,
+        blob_service,
+        session_id,
+        db_engine,
+        tool_name,
+        arguments,
+    ) -> None:
         contracts = importlib.import_module("elspeth.contracts.blobs")
         pending_error = contracts.BlobPendingProposalError
         record = await blob_service.create_blob(
@@ -315,13 +332,13 @@ class TestDeleteBlob:
                     id=str(uuid4()),
                     session_id=str(session_id),
                     tool_call_id="call_pending_blob_delete_guard",
-                    tool_name="set_pipeline",
+                    tool_name=tool_name,
                     status="pending",
                     summary="Review blob-backed pipeline",
                     rationale="Server generated",
                     affects=["source"],
-                    arguments_json={"source": {"blob_id": str(record.id)}},
-                    arguments_redacted_json={"source": {"blob_id": str(record.id)}},
+                    arguments_json=arguments(str(record.id)),
+                    arguments_redacted_json=arguments(str(record.id)),
                     base_state_id=None,
                     committed_state_id=None,
                     audit_event_id=None,
@@ -1434,7 +1451,47 @@ def _custody_request(db_engine, session_id: UUID, *, content: bytes = b"value\n4
     )
 
 
+def _postgres_custody_process(
+    database_url: str,
+    data_dir: str,
+    request_fields: dict[str, object],
+    start_event: object,
+    result_queue: object,
+) -> None:
+    """Spawn-safe worker proving PostgreSQL exclusion crosses processes."""
+    request_type, _ = _inline_custody_contract()
+    engine = create_session_engine(database_url)
+    normalized_fields = dict(request_fields)
+    normalized_fields["session_id"] = UUID(str(request_fields["session_id"]))
+    normalized_fields["creation_modality"] = CreationModality(str(request_fields["creation_modality"]))
+    request = request_type(**normalized_fields)
+    try:
+        if not start_event.wait(timeout=15):  # type: ignore[attr-defined]
+            raise RuntimeError("PostgreSQL custody process start barrier timed out")
+        record = asyncio.run(BlobServiceImpl(engine, Path(data_dir), max_storage_per_session=100).reserve_inline_custody(request))
+        result_queue.put(("ok", str(record.id)))  # type: ignore[attr-defined]
+    except BaseException as exc:
+        result_queue.put(("error", type(exc).__name__, str(exc)))  # type: ignore[attr-defined]
+    finally:
+        engine.dispose()
+
+
 class TestInlineCustody:
+    def test_atomic_write_fsyncs_parent_directory_after_replace(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        storage = tmp_path / "blobs" / "session" / "blob_candidate.csv"
+        fsynced: list[Path] = []
+        monkeypatch.setattr(
+            blob_service_module,
+            "_fsync_parent_directory",
+            lambda path: fsynced.append(path),
+            raising=False,
+        )
+
+        blob_service_module._atomic_write_blob(storage, b"value\n42\n")
+
+        assert storage.read_bytes() == b"value\n42\n"
+        assert fsynced == [storage.parent]
+
     def test_uuid5_identity_covers_every_authority_field_except_final_arguments_hash(
         self,
         db_engine,
@@ -1589,6 +1646,49 @@ class TestInlineCustody:
         assert record.id == blob_id
 
     @pytest.mark.asyncio
+    async def test_retry_reconciles_deterministic_and_legacy_stale_temp_files(
+        self,
+        db_engine,
+        session_id: UUID,
+        tmp_path: Path,
+    ) -> None:
+        service = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=100)
+        request = _custody_request(db_engine, session_id)
+        _, derive_blob_id = _inline_custody_contract()
+        blob_id = derive_blob_id(request)
+        storage = tmp_path.resolve() / "blobs" / str(session_id) / f"{blob_id}_candidate.csv"
+        storage.parent.mkdir(parents=True)
+        deterministic_temp = storage.with_name(f".{storage.name}.custody.tmp")
+        legacy_temp = storage.with_name(f".{storage.name}.orphan.tmp")
+        deterministic_temp.write_bytes(b"partial")
+        legacy_temp.write_bytes(b"partial")
+
+        record = await service.reserve_inline_custody(request)
+
+        assert record.status == "ready"
+        assert storage.read_bytes() == request.content
+        assert not deterministic_temp.exists()
+        assert not legacy_temp.exists()
+
+    @pytest.mark.asyncio
+    async def test_delete_removes_reconcilable_temp_artifacts(self, db_engine, session_id: UUID, tmp_path: Path) -> None:
+        service = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=100)
+        record = await service.create_blob(
+            session_id=session_id,
+            filename="candidate.csv",
+            content=b"value\n42\n",
+            mime_type="text/csv",
+        )
+        storage = Path(record.storage_path)
+        deterministic_temp = storage.with_name(f".{storage.name}.custody.tmp")
+        deterministic_temp.write_bytes(b"partial")
+
+        await service.delete_blob(record.id)
+
+        assert not storage.exists()
+        assert not deterministic_temp.exists()
+
+    @pytest.mark.asyncio
     async def test_mismatched_pending_file_fails_closed(self, db_engine, session_id: UUID, tmp_path: Path) -> None:
         from elspeth.web.blobs.protocol import BlobIntegrityError
 
@@ -1653,11 +1753,76 @@ class TestInlineCustody:
 
         assert storage.read_bytes() == request.content
         with db_engine.connect() as conn:
-            assert conn.execute(select(func.count()).select_from(blobs_table)).scalar_one() == 0
+            row = conn.execute(select(blobs_table)).one()
+        assert row.status == "pending"
 
         monkeypatch.setattr(blob_service_module, "_atomic_write_blob", original_write)
         recovered = await service.reserve_inline_custody(request)
         assert recovered.id == blob_id
+        assert recovered.status == "ready"
+        with db_engine.connect() as conn:
+            assert conn.execute(select(func.count()).select_from(blobs_table)).scalar_one() == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_file_write_leaves_durable_pending_reservation_for_retry(
+        self,
+        db_engine,
+        session_id: UUID,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        service = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=100)
+        request = _custody_request(db_engine, session_id)
+        original_write = blob_service_module._atomic_write_blob
+
+        def _interrupt_before_write(_path: Path, _content: bytes) -> None:
+            raise RuntimeError("simulated interruption before file write")
+
+        monkeypatch.setattr(blob_service_module, "_atomic_write_blob", _interrupt_before_write)
+        with pytest.raises(RuntimeError, match="before file write"):
+            await service.reserve_inline_custody(request)
+
+        with db_engine.connect() as conn:
+            row = conn.execute(select(blobs_table)).one()
+        assert row.status == "pending"
+        assert not Path(row.storage_path).exists()
+
+        monkeypatch.setattr(blob_service_module, "_atomic_write_blob", original_write)
+        recovered = await service.reserve_inline_custody(request)
+        assert recovered.status == "ready"
+        assert Path(recovered.storage_path).read_bytes() == request.content
+        with db_engine.connect() as conn:
+            charged = conn.execute(
+                select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0)).where(blobs_table.c.session_id == str(session_id))
+            ).scalar_one()
+        assert charged == len(request.content)
+
+    @pytest.mark.asyncio
+    async def test_failed_ready_transition_leaves_pending_row_and_file_for_retry(
+        self,
+        db_engine,
+        session_id: UUID,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        service = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=100)
+        request = _custody_request(db_engine, session_id)
+        original_update = blobs_table.update
+
+        def _interrupt_before_ready_update():
+            raise RuntimeError("simulated interruption before ready finalization")
+
+        monkeypatch.setattr(blobs_table, "update", _interrupt_before_ready_update)
+        with pytest.raises(RuntimeError, match="before ready finalization"):
+            await service.reserve_inline_custody(request)
+
+        with db_engine.connect() as conn:
+            row = conn.execute(select(blobs_table)).one()
+        assert row.status == "pending"
+        assert Path(row.storage_path).read_bytes() == request.content
+
+        monkeypatch.setattr(blobs_table, "update", original_update)
+        recovered = await service.reserve_inline_custody(request)
         assert recovered.status == "ready"
         with db_engine.connect() as conn:
             assert conn.execute(select(func.count()).select_from(blobs_table)).scalar_one() == 1
@@ -1741,15 +1906,13 @@ class TestInlineCustody:
             first_engine.dispose()
             second_engine.dispose()
 
-    @pytest.mark.asyncio
     @pytest.mark.skipif(
         not os.environ.get("ELSPETH_TEST_POSTGRES_URL"),
         reason="ELSPETH_TEST_POSTGRES_URL is required for the server-backend custody exercise",
     )
-    async def test_postgres_separate_engines_converge_on_one_blob_and_quota_charge(self, tmp_path: Path) -> None:
+    def test_postgres_separate_processes_converge_on_one_blob_and_quota_charge(self, tmp_path: Path) -> None:
         database_url = os.environ["ELSPETH_TEST_POSTGRES_URL"]
         first_engine = create_session_engine(database_url)
-        second_engine = create_session_engine(database_url)
         shared_session_id = uuid4()
         now = datetime.now(UTC)
         try:
@@ -1766,16 +1929,41 @@ class TestInlineCustody:
                     )
                 )
             request = _custody_request(first_engine, shared_session_id)
-            first_service = BlobServiceImpl(first_engine, tmp_path / "data", max_storage_per_session=100)
-            second_service = BlobServiceImpl(second_engine, tmp_path / "data", max_storage_per_session=100)
+            request_fields = {
+                "session_id": str(request.session_id),
+                "filename": request.filename,
+                "content": request.content,
+                "mime_type": request.mime_type,
+                "source_description": request.source_description,
+                "creation_modality": request.creation_modality.value,
+                "created_from_message_id": request.created_from_message_id,
+                "creating_model_identifier": request.creating_model_identifier,
+                "creating_model_version": request.creating_model_version,
+                "creating_provider": request.creating_provider,
+                "creating_composer_skill_hash": request.creating_composer_skill_hash,
+                "creating_arguments_hash": request.creating_arguments_hash,
+            }
+            context = multiprocessing.get_context("spawn")
+            start_event = context.Event()
+            result_queue = context.Queue()
+            processes = [
+                context.Process(
+                    target=_postgres_custody_process,
+                    args=(database_url, str(tmp_path / "data"), request_fields, start_event, result_queue),
+                )
+                for _ in range(2)
+            ]
+            for process in processes:
+                process.start()
+            start_event.set()
+            for process in processes:
+                process.join(timeout=30)
+                assert process.exitcode == 0
 
-            first, second = await asyncio.gather(
-                first_service.reserve_inline_custody(request),
-                second_service.reserve_inline_custody(request),
-            )
-
-            assert first == second
-            with second_engine.connect() as conn:
+            results = [result_queue.get(timeout=5) for _ in processes]
+            assert all(result[0] == "ok" for result in results), results
+            assert results[0][1] == results[1][1]
+            with first_engine.connect() as conn:
                 assert (
                     conn.execute(
                         select(func.count()).select_from(blobs_table).where(blobs_table.c.session_id == str(shared_session_id))
@@ -1790,7 +1978,6 @@ class TestInlineCustody:
             with first_engine.begin() as conn:
                 conn.execute(delete(sessions_table).where(sessions_table.c.id == str(shared_session_id)))
             first_engine.dispose()
-            second_engine.dispose()
 
     @pytest.mark.asyncio
     async def test_arguments_hash_is_excluded_from_identity_but_mismatched_reuse_fails_closed(

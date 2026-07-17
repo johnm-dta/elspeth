@@ -6,9 +6,8 @@ import hashlib
 import hmac
 import os
 import re
-import tempfile
-import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict, TypeVar, cast
@@ -17,7 +16,7 @@ from uuid import UUID, uuid4, uuid5
 from opentelemetry import metrics
 from sqlalchemy import Engine, func, select
 from sqlalchemy.engine import Connection, Row
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.errors import AuditIntegrityError
@@ -47,14 +46,20 @@ from elspeth.web.blobs.protocol import (
     InlineCustodyRequest,
 )
 from elspeth.web.sessions.converters import pipeline_dict_from_record
+from elspeth.web.sessions.locking import (
+    acquire_session_advisory_xact_lock,
+    postgres_session_advisory_lock,
+    sqlite_session_mutex,
+    transaction_session_lock,
+)
 from elspeth.web.sessions.models import (
     blob_run_links_table,
     blobs_table,
-    composition_proposals_table,
     composition_states_table,
     runs_table,
     sessions_table,
 )
+from elspeth.web.sessions.proposal_blob_refs import pending_proposal_reference_id
 from elspeth.web.sessions.protocol import CompositionStateRecord
 
 _T = TypeVar("_T")
@@ -64,8 +69,6 @@ _BLOB_COPY_FORK_ORPHAN_ROWS_COUNTER = metrics.get_meter(__name__).create_counter
 _INLINE_CUSTODY_NAMESPACE = UUID("8ef5fd65-8a90-5fe4-9084-eab5b9d2d2db")
 _INLINE_CUSTODY_SCHEMA = "elspeth.inline-custody.v1"
 _LOWERCASE_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
-_SESSION_BLOB_LOCKS: dict[tuple[tuple[str, ...], str], threading.RLock] = {}
-_SESSION_BLOB_LOCKS_GUARD = threading.Lock()
 
 
 class _NormalizedInlineCustodyFields(TypedDict):
@@ -201,7 +204,7 @@ def _normalized_inline_custody_fields(request: InlineCustodyRequest) -> _Normali
     """Validate and normalize the identity-bearing custody fields."""
     if type(request.content) is not bytes:
         raise TypeError(f"InlineCustodyRequest.content must be bytes, got {type(request.content).__name__}")
-    if not isinstance(request.session_id, UUID):
+    if type(request.session_id) is not UUID:
         raise TypeError(f"InlineCustodyRequest.session_id must be UUID, got {type(request.session_id).__name__}")
     if type(request.filename) is not str:
         raise TypeError(f"InlineCustodyRequest.filename must be str, got {type(request.filename).__name__}")
@@ -275,55 +278,39 @@ def inline_custody_blob_id(request: InlineCustodyRequest) -> UUID:
     return uuid5(_INLINE_CUSTODY_NAMESPACE, canonical_json(identity))
 
 
-def _database_lock_identity(engine: Engine) -> tuple[str, ...]:
-    """Return a credential-free identity shared by engines for one database.
-
-    SQLAlchemy engine identity is too narrow: separate ``Engine`` instances
-    can target the same database and data directory.  Rendering the URL is too
-    broad because it retains usernames and connection options, so otherwise
-    equivalent engines can miss the same-session file mutex (and credentials
-    can leak into a process-global diagnostic key).  File-backed SQLite is
-    keyed by its resolved database path; server databases use only their
-    backend, host, port, and database name.  Independent in-memory SQLite
-    engines do not share a database and are intentionally keyed by pool.
-    """
-    url = engine.url
-    backend = url.get_backend_name()
-    if backend == "sqlite":
-        database = url.database
-        if database is None or database in {"", ":memory:"}:
-            return (backend, "memory", str(id(engine.pool)))
-        return (backend, "file", str(Path(database).expanduser().resolve()))
-    return (
-        backend,
-        url.host or "",
-        str(url.port) if url.port is not None else "",
-        url.database or "",
-    )
-
-
-def _session_blob_lock(engine: Engine, session_id: str) -> threading.RLock:
-    """Return the process-wide blob/file mutex for one DB and session."""
-    database_identity = _database_lock_identity(engine)
-    key = (database_identity, session_id)
-    with _SESSION_BLOB_LOCKS_GUARD:
-        if key not in _SESSION_BLOB_LOCKS:
-            _SESSION_BLOB_LOCKS[key] = threading.RLock()
-        return _SESSION_BLOB_LOCKS[key]
-
-
 def _atomic_write_blob(storage: Path, content: bytes) -> None:
     storage.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(dir=storage.parent, prefix=f".{storage.name}.", suffix=".tmp")
-    temp_path = Path(name)
+    _remove_blob_temp_artifacts(storage)
+    temp_path = storage.with_name(f".{storage.name}.custody.tmp")
+    fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, storage)
+        _fsync_parent_directory(storage.parent)
     finally:
         temp_path.unlink(missing_ok=True)
+
+
+def _fsync_parent_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _blob_temp_artifacts(storage: Path) -> tuple[Path, ...]:
+    deterministic = storage.with_name(f".{storage.name}.custody.tmp")
+    legacy = tuple(storage.parent.glob(f".{storage.name}.*.tmp")) if storage.parent.exists() else ()
+    return tuple(dict.fromkeys((deterministic, *legacy)))
+
+
+def _remove_blob_temp_artifacts(storage: Path) -> None:
+    for path in _blob_temp_artifacts(storage):
+        path.unlink(missing_ok=True)
 
 
 def _validate_reusable_blob_row(
@@ -357,6 +344,144 @@ def _validate_reusable_blob_row(
         raise AuditIntegrityError(f"Inline custody blob {blob_id} has invalid reuse status {row.status!r}")
 
 
+@contextmanager
+def _blob_phase_transaction(engine: Engine, held_connection: Connection | None) -> Iterator[Connection]:
+    if held_connection is None:
+        with engine.begin() as conn:
+            yield conn
+        return
+    with held_connection.begin():
+        yield held_connection
+
+
+@contextmanager
+def _blob_custody_session_lock(engine: Engine, session_id: str) -> Iterator[Connection | None]:
+    dialect = engine.dialect.name
+    if dialect == "sqlite":
+        with sqlite_session_mutex(engine, session_id):
+            yield None
+        return
+    if dialect == "postgresql":
+        with engine.connect() as conn, postgres_session_advisory_lock(conn, session_id):
+            yield conn
+        return
+    raise NotImplementedError(f"Blob custody locking is not implemented for dialect {dialect}")
+
+
+def _acquire_blob_phase_lock(conn: Connection, session_id: str) -> None:
+    if conn.dialect.name == "postgresql":
+        acquire_session_advisory_xact_lock(conn, session_id)
+
+
+def _reserve_pending_blob(
+    *,
+    engine: Engine,
+    held_connection: Connection | None,
+    blob_id: str,
+    storage: Path,
+    expected: _ExpectedBlobFields,
+    max_storage_per_session: int,
+    idempotent: bool,
+) -> Row[Any]:
+    session_id = expected["session_id"]
+    with _blob_phase_transaction(engine, held_connection) as conn:
+        _acquire_blob_phase_lock(conn, session_id)
+        _lock_session_for_blob_quota(conn, session_id)
+        row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id)).first()
+        if row is None:
+            current_total = conn.execute(
+                select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0)).where(blobs_table.c.session_id == session_id)
+            ).scalar()
+            if type(current_total) is not int:
+                raise AuditIntegrityError(f"Tier 1: COALESCE(SUM) returned {type(current_total).__name__}, expected int")
+            if current_total + expected["size_bytes"] > max_storage_per_session:
+                raise BlobQuotaExceededError(
+                    session_id,
+                    current_bytes=current_total,
+                    limit_bytes=max_storage_per_session,
+                )
+            conn.execute(
+                blobs_table.insert().values(
+                    id=blob_id,
+                    session_id=session_id,
+                    filename=expected["filename"],
+                    mime_type=expected["mime_type"],
+                    size_bytes=expected["size_bytes"],
+                    content_hash=expected["content_hash"],
+                    storage_path=str(storage),
+                    created_at=datetime.now(UTC),
+                    created_by=expected["created_by"],
+                    source_description=expected["source_description"],
+                    status="pending",
+                    creation_modality=expected["creation_modality"].value,
+                    created_from_message_id=expected["created_from_message_id"],
+                    creating_model_identifier=expected["creating_model_identifier"],
+                    creating_model_version=expected["creating_model_version"],
+                    creating_provider=expected["creating_provider"],
+                    creating_composer_skill_hash=expected["creating_composer_skill_hash"],
+                    creating_arguments_hash=expected["creating_arguments_hash"],
+                )
+            )
+            row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id)).one()
+        elif not idempotent:
+            raise AuditIntegrityError(f"Unexpected duplicate blob id {blob_id}")
+        _validate_reusable_blob_row(row, expected=expected, blob_id=blob_id, storage_path=storage)
+        return row
+
+
+def _write_or_validate_reserved_blob(
+    *,
+    row: Row[Any],
+    storage: Path,
+    content: bytes,
+    expected_hash: str,
+    blob_id: str,
+) -> None:
+    if storage.exists():
+        existing_content = storage.read_bytes()
+        actual_hash = content_hash(existing_content)
+        if not hmac.compare_digest(existing_content, content) or not hmac.compare_digest(actual_hash, expected_hash):
+            raise BlobIntegrityError(blob_id, expected=expected_hash, actual=actual_hash)
+        return
+    if row.status == "ready":
+        raise BlobContentMissingError(blob_id, storage_path=str(storage))
+    _atomic_write_blob(storage, content)
+
+
+def _finalize_reserved_blob(
+    *,
+    engine: Engine,
+    held_connection: Connection | None,
+    blob_id: str,
+    storage: Path,
+    expected: _ExpectedBlobFields,
+) -> Row[Any]:
+    session_id = expected["session_id"]
+    with _blob_phase_transaction(engine, held_connection) as conn:
+        _acquire_blob_phase_lock(conn, session_id)
+        row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id)).one()
+        _validate_reusable_blob_row(row, expected=expected, blob_id=blob_id, storage_path=storage)
+        if row.status == "pending":
+            conn.execute(blobs_table.update().where(blobs_table.c.id == blob_id).values(status="ready"))
+        final_row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id)).one()
+        _guard_blob_row_literals(final_row)
+        return final_row
+
+
+def _discard_nonidempotent_reservation(
+    *,
+    engine: Engine,
+    held_connection: Connection | None,
+    blob_id: str,
+    session_id: str,
+    storage: Path,
+) -> None:
+    storage.unlink(missing_ok=True)
+    with _blob_phase_transaction(engine, held_connection) as conn:
+        _acquire_blob_phase_lock(conn, session_id)
+        conn.execute(blobs_table.delete().where(blobs_table.c.id == blob_id).where(blobs_table.c.status == "pending"))
+
+
 def _persist_blob_content(
     *,
     engine: Engine,
@@ -378,10 +503,10 @@ def _persist_blob_content(
     creating_arguments_hash: str | None,
     idempotent: bool,
 ) -> Row[Any]:
-    """Persist one blob under the shared file/row/quota transaction."""
-    if not isinstance(blob_id, UUID):
+    """Persist one blob through committed reservation, file, and ready phases."""
+    if type(blob_id) is not UUID:
         raise TypeError(f"blob_id must be UUID, got {type(blob_id).__name__}")
-    if not isinstance(session_id, UUID) and type(session_id) is not str:
+    if type(session_id) not in {UUID, str}:
         raise TypeError(f"session_id must be UUID or str, got {type(session_id).__name__}")
     if type(filename) is not str:
         raise TypeError(f"filename must be str, got {type(filename).__name__}")
@@ -449,79 +574,40 @@ def _persist_blob_content(
         "creating_composer_skill_hash": creating_composer_skill_hash,
         "creating_arguments_hash": creating_arguments_hash,
     }
-    file_created = False
-    file_write_attempted = False
-    with _session_blob_lock(engine, session_id_str):
+    with _blob_custody_session_lock(engine, session_id_str) as held_connection:
         try:
-            with engine.begin() as conn:
-                _lock_session_for_blob_quota(conn, session_id_str)
-                row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id_str)).first()
-                if row is None:
-                    current_total = conn.execute(
-                        select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0)).where(blobs_table.c.session_id == session_id_str)
-                    ).scalar()
-                    if type(current_total) is not int:
-                        raise AuditIntegrityError(f"Tier 1: COALESCE(SUM) returned {type(current_total).__name__}, expected int")
-                    if current_total + len(content) > max_storage_per_session:
-                        raise BlobQuotaExceededError(
-                            session_id_str,
-                            current_bytes=current_total,
-                            limit_bytes=max_storage_per_session,
-                        )
-                    try:
-                        with conn.begin_nested():
-                            conn.execute(
-                                blobs_table.insert().values(
-                                    id=blob_id_str,
-                                    session_id=session_id_str,
-                                    filename=safe_filename,
-                                    mime_type=mime_type,
-                                    size_bytes=len(content),
-                                    content_hash=expected["content_hash"],
-                                    storage_path=str(storage),
-                                    created_at=datetime.now(UTC),
-                                    created_by=created_by,
-                                    source_description=source_description,
-                                    status="pending",
-                                    creation_modality=creation_modality.value,
-                                    created_from_message_id=created_from_message_id,
-                                    creating_model_identifier=creating_model_identifier,
-                                    creating_model_version=creating_model_version,
-                                    creating_provider=creating_provider,
-                                    creating_composer_skill_hash=creating_composer_skill_hash,
-                                    creating_arguments_hash=creating_arguments_hash,
-                                )
-                            )
-                    except IntegrityError:
-                        if not idempotent:
-                            raise
-                    row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id_str)).first()
-                    if row is None:
-                        raise AuditIntegrityError(f"Blob {blob_id_str} reservation conflict produced no winning row")
-                elif not idempotent:
-                    raise AuditIntegrityError(f"Unexpected duplicate blob id {blob_id_str}")
-                _validate_reusable_blob_row(row, expected=expected, blob_id=blob_id_str, storage_path=storage)
-
-                if storage.exists():
-                    existing_content = storage.read_bytes()
-                    actual_hash = content_hash(existing_content)
-                    if not hmac.compare_digest(existing_content, content) or not hmac.compare_digest(actual_hash, expected["content_hash"]):
-                        raise BlobIntegrityError(blob_id_str, expected=expected["content_hash"], actual=actual_hash)
-                elif row.status == "ready":
-                    raise BlobContentMissingError(blob_id_str, storage_path=str(storage))
-                else:
-                    file_write_attempted = True
-                    _atomic_write_blob(storage, content)
-                    file_created = True
-
-                if row.status == "pending":
-                    conn.execute(blobs_table.update().where(blobs_table.c.id == blob_id_str).values(status="ready"))
-                final_row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id_str)).one()
-                _guard_blob_row_literals(final_row)
-                return final_row
+            row = _reserve_pending_blob(
+                engine=engine,
+                held_connection=held_connection,
+                blob_id=blob_id_str,
+                storage=storage,
+                expected=expected,
+                max_storage_per_session=max_storage_per_session,
+                idempotent=idempotent,
+            )
+            _write_or_validate_reserved_blob(
+                row=row,
+                storage=storage,
+                content=content,
+                expected_hash=expected["content_hash"],
+                blob_id=blob_id_str,
+            )
+            return _finalize_reserved_blob(
+                engine=engine,
+                held_connection=held_connection,
+                blob_id=blob_id_str,
+                storage=storage,
+                expected=expected,
+            )
         except Exception:
-            if not idempotent and (file_created or file_write_attempted):
-                storage.unlink(missing_ok=True)
+            if not idempotent:
+                _discard_nonidempotent_reservation(
+                    engine=engine,
+                    held_connection=held_connection,
+                    blob_id=blob_id_str,
+                    session_id=session_id_str,
+                    storage=storage,
+                )
             raise
 
 
@@ -536,46 +622,6 @@ def _option_value_references_blob(value: Any, blob_id: str, storage_path: str) -
     if type(value) is list:
         return any(_option_value_references_blob(child, blob_id, storage_path) for child in value)
     return False
-
-
-def pending_proposal_reference_id(conn: Connection, *, session_id: str, blob_id: str) -> str | None:
-    """Return the pending proposal retaining a blob, if any.
-
-    Proposal arguments are private canonical JSON.  Only the exact
-    ``blob_id`` key is authoritative for Plan-02 custody; filenames, storage
-    paths, descriptions, and arbitrary scalar equality do not create a
-    retention edge.
-    """
-    rows = conn.execute(
-        select(
-            composition_proposals_table.c.id,
-            composition_proposals_table.c.arguments_json,
-        ).where(
-            composition_proposals_table.c.session_id == session_id,
-            composition_proposals_table.c.status == "pending",
-            composition_proposals_table.c.tool_name == "set_pipeline",
-        )
-    ).fetchall()
-    for proposal_id, arguments_json in rows:
-        if type(arguments_json) is not dict:
-            raise AuditIntegrityError(
-                f"Tier 1: pending proposal {proposal_id} arguments_json is {type(arguments_json).__name__}, expected dict"
-            )
-        source = arguments_json.get("source")
-        if source is None:
-            continue
-        if type(source) is not dict:
-            raise AuditIntegrityError(
-                f"Tier 1: pending set_pipeline proposal {proposal_id} source is {type(source).__name__}, expected dict"
-            )
-        proposal_blob_id = source.get("blob_id")
-        if proposal_blob_id is not None and type(proposal_blob_id) is not str:
-            raise AuditIntegrityError(
-                f"Tier 1: pending set_pipeline proposal {proposal_id} source.blob_id is {type(proposal_blob_id).__name__}, expected str"
-            )
-        if proposal_blob_id == blob_id:
-            return str(proposal_id)
-    return None
 
 
 def _options_reference_blob(options: Any, blob_id: str, storage_path: str, owner: str) -> bool:
@@ -1076,8 +1122,13 @@ class BlobServiceImpl:
         blob_id_str = str(blob_id)
 
         def _sync() -> None:
-            with self._engine.begin() as conn:
-                # Check blob exists
+            with self._engine.connect() as lookup_conn:
+                session_id = lookup_conn.execute(select(blobs_table.c.session_id).where(blobs_table.c.id == blob_id_str)).scalar()
+            if session_id is None:
+                raise BlobNotFoundError(blob_id_str)
+            with self._engine.begin() as conn, transaction_session_lock(conn, self._engine, session_id):
+                # Re-read only after the shared lock: custody/proposal/delete
+                # decisions for this session must observe one serial order.
                 row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id_str)).first()
                 if row is None:
                     raise BlobNotFoundError(blob_id_str)
@@ -1136,6 +1187,7 @@ class BlobServiceImpl:
                 storage = Path(row.storage_path)
                 if storage.exists():
                     storage.unlink()
+                _remove_blob_temp_artifacts(storage)
 
                 # Delete metadata (cascades to blob_run_links)
                 conn.execute(blobs_table.delete().where(blobs_table.c.id == blob_id_str))

@@ -19,6 +19,7 @@ from sqlalchemy.pool import StaticPool
 
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
+from elspeth.web.blobs.protocol import BlobPendingProposalError
 from elspeth.web.blobs.routes import create_blobs_router
 from elspeth.web.blobs.service import BlobServiceImpl
 from elspeth.web.config import WebSettings
@@ -289,6 +290,24 @@ class TestPreviewBlob:
         assert resp.content == b"a" * 5000
         assert resp.headers["x-preview-truncated"] == "true"
         assert resp.headers["x-preview-limit"] == "5000"
+
+
+class TestDeleteBlob:
+    def test_pending_proposal_conflict_returns_409(self, tmp_path, monkeypatch) -> None:
+        app, _, blob_service = _make_app(tmp_path)
+        client = TestClient(app)
+        session_id = _create_session(client)
+        blob = _upload_blob(client, session_id)
+
+        async def reject_pending_proposal(blob_id) -> None:
+            raise BlobPendingProposalError(str(blob_id), proposal_id="proposal-pending")
+
+        monkeypatch.setattr(blob_service, "delete_blob", reject_pending_proposal)
+
+        response = client.delete(f"/api/sessions/{session_id}/blobs/{blob['id']}")
+
+        assert response.status_code == 409
+        assert "proposal-pending" in response.json()["detail"]
 
 
 # ---------------------------------------------------------------------------

@@ -180,6 +180,11 @@ def test_pipeline_proposal_is_recursively_immutable_and_detached() -> None:
     assert proposal.pipeline["nodes"][0]["options"]["rules"][0]["column"] == "name"
 
 
+def test_pipeline_proposal_rejects_plain_tuple_inside_mapping_proxy() -> None:
+    with pytest.raises(AuditIntegrityError, match="got tuple"):
+        _create_proposal(pipeline=MappingProxyType({"value": (1, 2)}))
+
+
 def test_secret_ref_markers_are_preserved_in_canonical_pipeline() -> None:
     pipeline = _pipeline()
     proposal = _create_proposal(pipeline=pipeline)

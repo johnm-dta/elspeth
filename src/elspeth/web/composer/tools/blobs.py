@@ -53,8 +53,8 @@ from elspeth.web.blobs.service import (
     _guard_blob_row_literals,
     _lock_session_for_blob_quota,
     _persist_blob_content,
+    _remove_blob_temp_artifacts,
     content_hash,
-    pending_proposal_reference_id,
     sanitize_filename,
 )
 from elspeth.web.composer.protocol import ToolArgumentError
@@ -79,7 +79,9 @@ from elspeth.web.composer.tools.declarations import (
 )
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
 from elspeth.web.provider_config_policy import web_aws_s3_endpoint_url_policy_error
+from elspeth.web.sessions.locking import transaction_session_lock
 from elspeth.web.sessions.models import blob_run_links_table, blobs_table, composition_states_table, runs_table
+from elspeth.web.sessions.proposal_blob_refs import pending_proposal_reference_id
 
 
 class BlobToolRecord(TypedDict):
@@ -1591,7 +1593,17 @@ def _execute_delete_blob(
     tombstone_path: Path | None = None
 
     try:
-        with session_engine.begin() as conn:
+        with session_engine.begin() as conn, transaction_session_lock(conn, session_engine, session_id):
+            locked_row = conn.execute(
+                select(blobs_table).where(
+                    blobs_table.c.id == blob_id,
+                    blobs_table.c.session_id == session_id,
+                )
+            ).first()
+            if locked_row is None:
+                return _failure_result(state, f"Blob '{blob_id}' not found.")
+            blob = _blob_row_to_tool_dict(locked_row)
+            storage_path = Path(blob["storage_path"])
             retaining_proposal_id = pending_proposal_reference_id(
                 conn,
                 session_id=session_id,
@@ -1654,6 +1666,7 @@ def _execute_delete_blob(
             if storage_path.exists():
                 tombstone_path = storage_path.with_name(f".{storage_path.name}.delete-{uuid4().hex}")
                 os.replace(storage_path, tombstone_path)
+            _remove_blob_temp_artifacts(storage_path)
 
             # Delete record — include session_id filter for defence in depth
             conn.execute(

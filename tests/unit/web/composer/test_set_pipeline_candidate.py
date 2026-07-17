@@ -73,7 +73,8 @@ def test_set_pipeline_candidate_contract_is_frozen_and_slots_based() -> None:
     candidate = SetPipelineCandidate(result=result, prepared_inline_blob=None)
 
     assert candidate.acceptable is True
-    assert not hasattr(candidate, "__dict__")
+    with pytest.raises(TypeError):
+        vars(candidate)
     with pytest.raises(FrozenInstanceError):
         candidate.prepared_inline_blob = None  # type: ignore[misc]
 

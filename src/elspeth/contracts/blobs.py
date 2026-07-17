@@ -330,8 +330,9 @@ class BlobServiceProtocol(Protocol):
     async def delete_blob(self, blob_id: UUID) -> None:
         """Delete blob metadata and backing file.
 
-        Raises ``BlobActiveRunError`` if linked to an active run and
-        ``BlobNotFoundError`` if the blob does not exist.
+        Raises ``BlobActiveRunError`` if linked to an active run,
+        ``BlobPendingProposalError`` if a pending proposal retains the blob,
+        and ``BlobNotFoundError`` if the blob does not exist.
         """
         ...
 

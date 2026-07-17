@@ -18,11 +18,12 @@ import asyncio
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 from uuid import UUID
 
 from elspeth.contracts.composer_progress import ComposerProgressEvent, ComposerProgressSink
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.blobs.protocol import BlobQuotaExceededError
 from elspeth.web.catalog.policy_view import PolicyCatalogView
@@ -110,6 +111,11 @@ from elspeth.web.execution.schemas import ValidationResult
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
+    from sqlalchemy import Engine
+
+    from elspeth.web.composer.pipeline_custody import PipelineCustodyPreparation
     from elspeth.web.composer.service import ComposerServiceImpl
     from elspeth.web.sessions.protocol import (
         ComposerSessionPreferencesRecord,
@@ -118,6 +124,26 @@ if TYPE_CHECKING:
 
 
 _MAX_PENDING_PROPOSALS_PER_TURN: Final[int] = 10
+
+
+async def _try_finalize_proposal_custody(
+    custody: PipelineCustodyPreparation,
+    *,
+    engine: Engine,
+    data_dir: str | Path,
+    max_storage_per_session: int,
+) -> Literal["ready", "quota_exceeded"]:
+    """Return an explicit quota outcome while preserving other failures."""
+    try:
+        await finalize_pipeline_custody(
+            custody,
+            engine=engine,
+            data_dir=data_dir,
+            max_storage_per_session=max_storage_per_session,
+        )
+    except BlobQuotaExceededError:
+        return "quota_exceeded"
+    return "ready"
 
 
 def _replace_llm_tool_call_arguments(
@@ -134,15 +160,17 @@ def _replace_llm_tool_call_arguments(
     """
     encoded = json.dumps(arguments, sort_keys=True, separators=(",", ":"))
     for message in reversed(llm_messages):
-        if message.get("role") != "assistant":
+        if "role" not in message or message["role"] != "assistant":
             continue
-        tool_calls = message.get("tool_calls")
+        tool_calls = message["tool_calls"] if "tool_calls" in message else None
         if type(tool_calls) is not list:
             continue
         for call in tool_calls:
-            if type(call) is not dict or call.get("id") != tool_call_id:
+            if type(call) is not dict:
                 continue
-            function = call.get("function")
+            if "id" not in call or call["id"] != tool_call_id:
+                continue
+            function = call["function"] if "function" in call else None
             if type(function) is not dict:
                 raise AuditIntegrityError("Assistant tool call has malformed function envelope")
             function["arguments"] = encoded
@@ -707,7 +735,7 @@ async def run_tool_batch(
                         # This happens before custody I/O so a reservation
                         # failure cannot leave raw content in the dispatch
                         # audit, persisted turn manifest, or next LLM request.
-                        arguments = cast(dict[str, Any], custody.arguments)
+                        arguments = cast(dict[str, Any], deep_thaw(custody.arguments))
                         audit = rebind_dispatch_arguments(audit, arguments)
                         decoded_args_by_call_id[tool_call.id] = arguments
                         _replace_llm_tool_call_arguments(
@@ -719,14 +747,13 @@ async def run_tool_batch(
                             candidate_context,
                             tool_arguments_hash=audit.arguments_hash,
                         )
-                        try:
-                            await finalize_pipeline_custody(
-                                custody,
-                                engine=ctx.service._session_engine,
-                                data_dir=ctx.service._data_dir,
-                                max_storage_per_session=ctx.service._settings.max_blob_storage_per_session_bytes,
-                            )
-                        except BlobQuotaExceededError:
+                        custody_outcome = await _try_finalize_proposal_custody(
+                            custody,
+                            engine=ctx.service._session_engine,
+                            data_dir=ctx.service._data_dir,
+                            max_storage_per_session=ctx.service._settings.max_blob_storage_per_session_bytes,
+                        )
+                        if custody_outcome == "quota_exceeded":
                             proposal_acceptable = False
                             finalized_candidate_result = finalize_tool_result(
                                 _failure_result(

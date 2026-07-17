@@ -39,6 +39,26 @@ describe("humaniseValidationMessage", () => {
     );
   });
 
+  it("humanises the backend transform contract shape without leaking its node id", () => {
+    const message =
+      "Transform contract violation: node 'select_output_fields' (field_mapper) declares output fields " +
+      "[batch_size, customer_tier] (required) but with select_only: true the mapping will only emit " +
+      "[customer_tier]. Declared required output fields not produced by this transform: [batch_size]. " +
+      "Fix by removing the missing field(s) from the schema declaration, OR by extending `mapping` so " +
+      "the transform actually emits them, OR by setting select_only: false.";
+
+    const finding = humaniseValidationMessage(
+      message,
+      (id) => (id === "select_output_fields" ? "choose the output fields" : "unknown step"),
+    );
+
+    expect(finding.headline).toBe(
+      "A step isn't connected correctly: \"choose the output fields\" doesn't match what the next step expects.",
+    );
+    expect(finding.headline).not.toContain("select_output_fields");
+    expect(finding.raw).toBe(message);
+  });
+
   it("humanises the edge-contract preflight dump format", () => {
     const finding = humaniseValidationMessage(
       "Edge contract violation between producer node 'rater' (schema 'A') and consumer node 'out' (schema 'B'):\nMissing: score",

@@ -35,6 +35,7 @@ import type { CompositionState } from "@/types/index";
  * validation endpoint's `message=str(exc)`):
  *   - composer authoring (web/composer/state.py):
  *     "Schema contract violation: 'producer' -> 'consumer'. …"
+ *     "Transform contract violation: node 'producer' (plugin). …"
  *   - DAG runtime preflight (core/dag/graph.py) — the live-verified format:
  *     "Schema contract violation: edge 'producer' → 'consumer'\n  Consumer …"
  *   - edge-contract preflight (web/execution/validation.py):
@@ -43,7 +44,7 @@ import type { CompositionState } from "@/types/index";
  * Capture groups: [1] = producer id, [2] = consumer id (optional).
  */
 const CONTRACT_VIOLATION_RES: readonly RegExp[] = [
-  /^(?:Schema|Semantic|Transform) contract violation: (?:edge )?'([^']+)'(?: (?:->|→) '([^']+)')?/,
+  /^(?:Schema|Semantic|Transform) contract violation: (?:(?:edge|node) )?'([^']+)'(?: (?:->|→) '([^']+)')?/,
   /^Edge contract violation between producer node '([^']+)' \(schema '[^']*'\) and consumer node '([^']+)'/,
 ];
 

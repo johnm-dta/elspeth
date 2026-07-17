@@ -2408,7 +2408,59 @@ def test_patch_helper_resolves_structured_requirement_without_legacy_placeholder
     assert patched_template == "Rate Innovative and creative this is."
     assert requirement["status"] == "resolved"
     assert requirement["accepted_value"] == "Innovative and creative"
-    assert requirement["resolved_prompt_template_hash"] == stable_hash(patched_template)
+    assert requirement["resolved_prompt_template_hash"] == stable_hash("Innovative and creative")
+
+
+def test_patch_helper_sequential_vague_resolutions_keep_per_requirement_value_hashes() -> None:
+    """Resolving a second vague term must not strand the first requirement's hash.
+
+    Each resolved requirement's ``resolved_prompt_template_hash`` attests its
+    own accepted value (sibling-resolution invariant), while the node-level
+    ``options.resolved_prompt_template_hash`` tracks the full rendered prompt.
+    Storing the full-render hash on the requirement froze the first-resolved
+    requirement at a partial render, so reconciliation flagged permanent
+    hash-drift once any second term resolved.
+    """
+    node = _structured_llm_node()
+    node["options"][PROMPT_TEMPLATE_PARTS_KEY] = [
+        {"kind": "text", "text": "Rate "},
+        {"kind": "interpretation_ref", "requirement_id": "cool"},
+        {"kind": "text", "text": " and "},
+        {"kind": "interpretation_ref", "requirement_id": "fast"},
+        {"kind": "text", "text": " this is."},
+    ]
+    node["options"][INTERPRETATION_REQUIREMENTS_KEY].append(
+        {
+            "id": "fast",
+            "kind": "vague_term",
+            "user_term": "fast",
+            "status": "pending",
+            "draft": "A draft of fast",
+            "event_id": None,
+            "accepted_value": None,
+            "resolved_prompt_template_hash": None,
+        }
+    )
+
+    first_pass = _patch_llm_transform_prompt(
+        _state_with_node(node),
+        affected_node_id="llm_transform_1",
+        user_term="cool",
+        accepted_value="modern",
+    )
+    second_pass = _patch_llm_transform_prompt(
+        _state_with_node(dict(next(iter(first_pass)))),
+        affected_node_id="llm_transform_1",
+        user_term="fast",
+        accepted_value="quick",
+    )
+
+    options = next(iter(second_pass))["options"]
+    requirements = {requirement["id"]: requirement for requirement in options[INTERPRETATION_REQUIREMENTS_KEY]}
+    assert options["prompt_template"] == "Rate modern and quick this is."
+    assert options["resolved_prompt_template_hash"] == stable_hash("Rate modern and quick this is.")
+    assert requirements["cool"]["resolved_prompt_template_hash"] == stable_hash("modern")
+    assert requirements["fast"]["resolved_prompt_template_hash"] == stable_hash("quick")
 
 
 def test_patch_helper_accepts_whitespace_tolerant_placeholder() -> None:
@@ -2768,7 +2820,9 @@ async def test_resolve_structured_requirement_round_trips_without_authoring_meta
     assert node.options["resolved_prompt_template_hash"] == resolved.resolved_prompt_template_hash
     assert requirement["status"] == "resolved"
     assert requirement["accepted_value"] == "modern and clear"
-    assert requirement["resolved_prompt_template_hash"] == resolved.resolved_prompt_template_hash
+    # Requirement-level hash attests the accepted value; the node-level hash
+    # (asserted above) carries the full-render anchor the event also records.
+    assert requirement["resolved_prompt_template_hash"] == stable_hash("modern and clear")
 
     yaml_str = generate_yaml(cs)
     assert "prompt_template: Rate modern and clear this is." in yaml_str

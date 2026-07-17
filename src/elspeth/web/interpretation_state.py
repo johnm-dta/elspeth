@@ -1597,7 +1597,20 @@ def _vague_review_is_unchanged(
     previous_prompt = previous.options["prompt_template"] if "prompt_template" in previous.options else None
     if type(previous_prompt) is not str:
         raise ValueError(f"resolved vague-term review {requirement_id!r} has no rendered prompt_template")
-    if _resolved_review_hash(requirement, InterpretationKind.VAGUE_TERM) != stable_hash(previous_prompt):
+    # Both checks must stay invariant under SIBLING vague-term resolution: any
+    # comparison against a hash frozen at this requirement's own resolution
+    # moment goes permanently stale the instant a second term on the same
+    # prompt resolves. So (1) the stored prompt must re-render from its own
+    # parts + requirements (order-invariant tamper guard), and (2) the
+    # requirement hash attests the accepted value alone.
+    rendered_previous = _render_prompt_parts(
+        previous_parts,
+        _requirements_by_id(previous.options),
+        unresolved_text=PENDING_INTERPRETATION_AUTHORING_TEXT,
+    )
+    if rendered_previous != previous_prompt:
+        raise ValueError(f"resolved vague-term review {requirement_id!r} prompt drifted from its parts render")
+    if _resolved_review_hash(requirement, InterpretationKind.VAGUE_TERM) != stable_hash(requirement["accepted_value"]):
         raise ValueError(f"resolved vague-term review {requirement_id!r} hash drifted")
     return prompt_structure_hash(previous_parts) == prompt_structure_hash(proposed_parts)
 

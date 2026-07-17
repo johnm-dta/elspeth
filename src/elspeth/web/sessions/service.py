@@ -944,7 +944,12 @@ def _patch_structured_interpretation_prompt(
     updated_requirement = dict(matching_requirement)
     updated_requirement["status"] = "resolved"
     updated_requirement["accepted_value"] = accepted_value
-    updated_requirement["resolved_prompt_template_hash"] = resolved_prompt_template_hash
+    # The requirement-level hash attests THIS requirement's accepted value, not
+    # the full render: the render changes again when a sibling vague term
+    # resolves, and reconciliation must be able to re-verify every resolved
+    # requirement against state that survives those later resolutions. The
+    # full-render hash lives at node level (options.resolved_prompt_template_hash).
+    updated_requirement["resolved_prompt_template_hash"] = stable_hash(accepted_value)
     requirements[matching_index] = updated_requirement
 
     patched_options = dict(options)

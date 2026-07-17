@@ -473,7 +473,7 @@ def test_resolved_vague_term_rehydrates_only_with_same_parts_and_renders_from_th
         status="resolved",
         draft="friendly",
         accepted_value="warm",
-        resolved_prompt_template_hash=stable_hash("Tone: warm"),
+        resolved_prompt_template_hash=stable_hash("warm"),
     )
     parts = [
         {"kind": "text", "text": "Tone: "},
@@ -518,6 +518,122 @@ def test_resolved_vague_term_rehydrates_only_with_same_parts_and_renders_from_th
     options = reconciled.nodes[0].options
     assert options["prompt_template"] == "Tone: warm"
     assert options[INTERPRETATION_REQUIREMENTS_KEY][0]["status"] == "resolved"
+
+
+def _two_vague_term_fixtures(
+    *,
+    tone_hash: str,
+    audience_hash: str,
+    previous_prompt: str = "Tone: warm, audience: new users",
+) -> tuple[CompositionState, CompositionState]:
+    parts = [
+        {"kind": "text", "text": "Tone: "},
+        {"kind": "interpretation_ref", "requirement_id": "vague:tone"},
+        {"kind": "text", "text": ", audience: "},
+        {"kind": "interpretation_ref", "requirement_id": "vague:audience"},
+    ]
+    tone = _requirement(
+        requirement_id="vague:tone",
+        kind=InterpretationKind.VAGUE_TERM,
+        user_term="friendly",
+        status="resolved",
+        draft="friendly",
+        accepted_value="warm",
+        resolved_prompt_template_hash=tone_hash,
+    )
+    audience = _requirement(
+        requirement_id="vague:audience",
+        kind=InterpretationKind.VAGUE_TERM,
+        user_term="everyone",
+        status="resolved",
+        draft="everyone",
+        accepted_value="new users",
+        resolved_prompt_template_hash=audience_hash,
+    )
+    previous = _state(
+        nodes=(
+            _node(
+                options={
+                    "prompt_template": previous_prompt,
+                    PROMPT_TEMPLATE_PARTS_KEY: parts,
+                    INTERPRETATION_REQUIREMENTS_KEY: [tone, audience],
+                }
+            ),
+        )
+    )
+    shells = [
+        _requirement(
+            requirement_id="vague:tone",
+            kind=InterpretationKind.VAGUE_TERM,
+            user_term="friendly",
+            draft="friendly",
+        ),
+        _requirement(
+            requirement_id="vague:audience",
+            kind=InterpretationKind.VAGUE_TERM,
+            user_term="everyone",
+            draft="everyone",
+        ),
+    ]
+    proposed = _state(
+        nodes=(
+            _node(
+                options={
+                    "prompt_template": "Tone: pending interpretation, audience: pending interpretation",
+                    PROMPT_TEMPLATE_PARTS_KEY: parts,
+                    INTERPRETATION_REQUIREMENTS_KEY: shells,
+                }
+            ),
+        )
+    )
+    return previous, proposed
+
+
+def test_two_resolved_vague_terms_round_trip_regardless_of_resolution_order() -> None:
+    """A prompt with two resolved vague terms must reconcile cleanly.
+
+    Each requirement's ``resolved_prompt_template_hash`` attests its own
+    accepted value, so it is invariant under the *sibling* term's later
+    resolution. The old semantics (hash of the full rendered prompt at that
+    requirement's resolution moment) made the first-resolved requirement's
+    hash permanently stale once a second term resolved, failing every
+    subsequent set_pipeline / splice_transform with hash-drift.
+    """
+    previous, proposed = _two_vague_term_fixtures(
+        tone_hash=stable_hash("warm"),
+        audience_hash=stable_hash("new users"),
+    )
+
+    reconciled = reconcile_authoritative_reviews(previous, proposed)
+
+    options = reconciled.nodes[0].options
+    assert options["prompt_template"] == "Tone: warm, audience: new users"
+    statuses = [requirement["status"] for requirement in options[INTERPRETATION_REQUIREMENTS_KEY]]
+    assert statuses == ["resolved", "resolved"]
+
+
+def test_vague_term_accepted_value_hash_mismatch_fails_closed() -> None:
+    previous, proposed = _two_vague_term_fixtures(
+        tone_hash=stable_hash("chilly"),
+        audience_hash=stable_hash("new users"),
+    )
+
+    with pytest.raises(ValueError, match="hash drifted"):
+        reconcile_authoritative_reviews(previous, proposed)
+
+
+def test_vague_term_tampered_previous_prompt_fails_closed() -> None:
+    """The stored previous prompt must re-render from its own parts and
+    requirements; a prompt edited out from under a resolved vague-term
+    review is drift, not a benign round-trip."""
+    previous, proposed = _two_vague_term_fixtures(
+        tone_hash=stable_hash("warm"),
+        audience_hash=stable_hash("new users"),
+        previous_prompt="Tone: chilly, audience: new users",
+    )
+
+    with pytest.raises(ValueError, match="drifted"):
+        reconcile_authoritative_reviews(previous, proposed)
 
 
 def test_invented_source_review_rehydrates_only_for_the_same_content_identity() -> None:

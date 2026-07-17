@@ -199,7 +199,13 @@ repos:
         name: Check Contracts
         entry: .venv/bin/python -m scripts.check_contracts
         language: system
-        files: ^(src/elspeth/core/config\.py|src/elspeth/contracts/config/|scripts/check_contracts\.py|tests/unit/core/test_config_alignment\.py)$
+        # Deliberately wider than the whole-repo-checks-defer-to-CI contract
+        # above: unpushed batch work let contract drift accumulate invisibly
+        # behind the old core/config.py-only trigger (elspeth-322b6c6f2a).
+        # This hook fires on any src/elspeth Python change and is EXPECTED to
+        # stay red until that drift is burned down — do not whitelist to
+        # silence it.
+        files: ^(src/elspeth/.*\.py|scripts/check_contracts\.py|config/cicd/contracts-whitelist\.yaml|tests/unit/core/test_config_alignment\.py)$
         pass_filenames: false
 
       - id: check-slot-type-cross-language

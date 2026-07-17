@@ -548,7 +548,7 @@ async def run_tool_batch(
             continue
 
         prevalidated_unapplied_result: ToolResult | None = None
-        preproposal_exception: Exception | None = None
+        preproposal_exception: BaseException | None = None
         if (
             turn_sessions_service is not None
             and turn_session_uuid is not None
@@ -636,7 +636,7 @@ async def run_tool_batch(
                         context=candidate_context,
                         prior_validation=candidate_prior_validation,
                     )
-                except Exception as exc:
+                except BaseException as exc:
                     # Candidate construction and finalization are one-time
                     # pre-proposal work. Re-raise the exact exception from
                     # inside ``dispatch_with_audit`` below so its existing
@@ -1238,7 +1238,7 @@ async def run_tool_batch(
             _composer_skill_hash: str = ctx.service._composer_skill_hash,
             _tool_arguments_hash: str = audit.arguments_hash,
             _prevalidated_unapplied_result: ToolResult | None = prevalidated_unapplied_result,
-            _preproposal_exception: Exception | None = preproposal_exception,
+            _preproposal_exception: BaseException | None = preproposal_exception,
         ) -> Any:
             if _preproposal_exception is not None:
                 raise _preproposal_exception

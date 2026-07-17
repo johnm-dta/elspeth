@@ -18,6 +18,7 @@ from sqlalchemy.pool import StaticPool
 from elspeth.contracts.composer_audit import ComposerToolStatus
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.anti_anchor import AntiAnchorTracker
+from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.protocol import ComposerPluginCrashError
 from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
@@ -91,6 +92,10 @@ class _FinalRejectingCatalog(PolicyCatalogView):
             policy_findings=(),
             validation=raw,
         )
+
+
+class _PreproposalBaseSignal(BaseException):
+    """Test-only shutdown-style signal outside the ``Exception`` hierarchy."""
 
 
 def _empty_state() -> CompositionState:
@@ -645,6 +650,59 @@ async def test_unexpected_candidate_finalizer_exception_uses_plugin_crash_audit_
         "error_message": "RuntimeError",
     }
     assert str(unexpected) not in persisted_feedback
+
+
+@pytest.mark.asyncio
+async def test_preproposal_base_exception_is_audited_once_and_propagated_unchanged(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    state = _empty_state()
+    args = _inline_pipeline_args(tmp_path)
+    llm = _ScriptedLLM(_tool_turn("call_finalizer_base_signal", "set_pipeline", args))
+    signal = _PreproposalBaseSignal("shutdown-style private detail")
+    recorded: list[Any] = []
+    original_record = BufferingRecorder.record
+
+    def _record(recorder: BufferingRecorder, invocation: Any) -> None:
+        recorded.append(invocation)
+        original_record(recorder, invocation)
+
+    with (
+        patch.object(harness.service, "_call_llm", new=llm),
+        patch(
+            "elspeth.web.composer.tool_batch.build_set_pipeline_candidate",
+            wraps=real_build_set_pipeline_candidate,
+        ) as builder,
+        patch("elspeth.web.composer.tool_batch.finalize_tool_result", side_effect=signal) as finalizer,
+        patch.object(BufferingRecorder, "record", new=_record),
+        pytest.raises(_PreproposalBaseSignal) as exc_info,
+    ):
+        await harness.service.compose(
+            "Build a reviewed inline pipeline.",
+            [],
+            state,
+            session_id=harness.session_id,
+            user_id="proposal-prevalidation-user",
+            user_message_id=harness.user_message_id,
+        )
+
+    assert exc_info.value is signal
+    assert not isinstance(exc_info.value, ComposerPluginCrashError)
+    assert builder.call_count == 1
+    assert finalizer.call_count == 1
+    assert len(llm.message_snapshots) == 1
+    assert await harness.sessions.list_composition_proposals(UUID(harness.session_id)) == []
+    assert _count_rows(harness.engine, blobs_table) == 0
+    assert _count_rows(harness.engine, composition_states_table) == 0
+
+    assert len(recorded) == 1
+    invocation = recorded[0]
+    assert invocation.tool_call_id == "call_finalizer_base_signal"
+    assert invocation.status is ComposerToolStatus.PLUGIN_CRASH
+    assert invocation.error_class == "_PreproposalBaseSignal"
+    assert invocation.error_message == "_PreproposalBaseSignal"
+    assert invocation.version_before == state.version
+    assert invocation.version_after is None
+    assert invocation.result_canonical is None
 
 
 @pytest.mark.asyncio

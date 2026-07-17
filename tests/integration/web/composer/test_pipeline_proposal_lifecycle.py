@@ -291,6 +291,37 @@ async def test_atomic_pipeline_settlement_exact_retry_returns_same_state_and_eve
 
 
 @pytest.mark.asyncio
+async def test_atomic_pipeline_settlement_exact_retry_rejects_tampered_terminal_event_pointer(
+    service: SessionServiceImpl,
+) -> None:
+    session_id = uuid4()
+    _insert_session(service, session_id)
+    plan = _plan()
+    row = await _create(service, session_id, plan)
+    binding = await _persist_dispatch(service, session_id)
+    kwargs = {
+        "session_id": session_id,
+        "proposal_id": row.id,
+        "draft_hash": plan.proposal.draft_hash,
+        "reviewed_facts": {},
+        "state": _state_data(),
+        "candidate_content_hash": _state_content_hash(_state_data()),
+        "executor_content_hash": _state_content_hash(_state_data()),
+        "final_composer_metadata": None,
+        "dispatch": binding,
+        "actor": "user:alice",
+    }
+    await service.settle_pipeline_composition_proposal(**kwargs)
+    with service._engine.begin() as conn:
+        conn.execute(
+            update(composition_proposals_table).where(composition_proposals_table.c.id == str(row.id)).values(audit_event_id=str(uuid4()))
+        )
+
+    with pytest.raises(AuditIntegrityError, match="terminal event"):
+        await service.settle_pipeline_composition_proposal(**kwargs)
+
+
+@pytest.mark.asyncio
 async def test_absent_base_conflicts_when_first_state_appears_before_settlement(service: SessionServiceImpl) -> None:
     session_id = uuid4()
     _insert_session(service, session_id)
@@ -483,6 +514,31 @@ async def test_pipeline_rejection_uses_closed_versioned_reason_and_is_exactly_id
             dispatch=None,
             actor="user:alice",
         )
+
+
+@pytest.mark.asyncio
+async def test_pipeline_rejection_exact_retry_rejects_tampered_terminal_event_pointer(service: SessionServiceImpl) -> None:
+    session_id = uuid4()
+    _insert_session(service, session_id)
+    plan = _plan()
+    row = await _create(service, session_id, plan)
+    kwargs = {
+        "session_id": session_id,
+        "proposal_id": row.id,
+        "draft_hash": plan.proposal.draft_hash,
+        "reviewed_facts": {},
+        "reason": "operator_rejected",
+        "dispatch": None,
+        "actor": "user:alice",
+    }
+    await service.reject_pipeline_composition_proposal(**kwargs)
+    with service._engine.begin() as conn:
+        conn.execute(
+            update(composition_proposals_table).where(composition_proposals_table.c.id == str(row.id)).values(audit_event_id=str(uuid4()))
+        )
+
+    with pytest.raises(AuditIntegrityError, match="terminal binding"):
+        await service.reject_pipeline_composition_proposal(**kwargs)
 
 
 @pytest.mark.asyncio

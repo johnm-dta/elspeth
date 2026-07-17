@@ -3598,6 +3598,8 @@ class SessionServiceImpl:
                 if authority.row.status == "committed":
                     if len(terminal_rows) != 1 or terminal_rows[0].event_type != "proposal.accepted":
                         raise AuditIntegrityError("committed pipeline proposal terminal event authority is malformed")
+                    if authority.row.audit_event_id != UUID(terminal_rows[0].id):
+                        raise AuditIntegrityError("committed pipeline proposal terminal event pointer is malformed")
                     if authority.row.committed_state_id is None:
                         raise AuditIntegrityError("committed pipeline proposal is missing committed state")
                     committed_row = conn.execute(
@@ -3848,6 +3850,7 @@ class SessionServiceImpl:
                     if (
                         len(terminal_rows) != 1
                         or terminal_rows[0].event_type != "proposal.rejected"
+                        or authority.row.audit_event_id != UUID(terminal_rows[0].id)
                         or terminal_rows[0].payload != expected_payload
                     ):
                         raise AuditIntegrityError("rejected pipeline proposal terminal binding mismatch")

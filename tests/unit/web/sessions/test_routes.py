@@ -6,6 +6,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -780,6 +781,304 @@ def test_accept_proposal_executes_tool_and_commits_state(tmp_path, monkeypatch) 
             select(composition_states_table.c.provenance).where(composition_states_table.c.id == str(persisted.id))
         ).scalar_one()
     assert provenance == "tool_call"
+
+
+async def _create_canonical_pipeline_route_proposal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    tool_call_id: str,
+) -> tuple[FastAPI, SessionServiceImpl, dict[str, Any], uuid.UUID, Any, str]:
+    from elspeth.web.composer.pipeline_planner import PipelinePlanResult
+    from elspeth.web.composer.pipeline_proposal import AbsentBase, PipelineProposal, PlannerSurface
+    from elspeth.web.composer.redaction import redact_tool_call_arguments
+    from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
+
+    app, service = _make_app(tmp_path)
+    monkeypatch.setattr(
+        "elspeth.web.sessions.routes._helpers._runtime_preflight_for_state",
+        _async_return(ValidationResult(is_valid=True, checks=[], errors=[])),
+    )
+    input_path = tmp_path / "blobs" / f"{tool_call_id}.csv"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_text("value\n1\n", encoding="utf-8")
+    pipeline: dict[str, Any] = {
+        "source": {
+            "plugin": "csv",
+            "on_success": "rows",
+            "options": {"path": str(input_path), "schema": {"mode": "observed"}},
+            "on_validation_failure": "discard",
+        },
+        "nodes": [],
+        "edges": [],
+        "outputs": [
+            {
+                "sink_name": "rows",
+                "plugin": "json",
+                "options": {
+                    "path": str(tmp_path / "outputs" / f"{tool_call_id}.jsonl"),
+                    "schema": {"mode": "observed"},
+                    "format": "jsonl",
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            }
+        ],
+    }
+    proposal = PipelineProposal.create(
+        pipeline=pipeline,
+        base=AbsentBase(),
+        reviewed_facts={},
+        surface=PlannerSurface.FREEFORM,
+        repair_count=0,
+        skill_hash=stable_hash("planner-skill"),
+    )
+    session = await service.create_session("alice", "Canonical accept", "local")
+    session_id = session.id
+    row = await service.create_pipeline_composition_proposal(
+        session_id=session_id,
+        plan=PipelinePlanResult(
+            proposal=proposal,
+            tool_call_id=tool_call_id,
+            custody_result="not_required",
+        ),
+        summary="Replace the pipeline.",
+        rationale="Requested by the operator.",
+        affects=("graph", "validation"),
+        arguments_redacted_json=redact_tool_call_arguments(
+            "set_pipeline",
+            pipeline,
+            telemetry=NoopRedactionTelemetry(),
+        ),
+        actor="composer-web:user:alice",
+        composer_model_identifier="planner-model",
+        composer_model_version="planner-model-v1",
+        composer_provider="provider",
+    )
+    endpoint = f"/api/sessions/{session.id}/proposals/{row.id}/accept"
+    return app, service, pipeline, session_id, row, endpoint
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "reason_code"),
+    [
+        ("validation", "validation_failed"),
+        ("mismatch", "candidate_executor_mismatch"),
+    ],
+)
+def test_canonical_pipeline_accept_terminalizes_audited_executor_failure(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+    reason_code: str,
+) -> None:
+    import elspeth.web.composer.pipeline_commit as commit_module
+
+    app, service, _pipeline, session_id, row, endpoint = asyncio.run(
+        _create_canonical_pipeline_route_proposal(
+            tmp_path,
+            monkeypatch,
+            tool_call_id=f"canonical-{failure_mode}-call",
+        )
+    )
+    original_execute = commit_module.execute_tool
+
+    def failing_execute(*args: Any, **kwargs: Any):
+        result = original_execute(*args, **kwargs)
+        if failure_mode == "validation":
+            return replace(result, success=False)
+        return replace(
+            result,
+            updated_state=CompositionState(
+                source=None,
+                nodes=(),
+                edges=(),
+                outputs=(),
+                metadata=PipelineMetadata(name="executor mismatch"),
+                version=result.updated_state.version,
+            ),
+        )
+
+    monkeypatch.setattr(commit_module, "execute_tool", failing_execute)
+
+    response = TestClient(app).post(endpoint, json={"draft_hash": row.pipeline_metadata.draft_hash})
+
+    assert response.status_code == 422, response.text
+    assert asyncio.run(service.get_current_state(session_id)) is None
+    terminal_row = asyncio.run(service.get_authoritative_composition_proposal(session_id=session_id, proposal_id=row.id, reviewed_facts={}))
+    assert terminal_row.row.status == "rejected"
+    events = asyncio.run(service.list_proposal_events(session_id))
+    assert events[-1].payload["reason_code"] == reason_code
+    assert events[-1].payload["dispatch"] is not None
+    audit_messages = [message for message in asyncio.run(service.get_messages(session_id, limit=None)) if message.role == "audit"]
+    assert len(audit_messages) == 1
+    assert audit_messages[0].tool_calls is not None
+    invocation = audit_messages[0].tool_calls[0]["invocation"]
+    assert invocation["result_canonical"] is not None
+    result_payload = json.loads(invocation["result_canonical"])
+    assert result_payload["pipeline_content_hash_schema"] == "composer.pipeline-dispatch-result.v1"
+    assert events[-1].payload["dispatch"]["result_hash"] == invocation["result_hash"]
+
+
+@pytest.mark.asyncio
+async def test_canonical_pipeline_cancel_then_prepare_failure_terminalizes_before_reraising(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elspeth.web.composer.pipeline_commit import PipelineCommitError
+
+    app, service, _pipeline, session_id, row, endpoint = await _create_canonical_pipeline_route_proposal(
+        tmp_path,
+        monkeypatch,
+        tool_call_id="canonical-cancel-prepare-call",
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fail_prepare(**_kwargs: Any):
+        started.set()
+        await release.wait()
+        raise PipelineCommitError("candidate validation failed", code="VALIDATION_FAILED")
+
+    monkeypatch.setattr(
+        "elspeth.web.sessions.routes.composer.proposals.prepare_pipeline_proposal_commit",
+        fail_prepare,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        request_task = asyncio.create_task(client.post(endpoint, json={"draft_hash": row.pipeline_metadata.draft_hash}))
+        await started.wait()
+        request_task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+
+    proposals = await service.list_composition_proposals(session_id)
+    assert proposals[0].status == "rejected"
+    assert (await service.list_proposal_events(session_id))[-1].payload["reason_code"] == "validation_failed"
+
+
+@pytest.mark.asyncio
+async def test_canonical_pipeline_cancel_during_failed_dispatch_audit_persist_terminalizes_before_reraising(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elspeth.core.canonical import stable_hash as canonical_stable_hash
+    from elspeth.web.composer.audit import begin_dispatch, finish_success
+    from elspeth.web.composer.pipeline_commit import (
+        PipelineCommitError,
+        PipelineDispatchAuditBinding,
+    )
+    from elspeth.web.sessions.routes.composer import proposals as proposal_routes
+
+    app, service, pipeline, session_id, row, endpoint = await _create_canonical_pipeline_route_proposal(
+        tmp_path,
+        monkeypatch,
+        tool_call_id="canonical-cancel-audit-call",
+    )
+    audit = begin_dispatch(
+        row.tool_call_id,
+        "set_pipeline",
+        pipeline,
+        version_before=0,
+        actor="user:alice",
+    )
+    recorder_invocation = finish_success(
+        audit,
+        result_payload={"success": False},
+        version_after=0,
+    )
+    executor_hash = canonical_stable_hash({"executor": "validation-failed"})
+    rebound_invocation = finish_success(
+        audit,
+        result_payload={
+            "success": False,
+            "pipeline_content_hash_schema": "composer.pipeline-dispatch-result.v1",
+            "pipeline_content_hash": executor_hash,
+        },
+        version_after=0,
+    )
+    dispatch = PipelineDispatchAuditBinding.from_invocation(rebound_invocation)
+
+    async def fail_after_dispatch(*, recorder, **_kwargs: Any):
+        recorder.record(recorder_invocation)
+        raise PipelineCommitError(
+            "executor validation failed",
+            code="VALIDATION_FAILED",
+            invocation=rebound_invocation,
+            dispatch=dispatch,
+        )
+
+    persist_started = asyncio.Event()
+    persist_release = asyncio.Event()
+    original_persist = proposal_routes._persist_tool_invocations
+
+    async def gated_persist(*args: Any, **kwargs: Any):
+        persist_started.set()
+        await persist_release.wait()
+        return await original_persist(*args, **kwargs)
+
+    monkeypatch.setattr(proposal_routes, "prepare_pipeline_proposal_commit", fail_after_dispatch)
+    monkeypatch.setattr(proposal_routes, "_persist_tool_invocations", gated_persist)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        request_task = asyncio.create_task(client.post(endpoint, json={"draft_hash": row.pipeline_metadata.draft_hash}))
+        await persist_started.wait()
+        request_task.cancel()
+        persist_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+
+    proposals = await service.list_composition_proposals(session_id)
+    assert proposals[0].status == "rejected"
+    terminal = (await service.list_proposal_events(session_id))[-1].payload
+    assert terminal["reason_code"] == "validation_failed"
+    audit_messages = [message for message in await service.get_messages(session_id, limit=None) if message.role == "audit"]
+    assert len(audit_messages) == 1
+    assert audit_messages[0].tool_calls is not None
+    persisted_envelope = audit_messages[0].tool_calls[0]
+    persisted_invocation = persisted_envelope["invocation"]
+    assert terminal["dispatch"] == {
+        "tool_call_id": persisted_invocation["tool_call_id"],
+        "tool_name": persisted_invocation["tool_name"],
+        "status": persisted_invocation["status"],
+        "arguments_hash": persisted_invocation["arguments_hash"],
+        "result_hash": persisted_invocation["result_hash"],
+    }
+    assert persisted_invocation["result_hash"] == dispatch.result_hash
+
+
+@pytest.mark.asyncio
+async def test_canonical_pipeline_cancel_then_settlement_failure_preserves_cancellation(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, service, _pipeline, session_id, row, endpoint = await _create_canonical_pipeline_route_proposal(
+        tmp_path,
+        monkeypatch,
+        tool_call_id="canonical-cancel-settlement-call",
+    )
+    settle_started = asyncio.Event()
+    settle_release = asyncio.Event()
+
+    async def fail_settlement(**_kwargs: Any):
+        settle_started.set()
+        await settle_release.wait()
+        raise RuntimeError("settlement failed")
+
+    monkeypatch.setattr(service, "settle_pipeline_composition_proposal", fail_settlement)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        request_task = asyncio.create_task(client.post(endpoint, json={"draft_hash": row.pipeline_metadata.draft_hash}))
+        await settle_started.wait()
+        request_task.cancel()
+        settle_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+
+    proposals = await service.list_composition_proposals(session_id)
+    assert proposals[0].status == "pending"
+    assert await service.get_current_state(session_id) is None
+    audit_messages = [message for message in await service.get_messages(session_id, limit=None) if message.role == "audit"]
+    assert len(audit_messages) == 1
 
 
 def test_canonical_pipeline_accept_requires_and_echoes_draft_hash(tmp_path, monkeypatch) -> None:

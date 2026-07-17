@@ -621,7 +621,7 @@ def test_non_empty_strings_are_strict_stripped_and_non_empty() -> None:
     with pytest.raises(ValidationError):
         EvidenceReference(id=" ", kind="harness", locator="test", claim="claim")
     with pytest.raises(ValidationError):
-        EvidenceReference(id=1, kind="harness", locator="test", claim="claim")  # type: ignore[arg-type]
+        EvidenceReference.model_validate({"id": 1, "kind": "harness", "locator": "test", "claim": "claim"})
 
 
 @pytest.mark.parametrize("kind", ["harness", "pytest"])
@@ -717,15 +717,17 @@ def test_unknown_fields_are_rejected_and_models_are_frozen() -> None:
         ConfigEvidence.model_validate({"loaded": True, "settings_sha256": "abc", "unexpected": "field"})
 
     evidence = ConfigEvidence(loaded=True, settings_sha256="abc")
+    # Exercise Pydantic's runtime freeze guard without a statically invalid assignment.
     with pytest.raises(ValidationError, match="frozen"):
-        evidence.loaded = False
+        evidence.__setattr__("loaded", False)
 
 
 def test_scenario_dimensions_reject_post_validation_mutation() -> None:
     scenario = _scenario(EvidenceCell(status="pass", evidence=("evidence-1",)))
 
     with pytest.raises(TypeError):
-        scenario.dimensions["runtime"] = "not-an-evidence-cell"  # type: ignore[assignment]
+        # Deliberately attempt mutation through the public read-only Mapping.
+        scenario.dimensions["runtime"] = EvidenceCell(status="pass", evidence=("evidence-1",))  # type: ignore[index]
 
 
 def test_scenario_dimensions_preserve_mapping_input_access_iteration_and_serialization() -> None:
@@ -751,9 +753,9 @@ def test_scenario_dimensions_preserve_mapping_input_access_iteration_and_seriali
 
 def test_strict_scalar_types_reject_coercion() -> None:
     with pytest.raises(ValidationError):
-        ConfigEvidence(loaded=1, settings_sha256="abc")  # type: ignore[arg-type]
+        ConfigEvidence.model_validate({"loaded": 1, "settings_sha256": "abc"})
     with pytest.raises(ValidationError):
-        RunExpectation(status="completed", output_rows="1", required_audit_record_types=())  # type: ignore[arg-type]
+        RunExpectation.model_validate({"status": "completed", "output_rows": "1", "required_audit_record_types": ()})
     with pytest.raises(ValidationError):
         AuditRecordCount(record_type="run_started", count=True)
 
@@ -1167,7 +1169,8 @@ def test_corpus_plugin_manager_exposes_builtins_and_custom_through_public_instan
         "json",
         "dag_corpus_fail_once_eof_batch",
     )
-    assert manager.get_transform_by_name("dag_corpus_fail_once_eof_batch") is CorpusFailOnceEOFBatchTransform
+    registered_transform: object = manager.get_transform_by_name("dag_corpus_fail_once_eof_batch")
+    assert registered_transform is CorpusFailOnceEOFBatchTransform
     assert manager_module.get_shared_plugin_manager() is manager
 
 
@@ -1562,6 +1565,17 @@ def test_manifest_rejects_pass_with_only_documentary_evidence(
     )
     _raw_dimensions(_raw_scenarios(raw)[0])["config"]["evidence"] = ["non-executable"]
     with pytest.raises(ValueError, match=r"pass cell.*only document/decision evidence"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_pass_lifecycle_cell_without_matching_executable_stage(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    config_evidence = set(cast(list[str], _raw_dimensions(_raw_scenarios(raw)[0])["config"]["evidence"]))
+    for evidence in _raw_evidence(raw):
+        if evidence["id"] in config_evidence:
+            evidence["stages"] = ["runtime"]
+
+    with pytest.raises(ValueError, match=r"pass lifecycle cell linear\.config.*executable evidence declaring stage 'config'"):
         load_manifest(write_manifest(tmp_path, raw))
 
 

@@ -5,19 +5,23 @@ from __future__ import annotations
 import ast
 import re
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import yaml
-from yaml.nodes import MappingNode
+from yaml.nodes import MappingNode, Node
 from yaml.resolver import BaseResolver
 
 from tests.fixtures.dag_scenario_corpus.schema import (
     EXPECTED_DIMENSIONS,
     EXPECTED_SCENARIOS,
+    Dimension,
     EvidenceReference,
     HarnessCaseSpec,
     ScenarioManifest,
     ScenarioSpec,
+    Stage,
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -27,6 +31,13 @@ FIXTURE_ROOT = REPOSITORY_ROOT / "tests/fixtures/dag_scenario_corpus/v1"
 _CRITERIA_REF = "docs/architecture/dag/completeness-criteria.md"
 _DECISION_LOCATOR = re.compile(r"^elspeth-[0-9a-f]{10}$")
 _HARNESS_LOCATOR = re.compile(r"^[a-z0-9][a-z0-9-]*:[A-Za-z0-9][A-Za-z0-9._-]*$")
+_LIFECYCLE_STAGE_BY_DIMENSION: dict[Dimension, Stage] = {
+    "config": "config",
+    "build": "build",
+    "runtime": "runtime",
+    "audit": "audit",
+    "recovery": "recovery",
+}
 
 
 class _UniqueKeySafeLoader(yaml.SafeLoader):
@@ -39,12 +50,13 @@ def _construct_unique_mapping(
     deep: bool = False,
 ) -> dict[object, object]:
     loader.flatten_mapping(node)
+    construct_object = cast(Callable[[Node, bool], object], loader.construct_object)
     mapping: dict[object, object] = {}
     for key_node, value_node in node.value:
-        key = loader.construct_object(key_node, deep=deep)
+        key = construct_object(key_node, deep)
         if key in mapping:
             raise ValueError(f"duplicate YAML mapping key {key!r} at line {key_node.start_mark.line + 1}")
-        mapping[key] = loader.construct_object(value_node, deep=deep)
+        mapping[key] = construct_object(value_node, deep)
     return mapping
 
 
@@ -56,7 +68,7 @@ def _load_yaml_without_duplicate_keys(path: Path) -> object:
     try:
         return loader.get_single_data()
     finally:
-        loader.dispose()
+        cast(Callable[[], None], loader.dispose)()
 
 
 def load_manifest(path: Path = DEFAULT_MANIFEST_PATH) -> ScenarioManifest:
@@ -174,8 +186,17 @@ def _validate_evidence_references(manifest: ScenarioManifest) -> None:
             unknown_ids = tuple(evidence_id for evidence_id in cell.evidence if evidence_id not in evidence_by_id)
             if unknown_ids:
                 raise ValueError(f"DAG scenario {scenario.id}.{dimension} references unknown evidence id(s): {', '.join(unknown_ids)}")
-            if cell.status == "pass" and not any(evidence_by_id[evidence_id].executable for evidence_id in cell.evidence):
-                raise ValueError(f"DAG scenario pass cell {scenario.id}.{dimension} references only document/decision evidence")
+            if cell.status == "pass":
+                executable_evidence = tuple(
+                    evidence_by_id[evidence_id] for evidence_id in cell.evidence if evidence_by_id[evidence_id].executable
+                )
+                if not executable_evidence:
+                    raise ValueError(f"DAG scenario pass cell {scenario.id}.{dimension} references only document/decision evidence")
+                required_stage = _LIFECYCLE_STAGE_BY_DIMENSION.get(dimension)
+                if required_stage is not None and not any(required_stage in evidence.stages for evidence in executable_evidence):
+                    raise ValueError(
+                        f"DAG scenario pass lifecycle cell {scenario.id}.{dimension} lacks executable evidence declaring stage {required_stage!r}"
+                    )
 
     orphan_evidence_ids = sorted(set(evidence_by_id) - referenced_evidence_ids)
     if orphan_evidence_ids:

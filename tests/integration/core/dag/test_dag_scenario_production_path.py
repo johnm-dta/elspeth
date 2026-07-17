@@ -260,7 +260,11 @@ def test_checkpoint_reopen_resume_has_exact_restart_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scenario, case = _declared_case("checkpoint-deterministic-resume", "reopen-resume")
-    assert [(entry.values[0].id, entry.values[1].id) for entry in RECOVERY_CASES] == [("checkpoint-deterministic-resume", "reopen-resume")]
+    assert tuple(
+        (declared_scenario.id, declared_case.id)
+        for declared_scenario, declared_case in iter_harness_cases(MANIFEST)
+        if declared_case.workflow == "recovery"
+    ) == (("checkpoint-deterministic-resume", "reopen-resume"),)
 
     production_run = inspect.unwrap(Orchestrator.run)
     production_resume = inspect.unwrap(Orchestrator.resume)

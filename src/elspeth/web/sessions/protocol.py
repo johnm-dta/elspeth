@@ -44,6 +44,7 @@ PipelineProposalRejectionReason = Literal[
     "validation_failed",
     "policy_changed",
     "base_conflict",
+    "request_cancelled",
     "superseded",
 ]
 PipelineProposalSurface = Literal["freeform", "guided_full", "guided_staged", "tutorial_profile"]

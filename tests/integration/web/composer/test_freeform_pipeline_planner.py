@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -232,6 +234,228 @@ async def test_empty_build_stages_one_canonical_pipeline_proposal_for_both_trust
     assert any(role == "audit" and calls and calls[0].get("_kind") == "llm_call_audit" for role, calls in audit_rows)
     assert len(requests) == 1
     assert requests[0]["max_tokens"] == settings.composer_planner_max_completion_tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("trust_mode", "expected_status", "expected_reason"),
+    [
+        ("auto_commit", "rejected", "request_cancelled"),
+        ("explicit_approve", "pending", None),
+    ],
+)
+async def test_cancellation_during_proposal_create_preserves_trust_mode_lifecycle_without_dispatch_or_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    trust_mode: str,
+    expected_status: str,
+    expected_reason: str | None,
+) -> None:
+    """Cancelled auto mode terminalises; explicit review stays crash-resumable."""
+    engine = create_session_engine(f"sqlite:///{tmp_path / 'sessions.db'}")
+    initialize_session_schema(engine)
+    sessions = SessionServiceImpl(engine, telemetry=build_sessions_telemetry(), log=structlog.get_logger("test"))
+    session = await sessions.create_session("planner-user", "Planner", "local")
+    await sessions.update_composer_preferences(
+        session.id,
+        trust_mode=trust_mode,  # type: ignore[arg-type]
+        density_default="high",
+        actor="test",
+    )
+    user_message = await sessions.add_message(
+        session.id,
+        "user",
+        "Build a CSV to JSONL pipeline.",
+        writer_principal="route_user_message",
+    )
+    settings = WebSettings(
+        data_dir=tmp_path,
+        composer_model="test/planner",
+        composer_boot_probe_enabled=False,
+        composer_max_composition_turns=3,
+        composer_max_discovery_turns=2,
+        composer_timeout_seconds=20.0,
+        composer_rate_limit_per_minute=10,
+        shareable_link_signing_key=b"\x00" * 32,
+    )
+    monkeypatch.setattr(
+        ComposerServiceImpl,
+        "_compute_availability",
+        lambda _self: ComposerAvailability(available=True, provider="test", model="test/planner", reason=None),
+    )
+    composer = ComposerServiceImpl.for_trained_operator(
+        create_catalog_service(),
+        settings,
+        sessions_service=sessions,
+        session_engine=engine,
+    )
+
+    async def completion(**_kwargs: Any) -> _Response:
+        return _terminal_response(tmp_path)
+
+    monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", completion)
+
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    worker_finished = threading.Event()
+    original_run_sync = sessions._run_sync  # type: ignore[attr-defined]
+
+    async def pause_create_worker(func: Any, *args: Any, **kwargs: Any) -> Any:
+        if "create_pipeline_composition_proposal.<locals>._sync" not in func.__qualname__:
+            return await original_run_sync(func, *args, **kwargs)
+
+        def paused_create() -> Any:
+            worker_started.set()
+            if not release_worker.wait(timeout=5.0):
+                raise TimeoutError("test did not release proposal creation worker")
+            try:
+                return func(*args, **kwargs)
+            finally:
+                worker_finished.set()
+
+        return await original_run_sync(paused_create)
+
+    monkeypatch.setattr(sessions, "_run_sync", pause_create_worker)
+    compose_task = asyncio.create_task(
+        composer.compose(
+            "Build a CSV to JSONL pipeline.",
+            [],
+            _empty_state(),
+            session_id=str(session.id),
+            user_id="planner-user",
+            user_message_id=str(user_message.id),
+        )
+    )
+    assert await asyncio.to_thread(worker_started.wait, 5.0), "proposal creation worker did not start"
+    compose_task.cancel()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    cancellation_escaped_before_worker = compose_task.done()
+    release_worker.set()
+    assert await asyncio.to_thread(worker_finished.wait, 5.0), "proposal creation worker did not finish"
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(compose_task, timeout=5.0)
+
+    proposals = await sessions.list_composition_proposals(session.id)
+    assert not cancellation_escaped_before_worker, "request cancellation escaped while proposal creation was still in flight"
+    assert len(proposals) == 1
+    assert proposals[0].status == expected_status
+    assert proposals[0].committed_state_id is None
+    authority = await sessions.get_authoritative_pipeline_proposal(
+        session_id=session.id,
+        proposal_id=proposals[0].id,
+        reviewed_facts={},
+    )
+    assert authority.row.status == expected_status
+
+    with engine.connect() as conn:
+        terminal_payloads = (
+            conn.execute(select(proposal_events_table.c.payload).where(proposal_events_table.c.event_type == "proposal.rejected"))
+            .scalars()
+            .all()
+        )
+        assert conn.execute(select(composition_states_table)).all() == []
+        audit_rows = conn.execute(select(chat_messages_table.c.role, chat_messages_table.c.tool_calls)).all()
+    if expected_reason is None:
+        assert terminal_payloads == []
+    else:
+        assert len(terminal_payloads) == 1
+        assert terminal_payloads[0]["reason_code"] == expected_reason
+        assert terminal_payloads[0]["dispatch"] is None
+    assert any(role == "audit" and calls and calls[0].get("_kind") == "llm_call_audit" for role, calls in audit_rows)
+    assert not any(calls and calls[0].get("_kind") == "audit" for _role, calls in audit_rows)
+
+    # A subsequent real write proves proposal creation and cancellation cleanup
+    # released the process/session transaction locks.
+    await asyncio.wait_for(
+        sessions.add_message(session.id, "system", "lock probe", writer_principal="route_system_message"),
+        timeout=2.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_commit_cancellation_survives_rejection_failure_and_repeated_cancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first request cancellation wins; cleanup failure remains its cause."""
+    message = "Build a CSV to JSONL pipeline."
+    engine, sessions, session, user_message, composer = await _recipe_composer_context(
+        tmp_path,
+        monkeypatch,
+        message=message,
+    )
+    await sessions.update_composer_preferences(
+        session.id,
+        trust_mode="auto_commit",
+        density_default="high",
+        actor="test",
+    )
+
+    async def completion(**_kwargs: Any) -> _Response:
+        return _terminal_response(tmp_path)
+
+    monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", completion)
+
+    proposal_created = asyncio.Event()
+    release_create_result = asyncio.Event()
+    rejection_started = asyncio.Event()
+    release_rejection = asyncio.Event()
+    rejection_kwargs: dict[str, Any] = {}
+    original_create = sessions.create_pipeline_composition_proposal
+
+    async def held_create(**kwargs: Any) -> Any:
+        row = await original_create(**kwargs)
+        proposal_created.set()
+        await release_create_result.wait()
+        return row
+
+    async def failing_rejection(**kwargs: Any) -> Any:
+        rejection_kwargs.update(kwargs)
+        rejection_started.set()
+        await release_rejection.wait()
+        raise AuditIntegrityError("rejection audit write failed")
+
+    monkeypatch.setattr(sessions, "create_pipeline_composition_proposal", held_create)
+    monkeypatch.setattr(sessions, "reject_pipeline_composition_proposal", failing_rejection)
+
+    compose_task = asyncio.create_task(
+        composer.compose(
+            message,
+            [],
+            _empty_state(),
+            session_id=str(session.id),
+            user_id="planner-user",
+            user_message_id=str(user_message.id),
+        )
+    )
+    await asyncio.wait_for(proposal_created.wait(), timeout=5.0)
+    compose_task.cancel("initial request cancellation")
+    await asyncio.sleep(0)
+    release_create_result.set()
+    await asyncio.wait_for(rejection_started.wait(), timeout=5.0)
+    compose_task.cancel("later shutdown cancellation")
+    await asyncio.sleep(0)
+    release_rejection.set()
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await asyncio.wait_for(compose_task, timeout=5.0)
+
+    assert exc_info.value.args == ("initial request cancellation",)
+    assert isinstance(exc_info.value.__cause__, AuditIntegrityError)
+    assert str(exc_info.value.__cause__) == "rejection audit write failed"
+    assert rejection_kwargs["reason"] == "request_cancelled"
+    assert rejection_kwargs["dispatch"] is None
+    assert rejection_kwargs["actor"] == "system:auto_reject_request_cancelled"
+    proposals = await sessions.list_composition_proposals(session.id)
+    assert len(proposals) == 1
+    assert proposals[0].status == "pending", "failed terminal cleanup must not fabricate a rejected row"
+    with engine.connect() as conn:
+        assert conn.execute(select(composition_states_table)).all() == []
+        audit_rows = conn.execute(select(chat_messages_table.c.role, chat_messages_table.c.tool_calls)).all()
+    assert any(role == "audit" and calls and calls[0].get("_kind") == "llm_call_audit" for role, calls in audit_rows)
+    assert not any(calls and calls[0].get("_kind") == "audit" for _role, calls in audit_rows)
 
 
 @pytest.mark.asyncio

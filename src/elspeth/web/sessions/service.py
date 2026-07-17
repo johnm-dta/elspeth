@@ -420,6 +420,7 @@ _PIPELINE_REJECTION_REASONS = frozenset(
         "validation_failed",
         "policy_changed",
         "base_conflict",
+        "request_cancelled",
         "superseded",
     }
 )

@@ -788,6 +788,48 @@ async def test_pipeline_rejection_uses_closed_versioned_reason_and_is_exactly_id
 
 
 @pytest.mark.asyncio
+async def test_pipeline_request_cancelled_rejection_is_closed_failed_and_dispatch_free(service: SessionServiceImpl) -> None:
+    session_id = uuid4()
+    _insert_session(service, session_id)
+    plan = _plan()
+    row = await _create(service, session_id, plan)
+
+    rejected = await service.reject_pipeline_composition_proposal(
+        session_id=session_id,
+        proposal_id=row.id,
+        draft_hash=plan.proposal.draft_hash,
+        reviewed_facts={},
+        reason="request_cancelled",
+        dispatch=None,
+        actor="system:auto_reject_request_cancelled",
+    )
+
+    assert rejected.status == "rejected"
+    assert rejected.committed_state_id is None
+    terminal = (await service.list_proposal_events(session_id))[-1]
+    assert terminal.event_type == "proposal.rejected"
+    assert terminal.actor == "system:auto_reject_request_cancelled"
+    assert terminal.payload == {
+        "schema": "pipeline_proposal_rejected.v1",
+        "tool_call_id": plan.tool_call_id,
+        "tool_name": "set_pipeline",
+        "status": "rejected",
+        "outcome": "failed",
+        "reason_code": "request_cancelled",
+        "draft_hash": plan.proposal.draft_hash,
+        "dispatch": None,
+    }
+    authority = await service.get_authoritative_pipeline_proposal(
+        session_id=session_id,
+        proposal_id=row.id,
+        reviewed_facts={},
+    )
+    assert authority.row.status == "rejected"
+    with service._engine.begin() as conn:
+        assert conn.execute(select(func.count()).select_from(composition_states_table)).scalar_one() == 0
+
+
+@pytest.mark.asyncio
 async def test_pipeline_rejection_exact_retry_rejects_tampered_terminal_event_pointer(service: SessionServiceImpl) -> None:
     session_id = uuid4()
     _insert_session(service, session_id)

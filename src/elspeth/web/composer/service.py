@@ -247,6 +247,41 @@ async def _await_tool_turn_with_deferred_cancellation[T](
             raise deferred from child_exc
 
 
+async def _await_pipeline_staging_write_with_deferred_cancellation[T](
+    awaitable: Awaitable[T],
+    *,
+    deferred: asyncio.CancelledError | None = None,
+) -> tuple[T, asyncio.CancelledError | None]:
+    """Finish one proposal lifecycle write after request cancellation.
+
+    Session writes run in synchronous workers which cannot be stopped after
+    submission. Shield the child from the outset, remember the first external
+    cancellation, and retain any later child failure as its diagnostic cause.
+    """
+    task = asyncio.ensure_future(awaitable)
+    while True:
+        try:
+            return await asyncio.shield(task), deferred
+        except asyncio.CancelledError as exc:
+            # A child that cancelled itself is not an external request cancel
+            # and must preserve its normal cancellation semantics.
+            if task.cancelled():
+                raise
+            if deferred is None:
+                deferred = exc
+            if task.done():
+                try:
+                    return task.result(), deferred
+                except asyncio.CancelledError:
+                    raise
+                except Exception as child_exc:
+                    raise deferred from child_exc
+        except Exception as child_exc:
+            if deferred is None:
+                raise
+            raise deferred from child_exc
+
+
 _blocking_result_from_tool_invocations = _no_tool_policy.blocking_result_from_tool_invocations
 _compose_empty_state_message = _no_tool_policy.compose_empty_state_message
 _compose_preflight_failure_message = _no_tool_policy.compose_preflight_failure_message
@@ -2149,19 +2184,37 @@ class ComposerServiceImpl:
             arguments=arguments,
             redacted_arguments=redacted_arguments,
         )
-        row = await self._require_sessions_service().create_pipeline_composition_proposal(
-            session_id=session_id,
-            plan=plan,
-            summary=summary.summary,
-            rationale=summary.rationale,
-            affects=summary.affects,
-            arguments_redacted_json=summary.arguments_redacted_json,
-            actor=f"composer-web:user:{user_id}" if user_id is not None else "composer-web:anonymous",
-            composer_model_identifier=plan.model_identifier,
-            composer_model_version=plan.model_version,
-            composer_provider=plan.provider,
-            user_message_id=user_message_id,
+        sessions = self._require_sessions_service()
+        row, deferred = await _await_pipeline_staging_write_with_deferred_cancellation(
+            sessions.create_pipeline_composition_proposal(
+                session_id=session_id,
+                plan=plan,
+                summary=summary.summary,
+                rationale=summary.rationale,
+                affects=summary.affects,
+                arguments_redacted_json=summary.arguments_redacted_json,
+                actor=f"composer-web:user:{user_id}" if user_id is not None else "composer-web:anonymous",
+                composer_model_identifier=plan.model_identifier,
+                composer_model_version=plan.model_version,
+                composer_provider=plan.provider,
+                user_message_id=user_message_id,
+            )
         )
+        if deferred is not None:
+            if trust_mode == "auto_commit":
+                await _await_pipeline_staging_write_with_deferred_cancellation(
+                    sessions.reject_pipeline_composition_proposal(
+                        session_id=session_id,
+                        proposal_id=row.id,
+                        draft_hash=plan.proposal.draft_hash,
+                        reviewed_facts={},
+                        reason="request_cancelled",
+                        dispatch=None,
+                        actor="system:auto_reject_request_cancelled",
+                    ),
+                    deferred=deferred,
+                )
+            raise deferred
         intent = PipelineCommitIntent(proposal_id=row.id, draft_hash=plan.proposal.draft_hash) if trust_mode == "auto_commit" else None
         message = (
             "I prepared and validated the requested pipeline. ELSPETH will commit it atomically."

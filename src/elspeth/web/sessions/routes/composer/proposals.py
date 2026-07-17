@@ -287,42 +287,47 @@ async def accept_composition_proposal(
                     state=cancellation_state,
                 )
             except PipelineCommitError as exc:
-                persisted_dispatch = recovery.binding if recovery is not None else exc.dispatch if exc.invocation is None else None
-                captured = (exc.invocation,) if exc.invocation is not None else tuple(recorder.invocations)
-                if captured:
-                    bindings, _ = await _await_with_deferred_cancellation(
-                        _persist_tool_invocations(
-                            service,
-                            session.id,
-                            captured,
-                            None,
-                            plugin_crash_pending=True,
-                        ),
-                        state=cancellation_state,
-                    )
-                    if exc.invocation is not None:
-                        if exc.dispatch is None or len(bindings) != 1:
-                            raise RuntimeError("pipeline failure dispatch did not persist exactly one rebound binding") from exc
-                        persisted_dispatch = bindings[0]
-                reason_by_code: dict[str, PipelineProposalRejectionReason] = {
-                    "CANDIDATE_EXECUTOR_MISMATCH": "candidate_executor_mismatch",
-                    "VALIDATION_FAILED": "validation_failed",
-                    "BASE_CONFLICT": "base_conflict",
-                }
-                reason = reason_by_code.get(exc.code)
-                if reason is not None:
-                    _rejected, _ = await _await_with_deferred_cancellation(
-                        service.reject_pipeline_composition_proposal(
-                            session_id=session.id,
-                            proposal_id=proposal.id,
-                            draft_hash=pipeline_authority.proposal.draft_hash,
-                            reviewed_facts={},
-                            reason=reason,
-                            dispatch=persisted_dispatch,
-                            actor=f"system:pipeline_commit:user:{user.user_id}",
-                        ),
-                        state=cancellation_state,
-                    )
+                try:
+                    persisted_dispatch = recovery.binding if recovery is not None else exc.dispatch if exc.invocation is None else None
+                    captured = (exc.invocation,) if exc.invocation is not None else tuple(recorder.invocations)
+                    if captured:
+                        bindings, _ = await _await_with_deferred_cancellation(
+                            _persist_tool_invocations(
+                                service,
+                                session.id,
+                                captured,
+                                None,
+                                plugin_crash_pending=True,
+                            ),
+                            state=cancellation_state,
+                        )
+                        if exc.invocation is not None:
+                            if exc.dispatch is None or len(bindings) != 1:
+                                raise RuntimeError("pipeline failure dispatch did not persist exactly one rebound binding") from exc
+                            persisted_dispatch = bindings[0]
+                    reason_by_code: dict[str, PipelineProposalRejectionReason] = {
+                        "CANDIDATE_EXECUTOR_MISMATCH": "candidate_executor_mismatch",
+                        "VALIDATION_FAILED": "validation_failed",
+                        "BASE_CONFLICT": "base_conflict",
+                    }
+                    reason = reason_by_code.get(exc.code)
+                    if reason is not None:
+                        _rejected, _ = await _await_with_deferred_cancellation(
+                            service.reject_pipeline_composition_proposal(
+                                session_id=session.id,
+                                proposal_id=proposal.id,
+                                draft_hash=pipeline_authority.proposal.draft_hash,
+                                reviewed_facts={},
+                                reason=reason,
+                                dispatch=persisted_dispatch,
+                                actor=f"system:pipeline_commit:user:{user.user_id}",
+                            ),
+                            state=cancellation_state,
+                        )
+                except BaseException as cleanup_exc:
+                    if cancellation_state.requested:
+                        raise asyncio.CancelledError from cleanup_exc
+                    raise
                 if cancellation_state.requested:
                     raise asyncio.CancelledError from exc
                 status_code = 409 if exc.code in {"BASE_CONFLICT", "NOT_PENDING"} else 422

@@ -959,6 +959,114 @@ async def test_canonical_pipeline_cancel_then_prepare_failure_terminalizes_befor
 
 
 @pytest.mark.asyncio
+async def test_canonical_pipeline_cancel_then_prepare_failure_preserves_binding_cleanup_failure_as_cause(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elspeth.web.composer.audit import begin_dispatch, finish_success
+    from elspeth.web.composer.pipeline_commit import (
+        PipelineCommitError,
+        PipelineDispatchAuditBinding,
+    )
+    from elspeth.web.sessions.routes.composer import proposals as proposal_routes
+
+    app, service, pipeline, session_id, row, endpoint = await _create_canonical_pipeline_route_proposal(
+        tmp_path,
+        monkeypatch,
+        tool_call_id="canonical-cancel-binding-cleanup-call",
+    )
+    audit = begin_dispatch(
+        row.tool_call_id,
+        "set_pipeline",
+        pipeline,
+        version_before=0,
+        actor="user:alice",
+    )
+    invocation = finish_success(
+        audit,
+        result_payload={
+            "success": False,
+            "pipeline_content_hash_schema": "composer.pipeline-dispatch-result.v1",
+            "pipeline_content_hash": stable_hash({"executor": "validation-failed"}),
+        },
+        version_after=0,
+    )
+    dispatch = PipelineDispatchAuditBinding.from_invocation(invocation)
+    prepare_started = asyncio.Event()
+    prepare_release = asyncio.Event()
+
+    async def fail_prepare(**_kwargs: Any):
+        prepare_started.set()
+        await prepare_release.wait()
+        raise PipelineCommitError(
+            "executor validation failed",
+            code="VALIDATION_FAILED",
+            invocation=invocation,
+            dispatch=dispatch,
+        )
+
+    async def lose_binding(*_args: Any, **_kwargs: Any):
+        return ()
+
+    monkeypatch.setattr(proposal_routes, "prepare_pipeline_proposal_commit", fail_prepare)
+    monkeypatch.setattr(proposal_routes, "_persist_tool_invocations", lose_binding)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        request_task = asyncio.create_task(client.post(endpoint, json={"draft_hash": row.pipeline_metadata.draft_hash}))
+        await prepare_started.wait()
+        request_task.cancel()
+        prepare_release.set()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await request_task
+
+    cleanup_failure = caught.value.__cause__
+    assert isinstance(cleanup_failure, RuntimeError)
+    assert "did not persist exactly one rebound binding" in str(cleanup_failure)
+    assert isinstance(cleanup_failure.__cause__ or cleanup_failure.__context__, PipelineCommitError)
+    assert (await service.list_composition_proposals(session_id))[0].status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_canonical_pipeline_cancel_then_prepare_failure_preserves_rejection_cleanup_failure_as_cause(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elspeth.web.composer.pipeline_commit import PipelineCommitError
+    from elspeth.web.sessions.routes.composer import proposals as proposal_routes
+
+    app, service, _pipeline, session_id, row, endpoint = await _create_canonical_pipeline_route_proposal(
+        tmp_path,
+        monkeypatch,
+        tool_call_id="canonical-cancel-rejection-cleanup-call",
+    )
+    prepare_started = asyncio.Event()
+    prepare_release = asyncio.Event()
+
+    async def fail_prepare(**_kwargs: Any):
+        prepare_started.set()
+        await prepare_release.wait()
+        raise PipelineCommitError("candidate validation failed", code="VALIDATION_FAILED")
+
+    async def fail_rejection(**_kwargs: Any):
+        raise RuntimeError("rejection cleanup failed")
+
+    monkeypatch.setattr(proposal_routes, "prepare_pipeline_proposal_commit", fail_prepare)
+    monkeypatch.setattr(service, "reject_pipeline_composition_proposal", fail_rejection)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        request_task = asyncio.create_task(client.post(endpoint, json={"draft_hash": row.pipeline_metadata.draft_hash}))
+        await prepare_started.wait()
+        request_task.cancel()
+        prepare_release.set()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await request_task
+
+    cleanup_failure = caught.value.__cause__
+    assert isinstance(cleanup_failure, RuntimeError)
+    assert str(cleanup_failure) == "rejection cleanup failed"
+    assert isinstance(cleanup_failure.__cause__ or cleanup_failure.__context__, PipelineCommitError)
+    assert (await service.list_composition_proposals(session_id))[0].status == "pending"
+
+
+@pytest.mark.asyncio
 async def test_canonical_pipeline_cancel_during_failed_dispatch_audit_persist_terminalizes_before_reraising(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

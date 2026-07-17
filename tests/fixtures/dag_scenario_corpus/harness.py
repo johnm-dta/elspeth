@@ -231,6 +231,7 @@ def _assert_terminal_recovery_state(
     *,
     run_id: str,
     checkpoint_id: str,
+    resume_node_id: str,
     payload_store: FilesystemPayloadStore,
 ) -> None:
     repositories = RecorderFactory.read_only(db, payload_store=payload_store)
@@ -255,18 +256,17 @@ def _assert_terminal_recovery_state(
             f"tokens={sorted(token_ids)!r}, latest_outcomes={latest_outcomes!r}"
         )
 
-    node_states = repositories.query.get_all_node_states_for_run(run_id)
-    if not any(state.attempt > 0 for state in node_states):
-        raise AssertionError("DAG recovery corpus requires a resumed node-state attempt")
-
     with db.connection() as conn:
         work_statuses = (
             conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == run_id)).scalars().all()
         )
         resumed_markers = (
             conn.execute(
-                select(node_states_table.c.resume_checkpoint_id).where(
+                select(node_states_table.c.state_id).where(
                     node_states_table.c.run_id == run_id,
+                    node_states_table.c.node_id == resume_node_id,
+                    node_states_table.c.attempt > 0,
+                    node_states_table.c.status == "completed",
                     node_states_table.c.resume_checkpoint_id == checkpoint_id,
                 )
             )
@@ -276,7 +276,7 @@ def _assert_terminal_recovery_state(
     if not work_statuses or set(work_statuses) != {"terminal"}:
         raise AssertionError(f"DAG recovery corpus left non-terminal scheduler work: {work_statuses!r}")
     if not resumed_markers:
-        raise AssertionError("DAG recovery corpus requires durable node-state resume checkpoint evidence")
+        raise AssertionError("DAG recovery corpus requires a completed resumed node-state attempt carrying the checkpoint marker")
 
 
 def _recovery_case(scenario: ScenarioSpec, case: HarnessCaseSpec, tmp_path: Path) -> ScenarioRunEvidence:
@@ -370,10 +370,14 @@ def _recovery_case(scenario: ScenarioSpec, case: HarnessCaseSpec, tmp_path: Path
         audit = _audit_evidence(records)
         if audit.source_operation_count != 1:
             raise AssertionError(f"DAG recovery corpus replayed its source: source_load count={audit.source_operation_count}")
+        aggregation_node_ids = tuple(str(node_id) for node_id in fresh_built.graph.get_aggregation_id_map().values())
+        if len(aggregation_node_ids) != 1:
+            raise AssertionError(f"DAG recovery corpus expected one aggregation node, got {aggregation_node_ids!r}")
         _assert_terminal_recovery_state(
             reopened_db,
             run_id=run_id,
             checkpoint_id=checkpoint_id,
+            resume_node_id=aggregation_node_ids[0],
             payload_store=reopened_store,
         )
         if reopened_checkpoint_manager.get_latest_checkpoint(run_id) is not None:

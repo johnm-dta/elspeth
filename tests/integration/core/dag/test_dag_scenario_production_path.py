@@ -10,6 +10,9 @@ from typing import Any
 
 import pytest
 
+from elspeth.core.landscape import LandscapeDB
+from elspeth.core.landscape.schema import node_states_table
+from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.engine.orchestrator import Orchestrator
 from tests.fixtures.dag_scenario_corpus import harness as corpus_harness
 from tests.fixtures.dag_scenario_corpus import loader as corpus_loader
@@ -294,3 +297,54 @@ def test_checkpoint_reopen_resume_has_exact_restart_evidence(
         {"value": 60, "count": 3}
     ]
     assert (tmp_path / "fault-triggered.marker").is_file()
+
+
+def test_recovery_verifier_rejects_checkpoint_marker_on_initial_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario, case = _declared_case("checkpoint-deterministic-resume", "reopen-resume")
+    production_run = inspect.unwrap(Orchestrator.run)
+    production_resume = inspect.unwrap(Orchestrator.resume)
+    monkeypatch.setattr(Orchestrator, "run", production_run)
+    monkeypatch.setattr(Orchestrator, "resume", production_resume)
+    install_corpus_plugin_manager(monkeypatch)
+    evidence = corpus_harness.run_scenario_case(scenario, case, tmp_path)
+    assert evidence.runtime.run_id is not None
+    assert evidence.recovery.checkpoint_id is not None
+
+    db = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}", create_tables=False)
+    try:
+        with db.engine.begin() as conn:
+            resume_node_id = conn.execute(
+                node_states_table.select()
+                .with_only_columns(node_states_table.c.node_id)
+                .where(
+                    node_states_table.c.run_id == evidence.runtime.run_id,
+                    node_states_table.c.attempt > 0,
+                    node_states_table.c.status == "completed",
+                    node_states_table.c.resume_checkpoint_id == evidence.recovery.checkpoint_id,
+                )
+            ).scalar_one()
+            conn.execute(
+                node_states_table.update().where(node_states_table.c.run_id == evidence.runtime.run_id).values(resume_checkpoint_id=None)
+            )
+            conn.execute(
+                node_states_table.update()
+                .where(
+                    node_states_table.c.run_id == evidence.runtime.run_id,
+                    node_states_table.c.attempt == 0,
+                )
+                .values(resume_checkpoint_id=evidence.recovery.checkpoint_id)
+            )
+
+        with pytest.raises(AssertionError, match="resumed node-state attempt"):
+            corpus_harness._assert_terminal_recovery_state(
+                db,
+                run_id=evidence.runtime.run_id,
+                checkpoint_id=evidence.recovery.checkpoint_id,
+                resume_node_id=resume_node_id,
+                payload_store=FilesystemPayloadStore(tmp_path / "payloads"),
+            )
+    finally:
+        db.close()

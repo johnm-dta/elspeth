@@ -15,8 +15,10 @@ import pytest
 from sqlalchemy import Engine, func, insert, select
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.composer_audit import ComposerToolStatus
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.anti_anchor import AntiAnchorTracker
+from elspeth.web.composer.protocol import ComposerPluginCrashError
 from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
 from elspeth.web.composer.tools import ToolResult
@@ -227,6 +229,18 @@ def _count_rows(engine: Engine, table: Any) -> int:
         return int(conn.execute(select(func.count()).select_from(table)).scalar_one())
 
 
+def _persisted_tool_content(harness: _Harness, tool_call_id: str) -> str:
+    with harness.engine.connect() as conn:
+        return str(
+            conn.execute(
+                select(chat_messages_table.c.content)
+                .where(chat_messages_table.c.session_id == harness.session_id)
+                .where(chat_messages_table.c.role == "tool")
+                .where(chat_messages_table.c.tool_call_id == tool_call_id)
+            ).scalar_one()
+        )
+
+
 @pytest.mark.asyncio
 async def test_semantic_rejection_reaches_next_model_turn_then_repair_creates_one_proposal(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
@@ -408,6 +422,229 @@ async def test_inline_candidate_creates_proposal_without_blob_state_file_or_quot
     assert files_after == files_before
     assert len(result.tool_invocations) == 1
     assert result.tool_invocations[0].version_after == state.version
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "expected_argument", "rejected_fragment"),
+    [
+        ("disallowed_mime", "mime_type", "application/octet-stream"),
+        ("unsanitizable_filename", "filename", ".."),
+    ],
+)
+async def test_inline_candidate_argument_error_is_audited_once_and_repairable(
+    tmp_path: Path,
+    case: str,
+    expected_argument: str,
+    rejected_fragment: str,
+) -> None:
+    harness = _harness(tmp_path)
+    state = _empty_state()
+    invalid = _inline_pipeline_args(tmp_path)
+    inline_blob = invalid["source"]["inline_blob"]
+    if case == "disallowed_mime":
+        inline_blob["mime_type"] = rejected_fragment
+    elif case == "unsanitizable_filename":
+        inline_blob["filename"] = rejected_fragment
+    else:  # pragma: no cover - parametrization is a closed local table
+        raise AssertionError(f"unknown case: {case}")
+
+    repaired = _inline_pipeline_args(tmp_path)
+    responses = [
+        _tool_turn(f"call_{case}", "set_pipeline", invalid),
+        _tool_turn(f"call_{case}_repaired", "set_pipeline", repaired),
+        _fake_llm_response(content="The repaired inline proposal is pending approval."),
+    ]
+    message_snapshots: list[list[dict[str, Any]]] = []
+    invalid_turn_outcomes: list[Any] = []
+
+    async def _llm(messages: list[dict[str, Any]], _tools: Any) -> Any:
+        message_snapshots.append(deepcopy(messages))
+        if len(message_snapshots) == 2:
+            invalid_turn_outcomes.extend(harness.service._phase3_last_tool_outcomes)
+            assert builder.call_count == 1
+            assert _count_rows(harness.engine, composition_proposals_table) == 0
+            assert _count_rows(harness.engine, blobs_table) == 0
+            assert _count_rows(harness.engine, composition_states_table) == 0
+        return responses.pop(0)
+
+    with (
+        patch.object(harness.service, "_call_llm", new=_llm),
+        patch(
+            "elspeth.web.composer.tool_batch.build_set_pipeline_candidate",
+            wraps=real_build_set_pipeline_candidate,
+        ) as builder,
+    ):
+        result = await harness.service.compose(
+            "Build a reviewed inline pipeline.",
+            [],
+            state,
+            session_id=harness.session_id,
+            user_id="proposal-prevalidation-user",
+            user_message_id=harness.user_message_id,
+        )
+
+    proposals = await harness.sessions.list_composition_proposals(UUID(harness.session_id))
+    assert len(proposals) == 1
+    assert proposals[0].tool_call_id == f"call_{case}_repaired"
+    assert result.state is state
+    assert builder.call_count == 2
+    assert _count_rows(harness.engine, blobs_table) == 0
+    assert _count_rows(harness.engine, composition_states_table) == 0
+
+    arg_error_invocations = [invocation for invocation in result.tool_invocations if invocation.status is ComposerToolStatus.ARG_ERROR]
+    assert len(arg_error_invocations) == 1
+    arg_error_invocation = arg_error_invocations[0]
+    assert arg_error_invocation.tool_call_id == f"call_{case}"
+    assert arg_error_invocation.error_class == "ToolArgumentError"
+    assert arg_error_invocation.version_before == state.version
+    assert arg_error_invocation.version_after is None
+
+    arg_error_outcomes = [outcome for outcome in invalid_turn_outcomes if outcome.error_class == "ToolArgumentError"]
+    assert len(arg_error_outcomes) == 1
+    assert arg_error_outcomes[0].pre_version == state.version
+    assert arg_error_outcomes[0].post_version == state.version
+    assert arg_error_outcomes[0].response is None
+
+    feedback = next(message for message in message_snapshots[1] if message.get("tool_call_id") == f"call_{case}")
+    feedback_payload = json.loads(feedback["content"])
+    assert f"'{expected_argument}' must be" in feedback_payload["error"]
+    assert rejected_fragment not in feedback["content"]
+    assert "caused by" not in feedback["content"]
+
+    persisted_feedback = _persisted_tool_content(harness, f"call_{case}")
+    assert json.loads(persisted_feedback)["error_class"] == "ToolArgumentError"
+    assert rejected_fragment not in persisted_feedback
+
+
+@pytest.mark.asyncio
+async def test_surrogate_inline_content_fails_closed_at_canonicalization_and_is_repairable(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    state = _empty_state()
+    invalid = _inline_pipeline_args(tmp_path)
+    rejected_content = "bad\udc80private"
+    invalid["source"]["inline_blob"]["content"] = rejected_content
+    repaired = _inline_pipeline_args(tmp_path)
+    responses = [
+        _tool_turn("call_surrogate", "set_pipeline", invalid),
+        _tool_turn("call_surrogate_repaired", "set_pipeline", repaired),
+        _fake_llm_response(content="The repaired inline proposal is pending approval."),
+    ]
+    message_snapshots: list[list[dict[str, Any]]] = []
+    invalid_turn_outcomes: list[Any] = []
+
+    async def _llm(messages: list[dict[str, Any]], _tools: Any) -> Any:
+        message_snapshots.append(deepcopy(messages))
+        if len(message_snapshots) == 2:
+            invalid_turn_outcomes.extend(harness.service._phase3_last_tool_outcomes)
+            assert builder.call_count == 0
+            assert _count_rows(harness.engine, composition_proposals_table) == 0
+            assert _count_rows(harness.engine, blobs_table) == 0
+            assert _count_rows(harness.engine, composition_states_table) == 0
+        return responses.pop(0)
+
+    with (
+        patch.object(harness.service, "_call_llm", new=_llm),
+        patch(
+            "elspeth.web.composer.tool_batch.build_set_pipeline_candidate",
+            wraps=real_build_set_pipeline_candidate,
+        ) as builder,
+    ):
+        result = await harness.service.compose(
+            "Build a reviewed inline pipeline.",
+            [],
+            state,
+            session_id=harness.session_id,
+            user_id="proposal-prevalidation-user",
+            user_message_id=harness.user_message_id,
+        )
+
+    proposals = await harness.sessions.list_composition_proposals(UUID(harness.session_id))
+    assert len(proposals) == 1
+    assert proposals[0].tool_call_id == "call_surrogate_repaired"
+    assert result.state is state
+    assert builder.call_count == 1
+    assert _count_rows(harness.engine, blobs_table) == 0
+    assert _count_rows(harness.engine, composition_states_table) == 0
+
+    arg_error_invocations = [invocation for invocation in result.tool_invocations if invocation.status is ComposerToolStatus.ARG_ERROR]
+    assert len(arg_error_invocations) == 1
+    arg_error_invocation = arg_error_invocations[0]
+    assert arg_error_invocation.tool_call_id == "call_surrogate"
+    assert arg_error_invocation.error_class == "CanonicalizationError"
+    assert arg_error_invocation.version_before == state.version
+    assert arg_error_invocation.version_after is None
+
+    arg_error_outcomes = [outcome for outcome in invalid_turn_outcomes if outcome.error_class == "CanonicalizationError"]
+    assert len(arg_error_outcomes) == 1
+    assert arg_error_outcomes[0].pre_version == state.version
+    assert arg_error_outcomes[0].post_version == state.version
+    assert arg_error_outcomes[0].response is None
+
+    feedback = next(message for message in message_snapshots[1] if message.get("tool_call_id") == "call_surrogate")
+    feedback_payload = json.loads(feedback["content"])
+    assert feedback_payload == {"error": "Tool 'set_pipeline' arguments are not canonical JSON (CanonicalizationError)."}
+    assert rejected_content not in feedback["content"]
+
+    persisted_feedback = _persisted_tool_content(harness, "call_surrogate")
+    assert json.loads(persisted_feedback) == {
+        "error_class": "CanonicalizationError",
+        "error_message": "CanonicalizationError",
+    }
+    assert rejected_content not in persisted_feedback
+
+
+@pytest.mark.asyncio
+async def test_unexpected_candidate_finalizer_exception_uses_plugin_crash_audit_and_wrapper(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    state = _empty_state()
+    args = _inline_pipeline_args(tmp_path)
+    llm = _ScriptedLLM(_tool_turn("call_finalizer_crash", "set_pipeline", args))
+    unexpected = RuntimeError("candidate finalizer internal failure with private detail")
+
+    with (
+        patch.object(harness.service, "_call_llm", new=llm),
+        patch(
+            "elspeth.web.composer.tool_batch.build_set_pipeline_candidate",
+            wraps=real_build_set_pipeline_candidate,
+        ) as builder,
+        patch("elspeth.web.composer.tool_batch.finalize_tool_result", side_effect=unexpected) as finalizer,
+        pytest.raises(ComposerPluginCrashError) as exc_info,
+    ):
+        await harness.service.compose(
+            "Build a reviewed inline pipeline.",
+            [],
+            state,
+            session_id=harness.session_id,
+            user_id="proposal-prevalidation-user",
+            user_message_id=harness.user_message_id,
+        )
+
+    assert exc_info.value.original_exc is unexpected
+    assert exc_info.value.__cause__ is unexpected
+    assert exc_info.value.partial_state is None
+    assert builder.call_count == 1
+    assert finalizer.call_count == 1
+    assert len(llm.message_snapshots) == 1
+    assert await harness.sessions.list_composition_proposals(UUID(harness.session_id)) == []
+    assert _count_rows(harness.engine, blobs_table) == 0
+    assert _count_rows(harness.engine, composition_states_table) == 0
+
+    outcomes = harness.service._phase3_last_tool_outcomes
+    assert len(outcomes) == 1
+    assert outcomes[0].error_class == "RuntimeError"
+    assert outcomes[0].error_message == "RuntimeError"
+    assert outcomes[0].pre_version == state.version
+    assert outcomes[0].post_version == state.version
+
+    assert exc_info.value.failed_turn is not None
+    assert exc_info.value.failed_turn.tool_calls_attempted == 1
+    persisted_feedback = _persisted_tool_content(harness, "call_finalizer_crash")
+    assert json.loads(persisted_feedback) == {
+        "error_class": "RuntimeError",
+        "error_message": "RuntimeError",
+    }
+    assert str(unexpected) not in persisted_feedback
 
 
 @pytest.mark.asyncio

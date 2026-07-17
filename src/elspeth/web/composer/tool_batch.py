@@ -548,6 +548,7 @@ async def run_tool_batch(
             continue
 
         prevalidated_unapplied_result: ToolResult | None = None
+        preproposal_exception: Exception | None = None
         if (
             turn_sessions_service is not None
             and turn_session_uuid is not None
@@ -621,45 +622,55 @@ async def run_tool_batch(
                     composer_skill_hash=ctx.service._composer_skill_hash,
                     tool_arguments_hash=audit.arguments_hash,
                 )
-                candidate = await run_sync_in_worker(
-                    build_set_pipeline_candidate,
-                    arguments,
-                    state,
-                    candidate_context,
-                )
-                finalized_candidate_result = finalize_tool_result(
-                    candidate.result,
-                    tool_name=tool_name,
-                    catalog=ctx.policy_catalog,
-                    context=candidate_context,
-                    prior_validation=candidate_prior_validation,
-                )
-                if not candidate.acceptable:
-                    if isinstance(finalized_candidate_result.data, Mapping):
-                        feedback_data = dict(finalized_candidate_result.data)
-                    elif finalized_candidate_result.data is None:
-                        feedback_data = {}
-                    else:
-                        feedback_data = {"candidate_data": finalized_candidate_result.data}
-                    feedback_data.update(
-                        {
-                            "status": "PREVALIDATION_REJECTED",
-                            "applied": False,
-                            "applied_version": state.version,
-                            "candidate_version": finalized_candidate_result.updated_state.version,
-                            "message": (
-                                "The candidate pipeline failed prevalidation, was not applied, and was not "
-                                "submitted for approval. Repair the reported validation errors and retry."
-                            ),
-                        }
+                try:
+                    candidate = await run_sync_in_worker(
+                        build_set_pipeline_candidate,
+                        arguments,
+                        state,
+                        candidate_context,
                     )
-                    prevalidated_unapplied_result = replace(
-                        finalized_candidate_result,
-                        data=feedback_data,
+                    finalized_candidate_result = finalize_tool_result(
+                        candidate.result,
+                        tool_name=tool_name,
+                        catalog=ctx.policy_catalog,
+                        context=candidate_context,
+                        prior_validation=candidate_prior_validation,
                     )
-                    # Skip proposal creation, then route the rejected result
-                    # through the canonical dispatch/outcome path below.
+                except Exception as exc:
+                    # Candidate construction and finalization are one-time
+                    # pre-proposal work. Re-raise the exact exception from
+                    # inside ``dispatch_with_audit`` below so its existing
+                    # ARG_ERROR / PLUGIN_CRASH classification remains the
+                    # single authority without rerunning either operation.
+                    preproposal_exception = exc
                     redacted_arguments = None
+                else:
+                    if not candidate.acceptable:
+                        if isinstance(finalized_candidate_result.data, Mapping):
+                            feedback_data = dict(finalized_candidate_result.data)
+                        elif finalized_candidate_result.data is None:
+                            feedback_data = {}
+                        else:
+                            feedback_data = {"candidate_data": finalized_candidate_result.data}
+                        feedback_data.update(
+                            {
+                                "status": "PREVALIDATION_REJECTED",
+                                "applied": False,
+                                "applied_version": state.version,
+                                "candidate_version": finalized_candidate_result.updated_state.version,
+                                "message": (
+                                    "The candidate pipeline failed prevalidation, was not applied, and was not "
+                                    "submitted for approval. Repair the reported validation errors and retry."
+                                ),
+                            }
+                        )
+                        prevalidated_unapplied_result = replace(
+                            finalized_candidate_result,
+                            data=feedback_data,
+                        )
+                        # Skip proposal creation, then route the rejected result
+                        # through the canonical dispatch/outcome path below.
+                        redacted_arguments = None
 
             if redacted_arguments is not None:
                 proposal_summary = build_tool_proposal_summary(
@@ -732,10 +743,10 @@ async def run_tool_batch(
                 )
                 turn_has_mutation = True
                 continue
-            # ``None`` means either invalid LLM arguments or an unacceptable
-            # prevalidated set_pipeline candidate. Both fall through to the
-            # canonical dispatch/outcome path; only the former executes the
-            # tool and may raise ToolArgumentError.
+            # ``None`` means invalid LLM arguments, an unacceptable
+            # prevalidated set_pipeline candidate, or captured one-time
+            # pre-proposal work. All fall through to the canonical
+            # dispatch/outcome path below.
 
         await emit_progress(progress, tool_started_progress_event(tool_name))
 
@@ -1227,7 +1238,10 @@ async def run_tool_batch(
             _composer_skill_hash: str = ctx.service._composer_skill_hash,
             _tool_arguments_hash: str = audit.arguments_hash,
             _prevalidated_unapplied_result: ToolResult | None = prevalidated_unapplied_result,
+            _preproposal_exception: Exception | None = preproposal_exception,
         ) -> Any:
+            if _preproposal_exception is not None:
+                raise _preproposal_exception
             if _prevalidated_unapplied_result is not None:
                 return _prevalidated_unapplied_result
             return await run_sync_in_worker(

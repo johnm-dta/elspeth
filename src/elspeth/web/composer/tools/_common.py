@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Final, TypedDict, cast
 
 from pydantic import BaseModel
@@ -318,15 +318,15 @@ def _options_with_ascii_safe_scrape_headers(
     if not isinstance(http, Mapping):
         return options
     folded_http: dict[str, Any] | None = None
-    for field in _WIRE_VISIBLE_SCRAPE_HEADER_FIELDS:
-        value = http.get(field)
+    for header_field in _WIRE_VISIBLE_SCRAPE_HEADER_FIELDS:
+        value = http.get(header_field)
         if not isinstance(value, str):
             continue
         folded = value.translate(_TYPOGRAPHIC_TRANSLATION)
         if folded != value:
             if folded_http is None:
                 folded_http = dict(http)
-            folded_http[field] = folded
+            folded_http[header_field] = folded
     if folded_http is None:
         return options
     new_options = dict(options)
@@ -660,6 +660,7 @@ class ToolResult:
     runtime_preflight: ValidationResult | None = None
     post_call_hints: tuple[str, ...] = ()
     plugin_schemas: Mapping[str, Mapping[str, Any]] | None = None
+    _validation_snapshot_hash: str | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         freeze_fields(self, "affected_nodes", "post_call_hints")
@@ -1987,12 +1988,19 @@ def normalize_tool_result_validation(
     result: ToolResult,
     catalog: PolicyCatalogView,
 ) -> ToolResult:
-    """Replace a tool's raw validation with the shared profile-aware result.
+    """Normalize a result through the request-scoped profile authority once.
 
     Handlers remain small state-transition functions and may construct their
-    provisional envelope with ``CompositionState.validate()``. This final
-    dispatch-boundary normalization is the sole outward authority.
+    provisional envelope with ``CompositionState.validate()``. Candidate
+    builders may call this authority before dispatch so they can make an
+    honest accept/reject decision. The outward dispatch boundary calls it
+    again to verify the result, but reuses validation already produced for
+    the same immutable plugin-availability snapshot. A different snapshot
+    always revalidates.
     """
+    snapshot_hash = catalog.snapshot.snapshot_hash
+    if result._validation_snapshot_hash == snapshot_hash:
+        return result
     shared = catalog.validate_composition_state(result.updated_state).validation
     rejections = tuple(entry for entry in result.validation.errors if entry.component == "rejected_mutation")
     if rejections:
@@ -2001,7 +2009,7 @@ def normalize_tool_result_validation(
             is_valid=False,
             errors=(*rejections, *shared.errors),
         )
-    return replace(result, validation=shared)
+    return replace(result, validation=shared, _validation_snapshot_hash=snapshot_hash)
 
 
 def _serialize_authoring_options(options: Mapping[str, Any]) -> dict[str, Any]:

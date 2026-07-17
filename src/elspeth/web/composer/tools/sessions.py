@@ -225,8 +225,8 @@ class SetPipelineCandidate:
     source_param="arguments",
     suppresses=("R1", "R5"),
     invariant="raises ToolArgumentError on SetPipelineArgumentsModel shape mismatch; never coerces",
-    test_ref="tests/unit/web/composer/test_promote_set_pipeline.py::TestPromoteSetPipelineArgErrorRouting::test_empty_arguments_raise_tool_argument_error",
-    test_fingerprint="02c5bd7c9f9aa90bd1af5d67ac7d60764bfc0306de78c6216ee84a5d905d362b",
+    test_ref="tests/unit/web/composer/test_promote_set_pipeline.py::TestPromoteSetPipelineArgErrorRouting::test_candidate_builder_empty_arguments_raise_tool_argument_error",
+    test_fingerprint="ddefe4e76642cb6a0fa8708b8100f4b6f1ee27f1cd3c9eebe9529daedb4778cd",
 )
 def build_set_pipeline_candidate(
     arguments: Mapping[str, Any],

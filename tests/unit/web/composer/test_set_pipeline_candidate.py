@@ -33,6 +33,7 @@ from elspeth.web.composer.tools import (
     build_set_pipeline_candidate,
     execute_tool,
 )
+from elspeth.web.composer.tools._common import normalize_tool_result_validation
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
 from elspeth.web.plugin_policy.models import (
@@ -260,6 +261,13 @@ def test_candidate_uses_final_request_scoped_profile_validation(tmp_path: Path) 
     assert catalog.validated_states[0] is candidate.result.updated_state
     assert candidate.result.validation.errors[0].error_code == "profile_complete_state_rejected"
 
+    normalized_again = normalize_tool_result_validation(candidate.result, catalog)
+
+    assert normalized_again is candidate.result
+    assert len(catalog.validated_states) == 1
+    assert "_validation_snapshot_hash" not in candidate.result.to_dict()
+    assert "_validation_snapshot_hash" not in repr(candidate.result)
+
     catalog.validated_states.clear()
     public_result = execute_tool(
         "set_pipeline",
@@ -273,7 +281,74 @@ def test_candidate_uses_final_request_scoped_profile_validation(tmp_path: Path) 
     assert public_result.updated_state == candidate.result.updated_state
     assert public_result.validation == candidate.result.validation
     assert public_result.validation.is_valid is False
-    assert catalog.validated_states
+    assert len(catalog.validated_states) == 2
+    assert catalog.validated_states[0] is state
+    assert catalog.validated_states[1] is public_result.updated_state
+
+
+@pytest.mark.parametrize("rejected", [False, True], ids=("success", "rejection"))
+def test_public_set_pipeline_validates_current_and_candidate_exactly_once(
+    tmp_path: Path,
+    *,
+    rejected: bool,
+) -> None:
+    args = _linear_args(tmp_path)
+    args["source"]["on_success"] = "main"
+    args["nodes"] = []
+    args["edges"] = []
+    if rejected:
+        args["sources"] = {}
+    state = _empty_state()
+    context, catalog = _final_validation_rejecting_context(data_dir=tmp_path)
+
+    result = execute_tool(
+        "set_pipeline",
+        args,
+        state,
+        catalog,
+        plugin_snapshot=context.plugin_snapshot,
+        data_dir=str(tmp_path),
+    )
+
+    assert result.success is not rejected
+    assert len(catalog.validated_states) == 2
+    assert catalog.validated_states[0] is state
+    assert catalog.validated_states[1] is result.updated_state
+
+
+def test_normalizer_revalidates_for_a_different_snapshot_and_preserves_rejection(tmp_path: Path) -> None:
+    args = _linear_args(tmp_path)
+    args["sources"] = {}
+    state = _empty_state()
+    context, _catalog = _final_validation_rejecting_context(data_dir=tmp_path)
+    candidate = build_set_pipeline_candidate(args, state, context)
+    rejection = candidate.result.validation.errors[0]
+
+    full = create_catalog_service()
+    original = context.plugin_snapshot
+    other_snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash="different-request-policy",
+        principal_scope=original.principal_scope,
+        available=original.available,
+        unavailable=original.unavailable,
+        selected=original.selected,
+        usable_profile_aliases=original.usable_profile_aliases,
+        selected_profile_aliases=original.selected_profile_aliases,
+        control_modes=original.control_modes,
+        binding_generation_fingerprint=original.binding_generation_fingerprint,
+    )
+    other_catalog = _FinalValidationRejectingCatalog.for_trained_operator(full, other_snapshot)
+    other_catalog.validated_states = []
+
+    revalidated = normalize_tool_result_validation(candidate.result, other_catalog)
+
+    assert other_snapshot.snapshot_hash != original.snapshot_hash
+    assert revalidated is not candidate.result
+    assert revalidated == candidate.result
+    assert revalidated.updated_state is candidate.result.updated_state
+    assert other_catalog.validated_states == [candidate.result.updated_state]
+    assert tuple(entry for entry in revalidated.validation.errors if entry.component == "rejected_mutation") == (rejection,)
+    assert revalidated._validation_snapshot_hash == other_snapshot.snapshot_hash
 
 
 def _named_multi_source_queue_args(tmp_path: Path) -> dict[str, Any]:

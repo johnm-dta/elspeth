@@ -53,7 +53,7 @@ from elspeth.web.composer.redaction import (
 )
 from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
-from elspeth.web.composer.tools import _execute_create_blob, _execute_set_pipeline
+from elspeth.web.composer.tools import _execute_create_blob, _execute_set_pipeline, build_set_pipeline_candidate
 from elspeth.web.composer.tools._common import ToolContext as _ToolContext
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, SOURCE_AUTHORING_KEY
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
@@ -185,6 +185,15 @@ def test_set_pipeline_manifest_entry_is_type_driven() -> None:
 
 
 class TestPromoteSetPipelineArgErrorRouting:
+    def test_candidate_builder_empty_arguments_raise_tool_argument_error(self) -> None:
+        """The decorated candidate boundary directly rejects malformed arguments."""
+        arguments: dict[str, Any] = {}
+
+        with pytest.raises(ToolArgumentError) as exc_info:
+            build_set_pipeline_candidate(arguments, _empty_state(), ToolContext(catalog=_mock_catalog()))
+
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
     def test_empty_arguments_raise_tool_argument_error(self) -> None:
         """A bare ``{}`` is missing all four top-level required fields."""
         with pytest.raises(ToolArgumentError) as exc_info:

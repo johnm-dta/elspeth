@@ -80,6 +80,7 @@ from elspeth.web.composer.tools._common import (
     _validate_transform_provider_config_path,
     _validate_transform_provider_config_policy,
     _vf_destination_note,
+    normalize_tool_result_validation,
     validate_composer_file_sink_collision_policy,
 )
 from elspeth.web.composer.tools.blobs import (
@@ -273,7 +274,8 @@ def build_set_pipeline_candidate(
     prepared_inline_blob: _PreparedBlobCreate | None = None
 
     def _candidate(result: ToolResult) -> SetPipelineCandidate:
-        return SetPipelineCandidate(result=result, prepared_inline_blob=prepared_inline_blob)
+        normalized = normalize_tool_result_validation(result, context.catalog)
+        return SetPipelineCandidate(result=normalized, prepared_inline_blob=prepared_inline_blob)
 
     def _failure_result(
         rejected_state: CompositionState,

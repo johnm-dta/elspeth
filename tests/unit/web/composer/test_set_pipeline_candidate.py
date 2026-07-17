@@ -25,12 +25,13 @@ from elspeth.contracts.hashing import stable_hash
 from elspeth.web.blobs.service import content_hash
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder, begin_dispatch, dispatch_with_audit
-from elspeth.web.composer.state import CompositionState, PipelineMetadata
+from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
 from elspeth.web.composer.tools import (
     SetPipelineCandidate,
     ToolContext,
     _execute_set_pipeline,
     build_set_pipeline_candidate,
+    execute_tool,
 )
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
@@ -148,6 +149,48 @@ def _profile_rejecting_context(*, data_dir: Path) -> ToolContext:
     return ToolContext(catalog=catalog, plugin_snapshot=snapshot, data_dir=str(data_dir))
 
 
+class _FinalValidationRejectingCatalog(PolicyCatalogView):
+    """Request catalog whose whole-state validation rejects one valid graph."""
+
+    validated_states: list[CompositionState]
+
+    def validate_composition_state(self, state: CompositionState) -> ProfileAwareValidationResult:
+        self.validated_states.append(state)
+        raw = state.validate()
+        if raw.is_valid and state.metadata.name == "final-profile-reject":
+            validation = ValidationSummary(
+                is_valid=False,
+                errors=(
+                    ValidationEntry(
+                        component="policy:final",
+                        message="The request-scoped profile rejects this complete composition.",
+                        severity="high",
+                        error_code="profile_complete_state_rejected",
+                    ),
+                ),
+                warnings=raw.warnings,
+                suggestions=raw.suggestions,
+                edge_contracts=raw.edge_contracts,
+                semantic_contracts=raw.semantic_contracts,
+            )
+        else:
+            validation = raw
+        return ProfileAwareValidationResult(
+            authored_state=state,
+            executable_state=state,
+            policy_findings=(),
+            validation=validation,
+        )
+
+
+def _final_validation_rejecting_context(*, data_dir: Path) -> tuple[ToolContext, _FinalValidationRejectingCatalog]:
+    full = create_catalog_service()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(full)
+    catalog = _FinalValidationRejectingCatalog.for_trained_operator(full, snapshot)
+    catalog.validated_states = []
+    return ToolContext(catalog=catalog, plugin_snapshot=snapshot, data_dir=str(data_dir)), catalog
+
+
 def _file_options(path: Path) -> dict[str, Any]:
     return {
         "path": str(path),
@@ -198,6 +241,39 @@ def _linear_args(tmp_path: Path) -> dict[str, Any]:
         ],
         "metadata": {"name": "linear"},
     }
+
+
+def test_candidate_uses_final_request_scoped_profile_validation(tmp_path: Path) -> None:
+    args = _linear_args(tmp_path)
+    args["source"]["on_success"] = "main"
+    args["nodes"] = []
+    args["edges"] = []
+    args["metadata"] = {"name": "final-profile-reject"}
+    state = _empty_state()
+    context, catalog = _final_validation_rejecting_context(data_dir=tmp_path)
+
+    candidate = build_set_pipeline_candidate(args, state, context)
+
+    assert candidate.result.success is True
+    assert candidate.result.updated_state.validate().is_valid is True
+    assert (candidate.acceptable, len(catalog.validated_states)) == (False, 1)
+    assert catalog.validated_states[0] is candidate.result.updated_state
+    assert candidate.result.validation.errors[0].error_code == "profile_complete_state_rejected"
+
+    catalog.validated_states.clear()
+    public_result = execute_tool(
+        "set_pipeline",
+        args,
+        state,
+        catalog,
+        plugin_snapshot=context.plugin_snapshot,
+        data_dir=str(tmp_path),
+    )
+
+    assert public_result.updated_state == candidate.result.updated_state
+    assert public_result.validation == candidate.result.validation
+    assert public_result.validation.is_valid is False
+    assert catalog.validated_states
 
 
 def _named_multi_source_queue_args(tmp_path: Path) -> dict[str, Any]:

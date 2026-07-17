@@ -8,6 +8,8 @@ from collections import Counter
 from pathlib import Path
 
 import yaml
+from yaml.nodes import MappingNode
+from yaml.resolver import BaseResolver
 
 from tests.fixtures.dag_scenario_corpus.schema import (
     EXPECTED_DIMENSIONS,
@@ -27,12 +29,46 @@ _DECISION_LOCATOR = re.compile(r"^elspeth-[0-9a-f]{10}$")
 _HARNESS_LOCATOR = re.compile(r"^[a-z0-9][a-z0-9-]*:[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects mapping-key information loss."""
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeySafeLoader,
+    node: MappingNode,
+    deep: bool = False,
+) -> dict[object, object]:
+    loader.flatten_mapping(node)
+    mapping: dict[object, object] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise ValueError(f"duplicate YAML mapping key {key!r} at line {key_node.start_mark.line + 1}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeySafeLoader.add_constructor(BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping)
+
+
+def _load_yaml_without_duplicate_keys(path: Path) -> object:
+    loader = _UniqueKeySafeLoader(path.read_text(encoding="utf-8"))
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
+
+
 def load_manifest(path: Path = DEFAULT_MANIFEST_PATH) -> ScenarioManifest:
     """Load the v1 manifest and fail closed on schema or semantic drift."""
 
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw = _load_yaml_without_duplicate_keys(path)
     if not isinstance(raw, dict):
         raise ValueError(f"DAG scenario manifest must be a YAML mapping: {path}")
+    schema_version = raw.get("schema_version")
+    # An isinstance check would admit bool because bool subclasses int.
+    if type(schema_version) is not int or schema_version != 1:
+        raise ValueError(f"DAG scenario manifest schema_version must be exactly integer 1: {path}")
     manifest = ScenarioManifest.model_validate(raw)
     _validate_exact_inventory(manifest)
     _validate_evidence_references(manifest)

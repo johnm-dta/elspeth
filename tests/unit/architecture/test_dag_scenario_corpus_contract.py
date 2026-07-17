@@ -322,6 +322,15 @@ EXPECTED_ASSESSMENT_LOCATORS = {
     ),
 }
 
+EXPECTED_ASSESSMENT_EVIDENCE = tuple(
+    (
+        evidence_group if index == 1 else f"{evidence_group}-{index:02}",
+        locator,
+    )
+    for evidence_group, locators in EXPECTED_ASSESSMENT_LOCATORS.items()
+    for index, locator in enumerate(locators, start=1)
+)
+
 
 def _reference(*, kind: EvidenceKind = "harness") -> EvidenceReference:
     return EvidenceReference(
@@ -818,6 +827,11 @@ def _add_harness_evidence(raw: dict[str, object], locator: str) -> None:
     )
 
 
+def _register_linear_case(raw: dict[str, object], case: dict[str, object]) -> None:
+    _raw_scenarios(raw)[0]["cases"] = [case]
+    _add_harness_evidence(raw, f"linear:{case['id']}")
+
+
 def test_manifest_has_exact_inventory_status_matrix_and_no_task_3_cases() -> None:
     manifest = load_manifest()
 
@@ -837,14 +851,12 @@ def test_manifest_has_exact_inventory_status_matrix_and_no_task_3_cases() -> Non
 def test_manifest_pins_every_exact_current_assessment_pytest_locator() -> None:
     manifest = load_manifest()
 
+    actual_evidence = tuple((reference.id, reference.locator) for reference in manifest.evidence)
+    assert actual_evidence == EXPECTED_ASSESSMENT_EVIDENCE
+    assert len(actual_evidence) == 47
+    assert len({evidence_id for evidence_id, _locator in actual_evidence}) == 47
+    assert len({locator for _evidence_id, locator in actual_evidence}) == 47
     assert all(reference.kind == "pytest" for reference in manifest.evidence)
-    for evidence_group, expected_locators in EXPECTED_ASSESSMENT_LOCATORS.items():
-        actual_locators = tuple(
-            reference.locator
-            for reference in manifest.evidence
-            if reference.id == evidence_group or reference.id.startswith(f"{evidence_group}-")
-        )
-        assert actual_locators == expected_locators
 
 
 def test_manifest_gap_ownership_and_not_applicable_reasons_follow_the_approved_rules() -> None:
@@ -890,16 +902,53 @@ def test_manifest_rejects_non_mapping_yaml(tmp_path: Path) -> None:
         load_manifest(path)
 
 
-@pytest.mark.parametrize("schema_version", [None, 2])
-def test_manifest_rejects_missing_or_wrong_schema_version(tmp_path: Path, schema_version: int | None) -> None:
+@pytest.mark.parametrize(
+    "schema_version",
+    [None, 2, True, 1.0, "1"],
+    ids=("missing", "wrong-integer", "boolean", "float", "string"),
+)
+def test_manifest_rejects_schema_version_that_is_not_exact_integer_one(
+    tmp_path: Path,
+    schema_version: object,
+) -> None:
     raw = valid_manifest_dict()
     if schema_version is None:
         raw.pop("schema_version")
     else:
         raw["schema_version"] = schema_version
 
-    with pytest.raises(ValidationError, match="schema_version"):
+    with pytest.raises(ValueError, match="schema_version must be exactly integer 1"):
         load_manifest(write_manifest(tmp_path, raw))
+
+
+@pytest.mark.parametrize(
+    ("duplicate_key", "source"),
+    [
+        (
+            "schema_version",
+            "schema_version: 1\nschema_version: 1\ncriteria_ref: docs/architecture/dag/completeness-criteria.md\n",
+        ),
+        (
+            "id",
+            "schema_version: 1\ncriteria_ref: docs/architecture/dag/completeness-criteria.md\nevidence: []\nscenarios:\n  - id: linear\n    id: linear\n",
+        ),
+        (
+            "config",
+            "schema_version: 1\ncriteria_ref: docs/architecture/dag/completeness-criteria.md\nevidence: []\nscenarios:\n  - id: linear\n    ordinal: 1\n    title: Linear\n    dimensions:\n      config: {}\n      config: {}\n",
+        ),
+    ],
+    ids=("top-level", "scenario", "dimension"),
+)
+def test_manifest_rejects_duplicate_yaml_mapping_keys(
+    tmp_path: Path,
+    duplicate_key: str,
+    source: str,
+) -> None:
+    path = tmp_path / "duplicate.yaml"
+    path.write_text(source, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=rf"duplicate YAML mapping key.*{duplicate_key}"):
+        load_manifest(path)
 
 
 def test_manifest_rejects_extra_keys(tmp_path: Path) -> None:
@@ -956,6 +1005,18 @@ def test_manifest_rejects_wrong_scenario_ordinal(tmp_path: Path) -> None:
 def test_manifest_rejects_missing_dimension(tmp_path: Path) -> None:
     raw = valid_manifest_dict()
     _raw_dimensions(_raw_scenarios(raw)[0]).pop("scale")
+    with pytest.raises(ValueError, match=r"dimension keys/order.*linear"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_reordered_dimensions(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    scenario = _raw_scenarios(raw)[0]
+    dimensions = _raw_dimensions(scenario)
+    reordered = list(dimensions.items())
+    reordered[0], reordered[1] = reordered[1], reordered[0]
+    scenario["dimensions"] = dict(reordered)
+
     with pytest.raises(ValueError, match=r"dimension keys/order.*linear"):
         load_manifest(write_manifest(tmp_path, raw))
 
@@ -1029,6 +1090,44 @@ def test_manifest_rejects_case_without_matching_harness_locator(tmp_path: Path) 
     raw = valid_manifest_dict()
     _raw_scenarios(raw)[0]["cases"] = [_case_dict()]
     with pytest.raises(ValueError, match=r"harness case.*linear:happy-path.*matching evidence locator"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+def test_manifest_rejects_registered_case_fixture_escape(tmp_path: Path) -> None:
+    raw = valid_manifest_dict()
+    case = _case_dict("escape")
+    case["fixture"] = "../../outside.yaml"
+    _register_linear_case(raw, case)
+
+    with pytest.raises(ValueError, match="escapes DAG scenario fixture root"):
+        load_manifest(write_manifest(tmp_path, raw))
+
+
+@pytest.mark.parametrize(
+    ("input_fixture", "error"),
+    [
+        ("../outside.csv", "escapes DAG scenario fixture root"),
+        ("linear/missing.csv", "DAG scenario fixture does not exist"),
+    ],
+    ids=("escape", "missing"),
+)
+def test_manifest_rejects_registered_case_invalid_input_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    input_fixture: str,
+    error: str,
+) -> None:
+    fixture_root = tmp_path / "fixtures"
+    linear_root = fixture_root / "linear"
+    linear_root.mkdir(parents=True)
+    (linear_root / "happy-path.yaml").write_text("fixture", encoding="utf-8")
+    monkeypatch.setattr(loader_module, "FIXTURE_ROOT", fixture_root)
+    raw = valid_manifest_dict()
+    case = _case_dict("invalid-input")
+    case["input_fixture"] = input_fixture
+    _register_linear_case(raw, case)
+
+    with pytest.raises(ValueError, match=error):
         load_manifest(write_manifest(tmp_path, raw))
 
 

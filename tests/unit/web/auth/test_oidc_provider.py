@@ -387,8 +387,17 @@ class TestOIDCAudienceClaimModes:
     def test_manual_claim_helper_is_a_trust_boundary(self) -> None:
         from elspeth.web.auth.oidc import _validate_cognito_access_claims
 
+        with pytest.raises(AuthenticationError, match="token_use"):
+            _validate_cognito_access_claims(
+                {"client_id": AUDIENCE, "token_use": "id"},
+                audience=AUDIENCE,
+            )
+
         metadata = _validate_cognito_access_claims.__trust_boundary__  # type: ignore[attr-defined]
         assert metadata.tier == 3
+        assert metadata.test_ref == (
+            "tests/unit/web/auth/test_oidc_provider.py::TestOIDCAudienceClaimModes::test_manual_claim_helper_is_a_trust_boundary"
+        )
         assert "client_id" in metadata.invariant
         assert "token_use" in metadata.invariant
 

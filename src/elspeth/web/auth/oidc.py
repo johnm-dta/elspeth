@@ -30,6 +30,8 @@ slog = structlog.get_logger()
     source_param="payload",
     suppresses=("R1", "R5"),
     invariant="raises AuthenticationError unless client_id is the exact configured string and token_use is exactly access; never falls back to aud",
+    test_ref=("tests/unit/web/auth/test_oidc_provider.py::TestOIDCAudienceClaimModes::test_manual_claim_helper_is_a_trust_boundary"),
+    test_fingerprint="7a4f5811c00d10440587fefe4b61b13b1f5c1cee09940a953eee1b05a467651b",
 )
 def _validate_cognito_access_claims(payload: dict[str, Any], *, audience: str) -> None:
     """Bind a verified Cognito access token to its exact public app client."""

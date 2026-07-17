@@ -41,9 +41,6 @@ def _audit_export_config(*, signed: bool) -> dict[str, object]:
         "per_chunk_record_limit": 1_000,
         "per_chunk_byte_limit": 1_000_000,
         "spool_root": ".elspeth/audit-export-spool",
-        "spool_cleanup_age_seconds": 3_600,
-        "spool_cleanup_byte_budget": 10_000_000,
-        "spool_cleanup_count_budget": 100,
         "content_store": {
             "content_store_id": "integration-test-store-v1",
             "namespace": "audit-export",
@@ -51,9 +48,6 @@ def _audit_export_config(*, signed: bool) -> dict[str, object]:
             "policy_version": "audit-store-policy-v1",
             "retention_days": 365,
             "durability": "fsync",
-            "orphan_grace_period_seconds": 7_200,
-            "reference_safe_gc": True,
-            "cleanup_scope": "candidate_unreferenced",
         },
     }
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
+import stat
 import tempfile
 import time
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
@@ -315,6 +316,48 @@ def _lock_path(target: Path) -> Path:
     return target.with_name(f".{target.name}.elspeth.lock")
 
 
+# Crashed-prepare temp bodies: mkstemp prefixes "." onto the already-hidden
+# staging name, so the double leading dot plus the ".stage." infix keeps the
+# glob disjoint from staging files, locks, and any user-owned name.
+_BUILDING_GLOB: Final = "..*.elspeth-*.stage.*.building"
+_BUILDING_STALE_SECONDS: Final = 60 * 60
+_BUILDING_CLEANUP_LIMIT: Final = 16
+
+
+def cleanup_stale_local_effect_building_files(
+    parent: Path,
+    *,
+    now: float | None = None,
+    older_than_seconds: float = _BUILDING_STALE_SECONDS,
+    max_entries: int = _BUILDING_CLEANUP_LIMIT,
+) -> int:
+    """Bound cleanup of crashed-prepare temp bodies; never scans outside parent.
+
+    A building file only survives a hard crash between mkstemp and its atomic
+    replace onto the staging name; prepare unlinks it on every in-process
+    failure, so anything old enough here is permanently orphaned.
+    """
+    if older_than_seconds < 0 or type(max_entries) is not int or max_entries < 0:
+        raise ValueError("stale building cleanup bounds must be non-negative")
+    current_time = time.time() if now is None else now
+    removed = 0
+    for path in sorted(parent.glob(_BUILDING_GLOB), key=lambda candidate: candidate.name):
+        if removed >= max_entries:
+            break
+        try:
+            result = path.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(result.st_mode) or current_time - result.st_mtime < older_than_seconds:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed
+
+
 def _plan_hash(
     *,
     effect_id: str,
@@ -381,6 +424,7 @@ def prepare_local_effect(
         raise LocalFileEffectLimitError(f"row limit exceeded: {row_count} > {max_rows}")
     target, predecessor, predecessor_declared = _inspection_snapshot(inspection, effect_id=effect_id)
     target.parent.mkdir(parents=True, exist_ok=True)
+    cleanup_stale_local_effect_building_files(target.parent)
     staging = _staging_path(target, effect_id)
     lock = _lock_path(target)
     descriptor_fd: int | None = None
@@ -681,26 +725,6 @@ def reconcile_local_effect(plan: SinkEffectPlan) -> SinkEffectReconcileResult:
     return SinkEffectReconcileResult.unknown(evidence={"staging": "divergent", "target": "ambiguous"})
 
 
-def cleanup_local_effect(plan: SinkEffectPlan) -> bool:
-    """Remove only the exact still-staged inode named by a durable plan."""
-    try:
-        evidence, _target, staging, _lock, _expected = _parse_plan(plan)
-        candidate = _snapshot(staging)
-    except (LocalFileEffectError, OSError):
-        return False
-    if not _matches(
-        candidate,
-        exists=True,
-        content_hash=evidence.staged_hash,
-        size=evidence.staged_size,
-        file_id=evidence.staged_file_id,
-    ):
-        return False
-    staging.unlink()
-    _fsync_directory(staging.parent)
-    return True
-
-
 def continuation_emission(
     *,
     append_mode: bool,
@@ -741,7 +765,7 @@ __all__ = [
     "LocalFileLockTimeout",
     "LocalFilePreconditionError",
     "LocalFileUnsupportedIdentity",
-    "cleanup_local_effect",
+    "cleanup_stale_local_effect_building_files",
     "commit_local_effect",
     "continuation_emission",
     "inspect_local_effect",

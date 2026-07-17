@@ -158,9 +158,6 @@ class TestValidateCommand:
                     "per_chunk_record_limit": 100,
                     "per_chunk_byte_limit": 1024 * 1024,
                     "spool_root": ".elspeth/audit-export-spool/validate-command",
-                    "spool_cleanup_age_seconds": 3_600,
-                    "spool_cleanup_byte_budget": 10 * 1024 * 1024,
-                    "spool_cleanup_count_budget": 100,
                     "content_store": {
                         "content_store_id": "validate-command-store-v1",
                         "namespace": "audit/export",
@@ -168,7 +165,6 @@ class TestValidateCommand:
                         "policy_version": "v1",
                         "retention_days": 30,
                         "durability": "fsync",
-                        "orphan_grace_period_seconds": 3_600,
                     },
                 },
             },

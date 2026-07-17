@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import stat
 from contextlib import suppress
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 from uuid import uuid4
@@ -19,7 +18,6 @@ from elspeth.contracts.audit_export import (
     AuditExportContentDescriptor,
     AuditExportContentStoreResolver,
     AuditExportObjectKind,
-    AuditExportOrphanCollectionRequest,
     BoundAuditExportContentReader,
     RegisteredAuditExportContent,
     validate_content_namespace,
@@ -32,9 +30,9 @@ _DIRECTORY_FLAGS: Final = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(
 _FILE_READ_FLAGS: Final = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
 _FILE_CREATE_FLAGS: Final = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
 _COPY_BYTES: Final = 64 * 1024
-# Explicit safe bound shared by the orphan-marker writer and collector. A
-# marker lists one canonical "sha256:<64 hex>" reference per content object —
-# at most AUDIT_EXPORT_MAX_CHUNKS data chunks plus one final manifest — plus a
+# Explicit safe bound on orphan-marker size. A marker lists one canonical
+# "sha256:<64 hex>" reference per content object — at most
+# AUDIT_EXPORT_MAX_CHUNKS data chunks plus one final manifest — plus a
 # fixed envelope; 128 bytes per reference over-covers JSON quoting, commas,
 # and the envelope with wide margin.
 MAX_AUDIT_EXPORT_ORPHAN_MARKER_BYTES: Final = (AUDIT_EXPORT_MAX_CHUNKS + 1) * 128
@@ -333,83 +331,6 @@ class FilesystemAuditExportContentStore:
         finally:
             os.close(candidates_fd)
             os.close(root_fd)
-
-    def garbage_collect_candidate(self, request: AuditExportOrphanCollectionRequest) -> bool:
-        if type(request) is not AuditExportOrphanCollectionRequest or request.namespace != self.namespace:
-            raise TypeError("request must be an exact orphan request for this namespace")
-        if request.grace_period_seconds < self._settings.orphan_grace_period_seconds:
-            return False
-        if datetime.now(UTC) < request.marked_at + timedelta(seconds=request.grace_period_seconds):
-            return False
-        if any(request.fresh_winner_reference_check(item.content_ref) for item in request.descriptors):
-            return False
-        root_fd, candidates_fd = self._open_area("candidates")
-        deleted = False
-        try:
-            candidate_fd = self._candidate_dir(candidates_fd, request.candidate_id, create=False)
-            try:
-                try:
-                    orphan_fd = os.open("orphan.json", _FILE_READ_FLAGS, dir_fd=candidate_fd)
-                except FileNotFoundError:
-                    return False
-                try:
-                    marker_stat = os.fstat(orphan_fd)
-                    if not stat.S_ISREG(marker_stat.st_mode) or marker_stat.st_size > MAX_AUDIT_EXPORT_ORPHAN_MARKER_BYTES:
-                        return False
-                    pieces: list[bytes] = []
-                    remaining = marker_stat.st_size
-                    while remaining:
-                        piece = os.read(orphan_fd, min(_COPY_BYTES, remaining))
-                        if not piece:
-                            return False
-                        pieces.append(piece)
-                        remaining -= len(piece)
-                    marker = json.loads(b"".join(pieces))
-                finally:
-                    os.close(orphan_fd)
-                if type(marker) is not dict or marker.get("candidate_id") != request.candidate_id:
-                    return False
-                try:
-                    marker_time = datetime.strptime(str(marker["marked_at"]), "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
-                except (KeyError, ValueError):
-                    return False
-                if datetime.now(UTC) < marker_time + timedelta(seconds=request.grace_period_seconds):
-                    return False
-                owned_fd = os.open("owned", _DIRECTORY_FLAGS, dir_fd=candidate_fd)
-                try:
-                    namespace_fd = _open_namespace(root_fd, self.namespace, create=False)
-                    try:
-                        objects_fd = os.open("objects", _DIRECTORY_FLAGS, dir_fd=namespace_fd)
-                        try:
-                            for descriptor in request.descriptors:
-                                try:
-                                    os.stat(descriptor.content_hash, dir_fd=owned_fd, follow_symlinks=False)
-                                except FileNotFoundError:
-                                    continue
-                                shard_fd = os.open(descriptor.content_hash[:2], _DIRECTORY_FLAGS, dir_fd=objects_fd)
-                                try:
-                                    if _read_exact_file(shard_fd, descriptor.content_hash, descriptor):
-                                        os.unlink(descriptor.content_hash, dir_fd=shard_fd)
-                                        os.fsync(shard_fd)
-                                        deleted = True
-                                finally:
-                                    os.close(shard_fd)
-                                os.unlink(descriptor.content_hash, dir_fd=owned_fd)
-                        finally:
-                            os.close(objects_fd)
-                    finally:
-                        os.close(namespace_fd)
-                finally:
-                    os.close(owned_fd)
-                os.unlink("orphan.json", dir_fd=candidate_fd)
-            finally:
-                os.close(candidate_fd)
-        except FileNotFoundError:
-            return False
-        finally:
-            os.close(candidates_fd)
-            os.close(root_fd)
-        return deleted
 
 
 def create_audit_export_content_store(

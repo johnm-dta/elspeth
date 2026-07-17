@@ -1218,9 +1218,6 @@ class AuditExportContentStoreSettings(BaseModel):
     policy_version: str = Field(min_length=1, max_length=64)
     retention_days: int = Field(gt=0, le=36_500)
     durability: Literal["fsync", "replicated"]
-    orphan_grace_period_seconds: int = Field(gt=0, le=31 * 24 * 60 * 60)
-    reference_safe_gc: bool = Field(default=True, strict=True)
-    cleanup_scope: Literal["candidate_unreferenced"] = "candidate_unreferenced"
 
     @field_validator("content_store_id")
     @classmethod
@@ -1247,13 +1244,6 @@ class AuditExportContentStoreSettings(BaseModel):
                 raise ValueError("content store root must be private (no group/world permissions)")
         return path
 
-    @field_validator("reference_safe_gc")
-    @classmethod
-    def validate_reference_safe_gc(cls, value: bool) -> bool:
-        if value is not True:
-            raise ValueError("reference_safe_gc must be true")
-        return value
-
 
 class LandscapeExportSettings(BaseModel):
     """Target-independent audit snapshot identity and bounded resources."""
@@ -1277,9 +1267,6 @@ class LandscapeExportSettings(BaseModel):
     per_chunk_record_limit: int | None = Field(default=None, gt=0, le=AUDIT_EXPORT_MAX_CHUNK_RECORDS)
     per_chunk_byte_limit: int | None = Field(default=None, gt=0, le=AUDIT_EXPORT_MAX_CHUNK_BYTES)
     spool_root: Path | None = None
-    spool_cleanup_age_seconds: int | None = Field(default=None, gt=0, le=365 * 24 * 60 * 60)
-    spool_cleanup_byte_budget: int | None = Field(default=None, gt=0, le=AUDIT_EXPORT_MAX_TOTAL_BYTES)
-    spool_cleanup_count_budget: int | None = Field(default=None, gt=0, le=AUDIT_EXPORT_MAX_CHUNKS)
     content_store: AuditExportContentStoreSettings | None = None
 
     @field_validator("signer_key_id")
@@ -1333,9 +1320,6 @@ class LandscapeExportSettings(BaseModel):
             "per_chunk_record_limit",
             "per_chunk_byte_limit",
             "spool_root",
-            "spool_cleanup_age_seconds",
-            "spool_cleanup_byte_budget",
-            "spool_cleanup_count_budget",
             "content_store",
         )
         if self.enabled:

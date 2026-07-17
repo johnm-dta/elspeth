@@ -186,10 +186,6 @@ class _Store:
     def mark_candidate_orphans(self, candidate_id: str, descriptors: tuple[object, ...]) -> None:
         del candidate_id, descriptors
 
-    def garbage_collect_candidate(self, request: object) -> bool:
-        del request
-        return False
-
 
 def test_store_resolver_keeps_content_store_id_stable_and_rejects_reinterpretation() -> None:
     resolver = AuditExportContentStoreResolver()

@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import md5, sha256
@@ -596,6 +598,46 @@ def test_remote_target_timestamp_is_bound_to_run_start(factory: Any) -> None:
         _CTX,
     )
     assert "2026-07-16T03:04:05.678901+00:00" in inspection.reference
+
+
+def test_stale_sweep_removes_crashed_building_spool_files(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ELSPETH_EFFECT_SPOOL_DIR", str(tmp_path))
+    provider_dir = tmp_path / "aws_s3"
+    provider_dir.mkdir()
+    stale_building = provider_dir / f".{'2' * 64}.body.abc123.building"
+    stale_building.write_bytes(b"crashed")
+    fresh_building = provider_dir / f".{'3' * 64}.body.def456.building"
+    fresh_building.write_bytes(b"in-flight")
+    stage = provider_dir / f"{'4' * 64}.body"
+    stage.write_bytes(b"staged")
+    old = time.time() - 2 * 60 * 60
+    for path in (stale_building, stage):
+        os.utime(path, (old, old))
+
+    removed = remote_effects.cleanup_stale_remote_spool_building_files(provider_dir)
+
+    # The one-hour mtime bound is the only shield for a concurrent in-flight
+    # _write_stage temp in this spool; its writes keep the mtime fresh.
+    assert removed == 1
+    assert not stale_building.exists()
+    assert fresh_building.exists()
+    assert stage.exists()
+
+
+def test_prepare_sweeps_stale_crashed_building_spool_files(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ELSPETH_EFFECT_SPOOL_DIR", str(tmp_path))
+    provider_dir = tmp_path / "aws_s3"
+    provider_dir.mkdir()
+    stale_building = provider_dir / f".{'5' * 64}.body.abc123.building"
+    stale_building.write_bytes(b"crashed")
+    old = time.time() - 2 * 60 * 60
+    os.utime(stale_building, (old, old))
+    store = _S3Store()
+    member = _member(0, {"id": 1})
+
+    _prepare(_s3(store), effect_id="6" * 64, current=(member,), target_snapshot=(member,))
+
+    assert not stale_building.exists()
 
 
 def test_effect_plan_body_is_durable_and_not_process_local(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1009,9 +1009,6 @@ landscape:
     per_chunk_record_limit: 10000
     per_chunk_byte_limit: 16777216
     spool_root: .elspeth/audit-export-spool/primary
-    spool_cleanup_age_seconds: 86400
-    spool_cleanup_byte_budget: 1073741824
-    spool_cleanup_count_budget: 100
     content_store:
       content_store_id: audit-archive-v1
       namespace: audit-exports
@@ -1019,9 +1016,6 @@ landscape:
       policy_version: retention-v1
       retention_days: 2555
       durability: replicated
-      orphan_grace_period_seconds: 86400
-      reference_safe_gc: true
-      cleanup_scope: candidate_unreferenced
   # Optional: JSONL change journal for emergency backup
   dump_to_jsonl: false
   dump_to_jsonl_path: ./runs/audit.journal.jsonl
@@ -1123,9 +1117,6 @@ compatibility record rather than relying on a structural probe alone.
 | `per_chunk_record_limit` | int | required when enabled | Maximum records in one chunk |
 | `per_chunk_byte_limit` | int | required when enabled | Maximum serialized bytes in one chunk |
 | `spool_root` | path | required when enabled | Private path below `.elspeth/audit-export-spool`; absolute and parent-traversal paths are refused |
-| `spool_cleanup_age_seconds` | int | required when enabled | Minimum age used by bounded spool cleanup |
-| `spool_cleanup_byte_budget` | int | required when enabled | Maximum bytes considered by one cleanup pass |
-| `spool_cleanup_count_budget` | int | required when enabled | Maximum candidates considered by one cleanup pass |
 | `content_store` | object | required when enabled | Explicit durable immutable-content policy |
 | `content_store.content_store_id` | string | required | Credential-free store identity persisted with snapshots |
 | `content_store.namespace` | string | required | Credential-free content namespace |
@@ -1133,14 +1124,11 @@ compatibility record rather than relying on a structural probe alone.
 | `content_store.policy_version` | string | required | Retention/durability policy version |
 | `content_store.retention_days` | int | required | Retention period |
 | `content_store.durability` | string | required | `fsync` or `replicated` |
-| `content_store.orphan_grace_period_seconds` | int | required | Minimum age before an unreferenced candidate can be collected |
-| `content_store.reference_safe_gc` | bool | `true` | Must remain true |
-| `content_store.cleanup_scope` | string | `candidate_unreferenced` | Cleanup is limited to unreferenced candidates |
 
 Enabled export is deliberately all-explicit: total capacity must fit within
-`chunk_limit × per_chunk_*_limit`, the spool must already be a private
-directory, and cleanup is age-, byte-, and count-bounded. Content-store
-retention never authorizes deletion of referenced snapshot objects.
+`chunk_limit × per_chunk_*_limit`, and the spool must already be a private
+directory. Content-store retention never authorizes deletion of referenced
+snapshot objects.
 
 **Signing and rotation:** `signer_key_id` is a public, credential-free identity
 that includes the operator's key version. It participates in snapshot identity,

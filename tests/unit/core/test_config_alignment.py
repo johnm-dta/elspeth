@@ -271,9 +271,6 @@ class TestLandscapeSettingsAlignment:
             "per_chunk_record_limit",
             "per_chunk_byte_limit",
             "spool_root",
-            "spool_cleanup_age_seconds",
-            "spool_cleanup_byte_budget",
-            "spool_cleanup_count_budget",
             "content_store",
         }
         actual_fields = set(LandscapeExportSettings.model_fields.keys())

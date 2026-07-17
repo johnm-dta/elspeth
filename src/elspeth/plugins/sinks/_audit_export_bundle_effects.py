@@ -56,6 +56,9 @@ _COPY_CHUNK_BYTES: Final = 64 * 1024
 _AT_FDCWD: Final = -100
 _RENAME_NOREPLACE: Final = 1
 _PROBE_PREFIX: Final = ".elspeth-bundle-probe-"
+# Crashed-prepare building trees; the trailing ".building-" segment keeps the
+# glob disjoint from effect-addressed ".bundle-stage" staging trees.
+_BUILDING_GLOB: Final = ".*.elspeth-*.building-*"
 _PROBE_STALE_SECONDS: Final = 60 * 60
 _PROBE_CLEANUP_LIMIT: Final = 16
 _LOWER_HEX_64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -934,15 +937,6 @@ def reconcile_audit_export_bundle(plan: SinkEffectPlan) -> SinkEffectReconcileRe
         return SinkEffectReconcileResult.unknown(evidence={"reason": type(exc).__name__})
 
 
-def cleanup_audit_export_bundle(plan: SinkEffectPlan) -> bool:
-    """Remove only the exact private staging tree named by a durable plan."""
-    try:
-        evidence, _target, staging, _descriptor = _parse_plan(plan)
-        return _remove_exact_tree(staging, evidence.files)
-    except (AuditExportBundleError, OSError, ValueError, TypeError):
-        return False
-
-
 _LIBC = ctypes.CDLL(None, use_errno=True)
 _RENAMEAT2 = getattr(_LIBC, "renameat2", None)
 
@@ -1026,19 +1020,25 @@ def _remove_probe_path(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
-def cleanup_stale_audit_export_bundle_probes(
+def cleanup_stale_audit_export_bundle_scratch(
     parent: Path,
     *,
     now: float | None = None,
     older_than_seconds: float = _PROBE_STALE_SECONDS,
     max_entries: int = _PROBE_CLEANUP_LIMIT,
 ) -> int:
-    """Bound cleanup of old private probe names; never scans outside parent."""
+    """Bound cleanup of old private probe and crashed-prepare building names.
+
+    Building trees are pre-staging scratch: prepare removes them in-process,
+    so one only survives a hard crash and is never credited by recovery.
+    Never scans outside parent.
+    """
     if older_than_seconds < 0 or type(max_entries) is not int or max_entries < 0:
-        raise ValueError("stale probe cleanup bounds must be non-negative")
+        raise ValueError("stale scratch cleanup bounds must be non-negative")
     current_time = time.time() if now is None else now
     removed = 0
-    for path in sorted(parent.glob(f"{_PROBE_PREFIX}*"), key=lambda candidate: candidate.name):
+    scratch = {*parent.glob(f"{_PROBE_PREFIX}*"), *parent.glob(_BUILDING_GLOB)}
+    for path in sorted(scratch, key=lambda candidate: candidate.name):
         if removed >= max_entries:
             break
         try:
@@ -1077,7 +1077,7 @@ def preflight_audit_export_bundle(target_path: Path) -> AuditExportBundlePreflig
     if target_parent_device != staging_parent_device:
         raise AuditExportBundlePreflightError("bundle staging and target parents must be on the same device")
 
-    cleanup_stale_audit_export_bundle_probes(parent)
+    cleanup_stale_audit_export_bundle_scratch(parent)
     token = f"{time.time_ns()}-{os.getpid()}-{uuid4().hex}"
     source = parent / f"{_PROBE_PREFIX}{token}-source"
     destination = parent / f"{_PROBE_PREFIX}{token}-destination"
@@ -1139,8 +1139,7 @@ __all__ = [
     "AuditExportBundlePreflightError",
     "BundleFileEntry",
     "BundlePlanEvidence",
-    "cleanup_audit_export_bundle",
-    "cleanup_stale_audit_export_bundle_probes",
+    "cleanup_stale_audit_export_bundle_scratch",
     "commit_audit_export_bundle",
     "inspect_audit_export_bundle",
     "preflight_audit_export_bundle",

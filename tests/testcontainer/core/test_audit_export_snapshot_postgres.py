@@ -95,10 +95,6 @@ class _MemoryContentStore:
     ) -> None:
         del candidate_id, descriptors
 
-    def garbage_collect_candidate(self, request: object) -> bool:
-        del request
-        return False
-
 
 def _candidate(store: _MemoryContentStore) -> AuditExportSnapshotCandidate:
     bundle = derive_audit_export_bundle(

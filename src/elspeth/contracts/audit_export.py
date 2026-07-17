@@ -774,29 +774,6 @@ class RegisteredAuditExportContent:
             raise TypeError("descriptor must be AuditExportContentDescriptor")
 
 
-@dataclass(frozen=True, slots=True)
-class AuditExportOrphanCollectionRequest:
-    """Candidate-scoped, reference-checked garbage collection authority."""
-
-    candidate_id: str
-    namespace: str
-    descriptors: tuple[AuditExportContentDescriptor, ...]
-    marked_at: datetime
-    grace_period_seconds: int
-    fresh_winner_reference_check: Callable[[str], bool]
-
-    def __post_init__(self) -> None:
-        validate_credential_free_identifier(self.candidate_id, "candidate_id")
-        validate_content_namespace(self.namespace)
-        if not self.descriptors or any(type(item) is not AuditExportContentDescriptor for item in self.descriptors):
-            raise ValueError("descriptors must be a non-empty exact descriptor tuple")
-        if self.marked_at.tzinfo is None or self.marked_at.utcoffset() is None:
-            raise ValueError("marked_at must be timezone-aware")
-        _integer(self.grace_period_seconds, "grace_period_seconds", minimum=1)
-        if not callable(self.fresh_winner_reference_check):
-            raise TypeError("fresh_winner_reference_check must be callable")
-
-
 @runtime_checkable
 class BoundAuditExportContentReader(Protocol):
     """No-arbitrary-ref reader returned only for registered content."""
@@ -821,8 +798,6 @@ class AuditExportContentStore(Protocol):
     def open_registered(self, registration: RegisteredAuditExportContent) -> BoundAuditExportContentReader: ...
 
     def mark_candidate_orphans(self, candidate_id: str, descriptors: tuple[AuditExportContentDescriptor, ...]) -> None: ...
-
-    def garbage_collect_candidate(self, request: AuditExportOrphanCollectionRequest) -> bool: ...
 
 
 class AuditExportContentStoreResolver:

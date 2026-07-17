@@ -37,9 +37,6 @@ def _write_settings(tmp_path: Path, db_path: Path, *, export_enabled: bool = Tru
     per_chunk_record_limit: 100
     per_chunk_byte_limit: 1048576
     spool_root: .elspeth/audit-export-spool/cli-test
-    spool_cleanup_age_seconds: 3600
-    spool_cleanup_byte_budget: 10485760
-    spool_cleanup_count_budget: 100
     content_store:
       content_store_id: audit-store-v1
       namespace: audit/export
@@ -47,7 +44,6 @@ def _write_settings(tmp_path: Path, db_path: Path, *, export_enabled: bool = Tru
       policy_version: v1
       retention_days: 30
       durability: fsync
-      orphan_grace_period_seconds: 3600
 """
     settings_content = f"""
 sources:

@@ -32,9 +32,6 @@ def _enabled_config(**overrides: object) -> dict[str, object]:
         "per_chunk_record_limit": 1_000,
         "per_chunk_byte_limit": 1_000_000,
         "spool_root": ".elspeth/audit-export-spool",
-        "spool_cleanup_age_seconds": 3600,
-        "spool_cleanup_byte_budget": 10_000_000,
-        "spool_cleanup_count_budget": 100,
         "content_store": {
             "content_store_id": "archive-primary-v1",
             "namespace": "audit-export",
@@ -42,9 +39,6 @@ def _enabled_config(**overrides: object) -> dict[str, object]:
             "policy_version": "audit-store-policy-v1",
             "retention_days": 365,
             "durability": "fsync",
-            "orphan_grace_period_seconds": 7200,
-            "reference_safe_gc": True,
-            "cleanup_scope": "candidate_unreferenced",
         },
     }
     config.update(overrides)
@@ -67,9 +61,6 @@ def test_enabled_export_requires_complete_explicit_bounded_resource_policy() -> 
         "per_chunk_record_limit",
         "per_chunk_byte_limit",
         "spool_root",
-        "spool_cleanup_age_seconds",
-        "spool_cleanup_byte_budget",
-        "spool_cleanup_count_budget",
         "content_store",
     ):
         config = _enabled_config()
@@ -181,14 +172,7 @@ def test_content_store_root_is_explicit_and_inside_code_owned_root(root: str) ->
         LandscapeExportSettings(**_enabled_config(content_store=content_store))
 
 
-@pytest.mark.parametrize(
-    "content_store",
-    [
-        {**_enabled_config()["content_store"], "durability": "best_effort"},  # type: ignore[dict-item]
-        {**_enabled_config()["content_store"], "reference_safe_gc": False},  # type: ignore[dict-item]
-        {**_enabled_config()["content_store"], "cleanup_scope": "namespace_prefix"},  # type: ignore[dict-item]
-    ],
-)
-def test_content_store_requires_durable_reference_safe_candidate_cleanup(content_store: object) -> None:
+def test_content_store_requires_fsync_or_replicated_durability() -> None:
+    content_store = {**_enabled_config()["content_store"], "durability": "best_effort"}  # type: ignore[dict-item]
     with pytest.raises(ValidationError):
         LandscapeExportSettings(**_enabled_config(content_store=content_store))

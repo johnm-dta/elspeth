@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import shutil
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -419,11 +420,38 @@ def test_casefold_filename_collision_fails_before_publication(tmp_path: Path) ->
     assert not (tmp_path / "audit").exists()
 
 
-def test_exact_cleanup_removes_only_bound_staging_tree(tmp_path: Path) -> None:
-    plan = _prepare(tmp_path / "audit")
-    assert bundle_effects.cleanup_audit_export_bundle(plan) is True
-    assert not _stage(plan).exists()
-    assert bundle_effects.cleanup_audit_export_bundle(plan) is False
+def test_stale_sweep_removes_crashed_building_trees_and_probes_but_not_staging(tmp_path: Path) -> None:
+    stale_building = tmp_path / f".audit.elspeth-{EFFECT_ID}.building-abc123"
+    stale_building.mkdir()
+    (stale_building / "runs.csv").write_bytes(b"record_type\n")
+    fresh_building = tmp_path / f".audit.elspeth-{'f' * 64}.building-def456"
+    fresh_building.mkdir()
+    stale_probe = tmp_path / ".elspeth-bundle-probe-old-source"
+    stale_probe.mkdir()
+    stale_staging = tmp_path / f".audit.elspeth-{EFFECT_ID}.bundle-stage"
+    stale_staging.mkdir()
+    old = time.time() - 2 * 60 * 60
+    for path in (stale_building, stale_probe, stale_staging):
+        os.utime(path, (old, old))
+
+    removed = bundle_effects.cleanup_stale_audit_export_bundle_scratch(tmp_path)
+
+    assert removed == 2
+    assert not stale_building.exists()
+    assert not stale_probe.exists()
+    assert fresh_building.exists()
+    assert stale_staging.exists()
+
+
+def test_preflight_sweeps_stale_crashed_building_trees(tmp_path: Path) -> None:
+    stale_building = tmp_path / f".audit.elspeth-{EFFECT_ID}.building-abc123"
+    stale_building.mkdir()
+    old = time.time() - 2 * 60 * 60
+    os.utime(stale_building, (old, old))
+
+    bundle_effects.preflight_audit_export_bundle(tmp_path / "audit")
+
+    assert not stale_building.exists()
 
 
 def test_preflight_exercises_linux_noreplace_and_fsync_without_target_publication(tmp_path: Path) -> None:

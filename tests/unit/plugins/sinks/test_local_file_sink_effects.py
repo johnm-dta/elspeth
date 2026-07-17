@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import fcntl
 import json
+import os
+import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -416,7 +418,7 @@ def test_commit_times_out_on_busy_advisory_lock(tmp_path: Path) -> None:
             local_effects.commit_local_effect(plan, lock_timeout_seconds=0.01)
 
 
-def test_staging_mismatch_is_unknown_and_cleanup_is_identity_scoped(tmp_path: Path) -> None:
+def test_staging_mismatch_is_unknown(tmp_path: Path) -> None:
     target = tmp_path / "out.txt"
     sink = TextSink({"path": str(target), "field": "message", "schema": _SCHEMA})
     plan = _prepare(sink, effect_id="6" * 64, rows=[{"message": "hello"}])
@@ -424,8 +426,48 @@ def test_staging_mismatch_is_unknown_and_cleanup_is_identity_scoped(tmp_path: Pa
     stage.write_bytes(b"tampered")
 
     assert sink.reconcile_effect(plan, _CTX).kind is SinkEffectReconcileKind.UNKNOWN
-    assert local_effects.cleanup_local_effect(plan) is False
     assert stage.exists()
+
+
+def test_stale_sweep_removes_crashed_building_files_but_not_stage_or_lock(tmp_path: Path) -> None:
+    effect_id = "6" * 64
+    stale_building = tmp_path / f"..out.txt.elspeth-{effect_id}.stage.abc123.building"
+    stale_building.write_bytes(b"crashed")
+    fresh_building = tmp_path / f"..out.txt.elspeth-{'7' * 64}.stage.def456.building"
+    fresh_building.write_bytes(b"in-flight")
+    stage = tmp_path / f".out.txt.elspeth-{effect_id}.stage"
+    stage.write_bytes(b"staged")
+    lock = tmp_path / ".out.txt.elspeth.lock"
+    lock.write_bytes(b"")
+    unrelated = tmp_path / "..notes.building"
+    unrelated.write_bytes(b"user file")
+    old = time.time() - 2 * 60 * 60
+    for path in (stale_building, stage, lock, unrelated):
+        os.utime(path, (old, old))
+
+    removed = local_effects.cleanup_stale_local_effect_building_files(tmp_path)
+
+    # The one-hour mtime bound is the only shield for a concurrent in-flight
+    # prepare's live temp in this parent; its writes keep the mtime fresh.
+    assert removed == 1
+    assert not stale_building.exists()
+    assert fresh_building.exists()
+    assert stage.exists()
+    assert lock.exists()
+    assert unrelated.exists()
+
+
+def test_prepare_sweeps_stale_crashed_building_files(tmp_path: Path) -> None:
+    target = tmp_path / "out.txt"
+    stale_building = tmp_path / f"..out.txt.elspeth-{'9' * 64}.stage.abc123.building"
+    stale_building.write_bytes(b"crashed")
+    old = time.time() - 2 * 60 * 60
+    os.utime(stale_building, (old, old))
+    sink = TextSink({"path": str(target), "field": "message", "schema": _SCHEMA})
+
+    _prepare(sink, effect_id="8" * 64, rows=[{"message": "hello"}])
+
+    assert not stale_building.exists()
 
 
 def test_commit_fsyncs_parent_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -494,15 +536,6 @@ def test_unsupported_filesystem_identity_fails_closed(tmp_path: Path, monkeypatc
             target_path=target,
             request=SinkEffectInspectionRequest(effect_id="9" * 64, target="{}", predecessor_descriptor=None),
         )
-
-
-def test_cleanup_removes_only_exact_abandoned_stage(tmp_path: Path) -> None:
-    target = tmp_path / "out.txt"
-    sink = TextSink({"path": str(target), "field": "message", "schema": _SCHEMA})
-    plan = _prepare(sink, effect_id="0" * 64, rows=[{"message": "hello"}])
-    stage = _stage_path(plan)
-    assert local_effects.cleanup_local_effect(plan) is True
-    assert not stage.exists()
 
 
 def test_no_publication_uses_exact_virtual_and_inherited_descriptors(tmp_path: Path) -> None:

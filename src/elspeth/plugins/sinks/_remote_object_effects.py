@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import stat
 import tempfile
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -290,6 +292,49 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+# Crashed-write temp bodies in the code-owned provider spool: hidden name,
+# ".body." infix, ".building" suffix — disjoint from the visible
+# "{effect_id}.body" stage files the durable plans reference.
+_BUILDING_GLOB: Final = ".*.body.*.building"
+_BUILDING_STALE_SECONDS: Final = 60 * 60
+_BUILDING_CLEANUP_LIMIT: Final = 16
+
+
+def cleanup_stale_remote_spool_building_files(
+    parent: Path,
+    *,
+    now: float | None = None,
+    older_than_seconds: float = _BUILDING_STALE_SECONDS,
+    max_entries: int = _BUILDING_CLEANUP_LIMIT,
+) -> int:
+    """Bound cleanup of crashed-write temp bodies; never scans outside parent.
+
+    A building file only survives a hard crash between mkstemp and its atomic
+    replace onto the stage name; every in-process failure unlinks it, and a
+    re-drive restages under a fresh temp name, so anything old enough here is
+    permanently orphaned.
+    """
+    if older_than_seconds < 0 or type(max_entries) is not int or max_entries < 0:
+        raise ValueError("stale building cleanup bounds must be non-negative")
+    current_time = time.time() if now is None else now
+    removed = 0
+    for path in sorted(parent.glob(_BUILDING_GLOB), key=lambda candidate: candidate.name):
+        if removed >= max_entries:
+            break
+        try:
+            result = path.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(result.st_mode) or current_time - result.st_mtime < older_than_seconds:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed
+
+
 def _write_stage(
     *,
     path: Path,
@@ -301,6 +346,7 @@ def _write_stage(
         raise ValueError("remote effect max_bytes must be a positive exact integer")
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
+    cleanup_stale_remote_spool_building_files(path.parent)
     descriptor, building_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".building", dir=path.parent)
     building = Path(building_name)
     digest = hashlib.sha256()
@@ -611,6 +657,7 @@ __all__ = [
     "RemoteObjectObservation",
     "RemoteObjectPlanEvidence",
     "RemoteObjectPreconditionError",
+    "cleanup_stale_remote_spool_building_files",
     "inspect_remote_object",
     "iter_file_chunks",
     "prepare_remote_object",

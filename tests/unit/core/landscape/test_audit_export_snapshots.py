@@ -72,10 +72,6 @@ class _MemoryContentStore:
     ) -> None:
         self.orphans.append((candidate_id, descriptors))
 
-    def garbage_collect_candidate(self, request: object) -> bool:
-        del request
-        return False
-
 
 def _insert_terminal_run(db: LandscapeDB, run_id: str = "run-export") -> None:
     with db.engine.begin() as connection:

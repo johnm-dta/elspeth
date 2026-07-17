@@ -3624,6 +3624,59 @@ class TestSchemaContractValidation:
         # not as a satisfied contract the composer cannot actually vouch for.
         assert not any(ec.to_id == "output:main" for ec in result.edge_contracts)
 
+    @pytest.mark.parametrize(
+        ("proven_sources", "expected_targets", "expected_missing"),
+        [
+            (("raw_url", "raw_summary"), ("summary", "url"), ()),
+            (("raw_url",), ("url",), ("summary",)),
+        ],
+    )
+    def test_guided_select_only_mapper_declares_only_proven_guarantees(
+        self,
+        proven_sources: tuple[str, ...],
+        expected_targets: tuple[str, ...],
+        expected_missing: tuple[str, ...],
+    ) -> None:
+        """Guided cleanup earns a positive verdict without guessing missing fields."""
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                options={"schema": {"mode": "observed", "guaranteed_fields": list(proven_sources)}},
+            )
+        )
+        state = state.with_node(
+            self._make_transform(
+                "t1",
+                "t1",
+                "main",
+                plugin="field_mapper",
+                options={
+                    "select_only": True,
+                    "mapping": {"raw_url": "url", "raw_summary": "summary"},
+                    "schema": {"mode": "observed", "guaranteed_fields": list(proven_sources)},
+                },
+            )
+        )
+        state = state.with_output(
+            OutputSpec(
+                name="main",
+                plugin="json",
+                options={
+                    "path": "outputs/results.json",
+                    "schema": {"mode": "observed", "required_fields": ["url", "summary"]},
+                },
+                on_write_failure="discard",
+            )
+        )
+        state = state.with_edge(self._make_edge("e1", "source", "t1"))
+
+        result = state.validate()
+        sink_contract = next(ec for ec in result.edge_contracts if ec.to_id == "output:main")
+        assert result.is_valid is (not expected_missing)
+        assert sink_contract.satisfied is (not expected_missing)
+        assert sink_contract.producer_guarantees == expected_targets
+        assert sink_contract.missing_fields == expected_missing
+
     def test_sink_required_fields_inherited_participation_still_fails(self) -> None:
         """A pass-through downstream of a participating producer cannot abstain.
 

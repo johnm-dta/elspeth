@@ -112,8 +112,8 @@ including the raw page text and fingerprint — and the output writes whatever r
 it receives. Only a `field_mapper` actually drops fields. Set:
 
 - `select_only: true`
-- `mapping` — list only the fields to keep (the requested result) and exclude the
-  raw scraped-content and fingerprint fields.
+- `mapping` — list only the fields to keep and exclude raw scrape fields; set observed `schema.guaranteed_fields` to mapping **keys** the immediate upstream contract guarantees so the mapper declares their mapped output **targets**.
+  Never include an unproven source just to earn a positive verdict: leave it undeclared so its required target stays fail-closed as missing.
 - `interpretation_requirements` — a **sibling of `mapping`** (never inside it).
   Dropping web-scrape raw fields is an audited row-shaping decision, so the
   cleanup `field_mapper` MUST carry one pending `pipeline_decision` requirement or

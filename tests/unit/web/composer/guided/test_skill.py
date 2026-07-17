@@ -102,6 +102,13 @@ class TestStepChatSkill:
         for marker in ("wiring", "chain_in", '"main"', "select_only"):
             assert marker in text
 
+    def test_step_3_only_declares_proven_mapper_guarantees(self) -> None:
+        text = load_step_chat_skill(GuidedStep.STEP_3_TRANSFORMS)
+        assert "mapping **keys**" in text
+        assert "immediate upstream contract guarantees" in text
+        assert "mapped output **targets**" in text
+        assert "unproven source" in text
+
     def test_full_guided_skill_includes_wiring_constraint_labels(self) -> None:
         assert "chain_in" in load_guided_skill()
 

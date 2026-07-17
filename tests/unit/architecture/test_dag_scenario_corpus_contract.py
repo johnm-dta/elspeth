@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 import sys
 from copy import deepcopy
@@ -207,8 +209,8 @@ EXPECTED_STATUS_MATRIX = {
         "partial",
         "partial",
         "partial",
-        "fail",
-        "unknown",
+        "partial",
+        "partial",
         "pass",
         "fail",
         "unknown",
@@ -319,6 +321,9 @@ EXPECTED_ASSESSMENT_LOCATORS = {
         "tests/unit/engine/test_processor.py::TestProcessRowMultiRowOutput",
         "tests/property/audit/test_fork_join_balance.py::TestForkRecoveryInvariant::test_expand_token_persists_per_child_payload",
         "tests/integration/core/test_batch_membership_contention.py",
+        "tests/unit/core/landscape/repository_integration/test_recorder_tokens.py::TestAtomicTokenOperations::test_expand_token_records_batch_parent_outcome_atomically",
+        "tests/testcontainer/core/test_token_outcome_atomicity_postgres.py::test_postgres_batch_expansion_claims_batch_once_under_contention",
+        "tests/unit/core/landscape/test_token_recording.py::TestExpandToken::test_batch_expansion_claim_is_scoped_to_batch_not_selected_parent",
     ),
     "runtime-disposition-drains": (
         "tests/unit/engine/test_scheduler_drain_characterization.py::test_sink_bound_result_parks_pending_sink_with_fenced_owner_and_tags_result",
@@ -353,6 +358,7 @@ EXPECTED_ASSESSMENT_EVIDENCE = tuple(
     for evidence_group, locators in EXPECTED_ASSESSMENT_LOCATORS.items()
     for index, locator in enumerate(locators, start=1)
 )
+EXPECTED_EVIDENCE_REGISTRY_SHA256 = "2fc77397f0ef8bba5ca54d7516c4b1cda61ad4c1236afe4d37bdd39cd7150068"
 
 EXPECTED_HARNESS_EVIDENCE = (
     (
@@ -371,6 +377,8 @@ EXPECTED_INPUT_CSV = b"id,value\n1,10\n2,20\n3,30\n"
 
 DAG_HUB_PATH = REPOSITORY_ROOT / "docs/architecture/dag/README.md"
 CORPUS_README_PATH = REPOSITORY_ROOT / "docs/architecture/dag/scenario-corpus/README.md"
+CURRENT_ASSESSMENT_ROOT = REPOSITORY_ROOT / "docs/architecture/dag/assessments/2026-07-18-0319"
+CURRENT_ASSESSMENT_DOCUMENTS = tuple(sorted(CURRENT_ASSESSMENT_ROOT.rglob("*.md")))
 ACTIVE_CORPUS_ISSUE = "elspeth-ef29ef6ba4"
 
 EXPECTED_HAPPY_PATH_YAML = b"""sources:
@@ -507,7 +515,7 @@ def test_scenario_corpus_readme_links_manifest_criteria_and_active_issue() -> No
     assert f"filigree show {ACTIVE_CORPUS_ISSUE} --json" in content
 
 
-@pytest.mark.parametrize("document", [DAG_HUB_PATH, CORPUS_README_PATH])
+@pytest.mark.parametrize("document", [DAG_HUB_PATH, CORPUS_README_PATH, *CURRENT_ASSESSMENT_DOCUMENTS])
 def test_dag_corpus_document_repository_relative_links_resolve(document: Path) -> None:
     assert _missing_repository_relative_link_targets(document) == ()
 
@@ -1051,7 +1059,7 @@ def test_manifest_has_exact_inventory_status_matrix_and_task_3_cases() -> None:
     assert manifest.verdict == "not_complete"
 
 
-def test_manifest_pins_every_exact_current_assessment_pytest_locator() -> None:
+def test_manifest_pins_every_exact_current_assessment_evidence_record() -> None:
     manifest = load_manifest()
 
     assessment_evidence = tuple((reference.id, reference.locator) for reference in manifest.evidence if reference.kind == "pytest")
@@ -1060,11 +1068,17 @@ def test_manifest_pins_every_exact_current_assessment_pytest_locator() -> None:
     )
     assert assessment_evidence == EXPECTED_ASSESSMENT_EVIDENCE
     assert harness_evidence == EXPECTED_HARNESS_EVIDENCE
-    assert len(manifest.evidence) == 49
-    assert len(assessment_evidence) == 47
+    assert len(manifest.evidence) == 52
+    assert len(assessment_evidence) == 50
     assert len(harness_evidence) == 2
-    assert len({reference.id for reference in manifest.evidence}) == 49
-    assert len({reference.locator for reference in manifest.evidence}) == 49
+    assert len({reference.id for reference in manifest.evidence}) == 52
+    assert len({reference.locator for reference in manifest.evidence}) == 52
+    normalized_registry = json.dumps(
+        [reference.model_dump(mode="json") for reference in manifest.evidence],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    assert hashlib.sha256(normalized_registry).hexdigest() == EXPECTED_EVIDENCE_REGISTRY_SHA256
 
 
 def test_task_3_cases_and_harness_references_have_exact_atomic_parity() -> None:
@@ -1359,14 +1373,8 @@ def test_manifest_gap_ownership_and_not_applicable_reasons_follow_the_approved_r
                 continue
             if scenario.id == "row-union-interleave":
                 expected_owner = "elspeth-a5b86149d4"
-            elif scenario.id == "row-expansion-parent-child-recovery" and dimension in {
-                "contracts",
-                "runtime",
-                "audit",
-                "recovery",
-                "concurrency",
-            }:
-                expected_owner = "elspeth-a25e9c009e"
+            elif scenario.id == "row-expansion-parent-child-recovery" and dimension == "recovery":
+                expected_owner = "elspeth-7cdc4da434"
             elif dimension == "guided":
                 expected_owner = "elspeth-7e2dd67275"
             elif dimension == "round_trip":
@@ -1377,6 +1385,74 @@ def test_manifest_gap_ownership_and_not_applicable_reasons_follow_the_approved_r
             assert cell.exit_gate is not None
             assert "corpus" in cell.exit_gate.lower()
             assert "pass" in cell.exit_gate.lower()
+
+
+def test_row_expansion_delta_is_backed_by_repaired_cross_backend_evidence() -> None:
+    manifest = load_manifest()
+    references = {reference.id: reference for reference in manifest.evidence}
+    unit = references["cardinality-identity-09"]
+    postgres = references["cardinality-identity-10"]
+    replay = references["cardinality-identity-11"]
+
+    assert unit.locator == (
+        "tests/unit/core/landscape/repository_integration/test_recorder_tokens.py"
+        "::TestAtomicTokenOperations::test_expand_token_records_batch_parent_outcome_atomically"
+    )
+    assert unit.stages == ("runtime", "audit")
+    assert postgres.locator == (
+        "tests/testcontainer/core/test_token_outcome_atomicity_postgres.py"
+        "::test_postgres_batch_expansion_claims_batch_once_under_contention"
+    )
+    assert postgres.stages == ("runtime", "audit")
+    assert replay.locator == (
+        "tests/unit/core/landscape/test_token_recording.py"
+        "::TestExpandToken::test_batch_expansion_claim_is_scoped_to_batch_not_selected_parent"
+    )
+    assert replay.stages == ("runtime", "audit")
+
+    scenario = next(item for item in manifest.scenarios if item.id == "row-expansion-parent-child-recovery")
+    affected_dimensions: tuple[Dimension, ...] = ("contracts", "runtime", "audit", "recovery", "concurrency")
+    assert {dimension: scenario.dimensions[dimension].evidence for dimension in affected_dimensions} == {
+        "contracts": (
+            "cardinality-identity-02",
+            "cardinality-identity-03",
+            "cardinality-identity-04",
+            "cardinality-identity-05",
+            "cardinality-identity-06",
+            "cardinality-identity-07",
+            "cardinality-identity-09",
+            "cardinality-identity-10",
+            "cardinality-identity-11",
+        ),
+        "runtime": (
+            "cardinality-identity-04",
+            "cardinality-identity-05",
+            "cardinality-identity-06",
+            "cardinality-identity-07",
+            "cardinality-identity-09",
+            "cardinality-identity-10",
+            "cardinality-identity-11",
+        ),
+        "audit": (
+            "cardinality-identity-02",
+            "cardinality-identity-03",
+            "cardinality-identity-04",
+            "cardinality-identity-05",
+            "cardinality-identity-07",
+            "cardinality-identity-09",
+            "cardinality-identity-10",
+            "cardinality-identity-11",
+        ),
+        "recovery": ("cardinality-identity-07",),
+        "concurrency": ("cardinality-identity-10",),
+    }
+    assert scenario.dimensions["recovery"].status == "partial"
+    assert scenario.dimensions["recovery"].owner_issue == "elspeth-7cdc4da434"
+    assert scenario.dimensions["recovery"].evidence == ("cardinality-identity-07",)
+    assert scenario.dimensions["concurrency"].status == "partial"
+    for dimension in ("contracts", "runtime", "audit", "concurrency"):
+        assert scenario.dimensions[dimension].owner_issue == "elspeth-ef29ef6ba4"
+    assert all(cell.owner_issue != "elspeth-a25e9c009e" for cell in scenario.dimensions.values())
 
 
 def test_manifest_rejects_non_mapping_yaml(tmp_path: Path) -> None:

@@ -8,19 +8,19 @@ mature through repeated assessments without erasing earlier conclusions.
 
 | Field | Current value |
 | --- | --- |
-| Assessment | [2026-07-17 17:39 AEST](assessments/2026-07-17-1739/02-scorecard-and-scenario-matrix.md) |
-| Baseline | `release/0.7.1` at `6e8a6bf5f2f8542bf5b95b1669ce3d3df68d93e3` |
+| Assessment | [2026-07-18 03:19 AEST](assessments/2026-07-18-0319/02-scorecard-and-scenario-delta.md) |
+| Baseline | `codex/dag-scenario-corpus` at `0235739274b534bd9e4e2b859bdd94a0b6a09651`, integrating `release/0.7.1` at `a5ec6e3d5` |
 | Verdict | **Not complete** |
 | Normalized maturity indicator | **Not calculated**; mandatory dimensions remain `U`, so the permanent framework forbids an aggregate |
 | Strongest layer | Structural validation |
 | Weakest layers | Guided authoring, secret-safe graph identity/audit, scale, and maintained contracts |
 
 The current assessment concludes that Elspeth's DAG is structurally capable but
-not production-complete as a whole product. The seed assessment's two subtype
-defects and disposition proof package are closed. Hard gates remain in replay
-identity, output/journal atomicity, crash and registered-process proof,
-secret-bearing graph surfaces, guided/browser parity, scale, and the normative
-contract.
+not production-complete as a whole product. Expansion replay identity,
+output-contract serialization, and committed sidecar publication are now
+closed. Hard gates remain in source and parent/child process-death proof,
+registered-process and long-plugin contention, secret-bearing graph surfaces,
+guided/browser parity, scale, and the normative contract.
 
 ## Change since the seed assessment
 
@@ -32,6 +32,9 @@ the following post-seed work at a new baseline:
 | 2026-07-17 | R1: normal dispositions accepted a reclaimed sink-redrive lease (`elspeth-f8f9272b68`) | Fixed: TS-07–TS-10 require the transform-lease subtype and preserve the complete durable image on refusal. | [`token-scheduler-state-engine.md`](../token-scheduler-state-engine.md#durable-subtype-admission-truth-table-v1) and the disposition truth-table regression matrix |
 | 2026-07-17 | R2: malformed `PENDING_SINK` rows were claimable (`elspeth-d8e172676c`) | Fixed: TS-04 uses the complete bundle predicate in both diagnosis and CAS admission. | Pending-sink incomplete/legal/atomic-race parameterizations |
 | 2026-07-17 | TS-07–TS-10 effects, guards, and rollback proof (`elspeth-1076e2716a`) | Verified: exact state, payload, lease, event, branch-loss, owner, membership, subtype, and rollback cells are maintained as one matrix. TS-10 also refuses malformed bundles at the writer boundary. | [Disposition follow-up evidence](../token-scheduler-state-engine.md#disposition-follow-up-executed-evidence--2026-07-17) |
+| 2026-07-18 | Expansion replay identity (`elspeth-a25e9c009e`) | Fixed: batch expansion consumes one durable claim, sequential replay is refused, and concurrent PostgreSQL attempts create one child set. | [Integration delta](assessments/2026-07-18-0319/02-scorecard-and-scenario-delta.md#closed-hard-gates) and live `cardinality-identity-09/10/11` evidence |
+| 2026-07-18 | Output-contract serialization (`elspeth-3335de38c2`) | Fixed: compatible observations merge under hash CAS and incompatible state fails closed across SQLite and PostgreSQL. | [Executed evidence](assessments/2026-07-18-0319/01-executed-evidence.md) |
+| 2026-07-18 | Sidecar journal commit ordering (`elspeth-d8d4d2849b`) | Fixed: a committed outbox publishes and recovers idempotently without recording failed transactions. | [Executed evidence](assessments/2026-07-18-0319/01-executed-evidence.md) |
 
 The reassessment confirms these closures. It also confirms selected fencing,
 idempotency, and atomicity improvements, but no mandatory scenario yet passes
@@ -46,18 +49,20 @@ the entire production-support lifecycle.
   mandatory dimensions, hard gates, and scenario corpus.
 - [Assessment framework](assessment-framework.md) — the repeatable workflow,
   evidence rules, scorecards, and templates.
-- [Current gap analysis](assessments/2026-07-17-1739/03-gap-analysis-and-remediation.md)
-  — the latest verdict and prioritized shore-up sequence.
-- [Current scorecard and scenario matrix](assessments/2026-07-17-1739/02-scorecard-and-scenario-matrix.md)
-  — normalized dimension scores, mandatory scenario cells, and hard-gate verdict.
-- [Current executed evidence](assessments/2026-07-17-1739/01-executed-evidence.md)
-  — exact commands, observed results, and limitations.
+- [Current scorecard and scenario delta](assessments/2026-07-18-0319/02-scorecard-and-scenario-delta.md)
+  — the full current dimension/scenario view and the narrow integration changes.
+- [Current executed evidence](assessments/2026-07-18-0319/01-executed-evidence.md)
+  — exact integration commands, observed results, and limitations.
+- [2026-07-17 full gap analysis](assessments/2026-07-17-1739/03-gap-analysis-and-remediation.md)
+  — the last full discovery assessment; the 2026-07-18 delta supersedes its
+  three now-closed hard-gate entries without rewriting the snapshot.
 
 ## Current hard-gate themes
 
 The current assessment groups the immediate blockers into five themes:
 
-1. Close replay/identity and remaining state/evidence atomicity defects.
+1. Close source and parent/child process-death seams plus the remaining
+   state/evidence atomicity proof.
 2. Keep raw secrets out of graph identity, metadata, persistence, exports, and diagnostics.
 3. Execute the deterministic crash and registered-process contention matrix.
 4. Deliver guided/freeform/browser parity and an explicit row-union contract.
@@ -93,6 +98,7 @@ code.
 
 | Date | Baseline | Verdict | Evidence |
 | --- | --- | --- | --- |
+| 2026-07-18 | `codex/dag-scenario-corpus` at `02357392` | Not complete — three hard gates closed; row-expansion Recovery and Concurrency are Partial; mandatory dimensions remain `U` | [Integration delta](assessments/2026-07-18-0319/02-scorecard-and-scenario-delta.md) |
 | 2026-07-17 | `release/0.7.1` at `6e8a6bf5` | Not complete — no aggregate while mandatory dimensions remain `U`; hard-gate failures are open | [Assessment package](assessments/2026-07-17-1739/02-scorecard-and-scenario-matrix.md) |
 | 2026-07-15 | `release/0.7.1` at `0dcd61ac` | Not complete — 2.4/5 with hard-gate failures | [Assessment package](assessments/2026-07-15-1415/04-dag-completeness-gap-analysis.md) |
 
@@ -106,6 +112,11 @@ assessments.
 The 2026-07-17 package is the first assessment to use the normalized
 15-dimension framework. It correctly withholds an aggregate because mandatory
 dimensions remain `U`; the seed's legacy 2.4 is not a comparison baseline.
+
+The 2026-07-18 package is an integration-triggered delta with a complete
+current matrix. It removes three closed defect gates, promotes only two
+row-expansion cells, and retains the same **Not complete** verdict and
+no-aggregate posture.
 
 ## How to iterate
 

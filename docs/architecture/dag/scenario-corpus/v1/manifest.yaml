@@ -155,6 +155,21 @@ evidence:
     locator: tests/integration/core/test_batch_membership_contention.py
     claim: Batch membership remains stable under selected contention.
     stages: [runtime, audit, recovery]
+  - id: cardinality-identity-09
+    kind: pytest
+    locator: tests/unit/core/landscape/repository_integration/test_recorder_tokens.py::TestAtomicTokenOperations::test_expand_token_records_batch_parent_outcome_atomically
+    claim: Batch expansion consumes its parent in the same transaction that creates children.
+    stages: [runtime, audit]
+  - id: cardinality-identity-10
+    kind: pytest
+    locator: tests/testcontainer/core/test_token_outcome_atomicity_postgres.py::test_postgres_batch_expansion_claims_batch_once_under_contention
+    claim: Concurrent PostgreSQL expansion attempts create one child set and one terminal batch claim.
+    stages: [runtime, audit]
+  - id: cardinality-identity-11
+    kind: pytest
+    locator: tests/unit/core/landscape/test_token_recording.py::TestExpandToken::test_batch_expansion_claim_is_scoped_to_batch_not_selected_parent
+    claim: Sequential replay through a different batch member is refused by the batch-wide expansion claim.
+    stages: [runtime, audit]
 
   - id: runtime-disposition-drains
     kind: pytest
@@ -606,8 +621,11 @@ scenarios:
           - cardinality-identity-05
           - cardinality-identity-06
           - cardinality-identity-07
-        reason: Happy-path cardinality evidence exists while the parent/child replay identity contract remains open.
-        owner_issue: elspeth-a25e9c009e
+          - cardinality-identity-09
+          - cardinality-identity-10
+          - cardinality-identity-11
+        reason: Atomic parent and batch claims now refuse duplicate expansion, but no production-path corpus contract case proves the complete parent/child identity contract.
+        owner_issue: elspeth-ef29ef6ba4
         exit_gate: The expansion corpus contract case passes stable parent/child identity assertions across replay.
       runtime: &expansion_runtime_partial
         status: partial
@@ -616,8 +634,11 @@ scenarios:
           - cardinality-identity-05
           - cardinality-identity-06
           - cardinality-identity-07
-        reason: Happy-path expansion runs, but replay can duplicate or ambiguously remint effective work.
-        owner_issue: elspeth-a25e9c009e
+          - cardinality-identity-09
+          - cardinality-identity-10
+          - cardinality-identity-11
+        reason: Batch expansion now consumes one durable claim and refuses replay, but no production-path corpus runtime case asserts exact child work and outcomes across replay.
+        owner_issue: elspeth-ef29ef6ba4
         exit_gate: The expansion corpus runtime case passes exact-once effective child work assertions across replay.
       audit: &expansion_audit_partial
         status: partial
@@ -627,19 +648,23 @@ scenarios:
           - cardinality-identity-04
           - cardinality-identity-05
           - cardinality-identity-07
-        reason: Selected expansion audit facts pass without complete replay-stable parent/child evidence.
-        owner_issue: elspeth-a25e9c009e
+          - cardinality-identity-09
+          - cardinality-identity-10
+          - cardinality-identity-11
+        reason: Selected expansion outcomes, payloads, and batch claims pass without complete production lineage, payload, and outcome reconciliation.
+        owner_issue: elspeth-ef29ef6ba4
         exit_gate: The expansion corpus audit case passes stable parent/child outcome and payload assertions across replay.
-      recovery: &expansion_recovery_fail
-        status: fail
+      recovery: &expansion_recovery_partial
+        status: partial
         evidence: [cardinality-identity-07]
-        reason: Expansion recovery can duplicate or ambiguously remint effective child work.
-        owner_issue: elspeth-a25e9c009e
-        exit_gate: The expansion corpus recovery case passes with the same durable child identities or a clean conflict.
-      concurrency: &expansion_concurrency_unknown
-        status: unknown
-        reason: Parent/child replay and contention have no complete effective-ownership proof.
-        owner_issue: elspeth-a25e9c009e
+        reason: Durable per-child payload evidence exists and the reproduced expansion bypass is closed, but the child-enqueue-before-parent-disposition process-death seam remains unexecuted.
+        owner_issue: elspeth-7cdc4da434
+        exit_gate: The expansion corpus recovery case passes child-enqueue interruption with stable child identities and deterministic parent reconciliation.
+      concurrency: &expansion_concurrency_partial
+        status: partial
+        evidence: [cardinality-identity-10]
+        reason: PostgreSQL different-member contention yields one child set and one terminal batch claim, but no complete parent/child corpus contention matrix exists.
+        owner_issue: elspeth-ef29ef6ba4
         exit_gate: The expansion corpus contention case passes single-effective-owner assertions for every child identity.
       freeform: *freeform_pass
       guided: *guided_fail

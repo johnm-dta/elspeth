@@ -99,6 +99,7 @@ from elspeth.web.composer.redaction import (
     _PipelineNodeModel,
     _PipelineOutputModel,
     _RepairToolCallShadowModel,
+    _SetPipelineNamedSourceModel,
     _SetPipelineSourceModel,
     _SpliceTransformNodeModel,
 )
@@ -197,6 +198,16 @@ def _set_pipeline_source_strategy() -> st.SearchStrategy[_SetPipelineSourceModel
     )
 
 
+def _set_pipeline_named_source_strategy() -> st.SearchStrategy[_SetPipelineNamedSourceModel]:
+    return st.builds(
+        _SetPipelineNamedSourceModel,
+        plugin=st.text(),
+        on_success=st.text(),
+        options=_OPTIONS_STRATEGY,
+        on_validation_failure=st.one_of(st.none(), st.text()),
+    )
+
+
 def _pipeline_node_strategy() -> st.SearchStrategy[_PipelineNodeModel]:
     return st.builds(
         _PipelineNodeModel,
@@ -276,6 +287,7 @@ def _repair_tool_call_strategy() -> st.SearchStrategy[_RepairToolCallShadowModel
 
 st.register_type_strategy(SetSourceFromBlobArgumentsModel, _set_source_from_blob_strategy())
 st.register_type_strategy(_SetPipelineSourceModel, _set_pipeline_source_strategy())
+st.register_type_strategy(_SetPipelineNamedSourceModel, _set_pipeline_named_source_strategy())
 st.register_type_strategy(_PipelineNodeModel, _pipeline_node_strategy())
 st.register_type_strategy(_PipelineOutputModel, _pipeline_output_strategy())
 st.register_type_strategy(_SpliceTransformNodeModel, _splice_transform_node_strategy())
@@ -292,6 +304,7 @@ st.register_type_strategy(_RepairToolCallShadowModel, _repair_tool_call_strategy
 _OVERRIDE_REGISTERED_MODELS: tuple[type[BaseModel], ...] = (
     SetSourceFromBlobArgumentsModel,
     _SetPipelineSourceModel,
+    _SetPipelineNamedSourceModel,
     _PipelineNodeModel,
     _PipelineOutputModel,
     _SpliceTransformNodeModel,

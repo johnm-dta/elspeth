@@ -48,6 +48,7 @@ from elspeth.web.composer.progress import (
     tool_completed_progress_event,
     tool_started_progress_event,
 )
+from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import SetPipelineArgumentsModel
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.composer.tools._common import RuntimePreflight, ToolContext, ToolResult
@@ -342,6 +343,9 @@ def _parse_response_tool_calls(response: Any) -> tuple[Any, tuple[_ParsedToolCal
             raise PipelinePlannerError("planner tool call metadata is malformed", code="MALFORMED_RESPONSE")
         arguments = _parse_json_object(raw_arguments, label=f"{name} arguments")
         parsed.append(_ParsedToolCall(call_id, name, cast(str, raw_arguments), arguments))
+    terminal_calls = tuple(call for call in parsed if call.name == _TERMINAL_TOOL_NAME)
+    if terminal_calls and len(parsed) != 1:
+        raise PipelinePlannerError("terminal proposal call must be the only tool call", code="MALFORMED_RESPONSE")
     return message, tuple(parsed)
 
 
@@ -391,6 +395,24 @@ def _canonical_schema_feedback() -> dict[str, Any]:
                     "severity": "high",
                     "error_code": "canonical_schema",
                     "error_class": "SchemaValidationError",
+                }
+            ],
+        },
+    }
+
+
+def _allowlisted_argument_feedback(error: ToolArgumentError) -> Mapping[str, Any]:
+    """Project a semantic argument failure without its message or input."""
+    return {
+        "success": False,
+        "validation": {
+            "is_valid": False,
+            "errors": [
+                {
+                    "component": error.argument,
+                    "severity": "high",
+                    "error_code": error.code or "argument_error",
+                    "error_class": "ToolArgumentError",
                 }
             ],
         },
@@ -557,7 +579,7 @@ async def _plan_pipeline_inner(
     repair_count = 0
     seen_discovery: set[tuple[str, str]] = set()
 
-    async def call_model() -> Any:
+    async def call_model() -> tuple[Any, tuple[_ParsedToolCall, ...]]:
         nonlocal total_calls, total_cost
         marked_messages, marked_tools = (
             apply_anthropic_cache_markers(messages, tools)
@@ -586,6 +608,12 @@ async def _plan_pipeline_inner(
                 "messages": marked_messages,
                 "tools": marked_tools,
                 "max_tokens": budget_policy.max_completion_tokens,
+                # The planner loop is the sole retry owner. LiteLLM accepts
+                # both spellings and gives num_retries precedence; pin both
+                # to zero so every physical attempt consumes one audited
+                # ordinal and one provider-call budget unit.
+                "num_retries": 0,
+                "max_retries": 0,
             }
             if model_config.temperature is not None:
                 kwargs["temperature"] = model_config.temperature
@@ -686,32 +714,46 @@ async def _plan_pipeline_inner(
                 planner_policy_hash=budget_policy.audit_hash,
                 planner_call_ordinal=ordinal,
             )
-            recorder.record_llm_call(call)
             # Cost enforcement is intentionally post-call and pre-parse.  Do
             # not inspect provider content or dispatch tools before it passes.
             if call.provider_cost is None:
+                recorder.record_llm_call(call)
                 raise PipelinePlannerError("planner provider cost metadata is missing or malformed", code="COST_UNAVAILABLE")
             if call.completion_tokens is not None and call.completion_tokens > budget_policy.max_completion_tokens:
+                recorder.record_llm_call(call)
                 raise PipelinePlannerError(
                     "planner provider reported a completion token limit overage",
                     code="COMPLETION_TOKENS_EXCEEDED",
                 )
             total_cost += Decimal(str(call.provider_cost))
             if total_cost > budget_policy.max_cumulative_provider_cost:
+                recorder.record_llm_call(call)
                 raise PipelinePlannerError("planner provider cost continuation cap exceeded", code="COST_CAP_EXCEEDED")
-            return response
+            try:
+                parsed_response = _parse_response_tool_calls(response)
+            except PipelinePlannerError as exc:
+                if exc.code != "MALFORMED_RESPONSE":
+                    raise
+                recorder.record_llm_call(
+                    replace(
+                        call,
+                        status=ComposerLLMCallStatus.MALFORMED_RESPONSE,
+                        error_class=type(exc).__name__,
+                        error_message=exc.code,
+                    )
+                )
+                raise
+            recorder.record_llm_call(call)
+            return parsed_response
         raise AssertionError("provider attempt loop exited without return or exception")
 
     while True:
-        response = await call_model()
-        message, calls = _parse_response_tool_calls(response)
+        message, calls = await call_model()
         if len(calls) > model_config.max_tool_calls_per_turn:
             raise PipelinePlannerError("planner per-turn tool call budget exhausted", code="TOOL_CALLS_EXHAUSTED")
 
         terminal_calls = tuple(call for call in calls if call.name == _TERMINAL_TOOL_NAME)
         if terminal_calls:
-            if len(calls) != 1:
-                raise PipelinePlannerError("terminal proposal call must be the only tool call", code="MALFORMED_RESPONSE")
             composition_turns += 1
             if composition_turns > model_config.max_composition_turns:
                 raise PipelinePlannerError("planner composition turn budget exhausted", code="COMPOSITION_EXHAUSTED")
@@ -741,7 +783,21 @@ async def _plan_pipeline_inner(
                 continue
             assert pipeline is not None
             candidate_context = replace(request_context, tool_arguments_hash=stable_hash(call.arguments))
-            candidate = build_set_pipeline_candidate(pipeline, current_state, candidate_context)
+            try:
+                candidate = build_set_pipeline_candidate(pipeline, current_state, candidate_context)
+            except ToolArgumentError as exc:
+                repair_count += 1
+                if repair_count > repair_budget:
+                    raise PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED") from None
+                messages.append(_assistant_tool_calls_message(message, calls))
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.call_id,
+                        "content": canonical_json(_allowlisted_argument_feedback(exc)),
+                    }
+                )
+                continue
             if not candidate.acceptable:
                 repair_count += 1
                 if repair_count > repair_budget:

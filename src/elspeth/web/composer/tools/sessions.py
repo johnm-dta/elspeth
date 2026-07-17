@@ -318,12 +318,6 @@ def build_set_pipeline_candidate(
         for source_name, source_model in validated.sources.items():
             if not source_name.strip():
                 return _failure_result(state, "set_pipeline sources keys must be non-empty source names.")
-            if source_model.blob_id is not None or source_model.inline_blob is not None:
-                return _failure_result(
-                    state,
-                    f"set_pipeline sources.{source_name} cannot use blob_id or inline_blob in v1. "
-                    "Bind blob-backed sources with set_source_from_blob, or use source for a single blob-backed pipeline.",
-                )
             src_plugin = source_model.plugin
             src_options = dict(source_model.options)
             endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(src_plugin, src_options)

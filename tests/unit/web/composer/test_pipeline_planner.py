@@ -436,6 +436,88 @@ async def test_invalid_candidate_gets_allowlisted_feedback_then_repairs(
 
 
 @pytest.mark.asyncio
+async def test_safe_candidate_argument_error_gets_closed_feedback_then_repairs_without_custody(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    engine, origin = _session_context()
+    raw_canary = "RAW_INVALID_FILENAME_CONTENT_CANARY"
+    invalid = _inline_pipeline(tmp_path)
+    invalid["source"]["inline_blob"]["filename"] = ""
+    invalid["source"]["inline_blob"]["content"] = raw_canary
+    completion = _ScriptedCompletion(
+        _response(("emit_pipeline_proposal", {"pipeline": invalid})),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+
+    proposal = await _plan(
+        tmp_path=tmp_path,
+        tool_context=tool_context,
+        completion=completion,
+        repair_budget=1,
+        originating_message=origin,
+        custody_config=PlannerCustodyConfig(
+            data_dir=str(tmp_path),
+            session_engine=engine,
+            max_storage_per_session=1_000_000,
+            secret_service=None,
+            runtime_preflight=None,
+        ),
+    )
+
+    assert proposal.repair_count == 1
+    feedback = json.loads(completion.requests[1]["messages"][-1]["content"])
+    assert set(feedback) == {"success", "validation"}
+    assert set(feedback["validation"]) == {"is_valid", "errors"}
+    assert feedback["validation"]["is_valid"] is False
+    assert feedback["validation"]["errors"] == [
+        {
+            "component": "filename",
+            "severity": "high",
+            "error_code": "argument_error",
+            "error_class": "ToolArgumentError",
+        }
+    ]
+    assert raw_canary not in canonical_json(feedback)
+    with engine.begin() as conn:
+        assert conn.execute(select(func.count()).select_from(blobs_table)).scalar_one() == 0
+        assert conn.execute(select(func.count()).select_from(composition_proposals_table)).scalar_one() == 0
+    assert tuple(path for path in (tmp_path / "blobs").rglob("*") if path.is_file()) == ()
+
+
+@pytest.mark.asyncio
+async def test_safe_candidate_argument_error_exhaustion_fails_without_custody(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    engine, origin = _session_context()
+    invalid = _inline_pipeline(tmp_path)
+    invalid["source"]["inline_blob"]["filename"] = ""
+    completion = _ScriptedCompletion(_response(("emit_pipeline_proposal", {"pipeline": invalid})))
+
+    with pytest.raises(PipelinePlannerError, match="repair budget exhausted"):
+        await _plan(
+            tmp_path=tmp_path,
+            tool_context=tool_context,
+            completion=completion,
+            repair_budget=0,
+            originating_message=origin,
+            custody_config=PlannerCustodyConfig(
+                data_dir=str(tmp_path),
+                session_engine=engine,
+                max_storage_per_session=1_000_000,
+                secret_service=None,
+                runtime_preflight=None,
+            ),
+        )
+
+    with engine.begin() as conn:
+        assert conn.execute(select(func.count()).select_from(blobs_table)).scalar_one() == 0
+        assert conn.execute(select(func.count()).select_from(composition_proposals_table)).scalar_one() == 0
+    assert tuple(path for path in (tmp_path / "blobs").rglob("*") if path.is_file()) == ()
+
+
+@pytest.mark.asyncio
 async def test_exact_request_bytes_and_post_call_cost_caps_fail_closed(
     tmp_path: Path,
     tool_context: ToolContext,
@@ -614,6 +696,8 @@ async def test_each_transient_api_retry_consumes_and_audits_a_wire_attempt(
     assert deep_thaw(proposal.pipeline) == _pipeline(tmp_path)
     assert len(completion.requests) == 2
     assert [request["max_tokens"] for request in completion.requests] == [800, 800]
+    assert [request["num_retries"] for request in completion.requests] == [0, 0]
+    assert [request["max_retries"] for request in completion.requests] == [0, 0]
     assert [call.planner_call_ordinal for call in recorder.llm_calls] == [1, 2]
     assert [call.status.value for call in recorder.llm_calls] == ["api_error", "success"]
     assert raw_canary not in canonical_json([call.to_dict() for call in recorder.llm_calls])
@@ -980,6 +1064,20 @@ async def test_malformed_provider_tool_call_matrix_fails_without_dispatch(
     with pytest.raises(PipelinePlannerError):
         await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion, recorder=recorder)
     assert len(recorder.llm_calls) == 1
+    audit = recorder.llm_calls[0]
+    sent = completion.requests[0]
+    assert audit.status.value == "malformed_response"
+    assert audit.messages_hash == stable_hash(sent["messages"])
+    assert audit.tools_spec_hash == stable_hash(sent["tools"])
+    assert audit.prompt_tokens == response.usage.get("prompt_tokens")
+    assert audit.completion_tokens == response.usage.get("completion_tokens")
+    assert audit.total_tokens == response.usage.get("total_tokens")
+    assert audit.provider_cost == response.usage["cost"]
+    assert audit.max_completion_tokens_requested == 800
+    assert audit.planner_policy_hash == _budget().audit_hash
+    assert audit.planner_call_ordinal == 1
+    assert audit.error_class == "PipelinePlannerError"
+    assert audit.error_message == "MALFORMED_RESPONSE"
     assert recorder.invocations == ()
 
 

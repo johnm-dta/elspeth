@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 from copy import deepcopy
 from typing import Any
@@ -122,3 +123,76 @@ def test_canonical_schema_accessor_returns_isolated_registered_copies() -> None:
     first["properties"]["source"]["properties"]["plugin"]["type"] = "integer"
 
     assert module.canonical_set_pipeline_schema() == registered
+
+
+def _schema_contract_module() -> Any:
+    return importlib.import_module("elspeth.web.composer.tools.schema_contract")
+
+
+def _node_at(schema: dict[str, Any], path: tuple[str, ...]) -> dict[str, Any]:
+    node: Any = schema
+    for segment in path:
+        node = node[segment]
+    assert isinstance(node, dict)
+    return node
+
+
+def test_registered_schema_is_directionally_compatible_with_full_runtime_model() -> None:
+    module = _schema_contract_module()
+    module.assert_set_pipeline_schema_compatible()
+
+
+def test_directional_guard_resolves_advertised_schema_references() -> None:
+    module = _schema_contract_module()
+    advertised = deepcopy(_registered_set_pipeline_schema())
+    advertised["$defs"] = {"AdvertisedNode": advertised["properties"]["nodes"]["items"]}
+    advertised["properties"]["nodes"]["items"] = {"$ref": "#/$defs/AdvertisedNode"}
+
+    module.assert_set_pipeline_schema_compatible(advertised_schema=advertised)
+
+
+def test_directional_guard_does_not_replace_an_explicit_empty_schema() -> None:
+    module = _schema_contract_module()
+
+    with pytest.raises(RuntimeError, match="typed runtime branch is not explicitly advertised"):
+        module.assert_set_pipeline_schema_compatible(advertised_schema={})
+
+
+@pytest.mark.parametrize(
+    ("path", "non_null_type"),
+    [
+        (("properties", "source", "properties", "inline_blob", "properties", "description"), "string"),
+        (("properties", "sources", "additionalProperties", "properties", "on_validation_failure"), "string"),
+        (("properties", "nodes", "items", "properties", "trigger", "properties", "timeout_seconds"), "number"),
+        (("properties", "edges", "items", "properties", "label"), "string"),
+        (("properties", "outputs", "items", "properties", "on_write_failure"), "string"),
+    ],
+)
+def test_directional_guard_rejects_advertised_nullability_narrowing(
+    path: tuple[str, ...],
+    non_null_type: str,
+) -> None:
+    module = _schema_contract_module()
+    advertised = deepcopy(_registered_set_pipeline_schema())
+    _node_at(advertised, path)["type"] = non_null_type
+
+    with pytest.raises(RuntimeError, match="null"):
+        module.assert_set_pipeline_schema_compatible(advertised_schema=advertised)
+
+
+def test_directional_guard_rejects_advertised_requiredness_narrowing() -> None:
+    module = _schema_contract_module()
+    advertised = deepcopy(_registered_set_pipeline_schema())
+    advertised["required"].append("source")
+
+    with pytest.raises(RuntimeError, match="required"):
+        module.assert_set_pipeline_schema_compatible(advertised_schema=advertised)
+
+
+def test_directional_guard_requires_every_typed_branch_to_be_advertised() -> None:
+    module = _schema_contract_module()
+    advertised = deepcopy(_registered_set_pipeline_schema())
+    del advertised["properties"]["nodes"]["items"]["properties"]["trigger"]
+
+    with pytest.raises(RuntimeError, match=r"nodes\[\]\.trigger"):
+        module.assert_set_pipeline_schema_compatible(advertised_schema=advertised)

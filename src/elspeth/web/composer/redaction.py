@@ -1219,7 +1219,24 @@ class _InlineBlobModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class _SetPipelineSourceModel(BaseModel):
+class _SetPipelineNamedSourceModel(BaseModel):
+    """Typed fields shared by every named ``set_pipeline.sources`` root.
+
+    Named sources deliberately exclude ``blob_id`` and ``inline_blob``:
+    those custody-bearing fields are supported only by the legacy singular
+    ``source`` branch. Keeping a distinct runtime model makes that semantic
+    boundary visible to the advertised-schema compatibility guard.
+    """
+
+    plugin: str
+    on_success: str
+    options: _LlmJsonObject = Field(default_factory=dict)
+    on_validation_failure: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _SetPipelineSourceModel(_SetPipelineNamedSourceModel):
     """Nested model for ``set_pipeline.source``.
 
     Mirrors the JSON schema's ``source`` sub-object declared at
@@ -1269,14 +1286,8 @@ class _SetPipelineSourceModel(BaseModel):
     ``apply_pipeline_recipe`` empty-``recipe_name`` handling.
     """
 
-    plugin: str
-    on_success: str
     blob_id: str | None = None
-    options: _LlmJsonObject = Field(default_factory=dict)
-    on_validation_failure: str | None = None
     inline_blob: _InlineBlobModel | None = None
-
-    model_config = ConfigDict(extra="forbid")
 
 
 class _NodeTriggerModel(BaseModel):
@@ -1546,7 +1557,7 @@ class SetPipelineArgumentsModel(BaseModel):
     """
 
     source: _SetPipelineSourceModel | None = None
-    sources: dict[str, _SetPipelineSourceModel] | None = None
+    sources: dict[str, _SetPipelineNamedSourceModel] | None = None
     nodes: list[_PipelineNodeModel]
     edges: list[_PipelineEdgeModel]
     outputs: list[_PipelineOutputModel]

@@ -13,11 +13,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.engine import Connection, RowMapping
 
 from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS, CoordinationToken
-from elspeth.contracts.enums import TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.scheduler import (
     BarrierEmission,
@@ -29,8 +28,7 @@ from elspeth.contracts.scheduler import (
     TokenWorkItem,
     TokenWorkStatus,
 )
-from elspeth.core.canonical import canonical_json
-from elspeth.core.ids import generate_id
+from elspeth.core.landscape.data_flow.outcomes import record_buffered_outcome_guarded
 from elspeth.core.landscape.database import Tier1Engine, begin_write
 from elspeth.core.landscape.execution.batches import add_batch_member_guarded
 from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
@@ -49,7 +47,6 @@ from elspeth.core.landscape.scheduler.work_items import (
 )
 from elspeth.core.landscape.schema import (
     blocked_barrier_hold_clause,
-    token_outcomes_table,
     token_work_items_table,
 )
 
@@ -971,12 +968,6 @@ class BarrierJournalRepository:
                     expected_run_id=run_id,
                 )
             if buffered_outcome is not None:
-                if not buffered_outcome.batch_id:
-                    # ADR-019 BUFFERED rule replicated: batch_id REQUIRED for path='buffered'.
-                    raise AuditIntegrityError(
-                        f"Scheduler barrier adoption for run_id={run_id!r} token_id={token_id!r} requires a "
-                        "non-empty buffered_outcome.batch_id (ADR-019: (NULL, BUFFERED) requires batch_id)."
-                    )
                 barrier_blocked_at = conn.execute(
                     select(token_work_items_table.c.barrier_blocked_at).where(token_work_items_table.c.work_item_id == work_item_id)
                 ).scalar_one()
@@ -989,26 +980,18 @@ class BarrierJournalRepository:
                 if barrier_blocked_at.tzinfo is None:
                     barrier_blocked_at = barrier_blocked_at.replace(tzinfo=UTC)
                 caller_context = {} if buffered_outcome.context is None else dict(buffered_outcome.context)
-                outcome_id = f"out_{generate_id()[:12]}"
-                conn.execute(
-                    insert(token_outcomes_table).values(
-                        outcome_id=outcome_id,
-                        run_id=run_id,
-                        token_id=token_id,
-                        outcome=None,
-                        path=TerminalPath.BUFFERED.value,
-                        completed=0,
-                        recorded_at=barrier_blocked_at,
-                        batch_id=buffered_outcome.batch_id,
-                        context_json=canonical_json(
-                            {
-                                **caller_context,
-                                # Honest provenance — caller context cannot mask it.
-                                "adopted_epoch": epoch,
-                                "adopted_at": now.isoformat(),
-                            }
-                        ),
-                    )
+                outcome_id = record_buffered_outcome_guarded(
+                    conn,
+                    run_id=run_id,
+                    token_id=token_id,
+                    batch_id=buffered_outcome.batch_id,
+                    recorded_at=barrier_blocked_at,
+                    context={
+                        **caller_context,
+                        # Honest provenance — caller context cannot mask it.
+                        "adopted_epoch": epoch,
+                        "adopted_at": now.isoformat(),
+                    },
                 )
         return BarrierAdoptionResult(adopted=True, barrier_adopted_epoch=epoch, outcome_id=outcome_id)
 

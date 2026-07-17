@@ -9,6 +9,7 @@ resume and explain.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import and_, or_, select
@@ -43,7 +44,7 @@ from elspeth.core.landscape.schema import (
     tokens_table,
 )
 
-__all__ = ["TokenOutcomeRepository"]
+__all__ = ["TokenOutcomeRepository", "record_buffered_outcome_guarded"]
 
 # IN-clause chunk size for token-id lock queries — stays under SQLite's
 # default 999 bound-parameter ceiling (the node_states.py convention) and
@@ -199,8 +200,8 @@ class TokenOutcomeRepository:
                 "changed its producing node_state during outcome validation."
             )
 
+    @staticmethod
     def _validate_outcome_fields(
-        self,
         outcome: TerminalOutcome | None,
         path: TerminalPath,
         *,
@@ -669,3 +670,57 @@ class TokenOutcomeRepository:
         )
         rows = self._ops.execute_fetchall(query)
         return [self._token_outcome_loader.load(r) for r in rows]
+
+
+def record_buffered_outcome_guarded(
+    conn: Connection,
+    *,
+    run_id: str,
+    token_id: str,
+    batch_id: str,
+    recorded_at: datetime,
+    context: Mapping[str, object] | None = None,
+) -> str:
+    """Record one backdated BUFFERED outcome inside a caller-owned transaction.
+
+    The scheduler barrier's fenced adoption transaction (ADR-030 §E.2) owns
+    ``conn`` and supplies the hold's durable ``barrier_blocked_at`` arrival
+    stamp as ``recorded_at`` — the audit's accept instant is invariant under
+    leader takeover, so backdating stays confined to this writer instead of
+    widening :meth:`TokenOutcomeRepository.record_token_outcome`. The ADR-019
+    (NULL, BUFFERED) discriminator rule runs through the SAME
+    ``_validate_outcome_fields`` validator as every repository-recorded
+    outcome, so a constraint change enforces on both paths.
+    """
+    TokenOutcomeRepository._validate_outcome_fields(
+        None,
+        TerminalPath.BUFFERED,
+        sink_name=None,
+        batch_id=batch_id,
+        fork_group_id=None,
+        join_group_id=None,
+        expand_group_id=None,
+        error_hash=None,
+    )
+    context_json = canonical_json(context) if context is not None else None
+    outcome_id = f"out_{generate_id()[:12]}"
+    stmt = token_outcomes_table.insert().values(
+        outcome_id=outcome_id,
+        run_id=run_id,
+        token_id=token_id,
+        outcome=None,
+        path=TerminalPath.BUFFERED.value,
+        completed=0,
+        recorded_at=recorded_at,
+        batch_id=batch_id,
+        context_json=context_json,
+    )
+    try:
+        result = conn.execute(stmt)
+    except SQLAlchemyError as exc:
+        raise LandscapeRecordError(
+            f"record_buffered_outcome_guarded failed for token_id={token_id!r} — database rejected audit write: {type(exc).__name__}"
+        ) from exc
+    if result.rowcount == 0:
+        raise LandscapeRecordError(f"record_buffered_outcome_guarded: zero rows affected for token_id={token_id!r} — audit write failed")
+    return outcome_id

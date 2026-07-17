@@ -3419,6 +3419,7 @@ class SessionServiceImpl:
                     InterpretationKind.VAGUE_TERM,
                     InterpretationKind.INVENTED_SOURCE,
                     InterpretationKind.PIPELINE_DECISION,
+                    InterpretationKind.LLM_MODEL_CHOICE,
                 }:
                     # Step 3: defence-in-depth validation of user/LLM-supplied
                     # content. Prompt-template review carries real Jinja and

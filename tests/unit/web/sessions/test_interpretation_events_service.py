@@ -3221,6 +3221,39 @@ async def test_resolve_llm_model_choice_amended_patches_options_model(service) -
 
 
 @pytest.mark.asyncio
+async def test_resolve_llm_model_choice_rejects_unsafe_amended_model_identifier(service) -> None:
+    """Direct service callers cannot bypass accepted-value content validation."""
+    session_id = uuid4()
+    drafted = "anthropic/claude-haiku-4.5"
+    state = await _seed_state_with_llm_node(service, session_id=session_id, node=_model_choice_review_node(model=drafted))
+    event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id="rate_node",
+        tool_call_id="call_mc_unsafe",
+        user_term="llm_model_choice:rate_node",
+        kind=InterpretationKind.LLM_MODEL_CHOICE,
+        llm_draft=drafted,
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    with pytest.raises(ValueError, match="template metacharacters"):
+        await service.resolve_interpretation_event(
+            session_id=session_id,
+            event_id=event.id,
+            choice=InterpretationChoice.AMENDED,
+            amended_value="openai/{{ model }}",
+            actor="user:alice",
+        )
+
+    pending = await service.list_interpretation_events(session_id, status="pending")
+    assert [record.id for record in pending] == [event.id]
+
+
+@pytest.mark.asyncio
 async def test_create_pending_is_idempotent_for_identical_resurface(service) -> None:
     """An identical re-surface returns the existing pending event, never a twin.
 

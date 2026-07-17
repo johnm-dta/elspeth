@@ -516,7 +516,10 @@ class TestLLMTransformAzurePipelining:
         assert result.status == "error"
         assert result.reason is not None
         assert result.reason["reason"] == "llm_call_failed"
-        assert "API Error" in result.reason["error"]
+        # Persisted error text is the audit-safe constant — raw provider text
+        # must not reach transform_errors.error_details_json (elspeth-5d17bcff15).
+        assert result.reason["error"] == "LLM provider request failed"
+        assert "API Error" not in result.reason["error"]
         assert result.retryable is False
 
     def test_rate_limit_error_propagates_for_engine_retry(
@@ -547,7 +550,8 @@ class TestLLMTransformAzurePipelining:
         # This allows the engine's RetryManager to retry the operation
         assert isinstance(result, ExceptionResult)
         assert isinstance(result.exception, RateLimitError)
-        assert "429" in str(result.exception)
+        assert str(result.exception) == "LLM provider request failed"
+        assert "429" in str(result.exception.__cause__)
 
     def test_missing_state_id_propagates_exception(
         self, audit_writer: _FakeAuditWriter, transform: LLMTransform, collector: CollectorOutputPort

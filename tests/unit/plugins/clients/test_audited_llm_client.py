@@ -362,7 +362,13 @@ class TestAuditedLLMClient:
         assert calls[1]["call_index"] == 1
 
     def test_failed_call_records_error(self) -> None:
-        """Provider detail remains caller-visible but never enters the audit record."""
+        """Raw provider detail never leaves the client — recorded AND raised text are static.
+
+        Callers persist caught exception text into transform_errors.error_details_json
+        (elspeth-5d17bcff15), so the raised message must be as audit-safe as the
+        recorded one. The original exception stays reachable via __cause__ for
+        in-process diagnostics.
+        """
         execution = self._create_mock_execution()
         provider_detail = (
             "API connection failed at https://provider.invalid/v1 "
@@ -384,7 +390,9 @@ class TestAuditedLLMClient:
                 messages=[{"role": "user", "content": "Hello"}],
             )
 
-        assert provider_detail in str(exc_info.value)
+        assert str(exc_info.value) == "LLM provider request failed"
+        assert isinstance(exc_info.value.__cause__, Exception)
+        assert provider_detail in str(exc_info.value.__cause__)
 
         # Verify error was recorded
         execution.assert_recorded_once()
@@ -394,6 +402,7 @@ class TestAuditedLLMClient:
         assert call_kwargs["error"].message == "LLM provider request failed"
         for marker in ("provider.invalid", "arn:aws:bedrock", "secret-request-marker"):
             assert marker not in call_kwargs["error"].message
+            assert marker not in str(exc_info.value)
         assert call_kwargs["error"].retryable is False
 
     def test_missing_usage_attribute_still_records_call(self) -> None:

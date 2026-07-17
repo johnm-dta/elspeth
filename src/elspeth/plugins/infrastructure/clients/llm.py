@@ -454,20 +454,25 @@ class AuditedLLMClient(AuditedClientBase):
                 token_usage=None,
             )
 
-            # Raise specific exception type based on error classification
+            # Raise specific exception type based on error classification.
+            # Message is the audit-safe constant, not str(e): callers persist
+            # caught exception text into transform_errors.error_details_json,
+            # so raw SDK error text (endpoints, ARNs, presigned URLs) must not
+            # leave this boundary. The original exception stays reachable via
+            # __cause__ for in-process diagnostics (elspeth-5d17bcff15).
             if error_class == "rate_limit":
-                raise RateLimitError(str(e)) from e
+                raise RateLimitError(_AUDIT_SAFE_PROVIDER_ERROR) from e
             elif error_class == "content_policy":
-                raise ContentPolicyError(str(e)) from e
+                raise ContentPolicyError(_AUDIT_SAFE_PROVIDER_ERROR) from e
             elif error_class == "context_length":
-                raise ContextLengthError(str(e)) from e
+                raise ContextLengthError(_AUDIT_SAFE_PROVIDER_ERROR) from e
             elif error_class == "server":
-                raise ServerError(str(e)) from e
+                raise ServerError(_AUDIT_SAFE_PROVIDER_ERROR) from e
             elif error_class == "network":
-                raise NetworkError(str(e)) from e
+                raise NetworkError(_AUDIT_SAFE_PROVIDER_ERROR) from e
             else:
                 # Client error or unknown - not retryable
-                raise LLMClientError(str(e), retryable=False) from e
+                raise LLMClientError(_AUDIT_SAFE_PROVIDER_ERROR, retryable=False) from e
 
         # Success path — OUTSIDE the SDK-call try/except so genuine internal logic
         # bugs crash instead of being misclassified as LLM errors. Tier-3 boundary

@@ -236,7 +236,10 @@ class TestMultiQueryBatchContract(BatchTransformContractTestBase):
         assert result.reason["reason"] == "multi_query_failed"
         assert result.reason["failed_query_name"] == "cs1_test_criterion"
         assert result.reason["failed_query_index"] == 0
-        assert "authentication failed" in result.reason["error"]
+        # Persisted error text is the audit-safe constant — raw provider text
+        # must not reach transform_errors.error_details_json (elspeth-5d17bcff15).
+        assert result.reason["error"] == "LLM provider request failed"
+        assert "authentication failed" not in result.reason["error"]
         assert result.reason["discarded_successful_queries"] == 0
 
     def test_token_usage_is_recorded_on_success(

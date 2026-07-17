@@ -109,6 +109,13 @@ SENSITIVE_PARAMS = frozenset(
         # Signed URL patterns
         "signature",
         "sig",
+        # AWS SigV4 presigned URLs — the signature is the authenticator; the
+        # credential/security-token params carry the access key id and session
+        # token. _base_param_name does not strip the x-amz- prefix, so these
+        # need their own entries.
+        "x-amz-signature",
+        "x-amz-credential",
+        "x-amz-security-token",
         # Header-style params sometimes in query strings
         "authorization",
         "x-api-key",

@@ -79,7 +79,7 @@ from elspeth.web.composer.tools.declarations import (
 )
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
 from elspeth.web.provider_config_policy import web_aws_s3_endpoint_url_policy_error
-from elspeth.web.sessions.locking import transaction_session_lock
+from elspeth.web.sessions.locking import locked_session_transaction
 from elspeth.web.sessions.models import blob_run_links_table, blobs_table, composition_states_table, runs_table
 from elspeth.web.sessions.proposal_blob_refs import pending_proposal_reference_id
 
@@ -1593,7 +1593,7 @@ def _execute_delete_blob(
     tombstone_path: Path | None = None
 
     try:
-        with session_engine.begin() as conn, transaction_session_lock(conn, session_engine, session_id):
+        with locked_session_transaction(session_engine, session_id) as conn:
             locked_row = conn.execute(
                 select(blobs_table).where(
                     blobs_table.c.id == blob_id,

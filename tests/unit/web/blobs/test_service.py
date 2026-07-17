@@ -11,6 +11,7 @@ Security boundaries tested:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import importlib
 import multiprocessing
@@ -24,6 +25,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import delete, func, insert, select
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.enums import CreationModality
@@ -1451,7 +1453,7 @@ def _custody_request(db_engine, session_id: UUID, *, content: bytes = b"value\n4
     )
 
 
-def _postgres_custody_process(
+def _custody_process(
     database_url: str,
     data_dir: str,
     request_fields: dict[str, object],
@@ -1477,6 +1479,65 @@ def _postgres_custody_process(
 
 
 class TestInlineCustody:
+    @pytest.mark.asyncio
+    async def test_nonidempotent_duplicate_does_not_delete_existing_ready_file(
+        self,
+        db_engine,
+        session_id: UUID,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        service = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=100)
+        fixed_blob_id = uuid4()
+        monkeypatch.setattr(blob_service_module, "uuid4", lambda: fixed_blob_id)
+
+        winner = await service.create_blob(
+            session_id=session_id,
+            filename="winner.csv",
+            content=b"value\n42\n",
+            mime_type="text/csv",
+        )
+
+        with pytest.raises(AuditIntegrityError, match="Unexpected duplicate blob id"):
+            await service.create_blob(
+                session_id=session_id,
+                filename="winner.csv",
+                content=b"value\n42\n",
+                mime_type="text/csv",
+            )
+
+        assert Path(winner.storage_path).read_bytes() == b"value\n42\n"
+        assert (await service.get_blob(fixed_blob_id)).status == "ready"
+
+    @pytest.mark.asyncio
+    async def test_nonidempotent_failure_preserves_preexisting_orphan_file(
+        self,
+        db_engine,
+        session_id: UUID,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from elspeth.web.blobs.protocol import BlobIntegrityError
+
+        service = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=100)
+        fixed_blob_id = uuid4()
+        monkeypatch.setattr(blob_service_module, "uuid4", lambda: fixed_blob_id)
+        storage = tmp_path.resolve() / "blobs" / str(session_id) / f"{fixed_blob_id}_orphan.csv"
+        storage.parent.mkdir(parents=True)
+        storage.write_bytes(b"preexisting integrity evidence")
+
+        with pytest.raises(BlobIntegrityError):
+            await service.create_blob(
+                session_id=session_id,
+                filename="orphan.csv",
+                content=b"new bytes",
+                mime_type="text/csv",
+            )
+
+        assert storage.read_bytes() == b"preexisting integrity evidence"
+        with db_engine.connect() as conn:
+            assert conn.execute(select(func.count()).select_from(blobs_table)).scalar_one() == 0
+
     def test_atomic_write_fsyncs_parent_directory_after_replace(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         storage = tmp_path / "blobs" / "session" / "blob_candidate.csv"
         fsynced: list[Path] = []
@@ -1906,6 +1967,135 @@ class TestInlineCustody:
             first_engine.dispose()
             second_engine.dispose()
 
+    def test_sqlite_separate_processes_converge_on_one_blob_and_quota_charge(self, tmp_path: Path) -> None:
+        database_path = tmp_path / "custody.sqlite3"
+        database_url = f"sqlite:///{database_path}"
+        engine = create_session_engine(database_url)
+        shared_session_id = uuid4()
+        now = datetime.now(UTC)
+        try:
+            initialize_session_schema(engine)
+            with engine.begin() as conn:
+                conn.execute(
+                    sessions_table.insert().values(
+                        id=str(shared_session_id),
+                        user_id="sqlite-custody-test",
+                        auth_provider_type="local",
+                        title="SQLite custody concurrency",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            request = _custody_request(engine, shared_session_id)
+            request_fields = {
+                "session_id": str(request.session_id),
+                "filename": request.filename,
+                "content": request.content,
+                "mime_type": request.mime_type,
+                "source_description": request.source_description,
+                "creation_modality": request.creation_modality.value,
+                "created_from_message_id": request.created_from_message_id,
+                "creating_model_identifier": request.creating_model_identifier,
+                "creating_model_version": request.creating_model_version,
+                "creating_provider": request.creating_provider,
+                "creating_composer_skill_hash": request.creating_composer_skill_hash,
+                "creating_arguments_hash": request.creating_arguments_hash,
+            }
+            context = multiprocessing.get_context("spawn")
+            start_event = context.Event()
+            result_queue = context.Queue()
+            processes = [
+                context.Process(
+                    target=_custody_process,
+                    args=(database_url, str(tmp_path / "data"), request_fields, start_event, result_queue),
+                )
+                for _ in range(2)
+            ]
+            for process in processes:
+                process.start()
+            start_event.set()
+            for process in processes:
+                process.join(timeout=30)
+                assert process.exitcode == 0
+
+            results = [result_queue.get(timeout=5) for _ in processes]
+            assert all(result[0] == "ok" for result in results), results
+            assert results[0][1] == results[1][1]
+            with engine.connect() as conn:
+                assert conn.execute(select(func.count()).select_from(blobs_table)).scalar_one() == 1
+                charged = conn.execute(
+                    select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0)).where(blobs_table.c.session_id == str(shared_session_id))
+                ).scalar_one()
+            assert charged == len(request.content)
+        finally:
+            engine.dispose()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mismatch", [False, True], ids=["matching-winner", "mismatched-winner"])
+    async def test_insert_conflict_reloads_and_validates_winner(
+        self,
+        db_engine,
+        session_id: UUID,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        mismatch: bool,
+    ) -> None:
+        request_type, _ = _inline_custody_contract()
+        message_id = _seed_custody_message(db_engine, session_id)
+        first_request = request_type(
+            session_id=session_id,
+            filename="candidate.csv",
+            content=b"value\n42\n",
+            mime_type="text/csv",
+            source_description="candidate",
+            creation_modality=CreationModality.LLM_GENERATED,
+            created_from_message_id=message_id,
+            creating_model_identifier="model-a",
+            creating_model_version="version-a",
+            creating_provider="provider-a",
+            creating_composer_skill_hash="a" * 64,
+            creating_arguments_hash="b" * 64,
+        )
+        service = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=100)
+        winner = await service.reserve_inline_custody(first_request)
+        retry = replace(first_request, creating_arguments_hash="c" * 64) if mismatch else first_request
+        original_phase_transaction = blob_service_module._blob_phase_transaction
+        phase_count = 0
+
+        class _InsertConflictConnection:
+            def __init__(self, conn) -> None:
+                self._conn = conn
+                self.dialect = conn.dialect
+                self._missed_blob_lookup = False
+
+            def execute(self, statement, *args, **kwargs):
+                if statement.is_select and not self._missed_blob_lookup:
+                    selected = tuple(statement.selected_columns)
+                    if selected and getattr(selected[0], "table", None) is blobs_table:
+                        self._missed_blob_lookup = True
+                        return SimpleNamespace(first=lambda: None)
+                if statement.is_insert and statement.table is blobs_table:
+                    raise IntegrityError("simulated concurrent winner", {}, RuntimeError("duplicate"))
+                return self._conn.execute(statement, *args, **kwargs)
+
+            def begin_nested(self):
+                return self._conn.begin_nested()
+
+        @contextlib.contextmanager
+        def _conflicting_first_phase(engine, held_connection):
+            nonlocal phase_count
+            phase_count += 1
+            with original_phase_transaction(engine, held_connection) as conn:
+                yield _InsertConflictConnection(conn) if phase_count == 1 else conn
+
+        monkeypatch.setattr(blob_service_module, "_blob_phase_transaction", _conflicting_first_phase)
+
+        if mismatch:
+            with pytest.raises(AuditIntegrityError, match="mismatched creating_arguments_hash"):
+                await service.reserve_inline_custody(retry)
+        else:
+            assert await service.reserve_inline_custody(retry) == winner
+
     @pytest.mark.skipif(
         not os.environ.get("ELSPETH_TEST_POSTGRES_URL"),
         reason="ELSPETH_TEST_POSTGRES_URL is required for the server-backend custody exercise",
@@ -1948,7 +2138,7 @@ class TestInlineCustody:
             result_queue = context.Queue()
             processes = [
                 context.Process(
-                    target=_postgres_custody_process,
+                    target=_custody_process,
                     args=(database_url, str(tmp_path / "data"), request_fields, start_event, result_queue),
                 )
                 for _ in range(2)

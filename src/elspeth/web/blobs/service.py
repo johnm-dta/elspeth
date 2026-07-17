@@ -16,7 +16,7 @@ from uuid import UUID, uuid4, uuid5
 from opentelemetry import metrics
 from sqlalchemy import Engine, func, select
 from sqlalchemy.engine import Connection, Row
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.errors import AuditIntegrityError
@@ -48,9 +48,9 @@ from elspeth.web.blobs.protocol import (
 from elspeth.web.sessions.converters import pipeline_dict_from_record
 from elspeth.web.sessions.locking import (
     acquire_session_advisory_xact_lock,
+    locked_session_transaction,
     postgres_session_advisory_lock,
-    sqlite_session_mutex,
-    transaction_session_lock,
+    sqlite_process_session_lock,
 )
 from elspeth.web.sessions.models import (
     blob_run_links_table,
@@ -358,7 +358,7 @@ def _blob_phase_transaction(engine: Engine, held_connection: Connection | None) 
 def _blob_custody_session_lock(engine: Engine, session_id: str) -> Iterator[Connection | None]:
     dialect = engine.dialect.name
     if dialect == "sqlite":
-        with sqlite_session_mutex(engine, session_id):
+        with sqlite_process_session_lock(engine, session_id):
             yield None
         return
     if dialect == "postgresql":
@@ -382,7 +382,7 @@ def _reserve_pending_blob(
     expected: _ExpectedBlobFields,
     max_storage_per_session: int,
     idempotent: bool,
-) -> Row[Any]:
+) -> tuple[Row[Any], bool]:
     session_id = expected["session_id"]
     with _blob_phase_transaction(engine, held_connection) as conn:
         _acquire_blob_phase_lock(conn, session_id)
@@ -400,33 +400,46 @@ def _reserve_pending_blob(
                     current_bytes=current_total,
                     limit_bytes=max_storage_per_session,
                 )
-            conn.execute(
-                blobs_table.insert().values(
-                    id=blob_id,
-                    session_id=session_id,
-                    filename=expected["filename"],
-                    mime_type=expected["mime_type"],
-                    size_bytes=expected["size_bytes"],
-                    content_hash=expected["content_hash"],
-                    storage_path=str(storage),
-                    created_at=datetime.now(UTC),
-                    created_by=expected["created_by"],
-                    source_description=expected["source_description"],
-                    status="pending",
-                    creation_modality=expected["creation_modality"].value,
-                    created_from_message_id=expected["created_from_message_id"],
-                    creating_model_identifier=expected["creating_model_identifier"],
-                    creating_model_version=expected["creating_model_version"],
-                    creating_provider=expected["creating_provider"],
-                    creating_composer_skill_hash=expected["creating_composer_skill_hash"],
-                    creating_arguments_hash=expected["creating_arguments_hash"],
-                )
-            )
-            row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id)).one()
+            try:
+                with conn.begin_nested():
+                    conn.execute(
+                        blobs_table.insert().values(
+                            id=blob_id,
+                            session_id=session_id,
+                            filename=expected["filename"],
+                            mime_type=expected["mime_type"],
+                            size_bytes=expected["size_bytes"],
+                            content_hash=expected["content_hash"],
+                            storage_path=str(storage),
+                            created_at=datetime.now(UTC),
+                            created_by=expected["created_by"],
+                            source_description=expected["source_description"],
+                            status="pending",
+                            creation_modality=expected["creation_modality"].value,
+                            created_from_message_id=expected["created_from_message_id"],
+                            creating_model_identifier=expected["creating_model_identifier"],
+                            creating_model_version=expected["creating_model_version"],
+                            creating_provider=expected["creating_provider"],
+                            creating_composer_skill_hash=expected["creating_composer_skill_hash"],
+                            creating_arguments_hash=expected["creating_arguments_hash"],
+                        )
+                    )
+            except IntegrityError as exc:
+                row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id)).first()
+                if row is None:
+                    raise
+                if not idempotent:
+                    raise AuditIntegrityError(f"Unexpected duplicate blob id {blob_id}") from exc
+                created_reservation = False
+            else:
+                created_reservation = True
+                row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id)).one()
         elif not idempotent:
             raise AuditIntegrityError(f"Unexpected duplicate blob id {blob_id}")
+        else:
+            created_reservation = False
         _validate_reusable_blob_row(row, expected=expected, blob_id=blob_id, storage_path=storage)
-        return row
+        return row, created_reservation
 
 
 def _write_or_validate_reserved_blob(
@@ -436,16 +449,17 @@ def _write_or_validate_reserved_blob(
     content: bytes,
     expected_hash: str,
     blob_id: str,
-) -> None:
+) -> bool:
     if storage.exists():
         existing_content = storage.read_bytes()
         actual_hash = content_hash(existing_content)
         if not hmac.compare_digest(existing_content, content) or not hmac.compare_digest(actual_hash, expected_hash):
             raise BlobIntegrityError(blob_id, expected=expected_hash, actual=actual_hash)
-        return
+        return False
     if row.status == "ready":
         raise BlobContentMissingError(blob_id, storage_path=str(storage))
     _atomic_write_blob(storage, content)
+    return True
 
 
 def _finalize_reserved_blob(
@@ -475,8 +489,10 @@ def _discard_nonidempotent_reservation(
     blob_id: str,
     session_id: str,
     storage: Path,
+    remove_storage: bool,
 ) -> None:
-    storage.unlink(missing_ok=True)
+    if remove_storage:
+        storage.unlink(missing_ok=True)
     with _blob_phase_transaction(engine, held_connection) as conn:
         _acquire_blob_phase_lock(conn, session_id)
         conn.execute(blobs_table.delete().where(blobs_table.c.id == blob_id).where(blobs_table.c.status == "pending"))
@@ -575,8 +591,10 @@ def _persist_blob_content(
         "creating_arguments_hash": creating_arguments_hash,
     }
     with _blob_custody_session_lock(engine, session_id_str) as held_connection:
+        created_reservation = False
+        created_storage = False
         try:
-            row = _reserve_pending_blob(
+            row, created_reservation = _reserve_pending_blob(
                 engine=engine,
                 held_connection=held_connection,
                 blob_id=blob_id_str,
@@ -585,13 +603,18 @@ def _persist_blob_content(
                 max_storage_per_session=max_storage_per_session,
                 idempotent=idempotent,
             )
-            _write_or_validate_reserved_blob(
-                row=row,
-                storage=storage,
-                content=content,
-                expected_hash=expected["content_hash"],
-                blob_id=blob_id_str,
-            )
+            storage_existed_before_write = storage.exists()
+            try:
+                created_storage = _write_or_validate_reserved_blob(
+                    row=row,
+                    storage=storage,
+                    content=content,
+                    expected_hash=expected["content_hash"],
+                    blob_id=blob_id_str,
+                )
+            except Exception:
+                created_storage = not storage_existed_before_write and storage.exists()
+                raise
             return _finalize_reserved_blob(
                 engine=engine,
                 held_connection=held_connection,
@@ -600,13 +623,14 @@ def _persist_blob_content(
                 expected=expected,
             )
         except Exception:
-            if not idempotent:
+            if not idempotent and created_reservation:
                 _discard_nonidempotent_reservation(
                     engine=engine,
                     held_connection=held_connection,
                     blob_id=blob_id_str,
                     session_id=session_id_str,
                     storage=storage,
+                    remove_storage=created_storage,
                 )
             raise
 
@@ -1126,7 +1150,7 @@ class BlobServiceImpl:
                 session_id = lookup_conn.execute(select(blobs_table.c.session_id).where(blobs_table.c.id == blob_id_str)).scalar()
             if session_id is None:
                 raise BlobNotFoundError(blob_id_str)
-            with self._engine.begin() as conn, transaction_session_lock(conn, self._engine, session_id):
+            with locked_session_transaction(self._engine, session_id) as conn:
                 # Re-read only after the shared lock: custody/proposal/delete
                 # decisions for this session must observe one serial order.
                 row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id_str)).first()

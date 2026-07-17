@@ -62,6 +62,7 @@ from elspeth.web.interpretation_state import (
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
 from elspeth.web.sessions.locking import (
     acquire_session_advisory_xact_lock,
+    process_session_lock,
     sqlite_session_mutex,
     sqlite_transaction_session_lock,
 )
@@ -1633,6 +1634,12 @@ class SessionServiceImpl:
         """Return the process-wide SQLite write lock for one DB/session pair."""
         return sqlite_session_mutex(self._engine, session_id)
 
+    @contextlib.contextmanager
+    def _session_process_locked_begin(self, session_id: str) -> Iterator[Connection]:
+        """Acquire SQLite process exclusion before opening the DB transaction."""
+        with process_session_lock(self._engine, session_id), self._engine.begin() as conn:
+            yield conn
+
     def _assert_session_write_lock_held(
         self,
         conn: Connection,
@@ -2045,7 +2052,7 @@ class SessionServiceImpl:
         # ``IntegrityError`` -- not ``Exception``, not ``SQLAlchemyError``
         # -- because only constraint violations belong on this counter.
         try:
-            with self._engine.begin() as conn:
+            with self._session_process_locked_begin(session_id) as conn:
                 with self._session_write_lock(conn, session_id):
                     # B5: if a parent
                     # composition state is supplied, it MUST belong to this
@@ -2284,7 +2291,7 @@ class SessionServiceImpl:
         now = self._now()
 
         def _sync() -> None:
-            with self._engine.begin() as conn:
+            with self._session_process_locked_begin(str(session_id)) as conn:
                 conn.execute(
                     insert(sessions_table).values(
                         id=str(session_id),
@@ -2533,7 +2540,7 @@ class SessionServiceImpl:
         sid = str(session_id)
 
         def _sync() -> ComposerSessionPreferencesTransition:
-            with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
                 # B2 (load-bearing): load the prior record inside the same
                 # transaction as the audit insert and the state update.
                 # A concurrent PATCH cannot interpose because the per-
@@ -2625,7 +2632,7 @@ class SessionServiceImpl:
         event_id = str(uuid.uuid4())
 
         def _sync() -> CompositionProposalRecord:
-            with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
                 validate_proposal_blob_references(
                     conn,
                     session_id=sid,
@@ -2710,7 +2717,7 @@ class SessionServiceImpl:
         pid = str(proposal_id)
 
         def _sync() -> CompositionProposalRecord:
-            with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
                 row = conn.execute(
                     select(composition_proposals_table)
                     .where(composition_proposals_table.c.id == pid)
@@ -2761,7 +2768,7 @@ class SessionServiceImpl:
         state_id = str(committed_state_id)
 
         def _sync() -> CompositionProposalRecord:
-            with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
                 row = conn.execute(
                     select(composition_proposals_table)
                     .where(composition_proposals_table.c.id == pid)
@@ -2880,7 +2887,7 @@ class SessionServiceImpl:
         plugin_snapshot = await self._plugin_snapshot_for_session(sid)
 
         def _sync() -> InterpretationEventRecord:
-            with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
                 # Writer-boundary validation: resolve the parent state and
                 # validate the affected component before any interpretation
                 # row is written. ``invented_source`` binds to the synthetic
@@ -3335,7 +3342,7 @@ class SessionServiceImpl:
         plugin_snapshot = await self._plugin_snapshot_for_session(sid)
 
         def _sync() -> tuple[InterpretationEventRecord, CompositionStateRecord]:
-            with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
                 # Step 1: SELECT pending event, scoped to session.
                 event_row = conn.execute(
                     select(interpretation_events_table)
@@ -3685,7 +3692,7 @@ class SessionServiceImpl:
         sid = str(session_id)
 
         def _sync() -> tuple[InterpretationEventRecord, bool]:
-            with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
                 # F-29: idempotency. SELECT inside the lock so the
                 # SELECT-then-INSERT sequence is atomic against concurrent
                 # writers. If a prior opt-out exists, return it; do not
@@ -3860,7 +3867,7 @@ class SessionServiceImpl:
         event_id = str(uuid.uuid4())
 
         def _sync() -> InterpretationEventRecord:
-            with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
                 conn.execute(
                     insert(interpretation_events_table).values(
                         id=event_id,
@@ -3939,7 +3946,7 @@ class SessionServiceImpl:
         sequence_holder: dict[str, int] = {}
 
         def _sync() -> None:
-            with self._engine.begin() as conn:
+            with self._session_process_locked_begin(sid) as conn:
                 if csid is not None:
                     _assert_state_in_session(
                         conn,
@@ -4198,7 +4205,7 @@ class SessionServiceImpl:
             # constraint directly — no retry layer is permitted to
             # consume that diagnostic before it reaches the operator
             # (CLAUDE.md No Legacy Code Policy: no belt-and-suspenders).
-            with self._engine.begin() as conn:
+            with self._session_process_locked_begin(sid) as conn:
                 with self._session_write_lock(conn, sid):
                     result = conn.execute(
                         select(func.max(composition_states_table.c.version)).where(composition_states_table.c.session_id == sid)
@@ -4451,12 +4458,16 @@ class SessionServiceImpl:
         payload = deep_thaw(dict(data))
 
         def _sync() -> tuple[str, int]:
-            with self._engine.begin() as conn:
-                session_id = conn.execute(select(runs_table.c.session_id).where(runs_table.c.id == rid)).scalar_one_or_none()
-                if session_id is None:
-                    raise ValueError(f"Run {run_id} not found")
-                session_id = str(session_id)
+            with self._engine.connect() as lookup_conn:
+                found_session_id = lookup_conn.execute(select(runs_table.c.session_id).where(runs_table.c.id == rid)).scalar_one_or_none()
+            if found_session_id is None:
+                raise ValueError(f"Run {run_id} not found")
+            session_id = str(found_session_id)
+            with self._session_process_locked_begin(session_id) as conn:
                 with self._session_write_lock(conn, session_id):
+                    locked_session_id = conn.execute(select(runs_table.c.session_id).where(runs_table.c.id == rid)).scalar_one_or_none()
+                    if locked_session_id != session_id:
+                        raise ValueError(f"Run {run_id} not found")
                     sequence = (
                         int(
                             conn.execute(
@@ -4719,7 +4730,7 @@ class SessionServiceImpl:
             # diagnostic before it reaches the operator (CLAUDE.md No
             # Legacy Code Policy: no belt-and-suspenders). Same
             # discipline as save_composition_state._sync above.
-            with self._engine.begin() as conn:
+            with self._session_process_locked_begin(sid) as conn:
                 with self._session_write_lock(conn, sid):
                     prior_row = conn.execute(
                         select(composition_states_table).where(composition_states_table.c.id == str(state_id))
@@ -5253,7 +5264,7 @@ class SessionServiceImpl:
 
         def _sync() -> int | None:
             """Single atomic transaction for the entire fork."""
-            with self._engine.begin() as conn:
+            with self._session_process_locked_begin(new_session_id_str) as conn:
                 # 1. Create session
                 conn.execute(
                     insert(sessions_table).values(

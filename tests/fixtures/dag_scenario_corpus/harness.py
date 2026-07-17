@@ -10,14 +10,22 @@ from pathlib import Path
 from string import Template
 from typing import Any
 
+from elspeth.contracts.sink_effects import SinkEffectExecutionPurpose, SinkEffectInputKind
 from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
 from elspeth.core.config import ElspethSettings, load_settings_from_yaml_string
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB, LandscapeExporter
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
-from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config, execution_sinks_for_runtime
+from elspeth.engine.orchestrator.preflight import (
+    assemble_and_validate_pipeline_config,
+    execution_sink_bindings_for_runtime,
+    execution_sinks_for_runtime,
+    sink_effect_modes_from_runtime_bindings,
+    validate_pipeline_sink_effect_capabilities,
+)
 from elspeth.plugins.infrastructure.runtime_factory import PluginBundle, instantiate_plugins_from_config
+from elspeth.plugins.transforms.llm.model_catalog import read_openrouter_catalog_snapshot_id
 from tests.fixtures.dag_scenario_corpus.loader import resolve_fixture_path
 from tests.fixtures.dag_scenario_corpus.schema import (
     AuditEvidence,
@@ -61,9 +69,9 @@ def render_settings(case: HarnessCaseSpec, tmp_path: Path) -> RenderedScenario:
     fixture_bytes = fixture_path.read_bytes()
     input_bytes = input_path.read_bytes()
     rendered = Template(fixture_bytes.decode("utf-8")).substitute(
-        input_csv=str(input_path),
-        output_jsonl=str(output_path),
-        fault_marker=str(fault_marker),
+        input_csv=json.dumps(str(input_path)),
+        output_jsonl=json.dumps(str(output_path)),
+        fault_marker=json.dumps(str(fault_marker)),
     )
     if "${" in rendered:
         raise ValueError(f"Unresolved DAG scenario template variable in {fixture_path}")
@@ -81,8 +89,21 @@ def build_scenario(rendered: RenderedScenario) -> BuiltScenario:
     """Build and validate a scenario through the production assembly sequence."""
 
     settings = rendered.settings
-    bundle = instantiate_plugins_from_config(settings, preflight_mode=True)
+    purpose = SinkEffectExecutionPurpose.FRESH
+    bundle = instantiate_plugins_from_config(settings, preflight_mode=True, sink_effect_purpose=purpose)
     execution_sinks = execution_sinks_for_runtime(settings, bundle.sinks)
+    execution_bindings = execution_sink_bindings_for_runtime(settings, bundle.sink_effect_bindings)
+    sink_effect_modes = sink_effect_modes_from_runtime_bindings(
+        execution_sinks,
+        execution_bindings,
+        purpose=purpose,
+        configured_options={name: settings.sinks[name].options for name in execution_sinks},
+    )
+    sink_effect_admission = validate_pipeline_sink_effect_capabilities(
+        execution_sinks,
+        configured_modes=sink_effect_modes,
+        required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+    )
     graph = ExecutionGraph.from_plugin_instances(
         sources=bundle.sources,
         source_settings_map=bundle.source_settings_map,
@@ -102,6 +123,8 @@ def build_scenario(rendered: RenderedScenario) -> BuiltScenario:
         aggregations=bundle.aggregations,
         settings=settings,
         graph=graph,
+        sink_effect_modes=sink_effect_modes,
+        sink_effect_admission=sink_effect_admission,
     )
     graph_evidence = GraphEvidence(
         accepted=True,
@@ -129,11 +152,14 @@ def _run_case(scenario: ScenarioSpec, case: HarnessCaseSpec, tmp_path: Path) -> 
     built = build_scenario(rendered)
     db = LandscapeDB(f"sqlite:///{tmp_path / 'audit.db'}")
     try:
+        catalog_sha256, catalog_source = read_openrouter_catalog_snapshot_id()
         result = Orchestrator(db).run(
             built.config,
             graph=built.graph,
             settings=built.rendered.settings,
             payload_store=FilesystemPayloadStore(tmp_path / "payloads"),
+            openrouter_catalog_sha256=catalog_sha256,
+            openrouter_catalog_source=catalog_source,
         )
         output_rows = [json.loads(line) for line in rendered.output_path.read_text(encoding="utf-8").splitlines()]
         audit = _audit_evidence(list(LandscapeExporter(db).export_run(result.run_id)))

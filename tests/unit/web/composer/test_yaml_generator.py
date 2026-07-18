@@ -767,16 +767,36 @@ class TestGenerateYaml:
         assert "file" not in public_source.get("options", {})
 
     @pytest.mark.parametrize(
-        "live_options",
+        ("reviewed_carriers", "live_options"),
         [
-            {"path": "/home/john/elspeth/data/blobs/live.json"},
-            {"schema": {"mode": "observed"}},
+            (
+                {"path": " /home/john/elspeth/data/blobs/bogus.json "},
+                {"path": "/home/john/elspeth/data/blobs/live.json"},
+            ),
+            ({"path": " /home/john/elspeth/data/blobs/bogus.json "}, {"schema": {"mode": "observed"}}),
+            (
+                {"path": "/home/john/elspeth/data/blobs/source.json"},
+                {
+                    "path": "/home/john/elspeth/data/blobs/source.json",
+                    "file": "/home/john/elspeth/data/blobs/secret.json",
+                },
+            ),
+            (
+                {
+                    "path": "/home/john/elspeth/data/blobs/source.json",
+                    "file": "/home/john/elspeth/data/blobs/source-alias.json",
+                },
+                {"path": "/home/john/elspeth/data/blobs/source.json"},
+            ),
         ],
-        ids=["mismatched_path", "missing_live_carrier"],
+        ids=["mismatched_path", "missing_live_carrier", "extra_live_carrier", "missing_live_reviewed_carrier"],
     )
-    def test_public_yaml_rejects_same_name_without_exact_reviewed_path(self, live_options: dict[str, object]) -> None:
+    def test_public_yaml_rejects_same_name_without_exact_reviewed_path(
+        self,
+        reviewed_carriers: dict[str, object],
+        live_options: dict[str, object],
+    ) -> None:
         stable_id = "11111111-1111-4111-8111-111111111111"
-        reviewed_path = " /home/john/elspeth/data/blobs/bogus.json "
         guided_session = replace(
             GuidedSession.initial(),
             source_order=(stable_id,),
@@ -784,7 +804,7 @@ class TestGenerateYaml:
                 stable_id: SourceResolved(
                     name="source",
                     plugin="json",
-                    options={"path": reviewed_path, "blob_ref": stable_id},
+                    options={**reviewed_carriers, "blob_ref": stable_id},
                     observed_columns=("value",),
                     sample_rows=(),
                     on_validation_failure="discard",

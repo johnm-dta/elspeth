@@ -7178,16 +7178,25 @@ sinks:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "live_options",
+        ("reviewed_carriers", "live_options"),
         [
-            {"path": "/data/blobs/foreign/live.csv"},
-            {"schema": {"mode": "observed"}},
+            ({"path": " /data/blobs/foreign/bogus.csv "}, {"path": "/data/blobs/foreign/live.csv"}),
+            ({"path": " /data/blobs/foreign/bogus.csv "}, {"schema": {"mode": "observed"}}),
+            (
+                {"path": "/data/blobs/foreign/live.csv"},
+                {"path": "/data/blobs/foreign/live.csv", "file": "/data/blobs/foreign/secret.csv"},
+            ),
+            (
+                {"path": "/data/blobs/foreign/live.csv", "file": "/data/blobs/foreign/live-alias.csv"},
+                {"path": "/data/blobs/foreign/live.csv"},
+            ),
         ],
-        ids=["mismatched_path", "missing_live_carrier"],
+        ids=["mismatched_path", "missing_live_carrier", "extra_live_carrier", "missing_live_reviewed_carrier"],
     )
     async def test_yaml_export_rejects_same_name_without_exact_reviewed_path_before_audit(
         self,
         tmp_path: Path,
+        reviewed_carriers: dict[str, object],
         live_options: dict[str, object],
     ) -> None:
         from sqlalchemy import select
@@ -7197,9 +7206,15 @@ sinks:
         app, service = _make_app(tmp_path)
         client = TestClient(app, raise_server_exceptions=False)
         stable_id = "98b1357d-5aab-4fb3-85b4-5ad643912e84"
-        reviewed_path = " /data/blobs/foreign/bogus.csv "
         session = await service.create_session("alice", "Pipeline", "local")
-        get_blob = AsyncMock()
+        get_blob = AsyncMock(
+            return_value=SimpleNamespace(
+                id=uuid.UUID(stable_id),
+                session_id=session.id,
+                storage_path="/data/blobs/foreign/live.csv",
+                status="ready",
+            )
+        )
         app.state.blob_service = SimpleNamespace(get_blob=get_blob)
         guided = replace(
             GuidedSession.initial(),
@@ -7208,7 +7223,7 @@ sinks:
                 stable_id: SourceResolved(
                     name="source",
                     plugin="csv",
-                    options={"path": reviewed_path, "blob_ref": stable_id},
+                    options={**reviewed_carriers, "blob_ref": stable_id},
                     observed_columns=("value",),
                     sample_rows=(),
                     on_validation_failure="discard",
@@ -7241,7 +7256,9 @@ sinks:
         assert response.status_code == 500
         assert response.text == "Internal Server Error"
         assert stable_id not in response.text
-        assert reviewed_path not in response.text
+        for value in (*reviewed_carriers.values(), *live_options.values()):
+            if type(value) is str and value:
+                assert value not in response.text
         get_blob.assert_not_awaited()
         with app.state.session_engine.connect() as conn:
             export_events = conn.execute(

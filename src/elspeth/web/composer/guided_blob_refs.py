@@ -50,7 +50,7 @@ def validate_guided_reviewed_blob_source_mapping(
     }
     for reviewed_name, reviewed_paths in reviewed_bindings:
         if reviewed_name in live_carriers:
-            if not reviewed_paths.intersection(live_carriers[reviewed_name]):
+            if reviewed_paths != live_carriers[reviewed_name]:
                 raise AuditIntegrityError("guided blob source mapping is inconsistent")
         elif any(reviewed_paths.intersection(paths) for paths in live_carriers.values()):
             raise AuditIntegrityError("guided blob source mapping is inconsistent")

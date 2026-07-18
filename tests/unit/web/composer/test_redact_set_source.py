@@ -511,23 +511,27 @@ def test_redact_guided_snapshot_accepts_two_valid_path_carriers() -> None:
 
 
 @pytest.mark.parametrize(
-    "live_options",
+    ("reviewed_carriers", "live_options"),
     [
-        {"path": "/internal/blobs/live.csv"},
-        {"schema": {"mode": "observed"}},
+        ({"path": " /internal/blobs/bogus.csv "}, {"path": "/internal/blobs/live.csv"}),
+        ({"path": " /internal/blobs/bogus.csv "}, {"schema": {"mode": "observed"}}),
+        ({"path": "/internal/blobs/source.csv"}, {"path": "/internal/blobs/source.csv", "file": "/internal/blobs/secret.csv"}),
+        ({"path": "/internal/blobs/source.csv", "file": "/internal/blobs/source-alias.csv"}, {"path": "/internal/blobs/source.csv"}),
     ],
-    ids=["mismatched_path", "missing_live_carrier"],
+    ids=["mismatched_path", "missing_live_carrier", "extra_live_carrier", "missing_live_reviewed_carrier"],
 )
-def test_redact_guided_snapshot_rejects_same_name_without_exact_reviewed_path(live_options: dict[str, object]) -> None:
+def test_redact_guided_snapshot_rejects_same_name_without_exact_reviewed_path(
+    reviewed_carriers: dict[str, object],
+    live_options: dict[str, object],
+) -> None:
     stable_id = "11111111-1111-4111-8111-111111111111"
-    reviewed_path = " /internal/blobs/bogus.csv "
     sources = {"source": {"options": live_options}}
     composer_meta = {
         "guided_session": {
             "reviewed_sources": {
                 stable_id: {
                     "name": "source",
-                    "options": {"path": reviewed_path, "blob_ref": stable_id},
+                    "options": {**reviewed_carriers, "blob_ref": stable_id},
                 }
             },
             "pending_source_intents": {},
@@ -538,7 +542,10 @@ def test_redact_guided_snapshot_rejects_same_name_without_exact_reviewed_path(li
         redact_guided_snapshot_storage_paths(sources, composer_meta)
 
     assert sources["source"]["options"] == live_options
-    assert composer_meta["guided_session"]["reviewed_sources"][stable_id]["options"]["path"] == reviewed_path
+    assert composer_meta["guided_session"]["reviewed_sources"][stable_id]["options"] == {
+        **reviewed_carriers,
+        "blob_ref": stable_id,
+    }
 
 
 def test_redact_guided_snapshot_rejects_reviewed_blob_ref_without_string_path_carrier() -> None:

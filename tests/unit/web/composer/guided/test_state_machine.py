@@ -321,7 +321,7 @@ class TestGuidedSession:
             }
         ]
 
-        with pytest.raises(InvariantError, match=r"TurnRecord\.from_dict"):
+        with pytest.raises(InvariantError, match=r"history\[0\].*summary.*exact dict"):
             GuidedSession.from_dict(current)
 
     def test_guided_session_schema8_requires_source_order(self) -> None:

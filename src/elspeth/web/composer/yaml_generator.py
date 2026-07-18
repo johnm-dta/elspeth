@@ -292,7 +292,7 @@ def reattach_guided_blob_refs_for_public_export(state: CompositionState) -> Comp
             raise AuditIntegrityError("guided reviewed source blob_ref must be a canonical UUID")
         blob_backed_paths = {value for key in SOURCE_LOCAL_PATH_OPTION_KEYS if type(value := snapshot_options.get(key)) is str}
         if not blob_backed_paths:
-            continue
+            raise AuditIntegrityError("guided reviewed blob source is missing a string path carrier")
         reviewed_bindings.append((source_name, frozenset(blob_backed_paths), blob_ref))
 
     if not reviewed_bindings:

@@ -413,6 +413,30 @@ def test_redact_guided_snapshot_allows_two_reviewed_names_to_share_one_blob_path
     assert shared_path not in str((sources_out, meta_out))
 
 
+def test_redact_guided_snapshot_rejects_reviewed_blob_ref_without_string_path_carrier() -> None:
+    """A reviewed blob binding without its path cannot be mapped safely."""
+    stable_id = "11111111-1111-4111-8111-111111111111"
+    live_path = "/internal/blobs/foreign.csv"
+    sources = {"source": {"options": {"path": live_path}}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                stable_id: {
+                    "name": "source",
+                    "options": {"blob_ref": stable_id},
+                }
+            },
+            "pending_source_intents": {},
+        }
+    }
+
+    with pytest.raises(AuditIntegrityError, match="string path carrier"):
+        redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+    assert sources["source"]["options"]["path"] == live_path
+    assert composer_meta["guided_session"]["reviewed_sources"][stable_id]["options"] == {"blob_ref": stable_id}
+
+
 def test_redact_guided_snapshot_fails_closed_when_name_drift_hides_same_blob_path() -> None:
     real_path = "/internal/blobs/renamed.csv"
     sources = {"renamed": {"options": {"path": real_path}}}

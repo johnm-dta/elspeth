@@ -3467,7 +3467,10 @@ def redact_guided_snapshot_storage_paths(
             reviewed_out[stable_id] = snapshot
             continue
 
+        blob_ref = snap_options["blob_ref"]
         blob_paths = {value for key in ("path", "file") if key in snap_options and type(value := snap_options[key]) is str}
+        if type(blob_ref) is str and blob_ref and not blob_paths:
+            raise AuditIntegrityError("guided reviewed blob source is missing a string path carrier")
         snap_options_redacted = dict(snap_options)
         for key in ("path", "file"):
             if key in snap_options_redacted:

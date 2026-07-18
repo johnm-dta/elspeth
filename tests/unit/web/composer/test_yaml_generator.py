@@ -667,6 +667,45 @@ class TestGenerateYaml:
         with pytest.raises(AuditIntegrityError, match="canonical UUID"):
             generate_public_yaml(state)
 
+    def test_public_yaml_rejects_reviewed_blob_ref_without_string_path_carrier(self) -> None:
+        stable_id = "11111111-1111-4111-8111-111111111111"
+        live_path = "/home/john/elspeth/data/blobs/foreign/source.json"
+        guided_session = replace(
+            GuidedSession.initial(),
+            source_order=(stable_id,),
+            reviewed_sources={
+                stable_id: SourceResolved(
+                    name="source",
+                    plugin="json",
+                    options={"blob_ref": stable_id},
+                    observed_columns=("value",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
+        )
+        state = CompositionState(
+            sources={
+                "source": SourceSpec(
+                    plugin="json",
+                    on_success="out",
+                    options={"path": live_path},
+                    on_validation_failure="discard",
+                )
+            },
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="json", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+            guided_session=guided_session,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="string path carrier"):
+            generate_public_yaml(state)
+
+        assert state.sources["source"].options == {"path": live_path}
+
     def test_mode_retained_when_not_bind_source_marker(self) -> None:
         """A plugin-meaningful ``mode`` option (no blob-bind marker) is engine
         config and must survive into the YAML — the strip only fires for the

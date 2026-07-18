@@ -5100,11 +5100,13 @@ class SessionServiceImpl:
 
         def _sync(connection: Connection | None = None) -> InterpretationEventRecord:
             if connection is None:
-                with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                with self._session_process_locked_begin(sid) as conn:
                     return _sync(conn)
             conn = connection
-            # Preserve one shared writer body for standalone and cohort transactions.
-            with contextlib.nullcontext():
+            # Preserve one shared, lexically lock-proven writer body for
+            # standalone and settlement-cohort transactions. The cohort owns
+            # the same re-entrant session lock at its outer boundary.
+            with self._session_write_lock(conn, sid):
                 # Writer-boundary validation: resolve the parent state and
                 # validate the affected component before any interpretation
                 # row is written. ``invented_source`` binds to the synthetic
@@ -7350,7 +7352,12 @@ class SessionServiceImpl:
                 inserted_state_id = self._insert_composition_state(
                     conn,
                     session_id=sid,
-                    payload=StatePayload(data=prepared_state, derived_from_state_id=None),
+                    payload=StatePayload(
+                        data=prepared_state,
+                        derived_from_state_id=(
+                            str(command.expected_current_state_id) if command.expected_current_state_id is not None else None
+                        ),
+                    ),
                     provenance=command.provenance,
                     created_at=now,
                     state_id=str(command.state_id),

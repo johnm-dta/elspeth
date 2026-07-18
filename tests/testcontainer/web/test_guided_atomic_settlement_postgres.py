@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -17,11 +18,15 @@ from elspeth.contracts.composer_llm_audit import (
     ComposerChatTurn,
     ComposerChatTurnStatus,
 )
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.composer.guided.state_machine import GuidedSession
+from elspeth.web.composer.pipeline_proposal import composition_content_hash
+from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import chat_messages_table, composition_states_table, guided_operations_table
 from elspeth.web.sessions.protocol import (
     CompositionStateData,
+    CompositionStateRecord,
     GuidedAuditEvidence,
     GuidedOperationClaimed,
     GuidedOperationFence,
@@ -30,6 +35,7 @@ from elspeth.web.sessions.protocol import (
     GuidedOriginatingUserMessageDraft,
     GuidedResponseDescriptor,
     GuidedStateOperationCommand,
+    StaleComposeStateError,
 )
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
@@ -63,6 +69,7 @@ def _command(
     fence: GuidedOperationFence,
     *,
     with_messages: bool = False,
+    predecessor: CompositionStateRecord | None = None,
 ) -> GuidedStateOperationCommand:
     now = datetime.now(UTC)
     evidence = (
@@ -87,9 +94,9 @@ def _command(
     )
     return GuidedStateOperationCommand(
         fence=fence,
-        expected_current_state_id=None,
-        expected_current_state_version=None,
-        expected_current_content_hash=None,
+        expected_current_state_id=predecessor.id if predecessor is not None else None,
+        expected_current_state_version=predecessor.version if predecessor is not None else None,
+        expected_current_content_hash=(composition_content_hash(state_from_record(predecessor)) if predecessor is not None else None),
         state_id=uuid4(),
         state=CompositionStateData(
             is_valid=False,
@@ -100,6 +107,18 @@ def _command(
         response=GuidedResponseDescriptor(kind="guided_respond", next_turn=None, assistant_turn_seq=None),
         audit_evidence=evidence,
         originating_message=(GuidedOriginatingUserMessageDraft(message_id=uuid4(), content="continue") if with_messages else None),
+    )
+
+
+async def _seed_predecessor(service: SessionServiceImpl, session_id) -> CompositionStateRecord:
+    return await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            metadata_={"name": "PostgreSQL predecessor", "description": ""},
+            is_valid=False,
+            composer_meta={"guided_session": GuidedSession.initial().to_dict()},
+        ),
+        provenance="convergence_persist",
     )
 
 
@@ -178,3 +197,74 @@ async def test_postgres_stale_fence_attempt_cannot_write_after_takeover(
         states = conn.execute(select(composition_states_table).where(composition_states_table.c.session_id == str(session_id))).all()
     assert [row.id for row in states] == [str(winning.state_id)]
     assert settlement.result_state.id == winning.state_id
+
+
+@pytest.mark.asyncio
+async def test_postgres_present_head_settles_derived_successor(
+    postgres_service: SessionServiceImpl,
+    postgres_engine: Engine,
+) -> None:
+    session_id = (await postgres_service.create_session("alice", "PG present head", "local")).id
+    predecessor = await _seed_predecessor(postgres_service, session_id)
+    claimed = await postgres_service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id="pg-present-exact",
+        kind="guided_respond",
+        request_hash="e" * 64,
+        actor="worker",
+        lease_seconds=60,
+    )
+    assert isinstance(claimed, GuidedOperationClaimed)
+    command = _command(claimed.fence, predecessor=predecessor)
+
+    settlement = await postgres_service.settle_guided_state_operation(command)
+
+    assert settlement.primary_state.derived_from_state_id == predecessor.id
+    assert settlement.primary_state.version == predecessor.version + 1
+    with postgres_engine.connect() as conn:
+        states = conn.execute(
+            select(composition_states_table)
+            .where(composition_states_table.c.session_id == str(session_id))
+            .order_by(composition_states_table.c.version)
+        ).all()
+    assert [row.id for row in states] == [str(predecessor.id), str(command.state_id)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mismatch", ["id", "version", "content_hash"])
+async def test_postgres_present_head_mismatch_rolls_back_and_retries(
+    postgres_service: SessionServiceImpl,
+    postgres_engine: Engine,
+    mismatch: str,
+) -> None:
+    session_id = (await postgres_service.create_session("alice", f"PG present mismatch {mismatch}", "local")).id
+    predecessor = await _seed_predecessor(postgres_service, session_id)
+    claimed = await postgres_service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id=f"pg-present-{mismatch}",
+        kind="guided_respond",
+        request_hash="f" * 64,
+        actor="worker",
+        lease_seconds=60,
+    )
+    assert isinstance(claimed, GuidedOperationClaimed)
+    exact = _command(claimed.fence, with_messages=True, predecessor=predecessor)
+    replacements = {
+        "id": {"expected_current_state_id": uuid4()},
+        "version": {"expected_current_state_version": predecessor.version + 1},
+        "content_hash": {"expected_current_content_hash": "0" * 64},
+    }[mismatch]
+
+    with pytest.raises((StaleComposeStateError, AuditIntegrityError)):
+        await postgres_service.settle_guided_state_operation(replace(exact, **replacements))
+
+    with postgres_engine.connect() as conn:
+        states = conn.execute(select(composition_states_table).where(composition_states_table.c.session_id == str(session_id))).all()
+        messages = conn.execute(select(chat_messages_table).where(chat_messages_table.c.session_id == str(session_id))).all()
+        operation = conn.execute(select(guided_operations_table).where(guided_operations_table.c.session_id == str(session_id))).one()
+    assert [row.id for row in states] == [str(predecessor.id)]
+    assert messages == []
+    assert operation.status == "in_progress"
+
+    settlement = await postgres_service.settle_guided_state_operation(exact)
+    assert settlement.primary_state.derived_from_state_id == predecessor.id

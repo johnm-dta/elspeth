@@ -28,7 +28,9 @@ from elspeth.contracts.hashing import stable_hash
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, GuidedStep, TurnType
 from elspeth.web.composer.guided.state_machine import GuidedSession, TurnRecord
+from elspeth.web.composer.pipeline_proposal import composition_content_hash
 from elspeth.web.plugin_policy.models import PluginId, PluginUnavailableReason
+from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     chat_messages_table,
@@ -52,6 +54,7 @@ from elspeth.web.sessions.protocol import (
     GuidedStateOperationCommand,
     PreparedGuidedInterpretationDraft,
     PreparedGuidedJsonPayload,
+    StaleComposeStateError,
 )
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
@@ -519,6 +522,49 @@ def _guided_with_next_turn(payload_id: str) -> GuidedSession:
     )
 
 
+@pytest.mark.parametrize("response_kind", ["guided_respond", "guided_chat"])
+@pytest.mark.parametrize("tamper", ["answered", "stale_stage"])
+def test_replay_requires_final_turn_to_be_current_and_unanswered(response_kind: str, tamper: str) -> None:
+    replay = importlib.import_module("elspeth.web.sessions.guided_replay")
+    payload = PreparedGuidedJsonPayload(
+        payload_id=stable_hash(
+            {
+                "question": "Choose a source",
+                "options": [{"id": "csv", "label": "CSV", "hint": None}],
+                "allow_custom": True,
+            }
+        ),
+        purpose="turn",
+        payload={
+            "question": "Choose a source",
+            "options": [{"id": "csv", "label": "CSV", "hint": None}],
+            "allow_custom": True,
+        },
+    )
+    guided = _guided_with_next_turn(payload.payload_id)
+    if tamper == "answered":
+        guided = replace(guided, history=(replace(guided.history[-1], response_hash="b" * 64),))
+    else:
+        guided = replace(guided, step=GuidedStep.STEP_2_SINK)
+    assistant_turn_seq = None
+    if response_kind == "guided_chat":
+        chat = _chat_guided_session()
+        guided = replace(guided, chat_history=chat.chat_history, chat_turn_seq=chat.chat_turn_seq)
+        assistant_turn_seq = 1
+    descriptor = GuidedResponseDescriptor(
+        kind=response_kind,
+        next_turn=GuidedReplayTurn(
+            turn_type=TurnType.SINGLE_SELECT,
+            step_index=0,
+            payload_id=payload.payload_id,
+        ),
+        assistant_turn_seq=assistant_turn_seq,
+    )
+
+    with pytest.raises(AuditIntegrityError, match="current unanswered"):
+        replay.project_guided_response(_replay_record(descriptor=descriptor, guided=guided), payloads=(payload,))
+
+
 @pytest.fixture
 def service_and_engine(tmp_path: Path):
     engine = create_session_engine(f"sqlite:///{tmp_path / 'guided-atomic.db'}")
@@ -812,6 +858,117 @@ def _empty_respond_command(fence: GuidedOperationFence, *, state_id=None) -> Gui
         actor="worker",
         response=GuidedResponseDescriptor(kind="guided_respond", next_turn=None, assistant_turn_seq=None),
     )
+
+
+async def _seed_present_guided_predecessor(service: SessionServiceImpl, session_id) -> CompositionStateRecord:
+    return await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            metadata_={"name": "Guided predecessor", "description": ""},
+            is_valid=False,
+            composer_meta={"guided_session": GuidedSession.initial().to_dict()},
+        ),
+        provenance="convergence_persist",
+    )
+
+
+def _present_respond_command(
+    fence: GuidedOperationFence,
+    predecessor: CompositionStateRecord,
+) -> GuidedStateOperationCommand:
+    invocation, llm_call, chat_turn = _audit_evidence()
+    return GuidedStateOperationCommand(
+        fence=fence,
+        expected_current_state_id=predecessor.id,
+        expected_current_state_version=predecessor.version,
+        expected_current_content_hash=composition_content_hash(state_from_record(predecessor)),
+        state_id=uuid4(),
+        state=CompositionStateData(
+            metadata_={"name": "Guided successor", "description": ""},
+            is_valid=False,
+            composer_meta={"guided_session": GuidedSession.initial().to_dict()},
+        ),
+        provenance="convergence_persist",
+        actor="worker",
+        response=GuidedResponseDescriptor(kind="guided_respond", next_turn=None, assistant_turn_seq=None),
+        audit_evidence=GuidedAuditEvidence(
+            invocations=(invocation,),
+            llm_calls=(llm_call,),
+            chat_turns=(chat_turn,),
+        ),
+        originating_message=GuidedOriginatingUserMessageDraft(message_id=uuid4(), content="continue"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_present_expected_head_exact_match_settles_derived_successor(service_and_engine) -> None:
+    service, engine = service_and_engine
+    session_id = (await service.create_session("alice", "guided present head", "local")).id
+    predecessor = await _seed_present_guided_predecessor(service, session_id)
+    claimed = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id="respond-present-exact",
+        kind="guided_respond",
+        request_hash="a" * 64,
+        actor="worker",
+        lease_seconds=60,
+    )
+    assert isinstance(claimed, GuidedOperationClaimed)
+    command = _present_respond_command(claimed.fence, predecessor)
+
+    settlement = await service.settle_guided_state_operation(command)
+
+    assert settlement.primary_state.id == command.state_id
+    assert settlement.primary_state.version == predecessor.version + 1
+    assert settlement.primary_state.derived_from_state_id == predecessor.id
+    with engine.connect() as conn:
+        states = conn.execute(
+            select(composition_states_table)
+            .where(composition_states_table.c.session_id == str(session_id))
+            .order_by(composition_states_table.c.version)
+        ).all()
+    assert [row.id for row in states] == [str(predecessor.id), str(command.state_id)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mismatch", ["id", "version", "content_hash"])
+async def test_present_expected_head_mismatch_rolls_back_and_same_fence_retries(service_and_engine, mismatch: str) -> None:
+    service, engine = service_and_engine
+    session_id = (await service.create_session("alice", f"guided present {mismatch}", "local")).id
+    predecessor = await _seed_present_guided_predecessor(service, session_id)
+    claimed = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id=f"respond-present-{mismatch}",
+        kind="guided_respond",
+        request_hash="a" * 64,
+        actor="worker",
+        lease_seconds=60,
+    )
+    assert isinstance(claimed, GuidedOperationClaimed)
+    exact = _present_respond_command(claimed.fence, predecessor)
+    replacements = {
+        "id": {"expected_current_state_id": uuid4()},
+        "version": {"expected_current_state_version": predecessor.version + 1},
+        "content_hash": {"expected_current_content_hash": "f" * 64},
+    }[mismatch]
+    bad = replace(exact, **replacements)
+
+    with pytest.raises((StaleComposeStateError, AuditIntegrityError)):
+        await service.settle_guided_state_operation(bad)
+
+    with engine.connect() as conn:
+        states = conn.execute(select(composition_states_table).where(composition_states_table.c.session_id == str(session_id))).all()
+        messages = conn.execute(select(chat_messages_table).where(chat_messages_table.c.session_id == str(session_id))).all()
+        operation = conn.execute(select(guided_operations_table).where(guided_operations_table.c.session_id == str(session_id))).one()
+    assert [row.id for row in states] == [str(predecessor.id)]
+    assert messages == []
+    assert operation.status == "in_progress"
+    assert operation.result_state_id is None
+    assert operation.response_hash is None
+
+    settlement = await service.settle_guided_state_operation(exact)
+    assert settlement.primary_state.id == exact.state_id
+    assert settlement.primary_state.derived_from_state_id == predecessor.id
 
 
 @pytest.mark.asyncio

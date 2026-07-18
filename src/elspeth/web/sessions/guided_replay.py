@@ -194,6 +194,8 @@ def _turn_response(
         or turn_record.payload_hash != turn.payload_id
     ):
         raise AuditIntegrityError("Guided replay turn does not match the persisted turn record")
+    if turn_record.step is not guided.step or turn_record.response_hash is not None:
+        raise AuditIntegrityError("Guided replay turn record is not the final current unanswered turn")
     return TurnPayloadResponse(
         type=turn.turn_type.value,
         step_index=turn.step_index,

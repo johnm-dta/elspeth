@@ -1935,6 +1935,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       );
       responseReceived = true;
       if (get().activeSessionId !== requestedSessionId) {
+        clearGuidedRetry(retry);
         return;
       }
       await get().applyGuidedResponse(requestedSessionId, response);

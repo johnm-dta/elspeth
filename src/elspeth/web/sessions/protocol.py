@@ -677,6 +677,25 @@ class CompositionStateRecord:
             freeze_fields(self, *non_none)
 
 
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedStartStateSeeded:
+    """The fenced start transaction inserted and settled a fresh seed."""
+
+    state: CompositionStateRecord
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedStartStateConverged:
+    """The fenced start transaction settled the exact guided head it found."""
+
+    state: CompositionStateRecord
+
+
+type GuidedStartStateOutcome = GuidedStartStateSeeded | GuidedStartStateConverged
+
+
 @dataclass(frozen=True, slots=True)
 class AuditAccessLogRecord:
     """Represents a row from the audit_access_log table.
@@ -985,6 +1004,16 @@ class SessionServiceProtocol(Protocol):
         response_hash_factory: Callable[[CompositionStateRecord], str],
         system_message: str | None = None,
     ) -> CompositionStateRecord: ...
+
+    async def seed_or_complete_guided_start_operation(
+        self,
+        fence: GuidedOperationFence,
+        *,
+        state: CompositionStateData,
+        provenance: CompositionStateProvenance,
+        actor: str,
+        response_hash_factory: Callable[[CompositionStateRecord], str],
+    ) -> GuidedStartStateOutcome: ...
 
     async def complete_existing_state_guided_operation(
         self,

@@ -268,6 +268,33 @@ async def test_guided_start_same_operation_id_rejects_different_profile(tmp_path
     assert conflict.json()["detail"] == "Operation id is already bound to a different request."
 
 
+@pytest.mark.parametrize(
+    "invalid_profile",
+    ["superuser", {"kind": "tutorial", "injected": {"admin": True}}],
+)
+@pytest.mark.asyncio
+async def test_guided_start_existing_operation_conflict_precedes_profile_semantics(tmp_path, invalid_profile) -> None:
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    operation_id = str(uuid.uuid4())
+    first = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": "tutorial", "operation_id": operation_id},
+    )
+    assert first.status_code == 200
+
+    conflict = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": invalid_profile, "operation_id": operation_id},
+    )
+
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"] == "Operation id is already bound to a different request."
+    assert "superuser" not in conflict.text
+    assert "injected" not in conflict.text
+
+
 @pytest.mark.asyncio
 async def test_guided_start_new_operation_returns_exact_existing_guided_head(tmp_path) -> None:
     app, service = _make_app(tmp_path)
@@ -391,7 +418,7 @@ async def test_guided_start_integrity_failure_is_terminal_and_safe_to_replay(tmp
         capture_logs() as logs,
         patch.object(
             service,
-            "save_state_for_guided_operation",
+            "seed_or_complete_guided_start_operation",
             side_effect=AuditIntegrityError("secret diagnostic must not escape"),
         ),
     ):
@@ -560,6 +587,54 @@ async def test_guided_start_empty_race_settles_exact_guided_winner(tmp_path) -> 
     current = await service.get_current_state(session.id)
     assert current is not None
     assert current.id == winner_record.id
+
+
+@pytest.mark.asyncio
+async def test_guided_start_late_empty_race_converges_inside_atomic_seed(tmp_path) -> None:
+    from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE
+    from elspeth.web.sessions.protocol import CompositionStateData
+    from elspeth.web.sessions.routes._helpers import _initial_composition_state_with_guided_session
+
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    original_seed = service.seed_or_complete_guided_start_operation
+    winner_record = None
+
+    async def seed_after_late_guided_winner(*args, **kwargs):
+        nonlocal winner_record
+        winner = _initial_composition_state_with_guided_session(profile=TUTORIAL_PROFILE)
+        assert winner.guided_session is not None
+        winner_data = winner.to_dict()
+        winner_record = await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                sources=winner_data["sources"],
+                nodes=winner_data["nodes"],
+                edges=winner_data["edges"],
+                outputs=winner_data["outputs"],
+                metadata_=winner_data["metadata"],
+                composer_meta={"guided_session": winner.guided_session.to_dict()},
+            ),
+            provenance="session_seed",
+        )
+        return await original_seed(*args, **kwargs)
+
+    with patch.object(
+        service,
+        "seed_or_complete_guided_start_operation",
+        side_effect=seed_after_late_guided_winner,
+    ):
+        response = client.post(
+            f"/api/sessions/{session.id}/guided/start",
+            json={"profile": "tutorial", "operation_id": str(uuid.uuid4())},
+        )
+
+    assert response.status_code == 200
+    assert winner_record is not None
+    assert response.json()["composition_state"]["id"] == str(winner_record.id)
+    versions = await service.get_state_versions(session.id)
+    assert [record.id for record in versions] == [winner_record.id]
 
 
 @pytest.mark.asyncio

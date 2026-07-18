@@ -299,6 +299,34 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(start.mock.calls[0]?.[2]).toBe(start.mock.calls[1]?.[2]);
   });
 
+  it("seedGuided: clears a definitive response dropped by the stale-session guard", async () => {
+    const { startGuidedSession } = await import("@/api/client");
+    const start = startGuidedSession as ReturnType<typeof vi.fn>;
+    let resolveFirst: (response: GetGuidedResponse) => void = () => undefined;
+    start
+      .mockReturnValueOnce(
+        new Promise<GetGuidedResponse>((resolve) => {
+          resolveFirst = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(sampleGetGuidedResponse);
+    useSessionStore.setState({ activeSessionId: RETRY_SESSION_ID });
+
+    const stale = useSessionStore
+      .getState()
+      .seedGuided(RETRY_SESSION_ID, "tutorial");
+    useSessionStore.setState({ activeSessionId: RETRY_SESSION_B });
+    resolveFirst(sampleGetGuidedResponse);
+    await stale;
+    expect(useSessionStore.getState().activeSessionId).toBe(RETRY_SESSION_B);
+    expect(useSessionStore.getState().guidedSession).toBeNull();
+
+    useSessionStore.setState({ activeSessionId: RETRY_SESSION_ID });
+    await useSessionStore.getState().seedGuided(RETRY_SESSION_ID, "tutorial");
+
+    expect(start.mock.calls[0]?.[2]).not.toBe(start.mock.calls[1]?.[2]);
+  });
+
   // ── Test 4: respondGuided happy path ─────────────────────────────────────
 
   it("respondGuided: atomically replaces all 4 wire fields on success", async () => {

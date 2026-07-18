@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 import structlog
 from sqlalchemy import func, select, update
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import stable_hash
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import chat_messages_table, composition_states_table, guided_operations_table
@@ -19,6 +22,8 @@ from elspeth.web.sessions.protocol import (
     GuidedOperationCompleted,
     GuidedOperationFenceLostError,
     GuidedOperationTakenOver,
+    GuidedStartStateConverged,
+    GuidedStartStateSeeded,
 )
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
@@ -39,6 +44,16 @@ def engine():
 @pytest.fixture
 def service(engine):
     return SessionServiceImpl(engine, telemetry=build_sessions_telemetry(), log=structlog.get_logger("test"))
+
+
+@pytest.fixture
+def file_engine(tmp_path: Path):
+    engine = create_session_engine(f"sqlite:///{tmp_path / 'guided-start.db'}")
+    initialize_session_schema(engine)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
 
 
 async def _claim(
@@ -192,3 +207,141 @@ async def test_existing_guided_state_can_settle_without_new_state_version(servic
 
     assert settled == existing
     assert [state.id for state in await service.get_state_versions(session.id)] == [existing.id]
+
+
+@pytest.mark.asyncio
+async def test_guided_start_atomic_seed_persists_and_settles_empty_session(service) -> None:
+    session = await service.create_session("alice", "Pipeline", "local")
+    fence = await _claim(service, session.id, kind="guided_start")
+    state_data = CompositionStateData(
+        composer_meta={"guided_session": {"schema_version": 8}},
+        is_valid=True,
+    )
+
+    outcome = await service.seed_or_complete_guided_start_operation(
+        fence,
+        state=state_data,
+        provenance="session_seed",
+        actor="route",
+        response_hash_factory=lambda state: stable_hash({"state_id": str(state.id)}),
+    )
+
+    assert isinstance(outcome, GuidedStartStateSeeded)
+    assert await service.get_current_state(session.id) == outcome.state
+    operation = await service.get_guided_operation(
+        session_id=session.id,
+        operation_id=fence.operation_id,
+        kind="guided_start",
+        request_hash="a" * 64,
+    )
+    assert operation == GuidedOperationCompleted(
+        result=GuidedCompositionStateResult(state_id=outcome.state.id),
+        response_hash=stable_hash({"state_id": str(outcome.state.id)}),
+    )
+
+
+@pytest.mark.asyncio
+async def test_guided_start_atomic_seed_converges_exact_existing_guided_head(service) -> None:
+    session = await service.create_session("alice", "Pipeline", "local")
+    existing = await service.save_composition_state(
+        session.id,
+        CompositionStateData(
+            composer_meta={"guided_session": {"schema_version": 8}},
+            is_valid=True,
+        ),
+        provenance="session_seed",
+    )
+    fence = await _claim(service, session.id, kind="guided_start")
+
+    def guided_response_hash(state):
+        assert state.composer_meta is not None
+        assert "guided_session" in state.composer_meta
+        return stable_hash({"state_id": str(state.id)})
+
+    outcome = await service.seed_or_complete_guided_start_operation(
+        fence,
+        state=CompositionStateData(is_valid=True),
+        provenance="session_seed",
+        actor="route",
+        response_hash_factory=guided_response_hash,
+    )
+
+    assert outcome == GuidedStartStateConverged(state=existing)
+    assert [state.id for state in await service.get_state_versions(session.id)] == [existing.id]
+
+
+@pytest.mark.asyncio
+async def test_guided_start_atomic_seed_does_not_treat_generic_integrity_error_as_convergence(service) -> None:
+    session = await service.create_session("alice", "Pipeline", "local")
+    freeform = await service.save_composition_state(
+        session.id,
+        CompositionStateData(is_valid=True),
+        provenance="post_compose",
+    )
+    fence = await _claim(service, session.id, kind="guided_start")
+
+    def reject_freeform(_state):
+        raise AuditIntegrityError("current head is not a valid guided checkpoint")
+
+    with pytest.raises(AuditIntegrityError, match="not a valid guided checkpoint"):
+        await service.seed_or_complete_guided_start_operation(
+            fence,
+            state=CompositionStateData(
+                composer_meta={"guided_session": {"schema_version": 8}},
+                is_valid=True,
+            ),
+            provenance="session_seed",
+            actor="route",
+            response_hash_factory=reject_freeform,
+        )
+
+    assert [state.id for state in await service.get_state_versions(session.id)] == [freeform.id]
+
+
+@pytest.mark.asyncio
+async def test_guided_start_atomic_seed_serializes_two_sqlite_services(file_engine) -> None:
+    service_a = SessionServiceImpl(file_engine, telemetry=build_sessions_telemetry(), log=structlog.get_logger("test.a"))
+    service_b = SessionServiceImpl(file_engine, telemetry=build_sessions_telemetry(), log=structlog.get_logger("test.b"))
+    session = await service_a.create_session("alice", "Pipeline", "local")
+    fence_a = await _claim(
+        service_a,
+        session.id,
+        operation_id="00000000-0000-4000-8000-000000000011",
+        kind="guided_start",
+        request_hash="b" * 64,
+    )
+    fence_b = await _claim(
+        service_b,
+        session.id,
+        operation_id="00000000-0000-4000-8000-000000000012",
+        kind="guided_start",
+        request_hash="c" * 64,
+    )
+    state_data = CompositionStateData(
+        composer_meta={"guided_session": {"schema_version": 8}},
+        is_valid=True,
+    )
+
+    outcomes = await asyncio.gather(
+        service_a.seed_or_complete_guided_start_operation(
+            fence_a,
+            state=state_data,
+            provenance="session_seed",
+            actor="route-a",
+            response_hash_factory=lambda state: stable_hash({"state_id": str(state.id)}),
+        ),
+        service_b.seed_or_complete_guided_start_operation(
+            fence_b,
+            state=state_data,
+            provenance="session_seed",
+            actor="route-b",
+            response_hash_factory=lambda state: stable_hash({"state_id": str(state.id)}),
+        ),
+    )
+
+    assert {type(outcome) for outcome in outcomes} == {
+        GuidedStartStateSeeded,
+        GuidedStartStateConverged,
+    }
+    assert outcomes[0].state.id == outcomes[1].state.id
+    assert len(await service_a.get_state_versions(session.id)) == 1

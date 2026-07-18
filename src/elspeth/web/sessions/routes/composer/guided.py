@@ -1069,6 +1069,26 @@ async def post_guided_start(
     service: SessionServiceProtocol = request.app.state.session_service
     catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
 
+    from elspeth.web.sessions.guided_operations import guided_operation_request_hash
+    from elspeth.web.sessions.protocol import GuidedOperationConflictError
+
+    try:
+        await service.get_guided_operation(
+            session_id=session_id,
+            operation_id=body.operation_id,
+            kind="guided_start",
+            request_hash=guided_operation_request_hash(
+                session_id=session_id,
+                kind="guided_start",
+                request=body,
+            ),
+        )
+    except GuidedOperationConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Operation id is already bound to a different request.",
+        ) from exc
+
     # Tier-3 -> Tier-2 coercion at the profile-kind boundary. A stale client
     # sending an unknown discriminator gets a 400 with a generic message
     # rather than a Pydantic 422; the typed kind then selects a SERVER-owned
@@ -1262,16 +1282,14 @@ async def post_guided_start(
                     validation_errors=persisted_errors,
                     composer_meta={"guided_session": seeded_guided.to_dict()},
                 )
-                seeded_record = await service.save_state_for_guided_operation(
+                seed_outcome = await service.seed_or_complete_guided_start_operation(
                     renewed_fence,
-                    expected_current_state_id=None,
-                    expected_current_state_version=None,
                     state=state_data,
                     provenance="session_seed",
                     actor="composer_route",
                     response_hash_factory=lambda record: guided_response_hash(_response_from_record(record)),
                 )
-                return _response_from_record(seeded_record)
+                return _response_from_record(seed_outcome.state)
         except GuidedOperationFenceLostError:
             # Never poll while holding the compose lock. Rejoin outside it;
             # reserve either observes the winner or performs the sole takeover.

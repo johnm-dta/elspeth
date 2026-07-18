@@ -139,6 +139,9 @@ from elspeth.web.sessions.protocol import (
     GuidedOperationTakenOver,
     GuidedProposalResult,
     GuidedSessionResult,
+    GuidedStartStateConverged,
+    GuidedStartStateOutcome,
+    GuidedStartStateSeeded,
     IllegalRunTransitionError,
     PipelineDispatchRecovery,
     PipelineProposalPublicMetadata,
@@ -7099,6 +7102,63 @@ class SessionServiceImpl:
             return
         if current is None or current.id != str(expected_state_id) or current.version != expected_state_version:
             raise AuditIntegrityError("Guided operation current state changed before settlement")
+
+    async def seed_or_complete_guided_start_operation(
+        self,
+        fence: GuidedOperationFence,
+        *,
+        state: CompositionStateData,
+        provenance: CompositionStateProvenance,
+        actor: str,
+        response_hash_factory: Callable[[CompositionStateRecord], str],
+    ) -> GuidedStartStateOutcome:
+        """Atomically seed an empty session or settle its exact guided head.
+
+        The response-hash callback is the guided-state validator for an
+        existing head: it must fail closed when the record is freeform or
+        otherwise cannot produce the strict start response. No generic
+        integrity failure is interpreted as convergence.
+        """
+
+        sid = str(fence.session_id)
+        now = self._now()
+
+        def _sync() -> GuidedStartStateOutcome:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                self.require_guided_operation_fence_on_connection(conn, fence)
+                current_row = conn.execute(
+                    select(composition_states_table)
+                    .where(composition_states_table.c.session_id == sid)
+                    .order_by(desc(composition_states_table.c.version))
+                    .limit(1)
+                ).one_or_none()
+                if current_row is None:
+                    state_id = self._insert_composition_state(
+                        conn,
+                        session_id=sid,
+                        payload=StatePayload(data=state, derived_from_state_id=None),
+                        provenance=provenance,
+                        created_at=now,
+                    )
+                    inserted_row = conn.execute(select(composition_states_table).where(composition_states_table.c.id == state_id)).one()
+                    record = self._row_to_state_record(inserted_row)
+                    outcome: GuidedStartStateOutcome = GuidedStartStateSeeded(state=record)
+                else:
+                    record = self._row_to_state_record(current_row)
+                    outcome = GuidedStartStateConverged(state=record)
+
+                response_hash = response_hash_factory(record)
+                self.bind_guided_operation_on_connection(conn, fence, result_state_id=record.id)
+                self.complete_guided_operation_on_connection(
+                    conn,
+                    fence,
+                    result=GuidedCompositionStateResult(state_id=record.id),
+                    response_hash=response_hash,
+                    actor=actor,
+                )
+                return outcome
+
+        return cast("GuidedStartStateOutcome", await self._run_sync(_sync))
 
     async def save_state_for_guided_operation(
         self,

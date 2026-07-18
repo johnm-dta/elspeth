@@ -21,9 +21,9 @@ cutover: do not leave an active v7 decoder or a reachable chain proposal arm.
 - Create: `tests/unit/web/composer/guided/test_schema8_state.py`
 - Modify: `tests/unit/web/composer/guided/test_state_machine.py`
 
-- [ ] Add failing round-trip, strict-key, strict-enum, recursive-immutability,
+- [x] Add failing round-trip, strict-key, strict-enum, recursive-immutability,
   and wrong-version tests for schema 8.
-- [ ] Replace `ChainProposal`, `step_3_proposal`, and `step_3_edit_index` with:
+- [x] Replace `ChainProposal`, `step_3_proposal`, and `step_3_edit_index` with:
 
 ```python
 GUIDED_SESSION_SCHEMA_VERSION = 8
@@ -61,15 +61,15 @@ PresentBase` union: a new pipeline has an explicit absent base, while a present
 base always carries both state id and composition-content hash. It is never a
 nullable or wildcard base.
 
-- [ ] Preserve current closed decoding, exact types, non-negative counters,
+- [x] Preserve current closed decoding, exact types, non-negative counters,
   terminal-state rules, and workflow-profile validation. Reject every
   `schema_version != 8`; do not add a converter. The entire guided composer
   metadata object and every guided request/response DTO use strict closed
   decoding (`extra="forbid"` / exact keys), while unrelated fields in the
   general session envelope retain their existing compatibility posture.
-- [ ] Cover every guided stage, pending proposal, stable edit target, deferred
+- [x] Cover every guided stage, pending proposal, stable edit target, deferred
   intent, completed/exited state, and process restart.
-- [ ] Include multi-source/multi-output reordering and stable-id retention in
+- [x] Include multi-source/multi-output reordering and stable-id retention in
   the schema-8 round trip now. Plan 04 adds controller behavior over this final
   shape; it must not alter persisted schema 8 after the epoch-29 cutover.
 
@@ -82,6 +82,10 @@ uv run pytest \
 ```
 
 Expected: PASS.
+
+Task 1 is accepted as the structural schema-8 contract. The Plan 03 cutover is
+still an atomic cohort: active routes and frontend callers remain intentionally
+unsupported until Tasks 2 through 6 replace the schema-7 protocol.
 
 ## Task 2: Allocate the pre-release session boundary
 

@@ -716,7 +716,7 @@ guided_operations_table = Table(
     ),
     CheckConstraint(
         "(status = 'in_progress' AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL "
-        "AND settled_at IS NULL AND result_kind IS NULL AND result_state_id IS NULL "
+        "AND settled_at IS NULL AND result_kind IS NULL "
         "AND response_hash IS NULL AND failure_code IS NULL) OR "
         "(status = 'completed' AND lease_token IS NULL AND lease_expires_at IS NULL "
         "AND settled_at IS NOT NULL AND result_kind IS NOT NULL AND response_hash IS NOT NULL AND failure_code IS NULL) OR "
@@ -728,6 +728,7 @@ guided_operations_table = Table(
     CheckConstraint(
         "(status = 'in_progress' AND "
         "(result_session_id IS NULL OR kind = 'session_fork') AND "
+        "(result_state_id IS NULL OR kind <> 'session_fork') AND "
         "(proposal_id IS NULL OR kind IN ('guided_respond', 'guided_chat', 'guided_plan'))) OR "
         "(status = 'completed' AND ("
         "(kind = 'session_fork' AND result_kind = 'session' AND result_session_id IS NOT NULL "

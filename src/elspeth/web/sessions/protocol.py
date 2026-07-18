@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import InitVar, dataclass
 from datetime import datetime
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, final, get_args, runtime_checkable
 from uuid import UUID
 
 from elspeth.contracts.auth import AuthProviderType
@@ -53,6 +53,24 @@ ProposalEventType = Literal[
     "proposal.accepted",
     "proposal.rejected",
     "trust_mode.changed",
+]
+GuidedOperationKind = Literal[
+    "guided_start",
+    "guided_respond",
+    "guided_chat",
+    "guided_convert",
+    "guided_reenter",
+    "state_revert",
+    "session_fork",
+    "guided_plan",
+]
+GuidedOperationFailureCode = Literal[
+    "provider_unavailable",
+    "provider_timeout",
+    "invalid_provider_response",
+    "integrity_error",
+    "custody_error",
+    "operation_failed",
 ]
 # ``audit`` is an internal-only role for breadcrumb rows that have no real
 # OpenAI tool-response or assistant parent (LLM-call audit envelopes,
@@ -133,6 +151,8 @@ COMPOSER_TRUST_MODE_VALUES: frozenset[str] = frozenset(get_args(ComposerTrustMod
 COMPOSER_DENSITY_DEFAULT_VALUES: frozenset[str] = frozenset(get_args(ComposerDensityDefault))
 PROPOSAL_LIFECYCLE_STATUS_VALUES: frozenset[str] = frozenset(get_args(ProposalLifecycleStatus))
 PROPOSAL_EVENT_TYPE_VALUES: frozenset[str] = frozenset(get_args(ProposalEventType))
+GUIDED_OPERATION_KIND_VALUES: frozenset[str] = frozenset(get_args(GuidedOperationKind))
+GUIDED_OPERATION_FAILURE_CODE_VALUES: frozenset[str] = frozenset(get_args(GuidedOperationFailureCode))
 CHAT_MESSAGE_WRITER_PRINCIPAL_VALUES: frozenset[str] = frozenset(get_args(ChatMessageWriterPrincipal))
 COMPOSITION_STATE_PROVENANCE_VALUES: frozenset[str] = frozenset(get_args(CompositionStateProvenance))
 SESSION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(SessionRunStatus))
@@ -147,6 +167,114 @@ _RUN_COUNTER_FIELDS: tuple[str, ...] = (
     "rows_routed_failure",
     "rows_quarantined",
 )
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedOperationFence:
+    """Unforgeable lease identity required by every durable operation write."""
+
+    session_id: UUID
+    operation_id: str
+    lease_token: str
+    attempt: int
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedCompositionStateResult:
+    """Replay locator for state-producing guided operations."""
+
+    state_id: UUID
+    proposal_id: UUID | None = None
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedSessionResult:
+    """Replay locator for a session-fork operation."""
+
+    session_id: UUID
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedProposalResult:
+    """Replay locator for a staged guided-plan proposal."""
+
+    proposal_id: UUID
+
+
+type GuidedOperationResult = GuidedCompositionStateResult | GuidedSessionResult | GuidedProposalResult
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedOperationClaimed:
+    """The caller created attempt one and owns its fence."""
+
+    fence: GuidedOperationFence
+    lease_expires_at: datetime
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedOperationTakenOver:
+    """The caller replaced one expired attempt and owns the new fence."""
+
+    fence: GuidedOperationFence
+    prior_attempt: int
+    lease_expires_at: datetime
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedOperationActive:
+    """A matching unexpired attempt is active; callers must join or poll it."""
+
+    attempt: int
+    lease_expires_at: datetime
+    expired: bool = False
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedOperationCompleted:
+    """Immutable terminal replay descriptor; the response itself is not duplicated."""
+
+    result: GuidedOperationResult
+    response_hash: str
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedOperationFailed:
+    """Immutable terminal failure containing only the closed safe code."""
+
+    failure_code: GuidedOperationFailureCode
+
+
+type GuidedOperationOutcome = (
+    GuidedOperationClaimed | GuidedOperationTakenOver | GuidedOperationActive | GuidedOperationCompleted | GuidedOperationFailed
+)
+
+
+class GuidedOperationConflictError(RuntimeError):
+    """An operation id was reused for a different kind or normalized request."""
+
+    def __init__(self, *, session_id: UUID, operation_id: str) -> None:
+        self.session_id = session_id
+        self.operation_id = operation_id
+        super().__init__("Guided operation id is already bound to a different request")
+
+
+class GuidedOperationFenceLostError(RuntimeError):
+    """The worker's exact fence is absent, expired, superseded, or terminal."""
+
+    def __init__(self, fence: GuidedOperationFence) -> None:
+        self.fence = fence
+        super().__init__("Guided operation fence is no longer current")
+
 
 # Legal run status transitions. Implementations MUST reject any
 # transition not in this table.
@@ -775,6 +903,61 @@ class SessionServiceProtocol(Protocol):
     ) -> SessionRecord: ...
 
     async def get_session(self, session_id: UUID) -> SessionRecord: ...
+
+    async def reserve_guided_operation(
+        self,
+        *,
+        session_id: UUID,
+        operation_id: str,
+        kind: GuidedOperationKind,
+        request_hash: str,
+        actor: str,
+        lease_seconds: int,
+    ) -> GuidedOperationOutcome: ...
+
+    async def get_guided_operation(
+        self,
+        *,
+        session_id: UUID,
+        operation_id: str,
+        kind: GuidedOperationKind,
+        request_hash: str,
+    ) -> GuidedOperationActive | GuidedOperationCompleted | GuidedOperationFailed | None: ...
+
+    async def renew_guided_operation(
+        self,
+        fence: GuidedOperationFence,
+        *,
+        actor: str,
+        lease_seconds: int,
+    ) -> GuidedOperationFence: ...
+
+    async def bind_guided_operation(
+        self,
+        fence: GuidedOperationFence,
+        *,
+        originating_message_id: UUID | None = None,
+        proposal_id: UUID | None = None,
+        result_state_id: UUID | None = None,
+        result_session_id: UUID | None = None,
+    ) -> None: ...
+
+    async def complete_guided_operation(
+        self,
+        fence: GuidedOperationFence,
+        *,
+        result: GuidedOperationResult,
+        response_hash: str,
+        actor: str,
+    ) -> GuidedOperationCompleted: ...
+
+    async def fail_guided_operation(
+        self,
+        fence: GuidedOperationFence,
+        *,
+        failure_code: GuidedOperationFailureCode,
+        actor: str,
+    ) -> GuidedOperationFailed: ...
 
     async def update_session_title(self, session_id: UUID, title: str) -> SessionRecord: ...
 

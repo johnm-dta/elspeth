@@ -24,6 +24,7 @@ from opentelemetry import metrics
 from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 
 from elspeth.contracts.auth import AuthProviderType
@@ -89,6 +90,8 @@ from elspeth.web.sessions.models import (
     composer_completion_events_table,
     composition_proposals_table,
     composition_states_table,
+    guided_operation_events_table,
+    guided_operations_table,
     interpretation_events_table,
     proposal_events_table,
     run_events_table,
@@ -100,6 +103,8 @@ from elspeth.web.sessions.proposal_blob_refs import validate_proposal_blob_refer
 from elspeth.web.sessions.protocol import (
     AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST,
     AUDIT_GRADE_VIEW_WRITER_PRINCIPAL,
+    GUIDED_OPERATION_FAILURE_CODE_VALUES,
+    GUIDED_OPERATION_KIND_VALUES,
     LEGAL_RUN_TRANSITIONS,
     OPERATOR_COMPLETION_RUN_STATUS_VALUES,
     SESSION_RUN_EVENT_TYPE_VALUES,
@@ -119,6 +124,21 @@ from elspeth.web.sessions.protocol import (
     CompositionStateData,
     CompositionStateProvenance,
     CompositionStateRecord,
+    GuidedCompositionStateResult,
+    GuidedOperationActive,
+    GuidedOperationClaimed,
+    GuidedOperationCompleted,
+    GuidedOperationConflictError,
+    GuidedOperationFailed,
+    GuidedOperationFailureCode,
+    GuidedOperationFence,
+    GuidedOperationFenceLostError,
+    GuidedOperationKind,
+    GuidedOperationOutcome,
+    GuidedOperationResult,
+    GuidedOperationTakenOver,
+    GuidedProposalResult,
+    GuidedSessionResult,
     IllegalRunTransitionError,
     PipelineDispatchRecovery,
     PipelineProposalPublicMetadata,
@@ -2426,6 +2446,689 @@ class SessionServiceImpl:
             raise NotImplementedError(f"_session_write_lock not implemented for dialect {dialect}")
         finally:
             _SESSION_WRITE_LOCK_HELD.reset(token)
+
+    @staticmethod
+    def _guided_database_now(conn: Connection) -> datetime:
+        """Read one fresh wall-clock timestamp from the operation database."""
+        dialect = conn.dialect.name
+        if dialect == "sqlite":
+            value = conn.exec_driver_sql("SELECT CURRENT_TIMESTAMP").scalar_one()
+        elif dialect == "postgresql":
+            # CURRENT_TIMESTAMP is transaction-start time on PostgreSQL.
+            value = conn.exec_driver_sql("SELECT clock_timestamp()").scalar_one()
+        else:
+            raise NotImplementedError(f"guided operation database time not implemented for dialect {dialect}")
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value)
+        if not isinstance(value, datetime):
+            raise AuditIntegrityError("Guided operation database clock returned a non-datetime value")
+        return SessionServiceImpl._ensure_utc(value)
+
+    @staticmethod
+    def _validate_guided_hash(value: str, *, label: str) -> None:
+        if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+            raise ValueError(f"{label} must be a lowercase SHA-256 hex digest")
+
+    @staticmethod
+    def _validate_guided_actor(actor: str) -> None:
+        if not isinstance(actor, str) or not actor or len(actor) > 128:
+            raise ValueError("guided operation actor must be a non-empty string of at most 128 characters")
+
+    @staticmethod
+    def _validate_guided_lease_seconds(lease_seconds: int) -> None:
+        if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or not 1 <= lease_seconds <= 3600:
+            raise ValueError("guided operation lease_seconds must be an integer from 1 through 3600")
+
+    @staticmethod
+    def _validate_guided_identity(*, operation_id: str, kind: GuidedOperationKind, request_hash: str) -> None:
+        if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 128:
+            raise ValueError("guided operation id must be a non-empty string of at most 128 characters")
+        if kind not in GUIDED_OPERATION_KIND_VALUES:
+            raise ValueError("unsupported guided operation kind")
+        SessionServiceImpl._validate_guided_hash(request_hash, label="guided operation request_hash")
+
+    @staticmethod
+    def _insert_guided_operation_event(
+        conn: Connection,
+        *,
+        session_id: str,
+        operation_id: str,
+        event_kind: Literal["claimed", "renewed", "taken_over", "completed", "failed"],
+        actor: str,
+        attempt: int,
+        prior_attempt: int | None,
+        lease_expires_at: datetime | None,
+        request_hash: str,
+        occurred_at: datetime,
+    ) -> None:
+        next_sequence = conn.execute(
+            select(func.coalesce(func.max(guided_operation_events_table.c.sequence), 0) + 1).where(
+                guided_operation_events_table.c.session_id == session_id,
+                guided_operation_events_table.c.operation_id == operation_id,
+            )
+        ).scalar_one()
+        conn.execute(
+            insert(guided_operation_events_table).values(
+                session_id=session_id,
+                operation_id=operation_id,
+                sequence=next_sequence,
+                event_kind=event_kind,
+                actor=actor,
+                attempt=attempt,
+                prior_attempt=prior_attempt,
+                lease_expires_at=lease_expires_at,
+                request_hash=request_hash,
+                occurred_at=occurred_at,
+            )
+        )
+
+    @staticmethod
+    def _guided_in_progress_expiry(row: RowMapping) -> datetime:
+        lease_token = row["lease_token"]
+        lease_expires_at = row["lease_expires_at"]
+        if not isinstance(lease_token, str) or not lease_token or not isinstance(lease_expires_at, datetime):
+            raise AuditIntegrityError("Tier 1: in-progress guided operation has an invalid lease bundle")
+        if any(row[field] is not None for field in ("settled_at", "result_kind", "response_hash", "failure_code")):
+            raise AuditIntegrityError("Tier 1: in-progress guided operation retained terminal residue")
+        kind = row["kind"]
+        if row["result_session_id"] is not None and kind != "session_fork":
+            raise AuditIntegrityError("Tier 1: in-progress guided operation has a mismatched session locator")
+        if row["result_state_id"] is not None and kind == "session_fork":
+            raise AuditIntegrityError("Tier 1: in-progress fork has a mismatched state locator")
+        if row["proposal_id"] is not None and kind not in {"guided_respond", "guided_chat", "guided_plan"}:
+            raise AuditIntegrityError("Tier 1: in-progress guided operation has a mismatched proposal locator")
+        return SessionServiceImpl._ensure_utc(lease_expires_at)
+
+    @staticmethod
+    def _guided_terminal_outcome(row: RowMapping) -> GuidedOperationCompleted | GuidedOperationFailed:
+        status = row["status"]
+        if status == "failed":
+            failure_code = row["failure_code"]
+            if failure_code not in GUIDED_OPERATION_FAILURE_CODE_VALUES:
+                raise AuditIntegrityError("Tier 1: guided operation has an invalid terminal failure code")
+            if any(
+                row[field] is not None
+                for field in (
+                    "lease_token",
+                    "lease_expires_at",
+                    "result_kind",
+                    "result_state_id",
+                    "result_session_id",
+                    "proposal_id",
+                    "response_hash",
+                )
+            ):
+                raise AuditIntegrityError("Tier 1: failed guided operation retained terminal failure residue")
+            if not isinstance(row["settled_at"], datetime):
+                raise AuditIntegrityError("Tier 1: failed guided operation is missing settled_at")
+            return GuidedOperationFailed(failure_code=cast("GuidedOperationFailureCode", failure_code))
+        if status != "completed":
+            raise AuditIntegrityError("Tier 1: guided operation terminal decoder received a non-terminal row")
+        if row["lease_token"] is not None or row["lease_expires_at"] is not None or row["failure_code"] is not None:
+            raise AuditIntegrityError("Tier 1: completed guided operation retained terminal residue")
+        if not isinstance(row["settled_at"], datetime):
+            raise AuditIntegrityError("Tier 1: completed guided operation is missing settled_at")
+        response_hash = row["response_hash"]
+        if not isinstance(response_hash, str):
+            raise AuditIntegrityError("Tier 1: completed guided operation is missing response_hash")
+        try:
+            SessionServiceImpl._validate_guided_hash(response_hash, label="guided operation response_hash")
+            result_kind = row["result_kind"]
+            if result_kind == "composition_state":
+                if row["kind"] in {"session_fork", "guided_plan"}:
+                    raise AuditIntegrityError("Tier 1: guided operation kind does not match its result locator")
+                if row["result_session_id"] is not None:
+                    raise AuditIntegrityError("Tier 1: state result retained a session locator")
+                if row["proposal_id"] is not None and row["kind"] not in {"guided_respond", "guided_chat"}:
+                    raise AuditIntegrityError("Tier 1: state result retained an unsupported proposal locator")
+                state_id = UUID(row["result_state_id"])
+                proposal_id = UUID(row["proposal_id"]) if row["proposal_id"] is not None else None
+                result: GuidedOperationResult = GuidedCompositionStateResult(state_id=state_id, proposal_id=proposal_id)
+            elif result_kind == "session":
+                if row["kind"] != "session_fork" or row["result_state_id"] is not None or row["proposal_id"] is not None:
+                    raise AuditIntegrityError("Tier 1: guided operation kind does not match its result locator")
+                result = GuidedSessionResult(session_id=UUID(row["result_session_id"]))
+            elif result_kind == "proposal":
+                if row["kind"] != "guided_plan" or row["result_state_id"] is not None or row["result_session_id"] is not None:
+                    raise AuditIntegrityError("Tier 1: guided operation kind does not match its result locator")
+                result = GuidedProposalResult(proposal_id=UUID(row["proposal_id"]))
+            else:
+                raise AuditIntegrityError("Tier 1: completed guided operation has an invalid result kind")
+        except (TypeError, ValueError) as exc:
+            raise AuditIntegrityError("Tier 1: completed guided operation has a malformed replay locator") from exc
+        return GuidedOperationCompleted(result=result, response_hash=response_hash)
+
+    @staticmethod
+    def _guided_conflict(*, session_id: UUID, operation_id: str) -> GuidedOperationConflictError:
+        return GuidedOperationConflictError(session_id=session_id, operation_id=operation_id)
+
+    async def reserve_guided_operation(
+        self,
+        *,
+        session_id: UUID,
+        operation_id: str,
+        kind: GuidedOperationKind,
+        request_hash: str,
+        actor: str,
+        lease_seconds: int,
+    ) -> GuidedOperationOutcome:
+        """Claim, join, replay, or take over one normalized operation."""
+        self._validate_guided_identity(operation_id=operation_id, kind=kind, request_hash=request_hash)
+        self._validate_guided_actor(actor)
+        self._validate_guided_lease_seconds(lease_seconds)
+        sid = str(session_id)
+
+        def _sync() -> GuidedOperationOutcome:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                now = self._guided_database_now(conn)
+                row = (
+                    conn.execute(
+                        select(guided_operations_table).where(
+                            guided_operations_table.c.session_id == sid,
+                            guided_operations_table.c.operation_id == operation_id,
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                lease_expires_at = now + timedelta(seconds=lease_seconds)
+                if row is None:
+                    lease_token = uuid.uuid4().hex
+                    conn.execute(
+                        insert(guided_operations_table).values(
+                            session_id=sid,
+                            operation_id=operation_id,
+                            kind=kind,
+                            status="in_progress",
+                            request_hash=request_hash,
+                            lease_token=lease_token,
+                            lease_expires_at=lease_expires_at,
+                            attempt=1,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    self._insert_guided_operation_event(
+                        conn,
+                        session_id=sid,
+                        operation_id=operation_id,
+                        event_kind="claimed",
+                        actor=actor,
+                        attempt=1,
+                        prior_attempt=None,
+                        lease_expires_at=lease_expires_at,
+                        request_hash=request_hash,
+                        occurred_at=now,
+                    )
+                    return GuidedOperationClaimed(
+                        fence=GuidedOperationFence(session_id, operation_id, lease_token, 1),
+                        lease_expires_at=lease_expires_at,
+                    )
+                if row["kind"] != kind or row["request_hash"] != request_hash:
+                    raise self._guided_conflict(session_id=session_id, operation_id=operation_id)
+                if row["status"] in {"completed", "failed"}:
+                    return self._guided_terminal_outcome(row)
+                if row["status"] != "in_progress":
+                    raise AuditIntegrityError("Tier 1: guided operation has an invalid status")
+                prior_expiry = self._guided_in_progress_expiry(row)
+                prior_attempt = row["attempt"]
+                if not isinstance(prior_attempt, int) or isinstance(prior_attempt, bool) or prior_attempt < 1:
+                    raise AuditIntegrityError("Tier 1: guided operation has an invalid attempt")
+                if prior_expiry > now:
+                    return GuidedOperationActive(attempt=prior_attempt, lease_expires_at=prior_expiry)
+                prior_token = row["lease_token"]
+                assert isinstance(prior_token, str)
+                next_attempt = prior_attempt + 1
+                lease_token = uuid.uuid4().hex
+                changed = conn.execute(
+                    update(guided_operations_table)
+                    .where(
+                        guided_operations_table.c.session_id == sid,
+                        guided_operations_table.c.operation_id == operation_id,
+                        guided_operations_table.c.status == "in_progress",
+                        guided_operations_table.c.lease_token == prior_token,
+                        guided_operations_table.c.attempt == prior_attempt,
+                        guided_operations_table.c.lease_expires_at <= now,
+                    )
+                    .values(
+                        lease_token=lease_token,
+                        lease_expires_at=lease_expires_at,
+                        attempt=next_attempt,
+                        updated_at=now,
+                    )
+                ).rowcount
+                if changed != 1:
+                    raise AuditIntegrityError("Guided operation takeover lost its locked compare-and-swap")
+                self._insert_guided_operation_event(
+                    conn,
+                    session_id=sid,
+                    operation_id=operation_id,
+                    event_kind="taken_over",
+                    actor=actor,
+                    attempt=next_attempt,
+                    prior_attempt=prior_attempt,
+                    lease_expires_at=lease_expires_at,
+                    request_hash=request_hash,
+                    occurred_at=now,
+                )
+                return GuidedOperationTakenOver(
+                    fence=GuidedOperationFence(session_id, operation_id, lease_token, next_attempt),
+                    prior_attempt=prior_attempt,
+                    lease_expires_at=lease_expires_at,
+                )
+
+        return cast("GuidedOperationOutcome", await self._run_sync(_sync))
+
+    async def get_guided_operation(
+        self,
+        *,
+        session_id: UUID,
+        operation_id: str,
+        kind: GuidedOperationKind,
+        request_hash: str,
+    ) -> GuidedOperationActive | GuidedOperationCompleted | GuidedOperationFailed | None:
+        """Read one matching replay descriptor without acquiring its lease."""
+        self._validate_guided_identity(operation_id=operation_id, kind=kind, request_hash=request_hash)
+        sid = str(session_id)
+
+        def _sync() -> GuidedOperationActive | GuidedOperationCompleted | GuidedOperationFailed | None:
+            with self._engine.connect() as conn:
+                now = self._guided_database_now(conn)
+                row = (
+                    conn.execute(
+                        select(guided_operations_table).where(
+                            guided_operations_table.c.session_id == sid,
+                            guided_operations_table.c.operation_id == operation_id,
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+            if row is None:
+                return None
+            if row["kind"] != kind or row["request_hash"] != request_hash:
+                raise self._guided_conflict(session_id=session_id, operation_id=operation_id)
+            if row["status"] in {"completed", "failed"}:
+                return self._guided_terminal_outcome(row)
+            if row["status"] != "in_progress":
+                raise AuditIntegrityError("Tier 1: guided operation has an invalid status")
+            expiry = self._guided_in_progress_expiry(row)
+            attempt = row["attempt"]
+            if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+                raise AuditIntegrityError("Tier 1: guided operation has an invalid attempt")
+            return GuidedOperationActive(attempt=attempt, lease_expires_at=expiry, expired=expiry <= now)
+
+        return cast(
+            "GuidedOperationActive | GuidedOperationCompleted | GuidedOperationFailed | None",
+            await self._run_sync(_sync),
+        )
+
+    def require_guided_operation_fence_on_connection(
+        self,
+        conn: Connection,
+        fence: GuidedOperationFence,
+    ) -> tuple[RowMapping, datetime]:
+        """Verify an exact live fence inside the caller's locked transaction."""
+        sid = str(fence.session_id)
+        self._assert_session_write_lock_held(conn, sid, caller="require_guided_operation_fence_on_connection")
+        now = self._guided_database_now(conn)
+        row = (
+            conn.execute(
+                select(guided_operations_table).where(
+                    guided_operations_table.c.session_id == sid,
+                    guided_operations_table.c.operation_id == fence.operation_id,
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if (
+            row is None
+            or row["status"] != "in_progress"
+            or row["lease_token"] != fence.lease_token
+            or row["attempt"] != fence.attempt
+            or self._guided_in_progress_expiry(row) <= now
+        ):
+            raise GuidedOperationFenceLostError(fence)
+        return row, now
+
+    async def renew_guided_operation(
+        self,
+        fence: GuidedOperationFence,
+        *,
+        actor: str,
+        lease_seconds: int,
+    ) -> GuidedOperationFence:
+        self._validate_guided_actor(actor)
+        self._validate_guided_lease_seconds(lease_seconds)
+        sid = str(fence.session_id)
+
+        def _sync() -> GuidedOperationFence:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                row, now = self.require_guided_operation_fence_on_connection(conn, fence)
+                lease_expires_at = now + timedelta(seconds=lease_seconds)
+                changed = conn.execute(
+                    update(guided_operations_table)
+                    .where(
+                        guided_operations_table.c.session_id == sid,
+                        guided_operations_table.c.operation_id == fence.operation_id,
+                        guided_operations_table.c.status == "in_progress",
+                        guided_operations_table.c.lease_token == fence.lease_token,
+                        guided_operations_table.c.attempt == fence.attempt,
+                        guided_operations_table.c.lease_expires_at > now,
+                    )
+                    .values(lease_expires_at=lease_expires_at, updated_at=now)
+                ).rowcount
+                if changed != 1:
+                    raise GuidedOperationFenceLostError(fence)
+                self._insert_guided_operation_event(
+                    conn,
+                    session_id=sid,
+                    operation_id=fence.operation_id,
+                    event_kind="renewed",
+                    actor=actor,
+                    attempt=fence.attempt,
+                    prior_attempt=None,
+                    lease_expires_at=lease_expires_at,
+                    request_hash=row["request_hash"],
+                    occurred_at=now,
+                )
+                return fence
+
+        return cast("GuidedOperationFence", await self._run_sync(_sync))
+
+    @staticmethod
+    def _merge_guided_binding(*, current: Any, requested: UUID | None, label: str) -> str | None:
+        if requested is None:
+            return cast("str | None", current)
+        requested_value = str(requested)
+        if current is not None and current != requested_value:
+            raise AuditIntegrityError(f"Guided operation {label} is already bound to a different row")
+        return requested_value
+
+    def bind_guided_operation_on_connection(
+        self,
+        conn: Connection,
+        fence: GuidedOperationFence,
+        *,
+        originating_message_id: UUID | None = None,
+        proposal_id: UUID | None = None,
+        result_state_id: UUID | None = None,
+        result_session_id: UUID | None = None,
+    ) -> None:
+        """Bind resumable row ids under the exact fence and caller transaction."""
+        row, now = self.require_guided_operation_fence_on_connection(conn, fence)
+        values = {
+            "originating_message_id": self._merge_guided_binding(
+                current=row["originating_message_id"], requested=originating_message_id, label="originating message"
+            ),
+            "proposal_id": self._merge_guided_binding(current=row["proposal_id"], requested=proposal_id, label="proposal"),
+            "result_state_id": self._merge_guided_binding(current=row["result_state_id"], requested=result_state_id, label="result state"),
+            "result_session_id": self._merge_guided_binding(
+                current=row["result_session_id"], requested=result_session_id, label="result session"
+            ),
+            "updated_at": now,
+        }
+        changed = conn.execute(
+            update(guided_operations_table)
+            .where(
+                guided_operations_table.c.session_id == str(fence.session_id),
+                guided_operations_table.c.operation_id == fence.operation_id,
+                guided_operations_table.c.status == "in_progress",
+                guided_operations_table.c.lease_token == fence.lease_token,
+                guided_operations_table.c.attempt == fence.attempt,
+                guided_operations_table.c.lease_expires_at > now,
+            )
+            .values(**values)
+        ).rowcount
+        if changed != 1:
+            raise GuidedOperationFenceLostError(fence)
+
+    async def bind_guided_operation(
+        self,
+        fence: GuidedOperationFence,
+        *,
+        originating_message_id: UUID | None = None,
+        proposal_id: UUID | None = None,
+        result_state_id: UUID | None = None,
+        result_session_id: UUID | None = None,
+    ) -> None:
+        sid = str(fence.session_id)
+
+        def _sync() -> None:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                self.bind_guided_operation_on_connection(
+                    conn,
+                    fence,
+                    originating_message_id=originating_message_id,
+                    proposal_id=proposal_id,
+                    result_state_id=result_state_id,
+                    result_session_id=result_session_id,
+                )
+
+        await self._run_sync(_sync)
+
+    @staticmethod
+    def _guided_completion_values(
+        *,
+        row: RowMapping,
+        result: GuidedOperationResult,
+    ) -> tuple[dict[str, str | None], GuidedOperationResult]:
+        kind = row["kind"]
+        if isinstance(result, GuidedCompositionStateResult):
+            if kind in {"session_fork", "guided_plan"}:
+                raise ValueError("guided operation kind requires a different result locator")
+            if result.proposal_id is not None and kind not in {"guided_respond", "guided_chat"}:
+                raise ValueError("only guided respond/chat state results may carry proposal_id")
+            state_id = SessionServiceImpl._merge_guided_binding(
+                current=row["result_state_id"], requested=result.state_id, label="result state"
+            )
+            proposal_id = SessionServiceImpl._merge_guided_binding(
+                current=row["proposal_id"], requested=result.proposal_id, label="proposal"
+            )
+            if row["result_session_id"] is not None:
+                raise AuditIntegrityError("State operation has a conflicting result-session binding")
+            assert state_id is not None
+            normalized: GuidedOperationResult = GuidedCompositionStateResult(
+                state_id=UUID(state_id),
+                proposal_id=UUID(proposal_id) if proposal_id is not None else None,
+            )
+            return (
+                {
+                    "result_kind": "composition_state",
+                    "result_state_id": state_id,
+                    "result_session_id": None,
+                    "proposal_id": proposal_id,
+                },
+                normalized,
+            )
+        if isinstance(result, GuidedSessionResult):
+            if kind != "session_fork":
+                raise ValueError("only session_fork may complete with a session locator")
+            session_id = SessionServiceImpl._merge_guided_binding(
+                current=row["result_session_id"], requested=result.session_id, label="result session"
+            )
+            if row["result_state_id"] is not None or row["proposal_id"] is not None:
+                raise AuditIntegrityError("Fork operation has a conflicting state/proposal binding")
+            assert session_id is not None
+            return (
+                {
+                    "result_kind": "session",
+                    "result_state_id": None,
+                    "result_session_id": session_id,
+                    "proposal_id": None,
+                },
+                GuidedSessionResult(session_id=UUID(session_id)),
+            )
+        if isinstance(result, GuidedProposalResult):
+            if kind != "guided_plan":
+                raise ValueError("only guided_plan may complete with a proposal locator")
+            proposal_id = SessionServiceImpl._merge_guided_binding(
+                current=row["proposal_id"], requested=result.proposal_id, label="proposal"
+            )
+            # guided_plan may bind a resumable checkpoint state while work is
+            # in progress. The terminal proposal locator deliberately
+            # normalizes that partial state reference back to NULL.
+            if row["result_session_id"] is not None:
+                raise AuditIntegrityError("Plan operation has a conflicting session binding")
+            assert proposal_id is not None
+            return (
+                {
+                    "result_kind": "proposal",
+                    "result_state_id": None,
+                    "result_session_id": None,
+                    "proposal_id": proposal_id,
+                },
+                GuidedProposalResult(proposal_id=UUID(proposal_id)),
+            )
+        raise TypeError("unsupported guided operation result locator")
+
+    def complete_guided_operation_on_connection(
+        self,
+        conn: Connection,
+        fence: GuidedOperationFence,
+        *,
+        result: GuidedOperationResult,
+        response_hash: str,
+        actor: str,
+    ) -> GuidedOperationCompleted:
+        """Settle a successful result and append its event in one transaction."""
+        self._validate_guided_actor(actor)
+        self._validate_guided_hash(response_hash, label="guided operation response_hash")
+        row, now = self.require_guided_operation_fence_on_connection(conn, fence)
+        locator_values, normalized = self._guided_completion_values(row=row, result=result)
+        changed = conn.execute(
+            update(guided_operations_table)
+            .where(
+                guided_operations_table.c.session_id == str(fence.session_id),
+                guided_operations_table.c.operation_id == fence.operation_id,
+                guided_operations_table.c.status == "in_progress",
+                guided_operations_table.c.lease_token == fence.lease_token,
+                guided_operations_table.c.attempt == fence.attempt,
+                guided_operations_table.c.lease_expires_at > now,
+            )
+            .values(
+                status="completed",
+                lease_token=None,
+                lease_expires_at=None,
+                response_hash=response_hash,
+                failure_code=None,
+                settled_at=now,
+                updated_at=now,
+                **locator_values,
+            )
+        ).rowcount
+        if changed != 1:
+            raise GuidedOperationFenceLostError(fence)
+        self._insert_guided_operation_event(
+            conn,
+            session_id=str(fence.session_id),
+            operation_id=fence.operation_id,
+            event_kind="completed",
+            actor=actor,
+            attempt=fence.attempt,
+            prior_attempt=None,
+            lease_expires_at=None,
+            request_hash=row["request_hash"],
+            occurred_at=now,
+        )
+        return GuidedOperationCompleted(result=normalized, response_hash=response_hash)
+
+    async def complete_guided_operation(
+        self,
+        fence: GuidedOperationFence,
+        *,
+        result: GuidedOperationResult,
+        response_hash: str,
+        actor: str,
+    ) -> GuidedOperationCompleted:
+        sid = str(fence.session_id)
+
+        def _sync() -> GuidedOperationCompleted:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                return self.complete_guided_operation_on_connection(
+                    conn,
+                    fence,
+                    result=result,
+                    response_hash=response_hash,
+                    actor=actor,
+                )
+
+        return cast("GuidedOperationCompleted", await self._run_sync(_sync))
+
+    def fail_guided_operation_on_connection(
+        self,
+        conn: Connection,
+        fence: GuidedOperationFence,
+        *,
+        failure_code: GuidedOperationFailureCode,
+        actor: str,
+    ) -> GuidedOperationFailed:
+        """Clear partial locators and settle one closed safe failure atomically."""
+        self._validate_guided_actor(actor)
+        if failure_code not in GUIDED_OPERATION_FAILURE_CODE_VALUES:
+            raise ValueError("unsupported guided operation failure code")
+        row, now = self.require_guided_operation_fence_on_connection(conn, fence)
+        changed = conn.execute(
+            update(guided_operations_table)
+            .where(
+                guided_operations_table.c.session_id == str(fence.session_id),
+                guided_operations_table.c.operation_id == fence.operation_id,
+                guided_operations_table.c.status == "in_progress",
+                guided_operations_table.c.lease_token == fence.lease_token,
+                guided_operations_table.c.attempt == fence.attempt,
+                guided_operations_table.c.lease_expires_at > now,
+            )
+            .values(
+                status="failed",
+                lease_token=None,
+                lease_expires_at=None,
+                originating_message_id=None,
+                proposal_id=None,
+                result_kind=None,
+                result_state_id=None,
+                result_session_id=None,
+                response_hash=None,
+                failure_code=failure_code,
+                settled_at=now,
+                updated_at=now,
+            )
+        ).rowcount
+        if changed != 1:
+            raise GuidedOperationFenceLostError(fence)
+        self._insert_guided_operation_event(
+            conn,
+            session_id=str(fence.session_id),
+            operation_id=fence.operation_id,
+            event_kind="failed",
+            actor=actor,
+            attempt=fence.attempt,
+            prior_attempt=None,
+            lease_expires_at=None,
+            request_hash=row["request_hash"],
+            occurred_at=now,
+        )
+        return GuidedOperationFailed(failure_code=failure_code)
+
+    async def fail_guided_operation(
+        self,
+        fence: GuidedOperationFence,
+        *,
+        failure_code: GuidedOperationFailureCode,
+        actor: str,
+    ) -> GuidedOperationFailed:
+        sid = str(fence.session_id)
+
+        def _sync() -> GuidedOperationFailed:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                return self.fail_guided_operation_on_connection(
+                    conn,
+                    fence,
+                    failure_code=failure_code,
+                    actor=actor,
+                )
+
+        return cast("GuidedOperationFailed", await self._run_sync(_sync))
 
     def _reserve_sequence_range(self, conn: Connection, session_id: str, *, count: int) -> int:
         """Reserve ``count`` consecutive sequence numbers for ``session_id``.

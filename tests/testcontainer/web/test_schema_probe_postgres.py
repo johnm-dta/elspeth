@@ -9,11 +9,12 @@ import time
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 import structlog
-from sqlalchemy import Connection, Engine, create_engine, event, inspect, select, text, update
+from sqlalchemy import Connection, Engine, create_engine, event, insert, inspect, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, OperationalError, SQLAlchemyError
 from sqlalchemy.pool import NullPool
@@ -43,9 +44,23 @@ from elspeth.web.schema_probe import (
     probe_landscape_schema,
     probe_session_schema,
 )
-from elspeth.web.sessions.models import SESSION_SCHEMA_EPOCH, skill_markdown_history_table
+from elspeth.web.sessions.models import (
+    SESSION_SCHEMA_EPOCH,
+    composition_states_table,
+    guided_operation_events_table,
+    guided_operations_table,
+    skill_markdown_history_table,
+)
 from elspeth.web.sessions.models import metadata as session_metadata
 from elspeth.web.sessions.models import schema_identity_table as session_schema_identity_table
+from elspeth.web.sessions.protocol import (
+    GuidedCompositionStateResult,
+    GuidedOperationActive,
+    GuidedOperationClaimed,
+    GuidedOperationCompleted,
+    GuidedOperationFenceLostError,
+    GuidedOperationTakenOver,
+)
 from elspeth.web.sessions.schema import SessionSchemaError, initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
@@ -244,6 +259,170 @@ def test_postgres_session_init_does_not_poison_later_sqlite_schema(postgres_engi
     initialize_session_schema(sqlite_engine)
 
     assert inspect(sqlite_engine).get_foreign_keys("chat_messages")
+
+
+@pytest.mark.asyncio
+async def test_postgres_guided_operation_takeover_fences_late_worker(postgres_engine: Engine) -> None:
+    """A stale worker cannot write after an audited PostgreSQL takeover."""
+    init_session_schema(postgres_engine)
+    service_a = SessionServiceImpl(
+        postgres_engine,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test.guided-operation-postgres-a"),
+    )
+    service_b = SessionServiceImpl(
+        postgres_engine,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test.guided-operation-postgres-b"),
+    )
+    session_id = (await service_a.create_session("alice", "PostgreSQL guided operation", "local")).id
+    state_id = uuid.uuid4()
+    with postgres_engine.begin() as conn:
+        conn.execute(
+            insert(composition_states_table).values(
+                id=str(state_id),
+                session_id=str(session_id),
+                version=1,
+                is_valid=False,
+                provenance="session_seed",
+                created_at=datetime.now(UTC),
+            )
+        )
+
+    operation_id = "postgres-takeover"
+    request_hash = "a" * 64
+    first = await service_a.reserve_guided_operation(
+        session_id=session_id,
+        operation_id=operation_id,
+        kind="guided_start",
+        request_hash=request_hash,
+        actor="worker-a",
+        lease_seconds=30,
+    )
+    assert isinstance(first, GuidedOperationClaimed)
+    with postgres_engine.begin() as conn:
+        conn.execute(
+            update(guided_operations_table)
+            .where(
+                guided_operations_table.c.session_id == str(session_id),
+                guided_operations_table.c.operation_id == operation_id,
+            )
+            .values(lease_expires_at=text("clock_timestamp() - interval '1 second'"))
+        )
+
+    takeover = await service_b.reserve_guided_operation(
+        session_id=session_id,
+        operation_id=operation_id,
+        kind="guided_start",
+        request_hash=request_hash,
+        actor="worker-b",
+        lease_seconds=30,
+    )
+    assert isinstance(takeover, GuidedOperationTakenOver)
+    with pytest.raises(GuidedOperationFenceLostError):
+        await service_a.bind_guided_operation(first.fence, result_state_id=state_id)
+    with pytest.raises(GuidedOperationFenceLostError):
+        await service_a.complete_guided_operation(
+            first.fence,
+            result=GuidedCompositionStateResult(state_id=state_id),
+            response_hash="b" * 64,
+            actor="worker-a",
+        )
+    await service_b.bind_guided_operation(takeover.fence, result_state_id=state_id)
+    completed = await service_b.complete_guided_operation(
+        takeover.fence,
+        result=GuidedCompositionStateResult(state_id=state_id),
+        response_hash="b" * 64,
+        actor="worker-b",
+    )
+    assert completed == GuidedOperationCompleted(
+        result=GuidedCompositionStateResult(state_id=state_id),
+        response_hash="b" * 64,
+    )
+    with postgres_engine.connect() as conn:
+        row = conn.execute(
+            select(guided_operations_table).where(
+                guided_operations_table.c.session_id == str(session_id),
+                guided_operations_table.c.operation_id == operation_id,
+            )
+        ).one()
+        events = conn.execute(
+            select(guided_operation_events_table)
+            .where(
+                guided_operation_events_table.c.session_id == str(session_id),
+                guided_operation_events_table.c.operation_id == operation_id,
+            )
+            .order_by(guided_operation_events_table.c.sequence)
+        ).all()
+    assert row.attempt == 2
+    assert row.result_state_id == str(state_id)
+    assert [event.event_kind for event in events] == ["claimed", "taken_over", "completed"]
+
+
+@pytest.mark.asyncio
+async def test_postgres_concurrent_expired_reserve_has_one_takeover_winner(postgres_engine: Engine) -> None:
+    init_session_schema(postgres_engine)
+    services = [
+        SessionServiceImpl(
+            postgres_engine,
+            telemetry=build_sessions_telemetry(),
+            log=structlog.get_logger(f"test.guided-operation-contender-{index}"),
+        )
+        for index in range(3)
+    ]
+    session_id = (await services[0].create_session("alice", "Contended PostgreSQL operation", "local")).id
+    operation_id = "postgres-contended-takeover"
+    request_hash = "c" * 64
+    first = await services[0].reserve_guided_operation(
+        session_id=session_id,
+        operation_id=operation_id,
+        kind="guided_start",
+        request_hash=request_hash,
+        actor="worker-a",
+        lease_seconds=30,
+    )
+    assert isinstance(first, GuidedOperationClaimed)
+    with postgres_engine.begin() as conn:
+        conn.execute(
+            update(guided_operations_table)
+            .where(
+                guided_operations_table.c.session_id == str(session_id),
+                guided_operations_table.c.operation_id == operation_id,
+            )
+            .values(lease_expires_at=text("clock_timestamp() - interval '1 second'"))
+        )
+
+    barrier = threading.Barrier(2)
+
+    def contend(service: SessionServiceImpl, actor: str):
+        barrier.wait()
+        return asyncio.run(
+            service.reserve_guided_operation(
+                session_id=session_id,
+                operation_id=operation_id,
+                kind="guided_start",
+                request_hash=request_hash,
+                actor=actor,
+                lease_seconds=30,
+            )
+        )
+
+    outcomes = await asyncio.gather(
+        asyncio.to_thread(contend, services[1], "worker-b"),
+        asyncio.to_thread(contend, services[2], "worker-c"),
+    )
+    assert sum(isinstance(outcome, GuidedOperationTakenOver) for outcome in outcomes) == 1
+    assert sum(isinstance(outcome, GuidedOperationActive) for outcome in outcomes) == 1
+    with postgres_engine.connect() as conn:
+        events = conn.execute(
+            select(guided_operation_events_table)
+            .where(
+                guided_operation_events_table.c.session_id == str(session_id),
+                guided_operation_events_table.c.operation_id == operation_id,
+            )
+            .order_by(guided_operation_events_table.c.sequence)
+        ).all()
+    assert [event.event_kind for event in events] == ["claimed", "taken_over"]
 
 
 def _seed_postgres_trigger_rows(postgres_engine: Engine, *, session_id: str, include_completion: bool) -> None:

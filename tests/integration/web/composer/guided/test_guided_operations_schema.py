@@ -294,6 +294,37 @@ def test_in_progress_resumable_refs_are_kind_bound_but_supported(engine) -> None
         connection.execute(
             insert(guided_operations_table).values(
                 **_operation(
+                    operation_id="00000000-0000-4000-8000-000000000014",
+                    kind="guided_start",
+                    result_state_id=STATE_ID,
+                )
+            )
+        )
+        connection.execute(
+            insert(guided_operations_table).values(
+                **_operation(
+                    operation_id="00000000-0000-4000-8000-000000000015",
+                    kind="guided_plan",
+                    result_state_id=STATE_ID,
+                )
+            )
+        )
+
+
+def test_in_progress_fork_cannot_bind_a_parent_session_state(engine) -> None:
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(
+            insert(guided_operations_table).values(
+                **_operation(
+                    operation_id="00000000-0000-4000-8000-000000000016",
+                    kind="session_fork",
+                    result_state_id=STATE_ID,
+                )
+            )
+        )
+        connection.execute(
+            insert(guided_operations_table).values(
+                **_operation(
                     operation_id="00000000-0000-4000-8000-000000000012",
                     kind="guided_plan",
                     proposal_id=PROPOSAL_ID,

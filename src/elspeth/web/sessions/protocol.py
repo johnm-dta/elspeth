@@ -15,21 +15,27 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import InitVar, dataclass
 from datetime import datetime
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Literal, Protocol, final, get_args, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, final, get_args, runtime_checkable
 from uuid import UUID
 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.blobs_inline import ResolvedBlobContent
+from elspeth.contracts.composer_audit import ComposerToolInvocation
 from elspeth.contracts.composer_interpretation import (
     InterpretationChoice,
     InterpretationEventRecord,
     InterpretationKind,
     InterpretationSource,
 )
+from elspeth.contracts.composer_llm_audit import ComposerChatTurn, ComposerLLMCall
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields, require_int
+from elspeth.contracts.hashing import stable_hash
+from elspeth.web.composer.guided.protocol import TurnType
+from elspeth.web.plugin_policy.models import PluginId, PluginUnavailableReason
 
 if TYPE_CHECKING:
+    from elspeth.contracts.payload_store import PayloadStore
     from elspeth.web.composer.pipeline_commit import PipelineDispatchAuditBinding
     from elspeth.web.composer.pipeline_planner import PipelinePlanResult
     from elspeth.web.composer.pipeline_proposal import PipelineProposal
@@ -178,6 +184,16 @@ class GuidedOperationFence:
     operation_id: str
     lease_token: str
     attempt: int
+
+    def __post_init__(self) -> None:
+        if type(self.session_id) is not UUID:
+            raise AuditIntegrityError("GuidedOperationFence.session_id must be a UUID")
+        if type(self.operation_id) is not str or not self.operation_id:
+            raise AuditIntegrityError("GuidedOperationFence.operation_id must be a non-empty exact string")
+        if type(self.lease_token) is not str or not self.lease_token:
+            raise AuditIntegrityError("GuidedOperationFence.lease_token must be a non-empty exact string")
+        if type(self.attempt) is not int or self.attempt < 1:
+            raise AuditIntegrityError("GuidedOperationFence.attempt must be a positive exact integer")
 
 
 @final
@@ -677,6 +693,374 @@ class CompositionStateRecord:
             freeze_fields(self, *non_none)
 
 
+GuidedJsonPayloadPurpose = Literal["turn", "turn_response"]
+GuidedPreparedAuditKind = Literal["tool", "llm", "chat"]
+GuidedResponseKind = Literal["guided_respond", "guided_chat"]
+
+
+class GuidedReplayTurnDict(TypedDict):
+    type: str
+    step_index: int
+    payload_id: str
+
+
+class GuidedReplayPolicyFindingDict(TypedDict):
+    component_id: str
+    plugin_id: str
+    reason_code: str
+    snapshot_fingerprint: str
+
+
+class GuidedResponseDescriptorDict(TypedDict):
+    schema: Literal["guided.operation-replay.v1"]
+    kind: GuidedResponseKind
+    next_turn: GuidedReplayTurnDict | None
+    assistant_turn_seq: int | None
+    plugin_policy_findings: list[GuidedReplayPolicyFindingDict]
+
+
+def _require_guided_sha256(value: object, field_name: str) -> None:
+    if type(value) is not str or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise AuditIntegrityError(f"{field_name} must be exactly 64 lowercase hexadecimal characters")
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class PreparedGuidedJsonPayload:
+    """One canonical JSON payload already durable in the content-addressed store."""
+
+    payload_id: str
+    purpose: GuidedJsonPayloadPurpose
+    payload: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        _require_guided_sha256(self.payload_id, "PreparedGuidedJsonPayload.payload_id")
+        if self.purpose not in {"turn", "turn_response"}:
+            raise AuditIntegrityError("PreparedGuidedJsonPayload purpose is outside the closed vocabulary")
+        freeze_fields(self, "payload")
+        if stable_hash(self.payload) != self.payload_id:
+            raise AuditIntegrityError("PreparedGuidedJsonPayload payload hash does not match payload_id")
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class PreparedGuidedAuditRow:
+    """One bounded, already-redacted audit-only chat row."""
+
+    kind: GuidedPreparedAuditKind
+    content: str
+    envelope: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"tool", "llm", "chat"}:
+            raise AuditIntegrityError("PreparedGuidedAuditRow kind is outside the closed vocabulary")
+        if type(self.content) is not str or not self.content:
+            raise AuditIntegrityError("PreparedGuidedAuditRow content must be a non-empty exact string")
+        if type(self.envelope) not in (dict, MappingProxyType):
+            raise AuditIntegrityError("PreparedGuidedAuditRow envelope must be an exact mapping")
+        expected_discriminator = {
+            "tool": "audit",
+            "llm": "llm_call_audit",
+            "chat": "chat_turn_audit",
+        }[self.kind]
+        if self.envelope.get("_kind") != expected_discriminator:
+            raise AuditIntegrityError("PreparedGuidedAuditRow envelope discriminator does not match kind")
+        freeze_fields(self, "envelope")
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedAuditEvidence:
+    """Typed audit facts; redaction is applied at the settlement boundary."""
+
+    invocations: tuple[ComposerToolInvocation, ...] = ()
+    llm_calls: tuple[ComposerLLMCall, ...] = ()
+    chat_turns: tuple[ComposerChatTurn, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.invocations) is not tuple or any(type(item) is not ComposerToolInvocation for item in self.invocations):
+            raise AuditIntegrityError("GuidedAuditEvidence.invocations must be an exact typed tuple")
+        if type(self.llm_calls) is not tuple or any(type(item) is not ComposerLLMCall for item in self.llm_calls):
+            raise AuditIntegrityError("GuidedAuditEvidence.llm_calls must be an exact typed tuple")
+        if type(self.chat_turns) is not tuple or any(type(item) is not ComposerChatTurn for item in self.chat_turns):
+            raise AuditIntegrityError("GuidedAuditEvidence.chat_turns must be an exact typed tuple")
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedReplayTurn:
+    """Stored locator for one exact next-turn payload."""
+
+    turn_type: TurnType
+    step_index: int
+    payload_id: str
+
+    def __post_init__(self) -> None:
+        if type(self.turn_type) is not TurnType:
+            raise AuditIntegrityError("GuidedReplayTurn.turn_type must be a TurnType")
+        if type(self.step_index) is not int or self.step_index < 0:
+            raise AuditIntegrityError("GuidedReplayTurn.step_index must be a non-negative exact integer")
+        _require_guided_sha256(self.payload_id, "GuidedReplayTurn.payload_id")
+
+    def to_dict(self) -> GuidedReplayTurnDict:
+        return {
+            "type": self.turn_type.value,
+            "step_index": self.step_index,
+            "payload_id": self.payload_id,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> GuidedReplayTurn:
+        if set(value) != {"type", "step_index", "payload_id"}:
+            raise AuditIntegrityError("GuidedReplayTurn persisted keys are malformed")
+        try:
+            return cls(
+                turn_type=TurnType(value["type"]),
+                step_index=value["step_index"],
+                payload_id=value["payload_id"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise AuditIntegrityError("GuidedReplayTurn persisted values are malformed") from exc
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedReplayPolicyFinding:
+    """Allowlisted policy fact frozen at operation settlement for exact replay."""
+
+    component_id: str
+    plugin_id: PluginId
+    reason_code: PluginUnavailableReason
+    snapshot_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.component_id) is not str
+            or not 1 <= len(self.component_id) <= 256
+            or any(not (char.isascii() and (char.isalnum() or char in "_.:-")) for char in self.component_id)
+        ):
+            raise AuditIntegrityError("GuidedReplayPolicyFinding.component_id must be a bounded structural identifier")
+        if type(self.plugin_id) is not PluginId:
+            raise AuditIntegrityError("GuidedReplayPolicyFinding.plugin_id must be a PluginId")
+        if type(self.reason_code) is not PluginUnavailableReason:
+            raise AuditIntegrityError("GuidedReplayPolicyFinding.reason_code must be a PluginUnavailableReason")
+        _require_guided_sha256(self.snapshot_fingerprint, "GuidedReplayPolicyFinding.snapshot_fingerprint")
+
+    def to_dict(self) -> GuidedReplayPolicyFindingDict:
+        return {
+            "component_id": self.component_id,
+            "plugin_id": str(self.plugin_id),
+            "reason_code": self.reason_code.value,
+            "snapshot_fingerprint": self.snapshot_fingerprint,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> GuidedReplayPolicyFinding:
+        if set(value) != {"component_id", "plugin_id", "reason_code", "snapshot_fingerprint"}:
+            raise AuditIntegrityError("GuidedReplayPolicyFinding persisted keys are malformed")
+        try:
+            return cls(
+                component_id=value["component_id"],
+                plugin_id=PluginId.parse(value["plugin_id"]),
+                reason_code=PluginUnavailableReason(value["reason_code"]),
+                snapshot_fingerprint=value["snapshot_fingerprint"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise AuditIntegrityError("GuidedReplayPolicyFinding persisted values are malformed") from exc
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedResponseDescriptor:
+    """Closed durable facts needed to reproduce one RESPOND or CHAT response."""
+
+    kind: GuidedResponseKind
+    next_turn: GuidedReplayTurn | None
+    assistant_turn_seq: int | None
+    policy_findings: tuple[GuidedReplayPolicyFinding, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"guided_respond", "guided_chat"}:
+            raise AuditIntegrityError("GuidedResponseDescriptor kind is outside the closed vocabulary")
+        if self.next_turn is not None and type(self.next_turn) is not GuidedReplayTurn:
+            raise AuditIntegrityError("GuidedResponseDescriptor.next_turn must be an exact replay turn or None")
+        if self.kind == "guided_respond" and self.assistant_turn_seq is not None:
+            raise AuditIntegrityError("guided_respond response descriptor cannot carry an assistant turn sequence")
+        if self.kind == "guided_chat" and (type(self.assistant_turn_seq) is not int or self.assistant_turn_seq < 0):
+            raise AuditIntegrityError("guided_chat response descriptor requires a non-negative assistant turn sequence")
+        if type(self.policy_findings) is not tuple or any(
+            type(finding) is not GuidedReplayPolicyFinding for finding in self.policy_findings
+        ):
+            raise AuditIntegrityError("GuidedResponseDescriptor.policy_findings must be an exact tuple")
+
+    def to_dict(self) -> GuidedResponseDescriptorDict:
+        return {
+            "schema": "guided.operation-replay.v1",
+            "kind": self.kind,
+            "next_turn": self.next_turn.to_dict() if self.next_turn is not None else None,
+            "assistant_turn_seq": self.assistant_turn_seq,
+            "plugin_policy_findings": [finding.to_dict() for finding in self.policy_findings],
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> GuidedResponseDescriptor:
+        expected_keys = {
+            "schema",
+            "kind",
+            "next_turn",
+            "assistant_turn_seq",
+            "plugin_policy_findings",
+        }
+        if set(value) != expected_keys or value["schema"] != "guided.operation-replay.v1":
+            raise AuditIntegrityError("GuidedResponseDescriptor persisted shape is malformed")
+        raw_turn = value["next_turn"]
+        if raw_turn is not None and not isinstance(raw_turn, Mapping):
+            raise AuditIntegrityError("GuidedResponseDescriptor next_turn is malformed")
+        raw_findings = value["plugin_policy_findings"]
+        if type(raw_findings) not in (list, tuple) or any(not isinstance(item, Mapping) for item in raw_findings):
+            raise AuditIntegrityError("GuidedResponseDescriptor plugin policy findings are malformed")
+        return cls(
+            kind=value["kind"],
+            next_turn=GuidedReplayTurn.from_dict(raw_turn) if raw_turn is not None else None,
+            assistant_turn_seq=value["assistant_turn_seq"],
+            policy_findings=tuple(GuidedReplayPolicyFinding.from_dict(item) for item in raw_findings),
+        )
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedOriginatingUserMessageDraft:
+    """Optional explicit-id user row inserted in the settlement transaction."""
+
+    message_id: UUID
+    content: str
+
+    def __post_init__(self) -> None:
+        if type(self.message_id) is not UUID:
+            raise AuditIntegrityError("GuidedOriginatingUserMessageDraft.message_id must be a UUID")
+        if type(self.content) is not str or not self.content.strip():
+            raise AuditIntegrityError("GuidedOriginatingUserMessageDraft.content must contain visible text")
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class PreparedGuidedInterpretationDraft:
+    """One fully attributed interpretation event prepared before SQL settlement."""
+
+    event_id: UUID
+    affected_node_id: str
+    tool_call_id: str
+    user_term: str
+    kind: InterpretationKind
+    llm_draft: str
+    model_identifier: str
+    model_version: str
+    provider: str
+    composer_skill_hash: str
+
+    def __post_init__(self) -> None:
+        if type(self.event_id) is not UUID:
+            raise AuditIntegrityError("PreparedGuidedInterpretationDraft.event_id must be a UUID")
+        for field_name in (
+            "affected_node_id",
+            "tool_call_id",
+            "user_term",
+            "llm_draft",
+            "model_identifier",
+            "model_version",
+            "provider",
+            "composer_skill_hash",
+        ):
+            value = getattr(self, field_name)
+            if type(value) is not str or not value:
+                raise AuditIntegrityError(f"PreparedGuidedInterpretationDraft.{field_name} must be a non-empty exact string")
+        if type(self.kind) is not InterpretationKind:
+            raise AuditIntegrityError("PreparedGuidedInterpretationDraft.kind must be an InterpretationKind")
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedStateOperationCommand:
+    """Complete immutable input for one fenced guided state settlement."""
+
+    fence: GuidedOperationFence
+    expected_current_state_id: UUID | None
+    expected_current_state_version: int | None
+    expected_current_content_hash: str | None
+    state_id: UUID
+    state: CompositionStateData
+    provenance: CompositionStateProvenance
+    actor: str
+    response: GuidedResponseDescriptor
+    payloads: tuple[PreparedGuidedJsonPayload, ...] = ()
+    audit_evidence: GuidedAuditEvidence = GuidedAuditEvidence()
+    originating_message: GuidedOriginatingUserMessageDraft | None = None
+    interpretations: tuple[PreparedGuidedInterpretationDraft, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.fence) is not GuidedOperationFence:
+            raise AuditIntegrityError("GuidedStateOperationCommand.fence must be an exact GuidedOperationFence")
+        if (self.expected_current_state_id is None) != (self.expected_current_state_version is None):
+            raise AuditIntegrityError("expected guided current state id and version must be both present or both absent")
+        if (self.expected_current_state_id is None) != (self.expected_current_content_hash is None):
+            raise AuditIntegrityError("expected guided current state and content hash must be both present or both absent")
+        if self.expected_current_content_hash is not None:
+            _require_guided_sha256(self.expected_current_content_hash, "expected_current_content_hash")
+        if self.expected_current_state_id is not None and type(self.expected_current_state_id) is not UUID:
+            raise AuditIntegrityError("expected_current_state_id must be a UUID or None")
+        if self.expected_current_state_version is not None and (
+            type(self.expected_current_state_version) is not int or self.expected_current_state_version < 1
+        ):
+            raise AuditIntegrityError("expected_current_state_version must be a positive exact integer or None")
+        if type(self.state_id) is not UUID:
+            raise AuditIntegrityError("GuidedStateOperationCommand.state_id must be a UUID")
+        if type(self.state) is not CompositionStateData:
+            raise AuditIntegrityError("GuidedStateOperationCommand.state must be an exact CompositionStateData")
+        if self.provenance not in COMPOSITION_STATE_PROVENANCE_VALUES:
+            raise AuditIntegrityError("GuidedStateOperationCommand provenance is outside the closed vocabulary")
+        if type(self.actor) is not str or not self.actor:
+            raise AuditIntegrityError("GuidedStateOperationCommand.actor must be a non-empty exact string")
+        if type(self.response) is not GuidedResponseDescriptor:
+            raise AuditIntegrityError("GuidedStateOperationCommand.response must be an exact GuidedResponseDescriptor")
+        if type(self.payloads) is not tuple or any(type(payload) is not PreparedGuidedJsonPayload for payload in self.payloads):
+            raise AuditIntegrityError("GuidedStateOperationCommand.payloads must be an exact tuple")
+        if len({payload.payload_id for payload in self.payloads}) != len(self.payloads):
+            raise AuditIntegrityError("GuidedStateOperationCommand.payloads must not repeat a payload_id")
+        payloads_by_id = {payload.payload_id: payload for payload in self.payloads}
+        if self.response.next_turn is not None:
+            next_payload = payloads_by_id.get(self.response.next_turn.payload_id)
+            if next_payload is None or next_payload.purpose != "turn":
+                raise AuditIntegrityError("Guided response next-turn payload must be present with purpose=turn")
+        if type(self.audit_evidence) is not GuidedAuditEvidence:
+            raise AuditIntegrityError("GuidedStateOperationCommand.audit_evidence must be exact typed evidence")
+        if self.originating_message is not None and type(self.originating_message) is not GuidedOriginatingUserMessageDraft:
+            raise AuditIntegrityError("GuidedStateOperationCommand.originating_message must be an exact draft or None")
+        if type(self.interpretations) is not tuple or any(
+            type(draft) is not PreparedGuidedInterpretationDraft for draft in self.interpretations
+        ):
+            raise AuditIntegrityError("GuidedStateOperationCommand.interpretations must be an exact tuple")
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedStateOperationSettlement:
+    """Durable cohort returned after the operation is terminally completed."""
+
+    primary_state: CompositionStateRecord
+    result_state: CompositionStateRecord
+    audit_messages: tuple[ChatMessageRecord, ...]
+    originating_message: ChatMessageRecord | None
+    interpretations: tuple[InterpretationEventRecord, ...]
+    response_json: Mapping[str, Any]
+    response_hash: str
+
+    def __post_init__(self) -> None:
+        _require_guided_sha256(self.response_hash, "GuidedStateOperationSettlement.response_hash")
+        freeze_fields(self, "response_json")
+        if stable_hash(self.response_json) != self.response_hash:
+            raise AuditIntegrityError("GuidedStateOperationSettlement response hash does not match response_json")
+
+
 @final
 @dataclass(frozen=True, slots=True)
 class GuidedStartStateSeeded:
@@ -1004,6 +1388,13 @@ class SessionServiceProtocol(Protocol):
         response_hash_factory: Callable[[CompositionStateRecord], str],
         system_message: str | None = None,
     ) -> CompositionStateRecord: ...
+
+    async def settle_guided_state_operation(
+        self,
+        command: GuidedStateOperationCommand,
+        *,
+        payload_store: PayloadStore | None = None,
+    ) -> GuidedStateOperationSettlement: ...
 
     async def seed_or_complete_guided_start_operation(
         self,

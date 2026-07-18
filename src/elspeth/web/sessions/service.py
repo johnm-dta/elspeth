@@ -77,6 +77,14 @@ from elspeth.web.interpretation_state import (
 )
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
 from elspeth.web.sessions.converters import state_from_record
+from elspeth.web.sessions.guided_audit import prepare_guided_audit_rows, validate_guided_audit_payload_references
+from elspeth.web.sessions.guided_payloads import verify_guided_json_payloads
+from elspeth.web.sessions.guided_replay import (
+    guided_response_projection_hash,
+    project_guided_response,
+    response_json,
+    with_guided_response_descriptor,
+)
 from elspeth.web.sessions.locking import (
     acquire_session_advisory_xact_lock,
     process_session_lock,
@@ -142,6 +150,8 @@ from elspeth.web.sessions.protocol import (
     GuidedStartStateConverged,
     GuidedStartStateOutcome,
     GuidedStartStateSeeded,
+    GuidedStateOperationCommand,
+    GuidedStateOperationSettlement,
     IllegalRunTransitionError,
     PipelineDispatchRecovery,
     PipelineProposalPublicMetadata,
@@ -163,6 +173,7 @@ from elspeth.web.sessions.telemetry import _SessionsTelemetry
 from elspeth.web.validation import INTERPRETATION_PLACEHOLDER_RE, _validate_accepted_value_content
 
 if TYPE_CHECKING:
+    from elspeth.contracts.payload_store import PayloadStore
     from elspeth.web.catalog.protocol import CatalogService
     from elspeth.web.composer.state import CompositionState, ValidationSummary
     from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
@@ -3323,6 +3334,7 @@ class SessionServiceImpl:
         tool_call_id: str | None,
         parent_assistant_id: str | None,
         created_at: datetime,
+        message_id: str | None = None,
     ) -> str:
         """Single-row insert into ``chat_messages`` with the supplied fields.
 
@@ -3385,7 +3397,7 @@ class SessionServiceImpl:
                 tool_calls=tool_calls,
                 caller="_insert_chat_message",
             )
-        msg_id = str(uuid.uuid4())
+        msg_id = message_id or str(uuid.uuid4())
         conn.execute(
             insert(chat_messages_table).values(
                 id=msg_id,
@@ -5014,6 +5026,42 @@ class SessionServiceImpl:
         composer_skill_hash: str,
         created_at: datetime | None = None,
     ) -> InterpretationEventRecord:
+        """Insert one checked pending event in its own locked transaction."""
+
+        result = await self._prepare_or_create_pending_interpretation_event(
+            session_id=session_id,
+            composition_state_id=composition_state_id,
+            affected_node_id=affected_node_id,
+            tool_call_id=tool_call_id,
+            user_term=user_term,
+            kind=kind,
+            llm_draft=llm_draft,
+            model_identifier=model_identifier,
+            model_version=model_version,
+            provider=provider,
+            composer_skill_hash=composer_skill_hash,
+            created_at=created_at,
+        )
+        return cast(InterpretationEventRecord, result)
+
+    async def _prepare_or_create_pending_interpretation_event(
+        self,
+        *,
+        session_id: UUID,
+        composition_state_id: UUID,
+        affected_node_id: str,
+        tool_call_id: str,
+        user_term: str,
+        kind: InterpretationKind,
+        llm_draft: str,
+        model_identifier: str,
+        model_version: str,
+        provider: str,
+        composer_skill_hash: str,
+        created_at: datetime | None = None,
+        _event_id: UUID | None = None,
+        _prepare_only: bool = False,
+    ) -> InterpretationEventRecord | Callable[[Connection], InterpretationEventRecord]:
         """Insert a PENDING interpretation event.
 
         Called from the compose-loop tool handler for
@@ -5047,11 +5095,16 @@ class SessionServiceImpl:
         sid = str(session_id)
         state_id_str = str(composition_state_id)
         kind_value = kind.value
-        event_id = str(uuid.uuid4())
+        event_id = str(_event_id if _event_id is not None else uuid.uuid4())
         plugin_snapshot = await self._plugin_snapshot_for_session(sid)
 
-        def _sync() -> InterpretationEventRecord:
-            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+        def _sync(connection: Connection | None = None) -> InterpretationEventRecord:
+            if connection is None:
+                with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                    return _sync(conn)
+            conn = connection
+            # Preserve one shared writer body for standalone and cohort transactions.
+            with contextlib.nullcontext():
                 # Writer-boundary validation: resolve the parent state and
                 # validate the affected component before any interpretation
                 # row is written. ``invented_source`` binds to the synthetic
@@ -5330,7 +5383,10 @@ class SessionServiceImpl:
                         state_from_record(patched_state_record),
                         plugin_snapshot=plugin_snapshot,
                     )
-                    patched_validation_errors = [error.message for error in patched_validation.errors] or None
+                    # Free-form validator text can echo filesystem paths,
+                    # credentials, and provider diagnostics. The state keeps
+                    # the structured validity bit, not those raw messages.
+                    patched_validation_errors = None
                     conn.execute(
                         insert(interpretation_events_table).values(
                             id=event_id,
@@ -5437,6 +5493,8 @@ class SessionServiceImpl:
                 row = conn.execute(select(interpretation_events_table).where(interpretation_events_table.c.id == event_id)).one()
                 return _interpretation_event_record_from_row(row)
 
+        if _prepare_only:
+            return _sync
         return cast(InterpretationEventRecord, await self._run_sync(_sync))
 
     async def resolve_interpretation_event(
@@ -7226,6 +7284,190 @@ class SessionServiceImpl:
                 return record
 
         return cast("CompositionStateRecord", await self._run_sync(_sync))
+
+    async def settle_guided_state_operation(
+        self,
+        command: GuidedStateOperationCommand,
+        *,
+        payload_store: PayloadStore | None = None,
+    ) -> GuidedStateOperationSettlement:
+        """Commit one RESPOND/CHAT state and its evidence under one live fence."""
+
+        if type(command) is not GuidedStateOperationCommand:
+            raise TypeError("command must be an exact GuidedStateOperationCommand")
+        audit_rows = prepare_guided_audit_rows(
+            invocations=command.audit_evidence.invocations,
+            llm_calls=command.audit_evidence.llm_calls,
+            chat_turns=command.audit_evidence.chat_turns,
+        )
+        validate_guided_audit_payload_references(audit_rows, command.payloads)
+        verify_guided_json_payloads(payload_store, command.payloads)
+        prepared_state = with_guided_response_descriptor(command.state, command.response)
+        sid = str(command.fence.session_id)
+        now = self._now()
+        interpretation_writers: list[Callable[[Connection], InterpretationEventRecord]] = []
+        for draft in command.interpretations:
+            writer = await self._prepare_or_create_pending_interpretation_event(
+                session_id=command.fence.session_id,
+                composition_state_id=command.state_id,
+                affected_node_id=draft.affected_node_id,
+                tool_call_id=draft.tool_call_id,
+                user_term=draft.user_term,
+                kind=draft.kind,
+                llm_draft=draft.llm_draft,
+                model_identifier=draft.model_identifier,
+                model_version=draft.model_version,
+                provider=draft.provider,
+                composer_skill_hash=draft.composer_skill_hash,
+                created_at=now,
+                _event_id=draft.event_id,
+                _prepare_only=True,
+            )
+            interpretation_writers.append(cast("Callable[[Connection], InterpretationEventRecord]", writer))
+
+        def _sync() -> GuidedStateOperationSettlement:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                operation_row, _database_now = self.require_guided_operation_fence_on_connection(conn, command.fence)
+                if operation_row["kind"] != command.response.kind:
+                    raise AuditIntegrityError("Guided response descriptor kind does not match the reserved operation")
+                self._require_guided_expected_current_state_on_connection(
+                    conn,
+                    session_id=sid,
+                    expected_state_id=command.expected_current_state_id,
+                    expected_state_version=command.expected_current_state_version,
+                )
+                if command.expected_current_content_hash is not None:
+                    current_row = conn.execute(
+                        select(composition_states_table)
+                        .where(composition_states_table.c.session_id == sid)
+                        .order_by(desc(composition_states_table.c.version))
+                        .limit(1)
+                    ).one()
+                    current_record = self._row_to_state_record(current_row)
+                    if composition_content_hash(state_from_record(current_record)) != command.expected_current_content_hash:
+                        raise AuditIntegrityError("Guided operation current state content changed before settlement")
+
+                inserted_state_id = self._insert_composition_state(
+                    conn,
+                    session_id=sid,
+                    payload=StatePayload(data=prepared_state, derived_from_state_id=None),
+                    provenance=command.provenance,
+                    created_at=now,
+                    state_id=str(command.state_id),
+                )
+                primary_row = conn.execute(select(composition_states_table).where(composition_states_table.c.id == inserted_state_id)).one()
+                primary_state = self._row_to_state_record(primary_row)
+
+                row_count = len(audit_rows) + (1 if command.originating_message is not None else 0)
+                sequence_no = self._reserve_sequence_range(conn, sid, count=row_count) if row_count else None
+                originating_record: ChatMessageRecord | None = None
+                if command.originating_message is not None:
+                    if sequence_no is None:
+                        raise AuditIntegrityError("Guided originating message has no reserved sequence")
+                    originating = command.originating_message
+                    self._insert_chat_message(
+                        conn,
+                        session_id=sid,
+                        role="user",
+                        content=originating.content,
+                        raw_content=None,
+                        tool_calls=None,
+                        sequence_no=sequence_no,
+                        writer_principal="route_user_message",
+                        composition_state_id=inserted_state_id,
+                        tool_call_id=None,
+                        parent_assistant_id=None,
+                        created_at=now,
+                        message_id=str(originating.message_id),
+                    )
+                    originating_record = ChatMessageRecord(
+                        id=originating.message_id,
+                        session_id=command.fence.session_id,
+                        role="user",
+                        content=originating.content,
+                        raw_content=None,
+                        tool_calls=None,
+                        created_at=now,
+                        sequence_no=sequence_no,
+                        composition_state_id=primary_state.id,
+                        writer_principal="route_user_message",
+                    )
+                    sequence_no += 1
+
+                audit_records: list[ChatMessageRecord] = []
+                for audit_row in audit_rows:
+                    if sequence_no is None:
+                        raise AuditIntegrityError("Guided audit message has no reserved sequence")
+                    message_id = self._insert_chat_message(
+                        conn,
+                        session_id=sid,
+                        role="audit",
+                        content=audit_row.content,
+                        raw_content=None,
+                        tool_calls=[deep_thaw(audit_row.envelope)],
+                        sequence_no=sequence_no,
+                        writer_principal="compose_loop",
+                        composition_state_id=inserted_state_id,
+                        tool_call_id=None,
+                        parent_assistant_id=None,
+                        created_at=now,
+                    )
+                    audit_records.append(
+                        ChatMessageRecord(
+                            id=UUID(message_id),
+                            session_id=command.fence.session_id,
+                            role="audit",
+                            content=audit_row.content,
+                            raw_content=None,
+                            tool_calls=[deep_thaw(audit_row.envelope)],
+                            created_at=now,
+                            sequence_no=sequence_no,
+                            composition_state_id=primary_state.id,
+                            writer_principal="compose_loop",
+                        )
+                    )
+                    sequence_no += 1
+
+                if row_count:
+                    conn.execute(update(sessions_table).where(sessions_table.c.id == sid).values(updated_at=now))
+
+                interpretation_records = tuple(writer(conn) for writer in interpretation_writers)
+                result_row = conn.execute(
+                    select(composition_states_table)
+                    .where(composition_states_table.c.session_id == sid)
+                    .order_by(desc(composition_states_table.c.version))
+                    .limit(1)
+                ).one()
+                result_state = self._row_to_state_record(result_row)
+                response = project_guided_response(result_state, payloads=command.payloads)
+                projected_json = response_json(response)
+                response_hash = guided_response_projection_hash(response)
+                self.bind_guided_operation_on_connection(
+                    conn,
+                    command.fence,
+                    originating_message_id=(command.originating_message.message_id if command.originating_message is not None else None),
+                    result_state_id=result_state.id,
+                )
+                self.complete_guided_operation_on_connection(
+                    conn,
+                    command.fence,
+                    result=GuidedCompositionStateResult(
+                        state_id=result_state.id,
+                    ),
+                    response_hash=response_hash,
+                    actor=command.actor,
+                )
+                return GuidedStateOperationSettlement(
+                    primary_state=primary_state,
+                    result_state=result_state,
+                    audit_messages=tuple(audit_records),
+                    originating_message=originating_record,
+                    interpretations=interpretation_records,
+                    response_json=projected_json,
+                    response_hash=response_hash,
+                )
+
+        return cast("GuidedStateOperationSettlement", await self._run_sync(_sync))
 
     async def complete_existing_state_guided_operation(
         self,

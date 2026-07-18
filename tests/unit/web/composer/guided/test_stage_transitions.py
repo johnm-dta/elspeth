@@ -343,10 +343,14 @@ def test_inspection_facts_survive_restart_between_selection_form_and_review() ->
         restored,
         target_id=SOURCE_A,
         turn=turn,
-        response=SchemaFormResponse(plugin="csv", options={"mode": "csv", "path": "/data/input.csv"}),
+        response=SchemaFormResponse(
+            plugin="csv",
+            options={"mode": "csv", "path": "blob:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+        ),
         authority=SchemaFormAuthority(
             knobs=SOURCE_KNOBS,
-            model_validated_options={"mode": "csv", "path": "/data/input.csv"},
+            model_validated_options={"mode": "csv", "path": "blob:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+            server_options={"path": "blob:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
         ),
     )
     restored_review = GuidedSession.from_dict(result.session.to_dict())
@@ -515,6 +519,21 @@ def test_source_schema_form_rejects_blob_custody_that_differs_from_inspection() 
         )
 
 
+def test_source_schema_form_rejects_inspection_without_blob_custody() -> None:
+    session, turn = _source_options_session(facts=_inspection())
+    with pytest.raises(ValueError, match="custody"):
+        transition_source_schema_form(
+            session,
+            target_id=SOURCE_A,
+            turn=turn,
+            response=SchemaFormResponse(plugin="csv", options={"mode": "csv", "path": "/data/uninspected.csv"}),
+            authority=SchemaFormAuthority(
+                knobs=SOURCE_KNOBS,
+                model_validated_options={"mode": "csv", "path": "/data/uninspected.csv"},
+            ),
+        )
+
+
 def test_sink_selection_allocates_stable_id_and_reuses_pending_target() -> None:
     base = GuidedSession(
         step=GuidedStep.STEP_2_SINK,
@@ -634,11 +653,20 @@ def test_source_structural_policy_survives_inspection_and_is_removed_from_plugin
         turn=source_turn,
         response=SchemaFormResponse(
             plugin="csv",
-            options={"mode": "csv", "on_validation_failure": "quarantine"},
+            options={
+                "mode": "csv",
+                "path": "blob:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "on_validation_failure": "quarantine",
+            },
         ),
         authority=SchemaFormAuthority(
             knobs=policy_knobs,
-            model_validated_options={"mode": "csv", "on_validation_failure": "quarantine"},
+            model_validated_options={
+                "mode": "csv",
+                "path": "blob:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "on_validation_failure": "quarantine",
+            },
+            server_options={"path": "blob:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
         ),
     ).session
     assert staged.pending_source_intents[SOURCE_A].options is not None

@@ -315,13 +315,6 @@ def _require_active_turn(
         raise ValueError(f"persisted answered turn step must be {expected_step.value}")
     if record.turn_type is not expected_turn_type:
         raise ValueError(f"persisted answered turn type must be {expected_turn_type.value}")
-    guided_turn_token(
-        schema=GUIDED_TURN_TOKEN_SCHEMA,
-        history_index=turn.history_index,
-        step=record.step,
-        turn_type=record.turn_type,
-        payload_hash=record.payload_hash,
-    )
 
 
 def _validated_inspection_facts(facts: SourceInspectionFacts) -> SourceInspectionFacts:
@@ -374,7 +367,7 @@ def _require_inspection_custody_match(
     if inspected_blob_id is None:
         return
     custody_ids = (*_option_blob_ids(submitted_and_server_options), *_option_blob_ids(server_options))
-    if any(blob_id != inspected_blob_id for blob_id in custody_ids):
+    if not custody_ids or any(blob_id != inspected_blob_id for blob_id in custody_ids):
         raise ValueError("source form blob custody does not match the blob named by inspection facts")
 
 

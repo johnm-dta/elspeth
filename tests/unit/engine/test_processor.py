@@ -1288,6 +1288,47 @@ class TestProcessRowNoTransforms:
     """Tests for process_row with an empty transform list."""
 
     @staticmethod
+    def _seed_pre_fix_ts02_gap(
+        factory: RecorderFactory,
+        *,
+        token_id: str,
+        row_id: str,
+        observed_at: datetime,
+    ) -> tuple[Any, Any]:
+        """Persist the exact legacy row/token + initial scheduler-claim image."""
+        coordination_token = leader_coordination_token(factory, "test-run")
+        source_data = {"value": 42}
+        pipeline_row = _make_source_row(source_data).to_pipeline_row()
+
+        def insert_pre_fix_ingress(conn: Any) -> tuple[Any, Any]:
+            return factory.data_flow.insert_row_with_token_on(
+                conn,
+                run_id="test-run",
+                source_node_id="source-0",
+                row_index=0,
+                data=source_data,
+                source_row_index=0,
+                ingest_sequence=0,
+                row_id=row_id,
+                token_id=token_id,
+            )
+
+        _row, _token, work_item = factory.scheduler.ingest_row_with_initial_claim(
+            coordination_token=coordination_token,
+            now=observed_at,
+            insert_row_and_token=insert_pre_fix_ingress,
+            token_id=token_id,
+            row_id=row_id,
+            node_id=None,
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(pipeline_row),
+            lease_owner=_TEST_LEADER_WORKER_ID,
+            lease_seconds=300,
+        )
+        return coordination_token, work_item
+
+    @staticmethod
     def _source_plugin(*, declared_guaranteed_fields: frozenset[str]) -> Any:
         plugin = type("ProcessorSourcePlugin", (), {})()
         plugin.name = "processor-source"
@@ -1350,7 +1391,12 @@ class TestProcessRowNoTransforms:
         with (
             patch.object(
                 factory.execution, "record_completed_node_state", wraps=factory.execution.record_completed_node_state
-            ) as completed,
+            ) as completed_standalone,
+            patch.object(
+                factory.execution,
+                "record_completed_node_state_on",
+                wraps=factory.execution.record_completed_node_state_on,
+            ) as completed_composed,
             patch.object(factory.execution, "begin_node_state", wraps=factory.execution.begin_node_state) as begin,
             patch.object(factory.execution, "complete_node_state", wraps=factory.execution.complete_node_state) as complete,
         ):
@@ -1363,7 +1409,8 @@ class TestProcessRowNoTransforms:
                 ingest_sequence=0,
             )
 
-        assert completed.call_count == 1
+        assert completed_composed.call_count == 1
+        assert completed_standalone.call_count == 0
         assert begin.call_count == 0
         assert complete.call_count == 0
 
@@ -1384,6 +1431,321 @@ class TestProcessRowNoTransforms:
         [source_state] = states
         assert source_state.node_id == "source-0"
         assert source_state.status == NodeStateStatus.COMPLETED
+
+    def test_fenced_ingest_commits_source_completion_before_return(self) -> None:
+        """A hard kill after TS-02 returns cannot strand source audit evidence."""
+        db, factory = _make_factory()
+        processor = _make_processor(factory)
+        source_row = _make_source_row()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        class _SimulatedProcessDeath(BaseException):
+            pass
+
+        committed_ingest = processor._ingest_source_row_with_initial_claim
+
+        def crash_after_ingest_commit(**kwargs: Any) -> None:
+            committed_ingest(**kwargs)
+            raise _SimulatedProcessDeath
+
+        with (
+            patch.object(processor, "_ingest_source_row_with_initial_claim", side_effect=crash_after_ingest_commit),
+            pytest.raises(_SimulatedProcessDeath),
+        ):
+            processor.process_row(
+                row_index=0,
+                source_row=source_row,
+                transforms=[],
+                ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
+            )
+
+        from sqlalchemy import func, select
+
+        from elspeth.core.landscape.schema import node_states_table, rows_table, token_work_items_table, tokens_table
+
+        with db.connection() as conn:
+            assert conn.execute(select(func.count()).select_from(rows_table)).scalar_one() == 1
+            assert conn.execute(select(func.count()).select_from(tokens_table)).scalar_one() == 1
+            assert conn.execute(select(func.count()).select_from(token_work_items_table)).scalar_one() == 1
+            source_states = conn.execute(
+                select(node_states_table).where(
+                    node_states_table.c.run_id == "test-run",
+                    node_states_table.c.node_id == "source-0",
+                )
+            ).fetchall()
+
+        assert [(state.status, state.attempt) for state in source_states] == [(NodeStateStatus.COMPLETED.value, 0)], (
+            "the fenced ingest commit must include the source COMPLETED witness"
+        )
+
+    def test_fenced_ingest_rolls_source_completion_back_with_scheduler_failure(self) -> None:
+        """A failure after the source-state insert rolls the whole ingress back."""
+        db, factory = _make_factory()
+        processor = _make_processor(factory)
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        with (
+            patch.object(factory.scheduler.queue, "enqueue_ready_claimed_on", side_effect=RuntimeError("injected TS-02 failure")),
+            pytest.raises(RuntimeError, match="injected TS-02 failure"),
+        ):
+            processor.process_row(
+                row_index=0,
+                source_row=_make_source_row(),
+                transforms=[],
+                ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
+            )
+
+        from sqlalchemy import func, select
+
+        from elspeth.core.landscape.schema import node_states_table, rows_table, token_work_items_table, tokens_table
+
+        with db.connection() as conn:
+            assert conn.execute(select(func.count()).select_from(rows_table)).scalar_one() == 0
+            assert conn.execute(select(func.count()).select_from(tokens_table)).scalar_one() == 0
+            assert conn.execute(select(func.count()).select_from(node_states_table)).scalar_one() == 0
+            assert conn.execute(select(func.count()).select_from(token_work_items_table)).scalar_one() == 0
+
+    def test_source_completion_reconciliation_rejects_conflicting_state(self) -> None:
+        """A fully witnessed TS-02 image never overwrites conflicting evidence."""
+        _db, factory = _make_factory()
+        coordination_token = leader_coordination_token(factory, "test-run")
+        observed_at = datetime.now(UTC)
+        source_data = {"value": 42}
+        pipeline_row = _make_source_row(source_data).to_pipeline_row()
+
+        def insert_pre_fix_ingress(conn: Any) -> tuple[Any, Any]:
+            return factory.data_flow.insert_row_with_token_on(
+                conn,
+                run_id="test-run",
+                source_node_id="source-0",
+                row_index=0,
+                data=source_data,
+                source_row_index=0,
+                ingest_sequence=0,
+                row_id="row-conflicting-source-state",
+                token_id="token-conflicting-source-state",
+            )
+
+        factory.scheduler.ingest_row_with_initial_claim(
+            coordination_token=coordination_token,
+            now=observed_at,
+            insert_row_and_token=insert_pre_fix_ingress,
+            token_id="token-conflicting-source-state",
+            row_id="row-conflicting-source-state",
+            node_id=None,
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(pipeline_row),
+            lease_owner=_TEST_LEADER_WORKER_ID,
+            lease_seconds=300,
+        )
+        factory.execution.record_completed_node_state(
+            token_id="token-conflicting-source-state",
+            node_id="source-0",
+            run_id="test-run",
+            step_index=0,
+            input_data={"value": 999},
+            output_data={"value": 999},
+            duration_ms=0,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="conflicting audit evidence"):
+            factory.execution.reconcile_source_completions_from_scheduler(
+                run_id="test-run",
+                coordination_token=coordination_token,
+                at=observed_at,
+            )
+
+    def test_source_completion_reconciliation_rejects_duplicate_claim_witness(self) -> None:
+        """Duplicate scheduler claims are ambiguous and must not synthesize evidence."""
+        db, factory = _make_factory()
+        observed_at = datetime.now(UTC)
+        token_id = "token-duplicate-claim"
+        coordination_token, work_item = self._seed_pre_fix_ts02_gap(
+            factory,
+            token_id=token_id,
+            row_id="row-duplicate-claim",
+            observed_at=observed_at,
+        )
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import node_states_table, scheduler_events_table
+
+        with db.write_connection() as conn:
+            claim = (
+                conn.execute(
+                    select(scheduler_events_table).where(
+                        scheduler_events_table.c.run_id == "test-run",
+                        scheduler_events_table.c.token_id == token_id,
+                        scheduler_events_table.c.event_type == "claim_ready",
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            values = dict(claim)
+            values["event_id"] = "duplicate-claim-event"
+            conn.execute(scheduler_events_table.insert().values(**values))
+
+        with pytest.raises(AuditIntegrityError, match="exactly two scheduler events"):
+            factory.execution.reconcile_source_completions_from_scheduler(
+                run_id="test-run",
+                coordination_token=coordination_token,
+                at=observed_at,
+            )
+        with db.connection() as conn:
+            assert conn.execute(select(node_states_table).where(node_states_table.c.token_id == token_id)).all() == []
+        assert work_item.attempt == 1
+
+    def test_source_completion_reconciliation_rejects_mismatched_work_item_witness(self) -> None:
+        """Token-level history cannot stand in for the current work-item witness."""
+        db, factory = _make_factory()
+        observed_at = datetime.now(UTC)
+        token_id = "token-mismatched-work-item"
+        coordination_token, _work_item = self._seed_pre_fix_ts02_gap(
+            factory,
+            token_id=token_id,
+            row_id="row-mismatched-work-item",
+            observed_at=observed_at,
+        )
+
+        from sqlalchemy import select, update
+
+        from elspeth.core.landscape.schema import node_states_table, scheduler_events_table
+
+        with db.write_connection() as conn:
+            conn.execute(
+                update(scheduler_events_table)
+                .where(
+                    scheduler_events_table.c.run_id == "test-run",
+                    scheduler_events_table.c.token_id == token_id,
+                    scheduler_events_table.c.event_type == "claim_ready",
+                )
+                .values(work_item_id="different-work-item")
+            )
+
+        with pytest.raises(AuditIntegrityError, match="exactly two scheduler events"):
+            factory.execution.reconcile_source_completions_from_scheduler(
+                run_id="test-run",
+                coordination_token=coordination_token,
+                at=observed_at,
+            )
+        with db.connection() as conn:
+            assert conn.execute(select(node_states_table).where(node_states_table.c.token_id == token_id)).all() == []
+
+    def test_source_completion_reconciliation_rejects_later_attempt(self) -> None:
+        """Historical attempt-1 events cannot authorize repair at attempt 2."""
+        db, factory = _make_factory()
+        observed_at = datetime.now(UTC)
+        token_id = "token-later-attempt"
+        coordination_token, _work_item = self._seed_pre_fix_ts02_gap(
+            factory,
+            token_id=token_id,
+            row_id="row-later-attempt",
+            observed_at=observed_at,
+        )
+
+        from sqlalchemy import select, update
+
+        from elspeth.core.landscape.schema import node_states_table, token_work_items_table
+
+        with db.write_connection() as conn:
+            conn.execute(update(token_work_items_table).where(token_work_items_table.c.token_id == token_id).values(attempt=2))
+
+        with pytest.raises(AuditIntegrityError, match="requires attempt=1"):
+            factory.execution.reconcile_source_completions_from_scheduler(
+                run_id="test-run",
+                coordination_token=coordination_token,
+                at=observed_at,
+            )
+        with db.connection() as conn:
+            assert conn.execute(select(node_states_table).where(node_states_table.c.token_id == token_id)).all() == []
+
+    def test_source_completion_reconciliation_rejects_malformed_existing_state(self) -> None:
+        """Unreadable COMPLETED evidence is a conflict, never an idempotent success."""
+        db, factory = _make_factory()
+        observed_at = datetime.now(UTC)
+        token_id = "token-malformed-source-state"
+        coordination_token, _work_item = self._seed_pre_fix_ts02_gap(
+            factory,
+            token_id=token_id,
+            row_id="row-malformed-source-state",
+            observed_at=observed_at,
+        )
+        factory.execution.record_completed_node_state(
+            token_id=token_id,
+            node_id="source-0",
+            run_id="test-run",
+            step_index=0,
+            input_data={"value": 42},
+            output_data={"value": 42},
+            duration_ms=0,
+        )
+
+        from sqlalchemy import select, update
+
+        from elspeth.core.landscape.schema import node_states_table
+
+        with db.write_connection() as conn:
+            conn.execute(update(node_states_table).where(node_states_table.c.token_id == token_id).values(completed_at=None))
+
+        with pytest.raises(AuditIntegrityError, match="completed_at"):
+            factory.execution.reconcile_source_completions_from_scheduler(
+                run_id="test-run",
+                coordination_token=coordination_token,
+                at=observed_at,
+            )
+        with db.connection() as conn:
+            assert conn.execute(select(node_states_table).where(node_states_table.c.token_id == token_id)).all() != []
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("context_before_json", "{}"),
+            ("context_after_json", "{}"),
+            ("success_reason_json", '{"action":"pass"}'),
+            ("resume_checkpoint_id", "checkpoint-impossible-for-source"),
+        ],
+    )
+    def test_source_completion_reconciliation_rejects_source_impossible_metadata(self, field: str, value: str) -> None:
+        """A source witness cannot carry transform or resume provenance."""
+        db, factory = _make_factory()
+        observed_at = datetime.now(UTC)
+        token_id = f"token-source-metadata-{field}"
+        coordination_token, _work_item = self._seed_pre_fix_ts02_gap(
+            factory,
+            token_id=token_id,
+            row_id=f"row-source-metadata-{field}",
+            observed_at=observed_at,
+        )
+        factory.execution.record_completed_node_state(
+            token_id=token_id,
+            node_id="source-0",
+            run_id="test-run",
+            step_index=0,
+            input_data={"value": 42},
+            output_data={"value": 42},
+            duration_ms=0,
+        )
+
+        from sqlalchemy import update
+
+        from elspeth.core.landscape.schema import node_states_table
+
+        with db.write_connection() as conn:
+            conn.execute(update(node_states_table).where(node_states_table.c.token_id == token_id).values({field: value}))
+
+        with pytest.raises(AuditIntegrityError, match="conflicting audit evidence"):
+            factory.execution.reconcile_source_completions_from_scheduler(
+                run_id="test-run",
+                coordination_token=coordination_token,
+                at=observed_at,
+            )
 
     def test_source_boundary_violation_records_failed_outcome_and_failed_source_state(self) -> None:
         """Tier-1 source boundary failures must still leave terminal audit evidence."""

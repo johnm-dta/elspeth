@@ -340,6 +340,7 @@ EXPECTED_ASSESSMENT_LOCATORS = {
         "tests/integration/pipeline/test_sink_effect_recovery.py::test_redrive_after_crash_before_reservation_recovers",
         "tests/unit/engine/test_processor.py::TestDurableSchedulerResumeDrain::test_pending_sink_resume_repairs_already_outcomed_row_without_reemitting_sink",
         "tests/unit/engine/test_processor.py::TestDurableSchedulerResumeDrain::test_recovers_expired_lease_then_drains_without_source_replay",
+        "tests/e2e/recovery/test_concurrent_resume.py::TestMidClaimCrashResume::test_ts02_source_completion_gap_reconciles_once_before_plugin_execution",
     ),
     "direct-contention-fencing": (
         "tests/integration/engine/test_two_process_scheduler_contention.py",
@@ -358,7 +359,7 @@ EXPECTED_ASSESSMENT_EVIDENCE = tuple(
     for evidence_group, locators in EXPECTED_ASSESSMENT_LOCATORS.items()
     for index, locator in enumerate(locators, start=1)
 )
-EXPECTED_EVIDENCE_REGISTRY_SHA256 = "2fc77397f0ef8bba5ca54d7516c4b1cda61ad4c1236afe4d37bdd39cd7150068"
+EXPECTED_EVIDENCE_REGISTRY_SHA256 = "17acb1f48fa91ef72768e11a496fdfcff94c0daac2b9f26d91562287244480ba"
 
 EXPECTED_HARNESS_EVIDENCE = (
     (
@@ -1068,11 +1069,11 @@ def test_manifest_pins_every_exact_current_assessment_evidence_record() -> None:
     )
     assert assessment_evidence == EXPECTED_ASSESSMENT_EVIDENCE
     assert harness_evidence == EXPECTED_HARNESS_EVIDENCE
-    assert len(manifest.evidence) == 52
-    assert len(assessment_evidence) == 50
+    assert len(manifest.evidence) == 53
+    assert len(assessment_evidence) == 51
     assert len(harness_evidence) == 2
-    assert len({reference.id for reference in manifest.evidence}) == 52
-    assert len({reference.locator for reference in manifest.evidence}) == 52
+    assert len({reference.id for reference in manifest.evidence}) == 53
+    assert len({reference.locator for reference in manifest.evidence}) == 53
     normalized_registry = json.dumps(
         [reference.model_dump(mode="json") for reference in manifest.evidence],
         sort_keys=True,

@@ -6,7 +6,8 @@
 | Excluded | The web session engine. |
 | Mapped against | Commit `8c5e9533c80c00bfc3b401c1c394e8308815ce1e` (release `0.7.1`). |
 | Disposition follow-up | Commit `360f3cf9e` on 2026-07-17; canonical subtype admission and TS-07–TS-10 closure matrix. |
-| Evidence state | Implementation mapped; Wave 1 executed for intake, leasing/recovery, claimed dispositions, and their plugin boundaries. The disposition follow-up is recorded below; remaining families retain their stated status. |
+| Source-ingress follow-up | 2026-07-18; TS-02 source-COMPLETED atomicity and fail-closed legacy-image recovery (`elspeth-aafba3b298`). |
+| Evidence state | Implementation mapped; Wave 1 executed for intake, leasing/recovery, claimed dispositions, and their plugin boundaries. The disposition and source-ingress follow-ups are recorded below; remaining families retain their stated status. |
 
 This is the canonical working map for the token scheduler's test-verification
 campaign. It describes what the current code does. It does not replace an ADR,
@@ -141,9 +142,9 @@ stateDiagram-v2
 `TS-01` is the atomic composition `absent → READY → LEASED`. When its
 deterministic row already exists as an exact `READY` replay, it reconciles the
 insert and performs only the claim, degenerating to TS-03 without a second
-`ENQUEUE` event. `TS-02` additionally composes the source `rows` and `tokens`
-inserts under the leader epoch fence. `TS-13` is the fail-closed bulk form of
-`TS-11`/`TS-12`.
+`ENQUEUE` event. `TS-02` additionally composes the source `rows`, `tokens`, and
+step-0 source `COMPLETED` witness under the leader epoch fence. `TS-13` is the
+fail-closed bulk form of `TS-11`/`TS-12`.
 
 ## Durable transition ledger
 
@@ -155,7 +156,7 @@ already reviewed; unreviewed legs remain **Candidate**.
 |---|---|---|---|---|---|
 | TS-00 | absent → `READY` | `SchedulerQueueRepository.enqueue_ready`; reference validation, deterministic identity, optional active-worker fence | Insert complete resume cursor; exact replay is idempotent; incompatible replay fails | `ENQUEUE` (`None→READY`) | `test_scheduler_events.py::test_enqueue_ready_records_single_idempotent_scheduler_event`; lifecycle property rules `enqueue` and `reenqueue_is_idempotent` |
 | TS-01 | absent → `READY` → `LEASED`; exact existing `READY` → `LEASED` | `enqueue_ready_claimed` / `enqueue_ready_claimed_on`; reconcile insert then claim CAS on one connection | A new work row plus both transitions commit or roll back together. An exact existing row receives only the claim mutation. | New row: `ENQUEUE`, `CLAIM_READY`; existing row: `CLAIM_READY` only | `test_scheduler_events.py::test_enqueue_ready_claimed_records_enqueue_and_claim_events_in_one_operation`; post-coalesce reconciliation candidates |
-| TS-02 | absent row/token → `READY` → `LEASED` | `ingest_row_with_initial_claim`; required leader identity and epoch fence is first statement | `rows`, `tokens`, work item, claim, and both events share one fenced `BEGIN IMMEDIATE` transaction | Same as TS-01; coordination plane records fence refusal | `test_leader_fence_stale_token.py::test_ingest_woken_mid_ingest_atomic_rollback`; `test_suspended_winner_fences.py::test_stale_ingest_rolls_back_atomically_no_orphan_rows_row` |
+| TS-02 | absent row/token/source state → `READY` → `LEASED` plus source `COMPLETED` | `ingest_row_with_initial_claim`; required leader identity and epoch fence is first statement | `rows`, `tokens`, exact step-0 source `COMPLETED`, work item, claim, and both events share one fenced `BEGIN IMMEDIATE` transaction | Same as TS-01; coordination plane records fence refusal | `test_processor.py::TestProcessRowNoTransforms::test_fenced_ingest_commits_source_completion_before_return`; rollback companion; stale-leader fence tests; `test_concurrent_resume.py::TestMidClaimCrashResume::test_ts02_source_completion_gap_reconciles_once_before_plugin_execution` |
 | TS-03 | `READY` → `LEASED` | `claim_ready`; run/status/availability CAS, deterministic order, membership fence. TS-01's reconciliation arm reaches the same row helper without that membership fence. | Set owner and expiry without changing attempt or identity | `CLAIM_READY` | lifecycle property rule `claim_ready`; `test_scheduler_events.py::test_claim_and_terminal_events_record_status_and_lease_ownership`; direct-repository N=0 claim hammers in `test_two_process_scheduler_contention.py` |
 | TS-04 | `PENDING_SINK` → `LEASED` | `claim_pending_sink`; run/status CAS plus membership fence | Preserve the pending-sink fields exactly as stored, plus attempt and identity; set new owner and expiry | `CLAIM_PENDING_SINK` | lifecycle property rule `claim_pending_sink`; `test_scheduler_events.py::test_pending_sink_claim_and_terminalization_record_transition_events`; absent-member refusal in `test_coordination_fence_constructs.py` |
 | TS-05 | expired transform `LEASED` → `READY` | strict `recover_expired_leases`; token-scoped run, expired lease not owned by the token worker, and dead owner or stall-budget expiry | Clear lease, increment attempt, rotate deterministic `work_item_id`; optionally record `worker_stalled` | `RECOVER_EXPIRED_LEASE` with previous identity in context | lifecycle property rule `recover_expired_leases`; `test_scheduler_events.py::test_recover_expired_leases_records_attempt_bump_and_previous_work_item`; lease-recovery race suite |
@@ -197,7 +198,7 @@ complete journal of every scheduler-related mutation.
 flowchart LR
     SRC[SourceProtocol.load] -->|valid SourceRow| ROW[RowProcessor.process_row]
     SRC -->|quarantined SourceRow| QUAR[Quarantine router and sink; no scheduler row]
-    ROW -->|boundary accepted| INGEST[TS-02 fenced row + token + initial claim]
+    ROW -->|boundary accepted| INGEST[TS-02 fenced row + token + source COMPLETED + initial claim]
     ROW -->|boundary refused| NOSCHED[Audit failure; no scheduler row]
     INGEST --> DRAIN[SchedulerDrainCoordinator]
     DRAIN --> TRAV[TokenTraversalEngine]
@@ -237,7 +238,7 @@ sink plugin I/O.
 
 | ID | Boundary | Production choreography | Scheduler consequence | Candidate production-path evidence |
 |---|---|---|---|---|
-| PB-01 | Source plugin ingress | `SourceIterationCoordinator.load_source_with_events` calls `SourceProtocol.load`; `run_main_processing_loop` passes each valid `SourceRow` and the source plugin to `RowProcessor.process_row`. Quarantined source rows branch earlier to the quarantine router and sink. Source declaration/contract checks run before happy-path scheduling. | Accepted row uses TS-02. A yielded-row boundary failure records row/token failure evidence but creates no scheduler row. A load/iterator exception before a row exists has no row, token, or scheduler record. Source quarantine bypasses scheduler state. | processor source-boundary tests; source load/iteration failure tests; stale-ingest E2E; concurrent pumping and quarantine integration tests |
+| PB-01 | Source plugin ingress | `SourceIterationCoordinator.load_source_with_events` calls `SourceProtocol.load`; `run_main_processing_loop` passes each valid `SourceRow` and the source plugin to `RowProcessor.process_row`. Quarantined source rows branch earlier to the quarantine router and sink. Source declaration/contract checks run before happy-path scheduling. | Accepted row uses TS-02, including its source `COMPLETED` witness. Resume repairs only the exact pre-fix attempt-1 TS-02 image before plugin execution and rejects ambiguous or malformed evidence. A yielded-row boundary failure records row/token failure evidence but creates no scheduler row. A load/iterator exception before a row exists has no row, token, or scheduler record. Source quarantine bypasses scheduler state. | processor atomic-ingress and fail-closed reconciliation tests; source load/iteration failure tests; stale-ingest E2E; `test_concurrent_resume.py::TestMidClaimCrashResume::test_ts02_source_completion_gap_reconciles_once_before_plugin_execution`; concurrent pumping and quarantine integration tests |
 | PB-02 | Row transform plugin | `TokenTraversalEngine.handle_transform_node` reaches `TransformExecutor.execute_transform`, which opens node state, validates boundaries, calls `TransformProtocol.process`, and terminally closes the node state. | Continue/fork/expand children use TS-00; sink-bound results use TS-10; normal terminal/failure paths use TS-08/09. | processor durable-scheduler result tests and transform executor tests |
 | PB-03 | Declarative gate | `TokenTraversalEngine.handle_gate_node` reaches `GateExecutor.execute_config_gate`. This evaluates configuration; it is not an arbitrary plugin call. | Continue/fork children use TS-00. Discard, routed sink, and failure dispositions become TS-08/10/09; coalesce branch loss rides the same disposition. | gate routing, discard, fork, and branch-loss processor tests |
 | PB-04 | Aggregation barrier | A claimed token reaches a batch-aware transform. Leader and follower paths deposit TS-07 before leader journal intake. `BarrierIntakeCoordinator` opens batch membership, performs AUX-03, feeds adopted rows to `AggregationExecutor`, and triggers the batch plugin. | Successful sink-bound output uses atomic TS-15+TS-16/17. Non-sink continuation children are enqueued later as TS-00, not TS-18. A returned plugin error writes terminal failure outcomes then performs separate TS-15-only release; a raised plugin exception leaves rows BLOCKED for restore/retry. | scheduler intake slice tests; aggregation buffering/flush tests; `test_aggregation_recovery.py::test_failed_flush_crash_between_terminal_write_and_release_resumes` |
@@ -281,7 +282,7 @@ after a process death between the two commits.
 | Earlier durable action | Later durable action | Recovery or replay authority |
 |---|---|---|
 | Source yields and boundary accepts a row | TS-02 ingest | Before TS-02 there is no row/token/scheduler witness; restart relies on source/checkpoint replay policy. |
-| TS-02 row/token/initial-claim commit | Source COMPLETED node state, then traversal | The scheduler lease is durable, but reconstruction of a missing source state at this exact crash point requires positive confirmation. |
+| Pre-fix TS-02 row/token/initial-claim image with no source state | Resume scheduler drain and plugin traversal | Before plugin execution, the fenced reconciler requires a root LEASED work item at attempt 1/step 1, exactly one matching `ENQUEUE` and `CLAIM_READY` transition for its current work-item identity, matching row/token/ingest/payload hashes, and no conflicting source state. It inserts one exact source `COMPLETED` witness; repeat repair validates it idempotently. Any ambiguity fails closed. Current ingress no longer creates this seam because source completion is inside TS-02. |
 | Whole-row resume token creation | Source COMPLETED state, then standalone TS-01 | These are three transactions; the recovery authority for a token stranded between them requires positive confirmation. |
 | Transform plugin returns or performs external effects | Terminal transform node state/audit | Hard death can leave an OPEN state and recoverable scheduler lease; replay may invoke the plugin again. |
 | Transform/gate audit result | TS-07/08/09/10 claimed-item disposition | The scheduler lease remains the replay authority until disposition commits. |
@@ -462,6 +463,21 @@ selection passed 127 tests; the four real drain characterizations passed
 separately. These results close the disposition proof package, not the broader
 PB-02/PB-03/PB-08 composition, registered multi-process contention, or crash
 seams tracked by other issues.
+
+### Source-ingress follow-up executed evidence — 2026-07-18
+
+This follow-up closes the Wave 1 candidate-19 seam owned by
+`elspeth-aafba3b298` without rewriting the dated Wave 1 result below.
+
+| Leg | Follow-up verdict | Closure evidence |
+|---|---|---|
+| TS-02 source state | **Confirmed atomic** | A hard-kill injection immediately after the production fenced ingest returns observes one row, token, initial work item, and exact source `COMPLETED` state. Injecting scheduler admission failure after the source-state insert rolls all four record types back together. |
+| Legacy TS-02 image | **Confirmed fail-closed recovery** | Public same-database resume repairs one exact pre-fix source-state gap before plugin execution. A second simulated process death immediately after repair leaves one source state and zero transform calls; another public resume validates that state idempotently, invokes the transform exactly once, preserves token identity, and completes. Duplicate or mismatched scheduler events, conflicting source evidence, and malformed completed evidence are refused without synthesizing a state. |
+
+Maintained regression entry points:
+
+- `test_processor.py::TestProcessRowNoTransforms::test_fenced_ingest_commits_source_completion_before_return` and its rollback/fail-closed reconciliation companions; and
+- `test_concurrent_resume.py::TestMidClaimCrashResume::test_ts02_source_completion_gap_reconciles_once_before_plugin_execution`.
 
 Specialist selections executed 83 passing pytest node invocations across the
 three packages; some nodes intentionally overlapped. The root review then ran

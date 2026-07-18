@@ -232,6 +232,11 @@ evidence:
     locator: tests/unit/engine/test_processor.py::TestDurableSchedulerResumeDrain::test_recovers_expired_lease_then_drains_without_source_replay
     claim: Expired-lease recovery drains without source replay.
     stages: [runtime, audit, recovery]
+  - id: focused-crash-restart-09
+    kind: pytest
+    locator: tests/e2e/recovery/test_concurrent_resume.py::TestMidClaimCrashResume::test_ts02_source_completion_gap_reconciles_once_before_plugin_execution
+    claim: Public resume repairs an exact pre-fix TS-02 source-state gap before plugin execution and remains idempotent across a second crash.
+    stages: [runtime, audit, recovery]
 
   - id: direct-contention-fencing
     kind: pytest
@@ -307,7 +312,8 @@ scenarios:
         exit_gate: The scenario corpus case passes exact durable audit-state and exported-record assertions.
       recovery: &recovery_partial
         status: partial
-        reason: Selected restart seams pass, but the complete scenario recovery path is not executable evidence.
+        evidence: [focused-crash-restart-09]
+        reason: The source-ingress crash seam now passes public-resume, fail-closed, and exactly-once plugin assertions, but the complete linear scenario recovery matrix is not yet executable evidence.
         owner_issue: elspeth-ef29ef6ba4
         exit_gate: The scenario corpus case passes database-reopen and public-resume assertions without duplicate work.
       concurrency: &concurrency_unknown

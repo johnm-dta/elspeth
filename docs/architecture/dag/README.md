@@ -17,8 +17,8 @@ mature through repeated assessments without erasing earlier conclusions.
 
 The current assessment concludes that Elspeth's DAG is structurally capable but
 not production-complete as a whole product. Expansion replay identity,
-output-contract serialization, and committed sidecar publication are now
-closed. Hard gates remain in source and parent/child process-death proof,
+output-contract serialization, committed sidecar publication, and the source
+ingress/source-COMPLETED seam are now closed. Hard gates remain in parent/child process-death proof,
 registered-process and long-plugin contention, secret-bearing graph surfaces,
 guided/browser parity, scale, and the normative contract.
 
@@ -35,6 +35,7 @@ the following post-seed work at a new baseline:
 | 2026-07-18 | Expansion replay identity (`elspeth-a25e9c009e`) | Fixed: batch expansion consumes one durable claim, sequential replay is refused, and concurrent PostgreSQL attempts create one child set. | [Integration delta](assessments/2026-07-18-0319/02-scorecard-and-scenario-delta.md#closed-hard-gates) and live `cardinality-identity-09/10/11` evidence |
 | 2026-07-18 | Output-contract serialization (`elspeth-3335de38c2`) | Fixed: compatible observations merge under hash CAS and incompatible state fails closed across SQLite and PostgreSQL. | [Executed evidence](assessments/2026-07-18-0319/01-executed-evidence.md) |
 | 2026-07-18 | Sidecar journal commit ordering (`elspeth-d8d4d2849b`) | Fixed: a committed outbox publishes and recovers idempotently without recording failed transactions. | [Executed evidence](assessments/2026-07-18-0319/01-executed-evidence.md) |
+| 2026-07-18 | Source ingress to source-COMPLETED crash seam (`elspeth-aafba3b298`) | Fixed: current TS-02 atomically commits row, token, source witness, initial lease, and scheduler events; resume repairs only an exact pre-fix image before plugin execution and fails closed on conflicting evidence. | [State-engine follow-up](../token-scheduler-state-engine.md#source-ingress-follow-up-executed-evidence--2026-07-18) and `focused-crash-restart-09` |
 
 The reassessment confirms these closures. It also confirms selected fencing,
 idempotency, and atomicity improvements, but no mandatory scenario yet passes
@@ -61,7 +62,7 @@ the entire production-support lifecycle.
 
 The current assessment groups the immediate blockers into five themes:
 
-1. Close source and parent/child process-death seams plus the remaining
+1. Close parent/child process-death seams plus the remaining
    state/evidence atomicity proof.
 2. Keep raw secrets out of graph identity, metadata, persistence, exports, and diagnostics.
 3. Execute the deterministic crash and registered-process contention matrix.

@@ -128,18 +128,31 @@ function writeDescriptors(descriptors: GuidedRetryDescriptor[]): void {
     fallbackAuthoritative = true;
     return;
   }
-  try {
-    if (bounded.length === 0) {
-      // Persist an empty generation before best-effort physical deletion. If
-      // removeItem fails after this write, a fresh module still reads the
-      // tombstone and cannot resurrect completed custody. If setItem itself
-      // is unavailable, only this live tab's bounded memory can remain
-      // authoritative; browser storage offers no durable recovery path.
+  if (bounded.length === 0) {
+    // The tombstone and physical deletion are independent durable-clearance
+    // paths. Always attempt both: a quota-blocked write must not prevent a
+    // permitted remove, and a blocked remove is safe when the tombstone was
+    // stored. Only when both browser operations fail can this live tab's
+    // bounded memory remain authoritative; a reload then has no durable
+    // browser-storage path with which to distinguish the stale generation.
+    let tombstoneStored = false;
+    try {
       storage.setItem(GUIDED_RETRY_STORAGE_KEY, encodedEnvelope([]));
-      storage.removeItem(GUIDED_RETRY_STORAGE_KEY);
-      fallbackAuthoritative = false;
-      return;
+      tombstoneStored = true;
+    } catch {
+      // Physical deletion below may still durably clear the stale envelope.
     }
+    let physicallyRemoved = false;
+    try {
+      storage.removeItem(GUIDED_RETRY_STORAGE_KEY);
+      physicallyRemoved = true;
+    } catch {
+      // The tombstone above may already be the durable empty generation.
+    }
+    fallbackAuthoritative = !tombstoneStored && !physicallyRemoved;
+    return;
+  }
+  try {
     storage.setItem(GUIDED_RETRY_STORAGE_KEY, encodedEnvelope(bounded));
     fallbackAuthoritative = false;
   } catch {

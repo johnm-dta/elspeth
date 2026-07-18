@@ -161,6 +161,24 @@ describe("guided operation retry custody", () => {
     expect(nextAction.operationId).not.toBe(completed.operationId);
   });
 
+  it("still removes stale custody when the empty-generation write fails", async () => {
+    const completed = acquireGuidedRetry("guided_reenter", SESSION_A, []);
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("quota", "QuotaExceededError");
+    });
+    const removeItem = vi.spyOn(Storage.prototype, "removeItem");
+
+    clearGuidedRetry(completed);
+    expect(removeItem).toHaveBeenCalledWith(GUIDED_RETRY_STORAGE_KEY);
+    setItem.mockRestore();
+    removeItem.mockRestore();
+    vi.resetModules();
+    const reloaded = await import("./guidedOperationRetry");
+    const nextAction = reloaded.acquireGuidedRetry("guided_reenter", SESSION_A, []);
+
+    expect(nextAction.operationId).not.toBe(completed.operationId);
+  });
+
   it("rejects non-canonical or oversized session ids", () => {
     expect(() => acquireGuidedRetry("guided_reenter", "sess-1", [])).toThrow(
       "canonical UUID",

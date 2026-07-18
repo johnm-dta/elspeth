@@ -546,6 +546,26 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(nextActionOperationId).not.toBe(firstOperationId);
   });
 
+  it("convertToGuided: clears a terminal 500 marker so an explicit retry gets a new operation id", async () => {
+    const { convertToGuided } = await import("@/api/client");
+    const convertMock = convertToGuided as ReturnType<typeof vi.fn>;
+    convertMock
+      .mockRejectedValueOnce({
+        status: 500,
+        error_type: "guided_operation_terminal_failure",
+        detail: "The operation failed.",
+      })
+      .mockResolvedValueOnce(sampleGetGuidedResponse);
+    useSessionStore.setState({ activeSessionId: RETRY_SESSION_ID });
+
+    await useSessionStore.getState().convertToGuided(RETRY_SESSION_ID);
+    await useSessionStore.getState().convertToGuided(RETRY_SESSION_ID);
+
+    expect(convertMock.mock.calls[0]?.[1]).toEqual(expect.any(String));
+    expect(convertMock.mock.calls[1]?.[1]).toEqual(expect.any(String));
+    expect(convertMock.mock.calls[1]?.[1]).not.toBe(convertMock.mock.calls[0]?.[1]);
+  });
+
   it("startGuided: surfaces the backend's typed detail instead of the generic banner", async () => {
     // elspeth-e2c3dba6b5 secondary fix: startGuided's catch used to hardcode
     // "Failed to load guided session. Please try again." and discard

@@ -375,7 +375,17 @@ class TestConvertEmptySession:
 
         assert first.status_code == 500
         assert replay.status_code == 500
-        assert first.json() == replay.json()
+        assert (
+            first.json()
+            == replay.json()
+            == {
+                "detail": {
+                    "error_type": "guided_operation_terminal_failure",
+                    "failure_code": "operation_failed",
+                    "detail": "The operation failed.",
+                }
+            }
+        )
         assert "tier-3 diagnostic" not in first.text
 
     def test_audit_integrity_failure_is_settled_without_swallowing_diagnostic(
@@ -387,16 +397,34 @@ class TestConvertEmptySession:
         operation_id = str(uuid4())
         service = client.app.state.session_service
 
+        from structlog.testing import capture_logs
+
         with (
+            capture_logs() as cap_logs,
             patch.object(
                 service,
                 "save_state_for_guided_operation",
                 side_effect=AuditIntegrityError("diagnostic retained for audit"),
             ),
-            pytest.raises(AuditIntegrityError, match="diagnostic retained for audit"),
         ):
-            _convert_raw(client, session_id, operation_id=operation_id)
+            first = _convert_raw(client, session_id, operation_id=operation_id)
 
         replay = _convert_raw(client, session_id, operation_id=operation_id)
-        assert replay.status_code == 500
-        assert replay.json() == {"detail": "The operation failed an integrity check."}
+        assert first.status_code == replay.status_code == 500
+        assert (
+            first.json()
+            == replay.json()
+            == {
+                "detail": {
+                    "error_type": "guided_operation_terminal_failure",
+                    "failure_code": "integrity_error",
+                    "detail": "The operation failed an integrity check.",
+                }
+            }
+        )
+        events = [entry for entry in cap_logs if entry.get("event") == "guided.operation_terminal_failure"]
+        assert len(events) == 1
+        assert events[0]["exc_class"] == "AuditIntegrityError"
+        assert events[0]["site"] == "post_guided_convert"
+        assert events[0]["frames"]
+        assert "diagnostic retained for audit" not in repr(events[0])

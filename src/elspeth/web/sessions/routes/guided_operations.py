@@ -75,7 +75,14 @@ def raise_guided_operation_failure(outcome: GuidedOperationFailed) -> Never:
     if safe is None:
         raise AuditIntegrityError("Guided operation returned an unknown failure code")
     status_code, detail = safe
-    raise HTTPException(status_code=status_code, detail=detail)
+    raise HTTPException(
+        status_code=status_code,
+        detail={
+            "error_type": "guided_operation_terminal_failure",
+            "failure_code": outcome.failure_code,
+            "detail": detail,
+        },
+    )
 
 
 async def _replay_completed[ResponseT: BaseModel](

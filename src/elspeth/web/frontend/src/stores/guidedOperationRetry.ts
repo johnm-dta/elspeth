@@ -239,7 +239,8 @@ export function clearAllGuidedRetries(): void {
 export function isAmbiguousGuidedRetryFailure(error: unknown): boolean {
   if (error instanceof TypeError) return true;
   if (typeof error !== "object" || error === null) return false;
-  const record = error as { name?: unknown; status?: unknown };
+  const record = error as { error_type?: unknown; name?: unknown; status?: unknown };
   if (record.name === "AbortError" || record.name === "TimeoutError") return true;
+  if (record.error_type === "guided_operation_terminal_failure") return false;
   return typeof record.status === "number" && record.status >= 500 && record.status <= 599;
 }

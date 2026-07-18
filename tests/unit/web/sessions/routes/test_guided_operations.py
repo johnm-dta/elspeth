@@ -246,7 +246,11 @@ async def test_failed_operation_maps_only_closed_safe_failure() -> None:
         )
 
     assert caught.value.status_code == 504
-    assert caught.value.detail == "The operation timed out. Retry with a new operation id."
+    assert caught.value.detail == {
+        "error_type": "guided_operation_terminal_failure",
+        "failure_code": "provider_timeout",
+        "detail": "The operation timed out. Retry with a new operation id.",
+    }
 
 
 async def _response(value: str) -> _Response:

@@ -201,6 +201,13 @@ describe("guided operation retry custody", () => {
     expect(isAmbiguousGuidedRetryFailure(new DOMException("aborted", "AbortError"))).toBe(true);
     expect(isAmbiguousGuidedRetryFailure({ name: "TimeoutError" })).toBe(true);
     expect(isAmbiguousGuidedRetryFailure({ status: 503 })).toBe(true);
+    expect(isAmbiguousGuidedRetryFailure({ status: 502, error_type: "proxy_error" })).toBe(true);
+    expect(
+      isAmbiguousGuidedRetryFailure({
+        status: 500,
+        error_type: "guided_operation_terminal_failure",
+      }),
+    ).toBe(false);
     expect(isAmbiguousGuidedRetryFailure({ status: 409 })).toBe(false);
     expect(isAmbiguousGuidedRetryFailure(new Error("application error"))).toBe(false);
   });

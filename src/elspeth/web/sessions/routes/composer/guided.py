@@ -3766,11 +3766,18 @@ async def post_guided_convert(
             return _response_from_record(state_record_out)
     except Exception as exc:
         failure_code: GuidedOperationFailureCode = "integrity_error" if isinstance(exc, AuditIntegrityError) else "operation_failed"
+        if isinstance(exc, AuditIntegrityError):
+            slog.error(
+                "guided.operation_terminal_failure",
+                session_id=str(session_id),
+                user_id=user.user_id,
+                exc_class=type(exc).__name__,
+                site="post_guided_convert",
+                frames=_safe_frame_strings(exc),
+            )
         failed = await service.fail_guided_operation(
             reserved.fence,
             failure_code=failure_code,
             actor="composer_route",
         )
-        if isinstance(exc, AuditIntegrityError):
-            raise
         raise_guided_operation_failure(failed)

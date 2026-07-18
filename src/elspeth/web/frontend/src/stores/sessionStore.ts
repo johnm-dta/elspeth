@@ -497,11 +497,13 @@ function clearedGuidedState(): Pick<
 // session has no guided_session attached (a plain freeform session) — see
 // get_guided's single 400 raise in routes/composer/guided.py — so any
 // caught error here is treated as "this session is freeform-only", not
-// surfaced as a selectSession failure. A non-400 failure (network blip) is
-// swallowed the same way: restoring guided state is a nice-to-have on load,
-// not load-bearing for the freeform surface that always renders regardless.
+// surfaced as a selectSession failure. Select-session callers tolerate a
+// non-400 failure because guided restoration is not load-bearing there;
+// mutation callers can request propagation so a multi-request action retains
+// its operation custody until every authoritative read has succeeded.
 async function fetchGuidedStateForSelect(
   sessionId: string,
+  unexpectedFailure: "tolerate" | "throw" = "tolerate",
 ): Promise<GetGuidedResponse | null> {
   try {
     const response = await api.getGuided(sessionId);
@@ -529,6 +531,9 @@ async function fetchGuidedStateForSelect(
     // is at least diagnosable rather than silently indistinguishable.
     const status = (err as ApiError | undefined)?.status;
     if (status !== 400) {
+      if (unexpectedFailure === "throw") {
+        throw err;
+      }
       console.warn(
         `[sessionStore] guided-state probe for session ${sessionId} failed (status ${status ?? "unknown"}); ` +
           "falling back to freeform. If this session was mid-guided-build, its state was not restored.",
@@ -2317,7 +2322,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         stateId,
         retry.operationId,
       );
-      clearGuidedRetry(retry);
       // Re-derive the guided surface from the reverted version. A revert can
       // cross the guided/freeform boundary — most visibly the recoverability
       // flow behind convertToGuided ("fresh wizard + consent",
@@ -2329,10 +2333,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // GET /guided (non-mutating; 400 => freeform-only) and set the wire
       // fields to what the reverted version actually is, mirroring
       // selectSession's discriminator.
-      const guided = await fetchGuidedStateForSelect(activeSessionId);
+      const guided = await fetchGuidedStateForSelect(activeSessionId, "throw");
       // Stale-guard: drop the result if the active session changed while the
       // revert + probe were in flight (mirrors startGuided/selectSession).
       if (get().activeSessionId !== activeSessionId) {
+        clearGuidedRetry(retry);
         return;
       }
       // Clear selection — the reverted version may not contain the selected node
@@ -2343,6 +2348,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedNextTurn: guided?.next_turn ?? null,
         guidedTerminal: guided?.terminal ?? null,
       });
+      clearGuidedRetry(retry);
     } catch (err) {
       if (!isAmbiguousGuidedRetryFailure(err)) {
         clearGuidedRetry(retry);

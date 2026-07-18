@@ -610,6 +610,30 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(nextActionOperationId).not.toBe(firstOperationId);
   });
 
+  it("revertToVersion: retains the operation id when the POST succeeds but the guided probe is ambiguous", async () => {
+    const { revertToVersion, getGuided } = await import("@/api/client");
+    const revertMock = revertToVersion as ReturnType<typeof vi.fn>;
+    revertMock
+      .mockResolvedValueOnce({ ...sampleCompositionState, version: 2 })
+      .mockResolvedValueOnce({ ...sampleCompositionState, version: 2 })
+      .mockResolvedValueOnce({ ...sampleCompositionState, version: 3 });
+    (getGuided as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce({ status: 503 })
+      .mockRejectedValueOnce({ status: 400 })
+      .mockRejectedValueOnce({ status: 400 });
+    useSessionStore.setState({ activeSessionId: RETRY_SESSION_ID });
+
+    await useSessionStore.getState().revertToVersion("state-old");
+    await useSessionStore.getState().revertToVersion("state-old");
+    await useSessionStore.getState().revertToVersion("state-old");
+
+    const firstOperationId = revertMock.mock.calls[0]?.[2];
+    const retryOperationId = revertMock.mock.calls[1]?.[2];
+    const nextActionOperationId = revertMock.mock.calls[2]?.[2];
+    expect(retryOperationId).toBe(firstOperationId);
+    expect(nextActionOperationId).not.toBe(firstOperationId);
+  });
+
   it("revertToVersion: reverting to a guided version restores the guided surface", async () => {
     const { revertToVersion, getGuided } = await import("@/api/client");
     (revertToVersion as ReturnType<typeof vi.fn>).mockResolvedValueOnce({

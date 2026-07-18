@@ -78,6 +78,7 @@ def _seed_exited_wire_state(client: TestClient, session_id: str) -> None:
 
 _SOURCE_ID = "00000000-0000-4000-8000-000000000101"
 _OUTPUT_ID = "00000000-0000-4000-8000-000000000102"
+_INSPECTION_WARNING = "csv_jagged_rows: row 2 has fewer fields"
 
 
 def _source_inspection() -> SourceInspectionFacts:
@@ -89,7 +90,7 @@ def _source_inspection() -> SourceInspectionFacts:
         observed_headers=("id", "name"),
         inferred_types={"id": "int", "name": "str"},
         url_candidates=(),
-        warnings=(),
+        warnings=(_INSPECTION_WARNING,),
     )
 
 
@@ -308,6 +309,9 @@ def test_reenter_schema8_earlier_checkpoint_replays_exact_hashed_response(
     assert replay.status_code == 200, replay.json()
     assert replay.json() == first.json()
     assert first.json()["next_turn"]["type"] == expected_turn_type.value
+    if checkpoint_name == "source_inspection_review":
+        assert first.json()["next_turn"]["payload"]["observed"]["warnings"] == [_INSPECTION_WARNING]
+        assert replay.json()["next_turn"]["payload"]["observed"]["warnings"] == [_INSPECTION_WARNING]
     versions = asyncio.run(composer_test_client.app.state.session_service.get_state_versions(UUID(session_id)))
     assert [state.version for state in versions] == [1, 2]
 

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   acquireGuidedRetry,
   clearAllGuidedRetries,
+  clearGuidedRetry,
   GUIDED_RETRY_STORAGE_KEY,
   isAmbiguousGuidedRetryFailure,
 } from "./guidedOperationRetry";
@@ -18,6 +19,7 @@ function storedEnvelope(): { descriptors: unknown[] } {
 
 describe("guided operation retry custody", () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
     window.sessionStorage.clear();
     clearAllGuidedRetries();
@@ -97,6 +99,37 @@ describe("guided operation retry custody", () => {
 
     expect(retry.operationId).toBe(first.operationId);
     setItem.mockRestore();
+  });
+
+  it("keeps the newer fallback authoritative when quota leaves a stale envelope readable", () => {
+    const stale = acquireGuidedRetry("state_revert", SESSION_A, ["state-a"]);
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("quota", "QuotaExceededError");
+    });
+
+    const replacement = acquireGuidedRetry("state_revert", SESSION_A, ["state-b"]);
+    const retry = acquireGuidedRetry("state_revert", SESSION_A, ["state-b"]);
+
+    expect(replacement.operationId).not.toBe(stale.operationId);
+    expect(retry.operationId).toBe(replacement.operationId);
+    setItem.mockRestore();
+  });
+
+  it("does not resurrect completed custody when removing stale storage fails", () => {
+    const completed = acquireGuidedRetry("guided_reenter", SESSION_A, []);
+    const staleEnvelope = window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY);
+    expect(staleEnvelope).not.toBeNull();
+    const removeItem = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      throw new DOMException("blocked", "SecurityError");
+    });
+
+    clearGuidedRetry(completed);
+    expect(removeItem).toHaveBeenCalledWith(GUIDED_RETRY_STORAGE_KEY);
+    expect(window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY)).toBe(staleEnvelope);
+    const nextAction = acquireGuidedRetry("guided_reenter", SESSION_A, []);
+
+    expect(nextAction.operationId).not.toBe(completed.operationId);
+    removeItem.mockRestore();
   });
 
   it("rejects non-canonical or oversized session ids", () => {

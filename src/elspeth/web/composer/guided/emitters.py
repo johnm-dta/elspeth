@@ -91,32 +91,20 @@ def build_step_1_inspect_and_confirm_turn_from_intent(
 ) -> Turn:
     """Build an ``inspect_and_confirm`` Turn from a persisted SourceIntent.
 
-    Called by GET /guided to rebuild the INSPECT_AND_CONFIRM turn on refresh
-    when ``guided.step_1_source_intent`` is set.  The intent carries the
-    plugin's observed_columns (the key data the widget needs), but not
-    the original blob-inspection warnings — those are not stored on
-    SourceIntent because they are observations about the blob, not about the
-    plugin choices.  The rebuild emits ``warnings=[]`` for this reason.
-    Clients that need the original warnings must resubmit the prior response;
-    the reconstructed turn is functionally equivalent for resuming the flow.
+    Schema-8 inspection-review intents retain the authoritative
+    ``SourceInspectionFacts`` used for the original turn. Reuse those facts so
+    columns and warnings rebuild byte-for-byte from persisted custody instead
+    of maintaining a second warning field on the intent.
 
     Args:
-        intent: The staged SourceIntent from GuidedSession.step_1_source_intent.
+        intent: A staged schema-8 SourceIntent in ``inspection_review`` phase.
 
     Returns:
         A ``Turn`` TypedDict ready for serialisation and hash.
     """
-    observed: _Observed = {
-        "columns": list(intent.observed_columns),
-        "samples": [],
-        "warnings": [],
-    }
-    payload: InspectAndConfirmPayload = {"observed": observed}
-    return Turn(
-        type=TurnType.INSPECT_AND_CONFIRM.value,
-        step_index=_step_index(GuidedStep.STEP_1_SOURCE),
-        payload=payload,
-    )
+    if intent.inspection_facts is None:
+        raise InvariantError("inspection-review source intent requires persisted inspection facts")
+    return _build_inspect_and_confirm_turn(intent.inspection_facts)
 
 
 def build_step_1_schema_form_turn(

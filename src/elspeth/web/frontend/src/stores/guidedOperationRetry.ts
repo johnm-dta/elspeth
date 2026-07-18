@@ -25,6 +25,7 @@ const MAX_DESCRIPTORS = 16;
 const MAX_STORAGE_BYTES = 8192;
 
 let fallbackDescriptors: GuidedRetryDescriptor[] = [];
+let fallbackAuthoritative = false;
 
 function sessionStorageOrNull(): Storage | null {
   try {
@@ -78,7 +79,7 @@ function boundedDescriptors(
 
 function readDescriptors(): GuidedRetryDescriptor[] {
   const storage = sessionStorageOrNull();
-  if (storage === null) {
+  if (fallbackAuthoritative || storage === null) {
     fallbackDescriptors = boundedDescriptors(fallbackDescriptors);
     return [...fallbackDescriptors];
   }
@@ -86,6 +87,7 @@ function readDescriptors(): GuidedRetryDescriptor[] {
   try {
     encoded = storage.getItem(GUIDED_RETRY_STORAGE_KEY);
   } catch {
+    fallbackAuthoritative = true;
     fallbackDescriptors = boundedDescriptors(fallbackDescriptors);
     return [...fallbackDescriptors];
   }
@@ -106,12 +108,13 @@ function readDescriptors(): GuidedRetryDescriptor[] {
     if (descriptors.length !== envelope.descriptors.length) writeDescriptors(descriptors);
     return descriptors;
   } catch {
+    fallbackDescriptors = [];
     try {
       storage.removeItem(GUIDED_RETRY_STORAGE_KEY);
+      fallbackAuthoritative = false;
     } catch {
-      // The in-memory fallback is still cleared below.
+      fallbackAuthoritative = true;
     }
-    fallbackDescriptors = [];
     return [];
   }
 }
@@ -120,15 +123,23 @@ function writeDescriptors(descriptors: GuidedRetryDescriptor[]): void {
   const bounded = boundedDescriptors(descriptors);
   fallbackDescriptors = [...bounded];
   const storage = sessionStorageOrNull();
-  if (storage === null) return;
+  if (storage === null) {
+    fallbackAuthoritative = true;
+    return;
+  }
   try {
     if (bounded.length === 0) {
       storage.removeItem(GUIDED_RETRY_STORAGE_KEY);
+      fallbackAuthoritative = false;
       return;
     }
     storage.setItem(GUIDED_RETRY_STORAGE_KEY, encodedEnvelope(bounded));
+    fallbackAuthoritative = false;
   } catch {
-    // A disabled or full sessionStorage still has a bounded in-memory fallback.
+    // A disabled or full sessionStorage leaves its previous envelope stale.
+    // Keep the bounded in-memory generation authoritative until a later write
+    // successfully synchronises storage with it.
+    fallbackAuthoritative = true;
   }
 }
 

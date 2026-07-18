@@ -601,6 +601,7 @@ export function ChatPanel({
   // returns below decide which surface to render based on these values.
   const guidedSession = useSessionStore((s) => s.guidedSession);
   const guidedNextTurn = useSessionStore((s) => s.guidedNextTurn);
+  const guidedProposalReview = useSessionStore((s) => s.guidedProposalReview);
   const respondGuided = useSessionStore((s) => s.respondGuided);
   const chatGuided = useSessionStore((s) => s.chatGuided);
   const startGuided = useSessionStore((s) => s.startGuided);
@@ -1701,6 +1702,7 @@ export function ChatPanel({
                   hasPendingGuidedInterpretations
                 }
                 isTutorial={isTutorial}
+                proposalReviewState={guidedProposalReview}
                 wirePendingAcknowledgements={
                   hasPendingGuidedInterpretations
                     ? wirePendingAcknowledgements

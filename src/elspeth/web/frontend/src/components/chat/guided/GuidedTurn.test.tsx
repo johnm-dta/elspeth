@@ -18,7 +18,7 @@
 //   inspect_and_confirm   -- "Looks right" button (inspect-view action)
 //   multi_select_with_custom -- payload.question text (legend text)
 //   schema_form           -- "Continue" button (submit action, present when canSubmit)
-//   propose_pipeline      -- deterministic unsupported error until Task 4
+//   propose_pipeline      -- ProposePipelineTurn review heading + accept action
 //   confirm_wiring        -- WireStageTurn review heading + "Confirm wiring" button
 // ============================================================================
 
@@ -32,6 +32,7 @@ import type {
   SingleSelectPayload,
   InspectAndConfirmPayload,
   MultiSelectWithCustomPayload,
+  ProposePipelinePayload,
   SchemaFormPayload,
   WireStageData,
 } from "@/types/guided";
@@ -159,6 +160,43 @@ const WIRE_STAGE_PAYLOAD: WireStageData = {
   // is absent and the dispatcher routes to the actionable "Confirm wiring" action.
 };
 
+const PROPOSAL_PAYLOAD: ProposePipelinePayload = {
+  proposal_id: "00000000-0000-4000-8000-000000000401",
+  draft_hash: "d".repeat(64),
+  summary: "guided.proposal.summary.full_graph.v1",
+  rationale: "guided.proposal.rationale.review_required.v1",
+  component_counts: { sources: 1, nodes: 0, edges: 2, outputs: 1 },
+  blockers: [],
+  graph: {
+    sources: [{
+      stable_id: "00000000-0000-4000-8000-000000000402",
+      label: "source-1",
+      plugin: { kind: "source", id: "csv" },
+    }],
+    edges: [
+      {
+        stable_id: "00000000-0000-4000-8000-000000000403",
+        from_endpoint: { kind: "source", stable_id: "00000000-0000-4000-8000-000000000402" },
+        to_endpoint: { kind: "output", stable_id: "00000000-0000-4000-8000-000000000404" },
+        flow: { kind: "source_success", branch: null },
+      },
+      {
+        stable_id: "00000000-0000-4000-8000-000000000405",
+        from_endpoint: { kind: "source", stable_id: "00000000-0000-4000-8000-000000000402" },
+        to_endpoint: { kind: "discard" },
+        flow: { kind: "source_validation_failure" },
+      },
+    ],
+  },
+  nodes: [],
+  outputs: [{
+    stable_id: "00000000-0000-4000-8000-000000000404",
+    label: "output-1",
+    plugin: { kind: "sink", id: "json" },
+  }],
+  edit_targets: [],
+};
+
 /** Build a TurnPayload with the given type and typed payload. */
 function makeTurn(
   type: "single_select",
@@ -178,7 +216,7 @@ function makeTurn(
 ): TurnPayload;
 function makeTurn(
   type: "propose_pipeline",
-  payload: Record<string, never>,
+  payload: ProposePipelinePayload,
 ): TurnPayload;
 function makeTurn(
   type: "confirm_wiring",
@@ -256,15 +294,20 @@ describe("GuidedTurn dispatcher — routing", () => {
     expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
   });
 
-  it("propose_pipeline: fails closed until the durable renderer lands", () => {
-    expect(() =>
-      render(
-        <GuidedTurn
-          turn={makeTurn("propose_pipeline", {})}
-          onSubmit={vi.fn()}
-        />,
-      ),
-    ).toThrow(/durable proposal routing/);
+  it("propose_pipeline: renders the current durable proposal renderer", () => {
+    render(
+      <GuidedTurn
+        turn={makeTurn("propose_pipeline", PROPOSAL_PAYLOAD)}
+        proposalReviewState={{
+          status: "active",
+          proposal_id: PROPOSAL_PAYLOAD.proposal_id,
+          draft_hash: PROPOSAL_PAYLOAD.draft_hash,
+        }}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: "Review pipeline proposal" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Accept pipeline" })).toBeEnabled();
   });
 
   it("confirm_wiring: renders WireStageTurn UI", () => {

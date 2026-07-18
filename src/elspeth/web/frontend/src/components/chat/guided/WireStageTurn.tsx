@@ -3,6 +3,7 @@ import type { WireStageData } from "@/types/guided";
 import { focusAcknowledgementCard } from "../AcknowledgementCard";
 import { stepLabelForPlugin } from "../interpretationStepLabel";
 import { MarkdownRenderer } from "../MarkdownRenderer";
+import { WireReviewList } from "./WireReviewList";
 
 const ADVISOR_FINDINGS_FENCE_LINES = new Set([
   "BEGIN_UNTRUSTED_ADVISOR_FINDINGS",
@@ -436,23 +437,21 @@ export function WireStageTurn({
       {/* Human step names + plain-language connection state
           (elspeth-016f463ff0). The raw ids / connection labels stay available
           verbatim behind the Technical details expander below. */}
-      <ul className="wire-stage__edges">
-        {edges.map((edge) => (
-          <li
-            key={`${edge.from}\u0000${edge.label}\u0000${edge.to}`}
-            aria-label={`${nameFor(edge.from)} to ${nameFor(edge.to)}`}
-          >
-            <span>{nameFor(edge.from)}</span>
-            <span aria-hidden="true">{" → "}</span>
-            <span>{nameFor(edge.to)}</span>
-            <span aria-hidden="true">{" — "}</span>
-            <span>{edgeStatus(edge)}</span>
-            {edge.missing_fields.length > 0 ? (
-              <span> Missing fields: {edge.missing_fields.join(", ")}</span>
-            ) : null}
-          </li>
-        ))}
-      </ul>
+      <WireReviewList
+        className="wire-stage__edges"
+        ariaLabel="Wiring routes"
+        items={edges.map((edge) => ({
+          id: `${edge.from}\u0000${edge.label}\u0000${edge.to}`,
+          from: nameFor(edge.from),
+          to: nameFor(edge.to),
+          summary: edgeStatus(edge),
+          detail:
+            edge.missing_fields.length > 0
+              ? `Missing fields: ${edge.missing_fields.join(", ")}`
+              : null,
+          ariaLabel: `${nameFor(edge.from)} to ${nameFor(edge.to)}`,
+        }))}
+      />
       {edges.length > 0 ? (
         <details className="wire-stage__raw">
           <summary>Technical details</summary>

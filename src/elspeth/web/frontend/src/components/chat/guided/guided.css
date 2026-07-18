@@ -1767,6 +1767,171 @@
    InterpretationReviewTurn widget; pending LLM decisions now render through the
    shared AcknowledgementStack/AcknowledgementCard (see chat.css → .ack-*). */
 
+/* ---------------------------------------------------------------------------
+   Durable full-pipeline proposal review
+   --------------------------------------------------------------------------- */
+
+.guided-proposal {
+  display: grid;
+  gap: var(--space-lg);
+}
+
+.guided-proposal__header h3,
+.guided-proposal__header p,
+.guided-proposal__components h4,
+.guided-proposal__routes h4,
+.guided-proposal__blockers h4 {
+  margin: 0;
+}
+
+.guided-proposal__header {
+  display: grid;
+  gap: var(--space-xs);
+}
+
+.guided-proposal__header > p:not(.guided-proposal__counts) {
+  color: var(--color-text-secondary);
+}
+
+.guided-proposal__counts {
+  margin-top: var(--space-xs);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.guided-proposal__status,
+.guided-proposal__tutorial-note {
+  margin: 0;
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+}
+
+.guided-proposal__status--error {
+  border-color: var(--color-error-border);
+  background-color: var(--color-error-bg);
+}
+
+.guided-proposal__blockers {
+  padding: var(--space-md);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-elevated);
+}
+
+.guided-proposal__blockers ul,
+.guided-proposal__components ul,
+.guided-wire-review {
+  margin: var(--space-sm) 0 0;
+  padding-left: var(--space-xl);
+}
+
+.guided-proposal__components,
+.guided-proposal__routes {
+  min-width: 0;
+}
+
+.guided-proposal__components li,
+.guided-wire-review li {
+  margin-bottom: var(--space-xs);
+  overflow-wrap: anywhere;
+}
+
+.guided-readonly-graph {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface);
+}
+
+.guided-readonly-graph__canvas {
+  display: block;
+  width: 100%;
+  min-width: 44rem;
+  height: auto;
+}
+
+.guided-readonly-graph__edge {
+  fill: none;
+  stroke: var(--color-border-strong);
+  stroke-width: 2;
+}
+
+.guided-readonly-graph__edge--error {
+  stroke: var(--color-error);
+  stroke-dasharray: 5 4;
+}
+
+.guided-readonly-graph__node {
+  fill: var(--color-surface-elevated);
+  stroke: var(--color-border-strong);
+  stroke-width: 1.5;
+}
+
+.guided-readonly-graph__node--source,
+.guided-readonly-graph__node--output {
+  stroke: var(--color-accent);
+}
+
+.guided-readonly-graph__node--discard {
+  stroke: var(--color-error);
+  stroke-dasharray: 4 3;
+}
+
+.guided-readonly-graph__node-label {
+  fill: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.guided-readonly-graph__node-subtitle {
+  fill: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+}
+
+.guided-proposal__controls {
+  display: grid;
+  gap: var(--space-md);
+}
+
+.guided-proposal__primary-actions,
+.guided-proposal__revise {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.guided-proposal__revise {
+  margin: 0;
+  padding: var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.guided-proposal__revise legend {
+  padding: 0 var(--space-xs);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+@media (max-width: 760px) {
+  .guided-proposal__primary-actions,
+  .guided-proposal__revise {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .guided-proposal__primary-actions button,
+  .guided-proposal__revise button {
+    width: 100%;
+  }
+}
+
 /* Honour OS-level motion preferences. Any new transition/animation added in
    the guided-* section above MUST be silenced here. */
 @media (prefers-reduced-motion: reduce) {

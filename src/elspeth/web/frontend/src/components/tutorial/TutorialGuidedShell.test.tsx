@@ -54,15 +54,23 @@ vi.mock("@/components/chat/ChatPanel", () => ({
   ChatPanel: (props: {
     isTutorial?: boolean;
     lockedChatPrompt?: Partial<Record<string, string>>;
-  }) => (
-    <div
-      data-testid="chat-panel-stub"
-      data-is-tutorial={String(props.isTutorial)}
-      data-locked-prompt={props.lockedChatPrompt?.step_1_source}
-      data-locked-sink={props.lockedChatPrompt?.step_2_sink}
-      data-locked-transforms={props.lockedChatPrompt?.step_3_transforms}
-    />
-  ),
+  }) => {
+    const nextTurn = useSessionStore((state) => state.guidedNextTurn);
+    const proposalReview = useSessionStore((state) => state.guidedProposalReview);
+    return (
+      <div
+        data-testid="chat-panel-stub"
+        data-is-tutorial={String(props.isTutorial)}
+        data-locked-prompt={props.lockedChatPrompt?.step_1_source}
+        data-locked-sink={props.lockedChatPrompt?.step_2_sink}
+        data-locked-transforms={props.lockedChatPrompt?.step_3_transforms}
+        data-turn-type={nextTurn?.type}
+        data-proposal-id={nextTurn?.type === "propose_pipeline" ? nextTurn.payload.proposal_id : undefined}
+        data-review-id={proposalReview?.proposal_id}
+        data-review-status={proposalReview?.status}
+      />
+    );
+  },
 }));
 
 describe("TutorialGuidedShell", () => {
@@ -109,6 +117,7 @@ describe("TutorialGuidedShell", () => {
       guidedSession: null,
       guidedNextTurn: null,
       guidedTerminal: null,
+      guidedProposalReview: null,
       guidedChatPending: false,
       guidedResponsePending: false,
       recoveryError: null,
@@ -162,6 +171,81 @@ describe("TutorialGuidedShell", () => {
     const stub = await screen.findByTestId("chat-panel-stub");
     expect(stub).toBeInTheDocument();
     expect(stub.dataset.isTutorial).toBe("true");
+  });
+
+  it("passes the same closed proposal and exact review binding to the passive tutorial surface", async () => {
+    const proposalId = "00000000-0000-4000-8000-000000000706";
+    const sourceId = "00000000-0000-4000-8000-000000000707";
+    const outputId = "00000000-0000-4000-8000-000000000708";
+    const closedProposalTurn = {
+      type: "propose_pipeline" as const,
+      step_index: 2,
+      turn_token: "f".repeat(64),
+      payload: {
+        proposal_id: proposalId,
+        draft_hash: "e".repeat(64),
+        summary: "guided.proposal.summary.full_graph.v1",
+        rationale: "guided.proposal.rationale.review_required.v1",
+        component_counts: { sources: 1, nodes: 0, edges: 2, outputs: 1 },
+        blockers: [],
+        graph: {
+          sources: [{
+            stable_id: sourceId,
+            label: "tutorial-source",
+            plugin: { kind: "source" as const, id: "csv" },
+          }],
+          edges: [
+            {
+              stable_id: "00000000-0000-4000-8000-000000000709",
+              from_endpoint: { kind: "source" as const, stable_id: sourceId },
+              to_endpoint: { kind: "output" as const, stable_id: outputId },
+              flow: { kind: "source_success" as const, branch: null },
+            },
+            {
+              stable_id: "00000000-0000-4000-8000-000000000710",
+              from_endpoint: { kind: "source" as const, stable_id: sourceId },
+              to_endpoint: { kind: "discard" as const },
+              flow: { kind: "source_validation_failure" as const },
+            },
+          ],
+        },
+        nodes: [],
+        outputs: [{
+          stable_id: outputId,
+          label: "tutorial-output",
+          plugin: { kind: "sink" as const, id: "json" },
+        }],
+        edit_targets: [{ kind: "source" as const, stable_id: sourceId }],
+      },
+    };
+    seedGuidedMock.mockImplementationOnce(async () => {
+      useSessionStore.setState({
+        guidedSession: {
+          step: "step_3_transforms",
+          history: [],
+          terminal: null,
+          chat_history: [],
+          chat_turn_seq: 0,
+          profile: null,
+        },
+        guidedNextTurn: closedProposalTurn,
+        guidedProposalReview: {
+          status: "active",
+          proposal_id: proposalId,
+          draft_hash: "e".repeat(64),
+        },
+      } as never);
+    });
+
+    render(<TutorialGuidedShell sessionId="sess-1" onCompleted={vi.fn()} />);
+
+    const stub = await screen.findByTestId("chat-panel-stub");
+    expect(stub.dataset.isTutorial).toBe("true");
+    expect(stub.dataset.turnType).toBe("propose_pipeline");
+    expect(stub.dataset.proposalId).toBe(proposalId);
+    expect(stub.dataset.reviewId).toBe(proposalId);
+    expect(stub.dataset.reviewStatus).toBe("active");
+    expect(useSessionStore.getState().guidedNextTurn).toBe(closedProposalTurn);
   });
 
   it("gives each stage its own prompt; appends sample URLs to the SOURCE stage only", async () => {

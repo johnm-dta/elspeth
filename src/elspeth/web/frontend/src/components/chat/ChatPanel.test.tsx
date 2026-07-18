@@ -32,6 +32,7 @@ import type {
   Session,
 } from "@/types/api";
 import type {
+  GuidedProposalReviewState,
   GuidedSession,
   SingleSelectPayload,
   TerminalState,
@@ -450,6 +451,116 @@ describe("ChatPanel mode discriminator", () => {
     };
     return { type: "single_select", step_index: 0, turn_token: "a".repeat(64), payload };
   }
+
+  const proposalId = "00000000-0000-4000-8000-000000000701";
+  const proposalHash = "f".repeat(64);
+
+  function proposalTurn(): TurnPayload {
+    const sourceId = "00000000-0000-4000-8000-000000000702";
+    const outputId = "00000000-0000-4000-8000-000000000703";
+    return {
+      type: "propose_pipeline",
+      step_index: 2,
+      turn_token: "f".repeat(64),
+      payload: {
+        proposal_id: proposalId,
+        draft_hash: proposalHash,
+        summary: "guided.proposal.summary.full_graph.v1",
+        rationale: "guided.proposal.rationale.review_required.v1",
+        component_counts: { sources: 1, nodes: 0, edges: 2, outputs: 1 },
+        blockers: [],
+        graph: {
+          sources: [{
+            stable_id: sourceId,
+            label: "orders-source",
+            plugin: { kind: "source", id: "csv" },
+          }],
+          edges: [
+            {
+              stable_id: "00000000-0000-4000-8000-000000000704",
+              from_endpoint: { kind: "source", stable_id: sourceId },
+              to_endpoint: { kind: "output", stable_id: outputId },
+              flow: { kind: "source_success", branch: null },
+            },
+            {
+              stable_id: "00000000-0000-4000-8000-000000000705",
+              from_endpoint: { kind: "source", stable_id: sourceId },
+              to_endpoint: { kind: "discard" },
+              flow: { kind: "source_validation_failure" },
+            },
+          ],
+        },
+        nodes: [],
+        outputs: [{
+          stable_id: outputId,
+          label: "orders-output",
+          plugin: { kind: "sink", id: "json" },
+        }],
+        edit_targets: [{ kind: "source", stable_id: sourceId }],
+      },
+    };
+  }
+
+  function proposalReview(
+    status: GuidedProposalReviewState["status"],
+  ): GuidedProposalReviewState {
+    if (status === "error") {
+      return {
+        status,
+        proposal_id: proposalId,
+        draft_hash: proposalHash,
+        message: "The proposal response was not received. Retry the same action.",
+        retryable: true,
+        retry_action: { kind: "accept" },
+      };
+    }
+    return { status, proposal_id: proposalId, draft_hash: proposalHash };
+  }
+
+  it.each([
+    ["active", null, false],
+    ["reloading", /reloading the authoritative proposal/i, true],
+    ["stale", /proposal is stale/i, true],
+    ["error", /response was not received/i, false],
+  ] as const)(
+    "renders the proposal review lifecycle state %s in the guided chat surface",
+    (status, statusMessage, acceptDisabled) => {
+      useSessionStore.setState({
+        activeSessionId: "session-guided",
+        sessions: [guidedSessionFixture],
+        messages: [],
+        guidedSession: { ...activeGuidedSession(), step: "step_3_transforms" },
+        guidedNextTurn: proposalTurn(),
+        guidedProposalReview: proposalReview(status),
+      });
+
+      render(<ChatPanel />);
+
+      expect(screen.getByText("Review pipeline proposal")).toBeVisible();
+      const accept = screen.getByRole("button", { name: "Accept pipeline" });
+      if (acceptDisabled) expect(accept).toBeDisabled();
+      else expect(accept).toBeEnabled();
+      if (statusMessage !== null) expect(screen.getByText(statusMessage)).toBeVisible();
+    },
+  );
+
+  it("renders the same closed proposal as a passive tutorial review", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: { ...activeGuidedSession(), step: "step_3_transforms" },
+      guidedNextTurn: proposalTurn(),
+      guidedProposalReview: proposalReview("active"),
+    });
+
+    render(<ChatPanel isTutorial />);
+
+    expect(screen.getByText("Review pipeline proposal")).toBeVisible();
+    expect(screen.getByText("orders-source · csv")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Accept pipeline" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reject proposal" })).toBeNull();
+  });
 
   it("renders guided-active surface (GuidedTurn + ExitToFreeformButton) when guidedSession is active and next turn is present", () => {
     useSessionStore.setState({

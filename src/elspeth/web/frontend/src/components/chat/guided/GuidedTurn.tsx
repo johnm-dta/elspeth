@@ -9,17 +9,22 @@
 //   "inspect_and_confirm"     -> InspectAndConfirmTurn
 //   "multi_select_with_custom"-> MultiSelectWithCustomTurn
 //   "schema_form"             -> SchemaFormTurn
-//   "propose_pipeline"        -> unavailable until the durable Task 4 adapter
+//   "propose_pipeline"        -> ProposePipelineTurn
 //   "confirm_wiring"          -> WireStageTurn
 //
 // ============================================================================
 
-import type { TurnPayload, GuidedRespondAction } from "@/types/guided";
+import type {
+  TurnPayload,
+  GuidedProposalReviewState,
+  GuidedRespondAction,
+} from "@/types/guided";
 import { SingleSelectTurn } from "./SingleSelectTurn";
 import { InspectAndConfirmTurn } from "./InspectAndConfirmTurn";
 import { MultiSelectWithCustomTurn } from "./MultiSelectWithCustomTurn";
 import { SchemaFormTurn } from "./SchemaFormTurn";
 import { WireStageTurn, type WireBlockerLink } from "./WireStageTurn";
+import { ProposePipelineTurn } from "./ProposePipelineTurn";
 
 interface GuidedTurnProps {
   turn: TurnPayload;
@@ -35,6 +40,8 @@ interface GuidedTurnProps {
   /** Client-known validation blockers for confirm_wiring (persisted
    * composition invalid) — forwarded to WireStageTurn. */
   wireValidationIssues?: string[];
+  /** Exact proposal/hash-bound local review lifecycle. Required by proposal turns. */
+  proposalReviewState?: GuidedProposalReviewState | null;
 }
 
 function guidedTurnInstanceKey(turn: TurnPayload): string {
@@ -48,6 +55,7 @@ export function GuidedTurn({
   isTutorial = false,
   wirePendingAcknowledgements,
   wireValidationIssues,
+  proposalReviewState,
 }: GuidedTurnProps) {
   const guardedSubmit = (body: GuidedRespondAction) => {
     if (disabled) return;
@@ -109,8 +117,18 @@ export function GuidedTurn({
         />
       );
     case "propose_pipeline":
-      throw new Error(
-        "GuidedTurn: propose_pipeline rendering is unavailable until durable proposal routing is enabled",
+      if (proposalReviewState === undefined || proposalReviewState === null) {
+        throw new Error("GuidedTurn: propose_pipeline requires an exact proposal review binding");
+      }
+      return (
+        <ProposePipelineTurn
+          key={turnInstanceKey}
+          payload={turn.payload}
+          reviewState={proposalReviewState}
+          onSubmit={guardedSubmit}
+          disabled={disabled}
+          isTutorial={isTutorial}
+        />
       );
     case "confirm_wiring":
       return (

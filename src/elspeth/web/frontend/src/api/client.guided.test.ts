@@ -224,8 +224,78 @@ describe("api/client guided functions", () => {
       const body = makeProposalResponse();
       fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => body } as Response);
 
-      await expect(getGuided("sess-proposal")).resolves.toEqual(body);
+      const decoded = await getGuided("sess-proposal");
+
+      expect(decoded).toEqual(body);
+      expect(decoded.next_turn).not.toBe(body.next_turn);
+      if (decoded.next_turn?.type !== "propose_pipeline" || body.next_turn?.type !== "propose_pipeline") {
+        throw new Error("proposal fixture did not decode as propose_pipeline");
+      }
+      expect(decoded.next_turn.payload).not.toBe(body.next_turn.payload);
+      expect(decoded.next_turn.payload.graph.edges).not.toBe(body.next_turn.payload.graph.edges);
+      body.next_turn.payload.graph.edges[0].flow = { kind: "source_validation_failure" };
+      expect(decoded.next_turn.payload.graph.edges[0].flow).toEqual({
+        kind: "source_success",
+        branch: null,
+      });
     });
+
+    it("constructs new guided-session, history, and chat-turn objects at the decoder boundary", async () => {
+      const body = makeGetGuidedResponse();
+      body.guided_session.history = [{
+        step: "step_1_source",
+        turn_type: "single_select",
+        payload_hash: "a".repeat(64),
+        response_hash: "b".repeat(64),
+        summary: "Selected CSV",
+        emitter: "server",
+      }];
+      body.guided_session.chat_history = [{
+        role: "user",
+        content: "Use CSV",
+        seq: 1,
+        step: "step_1_source",
+        ts_iso: "2026-07-19T00:00:00Z",
+        assistant_message_kind: null,
+        synthetic_failure_reason: null,
+      }];
+      body.guided_session.chat_turn_seq = 1;
+      fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => body } as Response);
+
+      const decoded = await getGuided("sess-session-identity");
+
+      expect(decoded.guided_session).not.toBe(body.guided_session);
+      expect(decoded.guided_session.history).not.toBe(body.guided_session.history);
+      expect(decoded.guided_session.history[0]).not.toBe(body.guided_session.history[0]);
+      expect(decoded.guided_session.chat_history).not.toBe(body.guided_session.chat_history);
+      expect(decoded.guided_session.chat_history[0]).not.toBe(body.guided_session.chat_history[0]);
+      body.guided_session.chat_history[0].content = "mutated after decoding";
+      expect(decoded.guided_session.chat_history[0].content).toBe("Use CSV");
+    });
+
+    it.each(["guided session", "chat turn"])(
+      "rejects an unexpected field on the closed %s DTO",
+      async (target) => {
+        const body = makeGetGuidedResponse();
+        if (target === "guided session") {
+          (body.guided_session as unknown as Record<string, unknown>).canary = true;
+        } else {
+          body.guided_session.chat_history = [{
+            role: "user",
+            content: "Use CSV",
+            seq: 1,
+            step: "step_1_source",
+            ts_iso: "2026-07-19T00:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
+          }];
+          (body.guided_session.chat_history[0] as unknown as Record<string, unknown>).canary = true;
+        }
+        fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => body } as Response);
+
+        await expect(getGuided("sess-extra-dto-field")).rejects.toThrow(/unexpected canary/i);
+      },
+    );
 
     it("requires all current composition response keys and normalizes nullable projections", async () => {
       const body = makeGetGuidedResponse() as unknown as Record<string, unknown>;
@@ -599,6 +669,60 @@ describe("api/client guided functions", () => {
       expect(JSON.parse(bodyStr)).toEqual(request);
       expect(result).toEqual(body);
     });
+
+    it.each([
+      ["accept", {
+        operation_id: "00000000-0000-4000-8000-000000000611",
+        turn_token: "b".repeat(64),
+        chosen: ["accept"],
+        edited_values: null,
+        custom_inputs: null,
+        proposal_id: "00000000-0000-4000-8000-000000000612",
+        draft_hash: "c".repeat(64),
+        edit_target: null,
+        control_signal: null,
+      }],
+      ["reject", {
+        operation_id: "00000000-0000-4000-8000-000000000613",
+        turn_token: "b".repeat(64),
+        chosen: null,
+        edited_values: null,
+        custom_inputs: null,
+        proposal_id: "00000000-0000-4000-8000-000000000612",
+        draft_hash: "c".repeat(64),
+        edit_target: null,
+        control_signal: "reject",
+      }],
+      ["target-only revise", {
+        operation_id: "00000000-0000-4000-8000-000000000614",
+        turn_token: "b".repeat(64),
+        chosen: null,
+        edited_values: null,
+        custom_inputs: null,
+        proposal_id: "00000000-0000-4000-8000-000000000612",
+        draft_hash: "c".repeat(64),
+        edit_target: {
+          kind: "edge",
+          stable_id: "00000000-0000-4000-8000-000000000615",
+        },
+        control_signal: null,
+      }],
+    ] satisfies [string, GuidedRespondRequest][])(
+      "serializes the exact proposal-bound %s request",
+      async (_label, request) => {
+        fetchSpy.mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => makeRespondResponse(),
+        } as Response);
+
+        await respondGuided("sess-proposal", request);
+
+        const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+        expect(url).toBe("/api/sessions/sess-proposal/guided/respond");
+        expect(JSON.parse(init.body as string)).toEqual(request);
+      },
+    );
 
     it("propagates AbortSignal to fetch", async () => {
       const controller = new AbortController();

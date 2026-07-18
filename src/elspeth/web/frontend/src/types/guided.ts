@@ -223,11 +223,46 @@ export type GuidedRespondAction =
     })
   | (BoundProposalFields & {
       chosen: null;
-      edited_values: Record<string, unknown>;
+      edited_values: null;
       custom_inputs: null;
       edit_target: GuidedEditTarget;
       control_signal: null;
     });
+
+/** Exact proposal control whose retry descriptor remains in local custody. */
+export type GuidedProposalRetryAction =
+  | { kind: "accept" }
+  | { kind: "reject" }
+  | { kind: "revise"; edit_target: GuidedEditTarget };
+
+/**
+ * Local review lifecycle for one exact durable guided proposal projection.
+ * Every state remains bound to the proposal id and draft hash whose controls
+ * it describes; a reload never silently transfers an old action to a new
+ * proposal.
+ */
+export type GuidedProposalReviewState =
+  | {
+      status: "active" | "submitting" | "reloading" | "stale";
+      proposal_id: string;
+      draft_hash: string;
+    }
+  | {
+      status: "error";
+      proposal_id: string;
+      draft_hash: string;
+      message: string;
+      retryable: true;
+      retry_action: GuidedProposalRetryAction;
+    }
+  | {
+      status: "error";
+      proposal_id: string;
+      draft_hash: string;
+      message: string;
+      retryable: false;
+      retry_action: null;
+    };
 
 /** Exact request body for POST /api/sessions/{id}/guided/respond. */
 export type GuidedRespondRequest = GuidedRespondAction & {

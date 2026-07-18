@@ -19,6 +19,8 @@ import type {
   TurnPayload,
   TerminalState,
   GuidedRespondAction,
+  GuidedProposalReviewState,
+  GuidedProposalRetryAction,
   GuidedRespondRequest,
   GuidedRespondResponse,
 } from "@/types/guided";
@@ -96,6 +98,29 @@ function isHttpConflict(err: unknown): boolean {
     return false;
   }
   return (err as { status?: unknown }).status === 409;
+}
+
+function proposalReviewForTurn(
+  turn: TurnPayload | null,
+): GuidedProposalReviewState | null {
+  if (turn?.type !== "propose_pipeline") return null;
+  return {
+    status: "active",
+    proposal_id: turn.payload.proposal_id,
+    draft_hash: turn.payload.draft_hash,
+  };
+}
+
+function proposalRetryActionForBody(
+  body: GuidedRespondAction,
+): GuidedProposalRetryAction | null {
+  if (body.proposal_id === null) return null;
+  if (body.chosen !== null) return { kind: "accept" };
+  if (body.control_signal === "reject") return { kind: "reject" };
+  if (body.edit_target !== null) {
+    return { kind: "revise", edit_target: body.edit_target };
+  }
+  return null;
 }
 
 let composerProgressPollTimer: ReturnType<typeof setInterval> | null = null;
@@ -403,6 +428,7 @@ async function resyncAfterAbortedGuidedTurn(
     return {
       guidedSession: resynced.guided_session,
       guidedNextTurn: resynced.next_turn,
+      guidedProposalReview: proposalReviewForTurn(resynced.next_turn),
       guidedTerminal: resynced.terminal ?? s.guidedTerminal,
       compositionState: resynced.composition_state ?? s.compositionState,
     };
@@ -472,6 +498,7 @@ function clearedGuidedState(): Pick<
   | "guidedSession"
   | "guidedNextTurn"
   | "guidedTerminal"
+  | "guidedProposalReview"
   | "guidedChatPending"
   | "guidedResponsePending"
   | "guidedSelfHealNotice"
@@ -480,6 +507,7 @@ function clearedGuidedState(): Pick<
     guidedSession: null,
     guidedNextTurn: null,
     guidedTerminal: null,
+    guidedProposalReview: null,
     guidedChatPending: false,
     guidedResponsePending: false,
     guidedSelfHealNotice: null,
@@ -727,6 +755,8 @@ interface SessionState {
   guidedSession: GuidedSession | null;
   guidedNextTurn: TurnPayload | null;
   guidedTerminal: TerminalState | null;
+  /** Exact proposal/hash-bound lifecycle for the current proposal controls. */
+  guidedProposalReview: GuidedProposalReviewState | null;
   // Per-step chat (Phase A slice 5).  The history itself lives on
   // `guidedSession.chat_history` (server-authoritative); only the in-flight
   // pending flag is local state.  Slice 4 carried an in-memory
@@ -1069,6 +1099,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               guidedSession: guided.guided_session,
               guidedNextTurn: guided.next_turn,
               guidedTerminal: guided.terminal,
+              guidedProposalReview: proposalReviewForTurn(guided.next_turn),
             }
           : {}),
       });
@@ -1905,6 +1936,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedSession: response.guided_session,
         guidedNextTurn: response.next_turn,
         guidedTerminal: response.terminal,
+        guidedProposalReview: proposalReviewForTurn(response.next_turn),
         compositionState: response.composition_state,
       });
     } catch (err) {
@@ -1980,6 +2012,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedSession: response.guided_session,
         guidedNextTurn: response.next_turn,
         guidedTerminal: response.terminal,
+        guidedProposalReview: proposalReviewForTurn(response.next_turn),
         compositionState: response.composition_state,
         error: null,
       });
@@ -2025,10 +2058,28 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       operation_id: retry.operationId,
       turn_token: requestedTurnToken ?? null,
     };
+    const proposalBinding = body.proposal_id === null
+      ? null
+      : {
+          proposal_id: body.proposal_id,
+          draft_hash: body.draft_hash,
+        };
+    const proposalRetryAction = proposalRetryActionForBody(body);
     // Clear any stale self-heal notice at the start of the next attempt, per
     // its documented lifecycle (the resync notice describes the PREVIOUS
     // desync, not this one).
-    set({ guidedResponsePending: true, guidedSelfHealNotice: null });
+    set({
+      guidedResponsePending: true,
+      guidedSelfHealNotice: null,
+      ...(proposalBinding === null
+        ? {}
+        : {
+            guidedProposalReview: {
+              status: "submitting",
+              ...proposalBinding,
+            },
+          }),
+    });
     let responseReceived = false;
     try {
       const response = await api.respondGuided(activeSessionId, request);
@@ -2048,7 +2099,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }
       clearGuidedRetriesForSession("guided_respond", requestedSessionId);
     } catch (err) {
-      if (!responseReceived && !isAmbiguousGuidedRetryFailure(err)) {
+      const isAmbiguousFailure =
+        !responseReceived && isAmbiguousGuidedRetryFailure(err);
+      if (!responseReceived && !isAmbiguousFailure) {
         clearGuidedRetry(retry);
       }
       if (get().activeSessionId !== requestedSessionId) {
@@ -2087,6 +2140,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               guidedSession: resynced.guided_session,
               guidedNextTurn: resynced.next_turn,
               guidedTerminal: resynced.terminal,
+              guidedProposalReview: proposalReviewForTurn(resynced.next_turn),
               compositionState: resynced.composition_state,
               guidedResponsePending: false,
               error: null,
@@ -2129,6 +2183,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             "proposal_id and draft_hash do not identify the active guided proposal");
       if (isProposalAuthorityConflict) {
         clearGuidedRetry(retry);
+        if (proposalBinding !== null) {
+          set({
+            guidedProposalReview: {
+              status: "reloading",
+              ...proposalBinding,
+            },
+          });
+        }
         try {
           const resynced = await api.getGuided(requestedSessionId);
           if (get().activeSessionId !== requestedSessionId) {
@@ -2140,10 +2202,22 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           if (get().activeSessionId !== requestedSessionId) {
             return;
           }
+          const authoritativeReview = proposalReviewForTurn(resynced.next_turn);
+          const sameProposal =
+            proposalBinding !== null &&
+            authoritativeReview !== null &&
+            authoritativeReview.proposal_id === proposalBinding.proposal_id &&
+            authoritativeReview.draft_hash === proposalBinding.draft_hash;
           set({
             guidedSession: resynced.guided_session,
             guidedNextTurn: resynced.next_turn,
             guidedTerminal: resynced.terminal,
+            guidedProposalReview:
+              proposalBinding === null
+                ? authoritativeReview
+                : authoritativeReview !== null && !sameProposal
+                  ? authoritativeReview
+                  : { status: "stale", ...proposalBinding },
             compositionState: resynced.composition_state,
             error:
               apiErr.detail ??
@@ -2159,6 +2233,27 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           }
           // Preserve the original conflict as the actionable failure when the
           // authoritative reload is itself unavailable.
+          if (proposalBinding !== null) {
+            set({
+              guidedProposalReview: {
+                status: "error",
+                ...proposalBinding,
+                message:
+                  "The proposal changed, but its authoritative replacement could not be loaded. Refresh the session before taking another action.",
+                retryable: false,
+                retry_action: null,
+              },
+            });
+          }
+          set({
+            error:
+              apiErr.detail ??
+              "The guided proposal changed, but its authoritative replacement could not be loaded.",
+            errorDetails: null,
+            guidedResponsePending: false,
+            guidedSelfHealNotice: null,
+          });
+          return;
         }
       }
 
@@ -2182,12 +2277,41 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             : message;
         })
         .filter((line) => line !== "");
+      const retainsRetryCustody = responseReceived || isAmbiguousFailure;
+      const proposalErrorReview: GuidedProposalReviewState | null =
+        proposalBinding === null
+          ? null
+          : retainsRetryCustody && proposalRetryAction !== null
+            ? {
+                status: "error",
+                ...proposalBinding,
+                message: responseReceived
+                  ? "The server accepted the response, but local review state could not be refreshed. Retry the same action."
+                  : apiErr.detail ??
+                    "The proposal response was not received. Retry the same action.",
+                retryable: true,
+                retry_action: proposalRetryAction,
+              }
+            : {
+                status: "error",
+                ...proposalBinding,
+                message:
+                  apiErr.detail ??
+                  "The proposal response failed. Refresh the session before taking another action.",
+                retryable: false,
+                retry_action: null,
+              };
       set({
         error:
           apiErr.detail ?? "Failed to submit guided response. Please try again.",
         errorDetails: rejectionDetails.length > 0 ? rejectionDetails : null,
         guidedResponsePending: false,
         guidedSelfHealNotice: null,
+        ...(proposalErrorReview === null
+          ? {}
+          : {
+              guidedProposalReview: proposalErrorReview,
+            }),
       });
     }
   },
@@ -2214,6 +2338,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       guidedSession: response.guided_session,
       guidedNextTurn: response.next_turn,
       guidedTerminal: response.terminal,
+      guidedProposalReview: proposalReviewForTurn(response.next_turn),
       compositionState: response.composition_state,
       guidedResponsePending: false,
       error: null,
@@ -2240,6 +2365,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedSession: response.guided_session,
         guidedNextTurn: response.next_turn,
         guidedTerminal: response.terminal,
+        guidedProposalReview: proposalReviewForTurn(response.next_turn),
         compositionState: response.composition_state,
         error: null,
       });
@@ -2348,6 +2474,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedSession: response.guided_session,
         guidedNextTurn: response.next_turn,
         guidedTerminal: response.terminal,
+        guidedProposalReview: proposalReviewForTurn(response.next_turn),
         compositionState: response.composition_state,
         guidedChatPending: false,
       });
@@ -2370,6 +2497,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             guidedSession: resynced.guided_session,
             guidedNextTurn: resynced.next_turn,
             guidedTerminal: resynced.terminal,
+            guidedProposalReview: proposalReviewForTurn(resynced.next_turn),
             compositionState: resynced.composition_state,
             error: apiErr.detail ?? "The guided turn changed. Review the refreshed step and try again.",
             guidedChatPending: false,
@@ -2493,6 +2621,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedSession: guided?.guided_session ?? null,
         guidedNextTurn: guided?.next_turn ?? null,
         guidedTerminal: guided?.terminal ?? null,
+        guidedProposalReview: proposalReviewForTurn(guided?.next_turn ?? null),
       });
       clearGuidedRetry(retry);
     } catch (err) {

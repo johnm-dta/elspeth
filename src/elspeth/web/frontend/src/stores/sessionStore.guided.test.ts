@@ -79,6 +79,50 @@ const sampleNextTurn: TurnPayload = {
   },
 };
 
+const PROPOSAL_ID = "00000000-0000-4000-8000-000000000501";
+const PROPOSAL_HASH = "d".repeat(64);
+const sampleProposalTurn: TurnPayload = {
+  type: "propose_pipeline",
+  step_index: 2,
+  turn_token: "c".repeat(64),
+  payload: {
+    proposal_id: PROPOSAL_ID,
+    draft_hash: PROPOSAL_HASH,
+    summary: "guided.proposal.summary.full_graph.v1",
+    rationale: "guided.proposal.rationale.review_required.v1",
+    component_counts: { sources: 1, nodes: 0, edges: 2, outputs: 1 },
+    blockers: [],
+    graph: {
+      sources: [{
+        stable_id: "00000000-0000-4000-8000-000000000502",
+        label: "source-1",
+        plugin: { kind: "source", id: "csv" },
+      }],
+      edges: [
+        {
+          stable_id: "00000000-0000-4000-8000-000000000503",
+          from_endpoint: { kind: "source", stable_id: "00000000-0000-4000-8000-000000000502" },
+          to_endpoint: { kind: "output", stable_id: "00000000-0000-4000-8000-000000000504" },
+          flow: { kind: "source_success", branch: null },
+        },
+        {
+          stable_id: "00000000-0000-4000-8000-000000000505",
+          from_endpoint: { kind: "source", stable_id: "00000000-0000-4000-8000-000000000502" },
+          to_endpoint: { kind: "discard" },
+          flow: { kind: "source_validation_failure" },
+        },
+      ],
+    },
+    nodes: [],
+    outputs: [{
+      stable_id: "00000000-0000-4000-8000-000000000504",
+      label: "output-1",
+      plugin: { kind: "sink", id: "json" },
+    }],
+    edit_targets: [],
+  },
+};
+
 const sampleTerminal: TerminalState = {
   kind: "completed",
   reason: null,
@@ -207,11 +251,30 @@ describe("sessionStore — guided-mode fields and actions", () => {
 
   // ── Test 1: Initial state ─────────────────────────────────────────────────
 
-  it("initial state: guidedSession, guidedNextTurn, guidedTerminal all null", () => {
+  it("initial state: guidedSession, guidedNextTurn, guidedTerminal and proposal review all null", () => {
     const state = useSessionStore.getState();
     expect(state.guidedSession).toBeNull();
     expect(state.guidedNextTurn).toBeNull();
     expect(state.guidedTerminal).toBeNull();
+    expect(state.guidedProposalReview).toBeNull();
+  });
+
+  it("startGuided: binds an authoritative proposal turn to its exact active review state", async () => {
+    const { getGuided } = await import("@/api/client");
+    (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ...sampleGetGuidedResponse,
+      guided_session: { ...sampleGuidedSession, step: "step_3_transforms" },
+      next_turn: sampleProposalTurn,
+    });
+    useSessionStore.setState({ activeSessionId: RETRY_SESSION_ID });
+
+    await useSessionStore.getState().startGuided(RETRY_SESSION_ID);
+
+    expect(useSessionStore.getState().guidedProposalReview).toEqual({
+      status: "active",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
+    });
   });
 
   // ── Test 2: startGuided happy path ────────────────────────────────────────
@@ -483,32 +546,358 @@ describe("sessionStore — guided-mode fields and actions", () => {
     const getMock = getGuided as ReturnType<typeof vi.fn>;
     const detail = "proposal_id and draft_hash do not identify the active guided proposal";
     respondMock.mockRejectedValueOnce({ status: 409, detail });
-    getMock.mockResolvedValueOnce({
-      ...sampleGetGuidedResponse,
-      next_turn: { ...sampleNextTurn, turn_token: "c".repeat(64) },
-    });
+    let resolveReload!: (response: GetGuidedResponse) => void;
+    getMock.mockReturnValueOnce(new Promise<GetGuidedResponse>((resolve) => {
+      resolveReload = resolve;
+    }));
     useSessionStore.setState({
       activeSessionId: RETRY_SESSION_ID,
-      guidedSession: sampleGuidedSession,
-      guidedNextTurn: sampleNextTurn,
+      guidedSession: { ...sampleGuidedSession, step: "step_3_transforms" },
+      guidedNextTurn: sampleProposalTurn,
+      guidedProposalReview: {
+        status: "active",
+        proposal_id: PROPOSAL_ID,
+        draft_hash: PROPOSAL_HASH,
+      },
     });
     const action: GuidedRespondAction = {
       chosen: ["accept"],
       edited_values: null,
       custom_inputs: null,
-      proposal_id: "00000000-0000-4000-8000-000000000501",
-      draft_hash: "d".repeat(64),
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
+      edit_target: null,
+      control_signal: null,
+    };
+
+    const response = useSessionStore.getState().respondGuided(action);
+
+    await vi.waitFor(() => expect(getMock).toHaveBeenCalledWith(RETRY_SESSION_ID));
+    expect(useSessionStore.getState().guidedProposalReview).toEqual({
+      status: "reloading",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
+    });
+    resolveReload({
+      ...sampleGetGuidedResponse,
+      guided_session: { ...sampleGuidedSession, step: "step_3_transforms" },
+      next_turn: sampleProposalTurn,
+    });
+    await response;
+
+    expect(respondMock).toHaveBeenCalledTimes(1);
+    expect(useSessionStore.getState().guidedNextTurn).toEqual(sampleProposalTurn);
+    expect(useSessionStore.getState().guidedProposalReview).toEqual({
+      status: "stale",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
+    });
+    expect(useSessionStore.getState().error).toBe(detail);
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it("respondGuided: activates a different authoritative proposal after a proposal-binding 409", async () => {
+    const { getGuided, respondGuided } = await import("@/api/client");
+    const respondMock = respondGuided as ReturnType<typeof vi.fn>;
+    const getMock = getGuided as ReturnType<typeof vi.fn>;
+    const detail = "proposal_id and draft_hash do not identify the active guided proposal";
+    const successorId = "00000000-0000-4000-8000-000000000506";
+    const successorHash = "e".repeat(64);
+    const successorTurn: TurnPayload = {
+      ...sampleProposalTurn,
+      turn_token: "e".repeat(64),
+      payload: {
+        ...sampleProposalTurn.payload,
+        proposal_id: successorId,
+        draft_hash: successorHash,
+      },
+    };
+    respondMock.mockRejectedValueOnce({ status: 409, detail });
+    getMock.mockResolvedValueOnce({
+      ...sampleGetGuidedResponse,
+      guided_session: { ...sampleGuidedSession, step: "step_3_transforms" },
+      next_turn: successorTurn,
+    });
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: { ...sampleGuidedSession, step: "step_3_transforms" },
+      guidedNextTurn: sampleProposalTurn,
+      guidedProposalReview: {
+        status: "active",
+        proposal_id: PROPOSAL_ID,
+        draft_hash: PROPOSAL_HASH,
+      },
+    });
+
+    await useSessionStore.getState().respondGuided({
+      chosen: ["accept"],
+      edited_values: null,
+      custom_inputs: null,
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
+      edit_target: null,
+      control_signal: null,
+    });
+
+    expect(respondMock).toHaveBeenCalledTimes(1);
+    expect(useSessionStore.getState().guidedNextTurn).toEqual(successorTurn);
+    expect(useSessionStore.getState().guidedProposalReview).toEqual({
+      status: "active",
+      proposal_id: successorId,
+      draft_hash: successorHash,
+    });
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it("respondGuided: keeps the old proposal stale when a proposal-binding 409 reload has no proposal", async () => {
+    const { getGuided, respondGuided } = await import("@/api/client");
+    const detail = "proposal_id and draft_hash do not identify the active guided proposal";
+    (respondGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce({ status: 409, detail });
+    (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ...sampleGetGuidedResponse,
+      guided_session: { ...sampleGuidedSession, step: "step_3_transforms" },
+      next_turn: null,
+    });
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: { ...sampleGuidedSession, step: "step_3_transforms" },
+      guidedNextTurn: sampleProposalTurn,
+      guidedProposalReview: {
+        status: "active",
+        proposal_id: PROPOSAL_ID,
+        draft_hash: PROPOSAL_HASH,
+      },
+    });
+
+    await useSessionStore.getState().respondGuided({
+      chosen: ["accept"],
+      edited_values: null,
+      custom_inputs: null,
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
+      edit_target: null,
+      control_signal: null,
+    });
+
+    expect(useSessionStore.getState().guidedNextTurn).toBeNull();
+    expect(useSessionStore.getState().guidedProposalReview).toEqual({
+      status: "stale",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
+    });
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it("respondGuided: cannot clobber a newly selected session during a proposal 409 reload", async () => {
+    const { getGuided, respondGuided } = await import("@/api/client");
+    const getMock = getGuided as ReturnType<typeof vi.fn>;
+    const detail = "proposal_id and draft_hash do not identify the active guided proposal";
+    (respondGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce({ status: 409, detail });
+    let resolveReload!: (response: GetGuidedResponse) => void;
+    getMock.mockReturnValueOnce(new Promise<GetGuidedResponse>((resolve) => {
+      resolveReload = resolve;
+    }));
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: { ...sampleGuidedSession, step: "step_3_transforms" },
+      guidedNextTurn: sampleProposalTurn,
+      guidedProposalReview: {
+        status: "active",
+        proposal_id: PROPOSAL_ID,
+        draft_hash: PROPOSAL_HASH,
+      },
+    });
+
+    const pending = useSessionStore.getState().respondGuided({
+      chosen: ["accept"],
+      edited_values: null,
+      custom_inputs: null,
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
+      edit_target: null,
+      control_signal: null,
+    });
+    await vi.waitFor(() => expect(getMock).toHaveBeenCalledWith(RETRY_SESSION_ID));
+
+    const newSessionId = "00000000-0000-4000-8000-000000000799";
+    const newProposalId = "00000000-0000-4000-8000-000000000798";
+    useSessionStore.setState({
+      activeSessionId: newSessionId,
+      guidedNextTurn: null,
+      guidedProposalReview: {
+        status: "active",
+        proposal_id: newProposalId,
+        draft_hash: "9".repeat(64),
+      },
+      guidedResponsePending: false,
+      error: null,
+    });
+    resolveReload({
+      ...sampleGetGuidedResponse,
+      guided_session: { ...sampleGuidedSession, step: "step_3_transforms" },
+      next_turn: sampleProposalTurn,
+    });
+    await pending;
+
+    expect(useSessionStore.getState().activeSessionId).toBe(newSessionId);
+    expect(useSessionStore.getState().guidedNextTurn).toBeNull();
+    expect(useSessionStore.getState().guidedProposalReview).toEqual({
+      status: "active",
+      proposal_id: newProposalId,
+      draft_hash: "9".repeat(64),
+    });
+    expect(useSessionStore.getState().error).toBeNull();
+  });
+
+  it("respondGuided: locks the old proposal when its authoritative reload fails after a 409", async () => {
+    const { getGuided, respondGuided } = await import("@/api/client");
+    const respondMock = respondGuided as ReturnType<typeof vi.fn>;
+    const detail = "proposal_id and draft_hash do not identify the active guided proposal";
+    respondMock.mockRejectedValueOnce({ status: 409, detail });
+    (getGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new TypeError("reload unavailable"));
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: { ...sampleGuidedSession, step: "step_3_transforms" },
+      guidedNextTurn: sampleProposalTurn,
+      guidedProposalReview: {
+        status: "active",
+        proposal_id: PROPOSAL_ID,
+        draft_hash: PROPOSAL_HASH,
+      },
+    });
+
+    await useSessionStore.getState().respondGuided({
+      chosen: ["accept"],
+      edited_values: null,
+      custom_inputs: null,
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
+      edit_target: null,
+      control_signal: null,
+    });
+
+    expect(respondMock).toHaveBeenCalledTimes(1);
+    expect(useSessionStore.getState().guidedNextTurn).toEqual(sampleProposalTurn);
+    expect(useSessionStore.getState().guidedProposalReview).toEqual({
+      status: "error",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
+      message: expect.stringMatching(/authoritative replacement could not be loaded/i),
+      retryable: false,
+      retry_action: null,
+    });
+    expect(useSessionStore.getState().guidedResponsePending).toBe(false);
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it("respondGuided: marks an ambiguous proposal transport failure as retryable error and reuses its operation id", async () => {
+    const { respondGuided } = await import("@/api/client");
+    const respondMock = respondGuided as ReturnType<typeof vi.fn>;
+    const successful = {
+      ...sampleRespondResponse,
+      guided_session: { ...sampleGuidedSession, step: "step_3_transforms" },
+      next_turn: sampleProposalTurn,
+    };
+    respondMock
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(successful);
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: { ...sampleGuidedSession, step: "step_3_transforms" },
+      guidedNextTurn: sampleProposalTurn,
+      guidedProposalReview: {
+        status: "active",
+        proposal_id: PROPOSAL_ID,
+        draft_hash: PROPOSAL_HASH,
+      },
+    });
+    const action: GuidedRespondAction = {
+      chosen: ["accept"],
+      edited_values: null,
+      custom_inputs: null,
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
       edit_target: null,
       control_signal: null,
     };
 
     await useSessionStore.getState().respondGuided(action);
+    expect(useSessionStore.getState().guidedProposalReview).toMatchObject({
+      status: "error",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
+      retryable: true,
+      retry_action: { kind: "accept" },
+    });
+    await useSessionStore.getState().respondGuided(action);
 
-    expect(respondMock).toHaveBeenCalledTimes(1);
-    expect(getMock).toHaveBeenCalledWith(RETRY_SESSION_ID);
-    expect(useSessionStore.getState().guidedNextTurn?.turn_token).toBe("c".repeat(64));
-    expect(useSessionStore.getState().error).toBe(detail);
-    expect(window.sessionStorage.length).toBe(0);
+    expect(respondMock.mock.calls[1]?.[1].operation_id).toBe(
+      respondMock.mock.calls[0]?.[1].operation_id,
+    );
+    expect(useSessionStore.getState().guidedProposalReview).toEqual({
+      status: "active",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
+    });
+  });
+
+  it("respondGuided: keeps the exact proposal action retryable when POST succeeds but local apply fails", async () => {
+    const { respondGuided } = await import("@/api/client");
+    const respondMock = respondGuided as ReturnType<typeof vi.fn>;
+    respondMock.mockResolvedValue({
+      ...sampleRespondResponse,
+      guided_session: { ...sampleGuidedSession, step: "step_3_transforms" },
+      next_turn: sampleProposalTurn,
+    });
+    const refreshAll = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("local interpretation refresh failed"))
+      .mockResolvedValueOnce(undefined);
+    useInterpretationEventsStore.setState({ refreshAll } as never);
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: { ...sampleGuidedSession, step: "step_3_transforms" },
+      guidedNextTurn: sampleProposalTurn,
+      guidedProposalReview: {
+        status: "active",
+        proposal_id: PROPOSAL_ID,
+        draft_hash: PROPOSAL_HASH,
+      },
+    });
+    const action: GuidedRespondAction = {
+      chosen: null,
+      edited_values: null,
+      custom_inputs: null,
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
+      edit_target: { kind: "source", stable_id: sampleProposalTurn.payload.graph.sources[0].stable_id },
+      control_signal: null,
+    };
+
+    await useSessionStore.getState().respondGuided(action);
+
+    expect(useSessionStore.getState().guidedNextTurn).toEqual(sampleProposalTurn);
+    expect(useSessionStore.getState().guidedProposalReview).toMatchObject({
+      status: "error",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
+      retryable: true,
+      retry_action: {
+        kind: "revise",
+        edit_target: action.edit_target,
+      },
+    });
+
+    await useSessionStore.getState().respondGuided(action);
+
+    expect(respondMock.mock.calls[1]?.[1].operation_id).toBe(
+      respondMock.mock.calls[0]?.[1].operation_id,
+    );
+    expect(useSessionStore.getState().guidedProposalReview).toEqual({
+      status: "active",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
+    });
   });
 
   it("respondGuided: does not publish proposal resync when interpretation refresh fails", async () => {

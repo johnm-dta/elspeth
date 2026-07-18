@@ -6,25 +6,25 @@ import type {
   GuidedRespondResponse,
   GuidedSession,
   GuidedStep,
+  GuidedEditTarget,
+  InspectAndConfirmPayload,
+  KnobField,
+  MultiSelectWithCustomPayload,
+  Option,
+  ProposalBlocker,
+  ProposalEndpoint,
+  ProposalFlow,
+  ProposalNodeBehavior,
+  ProposalPluginRef,
+  ProposePipelinePayload,
+  SchemaFormPayload,
+  SingleSelectPayload,
   TerminalState,
   TurnPayload,
   TurnType,
+  WireStageData,
 } from "@/types/guided";
 
-const TURN_TYPES = new Set<TurnType>([
-  "inspect_and_confirm",
-  "single_select",
-  "multi_select_with_custom",
-  "schema_form",
-  "propose_pipeline",
-  "confirm_wiring",
-]);
-const STEPS = new Set<GuidedStep>([
-  "step_1_source",
-  "step_2_sink",
-  "step_3_transforms",
-  "step_4_wire",
-]);
 const STEP_INDEX: Record<GuidedStep, number> = {
   step_1_source: 0,
   step_2_sink: 1,
@@ -61,12 +61,6 @@ const FLOW_KINDS = new Set([
 const TRIGGER_KINDS = ["count", "timeout", "condition"] as const;
 const COALESCE_POLICIES = new Set(["require_all", "quorum", "best_effort", "first"]);
 const COALESCE_MERGES = new Set(["union", "nested", "select"]);
-const FIELD_KINDS = new Set([
-  "text", "number-int", "number-float", "checkbox", "enum", "string-list",
-  "blob-ref", "json-object", "json-array", "json-value",
-]);
-const FIELD_TIERS = new Set(["essential", "common", "advanced"]);
-const ITEM_KINDS = new Set(["text", "number-int", "number-float"]);
 const COMPOSITION_NODE_TYPES = new Set(["transform", "gate", "aggregation", "coalesce", "queue"]);
 const COMPOSITION_EDGE_TYPES = new Set(["on_success", "on_error", "route_true", "route_false", "fork"]);
 const POLICY_REASONS = new Set([
@@ -114,6 +108,34 @@ function exactRecord(
 function stringValue(value: unknown, path: string): string {
   if (typeof value !== "string") invalid(path, "expected string");
   return value;
+}
+
+function decodeProposalNodeType(
+  value: unknown,
+  path: string,
+): ProposePipelinePayload["nodes"][number]["node_type"] {
+  const decoded = stringValue(value, path);
+  switch (decoded) {
+    case "transform":
+    case "gate":
+    case "aggregation":
+    case "queue":
+    case "coalesce":
+      return decoded;
+    default:
+      return invalid(path, "unknown node type");
+  }
+}
+
+function decodeTurnEmitter(value: unknown, path: string): "server" | "llm" {
+  const decoded = stringValue(value, path);
+  switch (decoded) {
+    case "server":
+    case "llm":
+      return decoded;
+    default:
+      return invalid(path, "unknown emitter");
+  }
 }
 
 function canonicalUuid(value: unknown, path: string): string {
@@ -164,48 +186,6 @@ function jsonRecord(value: unknown, path: string): Record<string, unknown> {
     invalid(path, "expected JSON object");
   }
   return decoded as Record<string, unknown>;
-}
-
-function validateOptions(value: unknown, path: string): void {
-  arrayValue(value, path).forEach((item, index) => {
-    const option = exactRecord(item, `${path}[${index}]`, ["id", "label", "hint"]);
-    stringValue(option.id, `${path}[${index}].id`);
-    stringValue(option.label, `${path}[${index}].label`);
-    nullableString(option.hint, `${path}[${index}].hint`);
-  });
-}
-
-function validateKnobs(value: unknown, path: string): void {
-  const knobs = exactRecord(value, path, ["fields"]);
-  arrayValue(knobs.fields, `${path}.fields`).forEach((item, index) => {
-    const fieldPath = `${path}.fields[${index}]`;
-    const field = exactRecord(
-      item,
-      fieldPath,
-      ["name", "label", "kind", "required", "nullable"],
-      ["description", "tier", "default", "enum", "item_kind", "visible_when"],
-    );
-    stringValue(field.name, `${fieldPath}.name`);
-    stringValue(field.label, `${fieldPath}.label`);
-    const kind = stringValue(field.kind, `${fieldPath}.kind`);
-    if (!FIELD_KINDS.has(kind)) invalid(`${fieldPath}.kind`, "unknown field kind");
-    booleanValue(field.required, `${fieldPath}.required`);
-    booleanValue(field.nullable, `${fieldPath}.nullable`);
-    if (field.description !== undefined) stringValue(field.description, `${fieldPath}.description`);
-    if (field.tier !== undefined) {
-      const tier = stringValue(field.tier, `${fieldPath}.tier`);
-      if (!FIELD_TIERS.has(tier)) invalid(`${fieldPath}.tier`, "unknown field tier");
-    }
-    if (field.enum !== undefined) stringArray(field.enum, `${fieldPath}.enum`);
-    if (field.item_kind !== undefined) {
-      const itemKind = stringValue(field.item_kind, `${fieldPath}.item_kind`);
-      if (!ITEM_KINDS.has(itemKind)) invalid(`${fieldPath}.item_kind`, "unknown item kind");
-    }
-    if (field.visible_when !== undefined) {
-      const predicate = exactRecord(field.visible_when, `${fieldPath}.visible_when`, ["field", "equals"]);
-      stringValue(predicate.field, `${fieldPath}.visible_when.field`);
-    }
-  });
 }
 
 function validateEditTarget(value: unknown, path: string): DecodedTarget {
@@ -730,56 +710,516 @@ function validateWirePayload(value: unknown, path: string): void {
   if (payload.passes_remaining !== undefined) integerValue(payload.passes_remaining, `${path}.passes_remaining`);
 }
 
+function decodeTurnType(value: unknown, path: string): TurnType {
+  const type = stringValue(value, path);
+  switch (type) {
+    case "inspect_and_confirm":
+    case "single_select":
+    case "multi_select_with_custom":
+    case "schema_form":
+    case "propose_pipeline":
+    case "confirm_wiring":
+      return type;
+    default:
+      return invalid(path, "unknown discriminator");
+  }
+}
+
+function decodeGuidedStep(value: unknown, path: string): GuidedStep {
+  const step = stringValue(value, path);
+  switch (step) {
+    case "step_1_source":
+    case "step_2_sink":
+    case "step_3_transforms":
+    case "step_4_wire":
+      return step;
+    default:
+      return invalid(path, "unknown guided step");
+  }
+}
+
+function decodeOptions(value: unknown, path: string): Option[] {
+  return arrayValue(value, path).map((item, index) => {
+    const optionPath = `${path}[${index}]`;
+    const option = exactRecord(item, optionPath, ["id", "label", "hint"]);
+    return {
+      id: stringValue(option.id, `${optionPath}.id`),
+      label: stringValue(option.label, `${optionPath}.label`),
+      hint: nullableString(option.hint, `${optionPath}.hint`),
+    };
+  });
+}
+
+function decodeInspectPayload(value: unknown, path: string): InspectAndConfirmPayload {
+  const payload = exactRecord(value, path, ["observed"]);
+  const observed = exactRecord(payload.observed, `${path}.observed`, ["columns", "samples", "warnings"]);
+  return {
+    observed: {
+      columns: stringArray(observed.columns, `${path}.observed.columns`),
+      samples: arrayValue(observed.samples, `${path}.observed.samples`).map(
+        (item, index) => jsonRecord(item, `${path}.observed.samples[${index}]`),
+      ),
+      warnings: stringArray(observed.warnings, `${path}.observed.warnings`),
+    },
+  };
+}
+
+function decodeSingleSelectPayload(value: unknown, path: string): SingleSelectPayload {
+  const payload = exactRecord(value, path, ["question", "options", "allow_custom"]);
+  return {
+    question: stringValue(payload.question, `${path}.question`),
+    options: decodeOptions(payload.options, `${path}.options`),
+    allow_custom: booleanValue(payload.allow_custom, `${path}.allow_custom`),
+  };
+}
+
+function decodeMultiSelectPayload(value: unknown, path: string): MultiSelectWithCustomPayload {
+  const payload = exactRecord(value, path, ["question", "options", "default_chosen", "escape_label"]);
+  return {
+    question: stringValue(payload.question, `${path}.question`),
+    options: decodeOptions(payload.options, `${path}.options`),
+    default_chosen: stringArray(payload.default_chosen, `${path}.default_chosen`),
+    escape_label: nullableString(payload.escape_label, `${path}.escape_label`),
+  };
+}
+
+function decodeFieldKind(value: unknown, path: string): KnobField["kind"] {
+  const kind = stringValue(value, path);
+  switch (kind) {
+    case "text":
+    case "number-int":
+    case "number-float":
+    case "checkbox":
+    case "enum":
+    case "string-list":
+    case "blob-ref":
+    case "json-object":
+    case "json-array":
+    case "json-value":
+      return kind;
+    default:
+      return invalid(path, "unknown field kind");
+  }
+}
+
+function decodeSchemaPayload(value: unknown, path: string): SchemaFormPayload {
+  const payload = exactRecord(value, path, ["mode", "plugin", "knobs", "prefilled"]);
+  if (stringValue(payload.mode, `${path}.mode`) !== "plugin_options") {
+    invalid(`${path}.mode`, "unknown schema form mode");
+  }
+  const knobs = exactRecord(payload.knobs, `${path}.knobs`, ["fields"]);
+  const fields = arrayValue(knobs.fields, `${path}.knobs.fields`).map((item, index): KnobField => {
+    const fieldPath = `${path}.knobs.fields[${index}]`;
+    const field = exactRecord(
+      item,
+      fieldPath,
+      ["name", "label", "kind", "required", "nullable"],
+      ["description", "tier", "default", "enum", "item_kind", "visible_when"],
+    );
+    const tier = field.tier === undefined ? undefined : stringValue(field.tier, `${fieldPath}.tier`);
+    if (tier !== undefined && tier !== "essential" && tier !== "common" && tier !== "advanced") {
+      invalid(`${fieldPath}.tier`, "unknown field tier");
+    }
+    const itemKind = field.item_kind === undefined
+      ? undefined
+      : stringValue(field.item_kind, `${fieldPath}.item_kind`);
+    if (itemKind !== undefined && itemKind !== "text" && itemKind !== "number-int" && itemKind !== "number-float") {
+      invalid(`${fieldPath}.item_kind`, "unknown item kind");
+    }
+    const visibleWhen = field.visible_when === undefined
+      ? undefined
+      : exactRecord(field.visible_when, `${fieldPath}.visible_when`, ["field", "equals"]);
+    return {
+      name: stringValue(field.name, `${fieldPath}.name`),
+      label: stringValue(field.label, `${fieldPath}.label`),
+      kind: decodeFieldKind(field.kind, `${fieldPath}.kind`),
+      required: booleanValue(field.required, `${fieldPath}.required`),
+      nullable: booleanValue(field.nullable, `${fieldPath}.nullable`),
+      ...(field.description === undefined
+        ? {}
+        : { description: stringValue(field.description, `${fieldPath}.description`) }),
+      ...(tier === undefined ? {} : { tier }),
+      ...(field.default === undefined ? {} : { default: jsonValue(field.default, `${fieldPath}.default`) }),
+      ...(field.enum === undefined ? {} : { enum: stringArray(field.enum, `${fieldPath}.enum`) }),
+      ...(itemKind === undefined ? {} : { item_kind: itemKind }),
+      ...(visibleWhen === undefined
+        ? {}
+        : {
+            visible_when: {
+              field: stringValue(visibleWhen.field, `${fieldPath}.visible_when.field`),
+              equals: jsonValue(visibleWhen.equals, `${fieldPath}.visible_when.equals`),
+            },
+          }),
+    };
+  });
+  return {
+    mode: "plugin_options",
+    plugin: stringValue(payload.plugin, `${path}.plugin`),
+    knobs: { fields },
+    prefilled: jsonRecord(payload.prefilled, `${path}.prefilled`),
+  };
+}
+
+function decodeEditTarget(value: unknown, path: string): GuidedEditTarget {
+  const target = exactRecord(value, path, ["kind", "stable_id"]);
+  const stableId = canonicalUuid(target.stable_id, `${path}.stable_id`);
+  const kind = stringValue(target.kind, `${path}.kind`);
+  switch (kind) {
+    case "source":
+    case "node":
+    case "edge":
+    case "output":
+      return { kind, stable_id: stableId };
+    default:
+      return invalid(`${path}.kind`, "unknown component kind");
+  }
+}
+
+function decodeProposalPlugin(
+  value: unknown,
+  expectedKind: ProposalPluginRef["kind"],
+  path: string,
+): ProposalPluginRef {
+  const plugin = exactRecord(value, path, ["kind", "id"]);
+  const kind = stringValue(plugin.kind, `${path}.kind`);
+  if (kind !== expectedKind) invalid(`${path}.kind`, `expected ${expectedKind}`);
+  return { kind: expectedKind, id: stringValue(plugin.id, `${path}.id`) };
+}
+
+function decodeProposalEndpoint(value: unknown, path: string): ProposalEndpoint {
+  const endpoint = exactRecord(value, path, ["kind", "stable_id"]);
+  const stableId = canonicalUuid(endpoint.stable_id, `${path}.stable_id`);
+  const kind = stringValue(endpoint.kind, `${path}.kind`);
+  switch (kind) {
+    case "source":
+    case "node":
+    case "output":
+      return { kind, stable_id: stableId };
+    default:
+      return invalid(`${path}.kind`, "unknown endpoint kind");
+  }
+}
+
+function decodeProposalFlow(value: unknown, path: string): ProposalFlow {
+  const flow = record(value, path);
+  const kind = stringValue(flow.kind, `${path}.kind`);
+  switch (kind) {
+    case "source_success":
+    case "node_success":
+    case "queue_continue":
+    case "coalesce_success": {
+      const exact = exactRecord(flow, path, ["kind", "branch"]);
+      return {
+        kind,
+        branch: exact.branch === null ? null : structuralAlias(exact.branch, "branch", `${path}.branch`),
+      };
+    }
+    case "source_validation_failure":
+    case "node_error":
+    case "output_write_failure":
+      exactRecord(flow, path, ["kind"]);
+      return { kind };
+    case "gate_route": {
+      const exact = exactRecord(flow, path, ["kind", "route", "branch"]);
+      return {
+        kind,
+        route: structuralAlias(exact.route, "route", `${path}.route`),
+        branch: exact.branch === null ? null : structuralAlias(exact.branch, "branch", `${path}.branch`),
+      };
+    }
+    case "gate_fork": {
+      const exact = exactRecord(flow, path, ["kind", "routes", "branch"]);
+      return {
+        kind,
+        routes: aliasArray(exact.routes, "route", `${path}.routes`, 1),
+        branch: structuralAlias(exact.branch, "branch", `${path}.branch`),
+      };
+    }
+    default:
+      return invalid(`${path}.kind`, "unknown flow kind");
+  }
+}
+
+function decodeProposalBehavior(
+  value: unknown,
+  nodeType: ProposePipelinePayload["nodes"][number]["node_type"],
+  path: string,
+): ProposalNodeBehavior {
+  const behaviorPath = `${path}.behavior`;
+  const behavior = record(value, behaviorPath);
+  if (stringValue(behavior.kind, `${behaviorPath}.kind`) !== nodeType) {
+    invalid(`${behaviorPath}.kind`, "does not match node_type");
+  }
+  switch (nodeType) {
+    case "transform":
+    case "queue":
+      exactRecord(behavior, behaviorPath, ["kind"]);
+      return { kind: nodeType };
+    case "gate": {
+      const exact = exactRecord(behavior, behaviorPath, ["kind", "route_aliases", "fork_branches"]);
+      return {
+        kind: "gate",
+        route_aliases: aliasArray(exact.route_aliases, "route", `${behaviorPath}.route_aliases`, 1),
+        fork_branches: arrayValue(exact.fork_branches, `${behaviorPath}.fork_branches`).map((item, index) => {
+          const itemPath = `${behaviorPath}.fork_branches[${index}]`;
+          const branch = exactRecord(item, itemPath, ["routes", "branch"]);
+          return {
+            routes: aliasArray(branch.routes, "route", `${itemPath}.routes`, 1),
+            branch: structuralAlias(branch.branch, "branch", `${itemPath}.branch`),
+          };
+        }),
+      };
+    }
+    case "aggregation": {
+      const exact = exactRecord(behavior, behaviorPath, [
+        "kind", "trigger_kinds", "count", "timeout_seconds", "output_mode", "expected_output_count",
+      ]);
+      const rawTriggers = stringArray(exact.trigger_kinds, `${behaviorPath}.trigger_kinds`);
+      const trigger_kinds = TRIGGER_KINDS.filter((trigger) => rawTriggers.includes(trigger));
+      const outputMode = stringValue(exact.output_mode, `${behaviorPath}.output_mode`);
+      if (outputMode !== "default" && outputMode !== "passthrough" && outputMode !== "transform") {
+        invalid(`${behaviorPath}.output_mode`, "unknown mode");
+      }
+      return {
+        kind: "aggregation",
+        trigger_kinds,
+        count: exact.count === null ? null : canonicalIntegerString(exact.count, `${behaviorPath}.count`, true),
+        timeout_seconds: exact.timeout_seconds === null
+          ? null
+          : finitePositiveNumber(exact.timeout_seconds, `${behaviorPath}.timeout_seconds`),
+        output_mode: outputMode,
+        expected_output_count: exact.expected_output_count === null
+          ? null
+          : canonicalIntegerString(exact.expected_output_count, `${behaviorPath}.expected_output_count`, false),
+      };
+    }
+    case "coalesce": {
+      const exact = exactRecord(behavior, behaviorPath, ["kind", "branch_aliases", "policy", "merge"]);
+      const policy = stringValue(exact.policy, `${behaviorPath}.policy`);
+      if (policy !== "require_all" && policy !== "quorum" && policy !== "best_effort" && policy !== "first") {
+        invalid(`${behaviorPath}.policy`, "unknown policy");
+      }
+      const merge = stringValue(exact.merge, `${behaviorPath}.merge`);
+      if (merge !== "union" && merge !== "nested" && merge !== "select") {
+        invalid(`${behaviorPath}.merge`, "unknown merge");
+      }
+      return {
+        kind: "coalesce",
+        branch_aliases: aliasArray(exact.branch_aliases, "branch", `${behaviorPath}.branch_aliases`, 2),
+        policy,
+        merge,
+      };
+    }
+  }
+}
+
+function decodeProposalPayload(value: unknown, path: string): ProposePipelinePayload {
+  validateProposalPayload(value, path);
+  const payload = exactRecord(value, path, [
+    "proposal_id", "draft_hash", "summary", "rationale", "component_counts",
+    "blockers", "graph", "nodes", "outputs", "edit_targets",
+  ]);
+  const counts = exactRecord(payload.component_counts, `${path}.component_counts`, ["sources", "nodes", "edges", "outputs"]);
+  const graph = exactRecord(payload.graph, `${path}.graph`, ["sources", "edges"]);
+  const blockers = arrayValue(payload.blockers, `${path}.blockers`).map((item, index): ProposalBlocker => {
+    const blockerPath = `${path}.blockers[${index}]`;
+    const blocker = exactRecord(item, blockerPath, ["code", "category", "summary", "edit_target"]);
+    const code = stringValue(blocker.code, `${blockerPath}.code`);
+    if (code !== "pipeline_invalid" && code !== "policy_review_required" && code !== "plugin_unavailable" && code !== "interpretation_required") {
+      invalid(`${blockerPath}.code`, "unknown blocker code");
+    }
+    const category = stringValue(blocker.category, `${blockerPath}.category`);
+    if (category !== "validation" && category !== "policy" && category !== "availability" && category !== "interpretation") {
+      invalid(`${blockerPath}.category`, "unknown blocker category");
+    }
+    return {
+      code,
+      category,
+      summary: stringValue(blocker.summary, `${blockerPath}.summary`),
+      edit_target: blocker.edit_target === null ? null : decodeEditTarget(blocker.edit_target, `${blockerPath}.edit_target`),
+    };
+  });
+  const nodes = arrayValue(payload.nodes, `${path}.nodes`).map((item, index) => {
+    const nodePath = `${path}.nodes[${index}]`;
+    const node = exactRecord(item, nodePath, ["stable_id", "label", "node_type", "plugin", "behavior"]);
+    const rawType = decodeProposalNodeType(node.node_type, `${nodePath}.node_type`);
+    const plugin = node.plugin === null
+      ? null
+      : decodeProposalPlugin(node.plugin, "transform", `${nodePath}.plugin`);
+    return {
+      stable_id: canonicalUuid(node.stable_id, `${nodePath}.stable_id`),
+      label: stringValue(node.label, `${nodePath}.label`),
+      node_type: rawType,
+      plugin,
+      behavior: decodeProposalBehavior(node.behavior, rawType, nodePath),
+    };
+  });
+  return {
+    proposal_id: canonicalUuid(payload.proposal_id, `${path}.proposal_id`),
+    draft_hash: stringValue(payload.draft_hash, `${path}.draft_hash`),
+    summary: stringValue(payload.summary, `${path}.summary`),
+    rationale: stringValue(payload.rationale, `${path}.rationale`),
+    component_counts: {
+      sources: integerValue(counts.sources, `${path}.component_counts.sources`),
+      nodes: integerValue(counts.nodes, `${path}.component_counts.nodes`),
+      edges: integerValue(counts.edges, `${path}.component_counts.edges`),
+      outputs: integerValue(counts.outputs, `${path}.component_counts.outputs`),
+    },
+    blockers,
+    graph: {
+      sources: arrayValue(graph.sources, `${path}.graph.sources`).map((item, index) => {
+        const sourcePath = `${path}.graph.sources[${index}]`;
+        const source = exactRecord(item, sourcePath, ["stable_id", "label", "plugin"]);
+        return {
+          stable_id: canonicalUuid(source.stable_id, `${sourcePath}.stable_id`),
+          label: stringValue(source.label, `${sourcePath}.label`),
+          plugin: decodeProposalPlugin(source.plugin, "source", `${sourcePath}.plugin`),
+        };
+      }),
+      edges: arrayValue(graph.edges, `${path}.graph.edges`).map((item, index) => {
+        const edgePath = `${path}.graph.edges[${index}]`;
+        const edge = exactRecord(item, edgePath, ["stable_id", "from_endpoint", "to_endpoint", "flow"]);
+        const targetRecord = record(edge.to_endpoint, `${edgePath}.to_endpoint`);
+        return {
+          stable_id: canonicalUuid(edge.stable_id, `${edgePath}.stable_id`),
+          from_endpoint: decodeProposalEndpoint(edge.from_endpoint, `${edgePath}.from_endpoint`),
+          to_endpoint: targetRecord.kind === "discard"
+            ? (() => {
+                exactRecord(targetRecord, `${edgePath}.to_endpoint`, ["kind"]);
+                return { kind: "discard" as const };
+              })()
+            : decodeProposalEndpoint(edge.to_endpoint, `${edgePath}.to_endpoint`),
+          flow: decodeProposalFlow(edge.flow, `${edgePath}.flow`),
+        };
+      }),
+    },
+    nodes,
+    outputs: arrayValue(payload.outputs, `${path}.outputs`).map((item, index) => {
+      const outputPath = `${path}.outputs[${index}]`;
+      const output = exactRecord(item, outputPath, ["stable_id", "label", "plugin"]);
+      return {
+        stable_id: canonicalUuid(output.stable_id, `${outputPath}.stable_id`),
+        label: stringValue(output.label, `${outputPath}.label`),
+        plugin: decodeProposalPlugin(output.plugin, "sink", `${outputPath}.plugin`),
+      };
+    }),
+    edit_targets: arrayValue(payload.edit_targets, `${path}.edit_targets`).map(
+      (item, index) => decodeEditTarget(item, `${path}.edit_targets[${index}]`),
+    ),
+  };
+}
+
+function decodeWirePayload(value: unknown, path: string): WireStageData {
+  validateWirePayload(value, path);
+  const payload = exactRecord(value, path, ["topology", "edge_contracts", "semantic_contracts", "warnings"], [
+    "advisor_findings", "signoff_outcome", "passes_remaining",
+  ]);
+  const topology = exactRecord(payload.topology, `${path}.topology`, ["sources", "nodes", "outputs"]);
+  return {
+    topology: {
+      sources: Object.fromEntries(
+        Object.entries(record(topology.sources, `${path}.topology.sources`)).map(([name, item]) => {
+          const sourcePath = `${path}.topology.sources.${name}`;
+          const source = exactRecord(item, sourcePath, ["id", "plugin", "on_success", "on_validation_failure"]);
+          return [name, {
+            id: stringValue(source.id, `${sourcePath}.id`),
+            plugin: stringValue(source.plugin, `${sourcePath}.plugin`),
+            on_success: nullableString(source.on_success, `${sourcePath}.on_success`),
+            on_validation_failure: stringValue(source.on_validation_failure, `${sourcePath}.on_validation_failure`),
+          }];
+        }),
+      ),
+      nodes: arrayValue(topology.nodes, `${path}.topology.nodes`).map((item, index) => {
+        const nodePath = `${path}.topology.nodes[${index}]`;
+        const node = exactRecord(item, nodePath, [
+          "id", "node_type", "plugin", "input", "on_success", "on_error", "routes", "fork_to", "branches",
+        ]);
+        return {
+          id: stringValue(node.id, `${nodePath}.id`),
+          node_type: stringValue(node.node_type, `${nodePath}.node_type`),
+          plugin: nullableString(node.plugin, `${nodePath}.plugin`),
+          input: nullableString(node.input, `${nodePath}.input`),
+          on_success: nullableString(node.on_success, `${nodePath}.on_success`),
+          on_error: nullableString(node.on_error, `${nodePath}.on_error`),
+          routes: node.routes === null ? null : Object.fromEntries(
+            Object.entries(record(node.routes, `${nodePath}.routes`)).map(([key, target]) => [key, stringValue(target, `${nodePath}.routes.${key}`)]),
+          ),
+          fork_to: node.fork_to === null ? null : stringArray(node.fork_to, `${nodePath}.fork_to`),
+          branches: node.branches === null
+            ? null
+            : Array.isArray(node.branches)
+              ? stringArray(node.branches, `${nodePath}.branches`)
+              : Object.fromEntries(
+                  Object.entries(record(node.branches, `${nodePath}.branches`)).map(([key, target]) => [key, stringValue(target, `${nodePath}.branches.${key}`)]),
+                ),
+        };
+      }),
+      outputs: arrayValue(topology.outputs, `${path}.topology.outputs`).map((item, index) => {
+        const outputPath = `${path}.topology.outputs[${index}]`;
+        const output = exactRecord(item, outputPath, ["id", "sink_name", "plugin", "on_write_failure"]);
+        return {
+          id: stringValue(output.id, `${outputPath}.id`),
+          sink_name: stringValue(output.sink_name, `${outputPath}.sink_name`),
+          plugin: stringValue(output.plugin, `${outputPath}.plugin`),
+          on_write_failure: stringValue(output.on_write_failure, `${outputPath}.on_write_failure`),
+        };
+      }),
+    },
+    edge_contracts: arrayValue(payload.edge_contracts, `${path}.edge_contracts`).map((item, index) => {
+      const edgePath = `${path}.edge_contracts[${index}]`;
+      const edge = exactRecord(item, edgePath, [
+        "from", "to", "producer_guarantees", "consumer_requires", "missing_fields", "satisfied",
+      ]);
+      return {
+        from: stringValue(edge.from, `${edgePath}.from`),
+        to: stringValue(edge.to, `${edgePath}.to`),
+        producer_guarantees: stringArray(edge.producer_guarantees, `${edgePath}.producer_guarantees`),
+        consumer_requires: stringArray(edge.consumer_requires, `${edgePath}.consumer_requires`),
+        missing_fields: stringArray(edge.missing_fields, `${edgePath}.missing_fields`),
+        satisfied: booleanValue(edge.satisfied, `${edgePath}.satisfied`),
+      };
+    }),
+    semantic_contracts: arrayValue(payload.semantic_contracts, `${path}.semantic_contracts`).map(
+      (item, index) => jsonRecord(item, `${path}.semantic_contracts[${index}]`),
+    ),
+    warnings: arrayValue(payload.warnings, `${path}.warnings`).map(
+      (item, index) => jsonRecord(item, `${path}.warnings[${index}]`),
+    ),
+    ...(payload.advisor_findings === undefined
+      ? {}
+      : { advisor_findings: stringValue(payload.advisor_findings, `${path}.advisor_findings`) }),
+    ...(payload.signoff_outcome === undefined
+      ? {}
+      : { signoff_outcome: stringValue(payload.signoff_outcome, `${path}.signoff_outcome`) }),
+    ...(payload.passes_remaining === undefined
+      ? {}
+      : { passes_remaining: integerValue(payload.passes_remaining, `${path}.passes_remaining`) }),
+  };
+}
+
 function decodeTurn(value: unknown, step: GuidedStep, path: string): TurnPayload {
   const turn = exactRecord(value, path, ["type", "step_index", "turn_token", "payload"]);
-  const type = stringValue(turn.type, `${path}.type`);
-  if (!TURN_TYPES.has(type as TurnType)) invalid(`${path}.type`, "unknown discriminator");
-  const turnType = type as TurnType;
+  const turnType = decodeTurnType(turn.type, `${path}.type`);
   if (!LEGAL_TURNS[step].has(turnType)) invalid(`${path}.type`, "illegal for guided step");
-  if (integerValue(turn.step_index, `${path}.step_index`) !== STEP_INDEX[step]) invalid(`${path}.step_index`, "does not match guided step");
-  if (!SHA256.test(stringValue(turn.turn_token, `${path}.turn_token`))) invalid(`${path}.turn_token`, "expected sha256");
+  const stepIndex = integerValue(turn.step_index, `${path}.step_index`);
+  if (stepIndex !== STEP_INDEX[step]) invalid(`${path}.step_index`, "does not match guided step");
+  const turnToken = stringValue(turn.turn_token, `${path}.turn_token`);
+  if (!SHA256.test(turnToken)) invalid(`${path}.turn_token`, "expected sha256");
   const payloadPath = `${path}.payload`;
   switch (turnType) {
-    case "inspect_and_confirm": {
-      const payload = exactRecord(turn.payload, payloadPath, ["observed"]);
-      const observed = exactRecord(payload.observed, `${payloadPath}.observed`, ["columns", "samples", "warnings"]);
-      stringArray(observed.columns, `${payloadPath}.observed.columns`);
-      arrayValue(observed.samples, `${payloadPath}.observed.samples`).forEach((item, index) => record(item, `${payloadPath}.observed.samples[${index}]`));
-      stringArray(observed.warnings, `${payloadPath}.observed.warnings`);
-      break;
-    }
-    case "single_select": {
-      const payload = exactRecord(turn.payload, payloadPath, ["question", "options", "allow_custom"]);
-      stringValue(payload.question, `${payloadPath}.question`);
-      validateOptions(payload.options, `${payloadPath}.options`);
-      booleanValue(payload.allow_custom, `${payloadPath}.allow_custom`);
-      break;
-    }
-    case "multi_select_with_custom": {
-      const payload = exactRecord(turn.payload, payloadPath, ["question", "options", "default_chosen", "escape_label"]);
-      stringValue(payload.question, `${payloadPath}.question`);
-      validateOptions(payload.options, `${payloadPath}.options`);
-      stringArray(payload.default_chosen, `${payloadPath}.default_chosen`);
-      nullableString(payload.escape_label, `${payloadPath}.escape_label`);
-      break;
-    }
-    case "schema_form": {
-      const payload = exactRecord(turn.payload, payloadPath, ["mode", "plugin", "knobs", "prefilled"]);
-      const mode = stringValue(payload.mode, `${payloadPath}.mode`);
-      if (mode !== "plugin_options") invalid(`${payloadPath}.mode`, "unknown schema form mode");
-      stringValue(payload.plugin, `${payloadPath}.plugin`);
-      validateKnobs(payload.knobs, `${payloadPath}.knobs`);
-      record(payload.prefilled, `${payloadPath}.prefilled`);
-      break;
-    }
+    case "inspect_and_confirm":
+      return { type: turnType, step_index: stepIndex, turn_token: turnToken, payload: decodeInspectPayload(turn.payload, payloadPath) };
+    case "single_select":
+      return { type: turnType, step_index: stepIndex, turn_token: turnToken, payload: decodeSingleSelectPayload(turn.payload, payloadPath) };
+    case "multi_select_with_custom":
+      return { type: turnType, step_index: stepIndex, turn_token: turnToken, payload: decodeMultiSelectPayload(turn.payload, payloadPath) };
+    case "schema_form":
+      return { type: turnType, step_index: stepIndex, turn_token: turnToken, payload: decodeSchemaPayload(turn.payload, payloadPath) };
     case "propose_pipeline":
-      validateProposalPayload(turn.payload, payloadPath);
-      break;
+      return { type: turnType, step_index: stepIndex, turn_token: turnToken, payload: decodeProposalPayload(turn.payload, payloadPath) };
     case "confirm_wiring":
-      validateWirePayload(turn.payload, payloadPath);
-      break;
+      return { type: turnType, step_index: stepIndex, turn_token: turnToken, payload: decodeWirePayload(turn.payload, payloadPath) };
   }
-  return turn as unknown as TurnPayload;
 }
 
 function decodeTerminal(value: unknown, path: string): TerminalState | null {
@@ -808,43 +1248,91 @@ function decodeChatTurn(value: unknown, path: string): ChatTurn {
   ]);
   const role = stringValue(turn.role, `${path}.role`);
   if (role !== "user" && role !== "assistant") invalid(`${path}.role`, "unknown chat role");
-  stringValue(turn.content, `${path}.content`);
-  integerValue(turn.seq, `${path}.seq`);
-  const step = stringValue(turn.step, `${path}.step`);
-  if (!STEPS.has(step as GuidedStep)) invalid(`${path}.step`, "unknown guided step");
-  stringValue(turn.ts_iso, `${path}.ts_iso`);
+  const step = decodeGuidedStep(turn.step, `${path}.step`);
+  const content = stringValue(turn.content, `${path}.content`);
+  const seq = integerValue(turn.seq, `${path}.seq`);
+  const tsIso = stringValue(turn.ts_iso, `${path}.ts_iso`);
   const kind = turn.assistant_message_kind === null ? null : stringValue(turn.assistant_message_kind, `${path}.assistant_message_kind`);
   const reason = turn.synthetic_failure_reason === null ? null : stringValue(turn.synthetic_failure_reason, `${path}.synthetic_failure_reason`);
   if (role === "user" && (kind !== null || reason !== null)) invalid(path, "user chat turn carries assistant discriminator");
   if (role === "assistant" && kind !== "assistant" && kind !== "synthetic_failure") invalid(path, "assistant chat turn lacks closed discriminator");
   if ((kind === "synthetic_failure") !== (reason !== null)) invalid(path, "synthetic failure discriminator is inconsistent");
   if (reason !== null && !["quality_guard", "unavailable", "not_applied"].includes(reason)) invalid(`${path}.synthetic_failure_reason`, "unknown reason");
-  return turn as unknown as ChatTurn;
+  if (role === "user") {
+    return {
+      role,
+      content,
+      seq,
+      step,
+      ts_iso: tsIso,
+      assistant_message_kind: null,
+      synthetic_failure_reason: null,
+    };
+  }
+  if (kind === "assistant") {
+    return {
+      role,
+      content,
+      seq,
+      step,
+      ts_iso: tsIso,
+      assistant_message_kind: kind,
+      synthetic_failure_reason: null,
+    };
+  }
+  if (kind !== "synthetic_failure") return invalid(path, "assistant chat turn lacks closed discriminator");
+  if (reason !== "quality_guard" && reason !== "unavailable" && reason !== "not_applied") {
+    return invalid(`${path}.synthetic_failure_reason`, "unknown reason");
+  }
+  return {
+    role,
+    content,
+    seq,
+    step,
+    ts_iso: tsIso,
+    assistant_message_kind: kind,
+    synthetic_failure_reason: reason,
+  };
 }
 
 function decodeSession(value: unknown, path: string): GuidedSession {
   const session = exactRecord(value, path, ["step", "history", "terminal", "chat_history", "chat_turn_seq", "profile"]);
-  const stepValue = stringValue(session.step, `${path}.step`);
-  if (!STEPS.has(stepValue as GuidedStep)) invalid(`${path}.step`, "unknown guided step");
-  arrayValue(session.history, `${path}.history`).forEach((item, index) => {
+  const step = decodeGuidedStep(session.step, `${path}.step`);
+  const history = arrayValue(session.history, `${path}.history`).map((item, index) => {
     const historyPath = `${path}.history[${index}]`;
-    const history = exactRecord(item, historyPath, ["step", "turn_type", "payload_hash", "response_hash", "summary", "emitter"]);
-    if (!STEPS.has(stringValue(history.step, `${historyPath}.step`) as GuidedStep)) invalid(`${historyPath}.step`, "unknown guided step");
-    if (!TURN_TYPES.has(stringValue(history.turn_type, `${historyPath}.turn_type`) as TurnType)) invalid(`${historyPath}.turn_type`, "unknown turn type");
-    stringValue(history.payload_hash, `${historyPath}.payload_hash`);
-    nullableString(history.response_hash, `${historyPath}.response_hash`);
-    nullableString(history.summary, `${historyPath}.summary`);
-    const emitter = stringValue(history.emitter, `${historyPath}.emitter`);
-    if (emitter !== "server" && emitter !== "llm") invalid(`${historyPath}.emitter`, "unknown emitter");
+    const recordValue = exactRecord(item, historyPath, ["step", "turn_type", "payload_hash", "response_hash", "summary", "emitter"]);
+    return {
+      step: decodeGuidedStep(recordValue.step, `${historyPath}.step`),
+      turn_type: decodeTurnType(recordValue.turn_type, `${historyPath}.turn_type`),
+      payload_hash: stringValue(recordValue.payload_hash, `${historyPath}.payload_hash`),
+      response_hash: nullableString(recordValue.response_hash, `${historyPath}.response_hash`),
+      summary: nullableString(recordValue.summary, `${historyPath}.summary`),
+      emitter: decodeTurnEmitter(recordValue.emitter, `${historyPath}.emitter`),
+    };
   });
-  decodeTerminal(session.terminal, `${path}.terminal`);
-  arrayValue(session.chat_history, `${path}.chat_history`).forEach((item, index) => decodeChatTurn(item, `${path}.chat_history[${index}]`));
-  integerValue(session.chat_turn_seq, `${path}.chat_turn_seq`);
-  if (session.profile !== null) {
-    const profile = exactRecord(session.profile, `${path}.profile`, ["coaching", "bookends", "advisor_checkpoints"]);
-    Object.entries(profile).forEach(([key, itemValue]) => booleanValue(itemValue, `${path}.profile.${key}`));
-  }
-  return session as unknown as GuidedSession;
+  const terminal = decodeTerminal(session.terminal, `${path}.terminal`);
+  const chatHistory = arrayValue(session.chat_history, `${path}.chat_history`).map(
+    (item, index) => decodeChatTurn(item, `${path}.chat_history[${index}]`),
+  );
+  const chatTurnSeq = integerValue(session.chat_turn_seq, `${path}.chat_turn_seq`);
+  const profile = session.profile === null
+    ? null
+    : (() => {
+        const profile = exactRecord(session.profile, `${path}.profile`, ["coaching", "bookends", "advisor_checkpoints"]);
+        return {
+          coaching: booleanValue(profile.coaching, `${path}.profile.coaching`),
+          bookends: booleanValue(profile.bookends, `${path}.profile.bookends`),
+          advisor_checkpoints: booleanValue(profile.advisor_checkpoints, `${path}.profile.advisor_checkpoints`),
+        };
+      })();
+  return {
+    step,
+    history,
+    terminal,
+    chat_history: chatHistory,
+    chat_turn_seq: chatTurnSeq,
+    profile,
+  };
 }
 
 function decodeCompositionState(value: unknown, path: string): CompositionState | null {

@@ -184,6 +184,28 @@ describe("guided protocol types", () => {
     expect(emptyCustom.custom_inputs).toEqual([]);
   });
 
+  it("GuidedRespondAction uses a target-only proposal revision contract", () => {
+    const targetOnlyRevision: GuidedRespondAction = {
+      chosen: null,
+      edited_values: null,
+      custom_inputs: null,
+      proposal_id: "00000000-0000-4000-8000-000000000701",
+      draft_hash: "f".repeat(64),
+      edit_target: {
+        kind: "node",
+        stable_id: "00000000-0000-4000-8000-000000000702",
+      },
+      control_signal: null,
+    };
+    // @ts-expect-error proposal revisions name only the durable target; inline edited values are not accepted
+    const revisionWithInlineValues: GuidedRespondAction = {
+      ...targetOnlyRevision,
+      edited_values: {},
+    };
+    expect(targetOnlyRevision.edit_target?.kind).toBe("node");
+    expect(revisionWithInlineValues.edited_values).toEqual({});
+  });
+
   it("GuidedRespondAction closes unrelated fields for every exact response action", () => {
     // @ts-expect-error chosen and edited_values are mutually exclusive actions
     const chosenAndEdited: GuidedRespondAction = {

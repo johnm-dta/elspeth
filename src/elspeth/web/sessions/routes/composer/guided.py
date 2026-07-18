@@ -19,7 +19,7 @@ from elspeth.web.composer.tutorial_sample import (
 from elspeth.web.interpretation_state import refine_prompt_shield_warnings_for_availability
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions._guided_step_chat import Step1SourceChatResult
-from elspeth.web.sessions.schemas import StartGuidedRequest, TutorialSampleResponse
+from elspeth.web.sessions.schemas import ReenterGuidedRequest, StartGuidedRequest, TutorialSampleResponse
 
 from .._helpers import (
     _COMMIT_REJECTED_MESSAGE,
@@ -858,6 +858,7 @@ async def get_guided_tutorial_sample(
 @router.post("/{session_id}/guided/reenter", response_model=GetGuidedResponse)
 async def post_guided_reenter(
     session_id: UUID,
+    body: ReenterGuidedRequest,
     request: Request,
     user: UserIdentity = Depends(get_current_user),  # noqa: B008
 ) -> GetGuidedResponse:
@@ -874,6 +875,125 @@ async def post_guided_reenter(
     catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
 
     compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
+
+    def _response_from_record(record: CompositionStateRecord) -> GetGuidedResponse:
+        response_state = _state_from_record(record)
+        response_guided = response_state.guided_session
+        if response_guided is None:
+            from elspeth.contracts.errors import AuditIntegrityError
+
+            raise AuditIntegrityError("Guided re-entry result state has no guided checkpoint")
+        response_terminal = response_guided.terminal
+        response_turn = None if response_terminal is not None else _build_get_guided_turn(response_state, response_guided, catalog=catalog)
+        terminal_response = (
+            TerminalStateResponse(
+                kind=response_terminal.kind.value,
+                reason=response_terminal.reason.value if response_terminal.reason is not None else None,
+                pipeline_yaml=response_terminal.pipeline_yaml,
+            )
+            if response_terminal is not None
+            else None
+        )
+        return GetGuidedResponse(
+            guided_session=GuidedSessionResponse(
+                step=response_guided.step.value,
+                history=[
+                    TurnRecordResponse(
+                        step=turn_record.step.value,
+                        turn_type=turn_record.turn_type.value,
+                        payload_hash=turn_record.payload_hash,
+                        response_hash=turn_record.response_hash,
+                        summary=turn_record.summary,
+                        emitter=turn_record.emitter,
+                    )
+                    for turn_record in response_guided.history
+                ],
+                terminal=terminal_response,
+                chat_history=[
+                    ChatTurnResponse(
+                        role=chat_turn.role.value,
+                        content=chat_turn.content,
+                        seq=chat_turn.seq,
+                        step=chat_turn.step.value,
+                        ts_iso=chat_turn.ts_iso,
+                        assistant_message_kind=chat_turn.assistant_message_kind,
+                        synthetic_failure_reason=chat_turn.synthetic_failure_reason,
+                    )
+                    for chat_turn in response_guided.chat_history
+                ],
+                chat_turn_seq=response_guided.chat_turn_seq,
+                profile=_workflow_profile_response(response_guided),
+            ),
+            next_turn=_turn_payload_response(
+                response_turn,
+                shield_available=_resolve_shield_available(plugin_snapshot),
+            ),
+            terminal=terminal_response,
+            composition_state=_state_response(record, policy_catalog=catalog),
+        )
+
+    from elspeth.contracts.errors import AuditIntegrityError
+    from elspeth.web.sessions.protocol import GuidedCompositionStateResult
+
+    from ..guided_operations import GuidedOperationLease, guided_response_hash, reserve_or_replay_guided_operation
+
+    async def _replay(result: object) -> GetGuidedResponse:
+        if type(result) is not GuidedCompositionStateResult:
+            raise AuditIntegrityError("Guided re-entry replay has a non-state result locator")
+        replay_record = await service.get_state_in_session(result.state_id, session_id)
+        return _response_from_record(replay_record)
+
+    reserved = await reserve_or_replay_guided_operation(
+        service=service,
+        session_id=session_id,
+        kind="guided_reenter",
+        request=body,
+        replay=_replay,
+        reserve_if_absent=False,
+    )
+    if reserved is None:
+        # Reject invalid mode transitions before allocating an operation row.
+        # The immutable checkpoint is re-read under the lock after a claim, so
+        # this is classification rather than the write authority boundary.
+        async with compose_lock:
+            candidate_record = await service.get_current_state(session_id)
+            if candidate_record is None:
+                raise HTTPException(status_code=400, detail="Session has no guided state to re-enter.")
+            candidate_state = _state_from_record(candidate_record)
+            candidate_guided = candidate_state.guided_session
+            if candidate_guided is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Session is not in guided mode. Use /api/sessions/{id}/messages.",
+                )
+            candidate_terminal = candidate_guided.terminal
+            if candidate_terminal is None:
+                raise HTTPException(status_code=409, detail="Guided session is already active.")
+            if (
+                candidate_terminal.kind is not TerminalKind.EXITED_TO_FREEFORM
+                or candidate_terminal.reason is not TerminalReason.USER_PRESSED_EXIT
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Only a guided session ended by a user exit can be re-entered.",
+                )
+            if next((r for r in reversed(candidate_guided.history) if r.step == candidate_guided.step), None) is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Guided session cannot be re-entered because no current turn record exists.",
+                )
+        reserved = await reserve_or_replay_guided_operation(
+            service=service,
+            session_id=session_id,
+            kind="guided_reenter",
+            request=body,
+            replay=_replay,
+        )
+    if reserved is None:  # pragma: no cover - reserve_if_absent defaults true
+        raise AuditIntegrityError("Guided re-entry operation was not reserved")
+    if not isinstance(reserved, GuidedOperationLease):
+        return reserved
+
     async with compose_lock:
         state_record = await service.get_current_state(session_id)
         if state_record is None:
@@ -984,56 +1104,14 @@ async def post_guided_reenter(
             validation_errors=persisted_errors,
             composer_meta=new_composer_meta,
         )
-        state_record_out = await service.save_composition_state(
-            session_id,
-            state_data,
+        state_record_out = await service.save_state_for_guided_operation(
+            reserved.fence,
+            state=state_data,
             provenance="convergence_persist",
+            actor="composer_route",
+            response_hash_factory=lambda record: guided_response_hash(_response_from_record(record)),
         )
-
-        shield_available = _resolve_shield_available(plugin_snapshot)
-        terminal_response = (
-            TerminalStateResponse(
-                kind=restored_terminal.kind.value,
-                reason=None,
-                pipeline_yaml=restored_terminal.pipeline_yaml,
-            )
-            if restored_terminal is not None
-            else None
-        )
-        return GetGuidedResponse(
-            guided_session=GuidedSessionResponse(
-                step=new_guided.step.value,
-                history=[
-                    TurnRecordResponse(
-                        step=r.step.value,
-                        turn_type=r.turn_type.value,
-                        payload_hash=r.payload_hash,
-                        response_hash=r.response_hash,
-                        summary=r.summary,
-                        emitter=r.emitter,
-                    )
-                    for r in new_guided.history
-                ],
-                terminal=terminal_response,
-                chat_history=[
-                    ChatTurnResponse(
-                        role=t.role.value,
-                        content=t.content,
-                        seq=t.seq,
-                        step=t.step.value,
-                        ts_iso=t.ts_iso,
-                        assistant_message_kind=t.assistant_message_kind,
-                        synthetic_failure_reason=t.synthetic_failure_reason,
-                    )
-                    for t in new_guided.chat_history
-                ],
-                chat_turn_seq=new_guided.chat_turn_seq,
-                profile=_workflow_profile_response(new_guided),
-            ),
-            next_turn=_turn_payload_response(turn, shield_available=shield_available),
-            terminal=terminal_response,
-            composition_state=_state_response(state_record_out, policy_catalog=catalog),
-        )
+        return _response_from_record(state_record_out)
 
 
 @router.post("/{session_id}/guided/start", response_model=GetGuidedResponse)

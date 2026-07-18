@@ -7062,6 +7062,101 @@ class SessionServiceImpl:
 
         return cast("CompositionStateRecord", await self._run_sync(_sync))
 
+    async def save_state_for_guided_operation(
+        self,
+        fence: GuidedOperationFence,
+        *,
+        state: CompositionStateData,
+        provenance: CompositionStateProvenance,
+        actor: str,
+        response_hash_factory: Callable[[CompositionStateRecord], str],
+        system_message: str | None = None,
+    ) -> CompositionStateRecord:
+        """Persist one guided checkpoint and its replay settlement atomically."""
+
+        if system_message is not None and (type(system_message) is not str or not system_message):
+            raise ValueError("guided operation system_message must be a non-empty string or None")
+        sid = str(fence.session_id)
+        now = self._now()
+
+        def _sync() -> CompositionStateRecord:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                self.require_guided_operation_fence_on_connection(conn, fence)
+                state_id = self._insert_composition_state(
+                    conn,
+                    session_id=sid,
+                    payload=StatePayload(data=state, derived_from_state_id=None),
+                    provenance=provenance,
+                    created_at=now,
+                )
+                state_row = conn.execute(select(composition_states_table).where(composition_states_table.c.id == state_id)).one()
+                record = self._row_to_state_record(state_row)
+                if system_message is not None:
+                    sequence_no = self._reserve_sequence_range(conn, sid, count=1)
+                    self._insert_chat_message(
+                        conn,
+                        session_id=sid,
+                        role="system",
+                        content=system_message,
+                        raw_content=None,
+                        tool_calls=None,
+                        sequence_no=sequence_no,
+                        writer_principal="route_system_message",
+                        composition_state_id=None,
+                        tool_call_id=None,
+                        parent_assistant_id=None,
+                        created_at=now,
+                    )
+                    conn.execute(update(sessions_table).where(sessions_table.c.id == sid).values(updated_at=now))
+                response_hash = response_hash_factory(record)
+                self.bind_guided_operation_on_connection(conn, fence, result_state_id=record.id)
+                self.complete_guided_operation_on_connection(
+                    conn,
+                    fence,
+                    result=GuidedCompositionStateResult(state_id=record.id),
+                    response_hash=response_hash,
+                    actor=actor,
+                )
+                return record
+
+        return cast("CompositionStateRecord", await self._run_sync(_sync))
+
+    async def complete_existing_state_guided_operation(
+        self,
+        fence: GuidedOperationFence,
+        *,
+        state_id: UUID,
+        actor: str,
+        response_hash_factory: Callable[[CompositionStateRecord], str],
+    ) -> CompositionStateRecord:
+        """Settle a no-op/idempotent surface against one immutable state."""
+
+        sid = str(fence.session_id)
+
+        def _sync() -> CompositionStateRecord:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                self.require_guided_operation_fence_on_connection(conn, fence)
+                row = conn.execute(
+                    select(composition_states_table)
+                    .where(composition_states_table.c.id == str(state_id))
+                    .where(composition_states_table.c.session_id == sid)
+                ).one_or_none()
+                if row is None:
+                    raise AuditIntegrityError("Guided operation result state is absent from its session")
+                record = self._row_to_state_record(row)
+                response_hash = response_hash_factory(record)
+                self.bind_guided_operation_on_connection(conn, fence, result_state_id=record.id)
+                self.complete_guided_operation_on_connection(
+                    conn,
+                    fence,
+                    result=GuidedCompositionStateResult(state_id=record.id),
+                    response_hash=response_hash,
+                    actor=actor,
+                )
+                return record
+
+        return cast("CompositionStateRecord", await self._run_sync(_sync))
+
     async def cancel_orphaned_runs(
         self,
         session_id: UUID,

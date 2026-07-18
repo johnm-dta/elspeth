@@ -808,11 +808,13 @@ export async function respondGuided(
  */
 export async function reenterGuided(
   sessionId: string,
+  operationId: string,
   signal?: AbortSignal,
 ): Promise<GetGuidedResponse> {
   const response = await fetch(`/api/sessions/${sessionId}/guided/reenter`, {
     method: "POST",
-    headers: authHeaders(),
+    headers: authHeaders("application/json"),
+    body: JSON.stringify({ operation_id: operationId }),
     signal,
   });
   return parseResponse<GetGuidedResponse>(response);
@@ -929,13 +931,14 @@ export async function fetchStateVersions(
 export async function revertToVersion(
   sessionId: string,
   stateId: string,
+  operationId: string,
 ): Promise<CompositionState> {
   const response = await fetch(
     `/api/sessions/${sessionId}/state/revert`,
     {
       method: "POST",
       headers: authHeaders("application/json"),
-      body: JSON.stringify({ state_id: stateId }),
+      body: JSON.stringify({ operation_id: operationId, state_id: stateId }),
     },
   );
   return parseResponse<CompositionState>(response);

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import asyncio
 from unittest.mock import AsyncMock, patch
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from tests.integration.web.composer.guided.test_step_3_e2e import (
     _confirm_wiring,
@@ -150,7 +150,7 @@ class TestConvertFreeformWithWork:
         # Revert to the pre-conversion freeform version.
         revert = client.post(
             f"/api/sessions/{session_id}/state/revert",
-            json={"state_id": freeform_version["id"]},
+            json={"operation_id": str(uuid4()), "state_id": freeform_version["id"]},
         )
         assert revert.status_code == 200, revert.json()
         restored = revert.json()

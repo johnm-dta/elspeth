@@ -301,7 +301,7 @@ class CompositionStateResponse(_StrictResponse):
     plugin_policy_findings: list[PluginPolicyFindingResponse] = pydantic.Field(default_factory=list)
 
 
-class ForkSessionRequest(_GuidedOperationRequest):
+class ForkSessionRequest(_RequestModel):
     """Request body for POST /api/sessions/{id}/fork."""
 
     from_message_id: UUID
@@ -357,7 +357,7 @@ class RevertStateRequest(_GuidedOperationRequest):
         raise ValueError("state_id must be a canonical UUID")
 
 
-class StartGuidedRequest(_GuidedOperationRequest):
+class StartGuidedRequest(_RequestModel):
     """Request body for POST /api/sessions/{session_id}/guided/start.
 
     ``profile`` is a raw boundary value whose valid form is a closed-enum
@@ -373,7 +373,7 @@ class StartGuidedRequest(_GuidedOperationRequest):
     profile: object = "live"
 
 
-class ConvertGuidedRequest(_GuidedOperationRequest):
+class ConvertGuidedRequest(_RequestModel):
     """Request body for POST /api/sessions/{id}/guided/convert."""
 
 
@@ -515,7 +515,7 @@ class TutorialSampleResponse(_StrictResponse):
     sample_urls: list[str]
 
 
-class GuidedRespondRequest(_GuidedOperationRequest):
+class GuidedRespondRequest(_RequestModel):
     """Request body for POST /api/sessions/{id}/guided/respond.
 
     Carries the user's typed response to the current guided turn.  All
@@ -555,7 +555,7 @@ class GuidedRespondResponse(_StrictResponse):
     composition_state: CompositionStateResponse | None
 
 
-class GuidedChatRequest(_GuidedOperationRequest):
+class GuidedChatRequest(_RequestModel):
     """Request body for POST /api/sessions/{id}/guided/chat.
 
     Carries a free-text chat message scoped to the user's current wizard

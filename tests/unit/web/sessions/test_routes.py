@@ -3016,7 +3016,7 @@ class TestIDORProtection:
         # Bob tries to revert state -- should be 404
         resp = bob_client.post(
             f"/api/sessions/{session_id}/state/revert",
-            json={"state_id": str(uuid.uuid4())},
+            json={"operation_id": str(uuid.uuid4()), "state_id": str(uuid.uuid4())},
         )
         assert resp.status_code == 404
 
@@ -3105,7 +3105,10 @@ class TestIDORProtection:
         # Bob tries to POST guided/reenter -- should be 404. Re-entry is
         # a mode transition that can reveal and mutate Alice's guided
         # session terminal state if ownership is bypassed.
-        resp = bob_client.post(f"/api/sessions/{session_id}/guided/reenter")
+        resp = bob_client.post(
+            f"/api/sessions/{session_id}/guided/reenter",
+            json={"operation_id": str(uuid.uuid4())},
+        )
         assert resp.status_code == 404
 
         # Bob tries to POST guided/respond — should be 404.  The respond

@@ -378,7 +378,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
 
     await useSessionStore.getState().reenterGuided();
 
-    expect(reenterGuided).toHaveBeenCalledWith("sess-1");
+    expect(reenterGuided).toHaveBeenCalledWith("sess-1", expect.any(String));
     const state = useSessionStore.getState();
     expect(state.guidedSession).toEqual(sampleGetGuidedResponse.guided_session);
     expect(state.guidedNextTurn).toEqual(sampleGetGuidedResponse.next_turn);
@@ -543,6 +543,12 @@ describe("sessionStore — guided-mode fields and actions", () => {
 
     await useSessionStore.getState().revertToVersion("state-freeform");
 
+    expect(revertToVersion).toHaveBeenCalledWith(
+      "sess-1",
+      "state-freeform",
+      expect.any(String),
+    );
+
     const state = useSessionStore.getState();
     expect(state.guidedSession).toBeNull();
     expect(state.guidedNextTurn).toBeNull();
@@ -624,7 +630,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
 
     await useSessionStore.getState().enterGuided();
 
-    expect(reenterGuided).toHaveBeenCalledWith("sess-1");
+    expect(reenterGuided).toHaveBeenCalledWith("sess-1", expect.any(String));
     // startGuided's underlying GET must NOT be called on the reenter path.
     expect(getGuided).not.toHaveBeenCalled();
   });

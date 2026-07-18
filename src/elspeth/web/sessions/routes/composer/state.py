@@ -521,6 +521,8 @@ async def revert_state(
         request=body,
         replay=_replay,
     )
+    if reserved is None:  # pragma: no cover - reserve_if_absent defaults true
+        raise AuditIntegrityError("State revert operation was not reserved")
     if not isinstance(reserved, GuidedOperationLease):
         return reserved
 

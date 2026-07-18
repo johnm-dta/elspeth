@@ -24,7 +24,7 @@ from elspeth.web.sessions.routes.guided_operations import (
     guided_response_hash,
     reserve_or_replay_guided_operation,
 )
-from elspeth.web.sessions.schemas import ConvertGuidedRequest
+from elspeth.web.sessions.schemas import ReenterGuidedRequest
 
 
 class _Response(BaseModel):
@@ -54,8 +54,8 @@ class _Service:
         return outcome
 
 
-def _request() -> ConvertGuidedRequest:
-    return ConvertGuidedRequest(operation_id="00000000-0000-4000-8000-000000000001")
+def _request() -> ReenterGuidedRequest:
+    return ReenterGuidedRequest(operation_id="00000000-0000-4000-8000-000000000001")
 
 
 @pytest.mark.asyncio
@@ -67,7 +67,7 @@ async def test_new_operation_returns_live_fence() -> None:
     result = await reserve_or_replay_guided_operation(
         service=service,
         session_id=session_id,
-        kind="guided_convert",
+        kind="guided_reenter",
         request=_request(),
         replay=lambda _locator: _never(),
     )
@@ -84,7 +84,7 @@ async def test_operation_id_reuse_conflict_is_static_409() -> None:
         await reserve_or_replay_guided_operation(
             service=service,
             session_id=session_id,
-            kind="guided_convert",
+            kind="guided_reenter",
             request=_request(),
             replay=lambda _locator: _never(),
         )
@@ -107,7 +107,7 @@ async def test_completed_operation_reconstructs_exact_strict_response() -> None:
     result = await reserve_or_replay_guided_operation(
         service=service,
         session_id=session_id,
-        kind="guided_convert",
+        kind="guided_reenter",
         request=_request(),
         replay=replay,
     )
@@ -125,7 +125,7 @@ async def test_completed_operation_rejects_response_domain_hash_mismatch() -> No
         await reserve_or_replay_guided_operation(
             service=service,
             session_id=session_id,
-            kind="guided_convert",
+            kind="guided_reenter",
             request=_request(),
             replay=lambda _locator: _response("changed"),
         )
@@ -150,12 +150,85 @@ async def test_active_operation_polls_to_terminal_replay(monkeypatch) -> None:
     result = await reserve_or_replay_guided_operation(
         service=service,
         session_id=session_id,
-        kind="guided_convert",
+        kind="guided_reenter",
         request=_request(),
         replay=lambda _locator: _response("joined"),
     )
 
     assert result == response
+    assert service.get_calls == 1
+    assert service.reserve_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_host_clock_ahead_does_not_trigger_reserve_spin(monkeypatch) -> None:
+    """Only the DB-computed expired flag authorises takeover."""
+
+    session_id = uuid4()
+    locator = GuidedCompositionStateResult(state_id=uuid4())
+    response = _Response(value="joined despite skew")
+    service = _Service(
+        [
+            GuidedOperationActive(
+                attempt=1,
+                # Deliberately behind the host clock while the authoritative
+                # DB classification remains unexpired.
+                lease_expires_at=datetime.now(UTC) - timedelta(minutes=10),
+                expired=False,
+            ),
+            GuidedOperationCompleted(result=locator, response_hash=guided_response_hash(response)),
+        ]
+    )
+    sleeps: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("elspeth.web.sessions.routes.guided_operations.asyncio.sleep", record_sleep)
+    result = await reserve_or_replay_guided_operation(
+        service=service,
+        session_id=session_id,
+        kind="guided_reenter",
+        request=_request(),
+        replay=lambda _locator: _response("joined despite skew"),
+    )
+
+    assert result == response
+    assert service.reserve_calls == 1
+    assert service.get_calls == 1
+    assert sleeps == [pytest.approx(0.05)]
+
+
+@pytest.mark.asyncio
+async def test_reserve_result_cannot_authorise_takeover_without_get_confirmation(monkeypatch) -> None:
+    session_id = uuid4()
+    locator = GuidedCompositionStateResult(state_id=uuid4())
+    response = _Response(value="joined")
+    service = _Service(
+        [
+            GuidedOperationActive(
+                attempt=1,
+                lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+                expired=True,
+            ),
+            GuidedOperationCompleted(result=locator, response_hash=guided_response_hash(response)),
+        ]
+    )
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("elspeth.web.sessions.routes.guided_operations.asyncio.sleep", no_sleep)
+    result = await reserve_or_replay_guided_operation(
+        service=service,
+        session_id=session_id,
+        kind="guided_reenter",
+        request=_request(),
+        replay=lambda _locator: _response("joined"),
+    )
+
+    assert result == response
+    assert service.reserve_calls == 1
     assert service.get_calls == 1
 
 
@@ -167,7 +240,7 @@ async def test_failed_operation_maps_only_closed_safe_failure() -> None:
         await reserve_or_replay_guided_operation(
             service=service,
             session_id=uuid4(),
-            kind="guided_convert",
+            kind="guided_reenter",
             request=_request(),
             replay=lambda _locator: _never(),
         )

@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { getGuided, respondGuided, startGuidedSession } from "./client";
+import { getGuided, reenterGuided, respondGuided, revertToVersion, startGuidedSession } from "./client";
 import type {
   GetGuidedResponse,
   GuidedRespondRequest,
@@ -217,6 +217,34 @@ describe("api/client guided functions", () => {
       );
       expect(JSON.parse(init.body as string)).toEqual({ profile: "tutorial" });
       expect(result.guided_session.profile?.advisor_checkpoints).toBe(true);
+    });
+  });
+
+  describe("retry-safe mutations", () => {
+    it("sends the store-owned operation id for guided re-entry", async () => {
+      const body = makeGetGuidedResponse();
+      fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => body } as Response);
+
+      await reenterGuided("sess-1", "00000000-0000-4000-8000-000000000001");
+
+      const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("/api/sessions/sess-1/guided/reenter");
+      expect(JSON.parse(init.body as string)).toEqual({
+        operation_id: "00000000-0000-4000-8000-000000000001",
+      });
+    });
+
+    it("sends the same explicit operation id with a state revert", async () => {
+      fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => ({ id: "state-new" }) } as Response);
+
+      await revertToVersion("sess-1", "state-old", "00000000-0000-4000-8000-000000000002");
+
+      const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("/api/sessions/sess-1/state/revert");
+      expect(JSON.parse(init.body as string)).toEqual({
+        operation_id: "00000000-0000-4000-8000-000000000002",
+        state_id: "state-old",
+      });
     });
   });
 });

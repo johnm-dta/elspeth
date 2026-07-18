@@ -22,6 +22,8 @@ Per spec §5.3, §9.4:
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
@@ -58,9 +60,12 @@ def _respond(client: TestClient, session_id: str, **kwargs) -> dict:
     return resp.json()
 
 
-def _reenter_raw(client: TestClient, session_id: str) -> object:
+def _reenter_raw(client: TestClient, session_id: str, *, operation_id: str | None = None) -> object:
     """POST /guided/reenter and return the raw response (any status)."""
-    return client.post(f"/api/sessions/{session_id}/guided/reenter")
+    return client.post(
+        f"/api/sessions/{session_id}/guided/reenter",
+        json={"operation_id": operation_id or str(uuid4())},
+    )
 
 
 def _get_current_composer_meta(client: TestClient, session_id: str) -> dict:
@@ -191,7 +196,8 @@ class TestReenterGuided:
         exited = _respond(composer_test_client, session_id, control_signal="exit_to_freeform")
         assert exited["terminal"]["kind"] == "exited_to_freeform"
 
-        resp = _reenter_raw(composer_test_client, session_id)
+        operation_id = str(uuid4())
+        resp = _reenter_raw(composer_test_client, session_id, operation_id=operation_id)
 
         assert resp.status_code == 200, resp.json()
         body = resp.json()
@@ -202,6 +208,10 @@ class TestReenterGuided:
         current_step_records = [record for record in body["guided_session"]["history"] if record["step"] == body["guided_session"]["step"]]
         assert current_step_records[-1]["response_hash"] is None
         assert current_step_records[-1]["summary"] is None
+
+        replay = _reenter_raw(composer_test_client, session_id, operation_id=operation_id)
+        assert replay.status_code == 200
+        assert replay.json() == body
 
         persisted = _get_guided(composer_test_client, session_id)
         assert persisted["guided_session"]["terminal"] is None

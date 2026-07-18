@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -93,7 +92,8 @@ async def reserve_or_replay_guided_operation[ResponseT: BaseModel](
     kind: GuidedOperationKind,
     request: BaseModel,
     replay: Callable[[GuidedOperationResult], Awaitable[ResponseT]],
-) -> GuidedOperationLease | ResponseT:
+    reserve_if_absent: bool = True,
+) -> GuidedOperationLease | ResponseT | None:
     """Claim one operation or synchronously join its immutable terminal result.
 
     Active requests are polled to a terminal result.  Once a lease expires the
@@ -123,7 +123,26 @@ async def reserve_or_replay_guided_operation[ResponseT: BaseModel](
                 detail="Operation id is already bound to a different request.",
             ) from exc
 
-    outcome = await reserve()
+    if reserve_if_absent:
+        outcome: GuidedOperationOutcome = await reserve()
+        observed_by_get = False
+    else:
+        try:
+            existing = await service.get_guided_operation(
+                session_id=session_id,
+                operation_id=operation_id,
+                kind=kind,
+                request_hash=request_hash,
+            )
+        except GuidedOperationConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Operation id is already bound to a different request.",
+            ) from exc
+        if existing is None:
+            return None
+        outcome = existing
+        observed_by_get = True
     while True:
         if isinstance(outcome, (GuidedOperationClaimed, GuidedOperationTakenOver)):
             return GuidedOperationLease(fence=outcome.fence)
@@ -134,11 +153,14 @@ async def reserve_or_replay_guided_operation[ResponseT: BaseModel](
         if not isinstance(outcome, GuidedOperationActive):
             raise AuditIntegrityError("Guided operation reserve returned an unknown outcome")
 
-        now = datetime.now(UTC)
-        if outcome.expired or outcome.lease_expires_at <= now:
+        if outcome.expired and observed_by_get:
+            # ``expired`` is computed against the database clock by the read
+            # primitive. Never compare the persisted timestamp with the web
+            # host clock: even modest skew can create a tight reserve loop.
             outcome = await reserve()
+            observed_by_get = False
             continue
-        await asyncio.sleep(min(_POLL_SECONDS, max(0.0, (outcome.lease_expires_at - now).total_seconds())))
+        await asyncio.sleep(_POLL_SECONDS)
         try:
             observed = await service.get_guided_operation(
                 session_id=session_id,
@@ -154,3 +176,4 @@ async def reserve_or_replay_guided_operation[ResponseT: BaseModel](
         if observed is None:
             raise AuditIntegrityError("Guided operation disappeared while a caller was joining it")
         outcome = observed
+        observed_by_get = True

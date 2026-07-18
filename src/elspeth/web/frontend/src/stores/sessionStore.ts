@@ -2103,8 +2103,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       throw new Error("reenterGuided called without active session");
     }
     const requestedSessionId = activeSessionId;
+    const operationId = crypto.randomUUID();
     try {
-      const response = await api.reenterGuided(activeSessionId);
+      const response = await api.reenterGuided(activeSessionId, operationId);
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
@@ -2294,6 +2295,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   async revertToVersion(stateId: string) {
     const { activeSessionId } = get();
     if (!activeSessionId) return;
+    const operationId = crypto.randomUUID();
 
     try {
       // R4-H3: Clear validation BEFORE updating compositionState
@@ -2303,6 +2305,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const compositionState = await api.revertToVersion(
         activeSessionId,
         stateId,
+        operationId,
       );
       // Re-derive the guided surface from the reverted version. A revert can
       // cross the guided/freeform boundary — most visibly the recoverability

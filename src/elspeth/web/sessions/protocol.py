@@ -973,6 +973,26 @@ class SessionServiceProtocol(Protocol):
         response_hash_factory: Callable[[CompositionStateRecord], str],
     ) -> CompositionStateRecord: ...
 
+    async def save_state_for_guided_operation(
+        self,
+        fence: GuidedOperationFence,
+        *,
+        state: CompositionStateData,
+        provenance: CompositionStateProvenance,
+        actor: str,
+        response_hash_factory: Callable[[CompositionStateRecord], str],
+        system_message: str | None = None,
+    ) -> CompositionStateRecord: ...
+
+    async def complete_existing_state_guided_operation(
+        self,
+        fence: GuidedOperationFence,
+        *,
+        state_id: UUID,
+        actor: str,
+        response_hash_factory: Callable[[CompositionStateRecord], str],
+    ) -> CompositionStateRecord: ...
+
     async def update_session_title(self, session_id: UUID, title: str) -> SessionRecord: ...
 
     async def list_sessions(

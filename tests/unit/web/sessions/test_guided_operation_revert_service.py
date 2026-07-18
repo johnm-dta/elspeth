@@ -41,12 +41,19 @@ def service(engine):
     return SessionServiceImpl(engine, telemetry=build_sessions_telemetry(), log=structlog.get_logger("test"))
 
 
-async def _claim(service, session_id, operation_id="00000000-0000-4000-8000-000000000001"):
+async def _claim(
+    service,
+    session_id,
+    operation_id="00000000-0000-4000-8000-000000000001",
+    *,
+    kind="state_revert",
+    request_hash="a" * 64,
+):
     outcome = await service.reserve_guided_operation(
         session_id=session_id,
         operation_id=operation_id,
-        kind="state_revert",
-        request_hash="a" * 64,
+        kind=kind,
+        request_hash=request_hash,
         actor="route",
         lease_seconds=60,
     )
@@ -134,3 +141,50 @@ async def test_stale_revert_fence_writes_nothing(service, engine) -> None:
             ).scalar_one()
             == 0
         )
+
+
+@pytest.mark.asyncio
+async def test_guided_state_save_system_message_and_settlement_are_atomic(service) -> None:
+    session = await service.create_session("alice", "Pipeline", "local")
+    fence = await _claim(service, session.id, kind="guided_convert")
+    state_data = CompositionStateData(composer_meta={"guided_session": {"schema_version": 8}}, is_valid=True)
+
+    saved = await service.save_state_for_guided_operation(
+        fence,
+        state=state_data,
+        provenance="session_seed",
+        actor="route",
+        system_message="Switched to guided mode.",
+        response_hash_factory=lambda state: stable_hash({"state_id": str(state.id)}),
+    )
+
+    current = await service.get_current_state(session.id)
+    assert current is not None and current.id == saved.id
+    assert [message.content for message in await service.get_messages(session.id, limit=None)] == ["Switched to guided mode."]
+    outcome = await service.get_guided_operation(
+        session_id=session.id,
+        operation_id=fence.operation_id,
+        kind="guided_convert",
+        request_hash="a" * 64,
+    )
+    assert outcome == GuidedOperationCompleted(
+        result=GuidedCompositionStateResult(state_id=saved.id),
+        response_hash=stable_hash({"state_id": str(saved.id)}),
+    )
+
+
+@pytest.mark.asyncio
+async def test_existing_guided_state_can_settle_without_new_state_version(service) -> None:
+    session = await service.create_session("alice", "Pipeline", "local")
+    existing = await service.save_composition_state(session.id, CompositionStateData(is_valid=True), provenance="session_seed")
+    fence = await _claim(service, session.id, kind="guided_start")
+
+    settled = await service.complete_existing_state_guided_operation(
+        fence,
+        state_id=existing.id,
+        actor="route",
+        response_hash_factory=lambda state: stable_hash({"state_id": str(state.id)}),
+    )
+
+    assert settled == existing
+    assert [state.id for state in await service.get_state_versions(session.id)] == [existing.id]

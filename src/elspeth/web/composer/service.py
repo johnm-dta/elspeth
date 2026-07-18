@@ -2110,6 +2110,98 @@ class ComposerServiceImpl:
             progress=progress,
         )
 
+    async def plan_guided_pipeline(
+        self,
+        *,
+        intent: str,
+        current_state: CompositionState,
+        guided: Any,
+        originating_message: PlannerOriginatingMessage,
+        base: PresentBase,
+        user_id: str | None,
+        supersedes_draft_hash: str | None,
+        recorder: BufferingRecorder,
+        progress: ComposerProgressSink | None = None,
+    ) -> tuple[PipelinePlanResult, Mapping[str, frozenset[str]]]:
+        """Run one shared planner call for the current guided checkpoint."""
+
+        from elspeth.web.composer.guided.planning import (
+            bind_guided_reviewed_components,
+            guided_private_reviewed_facts,
+            guided_redacted_current_state_context,
+            guided_redacted_planner_context,
+        )
+        from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE
+        from elspeth.web.composer.guided.state_machine import GuidedSession
+
+        if type(guided) is not GuidedSession:
+            raise TypeError("guided must be an exact GuidedSession")
+        if type(recorder) is not BufferingRecorder:
+            raise TypeError("recorder must be an exact BufferingRecorder")
+        if guided.active_proposal is not None:
+            raise AuditIntegrityError("guided planning requires no active proposal")
+        if guided.pending_source_intents or guided.pending_output_intents:
+            raise AuditIntegrityError("guided planning requires completed reviewed source/output facts")
+        if not guided.reviewed_sources or not guided.reviewed_outputs:
+            raise AuditIntegrityError("guided planning requires at least one reviewed source and output")
+        if not self._availability.available:
+            raise ComposerServiceError(self._availability.reason or "Composer is unavailable.")
+
+        plugin_snapshot, policy_catalog = self._plugin_policy_context(user_id)
+        reviewed_facts = guided_private_reviewed_facts(guided)
+        reviewed_context = guided_redacted_planner_context(guided)
+        plan = await plan_pipeline(
+            intent=intent,
+            current_state=current_state,
+            provider_current_state=guided_redacted_current_state_context(current_state),
+            reviewed_facts=reviewed_facts,
+            reviewed_planner_context=reviewed_context,
+            covered_deferred_intent_ids=tuple(item.intent_id for item in guided.deferred_intents),
+            supersedes_draft_hash=supersedes_draft_hash,
+            surface=(PlannerSurface.TUTORIAL_PROFILE if guided.profile == TUTORIAL_PROFILE else PlannerSurface.GUIDED_STAGED),
+            policy_catalog=policy_catalog,
+            plugin_snapshot=plugin_snapshot,
+            originating_message=originating_message,
+            base=base,
+            model_config=PlannerModelConfig(
+                completion=_litellm_acompletion,
+                model_identifier=self._model,
+                provider=self._availability.provider or "unknown",
+                temperature=self._settings.composer_temperature,
+                seed=self._settings.composer_seed,
+                timeout_seconds=self._timeout_seconds,
+                max_composition_turns=self._max_composition_turns,
+                max_discovery_turns=self._max_discovery_turns,
+                max_tool_calls_per_turn=self._max_tool_calls_per_turn,
+                max_api_attempts=_LLM_API_MAX_ATTEMPTS,
+                api_retry_base_seconds=_LLM_API_RETRY_BASE_DELAY_SECONDS,
+            ),
+            rendered_skill=build_system_prompt(self._data_dir),
+            repair_budget=self._settings.composer_planner_repair_budget,
+            budget_policy=PlannerBudgetPolicy(
+                max_total_provider_calls=self._settings.composer_planner_max_provider_calls,
+                max_request_bytes=self._settings.composer_planner_max_request_bytes,
+                max_completion_tokens=self._settings.composer_planner_max_completion_tokens,
+                max_cumulative_provider_cost=self._settings.composer_planner_max_cumulative_provider_cost,
+            ),
+            custody_config=PlannerCustodyConfig(
+                data_dir=self._data_dir,
+                session_engine=self._session_engine,
+                max_storage_per_session=self._settings.max_blob_storage_per_session_bytes,
+                secret_service=self._secret_service,
+                runtime_preflight=None,
+            ),
+            lifecycle=self._planner_request_lifecycle(progress),
+            recorder=recorder,
+            candidate_finalizer=lambda candidate: bind_guided_reviewed_components(candidate, guided),
+        )
+        catalog_ids: Mapping[str, frozenset[str]] = {
+            "source": frozenset(item.name for item in policy_catalog.list_sources()),
+            "transform": frozenset(item.name for item in policy_catalog.list_transforms()),
+            "sink": frozenset(item.name for item in policy_catalog.list_sinks()),
+        }
+        return plan, catalog_ids
+
     async def _persist_pipeline_planner_audit(
         self,
         *,
@@ -2307,6 +2399,9 @@ class ComposerServiceImpl:
                             pipeline=recipe_pipeline,
                             current_state=state,
                             reviewed_facts={},
+                            reviewed_planner_context={},
+                            covered_deferred_intent_ids=(),
+                            supersedes_draft_hash=None,
                             surface=PlannerSurface.FREEFORM,
                             policy_catalog=policy_catalog,
                             plugin_snapshot=plugin_snapshot,
@@ -2336,7 +2431,11 @@ class ComposerServiceImpl:
             plan = await plan_pipeline(
                 intent=message,
                 current_state=state,
+                provider_current_state=state.to_dict(),
                 reviewed_facts={},
+                reviewed_planner_context={},
+                covered_deferred_intent_ids=(),
+                supersedes_draft_hash=None,
                 surface=PlannerSurface.FREEFORM,
                 policy_catalog=policy_catalog,
                 plugin_snapshot=plugin_snapshot,
@@ -2366,6 +2465,7 @@ class ComposerServiceImpl:
                 custody_config=custody_config,
                 lifecycle=self._planner_request_lifecycle(progress),
                 recorder=recorder,
+                candidate_finalizer=lambda candidate: candidate,
             )
         return await self._stage_pipeline_plan(
             plan=plan,

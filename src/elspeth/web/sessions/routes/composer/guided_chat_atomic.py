@@ -38,6 +38,7 @@ from elspeth.web.sessions.protocol import (
     GuidedCompositionStateResult,
     GuidedOperationFailureCode,
     GuidedOperationFenceLostError,
+    GuidedOperationSettlementConflictError,
     GuidedOriginatingUserMessageDraft,
     GuidedReplayTurn,
     GuidedResponseDescriptor,
@@ -479,13 +480,13 @@ async def post_guided_chat_schema8(
                     fence = await service.renew_guided_operation(reserved.fence, actor="composer_route", lease_seconds=300)
                     current_record = await service.get_current_state(session_id)
                     if (current_record is None) != (frozen.state_record is None):
-                        raise AuditIntegrityError("Guided Chat current state presence changed after provider work")
+                        raise GuidedOperationSettlementConflictError()
                     if (
                         current_record is not None
                         and frozen.state_record is not None
                         and (current_record.id != frozen.state_record.id or current_record.version != frozen.state_record.version)
                     ):
-                        raise AuditIntegrityError("Guided Chat current state head changed after provider work")
+                        raise GuidedOperationSettlementConflictError()
                     current_state = (
                         _state_from_record(current_record)
                         if current_record is not None
@@ -765,7 +766,11 @@ async def post_guided_chat_schema8(
                 raise
             except Exception as exc:
                 failure_code: GuidedOperationFailureCode = (
-                    "integrity_error" if isinstance(exc, (AuditIntegrityError, InvariantError)) else "operation_failed"
+                    "stale_conflict"
+                    if isinstance(exc, GuidedOperationSettlementConflictError)
+                    else "integrity_error"
+                    if isinstance(exc, (AuditIntegrityError, InvariantError))
+                    else "operation_failed"
                 )
                 with contextlib.suppress(Exception):
                     slog.error(

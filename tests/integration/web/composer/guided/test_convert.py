@@ -38,7 +38,7 @@ from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.state_machine import TerminalKind, TerminalState
 from elspeth.web.sessions.guided_operations import guided_operation_request_hash
 from elspeth.web.sessions.guided_replay import load_guided_json_payload
-from elspeth.web.sessions.protocol import CompositionStateData, GuidedOperationCompleted
+from elspeth.web.sessions.protocol import CompositionStateData, GuidedOperationCompleted, GuidedOperationSettlementConflictError
 from elspeth.web.sessions.schemas import ConvertGuidedRequest
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
@@ -463,3 +463,21 @@ class TestConvertEmptySession:
         assert events[0]["site"] == "post_guided_convert"
         assert events[0]["frames"]
         assert "diagnostic retained for audit" not in repr(events[0])
+
+    def test_expected_head_conflict_is_terminal_409_and_exactly_replayed(self, composer_test_client: TestClient) -> None:
+        client = composer_test_client
+        session_id = _create_session(client)
+        operation_id = str(uuid4())
+        service = client.app.state.session_service
+
+        with patch.object(
+            service,
+            "save_state_for_guided_operation",
+            side_effect=GuidedOperationSettlementConflictError(),
+        ):
+            first = _convert_raw(client, session_id, operation_id=operation_id)
+        replay = _convert_raw(client, session_id, operation_id=operation_id)
+
+        assert first.status_code == replay.status_code == 409
+        assert first.json() == replay.json()
+        assert first.json()["detail"]["failure_code"] == "stale_conflict"

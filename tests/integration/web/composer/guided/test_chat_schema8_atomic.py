@@ -531,9 +531,11 @@ def test_provider_head_drift_fails_closed_without_settling_chat(
 
     monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", drifting_provider, raising=False)
     response = composer_test_client.post(f"/api/sessions/{session_id}/guided/chat", json=body)
+    replay = composer_test_client.post(f"/api/sessions/{session_id}/guided/chat", json=body)
 
-    assert response.status_code == 500
-    assert response.json()["detail"]["failure_code"] == "integrity_error"
+    assert response.status_code == replay.status_code == 409
+    assert response.json() == replay.json()
+    assert response.json()["detail"]["failure_code"] == "stale_conflict"
     assert len(asyncio.run(service.get_state_versions(UUID(session_id)))) == 1
     assert asyncio.run(service.get_messages(UUID(session_id), limit=None)) == []
 

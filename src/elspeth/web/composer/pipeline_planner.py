@@ -41,7 +41,7 @@ from elspeth.web.composer.llm_response_parsing import (
     supports_anthropic_prompt_cache_markers,
 )
 from elspeth.web.composer.pipeline_custody import finalize_pipeline_custody, prepare_pipeline_custody
-from elspeth.web.composer.pipeline_proposal import PipelineProposal, PlannerSurface, ProposalBase
+from elspeth.web.composer.pipeline_proposal import PipelineProposal, PlannerSurface, ProposalBase, reviewed_anchor_hash
 from elspeth.web.composer.progress import (
     emit_progress,
     model_call_progress_event,
@@ -51,6 +51,7 @@ from elspeth.web.composer.progress import (
 )
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import SetPipelineArgumentsModel
+from elspeth.web.composer.reviewed_source_authority import resolve_reviewed_source_authority
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.composer.tools._common import RuntimePreflight, ToolContext, ToolResult
 from elspeth.web.composer.tools._dispatch import (
@@ -184,12 +185,12 @@ class PlannerModelConfig:
 @dataclass(frozen=True, slots=True)
 class PlannerOriginatingMessage:
     session_id: str
-    message_id: str
+    message_id: str | None
     content: str
     user_id: str | None
 
     def __post_init__(self) -> None:
-        for name in ("session_id", "message_id"):
+        for name in ("session_id",):
             value = getattr(self, name)
             try:
                 parsed = UUID(value)
@@ -197,10 +198,20 @@ class PlannerOriginatingMessage:
                 raise ValueError(f"{name} must be a canonical UUID string") from exc
             if str(parsed) != value:
                 raise ValueError(f"{name} must be a canonical UUID string")
+        if self.message_id is not None:
+            try:
+                parsed_message_id = UUID(self.message_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("message_id must be a canonical UUID string or None") from exc
+            if str(parsed_message_id) != self.message_id:
+                raise ValueError("message_id must be a canonical UUID string or None")
         if type(self.content) is not str:
             raise TypeError("content must be an exact string")
         if self.user_id is not None and (type(self.user_id) is not str or not self.user_id.strip()):
             raise ValueError("user_id must be a non-empty exact string or None")
+
+
+type PipelineCandidateFinalizer = Callable[[Mapping[str, Any]], Mapping[str, Any]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -496,6 +507,8 @@ async def _build_valid_pipeline_plan(
     current_state: CompositionState,
     base: ProposalBase,
     reviewed_facts: Mapping[str, Any],
+    covered_deferred_intent_ids: tuple[str, ...],
+    supersedes_draft_hash: str | None,
     surface: PlannerSurface,
     repair_count: int,
     skill_hash: str,
@@ -558,6 +571,8 @@ async def _build_valid_pipeline_plan(
             surface=surface,
             repair_count=repair_count,
             skill_hash=skill_hash,
+            covered_deferred_intent_ids=covered_deferred_intent_ids,
+            supersedes_draft_hash=supersedes_draft_hash,
         ),
         tool_call_id=tool_call_id,
         custody_result=custody_result,
@@ -572,6 +587,9 @@ async def prepare_pipeline_plan(
     pipeline: Mapping[str, Any],
     current_state: CompositionState,
     reviewed_facts: Mapping[str, Any],
+    reviewed_planner_context: Mapping[str, Any],
+    covered_deferred_intent_ids: tuple[str, ...],
+    supersedes_draft_hash: str | None,
     surface: PlannerSurface,
     policy_catalog: PolicyCatalogView,
     plugin_snapshot: PluginAvailabilitySnapshot,
@@ -590,6 +608,9 @@ async def prepare_pipeline_plan(
 
     if policy_catalog.snapshot is not plugin_snapshot:
         raise ValueError("plugin_snapshot_catalog_mismatch")
+    # Server-derived plans do not send this context to a provider, but accept
+    # the same explicit authority split as the model-driven entry point.
+    canonical_json(reviewed_planner_context)
     if type(rendered_skill) is not str or not rendered_skill.strip():
         raise ValueError("rendered_skill must be a non-empty exact string")
     if type(repair_count) is not int or repair_count < 0:
@@ -627,6 +648,13 @@ async def prepare_pipeline_plan(
         composer_provider=provider,
         composer_skill_hash=skill_hash,
         tool_arguments_hash=None,
+        reviewed_source_authority=resolve_reviewed_source_authority(
+            engine=custody_config.session_engine,
+            session_id=originating_message.session_id,
+            user_id=originating_message.user_id,
+            reviewed_facts=reviewed_facts,
+            expected_reviewed_anchor_hash=reviewed_anchor_hash(reviewed_facts),
+        ),
     )
     try:
         return await _build_valid_pipeline_plan(
@@ -634,6 +662,8 @@ async def prepare_pipeline_plan(
             current_state=current_state,
             base=base,
             reviewed_facts=reviewed_facts,
+            covered_deferred_intent_ids=covered_deferred_intent_ids,
+            supersedes_draft_hash=supersedes_draft_hash,
             surface=surface,
             repair_count=repair_count,
             skill_hash=skill_hash,
@@ -654,7 +684,11 @@ async def plan_pipeline(
     *,
     intent: str,
     current_state: CompositionState,
+    provider_current_state: Mapping[str, Any],
     reviewed_facts: Mapping[str, Any],
+    reviewed_planner_context: Mapping[str, Any],
+    covered_deferred_intent_ids: tuple[str, ...],
+    supersedes_draft_hash: str | None,
     surface: PlannerSurface,
     policy_catalog: PolicyCatalogView,
     plugin_snapshot: PluginAvailabilitySnapshot,
@@ -667,6 +701,7 @@ async def plan_pipeline(
     custody_config: PlannerCustodyConfig,
     lifecycle: PlannerRequestLifecycle,
     recorder: BufferingRecorder,
+    candidate_finalizer: PipelineCandidateFinalizer,
 ) -> PipelinePlanResult:
     """Plan and validate one proposal without publishing state or DB rows."""
     if type(intent) is not str or not intent.strip():
@@ -677,6 +712,9 @@ async def plan_pipeline(
         raise ValueError("repair_budget must be a non-negative exact integer")
     if policy_catalog.snapshot is not plugin_snapshot:
         raise ValueError("plugin_snapshot_catalog_mismatch")
+    canonical_json(provider_current_state)
+    if not callable(candidate_finalizer):
+        raise TypeError("candidate_finalizer must be callable")
 
     outcome: PlannerSettlement = "failed"
     primary_error: BaseException | None = None
@@ -686,7 +724,11 @@ async def plan_pipeline(
             proposal = await _plan_pipeline_inner(
                 intent=intent,
                 current_state=current_state,
+                provider_current_state=provider_current_state,
                 reviewed_facts=reviewed_facts,
+                reviewed_planner_context=reviewed_planner_context,
+                covered_deferred_intent_ids=covered_deferred_intent_ids,
+                supersedes_draft_hash=supersedes_draft_hash,
                 surface=surface,
                 policy_catalog=policy_catalog,
                 plugin_snapshot=plugin_snapshot,
@@ -699,6 +741,7 @@ async def plan_pipeline(
                 custody_config=custody_config,
                 lifecycle=lifecycle,
                 recorder=recorder,
+                candidate_finalizer=candidate_finalizer,
             )
         outcome = "complete"
         return proposal
@@ -720,7 +763,11 @@ async def _plan_pipeline_inner(
     *,
     intent: str,
     current_state: CompositionState,
+    provider_current_state: Mapping[str, Any],
     reviewed_facts: Mapping[str, Any],
+    reviewed_planner_context: Mapping[str, Any],
+    covered_deferred_intent_ids: tuple[str, ...],
+    supersedes_draft_hash: str | None,
     surface: PlannerSurface,
     policy_catalog: PolicyCatalogView,
     plugin_snapshot: PluginAvailabilitySnapshot,
@@ -733,6 +780,7 @@ async def _plan_pipeline_inner(
     custody_config: PlannerCustodyConfig,
     lifecycle: PlannerRequestLifecycle,
     recorder: BufferingRecorder,
+    candidate_finalizer: PipelineCandidateFinalizer,
 ) -> PipelinePlanResult:
     skill_hash = hashlib.sha256(rendered_skill.encode("utf-8")).hexdigest()
     deadline = asyncio.get_running_loop().time() + model_config.timeout_seconds
@@ -767,6 +815,13 @@ async def _plan_pipeline_inner(
         composer_provider=model_config.provider,
         composer_skill_hash=skill_hash,
         tool_arguments_hash=None,
+        reviewed_source_authority=resolve_reviewed_source_authority(
+            engine=custody_config.session_engine,
+            session_id=originating_message.session_id,
+            user_id=originating_message.user_id,
+            reviewed_facts=reviewed_facts,
+            expected_reviewed_anchor_hash=reviewed_anchor_hash(reviewed_facts),
+        ),
     )
     tools = planner_tool_definitions()
     messages: list[dict[str, Any]] = [
@@ -776,8 +831,8 @@ async def _plan_pipeline_inner(
             "content": canonical_json(
                 {
                     "intent": intent,
-                    "current_state": current_state.to_dict(),
-                    "reviewed_facts": reviewed_facts,
+                    "current_state": provider_current_state,
+                    "reviewed_facts": reviewed_planner_context,
                     "surface": surface.value,
                     "instruction": (
                         "Use read-only discovery as needed, then call emit_pipeline_proposal exactly once "
@@ -998,16 +1053,21 @@ async def _plan_pipeline_inner(
                 )
                 continue
             assert pipeline is not None
+            finalized_pipeline = candidate_finalizer(pipeline)
+            if type(finalized_pipeline) is not dict:
+                raise AuditIntegrityError("pipeline candidate finalizer must return an exact dict")
             terminal_context = replace(
                 request_context,
                 composer_model_version=audited_call.model_returned or audited_call.model_requested,
             )
             try:
                 return await _build_valid_pipeline_plan(
-                    pipeline=pipeline,
+                    pipeline=finalized_pipeline,
                     current_state=current_state,
                     base=base,
                     reviewed_facts=reviewed_facts,
+                    covered_deferred_intent_ids=covered_deferred_intent_ids,
+                    supersedes_draft_hash=supersedes_draft_hash,
                     surface=surface,
                     repair_count=repair_count,
                     skill_hash=skill_hash,

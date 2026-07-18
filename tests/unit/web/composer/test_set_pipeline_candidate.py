@@ -7,24 +7,28 @@ inline-blob effects, not private control flow.
 
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import func, insert, select
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.enums import CreationModality
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import stable_hash
-from elspeth.web.blobs.service import content_hash
+from elspeth.web.blobs.service import BlobServiceImpl, content_hash
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder, begin_dispatch, dispatch_with_audit
+from elspeth.web.composer.pipeline_proposal import reviewed_anchor_hash
+from elspeth.web.composer.reviewed_source_authority import resolve_reviewed_source_authority
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
 from elspeth.web.composer.tools import (
     SetPipelineCandidate,
@@ -35,7 +39,7 @@ from elspeth.web.composer.tools import (
 )
 from elspeth.web.composer.tools._common import normalize_tool_result_validation
 from elspeth.web.dependencies import create_catalog_service
-from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, SOURCE_AUTHORING_KEY
 from elspeth.web.plugin_policy.models import (
     PluginAvailability,
     PluginAvailabilitySnapshot,
@@ -243,6 +247,416 @@ def _linear_args(tmp_path: Path) -> dict[str, Any]:
         ],
         "metadata": {"name": "linear"},
     }
+
+
+def _reviewed_source_harness(tmp_path: Path) -> tuple[Any, str, str, Any]:
+    engine = create_session_engine(
+        "sqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    initialize_session_schema(engine)
+    first_session = str(uuid4())
+    second_session = str(uuid4())
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        for session_id in (first_session, second_session):
+            conn.execute(
+                insert(sessions_table).values(
+                    id=session_id,
+                    user_id="review-owner",
+                    auth_provider_type="local",
+                    title="reviewed source authority",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+    service = BlobServiceImpl(engine, tmp_path)
+    first_blob = asyncio.run(
+        service.create_blob(
+            UUID(first_session),
+            "first.csv",
+            b"name,score\nAda,42\n",
+            "text/csv",
+        )
+    )
+    second_blob = asyncio.run(
+        service.create_blob(
+            UUID(second_session),
+            "second.csv",
+            b"name,score\nGrace,99\n",
+            "text/csv",
+        )
+    )
+    return engine, first_session, second_session, (first_blob, second_blob)
+
+
+def _reviewed_source_facts(*, blob_id: str, source_name: str = "source", path: str | None = None) -> dict[str, Any]:
+    stable_id = str(uuid4())
+    return {
+        "source_order": [stable_id],
+        "reviewed_sources": {
+            stable_id: {
+                "name": source_name,
+                "plugin": "csv",
+                "options": {
+                    "path": path if path is not None else f"blob:{blob_id}",
+                    "blob_ref": blob_id,
+                    "schema": {"mode": "observed"},
+                    SOURCE_AUTHORING_KEY: {
+                        "modality": "llm_generated",
+                        "content_hash": "a" * 64,
+                        "review_event_id": "review-event",
+                        "resolved_kind": "invented_source",
+                    },
+                },
+                "observed_columns": ["name", "score"],
+                "sample_rows": [{"name": "Ada", "score": 42}],
+                "on_validation_failure": "discard",
+            }
+        },
+        "output_order": [],
+        "reviewed_outputs": {},
+    }
+
+
+def _named_reviewed_pipeline(tmp_path: Path, facts: dict[str, Any]) -> dict[str, Any]:
+    pipeline = _linear_args(tmp_path)
+    source = pipeline.pop("source")
+    reviewed = next(iter(facts["reviewed_sources"].values()))
+    source.update(
+        {
+            "plugin": reviewed["plugin"],
+            "options": deepcopy(reviewed["options"]),
+            "on_validation_failure": reviewed["on_validation_failure"],
+        }
+    )
+    pipeline["sources"] = {reviewed["name"]: source}
+    return pipeline
+
+
+def test_reviewed_source_authority_resolves_only_ready_owned_current_anchor(tmp_path: Path) -> None:
+    engine, session_id, _other_session, blobs = _reviewed_source_harness(tmp_path)
+    blob = blobs[0]
+    facts = _reviewed_source_facts(blob_id=str(blob.id))
+    anchor = reviewed_anchor_hash(facts)
+
+    authority = resolve_reviewed_source_authority(
+        engine=engine,
+        session_id=session_id,
+        user_id="review-owner",
+        reviewed_facts=facts,
+        expected_reviewed_anchor_hash=anchor,
+    )
+
+    assert authority is not None
+    assert authority.session_id == session_id
+    assert authority.reviewed_anchor_hash == anchor
+    assert authority.verified_blob_paths == {f"blob:{blob.id}": blob.storage_path}
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["missing", "altered_uuid", "cross_session", "non_ready", "wrong_owner", "anchor_drift"],
+)
+def test_reviewed_source_authority_rejects_unverified_blob_custody(tmp_path: Path, failure: str) -> None:
+    engine, session_id, _other_session, blobs = _reviewed_source_harness(tmp_path)
+    first_blob, second_blob = blobs
+    selected_blob_id = str(first_blob.id)
+    user_id = "review-owner"
+    if failure in {"missing", "altered_uuid"}:
+        selected_blob_id = str(uuid4())
+    elif failure == "cross_session":
+        selected_blob_id = str(second_blob.id)
+    elif failure == "non_ready":
+        with engine.begin() as conn:
+            conn.execute(update(blobs_table).where(blobs_table.c.id == str(first_blob.id)).values(status="pending"))
+    elif failure == "wrong_owner":
+        user_id = "different-user"
+    facts = _reviewed_source_facts(blob_id=selected_blob_id)
+    expected_anchor = reviewed_anchor_hash(facts)
+    if failure == "anchor_drift":
+        expected_anchor = "f" * 64
+
+    with pytest.raises(AuditIntegrityError):
+        resolve_reviewed_source_authority(
+            engine=engine,
+            session_id=session_id,
+            user_id=user_id,
+            reviewed_facts=facts,
+            expected_reviewed_anchor_hash=expected_anchor,
+        )
+
+
+def test_reviewed_source_authority_rechecks_ready_status_at_accept_time(tmp_path: Path) -> None:
+    engine, session_id, _other_session, blobs = _reviewed_source_harness(tmp_path)
+    blob = blobs[0]
+    facts = _reviewed_source_facts(blob_id=str(blob.id))
+    anchor = reviewed_anchor_hash(facts)
+    assert (
+        resolve_reviewed_source_authority(
+            engine=engine,
+            session_id=session_id,
+            user_id="review-owner",
+            reviewed_facts=facts,
+            expected_reviewed_anchor_hash=anchor,
+        )
+        is not None
+    )
+
+    with engine.begin() as conn:
+        conn.execute(update(blobs_table).where(blobs_table.c.id == str(blob.id)).values(status="error"))
+
+    with pytest.raises(AuditIntegrityError, match="not ready"):
+        resolve_reviewed_source_authority(
+            engine=engine,
+            session_id=session_id,
+            user_id="review-owner",
+            reviewed_facts=facts,
+            expected_reviewed_anchor_hash=anchor,
+        )
+
+
+@pytest.mark.parametrize("raw_path_kind", ("alternate", "other_session"))
+def test_reviewed_source_authority_rejects_raw_path_not_bound_to_same_owned_blob(
+    tmp_path: Path,
+    raw_path_kind: str,
+) -> None:
+    engine, session_id, _other_session, blobs = _reviewed_source_harness(tmp_path)
+    first_blob, second_blob = blobs
+    raw_path = "/etc/looks-reviewed.csv" if raw_path_kind == "alternate" else second_blob.storage_path
+    facts = _reviewed_source_facts(blob_id=str(first_blob.id), path=raw_path)
+
+    with pytest.raises(AuditIntegrityError, match="storage path"):
+        resolve_reviewed_source_authority(
+            engine=engine,
+            session_id=session_id,
+            user_id="review-owner",
+            reviewed_facts=facts,
+            expected_reviewed_anchor_hash=reviewed_anchor_hash(facts),
+        )
+
+
+def test_reviewed_source_authority_checks_owner_without_recognized_blob(tmp_path: Path) -> None:
+    engine, session_id, _other_session, blobs = _reviewed_source_harness(tmp_path)
+    facts = _reviewed_source_facts(blob_id=str(blobs[0].id))
+    options = next(iter(facts["reviewed_sources"].values()))["options"]
+    options.pop("path")
+    options.pop("blob_ref")
+
+    with pytest.raises(AuditIntegrityError, match="owned by the current user session"):
+        resolve_reviewed_source_authority(
+            engine=engine,
+            session_id=session_id,
+            user_id="different-user",
+            reviewed_facts=facts,
+            expected_reviewed_anchor_hash=reviewed_anchor_hash(facts),
+        )
+
+
+def test_exact_reviewed_non_blob_path_remains_subject_to_candidate_path_policy(tmp_path: Path) -> None:
+    engine, session_id, _other_session, blobs = _reviewed_source_harness(tmp_path)
+    reviewed_path = str(tmp_path / "blobs" / "operator-reviewed.csv")
+    facts = _reviewed_source_facts(blob_id=str(blobs[0].id), path=reviewed_path)
+    options = next(iter(facts["reviewed_sources"].values()))["options"]
+    options.pop("blob_ref")
+
+    authority = resolve_reviewed_source_authority(
+        engine=engine,
+        session_id=session_id,
+        user_id="review-owner",
+        reviewed_facts=facts,
+        expected_reviewed_anchor_hash=reviewed_anchor_hash(facts),
+    )
+    candidate = build_set_pipeline_candidate(
+        _named_reviewed_pipeline(tmp_path, facts),
+        _empty_state(),
+        _trained_context(
+            data_dir=tmp_path,
+            session_engine=engine,
+            session_id=session_id,
+            user_id="review-owner",
+            reviewed_source_authority=authority,
+        ),
+    )
+
+    assert authority is not None
+    assert authority.verified_blob_paths == {}
+    assert candidate.acceptable is True, candidate.result.to_dict()
+    assert candidate.result.updated_state.sources["source"].options["path"] == reviewed_path
+
+
+def test_exact_owned_raw_storage_path_remains_private_executable_authority(tmp_path: Path) -> None:
+    engine, session_id, _other_session, blobs = _reviewed_source_harness(tmp_path)
+    blob = blobs[0]
+    facts = _reviewed_source_facts(blob_id=str(blob.id), path=blob.storage_path)
+    authority = resolve_reviewed_source_authority(
+        engine=engine,
+        session_id=session_id,
+        user_id="review-owner",
+        reviewed_facts=facts,
+        expected_reviewed_anchor_hash=reviewed_anchor_hash(facts),
+    )
+
+    candidate = build_set_pipeline_candidate(
+        _named_reviewed_pipeline(tmp_path, facts),
+        _empty_state(),
+        _trained_context(
+            data_dir=tmp_path,
+            session_engine=engine,
+            session_id=session_id,
+            user_id="review-owner",
+            reviewed_source_authority=authority,
+        ),
+    )
+
+    assert authority is not None
+    assert authority.verified_blob_paths == {}
+    assert candidate.acceptable is True, candidate.result.to_dict()
+    assert candidate.result.updated_state.sources["source"].options["path"] == blob.storage_path
+
+
+def test_exact_reviewed_source_authority_allows_private_blob_resolution(tmp_path: Path) -> None:
+    engine, session_id, _other_session, blobs = _reviewed_source_harness(tmp_path)
+    blob = blobs[0]
+    facts = _reviewed_source_facts(blob_id=str(blob.id))
+    authority = resolve_reviewed_source_authority(
+        engine=engine,
+        session_id=session_id,
+        user_id="review-owner",
+        reviewed_facts=facts,
+        expected_reviewed_anchor_hash=reviewed_anchor_hash(facts),
+    )
+
+    candidate = build_set_pipeline_candidate(
+        _named_reviewed_pipeline(tmp_path, facts),
+        _empty_state(),
+        _trained_context(
+            data_dir=tmp_path,
+            session_engine=engine,
+            session_id=session_id,
+            user_id="review-owner",
+            reviewed_source_authority=authority,
+        ),
+    )
+
+    assert candidate.acceptable is True, candidate.result.to_dict()
+    assert candidate.result.updated_state.sources["source"].options["path"] == blob.storage_path
+
+
+@pytest.mark.parametrize("mutation", ["name", "plugin", "options", "failure_policy"])
+def test_reviewed_source_authority_requires_every_candidate_field_to_match(tmp_path: Path, mutation: str) -> None:
+    engine, session_id, _other_session, blobs = _reviewed_source_harness(tmp_path)
+    blob = blobs[0]
+    facts = _reviewed_source_facts(blob_id=str(blob.id))
+    authority = resolve_reviewed_source_authority(
+        engine=engine,
+        session_id=session_id,
+        user_id="review-owner",
+        reviewed_facts=facts,
+        expected_reviewed_anchor_hash=reviewed_anchor_hash(facts),
+    )
+    pipeline = _named_reviewed_pipeline(tmp_path, facts)
+    source = pipeline["sources"].pop("source")
+    source_name = "source"
+    if mutation == "name":
+        source_name = "other"
+    elif mutation == "plugin":
+        source["plugin"] = "json"
+    elif mutation == "options":
+        source["options"][SOURCE_AUTHORING_KEY]["content_hash"] = "b" * 64
+    else:
+        source["on_validation_failure"] = "fail"
+    pipeline["sources"][source_name] = source
+
+    candidate = build_set_pipeline_candidate(
+        pipeline,
+        _empty_state(),
+        _trained_context(
+            data_dir=tmp_path,
+            session_engine=engine,
+            session_id=session_id,
+            user_id="review-owner",
+            reviewed_source_authority=authority,
+        ),
+    )
+
+    assert candidate.acceptable is False
+
+
+def test_generic_cross_session_and_filesystem_callers_cannot_reuse_reviewed_authority(tmp_path: Path) -> None:
+    engine, session_id, other_session, blobs = _reviewed_source_harness(tmp_path)
+    first_blob, second_blob = blobs
+    facts = _reviewed_source_facts(blob_id=str(first_blob.id))
+    pipeline = _named_reviewed_pipeline(tmp_path, facts)
+
+    generic = build_set_pipeline_candidate(
+        pipeline,
+        _empty_state(),
+        _trained_context(data_dir=tmp_path, session_engine=engine, session_id=session_id, user_id="review-owner"),
+    )
+    assert generic.acceptable is False
+
+    other_facts = _reviewed_source_facts(blob_id=str(second_blob.id))
+    other_authority = resolve_reviewed_source_authority(
+        engine=engine,
+        session_id=other_session,
+        user_id="review-owner",
+        reviewed_facts=other_facts,
+        expected_reviewed_anchor_hash=reviewed_anchor_hash(other_facts),
+    )
+    cross_session = build_set_pipeline_candidate(
+        _named_reviewed_pipeline(tmp_path, other_facts),
+        _empty_state(),
+        _trained_context(
+            data_dir=tmp_path,
+            session_engine=engine,
+            session_id=session_id,
+            user_id="review-owner",
+            reviewed_source_authority=other_authority,
+        ),
+    )
+    assert cross_session.acceptable is False
+
+    filesystem_facts = _reviewed_source_facts(blob_id=str(first_blob.id), path="/etc/looks-reviewed.csv")
+    with pytest.raises(AuditIntegrityError, match="storage path"):
+        resolve_reviewed_source_authority(
+            engine=engine,
+            session_id=session_id,
+            user_id="review-owner",
+            reviewed_facts=filesystem_facts,
+            expected_reviewed_anchor_hash=reviewed_anchor_hash(filesystem_facts),
+        )
+
+
+def test_reviewed_source_facts_for_another_source_cannot_authorize_candidate(tmp_path: Path) -> None:
+    engine, session_id, _other_session, blobs = _reviewed_source_harness(tmp_path)
+    blob = blobs[0]
+    other_facts = _reviewed_source_facts(blob_id=str(blob.id), source_name="other")
+    authority = resolve_reviewed_source_authority(
+        engine=engine,
+        session_id=session_id,
+        user_id="review-owner",
+        reviewed_facts=other_facts,
+        expected_reviewed_anchor_hash=reviewed_anchor_hash(other_facts),
+    )
+    candidate_facts = deepcopy(other_facts)
+    candidate_source = next(iter(candidate_facts["reviewed_sources"].values()))
+    candidate_source["name"] = "source"
+
+    candidate = build_set_pipeline_candidate(
+        _named_reviewed_pipeline(tmp_path, candidate_facts),
+        _empty_state(),
+        _trained_context(
+            data_dir=tmp_path,
+            session_engine=engine,
+            session_id=session_id,
+            user_id="review-owner",
+            reviewed_source_authority=authority,
+        ),
+    )
+
+    assert candidate.acceptable is False
 
 
 def test_candidate_uses_final_request_scoped_profile_validation(tmp_path: Path) -> None:
@@ -984,6 +1398,55 @@ def test_secret_bearing_structured_llm_probe_preserves_contract_and_authored_mar
     assert mapper_contract.satisfied is True
     assert args["nodes"][2]["options"]["api_key"] == original_marker == {"secret_ref": "AZURE_OPENAI_API_KEY"}
     assert deep_thaw(result.updated_state.nodes[2].options["api_key"]) == original_marker
+
+
+def test_structured_llm_probe_failure_abstains_and_blocks_downstream_field_mapper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unconstructed LLM output fields never become field-mapper authority."""
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+    from elspeth.plugins.infrastructure.templates import TemplateError
+
+    args = _secret_bearing_structured_fork_coalesce_args(tmp_path)
+    context = _trained_context(data_dir=tmp_path)
+    original_manager = get_shared_plugin_manager()
+    secret_canary = "RAW-PROBE-ERROR-SECRET-CANARY"
+
+    class _FailingLlmProbeManager:
+        def __getattr__(self, name: str):
+            return getattr(original_manager, name)
+
+        def get_transforms(self):
+            return original_manager.get_transforms()
+
+        def create_transform(self, plugin_name: str, options: dict[str, Any]):
+            if plugin_name == "llm":
+                raise TemplateError(secret_canary)
+            return original_manager.create_transform(plugin_name, options)
+
+    monkeypatch.setattr(
+        "elspeth.plugins.infrastructure.manager.get_shared_plugin_manager",
+        lambda: _FailingLlmProbeManager(),
+    )
+
+    result = _execute_set_pipeline(args, _empty_state(), context)
+
+    assert result.success is True
+    assert not result.validation.is_valid
+    warning = next(
+        warning
+        for warning in result.validation.warnings
+        if warning.component == "node:classify" and "computed contract probe" in warning.message.lower()
+    )
+    assert "TemplateError" in warning.message
+    assert secret_canary not in repr(result.to_dict())
+    mapper_contract = next(contract for contract in result.validation.edge_contracts if contract.to_id == "select_classification")
+    assert "colour_label" not in mapper_contract.producer_guarantees
+    assert "colour_score" not in mapper_contract.producer_guarantees
+    assert {"colour_label", "colour_score"} <= set(mapper_contract.consumer_requires)
+    assert {"colour_label", "colour_score"} <= set(mapper_contract.missing_fields)
+    assert mapper_contract.satisfied is False
 
 
 def _session_with_user_message() -> tuple[Any, str, str]:

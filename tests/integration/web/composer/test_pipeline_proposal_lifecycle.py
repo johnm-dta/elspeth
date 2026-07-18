@@ -115,6 +115,8 @@ def _plan(base: AbsentBase | PresentBase | None = None) -> PipelinePlanResult:
             surface=PlannerSurface.FREEFORM,
             repair_count=0,
             skill_hash=stable_hash("skill"),
+            covered_deferred_intent_ids=(),
+            supersedes_draft_hash=None,
         ),
         tool_call_id="planner-terminal-call",
         custody_result="not_required",
@@ -160,6 +162,8 @@ def _runnable_plan(tmp_path) -> PipelinePlanResult:
             surface=PlannerSurface.FREEFORM,
             repair_count=0,
             skill_hash=stable_hash("skill"),
+            covered_deferred_intent_ids=(),
+            supersedes_draft_hash=None,
         ),
         tool_call_id="planner-terminal-call",
         custody_result="not_required",
@@ -1052,6 +1056,7 @@ async def test_prepare_pipeline_commit_revalidates_and_audits_exact_arguments_wi
 
     prepared = await prepare_pipeline_proposal_commit(
         authority=authority,
+        reviewed_facts={},
         current_state=current,
         current_state_id=None,
         policy_catalog=policy,
@@ -1068,6 +1073,7 @@ async def test_prepare_pipeline_commit_revalidates_and_audits_exact_arguments_wi
         ),
         recorder=recorder,
         actor="user:alice",
+        settlement_surface="generic",
     )
 
     assert prepared.dispatch.tool_call_id == plan.tool_call_id
@@ -1123,6 +1129,7 @@ async def test_prepare_pipeline_commit_runs_blocking_policy_validation_off_event
     task = asyncio.create_task(
         prepare_pipeline_proposal_commit(
             authority=authority,
+            reviewed_facts={},
             current_state=CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1),
             current_state_id=None,
             policy_catalog=policy,
@@ -1139,6 +1146,7 @@ async def test_prepare_pipeline_commit_runs_blocking_policy_validation_off_event
             ),
             recorder=BufferingRecorder(),
             actor="user:alice",
+            settlement_surface="generic",
         )
     )
     for _ in range(50):
@@ -1200,6 +1208,7 @@ async def test_prepare_pipeline_commit_uses_one_total_timeout_budget(
     with pytest.raises(PipelineCommitError, match="timed out") as exc_info:
         await prepare_pipeline_proposal_commit(
             authority=authority,
+            reviewed_facts={},
             current_state=CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1),
             current_state_id=None,
             policy_catalog=policy,
@@ -1216,6 +1225,7 @@ async def test_prepare_pipeline_commit_uses_one_total_timeout_budget(
             ),
             recorder=BufferingRecorder(),
             actor="user:alice",
+            settlement_surface="generic",
         )
 
     assert exc_info.value.code == "TIMEOUT"
@@ -1275,6 +1285,7 @@ async def test_prepare_pipeline_commit_detects_candidate_executor_mismatch_after
     with pytest.raises(PipelineCommitMismatchError):
         await prepare_pipeline_proposal_commit(
             authority=authority,
+            reviewed_facts={},
             current_state=current,
             current_state_id=None,
             policy_catalog=policy,
@@ -1291,6 +1302,7 @@ async def test_prepare_pipeline_commit_detects_candidate_executor_mismatch_after
             ),
             recorder=recorder,
             actor="user:alice",
+            settlement_surface="generic",
         )
 
     assert len(recorder.invocations) == 1

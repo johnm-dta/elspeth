@@ -526,6 +526,8 @@ def test_pipeline_draft_hash_rejects_values_outside_strict_json_tree(invalid_tre
             surface=PlannerSurface.FREEFORM,
             repair_count=0,
             skill_hash="b" * 64,
+            covered_deferred_intent_ids=(),
+            supersedes_draft_hash=None,
         )
 
 

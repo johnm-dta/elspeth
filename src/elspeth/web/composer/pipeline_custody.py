@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
+from pydantic import JsonValue
 from sqlalchemy import Engine
 
 from elspeth.contracts.blobs import AllowedMimeType, BlobRecord, InlineCustodyRequest
@@ -74,7 +75,7 @@ def inline_custody_audit_projection(arguments: Mapping[str, Any]) -> Mapping[str
     return projected
 
 
-def inline_custody_manifest_redaction_input(arguments: Mapping[str, Any]) -> dict[str, Any]:
+def inline_custody_manifest_redaction_input(arguments: Mapping[str, Any]) -> dict[str, JsonValue]:
     """Restore a schema-valid shell solely for manifest redaction.
 
     Dispatch auditing removes the whole untrusted ``inline_blob`` value before
@@ -102,7 +103,7 @@ def inline_custody_manifest_redaction_input(arguments: Mapping[str, Any]) -> dic
                 _restore(child)
 
     _restore(restored)
-    return restored
+    return cast(dict[str, JsonValue], restored)
 
 
 def _contains_inline_blob(value: Any) -> bool:

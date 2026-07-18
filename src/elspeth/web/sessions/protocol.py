@@ -20,7 +20,7 @@ from uuid import UUID
 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.blobs_inline import ResolvedBlobContent
-from elspeth.contracts.composer_audit import ComposerToolInvocation
+from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
 from elspeth.contracts.composer_interpretation import (
     InterpretationChoice,
     InterpretationEventRecord,
@@ -68,12 +68,12 @@ GuidedOperationKind = Literal[
     "guided_reenter",
     "state_revert",
     "session_fork",
-    "guided_plan",
 ]
 GuidedOperationFailureCode = Literal[
     "provider_unavailable",
     "provider_timeout",
     "invalid_provider_response",
+    "stale_conflict",
     "integrity_error",
     "custody_error",
     "operation_failed",
@@ -213,15 +213,7 @@ class GuidedSessionResult:
     session_id: UUID
 
 
-@final
-@dataclass(frozen=True, slots=True)
-class GuidedProposalResult:
-    """Replay locator for a staged guided-plan proposal."""
-
-    proposal_id: UUID
-
-
-type GuidedOperationResult = GuidedCompositionStateResult | GuidedSessionResult | GuidedProposalResult
+type GuidedOperationResult = GuidedCompositionStateResult | GuidedSessionResult
 
 
 @final
@@ -282,6 +274,13 @@ class GuidedOperationConflictError(RuntimeError):
         self.session_id = session_id
         self.operation_id = operation_id
         super().__init__("Guided operation id is already bound to a different request")
+
+
+class GuidedOperationSettlementConflictError(RuntimeError):
+    """The DB-locked expected composition head changed before settlement."""
+
+    def __init__(self) -> None:
+        super().__init__("Guided operation expected head changed before settlement")
 
 
 class GuidedOperationFenceLostError(RuntimeError):
@@ -807,6 +806,27 @@ class GuidedAuditEvidence:
 
 @final
 @dataclass(frozen=True, slots=True)
+class GuidedOperationFailureCommand:
+    """One atomic closed failure settlement and its sanitized audit evidence."""
+
+    fence: GuidedOperationFence
+    failure_code: GuidedOperationFailureCode
+    actor: str
+    audit_evidence: GuidedAuditEvidence
+
+    def __post_init__(self) -> None:
+        if type(self.fence) is not GuidedOperationFence:
+            raise AuditIntegrityError("guided operation failure fence must be exact")
+        if self.failure_code not in GUIDED_OPERATION_FAILURE_CODE_VALUES:
+            raise AuditIntegrityError("guided operation failure code is outside the closed vocabulary")
+        if type(self.actor) is not str or not self.actor:
+            raise AuditIntegrityError("guided operation failure actor must be non-empty")
+        if type(self.audit_evidence) is not GuidedAuditEvidence:
+            raise AuditIntegrityError("guided operation failure audit evidence must be exact")
+
+
+@final
+@dataclass(frozen=True, slots=True)
 class GuidedReplayTurn:
     """Stored locator for one exact next-turn payload."""
 
@@ -1062,6 +1082,90 @@ class GuidedStateOperationCommand:
 
 @final
 @dataclass(frozen=True, slots=True)
+class GuidedPipelineProposalStageCommand:
+    """Complete input for one atomic guided checkpoint/proposal settlement."""
+
+    fence: GuidedOperationFence
+    expected_current_state_id: UUID
+    expected_current_state_version: int
+    expected_current_content_hash: str
+    checkpoint_state_id: UUID
+    proposal_id: UUID
+    state: CompositionStateData
+    plan: PipelinePlanResult
+    summary: str
+    rationale: str
+    affects: tuple[str, ...]
+    arguments_redacted_json: Mapping[str, Any]
+    catalog_plugin_ids: Mapping[str, frozenset[str]]
+    actor: str
+    user_message_id: UUID | None
+    user_message_content_hash: str | None
+    supersedes_proposal_id: UUID | None
+    response: GuidedResponseDescriptor
+    payloads: tuple[PreparedGuidedJsonPayload, ...]
+    audit_evidence: GuidedAuditEvidence = GuidedAuditEvidence()
+
+    def __post_init__(self) -> None:
+        if type(self.fence) is not GuidedOperationFence:
+            raise AuditIntegrityError("GuidedPipelineProposalStageCommand.fence must be exact")
+        for field_name in ("expected_current_state_id", "checkpoint_state_id", "proposal_id"):
+            if type(getattr(self, field_name)) is not UUID:
+                raise AuditIntegrityError(f"GuidedPipelineProposalStageCommand.{field_name} must be a UUID")
+        if type(self.expected_current_state_version) is not int or self.expected_current_state_version < 1:
+            raise AuditIntegrityError("expected_current_state_version must be a positive exact integer")
+        _require_guided_sha256(self.expected_current_content_hash, "expected_current_content_hash")
+        if type(self.state) is not CompositionStateData:
+            raise AuditIntegrityError("GuidedPipelineProposalStageCommand.state must be exact")
+        if type(self.summary) is not str or not self.summary:
+            raise AuditIntegrityError("GuidedPipelineProposalStageCommand.summary must be non-empty")
+        if type(self.rationale) is not str or not self.rationale:
+            raise AuditIntegrityError("GuidedPipelineProposalStageCommand.rationale must be non-empty")
+        if type(self.affects) is not tuple or any(type(value) is not str or not value for value in self.affects):
+            raise AuditIntegrityError("GuidedPipelineProposalStageCommand.affects must be an exact string tuple")
+        if type(self.arguments_redacted_json) not in {dict, MappingProxyType}:
+            raise AuditIntegrityError("GuidedPipelineProposalStageCommand.arguments_redacted_json must be a mapping")
+        if type(self.catalog_plugin_ids) not in {dict, MappingProxyType} or set(self.catalog_plugin_ids) != {
+            "source",
+            "transform",
+            "sink",
+        }:
+            raise AuditIntegrityError("Guided proposal stage catalog snapshot must have exact plugin-kind keys")
+        if any(
+            type(plugin_ids) is not frozenset or any(type(plugin_id) is not str or not plugin_id for plugin_id in plugin_ids)
+            for plugin_ids in self.catalog_plugin_ids.values()
+        ):
+            raise AuditIntegrityError("Guided proposal stage catalog snapshot values must be exact plugin-id frozensets")
+        if type(self.actor) is not str or not self.actor:
+            raise AuditIntegrityError("GuidedPipelineProposalStageCommand.actor must be non-empty")
+        if self.user_message_id is not None and type(self.user_message_id) is not UUID:
+            raise AuditIntegrityError("GuidedPipelineProposalStageCommand.user_message_id must be a UUID or None")
+        if (self.user_message_id is None) != (self.user_message_content_hash is None):
+            raise AuditIntegrityError("Guided proposal user message id/hash must be paired")
+        if self.user_message_content_hash is not None:
+            _require_guided_sha256(
+                self.user_message_content_hash,
+                "GuidedPipelineProposalStageCommand.user_message_content_hash",
+            )
+        if self.supersedes_proposal_id is not None and type(self.supersedes_proposal_id) is not UUID:
+            raise AuditIntegrityError("GuidedPipelineProposalStageCommand.supersedes_proposal_id must be a UUID or None")
+        if type(self.response) is not GuidedResponseDescriptor or self.response.kind != "guided_respond":
+            raise AuditIntegrityError("Guided proposal stage response must be guided_respond")
+        if self.response.next_turn is None or self.response.next_turn.turn_type is not TurnType.PROPOSE_PIPELINE:
+            raise AuditIntegrityError("Guided proposal stage response must carry propose_pipeline")
+        if type(self.payloads) is not tuple or not self.payloads:
+            raise AuditIntegrityError("Guided proposal stage requires prepared payloads")
+        payloads_by_id = {payload.payload_id: payload for payload in self.payloads}
+        proposal_payload = payloads_by_id.get(self.response.next_turn.payload_id)
+        if proposal_payload is None or proposal_payload.purpose != "turn":
+            raise AuditIntegrityError("Guided proposal stage payload does not bind the response")
+        if type(self.audit_evidence) is not GuidedAuditEvidence:
+            raise AuditIntegrityError("Guided proposal stage audit evidence must be exact")
+        freeze_fields(self, "affects", "arguments_redacted_json", "catalog_plugin_ids", "payloads")
+
+
+@final
+@dataclass(frozen=True, slots=True)
 class GuidedStateOperationSettlement:
     """Durable cohort returned after the operation is terminally completed."""
 
@@ -1078,6 +1182,109 @@ class GuidedStateOperationSettlement:
         freeze_fields(self, "response_json")
         if stable_hash(self.response_json) != self.response_hash:
             raise AuditIntegrityError("GuidedStateOperationSettlement response hash does not match response_json")
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedPipelineProposalStageSettlement:
+    """The durable checkpoint, private proposal, and replay projection."""
+
+    result_state: CompositionStateRecord
+    proposal: CompositionProposalRecord
+    audit_messages: tuple[ChatMessageRecord, ...]
+    response_json: Mapping[str, Any]
+    response_hash: str
+
+    def __post_init__(self) -> None:
+        _require_guided_sha256(self.response_hash, "GuidedPipelineProposalStageSettlement.response_hash")
+        freeze_fields(self, "audit_messages", "response_json")
+        if stable_hash(self.response_json) != self.response_hash:
+            raise AuditIntegrityError("Guided proposal stage response hash mismatch")
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedPipelineProposalAcceptCommand:
+    """Complete atomic guided acceptance cohort."""
+
+    fence: GuidedOperationFence
+    expected_current_state_id: UUID
+    expected_current_state_version: int
+    proposal_id: UUID
+    draft_hash: str
+    reviewed_facts: Mapping[str, Any]
+    proposal_payload: Mapping[str, Any]
+    state: CompositionStateData
+    candidate_content_hash: str
+    executor_content_hash: str
+    invocation: ComposerToolInvocation
+    actor: str
+    response: GuidedResponseDescriptor
+    payloads: tuple[PreparedGuidedJsonPayload, ...]
+    audit_evidence: GuidedAuditEvidence = GuidedAuditEvidence()
+
+    def __post_init__(self) -> None:
+        if type(self.fence) is not GuidedOperationFence:
+            raise AuditIntegrityError("guided accept fence must be exact")
+        for name in ("expected_current_state_id", "proposal_id"):
+            if type(getattr(self, name)) is not UUID:
+                raise AuditIntegrityError(f"guided accept {name} must be a UUID")
+        if type(self.expected_current_state_version) is not int or self.expected_current_state_version < 1:
+            raise AuditIntegrityError("guided accept expected version must be positive")
+        for name in ("draft_hash", "candidate_content_hash", "executor_content_hash"):
+            _require_guided_sha256(getattr(self, name), f"guided accept {name}")
+        if type(self.reviewed_facts) not in {dict, MappingProxyType} or type(self.proposal_payload) not in {
+            dict,
+            MappingProxyType,
+        }:
+            raise AuditIntegrityError("guided accept reviewed facts/proposal payload must be mappings")
+        if type(self.state) is not CompositionStateData or type(self.invocation) is not ComposerToolInvocation:
+            raise AuditIntegrityError("guided accept state/invocation must be exact")
+        if (
+            self.invocation.tool_name != "set_pipeline"
+            or self.invocation.status is not ComposerToolStatus.SUCCESS
+            or self.invocation.result_hash is None
+        ):
+            raise AuditIntegrityError("guided accept requires one exact successful set_pipeline invocation")
+        if type(self.actor) is not str or not self.actor:
+            raise AuditIntegrityError("guided accept actor must be non-empty")
+        if type(self.response) is not GuidedResponseDescriptor or self.response.kind != "guided_respond":
+            raise AuditIntegrityError("guided accept response must be guided_respond")
+        if type(self.payloads) is not tuple or type(self.audit_evidence) is not GuidedAuditEvidence:
+            raise AuditIntegrityError("guided accept payload/audit cohort must be exact")
+        freeze_fields(self, "reviewed_facts", "proposal_payload", "payloads")
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedPipelineProposalRejectCommand:
+    """Complete atomic guided operator rejection cohort."""
+
+    fence: GuidedOperationFence
+    expected_current_state_id: UUID
+    expected_current_state_version: int
+    proposal_id: UUID
+    draft_hash: str
+    reviewed_facts: Mapping[str, Any]
+    actor: str
+    response: GuidedResponseDescriptor
+
+    def __post_init__(self) -> None:
+        if type(self.fence) is not GuidedOperationFence:
+            raise AuditIntegrityError("guided reject fence must be exact")
+        for name in ("expected_current_state_id", "proposal_id"):
+            if type(getattr(self, name)) is not UUID:
+                raise AuditIntegrityError(f"guided reject {name} must be a UUID")
+        if type(self.expected_current_state_version) is not int or self.expected_current_state_version < 1:
+            raise AuditIntegrityError("guided reject expected version must be positive")
+        _require_guided_sha256(self.draft_hash, "guided reject draft_hash")
+        if type(self.reviewed_facts) not in {dict, MappingProxyType}:
+            raise AuditIntegrityError("guided reject reviewed_facts must be a mapping")
+        if type(self.actor) is not str or not self.actor:
+            raise AuditIntegrityError("guided reject actor must be non-empty")
+        if type(self.response) is not GuidedResponseDescriptor or self.response.kind != "guided_respond":
+            raise AuditIntegrityError("guided reject response must be guided_respond")
+        freeze_fields(self, "reviewed_facts")
 
 
 @final
@@ -1386,6 +1593,11 @@ class SessionServiceProtocol(Protocol):
         actor: str,
     ) -> GuidedOperationFailed: ...
 
+    async def fail_guided_operation_with_audit(
+        self,
+        command: GuidedOperationFailureCommand,
+    ) -> GuidedOperationFailed: ...
+
     async def revert_state_for_guided_operation(
         self,
         fence: GuidedOperationFence,
@@ -1417,6 +1629,35 @@ class SessionServiceProtocol(Protocol):
         *,
         payload_store: PayloadStore | None = None,
     ) -> GuidedStateOperationSettlement: ...
+
+    async def stage_guided_pipeline_proposal(
+        self,
+        command: GuidedPipelineProposalStageCommand,
+        *,
+        payload_store: PayloadStore | None = None,
+    ) -> GuidedPipelineProposalStageSettlement: ...
+
+    async def reconcile_rejected_guided_pipeline_proposal(
+        self,
+        *,
+        session_id: UUID,
+        expected_current_state_id: UUID,
+        proposal_id: UUID,
+        draft_hash: str,
+        reviewed_facts: Mapping[str, Any],
+    ) -> CompositionStateRecord: ...
+
+    async def accept_guided_pipeline_proposal(
+        self,
+        command: GuidedPipelineProposalAcceptCommand,
+        *,
+        payload_store: PayloadStore | None = None,
+    ) -> GuidedPipelineProposalStageSettlement: ...
+
+    async def reject_guided_pipeline_proposal(
+        self,
+        command: GuidedPipelineProposalRejectCommand,
+    ) -> GuidedPipelineProposalStageSettlement: ...
 
     async def seed_or_complete_guided_start_operation(
         self,

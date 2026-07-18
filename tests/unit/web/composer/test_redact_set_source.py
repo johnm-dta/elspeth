@@ -261,6 +261,83 @@ def test_redact_guided_snapshot_leaves_operator_typed_source() -> None:
     assert REDACTED_BLOB_SOURCE_PATH not in str((sources_out, meta_out))
 
 
+def test_redact_guided_snapshot_projects_canonical_blob_sentinel_by_exact_name() -> None:
+    real_path = "/internal/blobs/session/source.csv"
+    sentinel = "blob:11111111-1111-4111-8111-111111111111"
+    sources = {"source": {"options": {"path": real_path, "schema": {"mode": "observed"}}}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                "22222222-2222-4222-8222-222222222222": {
+                    "name": "source",
+                    "options": {"path": sentinel, "schema": {"mode": "observed"}},
+                }
+            },
+            "pending_source_intents": {},
+        },
+        "implicit_decisions": {
+            "schema_version": 1,
+            "entries": [{"path": "source.path", "value": real_path, "category": "source"}],
+            "normalization_events": [],
+        },
+    }
+
+    sources_out, meta_out = redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+    assert sources_out["source"]["options"]["path"] == sentinel
+    assert real_path not in str((sources_out, meta_out))
+    assert meta_out["implicit_decisions"]["entries"][0]["value"] == sentinel
+    assert composer_meta["guided_session"]["reviewed_sources"]["22222222-2222-4222-8222-222222222222"]["options"]["path"] == sentinel
+
+
+@pytest.mark.parametrize(
+    ("source_name", "sentinel"),
+    [
+        ("missing", "blob:11111111-1111-4111-8111-111111111111"),
+        ("source", "blob:not-a-uuid"),
+    ],
+    ids=["missing_name", "invalid_sentinel"],
+)
+def test_redact_guided_snapshot_rejects_unbound_or_invalid_blob_sentinel(source_name: str, sentinel: str) -> None:
+    sources = {"source": {"options": {"path": "/internal/blobs/session/source.csv"}}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                "22222222-2222-4222-8222-222222222222": {
+                    "name": source_name,
+                    "options": {"path": sentinel},
+                }
+            },
+            "pending_source_intents": {},
+        }
+    }
+
+    with pytest.raises(AuditIntegrityError):
+        redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+
+def test_redact_guided_snapshot_rejects_duplicate_reviewed_source_names() -> None:
+    sources = {"source": {"options": {"path": "/internal/blobs/session/source.csv"}}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                stable_id: {
+                    "name": "source",
+                    "options": {"path": f"blob:{stable_id}"},
+                }
+                for stable_id in (
+                    "11111111-1111-4111-8111-111111111111",
+                    "22222222-2222-4222-8222-222222222222",
+                )
+            },
+            "pending_source_intents": {},
+        }
+    }
+
+    with pytest.raises(AuditIntegrityError, match="names must be unique"):
+        redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+
 def test_redact_guided_snapshot_noop_for_freeform_state() -> None:
     """Freeform state (composer_meta is None, or has no guided_session snapshot) is
     returned unchanged — the helper only acts on a guided blob-backed snapshot."""

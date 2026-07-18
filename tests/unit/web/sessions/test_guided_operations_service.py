@@ -36,8 +36,8 @@ from elspeth.web.sessions.protocol import (
     GuidedOperationFailed,
     GuidedOperationFence,
     GuidedOperationFenceLostError,
+    GuidedOperationSettlementConflictError,
     GuidedOperationTakenOver,
-    GuidedProposalResult,
     GuidedSessionResult,
 )
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -459,7 +459,7 @@ async def test_guided_seed_rejects_cross_service_head_drift_before_writes(file_e
         provenance="session_seed",
     )
 
-    with pytest.raises(AuditIntegrityError, match="current state"):
+    with pytest.raises(GuidedOperationSettlementConflictError):
         await service_a.save_state_for_guided_operation(
             claim.fence,
             expected_current_state_id=None,
@@ -502,7 +502,7 @@ async def test_existing_guided_settlement_rejects_cross_service_head_drift(file_
         provenance="session_seed",
     )
 
-    with pytest.raises(AuditIntegrityError, match="current state"):
+    with pytest.raises(GuidedOperationSettlementConflictError):
         await service_a.complete_existing_state_guided_operation(
             claim.fence,
             state_id=observed.id,
@@ -650,7 +650,6 @@ async def test_file_backed_sqlite_concurrent_takeover_has_one_winner(file_engine
         ("guided_convert", "state"),
         ("guided_reenter", "state"),
         ("state_revert", "state"),
-        ("guided_plan", "proposal"),
         ("session_fork", "session"),
     ],
 )
@@ -670,7 +669,6 @@ async def test_terminal_replay_uses_closed_per_kind_locator(file_engine, kind: s
     result = {
         "state": GuidedCompositionStateResult(state_id=state_id),
         "state_with_proposal": GuidedCompositionStateResult(state_id=state_id, proposal_id=proposal_id),
-        "proposal": GuidedProposalResult(proposal_id=proposal_id),
         "session": GuidedSessionResult(session_id=child_session_id),
     }[result_factory]
     operation_id = f"operation-{kind}"
@@ -685,9 +683,7 @@ async def test_terminal_replay_uses_closed_per_kind_locator(file_engine, kind: s
     )
     assert isinstance(claimed, GuidedOperationClaimed)
 
-    if isinstance(result, GuidedProposalResult):
-        await service.bind_guided_operation(claimed.fence, proposal_id=result.proposal_id, result_state_id=state_id)
-    elif isinstance(result, GuidedSessionResult):
+    if isinstance(result, GuidedSessionResult):
         await service.bind_guided_operation(claimed.fence, result_session_id=result.session_id)
 
     completed = await service.complete_guided_operation(

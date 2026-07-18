@@ -848,6 +848,8 @@ async def _create_canonical_pipeline_route_proposal(
         surface=PlannerSurface.FREEFORM,
         repair_count=0,
         skill_hash=stable_hash("planner-skill"),
+        covered_deferred_intent_ids=(),
+        supersedes_draft_hash=None,
     )
     session = await service.create_session("alice", "Canonical accept", "local")
     session_id = session.id
@@ -1384,6 +1386,8 @@ def test_canonical_pipeline_accept_requires_and_echoes_draft_hash(tmp_path, monk
         surface=PlannerSurface.FREEFORM,
         repair_count=0,
         skill_hash=stable_hash("planner-skill"),
+        covered_deferred_intent_ids=(),
+        supersedes_draft_hash=None,
     )
     plan = PipelinePlanResult(
         proposal=proposal_envelope,
@@ -1515,6 +1519,8 @@ def test_generic_accept_rejects_guided_pipeline_surfaces_before_dispatch(tmp_pat
         surface=getattr(PlannerSurface, surface_name),
         repair_count=0,
         skill_hash=stable_hash("planner-skill"),
+        covered_deferred_intent_ids=(),
+        supersedes_draft_hash=None,
     )
     plan = PipelinePlanResult(
         proposal=proposal_envelope,
@@ -1593,6 +1599,8 @@ def test_malformed_canonical_creation_event_fails_closed_without_legacy_fallback
         surface=PlannerSurface.FREEFORM,
         repair_count=0,
         skill_hash=stable_hash("planner-skill"),
+        covered_deferred_intent_ids=(),
+        supersedes_draft_hash=None,
     )
     plan = PipelinePlanResult(
         proposal=proposal_envelope,

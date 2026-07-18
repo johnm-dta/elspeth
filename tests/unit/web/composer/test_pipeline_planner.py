@@ -274,7 +274,11 @@ async def _plan(
     return await plan_pipeline(
         intent=intent,
         current_state=current_state or _empty_state(),
+        provider_current_state=(current_state or _empty_state()).to_dict(),
         reviewed_facts={"request": "Build the requested pipeline."},
+        reviewed_planner_context={"request": "Build the requested pipeline."},
+        covered_deferred_intent_ids=(),
+        supersedes_draft_hash=None,
         surface=PlannerSurface.FREEFORM,
         policy_catalog=policy_catalog,
         plugin_snapshot=plugin_snapshot,
@@ -287,6 +291,7 @@ async def _plan(
         custody_config=custody_config or _custody(tmp_path),
         lifecycle=lifecycle or _lifecycle(),
         recorder=recorder or BufferingRecorder(),
+        candidate_finalizer=lambda candidate: candidate,
     )
 
 

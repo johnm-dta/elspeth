@@ -24,7 +24,7 @@ from elspeth.web.composer.guided.state_machine import (
 )
 from elspeth.web.composer.source_inspection import SourceInspectionFacts
 from elspeth.web.sessions.guided_replay import guided_turn_token, load_guided_json_payload
-from elspeth.web.sessions.protocol import CompositionStateData
+from elspeth.web.sessions.protocol import CompositionStateData, GuidedOperationSettlementConflictError
 from elspeth.web.sessions.routes._helpers import _initial_composition_state_with_guided_session
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
@@ -339,6 +339,25 @@ def test_reenter_audit_insert_failure_rolls_back_new_occurrence(composer_test_cl
     versions = asyncio.run(service.get_state_versions(UUID(session_id)))
     assert [state.version for state in versions] == [1]
     assert _guided_turn_emitted_args(composer_test_client, session_id) == []
+
+
+def test_reenter_settlement_head_conflict_is_terminal_and_exactly_replayed(composer_test_client: TestClient) -> None:
+    session_id = _create_session(composer_test_client)
+    _seed_exited_wire_state(composer_test_client, session_id)
+    service = composer_test_client.app.state.session_service
+    request_body = {"operation_id": str(uuid4())}
+
+    with patch.object(
+        service,
+        "settle_guided_state_operation",
+        side_effect=GuidedOperationSettlementConflictError(),
+    ):
+        first = composer_test_client.post(f"/api/sessions/{session_id}/guided/reenter", json=request_body)
+    replay = composer_test_client.post(f"/api/sessions/{session_id}/guided/reenter", json=request_body)
+
+    assert first.status_code == replay.status_code == 409
+    assert first.json() == replay.json()
+    assert first.json()["detail"]["failure_code"] == "stale_conflict"
 
 
 @pytest.mark.parametrize(

@@ -17,8 +17,10 @@ from pathlib import Path
 import pytest
 import structlog
 from fastapi import FastAPI
-from sqlalchemy.pool import StaticPool
+from testcontainers.postgres import PostgresContainer
 
+from elspeth.contracts.freeze import deep_thaw
+from elspeth.core.canonical import stable_hash
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 from elspeth.web.auth.middleware import get_current_user
@@ -26,6 +28,9 @@ from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.routes import create_blobs_router
 from elspeth.web.blobs.service import BlobServiceImpl
 from elspeth.web.composer.audit import BufferingRecorder
+from elspeth.web.composer.guided.planning import guided_private_reviewed_facts
+from elspeth.web.composer.pipeline_planner import PipelinePlanResult
+from elspeth.web.composer.pipeline_proposal import PipelineProposal, PlannerSurface
 from elspeth.web.composer.progress import ComposerProgressRegistry
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import create_catalog_service
@@ -42,7 +47,7 @@ from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
 @pytest.fixture
-def composer_test_client(tmp_path: Path) -> Iterator[TestClient]:
+def composer_test_client(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[TestClient]:
     """Yields a TestClient wrapping a minimal FastAPI app with session router.
 
     App state includes:
@@ -61,12 +66,18 @@ def composer_test_client(tmp_path: Path) -> Iterator[TestClient]:
             resp = composer_test_client.post("/api/sessions", json={"title": "x"})
             assert resp.status_code == 201
     """
-    # Create in-memory session database with schema initialized
-    engine = create_session_engine(
-        "sqlite:///:memory:",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
+    backend = getattr(request, "param", "sqlite")
+    postgres: PostgresContainer | None = None
+    if backend == "sqlite":
+        # Use independent SQLite connections so route-race tests exercise the
+        # same transaction/locking boundary as a deployed file-backed database.
+        engine = create_session_engine(f"sqlite:///{tmp_path / 'sessions.sqlite3'}")
+    elif backend == "postgres":
+        postgres = PostgresContainer("postgres:16-alpine")
+        postgres.start()
+        engine = create_session_engine(postgres.get_connection_url())
+    else:  # pragma: no cover - fixture contract
+        raise AssertionError(f"unsupported guided integration backend: {backend}")
     initialize_session_schema(engine)
 
     # Session and blob services
@@ -113,7 +124,61 @@ def composer_test_client(tmp_path: Path) -> Iterator[TestClient]:
             }
         },
     )
-    app.state.composer_service = None  # Not used in session router
+
+    class _DeterministicGuidedPlanner:
+        """Explicit test double for the shared planner route seam."""
+
+        async def plan_guided_pipeline(self, *, guided, base, supersedes_draft_hash, recorder, **_kwargs):
+            output_name = guided.reviewed_outputs[guided.output_order[0]].name
+            pipeline = {
+                "sources": {
+                    guided.reviewed_sources[stable_id].name: {
+                        "plugin": guided.reviewed_sources[stable_id].plugin,
+                        "options": deep_thaw(guided.reviewed_sources[stable_id].options),
+                        "on_success": output_name,
+                        "on_validation_failure": guided.reviewed_sources[stable_id].on_validation_failure,
+                    }
+                    for stable_id in guided.source_order
+                },
+                "nodes": [],
+                "edges": [],
+                "outputs": [
+                    {
+                        "sink_name": guided.reviewed_outputs[stable_id].name,
+                        "plugin": guided.reviewed_outputs[stable_id].plugin,
+                        "options": deep_thaw(guided.reviewed_outputs[stable_id].options),
+                        "on_write_failure": guided.reviewed_outputs[stable_id].on_write_failure,
+                    }
+                    for stable_id in guided.output_order
+                ],
+            }
+            proposal = PipelineProposal.create(
+                pipeline=pipeline,
+                base=base,
+                reviewed_facts=guided_private_reviewed_facts(guided),
+                surface=PlannerSurface.GUIDED_STAGED,
+                repair_count=0,
+                skill_hash=stable_hash("deterministic-guided-test-planner"),
+                covered_deferred_intent_ids=tuple(intent.intent_id for intent in guided.deferred_intents),
+                supersedes_draft_hash=supersedes_draft_hash,
+            )
+            return (
+                PipelinePlanResult(
+                    proposal=proposal,
+                    tool_call_id=f"guided-test-{proposal.draft_hash[:16]}",
+                    custody_result="not_required",
+                    model_identifier="deterministic-guided-test-planner",
+                    model_version="v1",
+                    provider="test",
+                ),
+                {
+                    "source": frozenset(source.plugin for source in guided.reviewed_sources.values()),
+                    "transform": frozenset(),
+                    "sink": frozenset(output.plugin for output in guided.reviewed_outputs.values()),
+                },
+            )
+
+    app.state.composer_service = _DeterministicGuidedPlanner()
     app.state.rate_limiter = ComposerRateLimiter(limit=100)
     app.state.catalog_service = create_catalog_service()
     runtime_policy = RuntimeWebPluginConfig.from_settings(app.state.settings)
@@ -165,7 +230,12 @@ def composer_test_client(tmp_path: Path) -> Iterator[TestClient]:
 
     # Wrap in TestClient and yield
     client = TestClient(app)
-    yield client
+    try:
+        yield client
+    finally:
+        engine.dispose()
+        if postgres is not None:
+            postgres.stop()
 
 
 @pytest.fixture

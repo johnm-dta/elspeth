@@ -300,6 +300,27 @@ async def test_failed_operation_maps_only_closed_safe_failure() -> None:
     }
 
 
+@pytest.mark.asyncio
+async def test_terminal_stale_settlement_conflict_maps_to_safe_http_409() -> None:
+    service = _Service([GuidedOperationFailed(failure_code="stale_conflict")])
+
+    with pytest.raises(HTTPException) as caught:
+        await reserve_or_replay_guided_operation(
+            service=service,
+            session_id=uuid4(),
+            kind="guided_reenter",
+            request=_request(),
+            replay=lambda _locator: _never(),
+        )
+
+    assert caught.value.status_code == 409
+    assert caught.value.detail == {
+        "error_type": "guided_operation_terminal_failure",
+        "failure_code": "stale_conflict",
+        "detail": "The guided state changed before settlement. Reload the authoritative state.",
+    }
+
+
 async def _response(value: str) -> _Response:
     return _Response(value=value)
 

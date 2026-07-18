@@ -16,7 +16,9 @@ from uuid import UUID
 
 if TYPE_CHECKING:
     from elspeth.web.composer.audit import BufferingRecorder
-    from elspeth.web.composer.guided.state_machine import TerminalState
+    from elspeth.web.composer.guided.state_machine import GuidedSession, TerminalState
+    from elspeth.web.composer.pipeline_planner import PipelinePlanResult, PlannerOriginatingMessage
+    from elspeth.web.composer.pipeline_proposal import PresentBase
     from elspeth.web.composer.service import AdvisorCheckpointVerdict
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation
@@ -794,6 +796,22 @@ class ComposerService(Protocol):
         Raises:
             ComposerConvergenceError: If the loop exceeds max_turns.
         """
+
+    async def plan_guided_pipeline(
+        self,
+        *,
+        intent: str,
+        current_state: CompositionState,
+        guided: GuidedSession,
+        originating_message: PlannerOriginatingMessage,
+        base: PresentBase,
+        user_id: str | None,
+        supersedes_draft_hash: str | None,
+        recorder: BufferingRecorder,
+        progress: ComposerProgressSink | None = None,
+    ) -> tuple[PipelinePlanResult, Mapping[str, frozenset[str]]]:
+        """Run the shared planner once with split private/provider-safe facts."""
+        ...
 
     async def surface_pending_interpretation_reviews(
         self,

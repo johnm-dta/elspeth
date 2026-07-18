@@ -233,8 +233,8 @@ def pipeline_draft_hash(
     surface: PlannerSurface,
     repair_count: int,
     skill_hash: str,
-    covered_deferred_intent_ids: tuple[str, ...] = (),
-    supersedes_draft_hash: str | None = None,
+    covered_deferred_intent_ids: tuple[str, ...],
+    supersedes_draft_hash: str | None,
 ) -> str:
     """Hash the complete authority-bearing proposal envelope under v2."""
     frozen_pipeline = _validate_and_freeze_canonical_mapping(pipeline, "pipeline")
@@ -273,8 +273,8 @@ class PipelineProposal:
     surface: PlannerSurface
     repair_count: int
     skill_hash: str
-    covered_deferred_intent_ids: tuple[str, ...] = ()
-    supersedes_draft_hash: str | None = None
+    covered_deferred_intent_ids: tuple[str, ...]
+    supersedes_draft_hash: str | None
 
     def __post_init__(self) -> None:
         frozen_pipeline = _validate_and_freeze_canonical_mapping(self.pipeline, "pipeline")
@@ -314,8 +314,8 @@ class PipelineProposal:
         surface: PlannerSurface,
         repair_count: int,
         skill_hash: str,
-        covered_deferred_intent_ids: tuple[str, ...] = (),
-        supersedes_draft_hash: str | None = None,
+        covered_deferred_intent_ids: tuple[str, ...],
+        supersedes_draft_hash: str | None,
         supplied_draft_hash: str | None = None,
         supplied_reviewed_anchor_hash: str | None = None,
     ) -> Self:

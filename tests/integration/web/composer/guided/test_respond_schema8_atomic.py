@@ -22,11 +22,8 @@ from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.payload_store import PayloadNotFoundError
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import (
-    PROPOSAL_RATIONALE_TEMPLATE,
-    PROPOSAL_SUMMARY_TEMPLATE,
     GuidedStep,
     TurnType,
-    proposal_component_label,
 )
 from elspeth.web.composer.guided.state_machine import (
     GuidedProposalRef,
@@ -638,71 +635,6 @@ def test_preflight_invariant_is_sanitized_without_reservation_or_mutation(
     ("step", "turn"),
     [
         (
-            GuidedStep.STEP_3_TRANSFORMS,
-            {
-                "type": TurnType.PROPOSE_PIPELINE.value,
-                "step_index": 2,
-                "payload": {
-                    "proposal_id": "00000000-0000-4000-8000-000000000401",
-                    "draft_hash": "d" * 64,
-                    "summary": PROPOSAL_SUMMARY_TEMPLATE,
-                    "rationale": PROPOSAL_RATIONALE_TEMPLATE,
-                    "component_counts": {"sources": 1, "nodes": 0, "edges": 3, "outputs": 1},
-                    "blockers": [],
-                    "graph": {
-                        "sources": [
-                            {
-                                "stable_id": "00000000-0000-4000-8000-000000000402",
-                                "label": proposal_component_label("source", 0),
-                                "plugin": {"kind": "source", "id": "csv"},
-                            }
-                        ],
-                        "edges": [
-                            {
-                                "stable_id": "00000000-0000-4000-8000-000000000403",
-                                "from_endpoint": {
-                                    "kind": "source",
-                                    "stable_id": "00000000-0000-4000-8000-000000000402",
-                                },
-                                "to_endpoint": {
-                                    "kind": "output",
-                                    "stable_id": "00000000-0000-4000-8000-000000000405",
-                                },
-                                "flow": {"kind": "source_success", "branch": None},
-                            },
-                            {
-                                "stable_id": "00000000-0000-4000-8000-000000000406",
-                                "from_endpoint": {
-                                    "kind": "source",
-                                    "stable_id": "00000000-0000-4000-8000-000000000402",
-                                },
-                                "to_endpoint": {"kind": "discard"},
-                                "flow": {"kind": "source_validation_failure"},
-                            },
-                            {
-                                "stable_id": "00000000-0000-4000-8000-000000000407",
-                                "from_endpoint": {
-                                    "kind": "output",
-                                    "stable_id": "00000000-0000-4000-8000-000000000405",
-                                },
-                                "to_endpoint": {"kind": "discard"},
-                                "flow": {"kind": "output_write_failure"},
-                            },
-                        ],
-                    },
-                    "nodes": [],
-                    "outputs": [
-                        {
-                            "stable_id": "00000000-0000-4000-8000-000000000405",
-                            "label": proposal_component_label("output", 0),
-                            "plugin": {"kind": "sink", "id": "json"},
-                        }
-                    ],
-                    "edit_targets": [],
-                },
-            },
-        ),
-        (
             GuidedStep.STEP_4_WIRE,
             {
                 "type": TurnType.CONFIRM_WIRING.value,
@@ -854,6 +786,8 @@ def test_respond_handler_has_no_legacy_or_unfenced_mutation_calls() -> None:
 
     assert calls.isdisjoint(
         {
+            "RecoveredPipelineCommit",
+            "_persist_tool_invocations",
             "step_advance",
             "_dispatch_guided_respond",
             "_append_server_turn_record",
@@ -861,7 +795,14 @@ def test_respond_handler_has_no_legacy_or_unfenced_mutation_calls() -> None:
             "stable_hash",
         }
     )
-    assert attributes.isdisjoint({"save_composition_state", "_persist_tool_invocations", "_persist_llm_calls"})
+    assert attributes.isdisjoint(
+        {
+            "get_pipeline_dispatch_recovery",
+            "save_composition_state",
+            "_persist_tool_invocations",
+            "_persist_llm_calls",
+        }
+    )
     assert {"reserve_or_replay_guided_operation", "GuidedStateOperationCommand"} <= calls
     assert {"renew_guided_operation", "settle_guided_state_operation"} <= attributes
 
@@ -1198,7 +1139,7 @@ def test_failure_handler_failure_raises_static_integrity_error_and_logs_only_saf
         raise RuntimeError(failure_canary)
 
     monkeypatch.setattr(service, "settle_guided_state_operation", fail_settlement)
-    monkeypatch.setattr(service, "fail_guided_operation", fail_failure_handler)
+    monkeypatch.setattr(service, "fail_guided_operation_with_audit", fail_failure_handler)
 
     from structlog.testing import capture_logs
 

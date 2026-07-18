@@ -704,13 +704,19 @@ async def test_guided_start_does_not_overwrite_head_changed_after_preflight(tmp_
         return outcome
 
     with patch.object(service, "reserve_guided_operation", side_effect=reserve_after_freeform_race):
+        operation_id = str(uuid.uuid4())
         response = client.post(
             f"/api/sessions/{session.id}/guided/start",
-            json={"profile": "tutorial", "operation_id": str(uuid.uuid4())},
+            json={"profile": "tutorial", "operation_id": operation_id},
         )
+    replay = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": "tutorial", "operation_id": operation_id},
+    )
 
-    assert response.status_code == 500
-    assert response.json()["detail"]["failure_code"] == "integrity_error"
+    assert response.status_code == replay.status_code == 409
+    assert response.json() == replay.json()
+    assert response.json()["detail"]["failure_code"] == "stale_conflict"
     persisted = await service.get_current_state(session.id)
     assert raced_record is not None
     assert persisted is not None

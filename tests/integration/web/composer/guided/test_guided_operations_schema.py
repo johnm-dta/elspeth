@@ -150,7 +150,6 @@ def test_tables_and_composite_keys_are_current(engine) -> None:
         "guided_reenter",
         "state_revert",
         "session_fork",
-        "guided_plan",
     ],
 )
 def test_operation_kind_closed_vocabulary_accepts_supported_kinds(engine, kind: str) -> None:
@@ -167,6 +166,7 @@ def test_operation_kind_closed_vocabulary_accepts_supported_kinds(engine, kind: 
         ("request_hash", "a" * 63),
         ("attempt", 0),
         ("operation_id", ""),
+        ("kind", "guided_plan"),
     ],
 )
 def test_operation_constraints_reject_invalid_values(engine, column: str, value: object) -> None:
@@ -263,17 +263,18 @@ def test_completed_and_failed_terminal_bundles_are_accepted(engine) -> None:
                 )
             )
         )
+
+
+def test_stale_conflict_is_a_current_closed_terminal_failure_code(engine) -> None:
+    with engine.begin() as connection:
         connection.execute(
             insert(guided_operations_table).values(
                 **_operation(
-                    operation_id="00000000-0000-4000-8000-000000000006",
-                    kind="guided_plan",
-                    status="completed",
+                    operation_id="00000000-0000-4000-8000-000000000017",
+                    status="failed",
                     lease_token=None,
                     lease_expires_at=None,
-                    result_kind="proposal",
-                    proposal_id=PROPOSAL_ID,
-                    response_hash="d" * 64,
+                    failure_code="stale_conflict",
                     settled_at=NOW,
                 )
             )
@@ -300,15 +301,6 @@ def test_in_progress_resumable_refs_are_kind_bound_but_supported(engine) -> None
                 )
             )
         )
-        connection.execute(
-            insert(guided_operations_table).values(
-                **_operation(
-                    operation_id="00000000-0000-4000-8000-000000000015",
-                    kind="guided_plan",
-                    result_state_id=STATE_ID,
-                )
-            )
-        )
 
 
 def test_in_progress_fork_cannot_bind_a_parent_session_state(engine) -> None:
@@ -319,24 +311,6 @@ def test_in_progress_fork_cannot_bind_a_parent_session_state(engine) -> None:
                     operation_id="00000000-0000-4000-8000-000000000016",
                     kind="session_fork",
                     result_state_id=STATE_ID,
-                )
-            )
-        )
-        connection.execute(
-            insert(guided_operations_table).values(
-                **_operation(
-                    operation_id="00000000-0000-4000-8000-000000000012",
-                    kind="guided_plan",
-                    proposal_id=PROPOSAL_ID,
-                )
-            )
-        )
-        connection.execute(
-            insert(guided_operations_table).values(
-                **_operation(
-                    operation_id="00000000-0000-4000-8000-000000000013",
-                    kind="guided_respond",
-                    proposal_id=PROPOSAL_ID,
                 )
             )
         )
@@ -368,7 +342,7 @@ def test_operation_id_is_scoped_by_session(engine) -> None:
         {"kind": "guided_start", "result_session_id": "00000000-0000-4000-8000-000000000009"},
         {"kind": "guided_start", "proposal_id": "00000000-0000-4000-8000-000000000008"},
         {"kind": "session_fork", "proposal_id": "00000000-0000-4000-8000-000000000008"},
-        {"kind": "guided_plan", "result_session_id": "00000000-0000-4000-8000-000000000009"},
+        {"kind": "guided_plan"},
         {"result_kind": "arbitrary_json"},
         {"result_kind": "composition_state", "result_state_id": "00000000-0000-4000-8000-000000000004"},
     ],
@@ -388,7 +362,6 @@ def test_in_progress_locator_fields_are_closed_and_kind_bound(engine, values: di
         ("guided_reenter", "session", {"result_session_id": "00000000-0000-4000-8000-000000000009"}),
         ("state_revert", "proposal", {"proposal_id": "00000000-0000-4000-8000-000000000008"}),
         ("session_fork", "composition_state", {"result_state_id": "00000000-0000-4000-8000-000000000004"}),
-        ("guided_plan", "composition_state", {"result_state_id": "00000000-0000-4000-8000-000000000004"}),
     ],
 )
 def test_completed_locator_discriminator_is_tied_to_operation_kind(

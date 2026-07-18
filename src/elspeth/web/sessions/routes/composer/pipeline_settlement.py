@@ -144,6 +144,7 @@ async def settle_pipeline_proposal_under_compose_lock(
         prepared, _ = await _await_with_deferred_cancellation(
             prepare_pipeline_proposal_commit(
                 authority=authority,
+                reviewed_facts={},
                 current_state=current_state,
                 current_state_id=current_record.id if current_record is not None else None,
                 policy_catalog=policy_catalog,
@@ -160,6 +161,7 @@ async def settle_pipeline_proposal_under_compose_lock(
                 ),
                 recorder=recorder,
                 actor=f"user:{user.user_id}",
+                settlement_surface="generic",
                 recovery_dispatch=recovery.binding if recovery is not None else None,
                 recovery_executor_content_hash=recovery.executor_content_hash if recovery is not None else None,
             ),

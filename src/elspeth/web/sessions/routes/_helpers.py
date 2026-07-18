@@ -160,6 +160,7 @@ from elspeth.web.sessions.schemas import (
     ChatMessageResponse,
     ChatTurnResponse,
     ComposerPreferencesResponse,
+    CompositionObject,
     CompositionProposalResponse,
     CompositionStateResponse,
     CreateSessionRequest,
@@ -649,7 +650,7 @@ def _plugin_policy_findings(
 def merge_composer_meta_updates(
     existing_meta: Mapping[str, Any] | None,
     updates: Mapping[str, Any],
-) -> dict[str, Any]:
+) -> CompositionObject:
     """Merge route-owned updates without dropping opaque lifecycle metadata.
 
     ``composer_meta`` is a shared persistence envelope.  Version-changing
@@ -657,7 +658,7 @@ def merge_composer_meta_updates(
     subsystems rather than rebuilding the envelope from only the keys they
     understand.
     """
-    merged = dict(deep_thaw(existing_meta)) if existing_meta is not None else {}
+    merged = cast(CompositionObject, dict(deep_thaw(existing_meta))) if existing_meta is not None else {}
     merged.update(updates)
     return merged
 

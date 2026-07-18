@@ -34,6 +34,7 @@ from elspeth.web.composer.state import (
     ValidationSummary,
 )
 from elspeth.web.composer.tools._common import (
+    ReviewedSourceAuthority,
     RuntimePreflight,
     ToolContext,
     ToolHandler,
@@ -540,6 +541,7 @@ def execute_tool(
     composer_provider: str | None = None,
     composer_skill_hash: str | None = None,
     tool_arguments_hash: str | None = None,
+    reviewed_source_authority: ReviewedSourceAuthority | None = None,
     raise_schema_argument_errors: bool = False,
 ) -> ToolResult:
     """Execute a composition tool by name.
@@ -661,6 +663,7 @@ def execute_tool(
         composer_provider=composer_provider,
         composer_skill_hash=composer_skill_hash,
         tool_arguments_hash=tool_arguments_hash,
+        reviewed_source_authority=reviewed_source_authority,
     )
 
     result = handler(arguments, state, context)

@@ -159,6 +159,9 @@ def prepare_guided_audit_rows(
         if call.status is not ComposerLLMCallStatus.SUCCESS:
             public_call = deep_thaw(envelope["call"])
             public_call["error_message"] = None
+            public_call["reasoning_content"] = None
+            public_call["reasoning_details"] = None
+            public_call["thinking_blocks"] = None
             envelope = {"_kind": "llm_call_audit", "call": public_call}
         rows.append(
             PreparedGuidedAuditRow(

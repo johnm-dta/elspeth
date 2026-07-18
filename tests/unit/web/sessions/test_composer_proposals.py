@@ -75,6 +75,8 @@ def _pipeline_plan_result(*, tool_call_id: str = "call_pipeline") -> PipelinePla
         surface=PlannerSurface.FREEFORM,
         repair_count=0,
         skill_hash=stable_hash("planner-skill"),
+        covered_deferred_intent_ids=(),
+        supersedes_draft_hash=None,
     )
     return PipelinePlanResult(
         proposal=proposal,
@@ -284,10 +286,43 @@ async def test_create_composition_proposal_writes_created_event(service) -> None
     assert [event.event_type for event in events] == ["proposal.created"]
     assert str(events[0].proposal_id) == str(proposal.id)
     assert events[0].payload == {
+        "schema": "tool_proposal_created.v1",
         "tool_call_id": "call_set_pipeline",
         "tool_name": "set_pipeline",
         "status": "pending",
     }
+
+
+@pytest.mark.asyncio
+async def test_three_field_proposal_created_event_is_rejected_not_compatibly_read(service) -> None:
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+    proposal = await service.create_composition_proposal(
+        session_id=session_id,
+        tool_call_id="call_current",
+        tool_name="set_pipeline",
+        summary="Current tool proposal.",
+        rationale="Requested by the user.",
+        affects=("graph",),
+        arguments_json={"sources": {"primary": {"plugin": "csv", "options": {}}}},
+        arguments_redacted_json={"sources": {"primary": {"plugin": "csv", "options": {}}}},
+        base_state_id=None,
+        actor="test",
+    )
+    with service._engine.begin() as conn:
+        conn.execute(
+            update(proposal_events_table)
+            .where(proposal_events_table.c.id == str(proposal.audit_event_id))
+            .values(payload={"tool_call_id": "call_current", "tool_name": "set_pipeline", "status": "pending"})
+        )
+
+    with pytest.raises(AuditIntegrityError, match="creation event fields"):
+        await service.get_authoritative_composition_proposal(
+            session_id=session_id,
+            proposal_id=proposal.id,
+            reviewed_facts=None,
+        )
 
 
 @pytest.mark.asyncio

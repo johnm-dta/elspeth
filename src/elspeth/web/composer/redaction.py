@@ -30,6 +30,7 @@ from elspeth.contracts.freeze import freeze_fields
 from elspeth.web.composer.guided_blob_refs import (
     GUIDED_REVIEWED_BLOB_PATH_KEYS,
     validate_guided_reviewed_blob_binding,
+    validate_guided_reviewed_blob_ref,
     validate_guided_reviewed_blob_source_mapping,
 )
 from elspeth.web.composer.redaction_telemetry import RedactionTelemetry
@@ -3458,6 +3459,9 @@ def redact_guided_snapshot_storage_paths(
     pending_out: dict[str, Any] = {}
     rebuilt_sources = dict(sources) if sources is not None else None
     reviewed_bindings: list[tuple[str, frozenset[str]]] = []
+    sentinel_bindings: dict[str, dict[str, str]] = {}
+    reviewed_names: set[str] = set()
+    private_path_projections: dict[str, str] = {}
     changed = False
     for stable_id, snapshot in reviewed_sources.items():
         if type(stable_id) is not str or type(snapshot) is not dict:
@@ -3465,10 +3469,22 @@ def redact_guided_snapshot_storage_paths(
         name = snapshot["name"]
         if type(name) is not str or not name:
             raise ValueError("redact_guided_snapshot_storage_paths: reviewed_sources.name must be a non-empty str")
+        if name in reviewed_names:
+            raise AuditIntegrityError("guided reviewed source names must be unique")
+        reviewed_names.add(name)
         snap_options = snapshot["options"]
         if type(snap_options) is not dict:
             raise ValueError(f"redact_guided_snapshot_storage_paths: guided_session.reviewed_sources[{stable_id!r}].options must be a dict")
         if "blob_ref" not in snap_options:
+            sentinels: dict[str, str] = {}
+            for key in GUIDED_REVIEWED_BLOB_PATH_KEYS:
+                candidate = snap_options.get(key)
+                if type(candidate) is str and candidate.startswith("blob:"):
+                    sentinels[key] = candidate
+            if sentinels:
+                for sentinel in sentinels.values():
+                    validate_guided_reviewed_blob_ref(sentinel.removeprefix("blob:"))
+                sentinel_bindings[name] = sentinels
             reviewed_out[stable_id] = snapshot
             continue
 
@@ -3513,10 +3529,35 @@ def redact_guided_snapshot_storage_paths(
             options_redacted = dict(live_options)
             for key in ("path", "file"):
                 if type(value := live_options.get(key)) is str and value in live_reviewed_paths:
+                    private_path_projections[value] = REDACTED_BLOB_SOURCE_PATH
                     options_redacted[key] = REDACTED_BLOB_SOURCE_PATH
             source_redacted = dict(live_source)
             source_redacted["options"] = options_redacted
             rebuilt_sources[live_name] = source_redacted
+
+    if rebuilt_sources and sentinel_bindings:
+        missing_names = set(sentinel_bindings) - set(rebuilt_sources)
+        if missing_names:
+            raise AuditIntegrityError("guided blob sentinel source mapping is inconsistent")
+        for source_name, sentinels in sentinel_bindings.items():
+            live_source = rebuilt_sources.get(source_name)
+            if type(live_source) is not dict or type(live_source.get("options")) is not dict:
+                raise AuditIntegrityError("guided blob sentinel source mapping is inconsistent")
+            live_options = live_source["options"]
+            redacted_options = dict(live_options)
+            for key, sentinel in sentinels.items():
+                private_path = live_options.get(key)
+                if type(private_path) is not str:
+                    raise AuditIntegrityError("guided blob sentinel source mapping is inconsistent")
+                existing_projection = private_path_projections.get(private_path)
+                if existing_projection is not None and existing_projection != sentinel:
+                    raise AuditIntegrityError("guided blob sentinel path projection is ambiguous")
+                private_path_projections[private_path] = sentinel
+                redacted_options[key] = sentinel
+            redacted_source = dict(live_source)
+            redacted_source["options"] = redacted_options
+            rebuilt_sources[source_name] = redacted_source
+            changed = True
 
     for stable_id, intent in pending_sources.items():
         if type(stable_id) is not str or type(intent) is not dict:
@@ -3548,6 +3589,24 @@ def redact_guided_snapshot_storage_paths(
         meta_out = dict(composer_meta)
         meta_out["guided_session"] = guided_redacted
         sources_out = rebuilt_sources
+
+    if private_path_projections and meta_out is not None and "implicit_decisions" in meta_out:
+        report = meta_out["implicit_decisions"]
+        if type(report) is not dict or type(report.get("entries")) is not list:
+            raise AuditIntegrityError("guided implicit-decision projection is malformed")
+        redacted_entries: list[dict[str, Any]] = []
+        for entry in report["entries"]:
+            if type(entry) is not dict:
+                raise AuditIntegrityError("guided implicit-decision entry is malformed")
+            redacted_entry = dict(entry)
+            if entry.get("path") in {"source.path", "source.file"} and type(entry.get("value")) is str:
+                projected = private_path_projections.get(entry["value"])
+                if projected is not None:
+                    redacted_entry["value"] = projected
+            redacted_entries.append(redacted_entry)
+        redacted_report = dict(report)
+        redacted_report["entries"] = redacted_entries
+        meta_out["implicit_decisions"] = redacted_report
 
     return sources_out, meta_out
 

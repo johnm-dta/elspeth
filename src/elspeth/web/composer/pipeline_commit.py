@@ -8,7 +8,7 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from sqlalchemy import Engine
@@ -26,6 +26,7 @@ from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder, begin_dispatch, dispatch_with_audit
 from elspeth.web.composer.pipeline_proposal import AbsentBase, PlannerSurface, PresentBase, composition_content_hash
+from elspeth.web.composer.reviewed_source_authority import resolve_reviewed_source_authority
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.composer.tools._common import RuntimePreflight, ToolContext, ToolResult
 from elspeth.web.composer.tools._dispatch import execute_tool
@@ -229,6 +230,7 @@ def _bind_executor_content_hash(
 async def prepare_pipeline_proposal_commit(
     *,
     authority: AuthoritativePipelineProposal,
+    reviewed_facts: Mapping[str, Any],
     current_state: CompositionState,
     current_state_id: UUID | None,
     policy_catalog: PolicyCatalogView,
@@ -236,14 +238,22 @@ async def prepare_pipeline_proposal_commit(
     config: PipelineCommitConfig,
     recorder: BufferingRecorder,
     actor: str,
+    settlement_surface: Literal["generic", "guided"],
     recovery_dispatch: PipelineDispatchAuditBinding | None = None,
     recovery_executor_content_hash: str | None = None,
 ) -> PreparedPipelineCommit | RecoveredPipelineCommit:
     """Revalidate and audited-dispatch exact arguments; never settle state."""
     if type(authority) is not AuthoritativePipelineProposal:
         raise TypeError("authority must be an exact AuthoritativePipelineProposal")
-    if authority.proposal.surface in {PlannerSurface.GUIDED_STAGED, PlannerSurface.TUTORIAL_PROFILE}:
+    if settlement_surface not in {"generic", "guided"}:
+        raise ValueError("settlement_surface is outside the closed vocabulary")
+    if settlement_surface == "generic" and authority.proposal.surface in {
+        PlannerSurface.GUIDED_STAGED,
+        PlannerSurface.TUTORIAL_PROFILE,
+    }:
         raise PipelineCommitError("generic route cannot settle staged pipeline proposals", code="SURFACE_REQUIRES_GUIDED")
+    if settlement_surface == "guided" and authority.proposal.surface is PlannerSurface.FREEFORM:
+        raise PipelineCommitError("guided route cannot settle freeform pipeline proposals", code="SURFACE_REQUIRES_GENERIC")
     if authority.row.status != "pending":
         raise PipelineCommitError("pipeline proposal is not pending", code="NOT_PENDING")
     if policy_catalog.snapshot is not plugin_snapshot:
@@ -297,6 +307,13 @@ async def prepare_pipeline_proposal_commit(
         composer_provider=authority.row.composer_provider,
         composer_skill_hash=authority.row.composer_skill_hash,
         tool_arguments_hash=authority.row.tool_arguments_hash,
+        reviewed_source_authority=resolve_reviewed_source_authority(
+            engine=config.session_engine,
+            session_id=str(authority.row.session_id),
+            user_id=config.user_id,
+            reviewed_facts=reviewed_facts,
+            expected_reviewed_anchor_hash=authority.proposal.reviewed_anchor_hash,
+        ),
     )
 
     candidate = await bounded(
@@ -312,6 +329,8 @@ async def prepare_pipeline_proposal_commit(
     if (recovery_dispatch is None) != (recovery_executor_content_hash is None):
         raise AuditIntegrityError("pipeline recovery dispatch and executor hash must be supplied together")
     if recovery_dispatch is not None:
+        if settlement_surface != "generic":
+            raise AuditIntegrityError("guided pipeline settlement cannot recover a prior dispatch")
         assert recovery_executor_content_hash is not None
         if candidate_hash != recovery_executor_content_hash:
             raise PipelineCommitMismatchError(None, recovery_dispatch)
@@ -357,6 +376,7 @@ async def prepare_pipeline_proposal_commit(
                 composer_provider=authority.row.composer_provider,
                 composer_skill_hash=authority.row.composer_skill_hash,
                 tool_arguments_hash=authority.row.tool_arguments_hash,
+                reviewed_source_authority=context.reviewed_source_authority,
                 raise_schema_argument_errors=True,
             ),
         )

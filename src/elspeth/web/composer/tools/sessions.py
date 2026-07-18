@@ -21,6 +21,7 @@ from elspeth.contracts.composer_interpretation import (
 )
 from elspeth.contracts.sink import FILE_SINK_PLUGIN_SLASH_TEXT
 from elspeth.contracts.trust_boundary import trust_boundary
+from elspeth.core.canonical import stable_hash
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.recipes import (
     RecipeValidationError,
@@ -53,6 +54,7 @@ from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
     _FULL_STATE_COMPONENT_ALIAS_SET,
     _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
+    ReviewedSourceAuthority,
     ToolContext,
     ToolResult,
     _credential_wiring_contract_failure,
@@ -294,6 +296,55 @@ def build_set_pipeline_candidate(
     ) -> SetPipelineCandidate:
         return _candidate(_tool_plugin_policy_failure(rejected_state, violation, component=component))
 
+    def _matches_reviewed_source(
+        *,
+        source_name: str,
+        plugin: str,
+        options: Mapping[str, Any],
+        on_validation_failure: str,
+    ) -> bool:
+        authority = context.reviewed_source_authority
+        if (
+            type(authority) is not ReviewedSourceAuthority
+            or type(context.session_id) is not str
+            or authority.session_id != context.session_id
+        ):
+            return False
+        matches = [
+            value for value in authority.reviewed_sources.values() if isinstance(value, Mapping) and value.get("name") == source_name
+        ]
+        if len(matches) != 1:
+            return False
+        reviewed = matches[0]
+        if set(reviewed) != {
+            "name",
+            "plugin",
+            "options",
+            "observed_columns",
+            "sample_rows",
+            "on_validation_failure",
+        }:
+            return False
+        reviewed_binding = {
+            "name": reviewed["name"],
+            "plugin": reviewed["plugin"],
+            "options": reviewed["options"],
+            "on_validation_failure": reviewed["on_validation_failure"],
+        }
+        candidate_binding = {
+            "name": source_name,
+            "plugin": plugin,
+            "options": options,
+            "on_validation_failure": on_validation_failure,
+        }
+        if stable_hash(reviewed_binding) != stable_hash(candidate_binding):
+            return False
+        return all(
+            value in authority.verified_blob_paths
+            for name, value in options.items()
+            if name in {"path", "file"} and type(value) is str and value.startswith("blob:")
+        )
+
     try:
         validated = SetPipelineArgumentsModel.model_validate(args)
     except PydanticValidationError as exc:
@@ -320,19 +371,35 @@ def build_set_pipeline_candidate(
                 return _failure_result(state, "set_pipeline sources keys must be non-empty source names.")
             src_plugin = source_model.plugin
             src_options = dict(source_model.options)
+            src_on_vf = source_model.on_validation_failure or _DEFAULT_SOURCE_VALIDATION_FAILURE
+            reviewed_source = _matches_reviewed_source(
+                source_name=source_name,
+                plugin=src_plugin,
+                options=src_options,
+                on_validation_failure=src_on_vf,
+            )
+            if reviewed_source:
+                authority = context.reviewed_source_authority
+                assert type(authority) is ReviewedSourceAuthority
+                for option_name in ("path", "file"):
+                    option_value = src_options[option_name] if option_name in src_options else None
+                    if type(option_value) is str and option_value.startswith("blob:"):
+                        src_options[option_name] = authority.verified_blob_paths[option_value]
             endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(src_plugin, src_options)
             if endpoint_policy_error is not None:
                 return _failure_result(state, endpoint_policy_error)
             plugin_error = _validate_plugin_name(context, "source", src_plugin)
             if plugin_error is not None:
                 return _plugin_policy_failure(state, plugin_error, component=f"Source '{source_name}'")
-            manual_blob_ref_error = _reject_manual_source_blob_ref(src_options, tool_name="set_pipeline")
+            manual_blob_ref_error = None if reviewed_source else _reject_manual_source_blob_ref(src_options, tool_name="set_pipeline")
             if manual_blob_ref_error is not None:
                 return _failure_result(state, f"Source '{source_name}': {manual_blob_ref_error}")
-            manual_authoring_error = _reject_manual_source_authoring(src_options, tool_name="set_pipeline")
+            manual_authoring_error = None if reviewed_source else _reject_manual_source_authoring(src_options, tool_name="set_pipeline")
             if manual_authoring_error is not None:
                 return _failure_result(state, f"Source '{source_name}': {manual_authoring_error}")
-            review_metadata_error = _resolver_owned_interpretation_requirement_error(src_options, tool_name="set_pipeline")
+            review_metadata_error = (
+                None if reviewed_source else _resolver_owned_interpretation_requirement_error(src_options, tool_name="set_pipeline")
+            )
             if review_metadata_error is not None:
                 return _failure_result(state, f"Source '{source_name}': {review_metadata_error}")
             credential_error = _credential_wiring_contract_failure(
@@ -345,7 +412,6 @@ def build_set_pipeline_candidate(
             )
             if credential_error is not None:
                 return _candidate(credential_error)
-            src_on_vf = source_model.on_validation_failure or _DEFAULT_SOURCE_VALIDATION_FAILURE
             path_error = _validate_source_path(src_options, data_dir)
             if path_error is not None:
                 return _failure_result(state, f"Source '{source_name}': {path_error}")

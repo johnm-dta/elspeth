@@ -687,8 +687,7 @@ guided_operations_table = Table(
         name="ck_guided_operations_result_session_id_bounded",
     ),
     CheckConstraint(
-        "kind IN ('guided_start', 'guided_respond', 'guided_chat', 'guided_convert', "
-        "'guided_reenter', 'state_revert', 'session_fork', 'guided_plan')",
+        "kind IN ('guided_start', 'guided_respond', 'guided_chat', 'guided_convert', 'guided_reenter', 'state_revert', 'session_fork')",
         name="ck_guided_operations_kind",
     ),
     CheckConstraint("status IN ('in_progress', 'completed', 'failed')", name="ck_guided_operations_status"),
@@ -706,12 +705,12 @@ guided_operations_table = Table(
         name="ck_guided_operations_lease_token_bounded",
     ),
     CheckConstraint(
-        "result_kind IS NULL OR result_kind IN ('composition_state', 'session', 'proposal')",
+        "result_kind IS NULL OR result_kind IN ('composition_state', 'session')",
         name="ck_guided_operations_result_kind",
     ),
     CheckConstraint(
         "failure_code IS NULL OR failure_code IN ('provider_unavailable', 'provider_timeout', "
-        "'invalid_provider_response', 'integrity_error', 'custody_error', 'operation_failed')",
+        "'invalid_provider_response', 'stale_conflict', 'integrity_error', 'custody_error', 'operation_failed')",
         name="ck_guided_operations_failure_code",
     ),
     CheckConstraint(
@@ -729,13 +728,11 @@ guided_operations_table = Table(
         "(status = 'in_progress' AND "
         "(result_session_id IS NULL OR kind = 'session_fork') AND "
         "(result_state_id IS NULL OR kind <> 'session_fork') AND "
-        "(proposal_id IS NULL OR kind IN ('guided_respond', 'guided_chat', 'guided_plan'))) OR "
+        "(proposal_id IS NULL OR kind IN ('guided_respond', 'guided_chat'))) OR "
         "(status = 'completed' AND ("
         "(kind = 'session_fork' AND result_kind = 'session' AND result_session_id IS NOT NULL "
         "AND result_state_id IS NULL AND proposal_id IS NULL) OR "
-        "(kind = 'guided_plan' AND result_kind = 'proposal' AND proposal_id IS NOT NULL "
-        "AND result_state_id IS NULL AND result_session_id IS NULL) OR "
-        "(kind NOT IN ('session_fork', 'guided_plan') AND result_kind = 'composition_state' "
+        "(kind <> 'session_fork' AND result_kind = 'composition_state' "
         "AND result_state_id IS NOT NULL AND result_session_id IS NULL "
         "AND (proposal_id IS NULL OR kind IN ('guided_respond', 'guided_chat'))))) OR "
         "(status = 'failed' AND result_kind IS NULL AND result_state_id IS NULL "
@@ -814,26 +811,27 @@ guided_operation_events_table = Table(
 # key, its vocabulary, and the owning phase at the same time.
 #
 # Payload contract for event_type="proposal.created":
-#   Legacy rows retain the exact historical
-#   {tool_call_id, tool_name, status="pending"} shape.
-#   Canonical set_pipeline rows use closed
+#   Generic tool proposals use the closed current
+#   {schema="tool_proposal_created.v1", tool_call_id, tool_name,
+#   status="pending"} shape. The old schema-less three-field payload is
+#   invalid and is never inferred or upgraded by readers.
+#   Canonical set_pipeline rows use the distinct closed
 #   schema="pipeline_proposal_created.v1" metadata. It binds the exact
 #   private arguments, manifest-redacted audit projection, provenance,
 #   tagged base, surface, draft/reviewed-anchor/skill hashes, repair count,
 #   deferred-intent ids, optional supersession pair, and custody result.
-#   Readers must never reinterpret malformed canonical metadata as legacy.
+#   Readers must never reinterpret malformed metadata as another schema.
 #
 # Payload contract for event_type="proposal.accepted":
-#   Legacy rows retain their historical shape. Canonical pipeline rows use
-#   schema="pipeline_proposal_accepted.v1" and bind the draft, committed
-#   state id/content, final composer metadata, and the exact durable redacted
-#   dispatch envelope (including its canonical executor-content hash).
+#   Canonical pipeline rows use schema="pipeline_proposal_accepted.v1" and
+#   bind the draft, committed state id/content, final composer metadata, and
+#   the exact durable redacted dispatch envelope (including its canonical
+#   executor-content hash).
 #
 # Payload contract for event_type="proposal.rejected":
-#   Legacy rows retain their historical shape. Canonical pipeline rows use
-#   schema="pipeline_proposal_rejected.v1" with a closed reason_code and an
-#   optional durable dispatch binding; free-form request/provider/exception
-#   text is never persisted in the canonical terminal event.
+#   Canonical pipeline rows use schema="pipeline_proposal_rejected.v1" with a
+#   closed reason_code and an optional durable dispatch binding; free-form
+#   request/provider/exception text is never persisted in the terminal event.
 proposal_events_table = Table(
     "proposal_events",
     metadata,

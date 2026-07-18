@@ -3,9 +3,8 @@
 This module owns only immutable checkpoint movement.  Routes remain
 responsible for catalog/policy lookup, blob/path resolution, audit events,
 history settlement, HTTP errors, and compare-and-swap persistence.  The
-transition result deliberately carries a closed *preparation* record rather
-than a wire ``Turn`` so this layer cannot grow a second renderer or topology
-model.
+replacement session carries every fact needed by the canonical route renderer;
+this layer does not construct turns or topology.
 """
 
 from __future__ import annotations
@@ -29,8 +28,6 @@ from elspeth.web.composer.guided.resolved import (
 from elspeth.web.composer.guided.state_machine import GuidedSession, SinkIntent, SourceIntent
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_from_dict, facts_to_dict
 
-GUIDED_TURN_TOKEN_SCHEMA: Final = "guided.turn-token.v1"
-_HASH_CHARS: Final = frozenset("0123456789abcdef")
 _PATH_OPTION_NAMES: Final = frozenset({"path", "file"})
 _SOURCE_KIND_PLUGIN: Final = {"csv": "csv", "json": "json", "jsonl": "json", "text": "text"}
 _KNOB_KINDS: Final = frozenset(
@@ -55,14 +52,6 @@ def _require_nonempty_exact_str(value: object, field_name: str) -> str:
     return value
 
 
-def _require_hash(value: object, field_name: str) -> str:
-    if type(value) is not str:
-        raise TypeError(f"{field_name} must be an exact str")
-    if len(value) != 64 or any(char not in _HASH_CHARS for char in value):
-        raise ValueError(f"{field_name} must be a canonical lowercase sha256 hex digest")
-    return value
-
-
 def _canonical_uuid(value: object, field_name: str) -> str:
     if type(value) is not str:
         raise TypeError(f"{field_name} must be a canonical UUID string")
@@ -75,51 +64,12 @@ def _canonical_uuid(value: object, field_name: str) -> str:
     return value
 
 
-def guided_turn_token(
-    *,
-    schema: str,
-    history_index: int,
-    step: GuidedStep,
-    turn_type: TurnType,
-    payload_hash: str,
-) -> str:
-    """Bind an unanswered turn occurrence, including repeated-payload ABA.
-
-    The token is deterministic rather than secret.  It gives the later route
-    and CAS cohort one canonical identity for "this payload at this occurrence"
-    without changing the current HTTP DTO in this task.
-    """
-
-    if type(schema) is not str:
-        raise TypeError("guided turn token schema must be an exact str")
-    if schema != GUIDED_TURN_TOKEN_SCHEMA:
-        raise ValueError(f"unsupported guided turn token schema {schema!r}")
-    if type(history_index) is not int:
-        raise TypeError("guided turn token history_index must be an exact int")
-    if history_index < 0:
-        raise ValueError("guided turn token history_index must be non-negative")
-    if type(step) is not GuidedStep:
-        raise TypeError("guided turn token step must be GuidedStep")
-    if type(turn_type) is not TurnType:
-        raise TypeError("guided turn token turn_type must be TurnType")
-    canonical_payload_hash = _require_hash(payload_hash, "guided turn token payload_hash")
-    return stable_hash(
-        {
-            "schema": schema,
-            "history_index": history_index,
-            "step": step.value,
-            "turn_type": turn_type.value,
-            "payload_hash": canonical_payload_hash,
-        }
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class AnsweredTurn:
     """Index of the persisted unanswered turn being consumed.
 
-    Step, type, payload hash, and deterministic occurrence id are derived from
-    the current persisted :class:`TurnRecord`; callers cannot restate them.
+    Step, type, and payload hash are derived from the current persisted
+    :class:`TurnRecord`; callers cannot restate them.
     """
 
     history_index: int
@@ -210,87 +160,6 @@ class FieldSelectionResponse:
         )
         if self.control_signal is not None and type(self.control_signal) is not ControlSignal:
             raise TypeError("FieldSelectionResponse.control_signal must be ControlSignal or None")
-
-
-@dataclass(frozen=True, slots=True)
-class SourceSchemaFormPreparation:
-    stable_id: str
-    plugin: str
-    inspection_facts: SourceInspectionFacts | None
-
-    def __post_init__(self) -> None:
-        _canonical_uuid(self.stable_id, "SourceSchemaFormPreparation.stable_id")
-        _require_nonempty_exact_str(self.plugin, "SourceSchemaFormPreparation.plugin")
-        if self.inspection_facts is not None:
-            object.__setattr__(self, "inspection_facts", _validated_inspection_facts(self.inspection_facts))
-
-
-@dataclass(frozen=True, slots=True)
-class SourceInspectionPreparation:
-    stable_id: str
-    inspection_facts: SourceInspectionFacts
-
-    def __post_init__(self) -> None:
-        _canonical_uuid(self.stable_id, "SourceInspectionPreparation.stable_id")
-        object.__setattr__(self, "inspection_facts", _validated_inspection_facts(self.inspection_facts))
-
-
-@dataclass(frozen=True, slots=True)
-class SinkPluginSelectionPreparation:
-    """Prepare the catalog-backed initial Step-2 sink selection turn."""
-
-
-@dataclass(frozen=True, slots=True)
-class SinkSchemaFormPreparation:
-    stable_id: str
-    plugin: str
-
-    def __post_init__(self) -> None:
-        _canonical_uuid(self.stable_id, "SinkSchemaFormPreparation.stable_id")
-        _require_nonempty_exact_str(self.plugin, "SinkSchemaFormPreparation.plugin")
-
-
-@dataclass(frozen=True, slots=True)
-class SinkFieldReviewPreparation:
-    stable_id: str
-    candidate_fields: Sequence[str]
-
-    def __post_init__(self) -> None:
-        _canonical_uuid(self.stable_id, "SinkFieldReviewPreparation.stable_id")
-        fields = freeze_guided_str_sequence(self.candidate_fields, "SinkFieldReviewPreparation.candidate_fields")
-        if len(set(fields)) != len(fields):
-            raise InvariantError("SinkFieldReviewPreparation.candidate_fields must be unique")
-        object.__setattr__(self, "candidate_fields", fields)
-
-
-type NextTurnPreparation = (
-    SourceSchemaFormPreparation
-    | SourceInspectionPreparation
-    | SinkPluginSelectionPreparation
-    | SinkSchemaFormPreparation
-    | SinkFieldReviewPreparation
-)
-
-
-@dataclass(frozen=True, slots=True)
-class StageTransitionResult:
-    """One replacement checkpoint plus the semantic next-turn instruction."""
-
-    session: GuidedSession
-    next_turn: NextTurnPreparation | None
-
-    def __post_init__(self) -> None:
-        if type(self.session) is not GuidedSession:
-            raise TypeError("StageTransitionResult.session must be GuidedSession")
-        allowed = (
-            SourceSchemaFormPreparation,
-            SourceInspectionPreparation,
-            SinkPluginSelectionPreparation,
-            SinkSchemaFormPreparation,
-            SinkFieldReviewPreparation,
-        )
-        if self.next_turn is not None and type(self.next_turn) not in allowed:
-            raise TypeError("StageTransitionResult.next_turn is not a closed preparation type")
 
 
 def _require_active_turn(
@@ -748,7 +617,7 @@ def transition_source_plugin_selection(
     inspection_facts: SourceInspectionFacts | None,
     new_stable_id: UUID | None = None,
     target_id: str | None = None,
-) -> StageTransitionResult:
+) -> GuidedSession:
     """Move one source from plugin selection to plugin options."""
 
     _require_active_turn(
@@ -777,11 +646,7 @@ def transition_source_plugin_selection(
         sample_rows=(),
     )
     source_order = (*session.source_order, stable_id) if created else session.source_order
-    replacement = replace(session, source_order=source_order, pending_source_intents=pending)
-    return StageTransitionResult(
-        session=replacement,
-        next_turn=SourceSchemaFormPreparation(stable_id=stable_id, plugin=plugin, inspection_facts=facts),
-    )
+    return replace(session, source_order=source_order, pending_source_intents=pending)
 
 
 def transition_source_schema_form(
@@ -791,7 +656,7 @@ def transition_source_schema_form(
     turn: AnsweredTurn,
     response: SchemaFormResponse,
     authority: SchemaFormAuthority,
-) -> StageTransitionResult:
+) -> GuidedSession:
     """Validate source options and either review inspection or finish Step 1."""
 
     _require_active_turn(
@@ -831,11 +696,7 @@ def transition_source_schema_form(
             observed_columns=facts.observed_headers or (),
             sample_rows=(),
         )
-        replacement = replace(session, pending_source_intents=pending)
-        return StageTransitionResult(
-            session=replacement,
-            next_turn=SourceInspectionPreparation(stable_id=stable_id, inspection_facts=facts),
-        )
+        return replace(session, pending_source_intents=pending)
 
     _require_no_other_pending(session.pending_source_intents, stable_id, "source")
     reviewed = dict(session.reviewed_sources)
@@ -849,13 +710,12 @@ def transition_source_schema_form(
     )
     pending = dict(session.pending_source_intents)
     del pending[stable_id]
-    replacement = replace(
+    return replace(
         session,
         step=GuidedStep.STEP_2_SINK,
         reviewed_sources=reviewed,
         pending_source_intents=pending,
     )
-    return StageTransitionResult(session=replacement, next_turn=SinkPluginSelectionPreparation())
 
 
 def transition_source_inspection_review(
@@ -864,7 +724,7 @@ def transition_source_inspection_review(
     target_id: str,
     turn: AnsweredTurn,
     response: InspectionResponse,
-) -> StageTransitionResult:
+) -> GuidedSession:
     """Resolve one inspection-review source using only edited column names."""
 
     _require_active_turn(
@@ -905,13 +765,12 @@ def transition_source_inspection_review(
     )
     pending = dict(session.pending_source_intents)
     del pending[stable_id]
-    replacement = replace(
+    return replace(
         session,
         step=GuidedStep.STEP_2_SINK,
         reviewed_sources=reviewed,
         pending_source_intents=pending,
     )
-    return StageTransitionResult(session=replacement, next_turn=SinkPluginSelectionPreparation())
 
 
 def transition_sink_plugin_selection(
@@ -922,7 +781,7 @@ def transition_sink_plugin_selection(
     permitted_plugins: Sequence[str],
     new_stable_id: UUID | None = None,
     target_id: str | None = None,
-) -> StageTransitionResult:
+) -> GuidedSession:
     """Move one output from plugin selection to plugin options."""
 
     _require_active_turn(
@@ -943,11 +802,7 @@ def transition_sink_plugin_selection(
     pending = dict(session.pending_output_intents)
     pending[stable_id] = SinkIntent(name=name, phase="plugin_options", plugin=plugin, options=None)
     output_order = (*session.output_order, stable_id) if created else session.output_order
-    replacement = replace(session, output_order=output_order, pending_output_intents=pending)
-    return StageTransitionResult(
-        session=replacement,
-        next_turn=SinkSchemaFormPreparation(stable_id=stable_id, plugin=plugin),
-    )
+    return replace(session, output_order=output_order, pending_output_intents=pending)
 
 
 def transition_sink_schema_form(
@@ -957,7 +812,7 @@ def transition_sink_schema_form(
     turn: AnsweredTurn,
     response: SchemaFormResponse,
     authority: SchemaFormAuthority,
-) -> StageTransitionResult:
+) -> GuidedSession:
     """Hold validated sink options and prepare required-field review."""
 
     _require_active_turn(
@@ -985,12 +840,8 @@ def transition_sink_schema_form(
         plugin=intent.plugin,
         options=_pending_options_with_structural(options, structural),
     )
-    candidates = _candidate_fields(session)
-    replacement = replace(session, pending_output_intents=pending)
-    return StageTransitionResult(
-        session=replacement,
-        next_turn=SinkFieldReviewPreparation(stable_id=stable_id, candidate_fields=candidates),
-    )
+    _candidate_fields(session)
+    return replace(session, pending_output_intents=pending)
 
 
 def transition_sink_field_review(
@@ -999,7 +850,7 @@ def transition_sink_field_review(
     target_id: str,
     turn: AnsweredTurn,
     response: FieldSelectionResponse,
-) -> StageTransitionResult:
+) -> GuidedSession:
     """Resolve one output field contract and finish Step 2."""
 
     _require_active_turn(
@@ -1049,31 +900,21 @@ def transition_sink_field_review(
     )
     pending = dict(session.pending_output_intents)
     del pending[stable_id]
-    replacement = replace(
+    return replace(
         session,
         step=GuidedStep.STEP_3_TRANSFORMS,
         reviewed_outputs=reviewed,
         pending_output_intents=pending,
     )
-    return StageTransitionResult(session=replacement, next_turn=None)
 
 
 __all__ = [
-    "GUIDED_TURN_TOKEN_SCHEMA",
     "AnsweredTurn",
     "FieldSelectionResponse",
     "InspectionResponse",
-    "NextTurnPreparation",
     "PluginSelectionResponse",
     "SchemaFormAuthority",
     "SchemaFormResponse",
-    "SinkFieldReviewPreparation",
-    "SinkPluginSelectionPreparation",
-    "SinkSchemaFormPreparation",
-    "SourceInspectionPreparation",
-    "SourceSchemaFormPreparation",
-    "StageTransitionResult",
-    "guided_turn_token",
     "transition_sink_field_review",
     "transition_sink_plugin_selection",
     "transition_sink_schema_form",

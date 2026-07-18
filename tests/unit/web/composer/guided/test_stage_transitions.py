@@ -16,19 +16,12 @@ from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import ControlSignal, GuidedStep, TurnType
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SourceResolved
 from elspeth.web.composer.guided.stage_transitions import (
-    GUIDED_TURN_TOKEN_SCHEMA,
     AnsweredTurn,
     FieldSelectionResponse,
     InspectionResponse,
     PluginSelectionResponse,
     SchemaFormAuthority,
     SchemaFormResponse,
-    SinkFieldReviewPreparation,
-    SinkPluginSelectionPreparation,
-    SinkSchemaFormPreparation,
-    SourceInspectionPreparation,
-    SourceSchemaFormPreparation,
-    guided_turn_token,
     transition_sink_field_review,
     transition_sink_plugin_selection,
     transition_sink_schema_form,
@@ -240,12 +233,11 @@ def test_source_selection_allocates_stable_id_once_and_retains_server_facts() ->
     )
 
     assert session.source_order == ()
-    assert result.session.source_order == (SOURCE_A,)
-    intent = result.session.pending_source_intents[SOURCE_A]
+    assert result.source_order == (SOURCE_A,)
+    intent = result.pending_source_intents[SOURCE_A]
     assert (intent.name, intent.phase, intent.plugin) == ("source", "plugin_options", "csv")
     assert intent.inspection_facts is not facts
     assert facts_to_dict(intent.inspection_facts) == facts_to_dict(facts)  # type: ignore[arg-type]
-    assert result.next_turn == SourceSchemaFormPreparation(stable_id=SOURCE_A, plugin="csv", inspection_facts=facts)
 
 
 def test_source_selection_reuses_target_and_preserves_multi_source_order() -> None:
@@ -275,9 +267,9 @@ def test_source_selection_reuses_target_and_preserves_multi_source_order() -> No
         target_id=SOURCE_B,
     )
 
-    assert result.session.source_order == (SOURCE_A, SOURCE_B)
-    assert result.session.pending_source_intents[SOURCE_B].name == "source_2"
-    assert result.session.reviewed_sources[SOURCE_A] == session.reviewed_sources[SOURCE_A]
+    assert result.source_order == (SOURCE_A, SOURCE_B)
+    assert result.pending_source_intents[SOURCE_B].name == "source_2"
+    assert result.reviewed_sources[SOURCE_A] == session.reviewed_sources[SOURCE_A]
 
 
 @pytest.mark.parametrize("chosen", [(), ("csv", "json"), ("blocked",)])
@@ -319,7 +311,7 @@ def test_source_schema_form_uses_held_plugin_and_custody_options_then_enters_ins
     )
 
     assert session.pending_source_intents[SOURCE_A].phase == "plugin_options"
-    intent = result.session.pending_source_intents[SOURCE_A]
+    intent = result.pending_source_intents[SOURCE_A]
     assert intent.phase == "inspection_review"
     assert intent.plugin == "csv"
     assert dict(intent.options or {}) == {
@@ -331,7 +323,6 @@ def test_source_schema_form_uses_held_plugin_and_custody_options_then_enters_ins
     assert intent.observed_columns == ("id", "name")
     assert intent.sample_rows == ()
     assert facts_to_dict(intent.inspection_facts) == facts_to_dict(facts)  # type: ignore[arg-type]
-    assert result.next_turn == SourceInspectionPreparation(stable_id=SOURCE_A, inspection_facts=facts)
 
 
 def test_inspection_facts_survive_restart_between_selection_form_and_review() -> None:
@@ -353,7 +344,7 @@ def test_inspection_facts_survive_restart_between_selection_form_and_review() ->
             server_options={"path": "blob:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
         ),
     )
-    restored_review = GuidedSession.from_dict(result.session.to_dict())
+    restored_review = GuidedSession.from_dict(result.to_dict())
 
     review_intent = restored_review.pending_source_intents[SOURCE_A]
     assert review_intent.phase == "inspection_review"
@@ -375,14 +366,14 @@ def test_source_schema_form_without_inspection_reviews_same_id_and_advances() ->
         ),
     )
 
-    assert result.session.step is GuidedStep.STEP_2_SINK
-    assert result.session.source_order == (SOURCE_A,)
-    assert not result.session.pending_source_intents
-    source = result.session.reviewed_sources[SOURCE_A]
+    assert result.step is GuidedStep.STEP_2_SINK
+    assert result.source_order == (SOURCE_A,)
+    assert not result.pending_source_intents
+    assert not result.pending_output_intents
+    source = result.reviewed_sources[SOURCE_A]
     assert source.name == "source"
     assert source.plugin == "csv"
     assert source.observed_columns == ()
-    assert result.next_turn == SinkPluginSelectionPreparation()
 
 
 @pytest.mark.parametrize(
@@ -438,15 +429,15 @@ def test_inspection_review_uses_only_edited_columns_and_held_intent() -> None:
         response=InspectionResponse(columns=("record_id", "display_name")),
     )
 
-    assert result.session.step is GuidedStep.STEP_2_SINK
-    assert result.session.source_order == (SOURCE_A,)
-    assert not result.session.pending_source_intents
-    source = result.session.reviewed_sources[SOURCE_A]
+    assert result.step is GuidedStep.STEP_2_SINK
+    assert result.source_order == (SOURCE_A,)
+    assert not result.pending_source_intents
+    assert not result.pending_output_intents
+    source = result.reviewed_sources[SOURCE_A]
     assert source.plugin == "csv"
     assert dict(source.options)["path"].startswith("blob:")
     assert source.observed_columns == ("record_id", "display_name")
     assert source.sample_rows == ()
-    assert result.next_turn == SinkPluginSelectionPreparation()
 
 
 @pytest.mark.parametrize("columns", [(), ("id", "id"), ("",), (1,)])
@@ -548,13 +539,17 @@ def test_sink_selection_allocates_stable_id_and_reuses_pending_target() -> None:
         permitted_plugins=("json",),
         new_stable_id=UUID(OUTPUT_A),
     )
-    assert result.session.output_order == (OUTPUT_A,)
-    assert result.session.pending_output_intents[OUTPUT_A].name == "output"
-    assert result.next_turn == SinkSchemaFormPreparation(stable_id=OUTPUT_A, plugin="json")
+    assert result.output_order == (OUTPUT_A,)
+    assert result.pending_output_intents[OUTPUT_A] == SinkIntent(
+        name="output",
+        phase="plugin_options",
+        plugin="json",
+        options=None,
+    )
 
     pending = SinkIntent(name="output_2", phase="plugin_selection", plugin=None, options=None)
     resumed = replace(
-        result.session,
+        result,
         history=(),
         output_order=(OUTPUT_A, OUTPUT_B),
         reviewed_outputs={OUTPUT_A: _output("output")},
@@ -568,8 +563,8 @@ def test_sink_selection_allocates_stable_id_and_reuses_pending_target() -> None:
         response=PluginSelectionResponse(chosen=("json",)),
         permitted_plugins=("json",),
     )
-    assert resumed_result.session.output_order == (OUTPUT_A, OUTPUT_B)
-    assert resumed_result.session.reviewed_outputs[OUTPUT_A].name == "output"
+    assert resumed_result.output_order == (OUTPUT_A, OUTPUT_B)
+    assert resumed_result.reviewed_outputs[OUTPUT_A].name == "output"
 
 
 def test_sink_selection_rejects_any_unreviewed_ordered_source() -> None:
@@ -614,11 +609,13 @@ def test_sink_schema_form_holds_options_and_emits_stable_deduplicated_candidates
     )
 
     assert session.pending_output_intents[OUTPUT_A].phase == "plugin_options"
-    intent = result.session.pending_output_intents[OUTPUT_A]
+    intent = result.pending_output_intents[OUTPUT_A]
     assert intent.phase == "field_review"
     assert intent.plugin == "json"
-    assert result.session.output_order == (OUTPUT_A,)
-    assert result.next_turn == SinkFieldReviewPreparation(stable_id=OUTPUT_A, candidate_fields=("id", "name", "email"))
+    assert result.output_order == (OUTPUT_A,)
+    assert tuple(
+        dict.fromkeys(column for stable_id in result.source_order for column in result.reviewed_sources[stable_id].observed_columns)
+    ) == ("id", "name", "email")
 
 
 def test_schema_forms_reject_wrong_knob_types() -> None:
@@ -668,9 +665,10 @@ def test_source_structural_policy_survives_inspection_and_is_removed_from_plugin
             },
             server_options={"path": "blob:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
         ),
-    ).session
-    assert staged.pending_source_intents[SOURCE_A].options is not None
-    assert staged.pending_source_intents[SOURCE_A].options["on_validation_failure"] == "quarantine"
+    )
+    staged_options = staged.pending_source_intents[SOURCE_A].options
+    assert staged_options is not None
+    assert staged_options["on_validation_failure"] == "quarantine"
     staged = replace(staged, history=())
     staged, inspection_turn = _with_unanswered_turn(staged, TurnType.INSPECT_AND_CONFIRM)
 
@@ -679,7 +677,7 @@ def test_source_structural_policy_survives_inspection_and_is_removed_from_plugin
         target_id=SOURCE_A,
         turn=inspection_turn,
         response=InspectionResponse(columns=("id", "name")),
-    ).session.reviewed_sources[SOURCE_A]
+    ).reviewed_sources[SOURCE_A]
 
     assert resolved.on_validation_failure == "quarantine"
     assert "on_validation_failure" not in resolved.options
@@ -711,7 +709,7 @@ def test_sink_structural_policy_survives_field_review_and_is_removed_from_plugin
             knobs=policy_knobs,
             model_validated_options={"path": "/data/out.jsonl", "on_write_failure": "quarantine"},
         ),
-    ).session
+    )
     staged = replace(staged, history=())
     staged, field_turn = _with_unanswered_turn(staged, TurnType.MULTI_SELECT_WITH_CUSTOM)
 
@@ -720,7 +718,7 @@ def test_sink_structural_policy_survives_field_review_and_is_removed_from_plugin
         target_id=OUTPUT_A,
         turn=field_turn,
         response=FieldSelectionResponse(chosen=("id",), custom_inputs=(), control_signal=None),
-    ).session.reviewed_outputs[OUTPUT_A]
+    ).reviewed_outputs[OUTPUT_A]
 
     assert resolved.on_write_failure == "quarantine"
     assert "on_write_failure" not in resolved.options
@@ -740,7 +738,7 @@ def test_sink_schema_mode_is_preserved_from_validated_options() -> None:
             knobs=SINK_KNOBS,
             model_validated_options={"path": "/data/out.jsonl", "schema": {"mode": "flexible"}},
         ),
-    ).session
+    )
     staged = replace(staged, history=())
     staged, field_turn = _with_unanswered_turn(staged, TurnType.MULTI_SELECT_WITH_CUSTOM)
 
@@ -751,7 +749,7 @@ def test_sink_schema_mode_is_preserved_from_validated_options() -> None:
         response=FieldSelectionResponse(chosen=("id",), custom_inputs=(), control_signal=None),
     )
 
-    assert resolved.session.reviewed_outputs[OUTPUT_A].schema_mode == "flexible"
+    assert resolved.reviewed_outputs[OUTPUT_A].schema_mode == "flexible"
 
 
 def test_sink_field_review_resolves_same_id_and_advances_without_topology() -> None:
@@ -765,14 +763,12 @@ def test_sink_field_review_resolves_same_id_and_advances_without_topology() -> N
     )
 
     assert session.pending_output_intents[OUTPUT_A].phase == "field_review"
-    assert result.session.step is GuidedStep.STEP_3_TRANSFORMS
-    assert result.session.output_order == (OUTPUT_A,)
-    assert not result.session.pending_output_intents
-    output = result.session.reviewed_outputs[OUTPUT_A]
+    assert result.step is GuidedStep.STEP_3_TRANSFORMS
+    assert result.output_order == (OUTPUT_A,)
+    assert not result.pending_output_intents
+    output = result.reviewed_outputs[OUTPUT_A]
     assert output.required_fields == ("id", "email", "derived")
     assert output.schema_mode == "observed"
-    assert result.next_turn is None
-    assert set(result.__dataclass_fields__) == {"session", "next_turn"}
     assert not hasattr(result, "topology")
 
 
@@ -784,7 +780,7 @@ def test_sink_field_review_explicit_passthrough_is_the_only_empty_selection() ->
         turn=turn,
         response=FieldSelectionResponse(chosen=(), custom_inputs=(), control_signal=ControlSignal.PASSTHROUGH),
     )
-    assert result.session.reviewed_outputs[OUTPUT_A].required_fields == ()
+    assert result.reviewed_outputs[OUTPUT_A].required_fields == ()
 
 
 @pytest.mark.parametrize(
@@ -831,50 +827,9 @@ def test_sink_field_review_preserves_two_output_order_and_unrelated_identity() -
         response=FieldSelectionResponse(chosen=("id",), custom_inputs=(), control_signal=None),
     )
 
-    assert result.session.output_order == (OUTPUT_A, OUTPUT_B)
-    assert result.session.reviewed_outputs[OUTPUT_A] is session.reviewed_outputs[OUTPUT_A]
-    assert result.session.reviewed_outputs[OUTPUT_B].name == "output_2"
-
-
-def test_turn_token_is_restart_stable_and_aba_sensitive() -> None:
-    kwargs = {
-        "schema": GUIDED_TURN_TOKEN_SCHEMA,
-        "step": GuidedStep.STEP_1_SOURCE,
-        "turn_type": TurnType.SCHEMA_FORM,
-        "payload_hash": PAYLOAD_A,
-    }
-    first = guided_turn_token(history_index=4, **kwargs)
-    restored = guided_turn_token(history_index=4, **kwargs)
-    later_same_payload = guided_turn_token(history_index=6, **kwargs)
-
-    assert first == restored
-    assert first != later_same_payload
-    assert first != guided_turn_token(history_index=4, **{**kwargs, "payload_hash": PAYLOAD_B})
-
-
-@pytest.mark.parametrize(
-    "overrides",
-    [
-        {"schema": "guided.turn-token.v0"},
-        {"history_index": True},
-        {"history_index": -1},
-        {"step": "step_1_source"},
-        {"turn_type": "schema_form"},
-        {"payload_hash": "A" * 64},
-        {"payload_hash": "short"},
-    ],
-)
-def test_turn_token_rejects_noncanonical_inputs(overrides: dict[str, object]) -> None:
-    kwargs: dict[str, object] = {
-        "schema": GUIDED_TURN_TOKEN_SCHEMA,
-        "history_index": 0,
-        "step": GuidedStep.STEP_1_SOURCE,
-        "turn_type": TurnType.SCHEMA_FORM,
-        "payload_hash": PAYLOAD_A,
-    }
-    kwargs.update(overrides)
-    with pytest.raises((TypeError, ValueError)):
-        guided_turn_token(**kwargs)  # type: ignore[arg-type]
+    assert result.output_order == (OUTPUT_A, OUTPUT_B)
+    assert result.reviewed_outputs[OUTPUT_A] is session.reviewed_outputs[OUTPUT_A]
+    assert result.reviewed_outputs[OUTPUT_B].name == "output_2"
 
 
 def test_transition_derives_current_turn_and_rejects_stale_index_wrong_type_and_component() -> None:

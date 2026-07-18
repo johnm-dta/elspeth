@@ -448,6 +448,99 @@ def test_redact_guided_snapshot_rejects_present_invalid_reviewed_blob_ref(invali
     }
 
 
+@pytest.mark.parametrize(
+    "invalid_carriers",
+    [
+        {"path": ""},
+        {"file": ""},
+        {"path": None},
+        {"file": 123},
+        {"path": "/internal/blobs/foreign.csv", "file": None},
+        {"path": "/internal/blobs/for\x00eign.csv"},
+    ],
+    ids=["empty_path", "empty_file", "none_path", "wrong_type_file", "valid_path_invalid_file", "nul_path"],
+)
+def test_redact_guided_snapshot_rejects_invalid_reviewed_path_carriers(invalid_carriers: dict[str, object]) -> None:
+    stable_id = "11111111-1111-4111-8111-111111111111"
+    live_path = "/internal/blobs/foreign.csv"
+    sources = {"source": {"options": {"path": live_path}}}
+    snapshot_options = {**invalid_carriers, "blob_ref": stable_id}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                stable_id: {
+                    "name": "source",
+                    "options": snapshot_options,
+                }
+            },
+            "pending_source_intents": {},
+        }
+    }
+
+    with pytest.raises(AuditIntegrityError, match="path carrier"):
+        redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+    assert sources["source"]["options"]["path"] == live_path
+    assert composer_meta["guided_session"]["reviewed_sources"][stable_id]["options"] == snapshot_options
+
+
+def test_redact_guided_snapshot_accepts_two_valid_path_carriers() -> None:
+    stable_id = "11111111-1111-4111-8111-111111111111"
+    path = "/internal/blobs/source.csv"
+    file = "/internal/blobs/source-alias.csv"
+    sources = {"source": {"options": {"path": path, "file": file}}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                stable_id: {
+                    "name": "source",
+                    "options": {"path": path, "file": file, "blob_ref": stable_id},
+                }
+            },
+            "pending_source_intents": {},
+        }
+    }
+
+    sources_out, meta_out = redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+    assert sources_out["source"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+    assert sources_out["source"]["options"]["file"] == REDACTED_BLOB_SOURCE_PATH
+    reviewed_options = meta_out["guided_session"]["reviewed_sources"][stable_id]["options"]
+    assert reviewed_options["path"] == REDACTED_BLOB_SOURCE_PATH
+    assert reviewed_options["file"] == REDACTED_BLOB_SOURCE_PATH
+
+
+@pytest.mark.parametrize(
+    "live_options",
+    [
+        {"path": "/internal/blobs/live.csv"},
+        {"schema": {"mode": "observed"}},
+    ],
+    ids=["mismatched_path", "missing_live_carrier"],
+)
+def test_redact_guided_snapshot_rejects_same_name_without_exact_reviewed_path(live_options: dict[str, object]) -> None:
+    stable_id = "11111111-1111-4111-8111-111111111111"
+    reviewed_path = " /internal/blobs/bogus.csv "
+    sources = {"source": {"options": live_options}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                stable_id: {
+                    "name": "source",
+                    "options": {"path": reviewed_path, "blob_ref": stable_id},
+                }
+            },
+            "pending_source_intents": {},
+        }
+    }
+
+    with pytest.raises(AuditIntegrityError, match="guided blob source mapping"):
+        redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+    assert sources["source"]["options"] == live_options
+    assert composer_meta["guided_session"]["reviewed_sources"][stable_id]["options"]["path"] == reviewed_path
+
+
 def test_redact_guided_snapshot_rejects_reviewed_blob_ref_without_string_path_carrier() -> None:
     """A reviewed blob binding without its path cannot be mapped safely."""
     stable_id = "11111111-1111-4111-8111-111111111111"

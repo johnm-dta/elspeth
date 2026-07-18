@@ -7097,6 +7097,162 @@ sinks:
         assert export_events == []
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "invalid_carriers",
+        [
+            {"path": ""},
+            {"file": ""},
+            {"path": None},
+            {"file": 123},
+            {"path": "/data/blobs/foreign/private.csv", "file": None},
+            {"path": "/data/blobs/foreign/pri\x00vate.csv"},
+        ],
+        ids=["empty_path", "empty_file", "none_path", "wrong_type_file", "valid_path_invalid_file", "nul_path"],
+    )
+    async def test_yaml_export_rejects_invalid_reviewed_path_carriers_before_audit(
+        self,
+        tmp_path: Path,
+        invalid_carriers: dict[str, object],
+    ) -> None:
+        from sqlalchemy import select
+
+        from elspeth.web.sessions.models import composer_completion_events_table
+
+        app, service = _make_app(tmp_path)
+        client = TestClient(app, raise_server_exceptions=False)
+        stable_id = "98b1357d-5aab-4fb3-85b4-5ad643912e84"
+        storage_path = "/data/blobs/foreign/private.csv"
+        session = await service.create_session("alice", "Pipeline", "local")
+        get_blob = AsyncMock()
+        app.state.blob_service = SimpleNamespace(get_blob=get_blob)
+        guided = replace(
+            GuidedSession.initial(),
+            source_order=(stable_id,),
+            reviewed_sources={
+                stable_id: SourceResolved(
+                    name="source",
+                    plugin="csv",
+                    options={**invalid_carriers, "blob_ref": stable_id},
+                    observed_columns=("value",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
+        )
+        await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                source={
+                    "plugin": "csv",
+                    "on_success": "out",
+                    "options": {"path": storage_path},
+                    "on_validation_failure": "discard",
+                },
+                outputs=[{"name": "out", "plugin": "csv", "options": {}, "on_write_failure": "discard"}],
+                metadata_={"name": "Invalid reviewed carrier", "description": ""},
+                is_valid=True,
+                composer_meta={"guided_session": guided.to_dict()},
+            ),
+            provenance="session_seed",
+        )
+
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
+            return ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
+            response = client.get(f"/api/sessions/{session.id}/state/yaml")
+
+        assert response.status_code == 500
+        assert response.text == "Internal Server Error"
+        assert stable_id not in response.text
+        assert storage_path not in response.text
+        get_blob.assert_not_awaited()
+        with app.state.session_engine.connect() as conn:
+            export_events = conn.execute(
+                select(composer_completion_events_table).where(
+                    composer_completion_events_table.c.session_id == str(session.id),
+                    composer_completion_events_table.c.event_type == "export_yaml",
+                )
+            ).all()
+        assert export_events == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "live_options",
+        [
+            {"path": "/data/blobs/foreign/live.csv"},
+            {"schema": {"mode": "observed"}},
+        ],
+        ids=["mismatched_path", "missing_live_carrier"],
+    )
+    async def test_yaml_export_rejects_same_name_without_exact_reviewed_path_before_audit(
+        self,
+        tmp_path: Path,
+        live_options: dict[str, object],
+    ) -> None:
+        from sqlalchemy import select
+
+        from elspeth.web.sessions.models import composer_completion_events_table
+
+        app, service = _make_app(tmp_path)
+        client = TestClient(app, raise_server_exceptions=False)
+        stable_id = "98b1357d-5aab-4fb3-85b4-5ad643912e84"
+        reviewed_path = " /data/blobs/foreign/bogus.csv "
+        session = await service.create_session("alice", "Pipeline", "local")
+        get_blob = AsyncMock()
+        app.state.blob_service = SimpleNamespace(get_blob=get_blob)
+        guided = replace(
+            GuidedSession.initial(),
+            source_order=(stable_id,),
+            reviewed_sources={
+                stable_id: SourceResolved(
+                    name="source",
+                    plugin="csv",
+                    options={"path": reviewed_path, "blob_ref": stable_id},
+                    observed_columns=("value",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
+        )
+        await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                source={
+                    "plugin": "csv",
+                    "on_success": "out",
+                    "options": live_options,
+                    "on_validation_failure": "discard",
+                },
+                outputs=[{"name": "out", "plugin": "csv", "options": {}, "on_write_failure": "discard"}],
+                metadata_={"name": "Inconsistent reviewed mapping", "description": ""},
+                is_valid=True,
+                composer_meta={"guided_session": guided.to_dict()},
+            ),
+            provenance="session_seed",
+        )
+
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
+            return ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
+            response = client.get(f"/api/sessions/{session.id}/state/yaml")
+
+        assert response.status_code == 500
+        assert response.text == "Internal Server Error"
+        assert stable_id not in response.text
+        assert reviewed_path not in response.text
+        get_blob.assert_not_awaited()
+        with app.state.session_engine.connect() as conn:
+            export_events = conn.execute(
+                select(composer_completion_events_table).where(
+                    composer_completion_events_table.c.session_id == str(session.id),
+                    composer_completion_events_table.c.event_type == "export_yaml",
+                )
+            ).all()
+        assert export_events == []
+
+    @pytest.mark.asyncio
     async def test_yaml_export_rejects_reviewed_blob_ref_without_path_before_audit(self, tmp_path: Path) -> None:
         from sqlalchemy import select
 

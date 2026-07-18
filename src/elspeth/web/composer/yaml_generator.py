@@ -33,7 +33,10 @@ import yaml
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.trust_boundary import trust_boundary
-from elspeth.web.composer.guided_blob_refs import validate_guided_reviewed_blob_ref
+from elspeth.web.composer.guided_blob_refs import (
+    validate_guided_reviewed_blob_binding,
+    validate_guided_reviewed_blob_source_mapping,
+)
 from elspeth.web.composer.state import COMPOSER_NODE_TYPES, CompositionState, queue_node_contract_error
 from elspeth.web.interpretation_state import AUTHORING_METADATA_OPTION_KEYS
 from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS
@@ -283,14 +286,15 @@ def reattach_guided_blob_refs_for_public_export(state: CompositionState) -> Comp
         snapshot_options = snapshot.options
         if "blob_ref" not in snapshot_options:
             continue
-        blob_ref = validate_guided_reviewed_blob_ref(snapshot_options["blob_ref"])
-        blob_backed_paths = {value for key in SOURCE_LOCAL_PATH_OPTION_KEYS if type(value := snapshot_options.get(key)) is str}
-        if not blob_backed_paths:
-            raise AuditIntegrityError("guided reviewed blob source is missing a string path carrier")
-        reviewed_bindings.append((source_name, frozenset(blob_backed_paths), blob_ref))
+        blob_ref, blob_backed_paths = validate_guided_reviewed_blob_binding(snapshot_options)
+        reviewed_bindings.append((source_name, blob_backed_paths, blob_ref))
 
     if not reviewed_bindings:
         return state
+    validate_guided_reviewed_blob_source_mapping(
+        [(name, paths) for name, paths, _blob_ref in reviewed_bindings],
+        {name: source.options for name, source in state.sources.items()},
+    )
     all_reviewed_paths = frozenset(path for _name, paths, _blob_ref in reviewed_bindings for path in paths)
     reattached = dict(state.sources)
     changed = False

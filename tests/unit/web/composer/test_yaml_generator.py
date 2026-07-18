@@ -674,6 +674,145 @@ class TestGenerateYaml:
 
         assert state.sources["source"].options == {"path": blob_path}
 
+    @pytest.mark.parametrize(
+        "invalid_carriers",
+        [
+            {"path": ""},
+            {"file": ""},
+            {"path": None},
+            {"file": 123},
+            {"path": "/home/john/elspeth/data/blobs/foreign/source.json", "file": None},
+            {"path": "/home/john/elspeth/data/blobs/foreign/so\x00urce.json"},
+        ],
+        ids=["empty_path", "empty_file", "none_path", "wrong_type_file", "valid_path_invalid_file", "nul_path"],
+    )
+    def test_public_yaml_rejects_invalid_reviewed_path_carriers(self, invalid_carriers: dict[str, object]) -> None:
+        stable_id = "11111111-1111-4111-8111-111111111111"
+        live_path = "/home/john/elspeth/data/blobs/foreign/source.json"
+        snapshot_options = {**invalid_carriers, "blob_ref": stable_id}
+        guided_session = replace(
+            GuidedSession.initial(),
+            source_order=(stable_id,),
+            reviewed_sources={
+                stable_id: SourceResolved(
+                    name="source",
+                    plugin="json",
+                    options=snapshot_options,
+                    observed_columns=("value",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
+        )
+        state = CompositionState(
+            sources={
+                "source": SourceSpec(
+                    plugin="json",
+                    on_success="out",
+                    options={"path": live_path},
+                    on_validation_failure="discard",
+                )
+            },
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="json", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+            guided_session=guided_session,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="path carrier"):
+            generate_public_yaml(state)
+
+        assert state.sources["source"].options == {"path": live_path}
+
+    def test_public_yaml_accepts_two_valid_reviewed_path_carriers(self) -> None:
+        stable_id = "11111111-1111-4111-8111-111111111111"
+        path = "/home/john/elspeth/data/blobs/source.json"
+        file = "/home/john/elspeth/data/blobs/source-alias.json"
+        guided_session = replace(
+            GuidedSession.initial(),
+            source_order=(stable_id,),
+            reviewed_sources={
+                stable_id: SourceResolved(
+                    name="source",
+                    plugin="json",
+                    options={"path": path, "file": file, "blob_ref": stable_id},
+                    observed_columns=("value",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
+        )
+        state = CompositionState(
+            sources={
+                "source": SourceSpec(
+                    plugin="json",
+                    on_success="out",
+                    options={"path": path, "file": file},
+                    on_validation_failure="discard",
+                )
+            },
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="json", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+            guided_session=guided_session,
+        )
+
+        public_source = yaml.safe_load(generate_public_yaml(state))["sources"]["source"]
+
+        assert "path" not in public_source.get("options", {})
+        assert "file" not in public_source.get("options", {})
+
+    @pytest.mark.parametrize(
+        "live_options",
+        [
+            {"path": "/home/john/elspeth/data/blobs/live.json"},
+            {"schema": {"mode": "observed"}},
+        ],
+        ids=["mismatched_path", "missing_live_carrier"],
+    )
+    def test_public_yaml_rejects_same_name_without_exact_reviewed_path(self, live_options: dict[str, object]) -> None:
+        stable_id = "11111111-1111-4111-8111-111111111111"
+        reviewed_path = " /home/john/elspeth/data/blobs/bogus.json "
+        guided_session = replace(
+            GuidedSession.initial(),
+            source_order=(stable_id,),
+            reviewed_sources={
+                stable_id: SourceResolved(
+                    name="source",
+                    plugin="json",
+                    options={"path": reviewed_path, "blob_ref": stable_id},
+                    observed_columns=("value",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
+        )
+        state = CompositionState(
+            sources={
+                "source": SourceSpec(
+                    plugin="json",
+                    on_success="out",
+                    options=live_options,
+                    on_validation_failure="discard",
+                )
+            },
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="json", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+            guided_session=guided_session,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="guided blob source mapping"):
+            generate_public_yaml(state)
+
+        assert state.sources["source"].options == live_options
+
     def test_public_yaml_rejects_reviewed_blob_ref_without_string_path_carrier(self) -> None:
         stable_id = "11111111-1111-4111-8111-111111111111"
         live_path = "/home/john/elspeth/data/blobs/foreign/source.json"

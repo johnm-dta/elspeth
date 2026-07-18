@@ -105,17 +105,23 @@ def test_untouched_when_snapshot_has_no_blob_ref() -> None:
     assert _reattach_guided_blob_refs(state) is state
 
 
-def test_does_not_touch_operator_typed_source() -> None:
-    # The committed source path does not match the snapshot's blob-backed path,
-    # so it is an operator-typed path and must NOT be marked blob-backed.
+def test_rejects_operator_typed_source_reusing_reviewed_name() -> None:
     state = _state(
         source_options={"path": "/tmp/operator/typed.csv"},
         guided_session=_guided_with_snapshot(blob_ref=BLOB_REF, path=BLOB_PATH),
     )
-    out = _reattach_guided_blob_refs(state)
-    # No reattachment happened, so the original (frozen) state is returned as-is.
-    assert out is state
-    assert "blob_ref" not in out.sources["source"].options
+
+    with pytest.raises(AuditIntegrityError, match="guided blob source mapping"):
+        _reattach_guided_blob_refs(state)
+
+
+def test_allows_retired_reviewed_binding_when_name_and_path_are_absent() -> None:
+    state = _state(
+        source_options={"path": "/tmp/operator/typed.csv"},
+        guided_session=_guided_with_snapshot(blob_ref=BLOB_REF, path=BLOB_PATH, name="retired"),
+    )
+
+    assert _reattach_guided_blob_refs(state) is state
 
 
 def test_preserves_source_that_already_has_blob_ref() -> None:

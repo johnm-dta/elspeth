@@ -27,7 +27,11 @@ from elspeth.contracts.blobs import AllowedMimeType
 from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields
-from elspeth.web.composer.guided_blob_refs import validate_guided_reviewed_blob_ref
+from elspeth.web.composer.guided_blob_refs import (
+    GUIDED_REVIEWED_BLOB_PATH_KEYS,
+    validate_guided_reviewed_blob_binding,
+    validate_guided_reviewed_blob_source_mapping,
+)
 from elspeth.web.composer.redaction_telemetry import RedactionTelemetry
 
 REDACTED_BLOB_SOURCE_PATH = "<redacted-blob-source-path>"
@@ -3468,31 +3472,34 @@ def redact_guided_snapshot_storage_paths(
             reviewed_out[stable_id] = snapshot
             continue
 
-        validate_guided_reviewed_blob_ref(snap_options["blob_ref"])
-        blob_paths = {value for key in ("path", "file") if key in snap_options and type(value := snap_options[key]) is str}
-        if not blob_paths:
-            raise AuditIntegrityError("guided reviewed blob source is missing a string path carrier")
+        _blob_ref, blob_paths = validate_guided_reviewed_blob_binding(snap_options)
         snap_options_redacted = dict(snap_options)
-        for key in ("path", "file"):
+        for key in GUIDED_REVIEWED_BLOB_PATH_KEYS:
             if key in snap_options_redacted:
                 snap_options_redacted[key] = REDACTED_BLOB_SOURCE_PATH
         snapshot_redacted = dict(snapshot)
         snapshot_redacted["options"] = snap_options_redacted
         reviewed_out[stable_id] = snapshot_redacted
         changed = True
-        if blob_paths:
-            reviewed_bindings.append((name, frozenset(blob_paths)))
+        reviewed_bindings.append((name, blob_paths))
 
     if rebuilt_sources is not None and reviewed_bindings:
-        all_reviewed_paths = frozenset(path for _name, paths in reviewed_bindings for path in paths)
-        for live_name, live_source in tuple(rebuilt_sources.items()):
+        live_source_options: dict[str, dict[str, Any]] = {}
+        for live_name, live_source in rebuilt_sources.items():
             if type(live_source) is not dict:
                 raise ValueError("redact_guided_snapshot_storage_paths: source entries must be dicts when guided blob redaction is active")
             if "options" not in live_source:
+                live_source_options[live_name] = {}
                 continue
             live_options = live_source["options"]
             if type(live_options) is not dict:
                 raise ValueError("redact_guided_snapshot_storage_paths: source.options must be a dict when guided blob redaction is active")
+            live_source_options[live_name] = live_options
+        validate_guided_reviewed_blob_source_mapping(reviewed_bindings, live_source_options)
+
+        all_reviewed_paths = frozenset(path for _name, paths in reviewed_bindings for path in paths)
+        for live_name, live_source in tuple(rebuilt_sources.items()):
+            live_options = live_source_options[live_name]
             live_reviewed_paths = {
                 value for key in ("path", "file") if type(value := live_options.get(key)) is str and value in all_reviewed_paths
             }

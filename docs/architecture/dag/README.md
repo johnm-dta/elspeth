@@ -38,9 +38,10 @@ the following post-seed work at a new baseline:
 | 2026-07-18 | Sidecar journal commit ordering (`elspeth-d8d4d2849b`) | Fixed: a committed outbox publishes and recovers idempotently without recording failed transactions. | [Executed evidence](assessments/2026-07-18-0319/01-executed-evidence.md) |
 | 2026-07-18 | Source ingress to source-COMPLETED crash seam (`elspeth-aafba3b298`) | Fixed: current TS-02 atomically commits row, token, source witness, initial lease, and scheduler events; resume repairs only an exact pre-fix image before plugin execution and fails closed on conflicting evidence. | [State-engine architecture](../state_engine/architecture.md#durable-transaction-boundaries) and `focused-crash-restart-09` |
 
-The reassessment confirms these closures. It also confirms selected fencing,
-idempotency, and atomicity improvements, but no mandatory scenario yet passes
-the entire production-support lifecycle.
+The DAG reassessment and the later state-engine follow-up confirm these narrow
+closures. They also confirm selected fencing, idempotency, and atomicity
+improvements, but no mandatory scenario yet passes the entire
+production-support lifecycle.
 
 ## Start here
 

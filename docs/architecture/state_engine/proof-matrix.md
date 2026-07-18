@@ -1,14 +1,14 @@
 # State Engine Proof Matrix
 
 This is the human-readable result for the current assessment at
-`42241500931926c5fd914ab7d92b479d9da1f8c2`. The machine authority is the
+`3c782ac3c7efb0550495be38f75800eddffa639a`. The machine authority is the
 [v1 catalog](proof-catalog/v1/catalog.json) plus the current dated
-[assessment manifest](assessments/2026-07-18-1631/assessment.json).
+[assessment manifest](assessments/2026-07-18-1820/assessment.json).
 
 ## Result
 
 **Verdict: not complete.** No catalog leg currently has a complete package
-across all ten mandatory dimensions. The 114 freshly executed checks below
+across all ten mandatory dimensions. The 127 freshly executed checks below
 establish important narrow properties, but they do not substitute for the
 missing production-boundary, multiprocess, crash/restart, read-model, and
 lifecycle evidence.
@@ -32,20 +32,20 @@ maturity score.
 
 | Area | Fresh evidence | What it establishes | Important limit |
 | --- | --- | --- | --- |
+| TS-02 source completion and compatibility recovery | EV-004, 13 checks across `test_processor.py` and the public-resume E2E harness | Current ingress commits the source witness inside TS-02; selected row/token/source/work rollback planes pass; pre-fix repair validates exact attempt/event/identity/state evidence before plugin execution; a crash after repair resumes with one transform call | SQLite and deterministic crash injection with fresh resume objects; not every durable plane or guard, abrupt OS process death, independent-process contention, every source exclusion arm, or the remaining TS-02/PB-01 dimensions |
 | Strict fencing and authority | EV-001, 29 checks in `test_scheduler_fencing.py` | `None` authority is rejected, stale tokens refuse without payload mutation, strict wrappers require authority, and production sources do not select the named legacy adapter | Mostly direct/source-contract evidence; not every live production call path or multiprocess takeover |
 | Pending-sink admission | EV-001, 17 checks in `test_scheduler_pending_sink_claim.py` | Malformed bundles are refused without mutation; complete bundles claim as sink-redrive leases | SQLite repository scope; not expiry/reclaim or production redrive lifecycle |
 | TS-07–TS-10 dispositions | EV-003, 30 checks in `test_scheduler_events.py` | Exact row/event/branch-loss success images, subtype/owner/membership refusal, and event/branch-loss rollback | Direct SQLite repository scope; not production plugin composition, contention, restart, or read-model truth tables |
 | Barrier completion | EV-002, 29 checks in `test_scheduler_repository_complete_barrier.py` | Exact snapshot coverage, atomic consume/emission, refusal cases, and rollback on injected repository failure | Direct repository scope; not every aggregation/coalesce process-death seam |
 | Built-in local sink recovery | EV-002, 9 checks in `test_builtin_sink_effect_recovery.py` | CSV/JSON response-loss reconciliation avoids duplicate publication; diversion and virtual-effect arms execute through the pipeline | Built-in local sinks only; injected response loss is not abrupt process death or long-lease takeover |
 
-See [evidence.md](assessments/2026-07-18-1631/evidence.md) for exact command
+See [evidence.md](assessments/2026-07-18-1820/evidence.md) for exact command
 vectors, collection counts, timings, and negative claims.
 
 ## Open proof themes
 
 | Theme | Primary catalog legs | Live owner where known | Exit condition |
 | --- | --- | --- | --- |
-| Source row/lease to source-node completion | TS-02, PB-01 | `elspeth-aafba3b298` | Fresh-process crash at the seam converges without duplicate source acceptance or stranded work |
 | Plugin call exceeds lease/stall budget | AUX-01, AUX-02, PB-02, PB-06 | `elspeth-51a4b5c771` | Bounded production call demonstrates heartbeat or safe lease-loss abandonment and takeover |
 | Child enqueue before parent disposition | TS-00, PB-02, PB-03 | `elspeth-7cdc4da434` | Each crash point resumes without duplicate child, stranded parent, or conflicting audit image |
 | Queue atomicity and replay | TS-00, TS-01 | `elspeth-c0d4a28e11` | Exact replay, incompatible replay, rollback, and independent-connection winner/loser cases pass |
@@ -62,9 +62,9 @@ vectors, collection counts, timings, and negative claims.
 
 ## Hard gates
 
-All ten hard gates remain open. EV-001 through EV-003 partially support malformed
-bundle refusal, strict authority, zero-mutation refusal, atomic barrier and
-disposition writes, and duplicate-publication recovery, but none closes its
-repository-wide gate.
+All ten hard gates remain open. EV-001 through EV-004 partially support
+malformed-bundle refusal, strict authority, zero-mutation refusal, atomic
+source/barrier/disposition writes, source compatibility recovery, and
+duplicate-publication recovery, but none closes its repository-wide gate.
 `HG-09-mandatory-leg-unresolved` is independently open because every leg has an
 unresolved required cell.

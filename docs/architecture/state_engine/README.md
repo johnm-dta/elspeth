@@ -8,18 +8,19 @@ current verdict, and historical assessments.
 
 | Field | Current value |
 | --- | --- |
-| Assessment | [2026-07-18 16:31 AEST](assessments/2026-07-18-1631/README.md) |
-| Code baseline | `release/0.7.1` at `42241500931926c5fd914ab7d92b479d9da1f8c2` |
+| Assessment | [2026-07-18 18:20 AEST](assessments/2026-07-18-1820/README.md) |
+| Code baseline | `release/0.7.1` at `3c782ac3c7efb0550495be38f75800eddffa639a` |
 | Catalog | `elspeth-state-engine-v1`, schema 1, 68 legs, 10 dimensions |
 | Verdict | **Not complete** |
-| Strongest evidence | Strict fencing; pending-sink admission; TS-07–TS-10 disposition images; barrier atomicity; built-in sink-effect recovery |
-| Primary gaps | Source-completion crash seam; long plugin/effect calls beyond leases; child-enqueue/parent-disposition seam; aggregation continuation; RC-04/RC-07 repository predicates; production follower and read-model matrices |
+| Strongest evidence | TS-02 source-completion atomicity and strict legacy-image recovery; strict fencing; pending-sink admission; TS-07–TS-10 disposition images; barrier atomicity; built-in sink-effect recovery |
+| Primary gaps | Long plugin/effect calls beyond leases; child-enqueue/parent-disposition seam; aggregation continuation; RC-04/RC-07 repository predicates; source exclusion breadth; production follower and read-model matrices |
 
 The July 2026 implementation is materially stronger than the 2026-07-15
-snapshot. The six concrete hard defects recorded there are fixed at the current
-baseline. The engine still fails the completion bar because mandatory
-crash/restart, concurrency, plugin-boundary, read-model, and maintenance cells
-remain unresolved.
+snapshot. The six concrete hard defects recorded there and the named
+TS-02/source-completion seam are fixed at the current baseline. The engine
+still fails the completion bar because mandatory crash/restart, concurrency,
+plugin-boundary, read-model, and maintenance cells remain unresolved. Closing
+one seam does not close the repository-wide atomicity or restart hard gates.
 
 Do not reuse the historical `3 Confirmed / 15 Gap` count. The v1 catalog closes
 68 legs across ten dimensions, so that older denominator is not comparable.
@@ -112,5 +113,6 @@ code.
 
 | Date | Baseline | Mode | Verdict | Notes |
 | --- | --- | --- | --- | --- |
+| 2026-07-18 | `3c782ac3c` | Full contract refresh and source-ingress evidence | Not complete | Adds the exact source `COMPLETED` witness to TS-02/PB-01, records strict pre-fix reconciliation, and attaches 13 fresh focused checks without promoting the broader legs or hard gates. |
 | 2026-07-18 | `422415009` | Full framework reset and conservative evidence import | Not complete | Introduces the 68-leg v1 catalog, explicit coordination state, sink-effect architecture, reproducibility contract, and reviewed authority model. |
 | 2026-07-15 | `0dcd61ac` | Seed assessment | Not complete | Historical 18-leg Wave 1 result; useful evidence, obsolete denominator and blocker list. |

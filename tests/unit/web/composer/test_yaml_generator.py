@@ -551,16 +551,21 @@ class TestGenerateYaml:
         blob_ref = "20b944e3-fd46-434f-b9a2-4fb508db30f0"
         guided_session = replace(
             GuidedSession.initial(),
-            step_1_result=SourceResolved(
-                plugin="json",
-                options={
-                    "path": blob_path,
-                    "blob_ref": blob_ref,
-                    "schema": {"mode": "observed"},
-                },
-                observed_columns=("title", "url"),
-                sample_rows=(),
-            ),
+            source_order=("11111111-1111-4111-8111-111111111111",),
+            reviewed_sources={
+                "11111111-1111-4111-8111-111111111111": SourceResolved(
+                    name="source",
+                    plugin="json",
+                    options={
+                        "path": blob_path,
+                        "blob_ref": blob_ref,
+                        "schema": {"mode": "observed"},
+                    },
+                    observed_columns=("title", "url"),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
         )
         state = CompositionState(
             sources={

@@ -56,8 +56,8 @@ class TestTurnRecord:
         rec = TurnRecord(
             step=GuidedStep.STEP_1_SOURCE,
             turn_type=TurnType.SINGLE_SELECT,
-            payload_hash="abc123",
-            response_hash="def456",
+            payload_hash="a" * 64,
+            response_hash="b" * 64,
             summary="Selected source: csv",
             emitter="server",
         )
@@ -68,7 +68,7 @@ class TestTurnRecord:
         rec = TurnRecord(
             step=GuidedStep.STEP_1_SOURCE,
             turn_type=TurnType.SINGLE_SELECT,
-            payload_hash="abc",
+            payload_hash="a" * 64,
             response_hash=None,
             emitter="server",
         )
@@ -79,8 +79,8 @@ class TestTurnRecord:
         rec = TurnRecord(
             step=GuidedStep.STEP_1_SOURCE,
             turn_type=TurnType.SINGLE_SELECT,
-            payload_hash="abc",
-            response_hash="def",
+            payload_hash="a" * 64,
+            response_hash="b" * 64,
             summary="Selected source: csv",
             emitter="server",
         )

@@ -97,6 +97,8 @@ def _step_1_session(
     result = None
     if result_plugin is not None:
         result = SourceResolved(
+            name="source",
+            on_validation_failure="discard",
             plugin=result_plugin,
             options={"schema": {"mode": "observed"}},
             observed_columns=("text",),

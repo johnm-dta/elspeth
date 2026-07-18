@@ -124,18 +124,22 @@ class TestStep3ContextBlock:
 
         ctx = build_step_3_context_block(
             source=SourceResolved(
+                name="source",
                 plugin="csv",
                 options={},
                 observed_columns=("price", "qty"),
                 sample_rows=({"price": "1.99", "qty": "2"},),
+                on_validation_failure="discard",
             ),
             sink=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
+                        name="main",
                         plugin="json",
                         options={"path": "out.jsonl"},
                         required_fields=("avg_price",),
                         schema_mode="fixed",
+                        on_write_failure="discard",
                     ),
                 )
             ),
@@ -156,6 +160,7 @@ class TestStep3ContextBlock:
 
         ctx = build_step_3_context_block(
             source=SourceResolved(
+                name="source",
                 plugin="csv",
                 options={},
                 observed_columns=("email", "api_key", "profile_url", "note"),
@@ -167,14 +172,17 @@ class TestStep3ContextBlock:
                         "note": "customer asked for refunds",
                     },
                 ),
+                on_validation_failure="discard",
             ),
             sink=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
+                        name="main",
                         plugin="json",
                         options={},
                         required_fields=("email_hash",),
                         schema_mode="fixed",
+                        on_write_failure="discard",
                     ),
                 )
             ),

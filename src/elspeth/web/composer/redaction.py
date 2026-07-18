@@ -3427,36 +3427,12 @@ def redact_guided_snapshot_storage_paths(
     sources: Mapping[str, Any] | None,
     composer_meta: Mapping[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Redact blob storage paths missed by :func:`redact_source_storage_path` for
-    guided-mode sources, using the persisted GuidedSession snapshot's ``blob_ref``
-    as a no-DB-lookup signal.
+    """Redact schema-8 reviewed source paths using each source's blob binding.
 
-    Why this exists: :func:`redact_source_storage_path` keys off ``blob_ref`` in a
-    source's options. The guided flow commits blob-backed sources through the
-    manual ``set_source`` path (``guided/steps.py``), which REJECTS/strips
-    ``blob_ref`` because it cannot prove ``path == storage_path``. So the committed
-    source carries the absolute ``storage_path`` with NO ``blob_ref`` and slips
-    past the source-keyed redaction. The co-located GuidedSession snapshot
-    persisted in ``composer_meta`` (``guided_session.step_1_result``) DID retain
-    ``blob_ref`` (the by-storage_path enrichment in ``guided/steps.py``), so a
-    ``blob_ref`` there is an authoritative, DB-lookup-free signal that the source
-    is blob-backed.
-
-    Closes the two HTTP-response (``_state_response``) egress channels of the same
-    storage_path that the source-keyed redaction misses for guided sources:
-      1. ``composition_state.composer_meta.guided_session.step_1_result.options.path``
-         — the snapshot itself (serialized unredacted), and
-      2. ``composition_state.sources.<name>.options.path`` — the committed source,
-         matched to the snapshot's blob-backed path so operator-typed (non-blob)
-         sources are left untouched.
-
-    Both ``"path"`` and ``"file"`` are treated as storage-path carriers (mirrors
-    :func:`redact_source_storage_path`). Returns shallow-redacted copies of
-    ``(sources, composer_meta)``; inputs are never mutated. When there is no
-    blob-backed guided snapshot (freeform state, operator-typed path, or no source
-    yet), the inputs are returned unchanged. Once ``guided_session`` or a
-    ``step_1_result`` snapshot is present, malformed nested state is Tier-1 drift
-    and fails loudly instead of degrading to freeform redaction.
+    Guided commits can omit ``blob_ref`` from the executable source while retaining
+    it in ``guided_session.reviewed_sources``. Each reviewed snapshot is matched to
+    the committed source by its persisted name and exact storage-path value. Both
+    copies are redacted without mutating the persisted input dictionaries.
     """
     sources_out = dict(sources) if sources is not None else None
     meta_out = dict(composer_meta) if composer_meta is not None else None
@@ -3466,71 +3442,62 @@ def redact_guided_snapshot_storage_paths(
     guided = composer_meta["guided_session"]
     if type(guided) is not dict:
         raise ValueError("redact_guided_snapshot_storage_paths: composer_meta.guided_session must be a dict")
-    snapshot = guided["step_1_result"]
-    if snapshot is None:
-        return sources_out, meta_out
-    if type(snapshot) is not dict:
-        raise ValueError("redact_guided_snapshot_storage_paths: guided_session.step_1_result must be a dict or None")
-    snap_options = snapshot["options"]
-    # Only a blob_ref on the snapshot marks the source as blob-backed; without it
-    # the source path is operator-typed and must NOT be redacted.
-    if type(snap_options) is not dict:
-        raise ValueError("redact_guided_snapshot_storage_paths: guided_session.step_1_result.options must be a dict")
-    if "blob_ref" not in snap_options:
-        return sources_out, meta_out
+    reviewed_sources = guided["reviewed_sources"]
+    if type(reviewed_sources) is not dict:
+        raise ValueError("redact_guided_snapshot_storage_paths: guided_session.reviewed_sources must be a dict")
 
-    blob_backed_paths: set[str] = set()
-    for key in ("path", "file"):
-        if key not in snap_options:
+    reviewed_out: dict[str, Any] = {}
+    rebuilt_sources = dict(sources) if sources is not None else None
+    changed = False
+    for stable_id, snapshot in reviewed_sources.items():
+        if type(stable_id) is not str or type(snapshot) is not dict:
+            raise ValueError("redact_guided_snapshot_storage_paths: reviewed_sources entries must be string-keyed dicts")
+        name = snapshot["name"]
+        if type(name) is not str or not name:
+            raise ValueError("redact_guided_snapshot_storage_paths: reviewed_sources.name must be a non-empty str")
+        snap_options = snapshot["options"]
+        if type(snap_options) is not dict:
+            raise ValueError(f"redact_guided_snapshot_storage_paths: guided_session.reviewed_sources[{stable_id!r}].options must be a dict")
+        if "blob_ref" not in snap_options:
+            reviewed_out[stable_id] = snapshot
             continue
-        value = snap_options[key]
-        if type(value) is str:
-            blob_backed_paths.add(value)
 
-    # Channel 1 (the snapshot itself): shallow-copy the composer_meta chain down to
-    # the snapshot options and mask its storage-path carriers.
-    snap_options_redacted = dict(snap_options)
-    for key in ("path", "file"):
-        if key in snap_options_redacted:
-            snap_options_redacted[key] = REDACTED_BLOB_SOURCE_PATH
-    snapshot_redacted = dict(snapshot)
-    snapshot_redacted["options"] = snap_options_redacted
-    guided_redacted = dict(guided)
-    guided_redacted["step_1_result"] = snapshot_redacted
-    meta_out = dict(composer_meta)
-    meta_out["guided_session"] = guided_redacted
+        blob_paths = {value for key in ("path", "file") if key in snap_options and type(value := snap_options[key]) is str}
+        snap_options_redacted = dict(snap_options)
+        for key in ("path", "file"):
+            if key in snap_options_redacted:
+                snap_options_redacted[key] = REDACTED_BLOB_SOURCE_PATH
+        snapshot_redacted = dict(snapshot)
+        snapshot_redacted["options"] = snap_options_redacted
+        reviewed_out[stable_id] = snapshot_redacted
+        changed = True
 
-    # Channel 2: mask the committed source(s) whose storage-path carrier matches a
-    # blob-backed path. A source already redacted by redact_source_storage_path
-    # carries REDACTED_BLOB_SOURCE_PATH (not the real path), so it simply won't
-    # match — no double processing.
-    if sources is not None and blob_backed_paths:
-        rebuilt: dict[str, Any] = {}
-        for name, source in sources.items():
-            if type(source) is not dict:
-                raise ValueError("redact_guided_snapshot_storage_paths: source entries must be dicts when guided blob redaction is active")
-            if "options" not in source:
-                rebuilt[name] = source
-                continue
-            options = source["options"]
-            if type(options) is not dict:
-                raise ValueError("redact_guided_snapshot_storage_paths: source.options must be a dict when guided blob redaction is active")
-            source_uses_blob_path = False
-            for key in ("path", "file"):
-                if key in options and options[key] in blob_backed_paths:
-                    source_uses_blob_path = True
-                    break
-            if source_uses_blob_path:
-                options_redacted = dict(options)
-                for key in ("path", "file"):
-                    if key in options_redacted and options_redacted[key] in blob_backed_paths:
-                        options_redacted[key] = REDACTED_BLOB_SOURCE_PATH
-                source_redacted = dict(source)
-                source_redacted["options"] = options_redacted
-                rebuilt[name] = source_redacted
-            else:
-                rebuilt[name] = source
-        sources_out = rebuilt
+        if rebuilt_sources is None or name not in rebuilt_sources or not blob_paths:
+            continue
+        source = rebuilt_sources[name]
+        if type(source) is not dict:
+            raise ValueError("redact_guided_snapshot_storage_paths: source entries must be dicts when guided blob redaction is active")
+        if "options" not in source:
+            continue
+        options = source["options"]
+        if type(options) is not dict:
+            raise ValueError("redact_guided_snapshot_storage_paths: source.options must be a dict when guided blob redaction is active")
+        matching_keys = [key for key in ("path", "file") if key in options and options[key] in blob_paths]
+        if not matching_keys:
+            continue
+        options_redacted = dict(options)
+        for key in matching_keys:
+            options_redacted[key] = REDACTED_BLOB_SOURCE_PATH
+        source_redacted = dict(source)
+        source_redacted["options"] = options_redacted
+        rebuilt_sources[name] = source_redacted
+
+    if changed:
+        guided_redacted = dict(guided)
+        guided_redacted["reviewed_sources"] = reviewed_out
+        meta_out = dict(composer_meta)
+        meta_out["guided_session"] = guided_redacted
+        sources_out = rebuilt_sources
 
     return sources_out, meta_out
 

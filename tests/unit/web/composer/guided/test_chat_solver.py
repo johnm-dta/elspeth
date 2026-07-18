@@ -164,6 +164,7 @@ def test_build_step_chat_context_block_names_artifacts_llm_safely() -> None:
     lists via the SAME LLM-safe serializers the revision prompts use — never
     raw options, blob paths, or secret-bearing values."""
     current_source = SourceResolved(
+        name="source",
         plugin="csv",
         options={
             "schema": {"mode": "observed", "guaranteed_fields": ["url"]},
@@ -177,10 +178,12 @@ def test_build_step_chat_context_block_names_artifacts_llm_safely() -> None:
     current_sink = SinkResolved(
         outputs=(
             SinkOutputResolved(
+                name="main",
                 plugin="json",
                 options={"path": "results.jsonl", "token": "sk-sink-secret"},
                 required_fields=("url", "score"),
                 schema_mode="observed",
+                on_write_failure="discard",
             ),
         )
     )
@@ -350,6 +353,7 @@ def test_step_1_source_dynamic_block_guides_aws_s3_endpoint_url_policy() -> None
 
 def test_step_1_revision_prompt_uses_llm_safe_source_context() -> None:
     current_source = SourceResolved(
+        name="source",
         plugin="csv",
         options={
             "schema": {"mode": "observed", "guaranteed_fields": ["email", "profile_url"]},
@@ -388,6 +392,7 @@ def test_step_2_revision_prompt_uses_llm_safe_sink_context() -> None:
     current_sink = SinkResolved(
         outputs=(
             SinkOutputResolved(
+                name="main",
                 plugin="azure_blob",
                 options={
                     "path": "/srv/elspeth/exports/private-output.jsonl",
@@ -396,6 +401,7 @@ def test_step_2_revision_prompt_uses_llm_safe_sink_context() -> None:
                 },
                 required_fields=("email_hash", "profile_url"),
                 schema_mode="fixed",
+                on_write_failure="discard",
             ),
         )
     )

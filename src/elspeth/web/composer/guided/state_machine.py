@@ -29,6 +29,12 @@ from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.profile import EMPTY_PROFILE, WorkflowProfile
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, Turn, TurnResponse, TurnType
 from elspeth.web.composer.guided.resolved import (
+    GUIDED_JSON_MAX_ITEMS,
+    GuidedJsonBudget,
+    freeze_guided_json_mapping,
+    freeze_guided_str_sequence,
+)
+from elspeth.web.composer.guided.resolved import (
     SinkOutputResolved as SinkOutputResolved,
 )
 from elspeth.web.composer.guided.resolved import (
@@ -43,6 +49,13 @@ from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_
 # Schema 8 is a pre-release hard cut. There is no schema-7 decoder or
 # converter: session epoch 29 owns the corresponding store recreation.
 GUIDED_SESSION_SCHEMA_VERSION = 8
+GUIDED_MAX_COMPONENTS_PER_KIND = 256
+GUIDED_MAX_DEFERRED_INTENTS = 256
+GUIDED_MAX_CONSTRAINTS_PER_INTENT = 64
+GUIDED_MAX_TOTAL_CONSTRAINTS = 4_096
+GUIDED_MAX_REDACTED_SUMMARY_CHARS = 4_096
+GUIDED_MAX_CHAT_CONTENT_CHARS = 65_536
+GUIDED_MAX_TURN_SUMMARY_CHARS = 4_096
 
 _SHA256_HEX = frozenset("0123456789abcdef")
 _ComponentT = TypeVar("_ComponentT")
@@ -89,6 +102,10 @@ def _require_nonempty_str(value: object, field_name: str) -> str:
     if type(value) is not str or value == "":
         raise InvariantError(f"{field_name} must be a non-empty exact str")
     return value
+
+
+def _is_exact_str(value: object) -> bool:
+    return type(value) is str
 
 
 def _require_optional_nonempty_str(value: object, field_name: str) -> str | None:
@@ -293,8 +310,24 @@ class TurnRecord:
     turn_type: TurnType
     payload_hash: str
     response_hash: str | None
-    emitter: str  # "server" | "llm"
+    emitter: Literal["server", "llm"]
     summary: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.step) is not GuidedStep:
+            raise TypeError("TurnRecord.step must be GuidedStep")
+        if type(self.turn_type) is not TurnType:
+            raise TypeError("TurnRecord.turn_type must be TurnType")
+        _require_hash(self.payload_hash, "TurnRecord.payload_hash")
+        if self.response_hash is not None:
+            _require_hash(self.response_hash, "TurnRecord.response_hash")
+        if not _is_exact_str(self.emitter) or self.emitter not in {"server", "llm"}:
+            raise InvariantError("TurnRecord.emitter must be 'server' or 'llm'")
+        if self.summary is not None:
+            if not _is_exact_str(self.summary):
+                raise TypeError("TurnRecord.summary must be an exact str or None")
+            if len(self.summary) > GUIDED_MAX_TURN_SUMMARY_CHARS:
+                raise InvariantError(f"TurnRecord.summary exceeds {GUIDED_MAX_TURN_SUMMARY_CHARS} characters")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain JSON-serialisable dict."""
@@ -326,7 +359,7 @@ class TurnRecord:
                 emitter=d["emitter"],
                 summary=d["summary"],
             )
-        except (KeyError, ValueError) as exc:
+        except (KeyError, ValueError, TypeError) as exc:
             raise InvariantError(f"TurnRecord.from_dict: malformed record {d!r}") from exc
 
 
@@ -348,16 +381,13 @@ class SourceIntent:
             raise ValueError("SourceIntent.phase is not in the closed phase vocabulary")
         if self.plugin is not None:
             _require_nonempty_str(self.plugin, "SourceIntent.plugin")
-        if self.options is not None and not isinstance(self.options, Mapping):
-            raise TypeError("SourceIntent.options must be a mapping or None")
         if self.inspection_facts is not None and type(self.inspection_facts) is not SourceInspectionFacts:
             raise TypeError("SourceIntent.inspection_facts must be SourceInspectionFacts or None")
-        if not isinstance(self.observed_columns, Sequence) or isinstance(self.observed_columns, (str, bytes)):
-            raise TypeError("SourceIntent.observed_columns must be a sequence[str]")
-        if any(type(column) is not str for column in self.observed_columns):
-            raise TypeError("SourceIntent.observed_columns must contain exact str values")
-        if not isinstance(self.sample_rows, Sequence):
+        sample_rows_value = cast(object, self.sample_rows)
+        if not isinstance(sample_rows_value, Sequence) or isinstance(sample_rows_value, (str, bytes, bytearray)):
             raise TypeError("SourceIntent.sample_rows must be a sequence[mapping]")
+        if len(sample_rows_value) > GUIDED_JSON_MAX_ITEMS:
+            raise InvariantError(f"SourceIntent.sample_rows exceeds the {GUIDED_JSON_MAX_ITEMS}-item limit")
         if any(not isinstance(row, Mapping) for row in self.sample_rows):
             raise TypeError("SourceIntent.sample_rows must contain mappings")
         if self.phase == "plugin_selection":
@@ -380,7 +410,32 @@ class SourceIntent:
                 raise ValueError("SourceIntent plugin_options phase requires only a selected plugin")
         elif self.plugin is None or self.options is None or self.inspection_facts is None:
             raise ValueError("SourceIntent inspection_review phase requires plugin, options, and inspection_facts")
-        freeze_fields(self, "options", "observed_columns", "sample_rows")
+        json_budget = GuidedJsonBudget()
+        if self.options is not None:
+            object.__setattr__(
+                self,
+                "options",
+                freeze_guided_json_mapping(self.options, "SourceIntent.options", budget=json_budget),
+            )
+        object.__setattr__(
+            self,
+            "observed_columns",
+            freeze_guided_str_sequence(self.observed_columns, "SourceIntent.observed_columns"),
+        )
+        object.__setattr__(
+            self,
+            "sample_rows",
+            tuple(
+                freeze_guided_json_mapping(row, f"SourceIntent.sample_rows[{index}]", budget=json_budget)
+                for index, row in enumerate(self.sample_rows)
+            ),
+        )
+        if self.inspection_facts is not None:
+            frozen_facts = freeze_guided_json_mapping(
+                facts_to_dict(self.inspection_facts),
+                "SourceIntent.inspection_facts",
+            )
+            object.__setattr__(self, "inspection_facts", facts_from_dict(cast(Mapping[str, Any], deep_thaw(frozen_facts))))
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain JSON-serialisable dict."""
@@ -461,8 +516,6 @@ class SinkIntent:
             raise ValueError("SinkIntent.phase is not in the closed phase vocabulary")
         if self.plugin is not None:
             _require_nonempty_str(self.plugin, "SinkIntent.plugin")
-        if self.options is not None and not isinstance(self.options, Mapping):
-            raise TypeError("SinkIntent.options must be a mapping or None")
         if self.phase == "plugin_selection":
             if self.plugin is not None or self.options is not None:
                 raise ValueError("SinkIntent plugin_selection phase cannot carry later-phase values")
@@ -471,7 +524,8 @@ class SinkIntent:
                 raise ValueError("SinkIntent plugin_options phase requires only a selected plugin")
         elif self.plugin is None or self.options is None:
             raise ValueError("SinkIntent field_review phase requires plugin and options")
-        freeze_fields(self, "options")
+        if self.options is not None:
+            object.__setattr__(self, "options", freeze_guided_json_mapping(self.options, "SinkIntent.options"))
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain JSON-serialisable dict."""
@@ -581,6 +635,8 @@ class GuidedProposalRef:
         if self.supersedes_proposal_id is not None:
             _require_uuid(self.supersedes_proposal_id, "GuidedProposalRef.supersedes_proposal_id")
             _require_hash(self.supersedes_draft_hash, "GuidedProposalRef.supersedes_draft_hash")
+            if self.supersedes_proposal_id == self.proposal_id:
+                raise InvariantError("GuidedProposalRef cannot supersede itself")
 
     def to_dict(self) -> GuidedProposalRefData:
         if type(self.base) is AbsentBase:
@@ -804,7 +860,20 @@ def _require_json_scalar(value: object, field_name: str) -> JsonScalar:
         canonical_json(value)
     except (TypeError, ValueError) as exc:
         raise InvariantError(f"{field_name} must be in the canonical JSON number domain") from exc
+    if type(value) is str and len(value) > 65_536:
+        raise InvariantError(f"{field_name} JSON string exceeds 65536 characters")
     return cast(JsonScalar, value)
+
+
+def _subject_component_kind(subject: DeferredSubject) -> Literal["source", "node", "edge", "output"]:
+    if type(subject) is StableSubject:
+        return subject.component_kind
+    if type(subject) is PluginSubject:
+        return cast(
+            Literal["source", "node", "edge", "output"],
+            {"source": "source", "transform": "node", "sink": "output"}[subject.plugin_kind],
+        )
+    raise InvariantError("Deferred subject is malformed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -825,6 +894,8 @@ class OptionValueConstraint:
                 raise InvariantError("OptionValueConstraint.option_path segments must be 1 to 128 characters")
         if self.operator not in {"equals", "not_equals"}:
             raise InvariantError("OptionValueConstraint.operator is unsupported")
+        if _subject_component_kind(self.subject) == "edge":
+            raise InvariantError("OptionValueConstraint subject cannot be an edge")
         _require_json_scalar(self.value, "OptionValueConstraint.value")
 
     def to_dict(self) -> OptionValueConstraintData:
@@ -862,6 +933,11 @@ class ComponentCountConstraint:
             raise InvariantError("ComponentCountConstraint plugin_kind/plugin_name must be paired")
         if self.plugin_kind is not None and self.plugin_kind not in {"source", "transform", "sink"}:
             raise InvariantError("ComponentCountConstraint.plugin_kind is unsupported")
+        expected_plugin_kind = {"source": "source", "node": "transform", "output": "sink"}
+        if self.component_kind == "edge" and self.plugin_kind is not None:
+            raise InvariantError("ComponentCountConstraint edge counts cannot carry plugin_kind/plugin_name")
+        if self.component_kind != "edge" and self.plugin_kind is not None and self.plugin_kind != expected_plugin_kind[self.component_kind]:
+            raise InvariantError("ComponentCountConstraint.plugin_kind is incompatible with component_kind")
         if self.plugin_name is not None:
             _require_nonempty_str(self.plugin_name, "ComponentCountConstraint.plugin_name")
         if self.operator not in {"equals", "at_least", "at_most"}:
@@ -903,6 +979,10 @@ class EdgeRouteConstraint:
             raise InvariantError("EdgeRouteConstraint subjects are malformed")
         if self.edge_type not in {"on_success", "on_error", "route_true", "route_false", "fork"}:
             raise InvariantError("EdgeRouteConstraint.edge_type is unsupported")
+        if _subject_component_kind(self.from_subject) not in {"source", "node"}:
+            raise InvariantError("EdgeRouteConstraint.from_subject must identify a source or node")
+        if _subject_component_kind(self.to_subject) not in {"node", "output"}:
+            raise InvariantError("EdgeRouteConstraint.to_subject must identify a node or output")
         if type(self.present) is not bool:
             raise InvariantError("EdgeRouteConstraint.present must be an exact bool")
 
@@ -940,10 +1020,19 @@ class FailureRouteConstraint:
             raise InvariantError("FailureRouteConstraint is malformed")
         if self.failure_kind not in {"source_validation", "node_error", "output_write"}:
             raise InvariantError("FailureRouteConstraint.failure_kind is unsupported")
+        expected_subject_kind = {
+            "source_validation": "source",
+            "node_error": "node",
+            "output_write": "output",
+        }[self.failure_kind]
+        if _subject_component_kind(self.subject) != expected_subject_kind:
+            raise InvariantError("FailureRouteConstraint.failure_kind is incompatible with subject")
         if self.operator not in {"equals", "not_equals"}:
             raise InvariantError("FailureRouteConstraint.operator is unsupported")
         if self.target != "discard" and type(self.target) not in {StableSubject, PluginSubject}:
             raise InvariantError("FailureRouteConstraint.target must be 'discard' or a closed subject")
+        if self.target != "discard" and _subject_component_kind(self.target) != "output":
+            raise InvariantError("FailureRouteConstraint.target subject must identify an output")
 
     def to_dict(self) -> FailureRouteConstraintData:
         return {
@@ -1083,6 +1172,8 @@ class DeferredStageIntent:
         if self.catalog_name is not None:
             _require_nonempty_str(self.catalog_name, "DeferredStageIntent.catalog_name")
         _require_nonempty_str(self.redacted_summary, "DeferredStageIntent.redacted_summary")
+        if len(self.redacted_summary) > GUIDED_MAX_REDACTED_SUMMARY_CHARS:
+            raise InvariantError(f"DeferredStageIntent.redacted_summary exceeds {GUIDED_MAX_REDACTED_SUMMARY_CHARS} characters")
         expected_summary_hash = stable_hash({"schema": "guided.deferred-summary.v1", "summary": self.redacted_summary})
         if self.summary_hash != expected_summary_hash:
             raise InvariantError("DeferredStageIntent.summary_hash mismatch")
@@ -1090,6 +1181,8 @@ class DeferredStageIntent:
         _require_hash(self.message_content_hash, "DeferredStageIntent.message_content_hash")
         if type(self.constraints) is not tuple:
             raise InvariantError("DeferredStageIntent.constraints must be a tuple")
+        if len(self.constraints) > GUIDED_MAX_CONSTRAINTS_PER_INTENT:
+            raise InvariantError(f"DeferredStageIntent.constraints exceeds the {GUIDED_MAX_CONSTRAINTS_PER_INTENT}-constraint limit")
         allowed = {
             SubjectPresenceConstraint,
             OptionValueConstraint,
@@ -1188,15 +1281,28 @@ def guided_reviewed_anchor_hash(
 ) -> str:
     """Hash the exact ordered reviewed facts bound by a guided proposal."""
 
+    reviewed_sources_snapshot = dict(reviewed_sources.items())
+    reviewed_outputs_snapshot = dict(reviewed_outputs.items())
+    validated_source_order = _require_exact_str_tuple(source_order, "guided_reviewed_anchor_hash.source_order", uuid_items=True)
+    validated_output_order = _require_exact_str_tuple(output_order, "guided_reviewed_anchor_hash.output_order", uuid_items=True)
+    if len(set(validated_source_order)) != len(validated_source_order):
+        raise InvariantError("guided_reviewed_anchor_hash.source_order must not contain duplicates")
+    if len(set(validated_output_order)) != len(validated_output_order):
+        raise InvariantError("guided_reviewed_anchor_hash.output_order must not contain duplicates")
+    if set(validated_source_order) != set(reviewed_sources_snapshot):
+        raise InvariantError("guided_reviewed_anchor_hash.source_order must exactly match reviewed_sources")
+    if set(validated_output_order) != set(reviewed_outputs_snapshot):
+        raise InvariantError("guided_reviewed_anchor_hash.output_order must exactly match reviewed_outputs")
+    if any(type(source) is not SourceResolved for source in reviewed_sources_snapshot.values()):
+        raise InvariantError("guided_reviewed_anchor_hash.reviewed_sources values must be SourceResolved")
+    if any(type(output) is not SinkOutputResolved for output in reviewed_outputs_snapshot.values()):
+        raise InvariantError("guided_reviewed_anchor_hash.reviewed_outputs values must be SinkOutputResolved")
+
     facts = {
-        "source_order": list(source_order),
-        "reviewed_sources": {
-            stable_id: reviewed_sources[stable_id].to_dict() for stable_id in source_order if stable_id in reviewed_sources
-        },
-        "output_order": list(output_order),
-        "reviewed_outputs": {
-            stable_id: reviewed_outputs[stable_id].to_dict() for stable_id in output_order if stable_id in reviewed_outputs
-        },
+        "source_order": list(validated_source_order),
+        "reviewed_sources": {stable_id: reviewed_sources_snapshot[stable_id].to_dict() for stable_id in validated_source_order},
+        "output_order": list(validated_output_order),
+        "reviewed_outputs": {stable_id: reviewed_outputs_snapshot[stable_id].to_dict() for stable_id in validated_output_order},
     }
     return reviewed_anchor_hash(facts)
 
@@ -1244,6 +1350,15 @@ class GuidedSession:
             raise TypeError("chat_history must be tuple[ChatTurn, ...]")
         if type(self.chat_turn_seq) is not int or self.chat_turn_seq < 0:
             raise TypeError("chat_turn_seq must be a non-negative exact int")
+        previous_chat_seq = -1
+        for turn in self.chat_history:
+            if turn.seq <= previous_chat_seq:
+                raise InvariantError("GuidedSession chat_history seq values must be unique and strictly increasing")
+            if len(turn.content) > GUIDED_MAX_CHAT_CONTENT_CHARS:
+                raise InvariantError(f"GuidedSession chat content exceeds {GUIDED_MAX_CHAT_CONTENT_CHARS} characters")
+            previous_chat_seq = turn.seq
+        if self.chat_history and self.chat_turn_seq <= self.chat_history[-1].seq:
+            raise InvariantError("GuidedSession.chat_turn_seq must be greater than the maximum persisted chat seq")
         if self.root_intent_message_id is not None:
             _canonical_uuid_text(self.root_intent_message_id, "GuidedSession.root_intent_message_id")
 
@@ -1275,6 +1390,10 @@ class GuidedSession:
             raise InvariantError("GuidedSession.output_order must be an exact permutation of output keys")
         if (set(reviewed_sources) | set(pending_sources)) & (set(reviewed_outputs) | set(pending_outputs)):
             raise InvariantError("GuidedSession stable component IDs must be globally unique")
+        if len(reviewed_sources) + len(pending_sources) > GUIDED_MAX_COMPONENTS_PER_KIND:
+            raise InvariantError(f"GuidedSession source components exceed the {GUIDED_MAX_COMPONENTS_PER_KIND}-component limit")
+        if len(reviewed_outputs) + len(pending_outputs) > GUIDED_MAX_COMPONENTS_PER_KIND:
+            raise InvariantError(f"GuidedSession output components exceed the {GUIDED_MAX_COMPONENTS_PER_KIND}-component limit")
 
         source_names = [source.name for source in reviewed_sources.values()] + [intent.name for intent in pending_sources.values()]
         output_names = [output.name for output in reviewed_outputs.values()] + [intent.name for intent in pending_outputs.values()]
@@ -1285,6 +1404,10 @@ class GuidedSession:
 
         if type(self.deferred_intents) is not tuple or any(type(intent) is not DeferredStageIntent for intent in self.deferred_intents):
             raise TypeError("deferred_intents must be tuple[DeferredStageIntent, ...]")
+        if len(self.deferred_intents) > GUIDED_MAX_DEFERRED_INTENTS:
+            raise InvariantError(f"GuidedSession deferred_intents exceed the {GUIDED_MAX_DEFERRED_INTENTS}-intent limit")
+        if sum(len(intent.constraints) for intent in self.deferred_intents) > GUIDED_MAX_TOTAL_CONSTRAINTS:
+            raise InvariantError(f"GuidedSession deferred constraints exceed the {GUIDED_MAX_TOTAL_CONSTRAINTS}-constraint limit")
         deferred_ids = [intent.intent_id for intent in self.deferred_intents]
         if len(set(deferred_ids)) != len(deferred_ids):
             raise InvariantError("GuidedSession deferred intent IDs must be unique")
@@ -1315,9 +1438,9 @@ class GuidedSession:
             if type(self.active_edit_target) is not ComponentTarget:
                 raise TypeError("active_edit_target must be ComponentTarget or None")
             target = self.active_edit_target
-            if target.kind == "source" and target.stable_id not in set(reviewed_sources) | set(pending_sources):
+            if target.kind == "source" and target.stable_id not in reviewed_sources:
                 raise InvariantError("GuidedSession active_edit_target source does not resolve")
-            if target.kind == "output" and target.stable_id not in set(reviewed_outputs) | set(pending_outputs):
+            if target.kind == "output" and target.stable_id not in reviewed_outputs:
                 raise InvariantError("GuidedSession active_edit_target output does not resolve")
             if target.kind in {"node", "edge"} and self.active_proposal is None:
                 raise InvariantError("GuidedSession node/edge active_edit_target requires active_proposal")

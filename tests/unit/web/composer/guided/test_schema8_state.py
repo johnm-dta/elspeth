@@ -16,7 +16,7 @@ from uuid import UUID
 import pytest
 
 from elspeth.web.composer.guided.errors import InvariantError
-from elspeth.web.composer.guided.protocol import GuidedStep
+from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, GuidedStep, TurnType
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SourceResolved
 from elspeth.web.composer.guided.state_machine import (
     GUIDED_SESSION_SCHEMA_VERSION,
@@ -36,6 +36,7 @@ from elspeth.web.composer.guided.state_machine import (
     TerminalKind,
     TerminalReason,
     TerminalState,
+    TurnRecord,
     guided_reviewed_anchor_hash,
 )
 from elspeth.web.composer.pipeline_proposal import AbsentBase, PresentBase
@@ -708,3 +709,285 @@ def test_schema8_state_is_recursively_immutable_and_detached() -> None:
         session.reviewed_sources[SOURCE_A].options["nested"]["delimiter"] = "|"  # type: ignore[index]
     with pytest.raises(FrozenInstanceError):
         session.active_proposal = None  # type: ignore[misc]
+
+
+def test_turn_record_requires_closed_exact_audit_fields() -> None:
+    class _StrSubclass(str):
+        pass
+
+    record = TurnRecord(
+        step=GuidedStep.STEP_1_SOURCE,
+        turn_type=TurnType.SINGLE_SELECT,
+        payload_hash=HASH_A,
+        response_hash=None,
+        emitter="server",
+        summary=None,
+    )
+    assert TurnRecord.from_dict(record.to_dict()) == record
+
+    for change, match in (
+        ({"payload_hash": "short"}, "payload_hash"),
+        ({"response_hash": "short"}, "response_hash"),
+        ({"emitter": "worker"}, "emitter"),
+        ({"emitter": _StrSubclass("server")}, "emitter"),
+        ({"summary": 7}, "summary"),
+    ):
+        with pytest.raises((InvariantError, TypeError, ValueError), match=match):
+            replace(record, **change)
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [b"bytes", bytearray(b"bytes"), {"set"}, ("tuple",), {1: "non-string-key"}, math.inf, -math.inf, math.nan],
+)
+def test_persisted_options_reject_non_strict_json_values(bad_value: object) -> None:
+    with pytest.raises((InvariantError, TypeError, ValueError), match=r"JSON|key|number"):
+        SourceResolved(
+            name="primary",
+            plugin="csv",
+            options={"bad": bad_value},
+            observed_columns=(),
+            sample_rows=(),
+            on_validation_failure="discard",
+        )
+
+
+def test_persisted_json_is_depth_item_and_string_bounded() -> None:
+    too_deep: dict[str, object] = {}
+    cursor = too_deep
+    for _ in range(65):
+        child: dict[str, object] = {}
+        cursor["child"] = child
+        cursor = child
+
+    for options, match in (
+        (too_deep, "depth"),
+        ({"items": list(range(10_001))}, "item"),
+        ({"text": "x" * 65_537}, "string"),
+    ):
+        with pytest.raises((InvariantError, TypeError, ValueError), match=match):
+            SinkIntent(name="archive", phase="field_review", plugin="json", options=options)
+
+
+def test_pending_intent_json_and_inspection_facts_are_detached_snapshots() -> None:
+    nested = {"items": [{"value": 1}]}
+    headers = ["id"]
+    urls = ["https://example.invalid/"]
+    warnings = ["sample warning"]
+    facts = SourceInspectionFacts(
+        source_kind="csv",
+        redacted_identity={"filename": "input.csv"},
+        byte_range_inspected=(0, 10),
+        sample_row_count=1,
+        observed_headers=headers,  # type: ignore[arg-type]
+        inferred_types={"id": "int"},
+        url_candidates=urls,  # type: ignore[arg-type]
+        warnings=warnings,  # type: ignore[arg-type]
+    )
+    intent = SourceIntent(
+        name="incoming",
+        phase="inspection_review",
+        plugin="csv",
+        options=nested,
+        inspection_facts=facts,
+        observed_columns=headers,
+        sample_rows=({"id": 1},),
+    )
+    encoded_before = intent.to_dict()
+
+    nested["items"][0]["value"] = 2
+    headers.append("mutated")
+    urls.append("https://mutated.invalid/")
+    warnings.append("mutated")
+
+    assert intent.to_dict() == encoded_before
+    assert intent.inspection_facts is not facts
+    assert intent.inspection_facts is not None
+    assert intent.inspection_facts.observed_headers == ("id",)
+    assert intent.inspection_facts.url_candidates == ("https://example.invalid/",)
+    assert intent.inspection_facts.warnings == ("sample warning",)
+
+
+def test_reviewed_anchor_rejects_missing_duplicate_and_unreviewed_order_entries() -> None:
+    source = _source("primary", "/data/primary.csv")
+    with pytest.raises(InvariantError, match="source_order"):
+        guided_reviewed_anchor_hash(
+            source_order=(SOURCE_A, SOURCE_A),
+            reviewed_sources={SOURCE_A: source},
+            output_order=(),
+            reviewed_outputs={},
+        )
+    with pytest.raises(InvariantError, match="source_order"):
+        guided_reviewed_anchor_hash(
+            source_order=(SOURCE_A,),
+            reviewed_sources={},
+            output_order=(),
+            reviewed_outputs={},
+        )
+    with pytest.raises(InvariantError, match="reviewed_sources"):
+        guided_reviewed_anchor_hash(
+            source_order=(),
+            reviewed_sources={SOURCE_A: source},
+            output_order=(),
+            reviewed_outputs={},
+        )
+
+
+def test_source_and_output_edit_targets_resolve_only_reviewed_components() -> None:
+    pending_source_session = replace(
+        GuidedSession.initial(),
+        source_order=(SOURCE_A,),
+        pending_source_intents={SOURCE_A: _source_intent()},
+    )
+    with pytest.raises(InvariantError, match="active_edit_target"):
+        replace(pending_source_session, active_edit_target=ComponentTarget(kind="source", stable_id=SOURCE_A))
+
+    pending_output_session = replace(
+        GuidedSession.initial(),
+        output_order=(OUTPUT_A,),
+        pending_output_intents={OUTPUT_A: _sink_intent()},
+    )
+    with pytest.raises(InvariantError, match="active_edit_target"):
+        replace(pending_output_session, active_edit_target=ComponentTarget(kind="output", stable_id=OUTPUT_A))
+
+
+def test_guided_component_deferred_constraint_and_prose_collections_are_bounded() -> None:
+    source_ids = tuple(str(UUID(int=index + 1)) for index in range(257))
+    pending_sources = {
+        stable_id: SourceIntent(
+            name=f"source-{index}",
+            phase="plugin_selection",
+            plugin=None,
+            options=None,
+            inspection_facts=None,
+            observed_columns=(),
+            sample_rows=(),
+        )
+        for index, stable_id in enumerate(source_ids)
+    }
+    with pytest.raises(InvariantError, match="source components"):
+        replace(GuidedSession.initial(), source_order=source_ids, pending_source_intents=pending_sources)
+
+    output_ids = tuple(str(UUID(int=index + 1_000)) for index in range(257))
+    pending_outputs = {
+        stable_id: SinkIntent(name=f"output-{index}", phase="plugin_selection", plugin=None, options=None)
+        for index, stable_id in enumerate(output_ids)
+    }
+    with pytest.raises(InvariantError, match="output components"):
+        replace(GuidedSession.initial(), output_order=output_ids, pending_output_intents=pending_outputs)
+
+    with pytest.raises(InvariantError, match="deferred_intents"):
+        replace(GuidedSession.initial(), deferred_intents=(_deferred(),) * 257)
+
+    with pytest.raises(InvariantError, match="constraints"):
+        replace(
+            _deferred(),
+            constraints=tuple(
+                SubjectPresenceConstraint(
+                    kind="subject_presence",
+                    subject=StableSubject(kind="stable", component_kind="source", stable_id=SOURCE_A),
+                    present=True,
+                )
+                for _ in range(65)
+            ),
+        )
+
+    with pytest.raises(InvariantError, match="redacted_summary"):
+        DeferredStageIntent.create(
+            intent_id=INTENT_A,
+            receiving_stage="source",
+            target_stage="output",
+            catalog_kind=None,
+            catalog_name=None,
+            redacted_summary="x" * 4097,
+            originating_message_id=MESSAGE_A,
+            message_content_hash=HASH_A,
+            constraints=(),
+        )
+
+
+def test_reviewed_components_have_no_name_or_failure_compatibility_defaults() -> None:
+    with pytest.raises(TypeError, match=r"name.*on_validation_failure|on_validation_failure.*name"):
+        SourceResolved(  # type: ignore[call-arg]
+            plugin="csv",
+            options={},
+            observed_columns=(),
+            sample_rows=(),
+        )
+    with pytest.raises(TypeError, match=r"name.*on_write_failure|on_write_failure.*name"):
+        SinkOutputResolved(  # type: ignore[call-arg]
+            plugin="json",
+            options={},
+            required_fields=(),
+            schema_mode="observed",
+        )
+
+
+def test_constraint_subjects_are_semantically_compatible_with_constraint_kind() -> None:
+    stable_source = StableSubject(kind="stable", component_kind="source", stable_id=SOURCE_A)
+    stable_node = StableSubject(kind="stable", component_kind="node", stable_id=NODE_A)
+    stable_edge = StableSubject(kind="stable", component_kind="edge", stable_id=NODE_B)
+    stable_output = StableSubject(kind="stable", component_kind="output", stable_id=OUTPUT_A)
+
+    with pytest.raises(InvariantError, match="plugin_kind"):
+        ComponentCountConstraint(
+            kind="component_count",
+            component_kind="node",
+            plugin_kind="source",
+            plugin_name="csv",
+            operator="equals",
+            count=1,
+        )
+    with pytest.raises(InvariantError, match="edge"):
+        OptionValueConstraint(kind="option_value", subject=stable_edge, option_path=("x",), operator="equals", value=1)
+    with pytest.raises(InvariantError, match="from_subject"):
+        EdgeRouteConstraint(kind="edge_route", from_subject=stable_output, edge_type="on_success", to_subject=stable_node, present=True)
+    with pytest.raises(InvariantError, match="to_subject"):
+        EdgeRouteConstraint(kind="edge_route", from_subject=stable_node, edge_type="on_success", to_subject=stable_source, present=True)
+    with pytest.raises(InvariantError, match="failure_kind"):
+        FailureRouteConstraint(
+            kind="failure_route",
+            subject=stable_node,
+            failure_kind="source_validation",
+            operator="equals",
+            target="discard",
+        )
+    with pytest.raises(InvariantError, match="target"):
+        FailureRouteConstraint(
+            kind="failure_route",
+            subject=stable_source,
+            failure_kind="source_validation",
+            operator="equals",
+            target=stable_node,
+        )
+
+
+def test_chat_history_sequence_is_unique_increasing_and_not_ahead_of_counter() -> None:
+    first = ChatTurn(
+        role=ChatRole.USER,
+        content="first",
+        seq=1,
+        step=GuidedStep.STEP_1_SOURCE,
+        ts_iso="2026-07-18T00:00:00Z",
+    )
+    duplicate = replace(first, role=ChatRole.ASSISTANT, content="duplicate")
+    earlier = replace(first, role=ChatRole.ASSISTANT, content="earlier", seq=0)
+
+    with pytest.raises(InvariantError, match="strictly increasing"):
+        replace(GuidedSession.initial(), chat_history=(first, duplicate), chat_turn_seq=1)
+    with pytest.raises(InvariantError, match="strictly increasing"):
+        replace(GuidedSession.initial(), chat_history=(first, earlier), chat_turn_seq=1)
+    with pytest.raises(InvariantError, match="chat_turn_seq"):
+        replace(GuidedSession.initial(), chat_history=(first,), chat_turn_seq=0)
+    with pytest.raises(InvariantError, match="chat_turn_seq"):
+        replace(GuidedSession.initial(), chat_history=(first,), chat_turn_seq=1)
+
+
+def test_proposal_ref_rejects_self_supersession() -> None:
+    proposal = _proposal(source_order=(), reviewed_sources={}, output_order=(), reviewed_outputs={}, covered=())
+    with pytest.raises(InvariantError, match="self"):
+        replace(
+            proposal,
+            supersedes_proposal_id=proposal.proposal_id,
+            supersedes_draft_hash=HASH_C,
+        )

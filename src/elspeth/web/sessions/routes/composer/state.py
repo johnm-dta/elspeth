@@ -754,12 +754,12 @@ async def seed_state_for_e2e(
 
 def _reattach_guided_blob_refs(state: CompositionState) -> CompositionState:
     """Reconstitute the ``blob_ref`` stripped from a guided blob-backed source's
-    committed options, using the GuidedSession snapshot's ``step_1_result`` as
-    the authoritative signal (elspeth-b5ee205720).
+    committed options, using schema-8 GuidedSession ``reviewed_sources`` as the
+    authoritative signal (elspeth-b5ee205720).
 
     The manual set_source commit strips ``blob_ref`` from guided sources (it
     cannot prove ``path == storage_path``); it survives only in the persisted
-    snapshot. Both export egress channels — the public-YAML storage-path omission
+    reviewed source snapshot. Both export egress channels — the public-YAML storage-path omission
     (``_strip_web_metadata(..., omit_blob_bound_source_paths=True)``) and the
     ``source_blob_ids`` sidecar — key off ``source.options["blob_ref"]``, so
     without this a guided blob source leaks its absolute storage path AND emits no
@@ -768,11 +768,9 @@ def _reattach_guided_blob_refs(state: CompositionState) -> CompositionState:
     freeform blob-bound ones. Mirrors the snapshot cross-reference in
     ``redact_guided_snapshot_storage_paths``; never mutates ``state``.
 
-    Sources are matched to the snapshot by storage-path-string equality (the same
-    approach as the reference redactor). A second, distinct source carrying the
-    identical absolute path string would also be treated as blob-backed — a
-    narrow, pre-existing edge shared with that redactor; equal paths do mean "the
-    same underlying file", and guided sessions commit a single source today.
+    Sources are matched to their reviewed snapshot by stable persisted source name
+    and storage-path-string equality, so plural sources cannot borrow one another's
+    binding even when they reference the same underlying file.
     """
     return reattach_guided_blob_refs_for_public_export(state)
 

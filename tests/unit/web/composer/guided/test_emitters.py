@@ -325,6 +325,7 @@ class TestSchemaFormPathMask:
 
     def test_step_1_from_resolved_masks_blob_backed_path(self) -> None:
         source = SourceResolved(
+            name="source",
             plugin="json",
             options={
                 "path": "/home/someuser/elspeth/data/blobs/sess/abc123_urls.json",
@@ -333,6 +334,7 @@ class TestSchemaFormPathMask:
             },
             observed_columns=("url",),
             sample_rows=(),
+            on_validation_failure="discard",
         )
         turn = build_step_1_schema_form_turn_from_resolved(source, _Catalog())
         assert turn["payload"]["prefilled"]["path"] == "blob:abc123"
@@ -341,10 +343,12 @@ class TestSchemaFormPathMask:
 
     def test_step_1_from_resolved_leaves_non_blob_path_untouched(self) -> None:
         source = SourceResolved(
+            name="source",
             plugin="json",
             options={"path": "data/input.json", "schema": {"mode": "observed"}},
             observed_columns=("url",),
             sample_rows=(),
+            on_validation_failure="discard",
         )
         turn = build_step_1_schema_form_turn_from_resolved(source, _Catalog())
         assert turn["payload"]["prefilled"]["path"] == "data/input.json"

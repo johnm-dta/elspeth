@@ -96,6 +96,8 @@ async def test_returns_chain_proposal() -> None:
         proposal = await solve_chain(
             model="anthropic/claude-3-opus",
             source=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="csv",
                 options={},
                 observed_columns=("price",),
@@ -104,6 +106,8 @@ async def test_returns_chain_proposal() -> None:
             sink=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
+                        name="main",
+                        on_write_failure="discard",
                         plugin="json",
                         options={},
                         required_fields=("price",),
@@ -151,6 +155,8 @@ async def test_repair_context_appears_in_system_prompt() -> None:
         await solve_chain(
             model="anthropic/claude-3-opus",
             source=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="csv",
                 options={},
                 observed_columns=("price",),
@@ -159,6 +165,8 @@ async def test_repair_context_appears_in_system_prompt() -> None:
             sink=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
+                        name="main",
+                        on_write_failure="discard",
                         plugin="json",
                         options={},
                         required_fields=("price",),
@@ -206,6 +214,8 @@ async def test_solve_chain_without_repair_context_has_no_repair_section() -> Non
         await solve_chain(
             model="anthropic/claude-3-opus",
             source=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="csv",
                 options={},
                 observed_columns=("price",),
@@ -214,6 +224,8 @@ async def test_solve_chain_without_repair_context_has_no_repair_section() -> Non
             sink=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
+                        name="main",
+                        on_write_failure="discard",
                         plugin="json",
                         options={},
                         required_fields=("price",),
@@ -274,6 +286,8 @@ async def test_revise_context_appears_in_system_prompt() -> None:
         await solve_chain(
             model="anthropic/claude-3-opus",
             source=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="csv",
                 options={},
                 observed_columns=("price",),
@@ -282,6 +296,8 @@ async def test_revise_context_appears_in_system_prompt() -> None:
             sink=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
+                        name="main",
+                        on_write_failure="discard",
                         plugin="json",
                         options={},
                         required_fields=("price",),
@@ -361,6 +377,8 @@ def _make_solve_chain_args() -> dict:
     return {
         "model": "anthropic/claude-3-opus",
         "source": SourceResolved(
+            name="source",
+            on_validation_failure="discard",
             plugin="csv",
             options={},
             observed_columns=("price",),
@@ -369,6 +387,8 @@ def _make_solve_chain_args() -> dict:
         "sink": SinkResolved(
             outputs=(
                 SinkOutputResolved(
+                    name="main",
+                    on_write_failure="discard",
                     plugin="json",
                     options={},
                     required_fields=("price",),
@@ -623,6 +643,8 @@ async def test_model_and_operator_sampling_passed_to_litellm() -> None:
         await solve_chain(
             model=TEST_MODEL,
             source=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="csv",
                 options={},
                 observed_columns=("price",),
@@ -631,6 +653,8 @@ async def test_model_and_operator_sampling_passed_to_litellm() -> None:
             sink=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
+                        name="main",
+                        on_write_failure="discard",
                         plugin="json",
                         options={},
                         required_fields=("price",),
@@ -678,6 +702,8 @@ def _make_resolved_source_and_sink():  # type: ignore[no-untyped-def]
     )
 
     source = SourceResolved(
+        name="source",
+        on_validation_failure="discard",
         plugin="csv",
         options={},
         observed_columns=("price",),
@@ -686,6 +712,8 @@ def _make_resolved_source_and_sink():  # type: ignore[no-untyped-def]
     sink = SinkResolved(
         outputs=(
             SinkOutputResolved(
+                name="main",
+                on_write_failure="discard",
                 plugin="json",
                 options={},
                 required_fields=("price",),

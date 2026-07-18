@@ -3198,10 +3198,12 @@ async def _dispatch_guided_respond(
                         ),
                     )
             resolved = SourceResolved(
+                name="source",
                 plugin=plugin_name,
                 options=options_dict,
                 observed_columns=tuple(observed_columns_raw),
                 sample_rows=tuple(dict(r) for r in sample_rows_raw),
+                on_validation_failure="discard",
             )
             handler_result = handle_step_1_source(
                 state=state,
@@ -3316,10 +3318,12 @@ async def _dispatch_guided_respond(
             # columns is the only field the widget edits; it is Tier-3: coerce to tuple[str, ...].
             columns = tuple(str(c) for c in columns_raw)
             resolved = SourceResolved(
+                name=source_intent.name,
                 plugin=source_intent.plugin,
                 options=dict(source_intent.options),
                 observed_columns=columns,
                 sample_rows=tuple(dict(r) for r in source_intent.sample_rows),
+                on_validation_failure="discard",
             )
             handler_result = handle_step_1_source(
                 state=state,
@@ -3581,10 +3585,12 @@ async def _dispatch_guided_respond(
                 )
 
             output = SinkOutputResolved(
+                name=intent.name,
                 plugin=intent.plugin,
                 options=dict(deep_thaw(intent.options)),
                 required_fields=chosen + custom_inputs,
                 schema_mode="observed",
+                on_write_failure="discard",
             )
             sink = SinkResolved(outputs=(output,))
 

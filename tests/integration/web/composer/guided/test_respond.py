@@ -1207,7 +1207,7 @@ class TestStep1InspectAndConfirmAccept:
         record = TurnRecord(
             step=GuidedStep.STEP_1_SOURCE,
             turn_type=TurnType.INSPECT_AND_CONFIRM,
-            payload_hash="seed-payload-hash",
+            payload_hash="a" * 64,
             response_hash=None,
             emitter="server",
         )

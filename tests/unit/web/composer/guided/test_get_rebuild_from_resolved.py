@@ -47,10 +47,12 @@ def _catalog() -> CatalogService:
 
 def test_get_rebuild_step_1_uses_from_resolved_when_applied_in_place() -> None:
     source = SourceResolved(
+        name="source",
         plugin="csv",
         options={"path": "/data/x.csv", "schema": {"mode": "observed"}},
         observed_columns=("a", "b"),
         sample_rows=({"a": "1", "b": "2"},),
+        on_validation_failure="discard",
     )
     # In-place applied STEP_1 state: result set, BOTH staging fields cleared.
     guided = _GuidedFake(step=GuidedStep.STEP_1_SOURCE, step_1_result=source)
@@ -65,10 +67,12 @@ def test_get_rebuild_step_2_uses_from_resolved_when_applied_in_place() -> None:
     sink = SinkResolved(
         outputs=(
             SinkOutputResolved(
+                name="main",
                 plugin="json",
                 options={"path": "/out/y.jsonl"},
                 required_fields=(),
                 schema_mode="observed",
+                on_write_failure="discard",
             ),
         )
     )

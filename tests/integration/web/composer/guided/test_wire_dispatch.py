@@ -88,6 +88,8 @@ def _step3_ready_session() -> tuple[CompositionState, GuidedSession, Any, MockPa
         catalog=catalog,
         plugin_snapshot=catalog.snapshot,
         resolved=SourceResolved(
+            name="source",
+            on_validation_failure="discard",
             plugin="csv",
             options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
             observed_columns=("price",),
@@ -102,6 +104,8 @@ def _step3_ready_session() -> tuple[CompositionState, GuidedSession, Any, MockPa
         resolved=SinkResolved(
             outputs=(
                 SinkOutputResolved(
+                    name="main",
+                    on_write_failure="discard",
                     plugin="json",
                     options={"path": "out.jsonl", "schema": {"mode": "observed"}},
                     required_fields=("price",),
@@ -192,6 +196,8 @@ def _profiled_wire_ready_session() -> tuple[CompositionState, GuidedSession, Pol
         catalog=catalog,
         plugin_snapshot=snapshot,
         resolved=SourceResolved(
+            name="source",
+            on_validation_failure="discard",
             plugin="csv",
             options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["text"]}},
             observed_columns=("text",),
@@ -206,6 +212,8 @@ def _profiled_wire_ready_session() -> tuple[CompositionState, GuidedSession, Pol
         resolved=SinkResolved(
             outputs=(
                 SinkOutputResolved(
+                    name="main",
+                    on_write_failure="discard",
                     plugin="json",
                     options={"path": "out.jsonl", "schema": {"mode": "observed"}},
                     required_fields=("summary",),
@@ -556,7 +564,7 @@ def _seed_invalid_wire_session(client: Any, session_id: str) -> int:
     wire_record = TurnRecord(
         step=GuidedStep.STEP_4_WIRE,
         turn_type=TurnType.CONFIRM_WIRING,
-        payload_hash="wire-payload-hash",
+        payload_hash="a" * 64,
         response_hash=None,
         emitter="server",
     )

@@ -266,36 +266,34 @@ def generate_pipeline_dict(state: CompositionState) -> dict[str, Any]:
 def reattach_guided_blob_refs_for_public_export(state: CompositionState) -> CompositionState:
     """Reconstitute guided blob refs before public YAML generation.
 
-    Guided mode can commit a source with only the storage ``path`` while the
-    authoritative ``blob_ref`` survives in the guided Step 1 snapshot. Public
-    YAML stripping keys off ``blob_ref``, so reattach it to a working copy when
-    the committed source path exactly matches the snapshot path.
+    Guided mode can commit sources with only their storage ``path`` while each
+    authoritative ``blob_ref`` survives in schema-8 ``reviewed_sources``.
+    Public YAML stripping keys off ``blob_ref``, so reattach each binding to a
+    working copy when both the persisted source name and storage path match.
     """
     guided = state.guided_session
-    if guided is None or guided.step_1_result is None:
-        return state
-    snapshot_options = guided.step_1_result.options
-    blob_ref = snapshot_options.get("blob_ref")
-    if not blob_ref:
+    if guided is None or not guided.reviewed_sources:
         return state
 
-    blob_backed_paths: set[str] = set()
-    for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
-        value = snapshot_options.get(key)
-        if isinstance(value, str):
-            blob_backed_paths.add(value)
-    if not blob_backed_paths:
-        return state
-
-    reattached = {}
+    reattached = dict(state.sources)
     changed = False
-    for source_name, source in state.sources.items():
+    for snapshot in guided.reviewed_sources.values():
+        source_name = snapshot.name
+        if source_name not in state.sources:
+            continue
+        snapshot_options = snapshot.options
+        blob_ref = snapshot_options.get("blob_ref")
+        if type(blob_ref) is not str or not blob_ref:
+            continue
+        blob_backed_paths = {value for key in SOURCE_LOCAL_PATH_OPTION_KEYS if type(value := snapshot_options.get(key)) is str}
+        if not blob_backed_paths:
+            continue
+        source = state.sources[source_name]
         options = source.options
         if "blob_ref" in options or not any(options.get(key) in blob_backed_paths for key in SOURCE_LOCAL_PATH_OPTION_KEYS):
-            reattached[source_name] = source
             continue
         merged = dict(options)
-        merged["blob_ref"] = str(blob_ref)
+        merged["blob_ref"] = blob_ref
         reattached[source_name] = replace(source, options=merged)
         changed = True
 

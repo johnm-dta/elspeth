@@ -4,10 +4,130 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from types import MappingProxyType
+from typing import Any, cast
 
-from elspeth.contracts.freeze import deep_thaw, freeze_fields
+from elspeth.contracts.freeze import FrozenJsonArray, deep_thaw, freeze_fields
+from elspeth.core.canonical import canonical_json
 from elspeth.web.composer.guided.errors import InvariantError
+
+GUIDED_JSON_MAX_DEPTH = 64
+GUIDED_JSON_MAX_ITEMS = 10_000
+GUIDED_JSON_MAX_STRING_CHARS = 65_536
+
+
+@dataclass(slots=True)
+class GuidedJsonBudget:
+    items: int = 0
+
+
+def _validate_and_freeze_guided_json(
+    value: object,
+    field_name: str,
+    *,
+    path: str,
+    depth: int,
+    budget: GuidedJsonBudget,
+    active_container_ids: set[int],
+) -> Any:
+    """Validate, bound, detach, and freeze one strict JSON value."""
+    if depth > GUIDED_JSON_MAX_DEPTH:
+        raise InvariantError(f"{field_name} exceeds the {GUIDED_JSON_MAX_DEPTH}-level JSON depth limit at {path}")
+
+    if isinstance(value, Mapping):
+        container_id = id(value)
+        if container_id in active_container_ids:
+            raise InvariantError(f"{field_name} contains a recursive JSON mapping at {path}")
+        active_container_ids.add(container_id)
+        try:
+            frozen_children: dict[str, Any] = {}
+            for key, child in value.items():
+                if type(key) is not str:
+                    raise InvariantError(f"{field_name} key at {path} must be an exact str")
+                if len(key) > GUIDED_JSON_MAX_STRING_CHARS:
+                    raise InvariantError(f"{field_name} key at {path} exceeds the JSON string limit")
+                budget.items += 1
+                if budget.items > GUIDED_JSON_MAX_ITEMS:
+                    raise InvariantError(f"{field_name} exceeds the {GUIDED_JSON_MAX_ITEMS}-item JSON limit")
+                frozen_children[key] = _validate_and_freeze_guided_json(
+                    child,
+                    field_name,
+                    path=f"{path}.{key}",
+                    depth=depth + 1,
+                    budget=budget,
+                    active_container_ids=active_container_ids,
+                )
+        finally:
+            active_container_ids.remove(container_id)
+        return MappingProxyType(frozen_children)
+
+    if type(value) in {list, FrozenJsonArray}:
+        sequence = cast(Sequence[object], value)
+        container_id = id(value)
+        if container_id in active_container_ids:
+            raise InvariantError(f"{field_name} contains a recursive JSON list at {path}")
+        active_container_ids.add(container_id)
+        try:
+            frozen_items: list[Any] = []
+            for index, child in enumerate(sequence):
+                budget.items += 1
+                if budget.items > GUIDED_JSON_MAX_ITEMS:
+                    raise InvariantError(f"{field_name} exceeds the {GUIDED_JSON_MAX_ITEMS}-item JSON limit")
+                frozen_items.append(
+                    _validate_and_freeze_guided_json(
+                        child,
+                        field_name,
+                        path=f"{path}[{index}]",
+                        depth=depth + 1,
+                        budget=budget,
+                        active_container_ids=active_container_ids,
+                    )
+                )
+        finally:
+            active_container_ids.remove(container_id)
+        return FrozenJsonArray(frozen_items)
+
+    if value is None or type(value) in {bool, int, float, str}:
+        if type(value) is str and len(value) > GUIDED_JSON_MAX_STRING_CHARS:
+            raise InvariantError(f"{field_name} JSON string at {path} exceeds {GUIDED_JSON_MAX_STRING_CHARS} characters")
+        try:
+            canonical_json(value)
+        except (TypeError, ValueError) as exc:
+            raise InvariantError(f"{field_name} JSON number at {path} is outside the canonical JSON domain") from exc
+        return value
+
+    raise InvariantError(f"{field_name} value at {path} must be an exact JSON leaf, list, or mapping; got {type(value).__name__}")
+
+
+def freeze_guided_json_mapping(value: object, field_name: str, *, budget: GuidedJsonBudget | None = None) -> Mapping[str, Any]:
+    """Return a detached immutable strict-JSON object with repository bounds."""
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{field_name} must be a mapping")
+    frozen = _validate_and_freeze_guided_json(
+        value,
+        field_name,
+        path="$",
+        depth=0,
+        budget=budget if budget is not None else GuidedJsonBudget(),
+        active_container_ids=set(),
+    )
+    return cast(Mapping[str, Any], frozen)
+
+
+def freeze_guided_str_sequence(value: object, field_name: str) -> tuple[str, ...]:
+    """Validate and snapshot one bounded sequence of exact strings."""
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        raise TypeError(f"{field_name} must be a sequence[str]")
+    if len(value) > GUIDED_JSON_MAX_ITEMS:
+        raise InvariantError(f"{field_name} exceeds the {GUIDED_JSON_MAX_ITEMS}-item limit")
+    result: list[str] = []
+    for index, item in enumerate(value):
+        if type(item) is not str:
+            raise TypeError(f"{field_name}[{index}] must be an exact str")
+        if len(item) > GUIDED_JSON_MAX_STRING_CHARS:
+            raise InvariantError(f"{field_name}[{index}] exceeds {GUIDED_JSON_MAX_STRING_CHARS} characters")
+        result.append(item)
+    return tuple(result)
 
 
 def _require_exact_keys(value: object, expected: frozenset[str], owner: str) -> Mapping[str, Any]:
@@ -44,30 +164,39 @@ def _require_str_list(value: object, field_name: str) -> tuple[str, ...]:
 class SourceResolved:
     """One reviewed source, named independently from its stable component id."""
 
+    name: str
     plugin: str
     options: Mapping[str, Any]
     observed_columns: Sequence[str]
     sample_rows: Sequence[Mapping[str, Any]]
-    on_validation_failure: str = "discard"
-    # Temporary construction default for pre-cutover internal callers. Schema 8
-    # always persists the key and its enclosing session enforces name uniqueness.
-    name: str = "source"
+    on_validation_failure: str
 
     def __post_init__(self) -> None:
         _require_nonempty_str(self.name, "SourceResolved.name")
         _require_nonempty_str(self.plugin, "SourceResolved.plugin")
         _require_nonempty_str(self.on_validation_failure, "SourceResolved.on_validation_failure")
-        if not isinstance(self.options, Mapping):
-            raise TypeError("SourceResolved.options must be a mapping")
-        if not isinstance(self.observed_columns, Sequence) or isinstance(self.observed_columns, (str, bytes)):
-            raise TypeError("SourceResolved.observed_columns must be a sequence[str]")
-        if any(type(column) is not str for column in self.observed_columns):
-            raise TypeError("SourceResolved.observed_columns must contain exact str values")
-        if not isinstance(self.sample_rows, Sequence):
+        sample_rows_value = cast(object, self.sample_rows)
+        if not isinstance(sample_rows_value, Sequence) or isinstance(sample_rows_value, (str, bytes, bytearray)):
             raise TypeError("SourceResolved.sample_rows must be a sequence[mapping]")
+        if len(sample_rows_value) > GUIDED_JSON_MAX_ITEMS:
+            raise InvariantError(f"SourceResolved.sample_rows exceeds the {GUIDED_JSON_MAX_ITEMS}-item limit")
         if any(not isinstance(row, Mapping) for row in self.sample_rows):
             raise TypeError("SourceResolved.sample_rows must contain mappings")
-        freeze_fields(self, "options", "observed_columns", "sample_rows")
+        budget = GuidedJsonBudget()
+        object.__setattr__(self, "options", freeze_guided_json_mapping(self.options, "SourceResolved.options", budget=budget))
+        object.__setattr__(
+            self,
+            "sample_rows",
+            tuple(
+                freeze_guided_json_mapping(row, f"SourceResolved.sample_rows[{index}]", budget=budget)
+                for index, row in enumerate(self.sample_rows)
+            ),
+        )
+        object.__setattr__(
+            self,
+            "observed_columns",
+            freeze_guided_str_sequence(self.observed_columns, "SourceResolved.observed_columns"),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -108,14 +237,12 @@ class SourceResolved:
 class SinkOutputResolved:
     """One reviewed named output, separate from its stable component id."""
 
+    name: str
     plugin: str
     options: Mapping[str, Any]
     required_fields: Sequence[str]
     schema_mode: str
-    # Temporary construction defaults for pre-cutover internal callers. Schema
-    # 8 persists both keys explicitly.
-    name: str = "main"
-    on_write_failure: str = "discard"
+    on_write_failure: str
 
     def __post_init__(self) -> None:
         _require_nonempty_str(self.name, "SinkOutputResolved.name")
@@ -123,13 +250,12 @@ class SinkOutputResolved:
         if self.schema_mode not in {"fixed", "flexible", "observed"}:
             raise ValueError("SinkOutputResolved.schema_mode must be fixed, flexible, or observed")
         _require_nonempty_str(self.on_write_failure, "SinkOutputResolved.on_write_failure")
-        if not isinstance(self.options, Mapping):
-            raise TypeError("SinkOutputResolved.options must be a mapping")
-        if not isinstance(self.required_fields, Sequence) or isinstance(self.required_fields, (str, bytes)):
-            raise TypeError("SinkOutputResolved.required_fields must be a sequence[str]")
-        if any(type(field) is not str for field in self.required_fields):
-            raise TypeError("SinkOutputResolved.required_fields must contain exact str values")
-        freeze_fields(self, "options", "required_fields")
+        object.__setattr__(self, "options", freeze_guided_json_mapping(self.options, "SinkOutputResolved.options"))
+        object.__setattr__(
+            self,
+            "required_fields",
+            freeze_guided_str_sequence(self.required_fields, "SinkOutputResolved.required_fields"),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {

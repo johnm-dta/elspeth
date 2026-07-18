@@ -410,6 +410,7 @@ async def _source_from_latest_uploaded_blob_for_step_1_chat(
     if not isinstance(on_validation_failure, str) or not on_validation_failure:
         on_validation_failure = "discard"
     return SourceResolved(
+        name="source",
         plugin=plugin_hint,
         options=options,
         observed_columns=tuple(inspection_facts.observed_headers or ()),
@@ -2526,6 +2527,7 @@ async def post_guided_chat(
                         ) from exc
 
                     resolved = SourceResolved(
+                        name="source",
                         plugin=source_resolution.plugin,
                         # Inline chat-resolved sources (json/csv) infer column types
                         # from the data they carry, so default `schema: {mode:

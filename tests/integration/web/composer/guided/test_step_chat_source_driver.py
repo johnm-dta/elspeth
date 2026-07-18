@@ -91,6 +91,8 @@ async def test_source_driver_retries_inline_json_control_advice_into_tool_call()
 @pytest.mark.asyncio
 async def test_source_driver_includes_current_source_in_prompt() -> None:
     current = SourceResolved(
+        name="source",
+        on_validation_failure="discard",
         plugin="json",
         options={"schema": {"mode": "observed"}, "blob_ref": "abc"},
         observed_columns=("url",),
@@ -160,6 +162,8 @@ async def test_source_driver_strips_echoed_server_owned_keys() -> None:
     # (stamped by handle_step_1_source) and source_authoring (stamped by
     # set_source_from_blob for LLM-authored / dynamic sources).
     current = SourceResolved(
+        name="source",
+        on_validation_failure="discard",
         plugin="json",
         options={
             "schema": {"mode": "observed"},

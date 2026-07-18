@@ -217,6 +217,8 @@ async def test_sink_driver_revise_threads_current_sink() -> None:
     current = SinkResolved(
         outputs=(
             SinkOutputResolved(
+                name="main",
+                on_write_failure="discard",
                 plugin="json",
                 options={"path": "old.jsonl"},
                 required_fields=(),

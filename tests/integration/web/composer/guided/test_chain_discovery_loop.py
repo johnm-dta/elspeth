@@ -85,6 +85,8 @@ _POLICY_CATALOG, _PLUGIN_SNAPSHOT = _policy_context()
 
 def _source() -> SourceResolved:
     return SourceResolved(
+        name="source",
+        on_validation_failure="discard",
         plugin="json",
         options={},
         observed_columns=("url",),
@@ -96,6 +98,8 @@ def _sink() -> SinkResolved:
     return SinkResolved(
         outputs=(
             SinkOutputResolved(
+                name="main",
+                on_write_failure="discard",
                 plugin="json",
                 options={"path": "outputs/ratings.json"},
                 required_fields=("rating",),

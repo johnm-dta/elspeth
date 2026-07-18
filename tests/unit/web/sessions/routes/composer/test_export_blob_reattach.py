@@ -2,7 +2,7 @@
 
 A guided blob-backed source has ``blob_ref`` stripped from its committed
 options (the manual set_source path can't prove ``path == storage_path``); it
-survives only in the GuidedSession snapshot's ``step_1_result``. The export
+survives only in the schema-8 GuidedSession ``reviewed_sources`` snapshot. The export
 sidecar and the public-YAML path-omit both key off ``source.options["blob_ref"]``,
 so without reattachment the export leaks the raw storage path AND emits no
 ``source_blob_ids`` (breaking the re-import round-trip). This helper reconstitutes
@@ -24,17 +24,20 @@ BLOB_PATH = "/data/blobs/sess-1/abc12300-0000-4000-8000-000000000000_data.csv"
 BLOB_REF = "abc12300-0000-4000-8000-000000000000"
 
 
-def _guided_with_snapshot(*, blob_ref: str | None, path: str) -> GuidedSession:
+def _guided_with_snapshot(*, blob_ref: str | None, path: str, name: str = "source") -> GuidedSession:
     options: dict[str, object] = {"path": path, "schema": {"mode": "observed"}}
     if blob_ref is not None:
         options["blob_ref"] = blob_ref
     snap = SourceResolved(
+        name=name,
         plugin="csv",
         options=options,
         observed_columns=("data.csv",),
         sample_rows=(),
+        on_validation_failure="discard",
     )
-    return replace(GuidedSession.initial(), step_1_result=snap)
+    stable_id = "11111111-1111-4111-8111-111111111111"
+    return replace(GuidedSession.initial(), source_order=(stable_id,), reviewed_sources={stable_id: snap})
 
 
 def _state(*, source_options: dict[str, object], guided_session: GuidedSession | None) -> CompositionState:
@@ -121,3 +124,61 @@ def test_preserves_source_that_already_has_blob_ref() -> None:
     # A source that already carries blob_ref needs no reattachment; identity holds.
     assert out is state
     assert out.sources["source"].options["blob_ref"] == "already-bound"
+
+
+def test_reattaches_each_plural_reviewed_source_by_stable_snapshot_name() -> None:
+    second_path = "/data/blobs/sess-1/def45600-0000-4000-8000-000000000000_data.csv"
+    first = SourceResolved(
+        name="first",
+        plugin="csv",
+        options={"path": BLOB_PATH, "blob_ref": BLOB_REF},
+        observed_columns=("value",),
+        sample_rows=(),
+        on_validation_failure="discard",
+    )
+    second = SourceResolved(
+        name="second",
+        plugin="csv",
+        options={"path": second_path, "blob_ref": "second-ref"},
+        observed_columns=("value",),
+        sample_rows=(),
+        on_validation_failure="discard",
+    )
+    guided = replace(
+        GuidedSession.initial(),
+        source_order=(
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+        ),
+        reviewed_sources={
+            "11111111-1111-4111-8111-111111111111": first,
+            "22222222-2222-4222-8222-222222222222": second,
+        },
+    )
+    state = CompositionState(
+        sources={
+            "first": SourceSpec(
+                plugin="csv",
+                on_success="main",
+                options={"path": BLOB_PATH},
+                on_validation_failure="discard",
+            ),
+            "second": SourceSpec(
+                plugin="csv",
+                on_success="main",
+                options={"path": second_path},
+                on_validation_failure="discard",
+            ),
+        },
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+        guided_session=guided,
+    )
+
+    out = _reattach_guided_blob_refs(state)
+
+    assert out.sources["first"].options["blob_ref"] == BLOB_REF
+    assert out.sources["second"].options["blob_ref"] == "second-ref"

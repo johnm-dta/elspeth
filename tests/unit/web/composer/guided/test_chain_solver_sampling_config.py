@@ -20,11 +20,29 @@ from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 
 def _source() -> SourceResolved:
-    return SourceResolved(plugin="csv", options={}, observed_columns=("name",), sample_rows=({"name": "alice"},))
+    return SourceResolved(
+        name="source",
+        plugin="csv",
+        options={},
+        observed_columns=("name",),
+        sample_rows=({"name": "alice"},),
+        on_validation_failure="discard",
+    )
 
 
 def _sink() -> SinkResolved:
-    return SinkResolved(outputs=(SinkOutputResolved(plugin="csv", options={}, required_fields=("name",), schema_mode="fixed"),))
+    return SinkResolved(
+        outputs=(
+            SinkOutputResolved(
+                name="main",
+                plugin="csv",
+                options={},
+                required_fields=("name",),
+                schema_mode="fixed",
+                on_write_failure="discard",
+            ),
+        )
+    )
 
 
 def _proposal_response() -> Any:
@@ -85,6 +103,7 @@ async def test_solve_chain_redacts_sample_rows_in_outbound_messages(monkeypatch:
     monkeypatch.setattr(chain_solver, "_litellm_acompletion", fake_acompletion)
 
     source = SourceResolved(
+        name="source",
         plugin="csv",
         options={},
         observed_columns=("email", "api_key", "profile_url"),
@@ -95,6 +114,7 @@ async def test_solve_chain_redacts_sample_rows_in_outbound_messages(monkeypatch:
                 "profile_url": "https://example.test/private?token=secret",
             },
         ),
+        on_validation_failure="discard",
     )
 
     await chain_solver.solve_chain(model="gpt-5", source=source, sink=_sink(), temperature=None, seed=None)

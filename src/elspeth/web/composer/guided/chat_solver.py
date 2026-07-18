@@ -1025,10 +1025,12 @@ def _parse_step_2_sink_tool_arguments(arguments: str) -> tuple[SinkResolved, str
             raise ValueError(f"resolve_sink outputs[{idx}].schema_mode must be fixed/flexible/observed; got {schema_mode!r}")
         outputs.append(
             SinkOutputResolved(
+                name="main",
                 plugin=plugin,
                 options=dict(options),
                 required_fields=tuple(required_fields),
                 schema_mode=schema_mode,
+                on_write_failure="discard",
             )
         )
     assistant_message = _require_prose_assistant_message(data["assistant_message"], tool="resolve_sink")

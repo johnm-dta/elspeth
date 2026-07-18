@@ -79,6 +79,8 @@ class TestStep1Handler:
             state=state,
             session=session,
             resolved=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="csv",
                 options={"path": "data.csv", "schema": {"mode": "observed"}},
                 observed_columns=("a",),
@@ -102,6 +104,8 @@ class TestStep1Handler:
             state=state,
             session=session,
             resolved=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="csv",
                 options={"path": "data.csv", "schema": {"mode": "observed"}},
                 observed_columns=("a", "b"),
@@ -134,11 +138,12 @@ class TestStep1Handler:
             state=state,
             session=session,
             resolved=SourceResolved(
+                name="source",
+                on_validation_failure="quarantine_sink",
                 plugin="csv",
                 options={"path": "data.csv", "schema": {"mode": "observed"}},
                 observed_columns=("a", "b"),
                 sample_rows=({"a": "1", "b": "2"},),
-                on_validation_failure="quarantine_sink",
             ),
             catalog=catalog,
             plugin_snapshot=snapshot,
@@ -158,6 +163,8 @@ class TestStep1Handler:
             state=state,
             session=session,
             resolved=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="DEFINITELY_NOT_A_REAL_PLUGIN_xyzzy",
                 options={},
                 observed_columns=(),
@@ -192,6 +199,8 @@ class TestStep1Handler:
             state=_empty_state(),
             session=GuidedSession.initial(),
             resolved=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="json",
                 options={"path": "blobs/lines.json", "schema": {"mode": "observed"}},
                 observed_columns=(),
@@ -225,6 +234,8 @@ class TestStep1Handler:
             state=_empty_state(),
             session=GuidedSession.initial(),
             resolved=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="json",
                 options={"path": str(outside_path), "schema": {"mode": "observed"}},
                 observed_columns=(),
@@ -253,6 +264,8 @@ class TestStep2Handler:
             catalog=catalog,
             plugin_snapshot=snapshot,
             resolved=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="csv",
                 options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["a"]}},
                 observed_columns=("a",),
@@ -269,6 +282,8 @@ class TestStep2Handler:
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
+                        name="main",
+                        on_write_failure="discard",
                         plugin="json",
                         options={"path": "out.jsonl", "schema": {"mode": "observed"}},
                         required_fields=("a",),
@@ -298,6 +313,8 @@ class TestStep2Handler:
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
+                        name="main",
+                        on_write_failure="discard",
                         plugin="DEFINITELY_NOT_A_REAL_PLUGIN_xyzzy",
                         options={},
                         required_fields=(),
@@ -325,6 +342,8 @@ class TestStep2Handler:
 
     def test_sink_options_rejects_malformed_present_schema(self) -> None:
         output = SinkOutputResolved(
+            name="main",
+            on_write_failure="discard",
             plugin="json",
             options={"path": "out.jsonl", "schema_config": "observed"},
             required_fields=("a",),
@@ -430,6 +449,8 @@ class TestStep3Handler:
             catalog=catalog,
             plugin_snapshot=snapshot,
             resolved=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="csv",
                 options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["text"]}},
                 observed_columns=("text",),
@@ -444,6 +465,8 @@ class TestStep3Handler:
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
+                        name="main",
+                        on_write_failure="discard",
                         plugin="json",
                         options={"path": "out.jsonl", "schema": {"mode": "observed"}},
                         required_fields=(),
@@ -514,6 +537,8 @@ class TestStep3Handler:
             catalog=catalog,
             plugin_snapshot=snapshot,
             resolved=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="csv",
                 options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
                 observed_columns=("price",),
@@ -530,6 +555,8 @@ class TestStep3Handler:
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
+                        name="main",
+                        on_write_failure="discard",
                         plugin="json",
                         options={"path": "out.jsonl", "schema": {"mode": "observed"}},
                         required_fields=("price",),
@@ -588,6 +615,8 @@ class TestStep3Handler:
             catalog=catalog,
             plugin_snapshot=snapshot,
             resolved=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="json",
                 options={"path": "urls.json", "schema": {"mode": "observed", "guaranteed_fields": ["url"]}},
                 observed_columns=("url",),
@@ -602,6 +631,8 @@ class TestStep3Handler:
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
+                        name="main",
+                        on_write_failure="discard",
                         plugin="json",
                         options={"path": "out.json", "schema": {"mode": "observed"}},
                         required_fields=(),
@@ -665,6 +696,8 @@ class TestStep3Handler:
             catalog=catalog,
             plugin_snapshot=snapshot,
             resolved=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="csv",
                 options={"path": "inventory.csv", "schema": {"mode": "observed", "guaranteed_fields": ["quantity"]}},
                 observed_columns=("quantity",),
@@ -679,6 +712,8 @@ class TestStep3Handler:
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
+                        name="main",
+                        on_write_failure="discard",
                         plugin="json",
                         options={"path": "filtered.jsonl", "schema": {"mode": "observed"}},
                         required_fields=(),
@@ -734,6 +769,8 @@ class TestStep3Handler:
             catalog=catalog,
             plugin_snapshot=snapshot,
             resolved=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="csv",
                 options={"path": "inventory.csv", "schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
                 observed_columns=("price",),
@@ -748,6 +785,8 @@ class TestStep3Handler:
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
+                        name="main",
+                        on_write_failure="discard",
                         plugin="json",
                         options={"path": "priced.jsonl", "schema": {"mode": "observed"}},
                         required_fields=(),
@@ -797,6 +836,8 @@ class TestStep3Handler:
             catalog=catalog,
             plugin_snapshot=snapshot,
             resolved=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="json",
                 options={"path": "rows.json", "schema": {"mode": "observed", "guaranteed_fields": ["line"]}},
                 observed_columns=("line",),
@@ -811,6 +852,8 @@ class TestStep3Handler:
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
+                        name="main",
+                        on_write_failure="discard",
                         plugin="json",
                         options={"path": "out.json", "schema": {"mode": "observed"}},
                         required_fields=(),
@@ -872,6 +915,8 @@ class TestTerminalStampInvariant:
             catalog=catalog,
             plugin_snapshot=snapshot,
             resolved=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="csv",
                 options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
                 observed_columns=("price",),
@@ -886,6 +931,8 @@ class TestTerminalStampInvariant:
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
+                        name="main",
+                        on_write_failure="discard",
                         plugin="json",
                         options={"path": "out.jsonl", "schema": {"mode": "observed"}},
                         required_fields=("price",),
@@ -1000,6 +1047,8 @@ class TestStep1ObservedColumnsDerivation:
             state=_empty_state(),
             session=GuidedSession.initial(),
             resolved=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="json",
                 options={"path": storage_path, "schema": {"mode": "observed"}},
                 observed_columns=(),
@@ -1025,6 +1074,8 @@ class TestStep1ObservedColumnsDerivation:
             state=_empty_state(),
             session=GuidedSession.initial(),
             resolved=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="json",
                 options={"path": storage_path, "schema": {"mode": "observed"}},
                 observed_columns=("url", "extra"),
@@ -1051,6 +1102,8 @@ class TestStep1ObservedColumnsDerivation:
             state=_empty_state(),
             session=GuidedSession.initial(),
             resolved=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="json",
                 options={"path": f"blob:{blob_id}", "schema": {"mode": "observed"}},
                 observed_columns=("url",),
@@ -1080,6 +1133,8 @@ class TestStep1ObservedColumnsDerivation:
                 state=_empty_state(),
                 session=GuidedSession.initial(),
                 resolved=SourceResolved(
+                    name="source",
+                    on_validation_failure="discard",
                     plugin="json",
                     options={"path": f"blob:{uuid4()}", "schema": {"mode": "observed"}},
                     observed_columns=("url",),

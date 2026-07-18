@@ -414,6 +414,8 @@ class TestExitFromCompletedTerminal:
             catalog=catalog,
             plugin_snapshot=plugin_snapshot,
             resolved=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="csv",
                 options={"path": "x.csv", "schema": {"mode": "observed", "guaranteed_fields": ["price"]}},
                 observed_columns=("price",),
@@ -428,6 +430,8 @@ class TestExitFromCompletedTerminal:
             resolved=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
+                        name="main",
+                        on_write_failure="discard",
                         plugin="json",
                         options={"path": "out.jsonl", "schema": {"mode": "observed"}},
                         required_fields=("price",),
@@ -463,8 +467,8 @@ class TestExitFromCompletedTerminal:
         record = TurnRecord(
             step=GuidedStep.STEP_4_WIRE,
             turn_type=TurnType.CONFIRM_WIRING,
-            payload_hash="seed-payload-hash",
-            response_hash="seed-response-hash",
+            payload_hash="a" * 64,
+            response_hash="b" * 64,
             emitter="server",
         )
         completed_terminal = TerminalState(
@@ -579,7 +583,7 @@ class TestExitFromCompletedTerminal:
         assert body["next_turn"] is None
 
         current_step_records = [record for record in body["guided_session"]["history"] if record["step"] == body["guided_session"]["step"]]
-        assert current_step_records[-1]["response_hash"] == "seed-response-hash"
+        assert current_step_records[-1]["response_hash"] == "b" * 64
 
         persisted = _get_guided(composer_test_client, session_id)
         assert persisted["terminal"]["kind"] == "completed"
@@ -1199,7 +1203,7 @@ class TestOrphanedStep2_5Recovery:
         record = TurnRecord(
             step=GuidedStep.STEP_2_5_RECIPE_MATCH,
             turn_type=TurnType.RECIPE_OFFER,
-            payload_hash="seed-step-2-5-payload-hash",
+            payload_hash="a" * 64,
             response_hash=None,
             emitter="server",
         )

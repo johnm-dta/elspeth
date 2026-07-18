@@ -522,18 +522,10 @@ class GuidedEditTargetRequest(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
 
     kind: Literal["source", "node", "edge", "output"]
-    stable_id: str = pydantic.Field(min_length=36, max_length=36)
-
-    @field_validator("stable_id")
-    @classmethod
-    def _validate_stable_id(cls, value: str) -> str:
-        try:
-            parsed = UUID(value)
-        except ValueError as exc:
-            raise ValueError("edit_target.stable_id must be a canonical UUID") from exc
-        if str(parsed) != value:
-            raise ValueError("edit_target.stable_id must be a canonical UUID")
-        return value
+    # Kept as a bounded raw string so the route can map malformed structural
+    # identifiers to the operation contract's HTTP 400 response. Pydantic UUID
+    # coercion would turn the same protocol error into a framework-owned 422.
+    stable_id: str = pydantic.Field(min_length=1, max_length=36)
 
 
 class GuidedRespondRequest(_GuidedOperationRequest):

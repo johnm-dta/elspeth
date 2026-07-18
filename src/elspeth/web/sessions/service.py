@@ -132,6 +132,7 @@ from elspeth.web.sessions.protocol import (
     CompositionStateData,
     CompositionStateProvenance,
     CompositionStateRecord,
+    GuidedAuditEvidence,
     GuidedCompositionStateResult,
     GuidedOperationActive,
     GuidedOperationClaimed,
@@ -157,6 +158,8 @@ from elspeth.web.sessions.protocol import (
     PipelineProposalPublicMetadata,
     PipelineProposalRejectionReason,
     PipelineProposalSettlementResult,
+    PreparedGuidedAuditRow,
+    PreparedGuidedJsonPayload,
     ProposalEventRecord,
     ProposalLifecycleStatus,
     RunAlreadyActiveError,
@@ -7163,6 +7166,77 @@ class SessionServiceImpl:
         if current is None or current.id != str(expected_state_id) or current.version != expected_state_version:
             raise AuditIntegrityError("Guided operation current state changed before settlement")
 
+    @staticmethod
+    def _prepare_guided_audit_cohort(
+        *,
+        audit_evidence: GuidedAuditEvidence,
+        payloads: tuple[PreparedGuidedJsonPayload, ...],
+        payload_store: PayloadStore | None,
+    ) -> tuple[PreparedGuidedAuditRow, ...]:
+        """Validate one CAS-bound evidence cohort before opening SQL."""
+
+        if type(audit_evidence) is not GuidedAuditEvidence:
+            raise TypeError("audit_evidence must be exact GuidedAuditEvidence")
+        if type(payloads) is not tuple or any(type(payload) is not PreparedGuidedJsonPayload for payload in payloads):
+            raise TypeError("payloads must be an exact prepared-payload tuple")
+        audit_rows = prepare_guided_audit_rows(
+            invocations=audit_evidence.invocations,
+            llm_calls=audit_evidence.llm_calls,
+            chat_turns=audit_evidence.chat_turns,
+        )
+        validate_guided_audit_payload_references(audit_rows, payloads)
+        verify_guided_json_payloads(payload_store, payloads)
+        return audit_rows
+
+    def _insert_prepared_guided_audit_rows_on_connection(
+        self,
+        conn: Connection,
+        *,
+        session_id: str,
+        composition_state_id: UUID,
+        audit_rows: tuple[PreparedGuidedAuditRow, ...],
+        sequence_no: int | None,
+        created_at: datetime,
+    ) -> tuple[ChatMessageRecord, ...]:
+        """Insert a prevalidated guided evidence cohort in the caller's transaction."""
+
+        if audit_rows and sequence_no is None:
+            raise AuditIntegrityError("Guided audit cohort has no reserved sequence")
+        records: list[ChatMessageRecord] = []
+        for audit_row in audit_rows:
+            if sequence_no is None:  # pragma: no cover - guarded above
+                raise AuditIntegrityError("Guided audit row has no reserved sequence")
+            message_id = self._insert_chat_message(
+                conn,
+                session_id=session_id,
+                role="audit",
+                content=audit_row.content,
+                raw_content=None,
+                tool_calls=[deep_thaw(audit_row.envelope)],
+                sequence_no=sequence_no,
+                writer_principal="compose_loop",
+                composition_state_id=str(composition_state_id),
+                tool_call_id=None,
+                parent_assistant_id=None,
+                created_at=created_at,
+            )
+            records.append(
+                ChatMessageRecord(
+                    id=UUID(message_id),
+                    session_id=UUID(session_id),
+                    role="audit",
+                    content=audit_row.content,
+                    raw_content=None,
+                    tool_calls=[deep_thaw(audit_row.envelope)],
+                    created_at=created_at,
+                    sequence_no=sequence_no,
+                    composition_state_id=composition_state_id,
+                    writer_principal="compose_loop",
+                )
+            )
+            sequence_no += 1
+        return tuple(records)
+
     async def seed_or_complete_guided_start_operation(
         self,
         fence: GuidedOperationFence,
@@ -7171,6 +7245,9 @@ class SessionServiceImpl:
         provenance: CompositionStateProvenance,
         actor: str,
         response_hash_factory: Callable[[CompositionStateRecord], str],
+        payloads: tuple[PreparedGuidedJsonPayload, ...] = (),
+        audit_evidence: GuidedAuditEvidence | None = None,
+        payload_store: PayloadStore | None = None,
     ) -> GuidedStartStateOutcome:
         """Atomically seed an empty session or settle its exact guided head.
 
@@ -7180,6 +7257,11 @@ class SessionServiceImpl:
         integrity failure is interpreted as convergence.
         """
 
+        audit_rows = self._prepare_guided_audit_cohort(
+            audit_evidence=audit_evidence if audit_evidence is not None else GuidedAuditEvidence(),
+            payloads=payloads,
+            payload_store=payload_store,
+        )
         sid = str(fence.session_id)
         now = self._now()
 
@@ -7202,6 +7284,17 @@ class SessionServiceImpl:
                     )
                     inserted_row = conn.execute(select(composition_states_table).where(composition_states_table.c.id == state_id)).one()
                     record = self._row_to_state_record(inserted_row)
+                    if audit_rows:
+                        sequence_no = self._reserve_sequence_range(conn, sid, count=len(audit_rows))
+                        self._insert_prepared_guided_audit_rows_on_connection(
+                            conn,
+                            session_id=sid,
+                            composition_state_id=record.id,
+                            audit_rows=audit_rows,
+                            sequence_no=sequence_no,
+                            created_at=now,
+                        )
+                        conn.execute(update(sessions_table).where(sessions_table.c.id == sid).values(updated_at=now))
                     outcome: GuidedStartStateOutcome = GuidedStartStateSeeded(state=record)
                 else:
                     record = self._row_to_state_record(current_row)
@@ -7231,11 +7324,19 @@ class SessionServiceImpl:
         actor: str,
         response_hash_factory: Callable[[CompositionStateRecord], str],
         system_message: str | None = None,
+        payloads: tuple[PreparedGuidedJsonPayload, ...] = (),
+        audit_evidence: GuidedAuditEvidence | None = None,
+        payload_store: PayloadStore | None = None,
     ) -> CompositionStateRecord:
         """Persist one guided checkpoint and its replay settlement atomically."""
 
         if system_message is not None and (type(system_message) is not str or not system_message):
             raise ValueError("guided operation system_message must be a non-empty string or None")
+        audit_rows = self._prepare_guided_audit_cohort(
+            audit_evidence=audit_evidence if audit_evidence is not None else GuidedAuditEvidence(),
+            payloads=payloads,
+            payload_store=payload_store,
+        )
         sid = str(fence.session_id)
         now = self._now()
 
@@ -7257,8 +7358,11 @@ class SessionServiceImpl:
                 )
                 state_row = conn.execute(select(composition_states_table).where(composition_states_table.c.id == state_id)).one()
                 record = self._row_to_state_record(state_row)
+                row_count = len(audit_rows) + (1 if system_message is not None else 0)
+                sequence_no = self._reserve_sequence_range(conn, sid, count=row_count) if row_count else None
                 if system_message is not None:
-                    sequence_no = self._reserve_sequence_range(conn, sid, count=1)
+                    if sequence_no is None:
+                        raise AuditIntegrityError("Guided system message has no reserved sequence")
                     self._insert_chat_message(
                         conn,
                         session_id=sid,
@@ -7273,6 +7377,17 @@ class SessionServiceImpl:
                         parent_assistant_id=None,
                         created_at=now,
                     )
+                    sequence_no += 1
+                if audit_rows:
+                    self._insert_prepared_guided_audit_rows_on_connection(
+                        conn,
+                        session_id=sid,
+                        composition_state_id=record.id,
+                        audit_rows=audit_rows,
+                        sequence_no=sequence_no,
+                        created_at=now,
+                    )
+                if row_count:
                     conn.execute(update(sessions_table).where(sessions_table.c.id == sid).values(updated_at=now))
                 response_hash = response_hash_factory(record)
                 self.bind_guided_operation_on_connection(conn, fence, result_state_id=record.id)
@@ -7297,13 +7412,11 @@ class SessionServiceImpl:
 
         if type(command) is not GuidedStateOperationCommand:
             raise TypeError("command must be an exact GuidedStateOperationCommand")
-        audit_rows = prepare_guided_audit_rows(
-            invocations=command.audit_evidence.invocations,
-            llm_calls=command.audit_evidence.llm_calls,
-            chat_turns=command.audit_evidence.chat_turns,
+        audit_rows = self._prepare_guided_audit_cohort(
+            audit_evidence=command.audit_evidence,
+            payloads=command.payloads,
+            payload_store=payload_store,
         )
-        validate_guided_audit_payload_references(audit_rows, command.payloads)
-        verify_guided_json_payloads(payload_store, command.payloads)
         prepared_state = with_guided_response_descriptor(command.state, command.response)
         sid = str(command.fence.session_id)
         now = self._now()
@@ -7401,39 +7514,14 @@ class SessionServiceImpl:
                     )
                     sequence_no += 1
 
-                audit_records: list[ChatMessageRecord] = []
-                for audit_row in audit_rows:
-                    if sequence_no is None:
-                        raise AuditIntegrityError("Guided audit message has no reserved sequence")
-                    message_id = self._insert_chat_message(
-                        conn,
-                        session_id=sid,
-                        role="audit",
-                        content=audit_row.content,
-                        raw_content=None,
-                        tool_calls=[deep_thaw(audit_row.envelope)],
-                        sequence_no=sequence_no,
-                        writer_principal="compose_loop",
-                        composition_state_id=inserted_state_id,
-                        tool_call_id=None,
-                        parent_assistant_id=None,
-                        created_at=now,
-                    )
-                    audit_records.append(
-                        ChatMessageRecord(
-                            id=UUID(message_id),
-                            session_id=command.fence.session_id,
-                            role="audit",
-                            content=audit_row.content,
-                            raw_content=None,
-                            tool_calls=[deep_thaw(audit_row.envelope)],
-                            created_at=now,
-                            sequence_no=sequence_no,
-                            composition_state_id=primary_state.id,
-                            writer_principal="compose_loop",
-                        )
-                    )
-                    sequence_no += 1
+                audit_records = self._insert_prepared_guided_audit_rows_on_connection(
+                    conn,
+                    session_id=sid,
+                    composition_state_id=primary_state.id,
+                    audit_rows=audit_rows,
+                    sequence_no=sequence_no,
+                    created_at=now,
+                )
 
                 if row_count:
                     conn.execute(update(sessions_table).where(sessions_table.c.id == sid).values(updated_at=now))
@@ -7467,7 +7555,7 @@ class SessionServiceImpl:
                 return GuidedStateOperationSettlement(
                     primary_state=primary_state,
                     result_state=result_state,
-                    audit_messages=tuple(audit_records),
+                    audit_messages=audit_records,
                     originating_message=originating_record,
                     interpretations=interpretation_records,
                     response_json=projected_json,

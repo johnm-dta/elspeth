@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import patch
+from uuid import UUID
 
 from elspeth.web.sessions._guided_step_chat import _COMMIT_REJECTED_MESSAGE, _SYNTHETIC_UNAVAILABLE_MESSAGE
 
@@ -117,6 +119,68 @@ def _fake_chain_response() -> SimpleNamespace:
             )
         ]
     )
+
+
+def test_chat_applied_checkpoint_turn_custody_remains_get_and_replay_loadable(
+    composer_test_client: TestClient,
+) -> None:
+    """A Chat-style saved checkpoint references the same durable turn it emits."""
+    from elspeth.contracts.freeze import deep_thaw
+    from elspeth.web.auth.models import UserIdentity
+    from elspeth.web.catalog.policy_view import PolicyCatalogView
+    from elspeth.web.sessions.guided_replay import load_guided_json_payload
+    from elspeth.web.sessions.routes._helpers import _initial_composition_state_with_guided_session
+    from elspeth.web.sessions.routes.composer.guided import (
+        _build_get_guided_turn,
+        _build_guided_chat_apply_response,
+        _finalize_guided_turn,
+        _prepare_server_turn_occurrence,
+    )
+
+    client = composer_test_client
+    session_id = _create_session(client)
+    state = _initial_composition_state_with_guided_session()
+    guided = state.guided_session
+    assert guided is not None
+    snapshot = client.app.state.plugin_snapshot_factory(UserIdentity(user_id="alice", username="alice"))
+    catalog = PolicyCatalogView(
+        client.app.state.catalog_service,
+        snapshot,
+        client.app.state.operator_profile_registry,
+    )
+    turn = _build_get_guided_turn(state, guided, catalog=catalog)
+    assert turn is not None
+    turn = _finalize_guided_turn(turn, shield_available=False)
+    guided, _record, _turn_type, prepared = _prepare_server_turn_occurrence(
+        guided,
+        current_step=guided.step,
+        turn=turn,
+        payload_store=client.app.state.payload_store,
+    )
+
+    applied, _state_record = asyncio.run(
+        _build_guided_chat_apply_response(
+            guided=guided,
+            state=state,
+            next_turn=turn,
+            assistant_message="Applied the guided change.",
+            service=client.app.state.session_service,
+            session_id=UUID(session_id),
+            state_record=None,
+            shield_available=False,
+            policy_catalog=catalog,
+        )
+    )
+    fetched = client.get(f"/api/sessions/{session_id}/guided")
+
+    assert fetched.status_code == 200, fetched.json()
+    assert fetched.json()["next_turn"] == applied.next_turn.model_dump(mode="json")
+    loaded = load_guided_json_payload(
+        client.app.state.payload_store,
+        payload_id=prepared.payload_id,
+        purpose="turn",
+    )
+    assert deep_thaw(loaded.payload) == fetched.json()["next_turn"]["payload"]
 
 
 def _drive_to_step_2(client: TestClient, session_id: str) -> None:

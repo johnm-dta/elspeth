@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Literal
+from uuid import uuid4
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_capabilities import PluginCapability
@@ -22,8 +23,20 @@ from elspeth.web.interpretation_state import refine_prompt_shield_warnings_for_a
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions._guided_step_chat import Step1SourceChatResult
 from elspeth.web.sessions.guided_payloads import prepare_guided_json_payload
-from elspeth.web.sessions.guided_replay import guided_turn_token
-from elspeth.web.sessions.protocol import guided_json_payload_id
+from elspeth.web.sessions.guided_replay import (
+    guided_turn_token,
+    load_guided_json_payload,
+    parse_guided_response_descriptor,
+    project_guided_response,
+)
+from elspeth.web.sessions.protocol import (
+    GuidedAuditEvidence,
+    GuidedReplayTurn,
+    GuidedResponseDescriptor,
+    GuidedStateOperationCommand,
+    PreparedGuidedJsonPayload,
+    guided_json_payload_id,
+)
 from elspeth.web.sessions.schemas import ConvertGuidedRequest, ReenterGuidedRequest, StartGuidedRequest, TutorialSampleResponse
 
 from .._helpers import (
@@ -176,15 +189,14 @@ def _turn_payload_response(
     guided: GuidedSession,
     shield_available: bool,
 ) -> TurnPayloadResponse | None:
-    """Build a ``TurnPayloadResponse``, refining shield warnings for B-vs-C state.
+    """Project the exact already-finalized payload bound by the occurrence.
 
-    For ``confirm_wiring`` turns the ``payload["warnings"]`` list is
-    post-processed by :func:`refine_prompt_shield_warnings_for_availability` so
-    the caller receives State-B wording when the authorized shield is present in
-    this deployment.  All other turn types pass through unchanged.
-
-    Returns ``None`` when ``turn`` is ``None`` (terminal or no-turn step).
+    Shield availability is deliberately ignored here. ``confirm_wiring`` must
+    be finalized before its hash, CAS payload, and ``TurnRecord`` are created;
+    mutating it during response projection would make the wire body differ from
+    its durable authority and make replay depend on mutable policy state.
     """
+    del shield_available
     if turn is None:
         return None
     if not guided.history:
@@ -203,18 +215,105 @@ def _turn_payload_response(
         or record.payload_hash != guided_json_payload_id("turn", turn["payload"])
     ):
         raise AuditIntegrityError("Guided turn response differs from its persisted occurrence")
-    payload = dict(turn["payload"])
+    return TurnPayloadResponse(
+        type=turn["type"],
+        step_index=turn["step_index"],
+        turn_token=guided_turn_token(guided),
+        payload=dict(turn["payload"]),
+    )
+
+
+def _finalize_guided_turn(turn: Mapping[str, Any], *, shield_available: bool) -> Turn:
+    """Freeze request-scoped wire facts before occurrence custody is assigned."""
+
+    payload = dict(deep_thaw(turn["payload"]))
     if turn["type"] == TurnType.CONFIRM_WIRING.value:
         payload["warnings"] = refine_prompt_shield_warnings_for_availability(
             payload["warnings"],
             shield_available=shield_available,
         )
-    return TurnPayloadResponse(
+    return Turn(
         type=turn["type"],
         step_index=turn["step_index"],
-        turn_token=guided_turn_token(guided),
         payload=payload,
     )
+
+
+def _load_durable_current_turn(
+    guided: GuidedSession,
+    *,
+    payload_store: Any,
+) -> tuple[Turn, PreparedGuidedJsonPayload]:
+    """Load the exact current unanswered occurrence without live rebuilding."""
+
+    guided_turn_token(guided)
+    record = guided.history[-1]
+    prepared = load_guided_json_payload(
+        payload_store,
+        payload_id=record.payload_hash,
+        purpose="turn",
+    )
+    step_index = {
+        GuidedStep.STEP_1_SOURCE: 0,
+        GuidedStep.STEP_2_SINK: 1,
+        GuidedStep.STEP_2_5_RECIPE_MATCH: 2,
+        GuidedStep.STEP_3_TRANSFORMS: 3,
+        GuidedStep.STEP_4_WIRE: 4,
+    }[record.step]
+    return (
+        Turn(
+            type=record.turn_type.value,
+            step_index=step_index,
+            payload=dict(deep_thaw(prepared.payload)),
+        ),
+        prepared,
+    )
+
+
+def _prepare_server_turn_occurrence(
+    guided: GuidedSession,
+    *,
+    current_step: GuidedStep,
+    turn: Turn,
+    payload_store: Any,
+) -> tuple[GuidedSession, TurnRecord, TurnType, PreparedGuidedJsonPayload]:
+    """Prepare CAS first, then append a record bound to that exact payload ID."""
+
+    prepared = prepare_guided_json_payload(
+        payload_store,
+        purpose="turn",
+        payload=turn["payload"],
+    )
+    new_guided, record, turn_type, payload_hash = _append_server_turn_record(
+        guided,
+        current_step=current_step,
+        turn=turn,
+    )
+    if payload_hash != prepared.payload_id:
+        raise AuditIntegrityError("Guided turn CAS differs from its history record")
+    return new_guided, record, turn_type, prepared
+
+
+def _turn_emission_evidence(
+    *,
+    step: GuidedStep,
+    turn_type: TurnType,
+    prepared: PreparedGuidedJsonPayload,
+    composition_version: int,
+    actor: str,
+) -> GuidedAuditEvidence:
+    recorder = BufferingRecorder()
+    emit_turn_emitted(
+        recorder,
+        step=step,
+        turn_type=turn_type,
+        payload_hash=prepared.payload_id,
+        payload_payload_id=prepared.payload_id,
+        emitter="server",
+        composition_version=composition_version,
+        actor=actor,
+    )
+    return GuidedAuditEvidence(invocations=recorder.invocations)
 
 
 router = APIRouter()
@@ -445,10 +544,9 @@ async def get_guided(
     the version history from starting with an empty graph solely because
     the frontend auto-loaded guided mode.
 
-    For sessions that already have a persisted CompositionState, if the
-    current step has no emitted TurnRecord in the guided session history, a
-    turn is built and persisted. Subsequent fetches are idempotent — the
-    existing TurnRecord's payload_hash is returned verbatim.
+    A missing occurrence is projected prospectively for both fresh and
+    persisted sessions. GET never writes half of the state/evidence pair; the
+    first fenced mutation materializes the occurrence, CAS, and audit evidence.
 
     Returns 404 if the session does not exist or does not belong to
     the requesting user.
@@ -542,6 +640,11 @@ async def get_guided(
                     ) from exc
             else:
                 turn = None
+            if turn is not None:
+                turn = _finalize_guided_turn(
+                    turn,
+                    shield_available=_resolve_shield_available(plugin_snapshot),
+                )
             turn_type: TurnType | None = TurnType(turn["type"]) if turn is not None else None
             payload_hash: str | None = guided_json_payload_id("turn", turn["payload"]) if turn is not None else None
 
@@ -574,53 +677,7 @@ async def get_guided(
                     current_step=current_step,
                     turn=turn,
                 )
-                new_state = _replace(state, guided_session=new_guided)
                 guided = new_guided
-
-                # A fresh GET remains non-mutating, but its in-memory history
-                # includes the prospective occurrence so the token exactly
-                # matches the occurrence RESPOND will reconstruct. Existing
-                # checkpoints persist the occurrence and its purpose-bound CAS.
-                if state_record is not None:
-                    payload_payload_id = prepare_guided_json_payload(
-                        request.app.state.payload_store,
-                        purpose="turn",
-                        payload=turn["payload"],
-                    ).payload_id
-
-                    # Persist state with updated guided_session in composer_meta.
-                    # Preserve any existing composer_meta keys (e.g. repair_turns_used).
-                    existing_meta = dict(deep_thaw(state_record.composer_meta)) if state_record.composer_meta is not None else {}
-                    new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
-
-                    state_d = new_state.to_dict()
-                    persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)
-                    state_data = CompositionStateData(
-                        sources=state_d["sources"],
-                        nodes=state_d["nodes"],
-                        edges=state_d["edges"],
-                        outputs=state_d["outputs"],
-                        metadata_=state_d["metadata"],
-                        is_valid=persisted_is_valid,
-                        validation_errors=persisted_errors,
-                        composer_meta=new_composer_meta,
-                    )
-                    state_record_out = await service.save_composition_state(
-                        session_id,
-                        state_data,
-                        provenance="convergence_persist",
-                    )
-
-                    emit_turn_emitted(
-                        recorder,
-                        step=current_step,
-                        turn_type=turn_type,
-                        payload_hash=payload_hash,
-                        payload_payload_id=payload_payload_id,
-                        emitter="server",
-                        composition_version=new_state.version,
-                        actor=user.user_id,
-                    )
 
             # Build response.  On re-fetch the same turn is returned (deterministic
             # rebuild) and the payload_hash matches what was recorded on first visit.
@@ -842,68 +899,28 @@ async def post_guided_reenter(
     compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
 
     def _response_from_record(record: CompositionStateRecord) -> GetGuidedResponse:
-        response_state = _state_from_record(record)
-        response_guided = response_state.guided_session
-        if response_guided is None:
-            from elspeth.contracts.errors import AuditIntegrityError
-
-            raise AuditIntegrityError("Guided re-entry result state has no guided checkpoint")
-        response_terminal = response_guided.terminal
-        response_turn = None if response_terminal is not None else _build_get_guided_turn(response_state, response_guided, catalog=catalog)
-        terminal_response = (
-            TerminalStateResponse(
-                kind=response_terminal.kind.value,
-                reason=response_terminal.reason.value if response_terminal.reason is not None else None,
-                pipeline_yaml=response_terminal.pipeline_yaml,
+        descriptor = parse_guided_response_descriptor(record)
+        if descriptor.kind != "guided_reenter":
+            raise AuditIntegrityError("Guided re-entry result has the wrong replay descriptor")
+        payloads: tuple[PreparedGuidedJsonPayload, ...] = ()
+        if descriptor.next_turn is not None:
+            payloads = (
+                load_guided_json_payload(
+                    request.app.state.payload_store,
+                    payload_id=descriptor.next_turn.payload_id,
+                    purpose="turn",
+                ),
             )
-            if response_terminal is not None
-            else None
-        )
-        return GetGuidedResponse(
-            guided_session=GuidedSessionResponse(
-                step=response_guided.step.value,
-                history=[
-                    TurnRecordResponse(
-                        step=turn_record.step.value,
-                        turn_type=turn_record.turn_type.value,
-                        payload_hash=turn_record.payload_hash,
-                        response_hash=turn_record.response_hash,
-                        summary=turn_record.summary,
-                        emitter=turn_record.emitter,
-                    )
-                    for turn_record in response_guided.history
-                ],
-                terminal=terminal_response,
-                chat_history=[
-                    ChatTurnResponse(
-                        role=chat_turn.role.value,
-                        content=chat_turn.content,
-                        seq=chat_turn.seq,
-                        step=chat_turn.step.value,
-                        ts_iso=chat_turn.ts_iso,
-                        assistant_message_kind=chat_turn.assistant_message_kind,
-                        synthetic_failure_reason=chat_turn.synthetic_failure_reason,
-                    )
-                    for chat_turn in response_guided.chat_history
-                ],
-                chat_turn_seq=response_guided.chat_turn_seq,
-                profile=_workflow_profile_response(response_guided),
-            ),
-            next_turn=_turn_payload_response(
-                response_turn,
-                guided=response_guided,
-                shield_available=_resolve_shield_available(plugin_snapshot),
-            ),
-            terminal=terminal_response,
-            composition_state=_state_response(record, policy_catalog=catalog),
-        )
+        response = project_guided_response(record, payloads=payloads)
+        if type(response) is not GetGuidedResponse:
+            raise AuditIntegrityError("Guided re-entry projection returned the wrong response type")
+        return response
 
     from elspeth.contracts.errors import AuditIntegrityError
     from elspeth.web.sessions.protocol import GuidedCompositionStateResult
 
     from ..guided_operations import (
         GuidedOperationLease,
-        guided_response_hash,
         reserve_or_replay_guided_operation,
     )
 
@@ -1049,17 +1066,35 @@ async def post_guided_reenter(
             new_guided = _replace(guided, terminal=restored_terminal)
             new_state = _replace(state, guided_session=new_guided)
             turn = None
+            prepared_turn = None
+            audit_evidence = GuidedAuditEvidence()
         else:
-            reopened_record = _replace(current_record, response_hash=None, summary=None)
-            reopened_history = tuple(reopened_record if r is current_record else r for r in guided.history)
-            new_guided = _replace(guided, history=reopened_history, terminal=None)
-            new_state = _replace(state, guided_session=new_guided)
-            turn = _build_get_guided_turn(new_state, new_guided, catalog=catalog)
-            if turn is None:
+            active_guided = _replace(guided, terminal=None)
+            active_state = _replace(state, guided_session=active_guided)
+            rebuilt_turn = _build_get_guided_turn(active_state, active_guided, catalog=catalog)
+            if rebuilt_turn is None:
                 raise HTTPException(
                     status_code=409,
                     detail="Guided session cannot be re-entered because the current turn cannot be rebuilt.",
                 )
+            turn = _finalize_guided_turn(
+                rebuilt_turn,
+                shield_available=_resolve_shield_available(plugin_snapshot),
+            )
+            new_guided, _new_record, turn_type, prepared_turn = _prepare_server_turn_occurrence(
+                active_guided,
+                current_step=active_guided.step,
+                turn=turn,
+                payload_store=request.app.state.payload_store,
+            )
+            new_state = _replace(state, guided_session=new_guided)
+            audit_evidence = _turn_emission_evidence(
+                step=new_guided.step,
+                turn_type=turn_type,
+                prepared=prepared_turn,
+                composition_version=new_state.version,
+                actor=user.user_id,
+            )
 
         new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
         state_d = new_state.to_dict()
@@ -1074,16 +1109,36 @@ async def post_guided_reenter(
             validation_errors=persisted_errors,
             composer_meta=new_composer_meta,
         )
-        state_record_out = await service.save_state_for_guided_operation(
-            reserved.fence,
-            expected_current_state_id=state_record.id,
-            expected_current_state_version=state_record.version,
-            state=state_data,
-            provenance="convergence_persist",
-            actor="composer_route",
-            response_hash_factory=lambda record: guided_response_hash(_response_from_record(record)),
+        next_turn_descriptor = (
+            GuidedReplayTurn(
+                turn_type=TurnType(turn["type"]),
+                step_index=turn["step_index"],
+                payload_id=prepared_turn.payload_id,
+            )
+            if turn is not None and prepared_turn is not None
+            else None
         )
-        return _response_from_record(state_record_out)
+        settlement = await service.settle_guided_state_operation(
+            GuidedStateOperationCommand(
+                fence=reserved.fence,
+                expected_current_state_id=state_record.id,
+                expected_current_state_version=state_record.version,
+                expected_current_content_hash=composition_content_hash(state),
+                state_id=uuid4(),
+                state=state_data,
+                provenance="convergence_persist",
+                actor="composer_route",
+                response=GuidedResponseDescriptor(
+                    kind="guided_reenter",
+                    next_turn=next_turn_descriptor,
+                    assistant_turn_seq=None,
+                ),
+                payloads=(prepared_turn,) if prepared_turn is not None else (),
+                audit_evidence=audit_evidence,
+            ),
+            payload_store=request.app.state.payload_store,
+        )
+        return _response_from_record(settlement.result_state)
 
 
 @router.post("/{session_id}/guided/start", response_model=GetGuidedResponse)
@@ -1169,7 +1224,12 @@ async def post_guided_start(
         if guided is None:
             raise AuditIntegrityError("Guided start result state has no guided checkpoint")
         terminal = guided.terminal
-        turn = None if terminal is not None else _build_get_guided_turn(state, guided, catalog=catalog)
+        turn = None
+        if terminal is None:
+            turn, _prepared = _load_durable_current_turn(
+                guided,
+                payload_store=request.app.state.payload_store,
+            )
         terminal_response = (
             TerminalStateResponse(
                 kind=terminal.kind.value,
@@ -1314,18 +1374,23 @@ async def post_guided_start(
                 seed_turn = _build_get_guided_turn(new_state, seeded_guided, catalog=catalog)
                 if seed_turn is None:  # pragma: no cover - initial STEP_1 always emits
                     raise InvariantError("post_guided_start: initial guided session has no first turn")
-                seeded_guided, _record, _turn_type, _payload_hash = _append_server_turn_record(
+                seed_turn = _finalize_guided_turn(
+                    seed_turn,
+                    shield_available=_resolve_shield_available(plugin_snapshot),
+                )
+                seeded_guided, _record, seed_turn_type, prepared_seed_turn = _prepare_server_turn_occurrence(
                     seeded_guided,
                     current_step=seeded_guided.step,
                     turn=seed_turn,
+                    payload_store=request.app.state.payload_store,
                 )
-                prepared_seed_turn = prepare_guided_json_payload(
-                    request.app.state.payload_store,
-                    purpose="turn",
-                    payload=seed_turn["payload"],
+                seed_evidence = _turn_emission_evidence(
+                    step=seeded_guided.step,
+                    turn_type=seed_turn_type,
+                    prepared=prepared_seed_turn,
+                    composition_version=new_state.version,
+                    actor=user.user_id,
                 )
-                if prepared_seed_turn.payload_id != _payload_hash:
-                    raise AuditIntegrityError("Guided start seed turn CAS differs from its history record")
                 new_state = _replace(new_state, guided_session=seeded_guided)
                 state_d = new_state.to_dict()
                 persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)
@@ -1345,6 +1410,9 @@ async def post_guided_start(
                     provenance="session_seed",
                     actor="composer_route",
                     response_hash_factory=lambda record: guided_response_hash(_response_from_record(record)),
+                    payloads=(prepared_seed_turn,),
+                    audit_evidence=seed_evidence,
+                    payload_store=request.app.state.payload_store,
                 )
                 return _response_from_record(seed_outcome.state)
         except GuidedOperationFenceLostError:
@@ -1406,6 +1474,13 @@ async def post_guided_respond(
     Raises 404 if the session does not exist or belong to the requesting user.
     """
     await _verify_session_ownership(session_id, user, request)
+    if body.edit_target is not None:
+        try:
+            parsed_edit_target_id = UUID(body.edit_target.stable_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="edit_target.stable_id must be a canonical UUID") from exc
+        if str(parsed_edit_target_id) != body.edit_target.stable_id:
+            raise HTTPException(status_code=400, detail="edit_target.stable_id must be a canonical UUID")
     service: SessionServiceProtocol = request.app.state.session_service
     catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
     recorder = BufferingRecorder()
@@ -2423,18 +2498,20 @@ async def post_guided_chat(
                 turn = _build_get_guided_turn(state, guided, catalog=catalog)
                 if turn is None:
                     raise InvariantError("Guided Step-1 chat has no rebuildable current turn")
-                guided, existing_record_for_chat, emitted_turn_type, emitted_payload_hash = _append_server_turn_record(
+                turn = _finalize_guided_turn(turn, shield_available=shield_available)
+                guided, existing_record_for_chat, emitted_turn_type, prepared_turn = _prepare_server_turn_occurrence(
                     guided,
                     current_step=guided.step,
                     turn=turn,
+                    payload_store=request.app.state.payload_store,
                 )
                 state = _replace(state, guided_session=guided)
                 emit_turn_emitted(
                     recorder,
                     step=guided.step,
                     turn_type=emitted_turn_type,
-                    payload_hash=emitted_payload_hash,
-                    payload_payload_id=_store_guided_audit_payload(request.app.state.payload_store, turn["payload"]),
+                    payload_hash=prepared_turn.payload_id,
+                    payload_payload_id=prepared_turn.payload_id,
                     emitter="server",
                     composition_version=state.version,
                     actor=user.user_id,
@@ -2539,8 +2616,14 @@ async def post_guided_chat(
                                     "handler set tool_result.success=True but did not set step_1_result"
                                 )
                             next_turn = build_step_1_schema_form_turn_from_resolved(applied_step_1_result, catalog)
+                            next_turn = _finalize_guided_turn(next_turn, shield_available=shield_available)
                             next_turn_type = TurnType(next_turn["type"])
-                            next_payload_hash = stable_hash(next_turn["payload"])
+                            prepared_next_turn = prepare_guided_json_payload(
+                                request.app.state.payload_store,
+                                purpose="turn",
+                                payload=next_turn["payload"],
+                            )
+                            next_payload_hash = prepared_next_turn.payload_id
                             new_record = TurnRecord(
                                 step=GuidedStep.STEP_1_SOURCE,
                                 turn_type=next_turn_type,
@@ -2553,7 +2636,7 @@ async def post_guided_chat(
                                 step=GuidedStep.STEP_1_SOURCE,
                                 turn_type=next_turn_type,
                                 payload_hash=next_payload_hash,
-                                payload_payload_id=_store_guided_audit_payload(request.app.state.payload_store, next_turn["payload"]),
+                                payload_payload_id=prepared_next_turn.payload_id,
                                 emitter="server",
                                 composition_version=state.version,
                                 actor=user.user_id,
@@ -2796,8 +2879,14 @@ async def post_guided_chat(
                             "handler set tool_result.success=True but did not set step_1_result"
                         )
                     next_turn = build_step_1_schema_form_turn_from_resolved(applied_step_1_result, catalog)
+                    next_turn = _finalize_guided_turn(next_turn, shield_available=shield_available)
                     next_turn_type = TurnType(next_turn["type"])
-                    next_payload_hash = stable_hash(next_turn["payload"])
+                    prepared_next_turn = prepare_guided_json_payload(
+                        request.app.state.payload_store,
+                        purpose="turn",
+                        payload=next_turn["payload"],
+                    )
+                    next_payload_hash = prepared_next_turn.payload_id
                     new_record = TurnRecord(
                         step=GuidedStep.STEP_1_SOURCE,
                         turn_type=next_turn_type,
@@ -2810,7 +2899,7 @@ async def post_guided_chat(
                         step=GuidedStep.STEP_1_SOURCE,
                         turn_type=next_turn_type,
                         payload_hash=next_payload_hash,
-                        payload_payload_id=_store_guided_audit_payload(request.app.state.payload_store, next_turn["payload"]),
+                        payload_payload_id=prepared_next_turn.payload_id,
                         emitter="server",
                         composition_version=state.version,
                         actor=user.user_id,
@@ -3020,8 +3109,14 @@ async def post_guided_chat(
                             "handler set tool_result.success=True but did not set step_2_result"
                         )
                     next_turn = build_step_2_schema_form_turn_from_resolved(applied_step_2_result, catalog)
+                    next_turn = _finalize_guided_turn(next_turn, shield_available=shield_available)
                     next_turn_type = TurnType(next_turn["type"])
-                    next_payload_hash = stable_hash(next_turn["payload"])
+                    prepared_next_turn = prepare_guided_json_payload(
+                        request.app.state.payload_store,
+                        purpose="turn",
+                        payload=next_turn["payload"],
+                    )
+                    next_payload_hash = prepared_next_turn.payload_id
                     new_record = TurnRecord(
                         step=GuidedStep.STEP_2_SINK,
                         turn_type=next_turn_type,
@@ -3034,7 +3129,7 @@ async def post_guided_chat(
                         step=GuidedStep.STEP_2_SINK,
                         turn_type=next_turn_type,
                         payload_hash=next_payload_hash,
-                        payload_payload_id=_store_guided_audit_payload(request.app.state.payload_store, next_turn["payload"]),
+                        payload_payload_id=prepared_next_turn.payload_id,
                         emitter="server",
                         composition_version=state.version,
                         actor=user.user_id,
@@ -3205,8 +3300,14 @@ async def post_guided_chat(
                         guided = _replace(guided, step_3_proposal=proposal, step_3_edit_index=None)
                         state = _replace(state, guided_session=guided)
                         next_turn = build_step_3_propose_chain_turn(proposal)
+                        next_turn = _finalize_guided_turn(next_turn, shield_available=shield_available)
                         next_turn_type = TurnType(next_turn["type"])
-                        next_payload_hash = stable_hash(next_turn["payload"])
+                        prepared_next_turn = prepare_guided_json_payload(
+                            request.app.state.payload_store,
+                            purpose="turn",
+                            payload=next_turn["payload"],
+                        )
+                        next_payload_hash = prepared_next_turn.payload_id
                         new_record = TurnRecord(
                             step=GuidedStep.STEP_3_TRANSFORMS,
                             turn_type=next_turn_type,
@@ -3219,7 +3320,7 @@ async def post_guided_chat(
                             step=GuidedStep.STEP_3_TRANSFORMS,
                             turn_type=next_turn_type,
                             payload_hash=next_payload_hash,
-                            payload_payload_id=_store_guided_audit_payload(request.app.state.payload_store, next_turn["payload"]),
+                            payload_payload_id=prepared_next_turn.payload_id,
                             emitter="server",
                             composition_version=state.version,
                             actor=user.user_id,
@@ -3733,30 +3834,17 @@ async def post_guided_convert(
     )
 
     def _response_from_record(record: CompositionStateRecord) -> GetGuidedResponse:
-        # Replay deliberately stores no response body or policy snapshot. The
-        # immutable state locator is rebuilt against live policy and checked
-        # against the stored strict response-domain hash; policy projection
-        # drift therefore fails closed instead of silently replaying stale data.
         state = _state_from_record(record)
         guided = state.guided_session
         if guided is None:
             raise AuditIntegrityError("Guided conversion result state has no guided checkpoint")
         terminal = guided.terminal
-        try:
-            turn = None if terminal is not None else _build_get_guided_turn(state, guided, catalog=catalog)
-        except InvariantError as exc:
-            slog.error(
-                "guided.invariant_violated",
-                session_id=str(session_id),
-                user_id=user.user_id,
-                exc_class=type(exc).__name__,
-                site="post_guided_convert._build_get_guided_turn",
-                frames=_safe_frame_strings(exc),
+        turn = None
+        if terminal is None:
+            turn, _prepared = _load_durable_current_turn(
+                guided,
+                payload_store=request.app.state.payload_store,
             )
-            raise HTTPException(
-                status_code=500,
-                detail="Server invariant violated. See application audit log for diagnostic detail.",
-            ) from exc
         terminal_response = (
             TerminalStateResponse(
                 kind=terminal.kind.value,
@@ -3850,18 +3938,23 @@ async def post_guided_convert(
             seed_turn = _build_get_guided_turn(new_state, seeded_guided, catalog=catalog)
             if seed_turn is None:  # pragma: no cover - initial STEP_1 always emits
                 raise InvariantError("post_guided_convert: initial guided session has no first turn")
-            seeded_guided, _record, _turn_type, _payload_hash = _append_server_turn_record(
+            seed_turn = _finalize_guided_turn(
+                seed_turn,
+                shield_available=_resolve_shield_available(plugin_snapshot),
+            )
+            seeded_guided, _record, seed_turn_type, prepared_seed_turn = _prepare_server_turn_occurrence(
                 seeded_guided,
                 current_step=seeded_guided.step,
                 turn=seed_turn,
+                payload_store=request.app.state.payload_store,
             )
-            prepared_seed_turn = prepare_guided_json_payload(
-                request.app.state.payload_store,
-                purpose="turn",
-                payload=seed_turn["payload"],
+            seed_evidence = _turn_emission_evidence(
+                step=seeded_guided.step,
+                turn_type=seed_turn_type,
+                prepared=prepared_seed_turn,
+                composition_version=new_state.version,
+                actor=user.user_id,
             )
-            if prepared_seed_turn.payload_id != _payload_hash:
-                raise AuditIntegrityError("Guided conversion seed turn CAS differs from its history record")
             new_state = _replace(new_state, guided_session=seeded_guided)
             new_composer_meta = {"guided_session": seeded_guided.to_dict()}
             state_d = new_state.to_dict()
@@ -3892,6 +3985,9 @@ async def post_guided_convert(
                 actor="composer_route",
                 response_hash_factory=lambda record: guided_response_hash(_response_from_record(record)),
                 system_message=system_message,
+                payloads=(prepared_seed_turn,),
+                audit_evidence=seed_evidence,
+                payload_store=request.app.state.payload_store,
             )
             return _response_from_record(state_record_out)
     except Exception as exc:

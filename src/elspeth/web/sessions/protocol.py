@@ -695,7 +695,7 @@ class CompositionStateRecord:
 
 GuidedJsonPayloadPurpose = Literal["turn", "turn_response"]
 GuidedPreparedAuditKind = Literal["tool", "llm", "chat"]
-GuidedResponseKind = Literal["guided_respond", "guided_chat"]
+GuidedResponseKind = Literal["guided_respond", "guided_chat", "guided_reenter"]
 
 
 class GuidedReplayTurnDict(TypedDict):
@@ -899,12 +899,12 @@ class GuidedResponseDescriptor:
     policy_findings: tuple[GuidedReplayPolicyFinding, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.kind not in {"guided_respond", "guided_chat"}:
+        if self.kind not in {"guided_respond", "guided_chat", "guided_reenter"}:
             raise AuditIntegrityError("GuidedResponseDescriptor kind is outside the closed vocabulary")
         if self.next_turn is not None and type(self.next_turn) is not GuidedReplayTurn:
             raise AuditIntegrityError("GuidedResponseDescriptor.next_turn must be an exact replay turn or None")
-        if self.kind == "guided_respond" and self.assistant_turn_seq is not None:
-            raise AuditIntegrityError("guided_respond response descriptor cannot carry an assistant turn sequence")
+        if self.kind in {"guided_respond", "guided_reenter"} and self.assistant_turn_seq is not None:
+            raise AuditIntegrityError(f"{self.kind} response descriptor cannot carry an assistant turn sequence")
         if self.kind == "guided_chat" and (type(self.assistant_turn_seq) is not int or self.assistant_turn_seq < 0):
             raise AuditIntegrityError("guided_chat response descriptor requires a non-negative assistant turn sequence")
         if type(self.policy_findings) is not tuple or any(
@@ -1406,6 +1406,9 @@ class SessionServiceProtocol(Protocol):
         actor: str,
         response_hash_factory: Callable[[CompositionStateRecord], str],
         system_message: str | None = None,
+        payloads: tuple[PreparedGuidedJsonPayload, ...] = (),
+        audit_evidence: GuidedAuditEvidence | None = None,
+        payload_store: PayloadStore | None = None,
     ) -> CompositionStateRecord: ...
 
     async def settle_guided_state_operation(
@@ -1423,6 +1426,9 @@ class SessionServiceProtocol(Protocol):
         provenance: CompositionStateProvenance,
         actor: str,
         response_hash_factory: Callable[[CompositionStateRecord], str],
+        payloads: tuple[PreparedGuidedJsonPayload, ...] = (),
+        audit_evidence: GuidedAuditEvidence | None = None,
+        payload_store: PayloadStore | None = None,
     ) -> GuidedStartStateOutcome: ...
 
     async def complete_existing_state_guided_operation(

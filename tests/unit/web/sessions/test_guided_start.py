@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -120,22 +121,35 @@ def _make_app(tmp_path, user_id="alice", database_url: str | None = None):
     return app, service
 
 
-def _materialize_first_turn(state, catalog):
+def _materialize_first_turn(state, catalog, payload_store):
     from elspeth.web.sessions.routes.composer.guided import (
-        _append_server_turn_record,
         _build_get_guided_turn,
+        _finalize_guided_turn,
+        _prepare_server_turn_occurrence,
     )
 
     guided = state.guided_session
     assert guided is not None
     turn = _build_get_guided_turn(state, guided, catalog=catalog)
     assert turn is not None
-    guided, _record, _turn_type, _payload_hash = _append_server_turn_record(
+    turn = _finalize_guided_turn(turn, shield_available=False)
+    guided, _record, _turn_type, _prepared = _prepare_server_turn_occurrence(
         guided,
         current_step=guided.step,
         turn=turn,
+        payload_store=payload_store,
     )
     return replace(state, guided_session=guided)
+
+
+async def _guided_turn_emitted_args(service, session_id) -> list[dict]:
+    events: list[dict] = []
+    for message in await service.get_messages(session_id, limit=None):
+        for tool_call in message.tool_calls or ():
+            invocation = tool_call.get("invocation", {})
+            if invocation.get("tool_name") == "guided_turn_emitted":
+                events.append(json.loads(invocation["arguments_canonical"]))
+    return events
 
 
 @pytest.mark.asyncio
@@ -302,6 +316,10 @@ async def test_guided_start_is_idempotent(tmp_path) -> None:
             {"sid": str(session.id)},
         ).scalar()
     assert versions == 1
+    emissions = await _guided_turn_emitted_args(service, session.id)
+    assert len(emissions) == 1
+    assert emissions[0]["payload_hash"] == first.json()["guided_session"]["history"][-1]["payload_hash"]
+    assert emissions[0]["payload_payload_id"] == emissions[0]["payload_hash"]
 
 
 @pytest.mark.asyncio
@@ -617,9 +635,28 @@ async def test_guided_start_integrity_failure_is_terminal_and_safe_to_replay(tmp
 
 
 @pytest.mark.asyncio
-async def test_guided_start_replay_fails_closed_on_response_drift(tmp_path) -> None:
-    from elspeth.contracts.errors import AuditIntegrityError
+async def test_guided_start_audit_insert_failure_rolls_back_seed_and_occurrence(tmp_path) -> None:
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
 
+    with patch.object(
+        service,
+        "_insert_prepared_guided_audit_rows_on_connection",
+        side_effect=RuntimeError("injected audit insert failure"),
+    ):
+        response = client.post(
+            f"/api/sessions/{session.id}/guided/start",
+            json={"profile": "tutorial", "operation_id": str(uuid.uuid4())},
+        )
+
+    assert response.status_code == 500
+    assert await service.get_current_state(session.id) is None
+    assert await service.get_messages(session.id, limit=None) == []
+
+
+@pytest.mark.asyncio
+async def test_guided_start_replay_uses_durable_turn_after_live_catalog_drift(tmp_path) -> None:
     app, service = _make_app(tmp_path)
     client = TestClient(app)
     session = await service.create_session("alice", "T", "local")
@@ -627,19 +664,15 @@ async def test_guided_start_replay_fails_closed_on_response_drift(tmp_path) -> N
     payload = {"profile": "tutorial", "operation_id": operation_id}
     first = client.post(f"/api/sessions/{session.id}/guided/start", json=payload)
     assert first.status_code == 200
-    drifted = {
-        **first.json()["next_turn"],
-        "payload": {**first.json()["next_turn"]["payload"], "question": "drifted"},
-    }
-
-    with (
-        patch(
-            "elspeth.web.sessions.routes.composer.guided._build_get_guided_turn",
-            return_value=drifted,
-        ),
-        pytest.raises(AuditIntegrityError, match="persisted occurrence"),
+    with patch(
+        "elspeth.web.sessions.routes.composer.guided._build_get_guided_turn",
+        side_effect=AssertionError("completed replay must not consult the live catalog"),
     ):
-        client.post(f"/api/sessions/{session.id}/guided/start", json=payload)
+        replay = client.post(f"/api/sessions/{session.id}/guided/start", json=payload)
+
+    assert replay.status_code == 200
+    assert replay.json() == first.json()
+    assert replay.json()["next_turn"]["turn_token"] == first.json()["next_turn"]["turn_token"]
 
 
 @pytest.mark.asyncio
@@ -737,6 +770,7 @@ async def test_guided_start_empty_race_settles_exact_guided_winner(tmp_path) -> 
             winner = _materialize_first_turn(
                 _initial_composition_state_with_guided_session(profile=TUTORIAL_PROFILE),
                 app.state.catalog_service,
+                app.state.payload_store,
             )
             assert winner.guided_session is not None
             winner_data = winner.to_dict()
@@ -785,6 +819,7 @@ async def test_guided_start_late_empty_race_converges_inside_atomic_seed(tmp_pat
         winner = _materialize_first_turn(
             _initial_composition_state_with_guided_session(profile=TUTORIAL_PROFILE),
             app.state.catalog_service,
+            app.state.payload_store,
         )
         assert winner.guided_session is not None
         winner_data = winner.to_dict()

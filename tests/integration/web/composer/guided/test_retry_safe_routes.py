@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
 
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
 from elspeth.web.composer.guided.resolved import SourceResolved
 from elspeth.web.composer.guided.state_machine import (
@@ -20,6 +23,7 @@ from elspeth.web.composer.guided.state_machine import (
     TurnRecord,
 )
 from elspeth.web.composer.source_inspection import SourceInspectionFacts
+from elspeth.web.sessions.guided_replay import guided_turn_token, load_guided_json_payload
 from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.sessions.routes._helpers import _initial_composition_state_with_guided_session
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
@@ -33,7 +37,7 @@ def _create_session(client: TestClient) -> str:
     return session_id
 
 
-def _seed_exited_wire_state(client: TestClient, session_id: str) -> None:
+def _seed_exited_wire_state(client: TestClient, session_id: str) -> str:
     service = client.app.state.session_service
     state = _initial_composition_state_with_guided_session()
     assert state.guided_session is not None
@@ -56,6 +60,12 @@ def _seed_exited_wire_state(client: TestClient, session_id: str) -> None:
             pipeline_yaml=None,
         ),
     )
+    prior_live = replace(
+        guided,
+        history=(replace(guided.history[0], response_hash=None, summary=None),),
+        terminal=None,
+    )
+    prior_turn_token = guided_turn_token(prior_live)
     state = replace(state, guided_session=guided)
     state_data_raw = state.to_dict()
     asyncio.run(
@@ -74,6 +84,18 @@ def _seed_exited_wire_state(client: TestClient, session_id: str) -> None:
             provenance="session_seed",
         )
     )
+    return prior_turn_token
+
+
+def _guided_turn_emitted_args(client: TestClient, session_id: str) -> list[dict]:
+    messages = asyncio.run(client.app.state.session_service.get_messages(UUID(session_id), limit=None))
+    events: list[dict] = []
+    for message in messages:
+        for tool_call in message.tool_calls or ():
+            invocation = tool_call.get("invocation", {})
+            if invocation.get("tool_name") == "guided_turn_emitted":
+                events.append(json.loads(invocation["arguments_canonical"]))
+    return events
 
 
 _SOURCE_ID = "00000000-0000-4000-8000-000000000101"
@@ -254,24 +276,69 @@ def _seed_exited_checkpoint(client: TestClient, session_id: str, checkpoint: Gui
 
 def test_reenter_replays_exact_located_response_without_a_second_state(composer_test_client: TestClient) -> None:
     session_id = _create_session(composer_test_client)
-    _seed_exited_wire_state(composer_test_client, session_id)
+    prior_turn_token = _seed_exited_wire_state(composer_test_client, session_id)
     operation_id = str(uuid4())
 
     first = composer_test_client.post(
         f"/api/sessions/{session_id}/guided/reenter",
         json={"operation_id": operation_id},
     )
-    replay = composer_test_client.post(
-        f"/api/sessions/{session_id}/guided/reenter",
-        json={"operation_id": operation_id},
-    )
+    with patch(
+        "elspeth.web.sessions.routes.composer.guided._build_get_guided_turn",
+        side_effect=AssertionError("completed reentry replay must not rebuild live policy"),
+    ):
+        replay = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/reenter",
+            json={"operation_id": operation_id},
+        )
 
     assert first.status_code == 200, first.json()
     assert replay.status_code == 200, replay.json()
     assert replay.json() == first.json()
+    body = first.json()
+    assert len(body["guided_session"]["history"]) == 2
+    assert body["guided_session"]["history"][0]["response_hash"] == "b" * 64
+    assert body["guided_session"]["history"][1]["response_hash"] is None
+    assert body["next_turn"]["turn_token"] != prior_turn_token
+    loaded = load_guided_json_payload(
+        composer_test_client.app.state.payload_store,
+        payload_id=body["guided_session"]["history"][-1]["payload_hash"],
+        purpose="turn",
+    )
+    assert deep_thaw(loaded.payload) == body["next_turn"]["payload"]
+    fetched = composer_test_client.get(f"/api/sessions/{session_id}/guided")
+    assert fetched.status_code == 200
+    assert fetched.json()["next_turn"]["turn_token"] == body["next_turn"]["turn_token"]
+    emissions = _guided_turn_emitted_args(composer_test_client, session_id)
+    assert len(emissions) == 1
+    assert emissions[0]["payload_hash"] == body["guided_session"]["history"][-1]["payload_hash"]
+    assert emissions[0]["payload_payload_id"] == emissions[0]["payload_hash"]
     service = composer_test_client.app.state.session_service
     versions = asyncio.run(service.get_state_versions(UUID(session_id)))
     assert [state.version for state in versions] == [1, 2]
+
+
+def test_reenter_audit_insert_failure_rolls_back_new_occurrence(composer_test_client: TestClient) -> None:
+    session_id = _create_session(composer_test_client)
+    _seed_exited_wire_state(composer_test_client, session_id)
+    service = composer_test_client.app.state.session_service
+
+    with (
+        patch.object(
+            service,
+            "_insert_prepared_guided_audit_rows_on_connection",
+            side_effect=RuntimeError("injected audit insert failure"),
+        ),
+        pytest.raises(RuntimeError, match="injected audit insert failure"),
+    ):
+        composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/reenter",
+            json={"operation_id": str(uuid4())},
+        )
+
+    versions = asyncio.run(service.get_state_versions(UUID(session_id)))
+    assert [state.version for state in versions] == [1]
+    assert _guided_turn_emitted_args(composer_test_client, session_id) == []
 
 
 @pytest.mark.parametrize(

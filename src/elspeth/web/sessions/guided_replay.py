@@ -30,6 +30,7 @@ from elspeth.web.sessions.protocol import (
 from elspeth.web.sessions.schemas import (
     ChatTurnResponse,
     CompositionStateResponse,
+    GetGuidedResponse,
     GuidedChatResponse,
     GuidedRespondResponse,
     GuidedSessionResponse,
@@ -276,7 +277,7 @@ def project_guided_response(
     state: CompositionStateRecord,
     *,
     payloads: Sequence[PreparedGuidedJsonPayload],
-) -> GuidedRespondResponse | GuidedChatResponse:
+) -> GuidedRespondResponse | GuidedChatResponse | GetGuidedResponse:
     """Construct the exact strict response committed by a guided operation."""
 
     descriptor = parse_guided_response_descriptor(state)
@@ -289,6 +290,14 @@ def project_guided_response(
     state_response = _composition_state_response(state, descriptor)
     if descriptor.kind == "guided_respond":
         return GuidedRespondResponse(
+            guided_session=guided_response,
+            next_turn=next_turn,
+            terminal=terminal,
+            composition_state=state_response,
+        )
+
+    if descriptor.kind == "guided_reenter":
+        return GetGuidedResponse(
             guided_session=guided_response,
             next_turn=next_turn,
             terminal=terminal,

@@ -27,11 +27,10 @@ Branch behaviour:
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from unittest.mock import patch
 from uuid import UUID, uuid4
-
-import pytest
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
@@ -91,6 +90,17 @@ def _convert_outcome(client: TestClient, session_id: str, operation_id: str) -> 
     )
     assert isinstance(outcome, GuidedOperationCompleted)
     return outcome
+
+
+def _guided_turn_emitted_args(client: TestClient, session_id: str) -> list[dict]:
+    messages = asyncio.run(client.app.state.session_service.get_messages(UUID(session_id), limit=None))
+    events: list[dict] = []
+    for message in messages:
+        for tool_call in message.tool_calls or ():
+            invocation = tool_call.get("invocation", {})
+            if invocation.get("tool_name") == "guided_turn_emitted":
+                events.append(json.loads(invocation["arguments_canonical"]))
+    return events
 
 
 def _seed_freeform_state_with_work(client: TestClient, session_id: str) -> None:
@@ -233,8 +243,30 @@ class TestConvertFreeformWithWork:
         assert [version.version for version in versions] == [1, 2]
         messages = asyncio.run(client.app.state.session_service.get_messages(UUID(session_id)))
         assert len([message for message in messages if message.role == "system"]) == 1
+        emissions = _guided_turn_emitted_args(client, session_id)
+        assert len(emissions) == 1
+        assert emissions[0]["payload_hash"] == first.json()["guided_session"]["history"][-1]["payload_hash"]
+        assert emissions[0]["payload_payload_id"] == emissions[0]["payload_hash"]
         outcome = _convert_outcome(client, session_id, operation_id)
         assert str(outcome.result.state_id) == first.json()["composition_state"]["id"]
+
+    def test_audit_insert_failure_rolls_back_conversion_state_and_breadcrumb(self, composer_test_client: TestClient) -> None:
+        client = composer_test_client
+        session_id = _create_session(client)
+        _seed_freeform_state_with_work(client, session_id)
+        service = client.app.state.session_service
+
+        with patch.object(
+            service,
+            "_insert_prepared_guided_audit_rows_on_connection",
+            side_effect=RuntimeError("injected audit insert failure"),
+        ):
+            response = _convert_raw(client, session_id)
+
+        assert response.status_code == 500
+        versions = asyncio.run(service.get_state_versions(UUID(session_id)))
+        assert [version.version for version in versions] == [1]
+        assert asyncio.run(service.get_messages(UUID(session_id), limit=None)) == []
 
 
 # ---------------------------------------------------------------------------
@@ -347,31 +379,22 @@ class TestConvertEmptySession:
         versions = client.get(f"/api/sessions/{session_id}/state/versions")
         assert versions.json() == []
 
-    def test_replay_fails_closed_when_located_response_drifts(self, composer_test_client: TestClient) -> None:
-        """Policy/live response drift is intentionally not stored or replayed.
-
-        The operation stores only a state locator and strict response-domain
-        hash. Rebuilding under a changed live projection must fail closed.
-        """
+    def test_replay_uses_durable_turn_after_live_catalog_drift(self, composer_test_client: TestClient) -> None:
+        """Completed conversion replay never rebuilds from mutable policy state."""
         client = composer_test_client
         session_id = _create_session(client)
         operation_id = str(uuid4())
         first = _convert_raw(client, session_id, operation_id=operation_id)
         assert first.status_code == 200, first.json()
-        original_turn = first.json()["next_turn"]
-        drifted_turn = {
-            **original_turn,
-            "payload": {**original_turn["payload"], "question": "drifted after settlement"},
-        }
-
-        with (
-            patch(
-                "elspeth.web.sessions.routes.composer.guided._build_get_guided_turn",
-                return_value=drifted_turn,
-            ),
-            pytest.raises(AuditIntegrityError, match="persisted occurrence"),
+        with patch(
+            "elspeth.web.sessions.routes.composer.guided._build_get_guided_turn",
+            side_effect=AssertionError("completed replay must not consult the live catalog"),
         ):
-            _convert_raw(client, session_id, operation_id=operation_id)
+            replay = _convert_raw(client, session_id, operation_id=operation_id)
+
+        assert replay.status_code == 200, replay.json()
+        assert replay.json() == first.json()
+        assert replay.json()["next_turn"]["turn_token"] == first.json()["next_turn"]["turn_token"]
 
     def test_deterministic_response_failure_is_settled_and_replayed(self, composer_test_client: TestClient) -> None:
         client = composer_test_client

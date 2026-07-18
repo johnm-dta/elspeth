@@ -32,8 +32,6 @@ import asyncio
 import json
 from uuid import UUID
 
-import pytest
-
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 # ---------------------------------------------------------------------------
@@ -549,8 +547,11 @@ def _guided_turn_emitted_args(client: TestClient, session_id: str) -> list[dict]
 
 
 class TestGetGuidedAuditPayloadOrdering:
-    def test_payload_store_failure_before_first_get_emit_does_not_orphan_history(self, composer_test_client: TestClient) -> None:
-        """A failed payload ref write must not make retry skip guided audit emission."""
+    def test_persisted_lazy_get_is_prospective_and_never_splits_history_from_evidence(
+        self,
+        composer_test_client: TestClient,
+    ) -> None:
+        """A read-only GET does not touch CAS, state history, or audit rows."""
         session_id = _create_session(composer_test_client)
         _seed_guided_session(
             composer_test_client,
@@ -558,38 +559,18 @@ class TestGetGuidedAuditPayloadOrdering:
             {
                 "step": "step_2_sink",
                 "history": [],
-                "step_1_result": {
-                    "plugin": "csv",
-                    "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
-                    "observed_columns": ["col_a"],
-                    "sample_rows": [{"col_a": "x"}],
-                    "on_validation_failure": "discard",
-                },
-                "step_2_result": None,
-                "step_3_proposal": None,
-                "terminal": None,
-                "transition_consumed": False,
-                "step_1_source_intent": None,
-                "step_2_sink_intent": None,
-                "step_2_5_recipe_offer": None,
-                "step_2_chosen_plugin": None,
-                "chat_history": [],
-                "chat_turn_seq": 0,
             },
         )
         payload_store = _FailOncePayloadStore(composer_test_client.app.state.payload_store)
         composer_test_client.app.state.payload_store = payload_store
 
-        with pytest.raises(RuntimeError, match="payload store unavailable"):
-            composer_test_client.get(f"/api/sessions/{session_id}/guided")
-
         body = _get_guided(composer_test_client, session_id)
         assert body["next_turn"]["type"] == "single_select"
-        events = _guided_turn_emitted_args(composer_test_client, session_id)
-        assert len(events) == 1
-        payload_ref = events[0]["payload_payload_id"]
-        assert payload_ref == events[0]["payload_hash"]
-        assert payload_store.retrieve(payload_ref)
+        assert len(body["guided_session"]["history"]) == 1
+        assert payload_store.store_calls == 0
+        assert _guided_turn_emitted_args(composer_test_client, session_id) == []
+        versions = asyncio.run(composer_test_client.app.state.session_service.get_state_versions(UUID(session_id)))
+        assert [version.version for version in versions] == [1]
 
 
 class TestGetGuidedFullStateRebuild:

@@ -29,6 +29,7 @@ from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, GuidedStep, TurnType
 from elspeth.web.composer.guided.state_machine import GuidedSession, TurnRecord
 from elspeth.web.composer.pipeline_proposal import composition_content_hash
+from elspeth.web.interpretation_state import PROMPT_SHIELD_AVAILABLE_DRAFT, PROMPT_SHIELD_WARNING_DRAFT
 from elspeth.web.plugin_policy.models import PluginId, PluginUnavailableReason
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.engine import create_session_engine
@@ -121,6 +122,65 @@ def _audit_evidence() -> tuple[ComposerToolInvocation, ComposerLLMCall, Composer
         finished_at=now,
     )
     return invocation, llm_call, chat_turn
+
+
+@pytest.mark.parametrize(
+    ("shield_available", "expected_fragment", "forbidden_fragment"),
+    [
+        (False, PROMPT_SHIELD_WARNING_DRAFT, PROMPT_SHIELD_AVAILABLE_DRAFT),
+        (True, PROMPT_SHIELD_AVAILABLE_DRAFT, PROMPT_SHIELD_WARNING_DRAFT),
+    ],
+)
+def test_confirm_wiring_cas_is_exact_finalized_wire_authority(
+    tmp_path: Path,
+    shield_available: bool,
+    expected_fragment: str,
+    forbidden_fragment: str,
+) -> None:
+    from elspeth.web.sessions.routes.composer.guided import (
+        _finalize_guided_turn,
+        _load_durable_current_turn,
+        _prepare_server_turn_occurrence,
+        _turn_payload_response,
+    )
+
+    store = FilesystemPayloadStore(tmp_path / "wire-authority")
+    raw_turn = {
+        "type": "confirm_wiring",
+        "step_index": 4,
+        "payload": {
+            "topology": {"sources": {}, "nodes": [], "outputs": []},
+            "edge_contracts": [],
+            "semantic_contracts": [],
+            "warnings": [
+                {
+                    "component": "node:llm",
+                    "message": f"lead {PROMPT_SHIELD_WARNING_DRAFT}",
+                    "severity": "medium",
+                }
+            ],
+        },
+    }
+    finalized = _finalize_guided_turn(raw_turn, shield_available=shield_available)
+    guided = replace(GuidedSession.initial(), step=GuidedStep.STEP_4_WIRE)
+    guided, record, _turn_type, prepared = _prepare_server_turn_occurrence(
+        guided,
+        current_step=GuidedStep.STEP_4_WIRE,
+        turn=finalized,
+        payload_store=store,
+    )
+
+    response = _turn_payload_response(finalized, guided=guided, shield_available=not shield_available)
+    reloaded_turn, reloaded_payload = _load_durable_current_turn(guided, payload_store=store)
+    replay = _turn_payload_response(reloaded_turn, guided=guided, shield_available=not shield_available)
+
+    assert response is not None
+    assert replay == response
+    assert deep_thaw(reloaded_payload.payload) == response.payload
+    assert prepared.payload_id == record.payload_hash
+    messages = [warning["message"] for warning in response.payload["warnings"]]
+    assert any(expected_fragment in message for message in messages)
+    assert not any(forbidden_fragment in message for message in messages)
 
 
 def _turn_emitted_evidence(payload_id: str) -> ComposerToolInvocation:

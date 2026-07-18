@@ -36,7 +36,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from elspeth.web.composer.redaction import REDACTED_BLOB_SOURCE_PATH
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
@@ -88,6 +88,24 @@ def _confirm_wiring(client: TestClient, session_id: str) -> dict:
         edit_step_index=None,
         control_signal=None,
     )
+
+
+def test_malformed_edit_target_stable_id_is_http_400(composer_test_client: TestClient) -> None:
+    session_id = _create_session(composer_test_client)
+
+    response = composer_test_client.post(
+        f"/api/sessions/{session_id}/guided/respond",
+        json={
+            "operation_id": str(uuid4()),
+            "turn_token": "a" * 64,
+            "proposal_id": "00000000-0000-4000-8000-000000000002",
+            "draft_hash": "b" * 64,
+            "edit_target": {"kind": "source", "stable_id": "../source"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "edit_target.stable_id must be a canonical UUID"
 
 
 def _seed_blob(client: TestClient, session_id: str) -> tuple[str, str]:

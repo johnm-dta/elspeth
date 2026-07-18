@@ -1676,11 +1676,21 @@ class RowProcessor:
         # the emitted rows.
         if settings.output_mode == OutputMode.PASSTHROUGH:
             flush_results, child_items = self._route_passthrough_results(fctx, result)
-            flush_results, _pending_sink_token_ids = self._complete_aggregation_flush(node_id, flush_results, buffered_tokens)
+            flush_results, _pending_sink_token_ids = self._complete_aggregation_flush(
+                node_id,
+                flush_results,
+                buffered_tokens,
+                child_items,
+            )
             return flush_results, child_items
         if settings.output_mode == OutputMode.TRANSFORM:
             flush_results, child_items = self._route_transform_results(fctx, result)
-            flush_results, _pending_sink_token_ids = self._complete_aggregation_flush(node_id, flush_results, buffered_tokens)
+            flush_results, _pending_sink_token_ids = self._complete_aggregation_flush(
+                node_id,
+                flush_results,
+                buffered_tokens,
+                child_items,
+            )
             return flush_results, child_items
         raise OrchestrationInvariantError(f"Unknown output_mode: {settings.output_mode}")
 
@@ -3109,13 +3119,15 @@ class RowProcessor:
         node_id: NodeID,
         results: tuple[RowResult, ...],
         buffered_tokens: Sequence[TokenInfo],
+        child_items: Sequence[WorkItem],
     ) -> tuple[tuple[RowResult, ...], frozenset[str]]:
         """Complete a successful aggregation flush as ONE atomic journal transition.
 
         Consumes the buffered tokens' BLOCKED rows and emits every sink-bound
-        flush output as a durable PENDING_SINK row in the same transaction
-        (F1/D6): the moment the inputs are consumed, the outputs are journal-
-        durable, so a crash before the sink write can no longer strand a
+        flush output as a durable PENDING_SINK row, plus every non-sink
+        continuation as a durable READY row, in the same transaction (F1/D6):
+        the moment the inputs are consumed, every output is journal-durable,
+        so a crash before the next in-process step can no longer strand a
         flush output in memory while its inputs are TERMINAL.
 
         ORDERING vs batch status: ``execute_flush`` finalizes the batches row
@@ -3167,7 +3179,12 @@ class RowProcessor:
             barrier_key=str(node_id),
             consumed_token_ids=consumed_token_ids,
             emitted_pending_sink=tuple(emissions),
-            emitted_ready=(),
+            # The later in-process continuation loop invokes process_token for
+            # these same WorkItems. Its idempotent enqueue reconciles against
+            # the rows inserted here by deterministic work_item_id and strict
+            # field equality; a crash before that loop leaves durable READY
+            # work for resume instead of losing the continuation.
+            emitted_ready=tuple(self._work_codec.ready_emission(item) for item in child_items),
             now=self._clock.now_utc(),
             # §E.3 per-firing-group snapshot: this batch's adopted members.
             intake_snapshot_token_ids=frozenset(token.token_id for token in buffered_tokens),

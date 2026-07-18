@@ -2869,10 +2869,14 @@ class TestAggregationFailureMatrix:
             )
 
     def test_timeout_flush_passthrough_with_downstream_returns_continuation_work(self) -> None:
-        """Timeout flush routes passthrough tokens into child work when downstream exists."""
+        """Timeout flush atomically journals downstream continuation work."""
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
         downstream_node = NodeID("downstream-2")
         agg_node = NodeID("agg-1")
-        _db, factory, processor, transform, agg_node = self._setup_batch_processor(
+        db, factory, processor, transform, agg_node = self._setup_batch_processor(
             output_mode="passthrough",
             node_to_next={NodeID("source-0"): agg_node, agg_node: downstream_node, downstream_node: None},
         )
@@ -2900,6 +2904,20 @@ class TestAggregationFailureMatrix:
         assert results == ()
         assert len(child_items) == 1
         assert child_items[0].current_node_id == downstream_node
+
+        with db.connection() as conn:
+            journal = conn.execute(
+                select(
+                    token_work_items_table.c.token_id,
+                    token_work_items_table.c.node_id,
+                    token_work_items_table.c.status,
+                ).where(token_work_items_table.c.run_id == processor.run_id)
+            ).all()
+
+        assert {(row.token_id, row.node_id, row.status) for row in journal} == {
+            (buffered_token.token_id, str(agg_node), "terminal"),
+            (child_items[0].token.token_id, str(downstream_node), "ready"),
+        }
 
     def test_timeout_flush_passthrough_terminal_returns_completed(self) -> None:
         """Timeout flush returns terminal COMPLETED results when no downstream/coalesce exists."""

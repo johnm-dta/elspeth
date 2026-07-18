@@ -54,6 +54,7 @@ from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.results import TransformResult
 from tests.fixtures.base_classes import _TestSchema, _TestSourceBase, as_sink, as_source, as_transform
+from tests.fixtures.factories import wire_transforms
 from tests.fixtures.landscape import make_factory
 from tests.fixtures.plugins import CollectSink, ListSource
 from tests.helpers.checkpoint import create_checkpoint
@@ -172,26 +173,58 @@ class _FailOnceSink(CollectSink):
         return super().commit_effect(plan, ctx)
 
 
+class _CountingPassTransform(BaseTransform):
+    """Downstream transform whose call count proves continuation exactness."""
+
+    name = "counting_pass"
+    determinism = Determinism.DETERMINISTIC
+    input_schema = _TestSchema
+    output_schema = _TestSchema
+    on_success = "output"
+    on_error = "discard"
+
+    def __init__(self) -> None:
+        super().__init__({"schema": {"mode": "observed"}})
+        self.process_calls = 0
+
+    def process(self, row: PipelineRow, ctx: Any) -> TransformResult:
+        self.process_calls += 1
+        return TransformResult.success(row, success_reason={"action": "counted_passthrough"})
+
+
 def _build_eof_aggregation_pipeline(
     source: Any,
     transform: _SumBatchTransform,
     output_sink: CollectSink,
+    downstream: _CountingPassTransform | None = None,
 ) -> tuple[PipelineConfig, ExecutionGraph]:
     """Count-triggered transform-mode aggregation whose flush only fires at EOF."""
+    aggregation_output = "aggregate_ready" if downstream is not None else "output"
+    transform.on_success = aggregation_output
     agg_settings = AggregationSettings(
         name="eof_sum",
         plugin=transform.name,
         input="batch_in",
-        on_success="output",
+        on_success=aggregation_output,
         on_error="discard",
         trigger=TriggerConfig(count=100, timeout_seconds=3600),
         output_mode="transform",
+    )
+    wired_transforms = (
+        []
+        if downstream is None
+        else wire_transforms(
+            [as_transform(downstream)],
+            source_connection=aggregation_output,
+            final_sink="output",
+            names=[downstream.name],
+        )
     )
 
     graph = ExecutionGraph.from_plugin_instances(
         sources={"primary": as_source(source)},
         source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="batch_in", options={})},
-        transforms=[],
+        transforms=wired_transforms,
         sinks={"output": as_sink(output_sink)},
         aggregations={"eof_sum": (as_transform(transform), agg_settings)},
         gates=[],
@@ -201,7 +234,9 @@ def _build_eof_aggregation_pipeline(
 
     config = PipelineConfig(
         sources={"primary": as_source(source)},
-        transforms=[as_transform(transform)],
+        # Regular transforms must retain their graph sequence before the
+        # graph-confirmed aggregation plugin, whose node_id is pre-assigned.
+        transforms=([as_transform(downstream)] if downstream is not None else []) + [as_transform(transform)],
         sinks={"output": as_sink(output_sink)},
         aggregation_settings={agg_node_id: agg_settings},
     )
@@ -330,6 +365,127 @@ class TestFlushOutputJournalDurability:
         assert result.status == RunStatus.COMPLETED
         assert output_sink.results == [{"value": 60, "count": 3}]
         assert transform.batch_calls == 1, "resume must deliver the journal-durable output, not re-run the flush"
+        assert source.load_invocations == 1, "resume must not re-invoke the source plugin"
+
+        with db.connection() as conn:
+            work_statuses = (
+                conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == run_id)).scalars().all()
+            )
+        assert work_statuses
+        assert set(work_statuses) <= {"terminal"}
+
+    def test_non_sink_flush_atomic_ready_child_reconciles_in_process(self, tmp_path: Any) -> None:
+        """The live continuation loop reconciles the READY row instead of duplicating it."""
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        db = LandscapeDB(f"sqlite:///{tmp_path / 'audit.db'}")
+        source = _LoadCountingSource([{"value": 10}, {"value": 20}, {"value": 30}], on_success="batch_in")
+        batch_transform = _SumBatchTransform()
+        downstream = _CountingPassTransform()
+        output_sink = CollectSink("output")
+        config, graph = _build_eof_aggregation_pipeline(source, batch_transform, output_sink, downstream)
+        downstream_node_id = graph.get_transform_id_map()[0]
+
+        result = Orchestrator(db).run(
+            config,
+            graph=graph,
+            payload_store=FilesystemPayloadStore(tmp_path / "payloads"),
+        )
+
+        assert result.status == RunStatus.COMPLETED
+        assert output_sink.results == [{"value": 60, "count": 3}]
+        assert downstream.process_calls == 1
+        assert batch_transform.batch_calls == 1
+        assert source.load_invocations == 1
+
+        with db.connection() as conn:
+            journal = conn.execute(
+                select(
+                    token_work_items_table.c.node_id,
+                    token_work_items_table.c.status,
+                ).where(token_work_items_table.c.run_id == result.run_id)
+            ).all()
+        assert len([row for row in journal if row.node_id == downstream_node_id]) == 1
+        assert {row.status for row in journal} <= {"terminal"}
+
+    def test_non_sink_flush_crash_after_barrier_completion_resumes_child_exactly_once(
+        self,
+        tmp_path: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A crash after TS-15 cannot lose a non-sink aggregation continuation."""
+        import elspeth.engine.orchestrator.aggregation as aggregation_runtime
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        db = LandscapeDB(f"sqlite:///{tmp_path / 'audit.db'}")
+        payload_store = FilesystemPayloadStore(tmp_path / "payloads")
+        checkpoint_mgr = CheckpointManager(db)
+        checkpoint_config = RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True, frequency="every_row"))
+
+        source = _LoadCountingSource([{"value": 10}, {"value": 20}, {"value": 30}], on_success="batch_in")
+        batch_transform = _SumBatchTransform()
+        downstream = _CountingPassTransform()
+        output_sink = CollectSink("output")
+        config, graph = _build_eof_aggregation_pipeline(source, batch_transform, output_sink, downstream)
+        downstream_node_id = graph.get_transform_id_map()[0]
+
+        orchestrator = Orchestrator(
+            db=db,
+            checkpoint_manager=checkpoint_mgr,
+            checkpoint_config=checkpoint_config,
+        )
+
+        real_process_flush_results = aggregation_runtime._process_flush_results
+
+        def crash_before_continuation(*args: Any, **kwargs: Any) -> None:
+            work_items = args[1]
+            assert len(work_items) == 1
+            assert work_items[0].current_node_id == downstream_node_id
+            raise RuntimeError("injected crash after aggregation barrier completion")
+
+        monkeypatch.setattr(aggregation_runtime, "_process_flush_results", crash_before_continuation)
+        with pytest.raises(RuntimeError, match="injected crash after aggregation barrier completion"):
+            orchestrator.run(config, graph=graph, payload_store=payload_store)
+        monkeypatch.setattr(aggregation_runtime, "_process_flush_results", real_process_flush_results)
+
+        assert source.load_invocations == 1
+        assert batch_transform.batch_calls == 1
+        assert downstream.process_calls == 0
+        assert output_sink.results == []
+
+        with db.connection() as conn:
+            run_id = str(conn.execute(select(batches_table.c.run_id)).scalars().first())
+            journal = conn.execute(
+                select(
+                    token_work_items_table.c.token_id,
+                    token_work_items_table.c.node_id,
+                    token_work_items_table.c.status,
+                ).where(token_work_items_table.c.run_id == run_id)
+            ).all()
+
+        ready_rows = [row for row in journal if row.status == "ready"]
+        assert len(ready_rows) == 1
+        assert ready_rows[0].node_id == downstream_node_id
+        assert len([row for row in journal if row.status == "terminal"]) == 3
+        assert not [row for row in journal if row.status == "blocked"]
+
+        recovery = RecoveryManager(db, checkpoint_mgr)
+        check = recovery.can_resume(run_id, graph)
+        assert check.can_resume, f"Expected resumable run, got: {check.reason}"
+        resume_point = recovery.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        result = orchestrator.resume(
+            resume_point=resume_point,
+            config=config,
+            graph=graph,
+            payload_store=payload_store,
+        )
+
+        assert result.status == RunStatus.COMPLETED
+        assert output_sink.results == [{"value": 60, "count": 3}]
+        assert downstream.process_calls == 1
+        assert batch_transform.batch_calls == 1, "resume must not re-run the completed aggregation flush"
         assert source.load_invocations == 1, "resume must not re-invoke the source plugin"
 
         with db.connection() as conn:

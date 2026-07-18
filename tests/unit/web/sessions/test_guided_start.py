@@ -268,12 +268,8 @@ async def test_guided_start_same_operation_id_rejects_different_profile(tmp_path
     assert conflict.json()["detail"] == "Operation id is already bound to a different request."
 
 
-@pytest.mark.parametrize(
-    "invalid_profile",
-    ["superuser", {"kind": "tutorial", "injected": {"admin": True}}],
-)
 @pytest.mark.asyncio
-async def test_guided_start_existing_operation_conflict_precedes_profile_semantics(tmp_path, invalid_profile) -> None:
+async def test_guided_start_existing_operation_conflict_precedes_profile_semantics(tmp_path) -> None:
     app, service = _make_app(tmp_path)
     client = TestClient(app)
     session = await service.create_session("alice", "T", "local")
@@ -286,13 +282,69 @@ async def test_guided_start_existing_operation_conflict_precedes_profile_semanti
 
     conflict = client.post(
         f"/api/sessions/{session.id}/guided/start",
-        json={"profile": invalid_profile, "operation_id": operation_id},
+        json={"profile": "superuser", "operation_id": operation_id},
     )
 
     assert conflict.status_code == 409
     assert conflict.json()["detail"] == "Operation id is already bound to a different request."
     assert "superuser" not in conflict.text
-    assert "injected" not in conflict.text
+
+
+@pytest.mark.asyncio
+async def test_guided_start_same_operation_object_profile_is_shape_error_before_conflict(tmp_path) -> None:
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    operation_id = str(uuid.uuid4())
+    first = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": "tutorial", "operation_id": operation_id},
+    )
+    assert first.status_code == 200
+
+    invalid = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={
+            "profile": {"kind": "tutorial", "injected": {"admin": True}},
+            "operation_id": operation_id,
+        },
+    )
+
+    assert invalid.status_code == 400
+    assert "injected" not in invalid.text
+    assert "admin" not in invalid.text
+
+
+@pytest.mark.parametrize("hostile_kind", ["huge_integer", "deep_object"])
+@pytest.mark.asyncio
+async def test_guided_start_hostile_profile_rejected_before_hash_or_reservation(tmp_path, hostile_kind) -> None:
+    from sqlalchemy import text
+
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    if hostile_kind == "huge_integer":
+        hostile_profile = 2**100
+        forbidden = str(hostile_profile)
+    else:
+        hostile_profile = {"marker": "secret-hostile-marker"}
+        for _ in range(40):
+            hostile_profile = {"nested": hostile_profile}
+        forbidden = "secret-hostile-marker"
+
+    response = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": hostile_profile, "operation_id": str(uuid.uuid4())},
+    )
+
+    assert response.status_code == 400
+    assert forbidden not in response.text
+    with service._engine.connect() as conn:
+        operation_count = conn.execute(
+            text("SELECT COUNT(*) FROM guided_operations WHERE session_id = :session_id"),
+            {"session_id": str(session.id)},
+        ).scalar_one()
+    assert operation_count == 0
 
 
 @pytest.mark.asyncio

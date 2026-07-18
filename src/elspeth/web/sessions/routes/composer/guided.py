@@ -1069,6 +1069,15 @@ async def post_guided_start(
     service: SessionServiceProtocol = request.app.state.session_service
     catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
 
+    # Bound the raw profile before canonical request hashing. Object-shaped,
+    # oversized, or otherwise non-string inputs are outside the valid request
+    # domain and must not reach RFC 8785 normalization.
+    if not isinstance(body.profile, str) or len(body.profile) > 32:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Invalid profile discriminator. Valid values: {sorted(k.value for k in WorkflowProfileKind)}."),
+        )
+
     from elspeth.web.sessions.guided_operations import guided_operation_request_hash
     from elspeth.web.sessions.protocol import GuidedOperationConflictError
 
@@ -1095,11 +1104,6 @@ async def post_guided_start(
     # constant — the client never supplies the profile object. Do not echo
     # the raw value: it may be a long string or an attempted profile object
     # carrying attacker-controlled profile fields.
-    if not isinstance(body.profile, str) or len(body.profile) > 32:
-        raise HTTPException(
-            status_code=400,
-            detail=(f"Invalid profile discriminator. Valid values: {sorted(k.value for k in WorkflowProfileKind)}."),
-        )
     try:
         profile_kind = WorkflowProfileKind(body.profile)
     except ValueError as exc:

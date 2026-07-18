@@ -265,6 +265,26 @@ class BlobFinalizationResult:
         freeze_fields(self, "finalized", "errors")
 
 
+@dataclass(frozen=True, slots=True)
+class BlobForkCleanupError:
+    """One explicit failure while cleaning a fork child blob."""
+
+    blob_id: UUID
+    exc_type: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class BlobForkCleanupResult:
+    """Idempotent whole-child fork cleanup outcome."""
+
+    deleted_ids: Sequence[UUID]
+    errors: Sequence[BlobForkCleanupError]
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "deleted_ids", "errors")
+
+
 @runtime_checkable
 class BlobServiceProtocol(Protocol):
     """Protocol for blob persistence and lifecycle operations."""
@@ -376,6 +396,14 @@ class BlobServiceProtocol(Protocol):
         Returns old blob ID to new record mappings so callers can remap
         source references in forked state.
         """
+        ...
+
+    async def cleanup_blobs_for_fork(
+        self,
+        source_session_id: UUID,
+        target_session_id: UUID,
+    ) -> BlobForkCleanupResult:
+        """Clean blobs from the named source's same-principal fork child."""
         ...
 
     async def finalize_run_output_blobs(

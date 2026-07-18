@@ -33,7 +33,11 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.blobs import service as blob_service_module
 from elspeth.web.blobs.protocol import (
     BlobActiveRunError,
+    BlobForkCleanupError,
+    BlobForkCleanupResult,
+    BlobIntegrityError,
     BlobNotFoundError,
+    BlobQuotaExceededError,
 )
 from elspeth.web.blobs.service import (
     BlobServiceImpl,
@@ -2205,20 +2209,15 @@ class TestInlineCustody:
 
 
 # ---------------------------------------------------------------------------
-# copy_blobs_for_fork — rollback on partial failure
+# copy_blobs_for_fork — deterministic replay and whole-child cleanup
 # ---------------------------------------------------------------------------
 
 
-class TestCopyBlobsForForkRollback:
-    """Rollback path: partial blob copies are cleaned up on failure.
-
-    copy_blobs_for_fork creates blobs atomically (one at a time). If the
-    second create_blob fails, the first already-committed blob must be
-    deleted — both its DB row and its file on disk.
-    """
+class TestCopyBlobsForFork:
+    """Fork copies converge on deterministic rows and clean up explicitly."""
 
     @pytest.fixture()
-    def target_session_id(self, db_engine) -> UUID:
+    def target_session_id(self, db_engine, session_id: UUID) -> UUID:
         """Second session for the fork target."""
         sid = str(uuid4())
         now = datetime.now(UTC)
@@ -2231,54 +2230,282 @@ class TestCopyBlobsForForkRollback:
                     title="Forked Session",
                     created_at=now,
                     updated_at=now,
+                    forked_from_session_id=str(session_id),
                 )
             )
         return UUID(sid)
 
+    @staticmethod
+    def _insert_session(
+        db_engine,
+        *,
+        user_id: str = "test-user",
+        auth_provider_type: str = "local",
+        forked_from_session_id: UUID | None = None,
+    ) -> UUID:
+        session_id = uuid4()
+        now = datetime.now(UTC)
+        with db_engine.begin() as conn:
+            conn.execute(
+                sessions_table.insert().values(
+                    id=str(session_id),
+                    user_id=user_id,
+                    auth_provider_type=auth_provider_type,
+                    title="Test Session",
+                    created_at=now,
+                    updated_at=now,
+                    forked_from_session_id=(str(forked_from_session_id) if forked_from_session_id is not None else None),
+                )
+            )
+        return session_id
+
+    def test_fork_blob_id_has_frozen_uuid5_contract_vector(self) -> None:
+        target = UUID("11111111-1111-4111-8111-111111111111")
+        source = UUID("22222222-2222-4222-8222-222222222222")
+
+        expected = blob_service_module._fork_blob_id(
+            target_session_id=target,
+            source_blob_id=source,
+        )
+
+        assert expected == UUID("7db1b79c-2cad-5fc0-87c8-45652bd6cfd4")
+        assert (
+            blob_service_module._fork_blob_id(
+                target_session_id=UUID("33333333-3333-4333-8333-333333333333"),
+                source_blob_id=source,
+            )
+            != expected
+        )
+        assert (
+            blob_service_module._fork_blob_id(
+                target_session_id=target,
+                source_blob_id=UUID("44444444-4444-4444-8444-444444444444"),
+            )
+            != expected
+        )
+
     @pytest.mark.asyncio
-    async def test_rollback_cleans_up_partial_copies(
+    @pytest.mark.parametrize("invalid_argument", ["source", "target"])
+    async def test_copy_requires_exact_uuid_session_ids(
         self,
         blob_service: BlobServiceImpl,
         session_id: UUID,
         target_session_id: UUID,
-        tmp_path,
+        invalid_argument: str,
     ) -> None:
-        """When create_blob fails mid-copy, already-created blobs are removed."""
-        # Create two blobs in the source session
-        await blob_service.create_blob(
+        source: UUID | str = session_id
+        target: UUID | str = target_session_id
+        if invalid_argument == "source":
+            source = str(source)
+        else:
+            target = str(target)
+
+        with pytest.raises(TypeError, match=f"{invalid_argument}_session_id must be UUID"):
+            await blob_service.copy_blobs_for_fork(source, target)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_copy_rejects_source_as_its_own_target(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+    ) -> None:
+        with pytest.raises(ValueError, match="source and target sessions must differ"):
+            await blob_service.copy_blobs_for_fork(session_id, session_id)
+
+    @pytest.mark.asyncio
+    async def test_copy_rejects_unrelated_target_before_blob_work(
+        self,
+        blob_service: BlobServiceImpl,
+        db_engine,
+        session_id: UUID,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        unrelated_target = self._insert_session(db_engine)
+        await blob_service.create_blob(session_id, "source.csv", b"source", "text/csv")
+
+        async def _unexpected_blob_list(*_args, **_kwargs):
+            pytest.fail("fork custody must be verified before listing blobs")
+
+        monkeypatch.setattr(blob_service, "list_blobs", _unexpected_blob_list)
+
+        with pytest.raises(AuditIntegrityError, match="not a fork child"):
+            await blob_service.copy_blobs_for_fork(session_id, unrelated_target)
+
+        with db_engine.connect() as conn:
+            assert (
+                conn.execute(
+                    select(func.count()).select_from(blobs_table).where(blobs_table.c.session_id == str(unrelated_target))
+                ).scalar_one()
+                == 0
+            )
+
+    @pytest.mark.asyncio
+    async def test_copy_rejects_missing_target_before_blob_work(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+    ) -> None:
+        await blob_service.create_blob(session_id, "source.csv", b"source", "text/csv")
+
+        with pytest.raises(AuditIntegrityError, match=r"target session .* does not exist"):
+            await blob_service.copy_blobs_for_fork(session_id, uuid4())
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("user_id", "auth_provider_type"),
+        [("different-user", "local"), ("test-user", "oidc")],
+    )
+    async def test_copy_rejects_cross_principal_fork_child(
+        self,
+        blob_service: BlobServiceImpl,
+        db_engine,
+        session_id: UUID,
+        user_id: str,
+        auth_provider_type: str,
+    ) -> None:
+        target = self._insert_session(
+            db_engine,
+            user_id=user_id,
+            auth_provider_type=auth_provider_type,
+            forked_from_session_id=session_id,
+        )
+        await blob_service.create_blob(session_id, "source.csv", b"source", "text/csv")
+
+        with pytest.raises(AuditIntegrityError, match="principal does not match"):
+            await blob_service.copy_blobs_for_fork(session_id, target)
+
+        assert await blob_service.list_blobs(target, limit=None) == []
+
+    @pytest.mark.asyncio
+    async def test_repeat_copy_returns_same_deterministic_ids(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+        target_session_id: UUID,
+    ) -> None:
+        first = await blob_service.create_blob(
             session_id=session_id,
             filename="first.csv",
-            content=b"first file content",
+            content=b"first",
             mime_type="text/csv",
             created_by="user",
         )
-        await blob_service.create_blob(
+        second = await blob_service.create_blob(
             session_id=session_id,
             filename="second.csv",
-            content=b"second file content",
+            content=b"second",
             mime_type="text/csv",
             created_by="user",
         )
 
-        # Patch create_blob to fail on the second call
-        original_create = blob_service.create_blob
-        call_count = 0
+        first_result = await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+        second_result = await blob_service.copy_blobs_for_fork(session_id, target_session_id)
 
-        async def _failing_create(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count >= 2:
-                raise RuntimeError("Simulated disk failure on second blob")
-            return await original_create(*args, **kwargs)
+        assert set(first_result) == {first.id, second.id}
+        assert {source_id: record.id for source_id, record in first_result.items()} == {
+            source_id: record.id for source_id, record in second_result.items()
+        }
+        assert all(record.session_id == target_session_id for record in second_result.values())
+        assert len(await blob_service.list_blobs(target_session_id, limit=None)) == 2
 
-        blob_service.create_blob = _failing_create  # type: ignore[method-assign]
+    @pytest.mark.asyncio
+    async def test_partial_prior_success_resumes_without_duplicate(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+        target_session_id: UUID,
+    ) -> None:
+        first = await blob_service.create_blob(session_id, "first.csv", b"first", "text/csv")
+        first_pass = await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+        second = await blob_service.create_blob(session_id, "second.csv", b"second", "text/csv")
 
-        with pytest.raises(RuntimeError, match="Simulated disk failure"):
+        resumed = await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+
+        assert resumed[first.id].id == first_pass[first.id].id
+        assert set(resumed) == {first.id, second.id}
+        assert len(await blob_service.list_blobs(target_session_id, limit=None)) == 2
+
+    @pytest.mark.asyncio
+    async def test_quota_preflight_charges_only_missing_expected_copies(
+        self,
+        blob_service: BlobServiceImpl,
+        db_engine,
+        session_id: UUID,
+        target_session_id: UUID,
+        tmp_path: Path,
+    ) -> None:
+        first = await blob_service.create_blob(session_id, "first.csv", b"first", "text/csv")
+        quota_service = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=11)
+        first_pass = await quota_service.copy_blobs_for_fork(session_id, target_session_id)
+        second = await blob_service.create_blob(session_id, "second.csv", b"second", "text/csv")
+
+        resumed = await quota_service.copy_blobs_for_fork(session_id, target_session_id)
+
+        assert resumed[first.id].id == first_pass[first.id].id
+        assert second.id in resumed
+        assert sum(blob.size_bytes for blob in await quota_service.list_blobs(target_session_id, limit=None)) == 11
+
+    @pytest.mark.asyncio
+    async def test_zero_write_replay_succeeds_after_quota_is_lowered_below_current_usage(
+        self,
+        db_engine,
+        session_id: UUID,
+        target_session_id: UUID,
+        tmp_path: Path,
+    ) -> None:
+        high_quota = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=100)
+        source = await high_quota.create_blob(session_id, "source.csv", b"source", "text/csv")
+        first = await high_quota.copy_blobs_for_fork(session_id, target_session_id)
+        low_quota = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=1)
+
+        replay = await low_quota.copy_blobs_for_fork(session_id, target_session_id)
+
+        assert replay[source.id].id == first[source.id].id
+        assert [blob.id for blob in await low_quota.list_blobs(target_session_id, limit=None)] == [first[source.id].id]
+
+    @pytest.mark.asyncio
+    async def test_copy_supports_more_than_fifty_ready_blobs(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+        target_session_id: UUID,
+    ) -> None:
+        for index in range(51):
+            await blob_service.create_blob(session_id, f"item-{index}.csv", str(index).encode(), "text/csv")
+
+        result = await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+
+        assert len(result) == 51
+        assert len(await blob_service.list_blobs(target_session_id, limit=None)) == 51
+
+    @pytest.mark.asyncio
+    async def test_copy_ignores_non_ready_source_blobs(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+        target_session_id: UUID,
+    ) -> None:
+        ready = await blob_service.create_blob(session_id, "ready.csv", b"ready", "text/csv")
+        await blob_service.create_pending_blob(session_id, "pending.csv", "text/csv")
+
+        result = await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+
+        assert set(result) == {ready.id}
+
+    @pytest.mark.asyncio
+    async def test_copy_preserves_source_content_integrity_gate(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+        target_session_id: UUID,
+    ) -> None:
+        source = await blob_service.create_blob(session_id, "ready.csv", b"ready", "text/csv")
+        Path(source.storage_path).write_bytes(b"tampered")
+
+        with pytest.raises(BlobIntegrityError):
             await blob_service.copy_blobs_for_fork(session_id, target_session_id)
 
-        # Verify rollback: no blobs should remain in the target session
-        target_blobs = await blob_service.list_blobs(target_session_id)
-        assert target_blobs == [], f"Expected 0 blobs after rollback, found {len(target_blobs)}: {[b.filename for b in target_blobs]}"
+        assert await blob_service.list_blobs(target_session_id, limit=None) == []
 
     @pytest.mark.asyncio
     async def test_empty_source_returns_empty_map(
@@ -2301,9 +2528,6 @@ class TestCopyBlobsForForkRollback:
         tmp_path,
     ) -> None:
         """Quota check happens before copying — no partial writes."""
-        from elspeth.web.blobs.protocol import BlobQuotaExceededError
-
-        # Create a blob using the default (large-quota) service
         await blob_service.create_blob(
             session_id=session_id,
             filename="big.csv",
@@ -2312,110 +2536,241 @@ class TestCopyBlobsForForkRollback:
             created_by="user",
         )
 
-        # Fork with a small-quota service — quota pre-check should reject
         small_quota = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=10)
 
         with pytest.raises(BlobQuotaExceededError):
             await small_quota.copy_blobs_for_fork(session_id, target_session_id)
 
-        # Verify: no blobs in target (pre-check prevented any copies)
         target_blobs = await blob_service.list_blobs(target_session_id)
         assert target_blobs == []
 
     @pytest.mark.asyncio
-    async def test_cleanup_failures_attached_as_notes_not_swallowed(
+    async def test_cleanup_is_idempotent_and_typed(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+        target_session_id: UUID,
+    ) -> None:
+        source = await blob_service.create_blob(session_id, "first.csv", b"first", "text/csv")
+        copied = await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+
+        first = await blob_service.cleanup_blobs_for_fork(session_id, target_session_id)
+        second = await blob_service.cleanup_blobs_for_fork(session_id, target_session_id)
+
+        assert type(first) is BlobForkCleanupResult
+        assert type(first.deleted_ids) is tuple
+        assert type(first.errors) is tuple
+        assert tuple(first.deleted_ids) == (copied[source.id].id,)
+        assert tuple(first.errors) == ()
+        assert tuple(second.deleted_ids) == ()
+        assert tuple(second.errors) == ()
+        assert await blob_service.list_blobs(target_session_id, limit=None) == []
+
+    @pytest.mark.asyncio
+    async def test_cleanup_rejects_wrong_parent_and_preserves_child_blobs(
+        self,
+        blob_service: BlobServiceImpl,
+        db_engine,
+        session_id: UUID,
+        target_session_id: UUID,
+    ) -> None:
+        wrong_parent = self._insert_session(db_engine)
+        source = await blob_service.create_blob(session_id, "source.csv", b"source", "text/csv")
+        copied = await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+
+        with pytest.raises(AuditIntegrityError, match="not a fork child"):
+            await blob_service.cleanup_blobs_for_fork(wrong_parent, target_session_id)
+
+        assert [blob.id for blob in await blob_service.list_blobs(target_session_id, limit=None)] == [copied[source.id].id]
+
+    @pytest.mark.asyncio
+    async def test_cleanup_fails_closed_when_snapshot_id_is_rebound_to_another_session(
+        self,
+        blob_service: BlobServiceImpl,
+        db_engine,
+        session_id: UUID,
+        target_session_id: UUID,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        await blob_service.create_blob(session_id, "source.csv", b"source", "text/csv")
+        await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+        stale_snapshot = await blob_service.list_blobs(target_session_id, limit=None)
+        stale_blob = stale_snapshot[0]
+        await blob_service.delete_blob(stale_blob.id)
+        unrelated_session = self._insert_session(db_engine)
+        rebound_path = tmp_path.resolve() / "blobs" / str(unrelated_session) / f"{stale_blob.id}_{stale_blob.filename}"
+        rebound_path.parent.mkdir(parents=True, exist_ok=True)
+        rebound_path.write_bytes(b"source")
+        with db_engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=str(stale_blob.id),
+                    session_id=str(unrelated_session),
+                    filename=stale_blob.filename,
+                    mime_type=stale_blob.mime_type,
+                    size_bytes=stale_blob.size_bytes,
+                    content_hash=stale_blob.content_hash,
+                    storage_path=str(rebound_path),
+                    created_at=stale_blob.created_at,
+                    created_by=stale_blob.created_by,
+                    source_description=stale_blob.source_description,
+                    status=stale_blob.status,
+                    creation_modality=stale_blob.creation_modality.value,
+                    created_from_message_id=stale_blob.created_from_message_id,
+                    creating_model_identifier=stale_blob.creating_model_identifier,
+                    creating_model_version=stale_blob.creating_model_version,
+                    creating_provider=stale_blob.creating_provider,
+                    creating_composer_skill_hash=stale_blob.creating_composer_skill_hash,
+                    creating_arguments_hash=stale_blob.creating_arguments_hash,
+                )
+            )
+
+        async def _stale_list(*_args, **_kwargs):
+            return stale_snapshot
+
+        monkeypatch.setattr(blob_service, "list_blobs", _stale_list)
+        with pytest.raises(AuditIntegrityError, match="rebound outside target session"):
+            await blob_service.cleanup_blobs_for_fork(session_id, target_session_id)
+
+        rebound = await blob_service.get_blob(stale_blob.id)
+        assert rebound.session_id == unrelated_session
+        assert rebound_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_treats_already_missing_snapshot_row_as_success(
         self,
         blob_service: BlobServiceImpl,
         session_id: UUID,
         target_session_id: UUID,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Rollback delete_blob failures must surface as notes on the primary exception.
+        await blob_service.create_blob(session_id, "first.csv", b"first", "text/csv")
+        await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+        stale_snapshot = await blob_service.list_blobs(target_session_id, limit=None)
+        await blob_service.delete_blob(stale_snapshot[0].id)
 
-        The original silent-failure was an inner ``except Exception: pass`` on
-        the rollback delete_blob call.  A failed delete_blob leaves the DB row
-        orphaned — the target session would carry phantom blob metadata that
-        auditors interpret as successfully-copied blobs while the file is
-        gone.  Mirrors the RecoveryFailed[...] convention used by
-        ``BlobServiceImpl.finalize_run_output_blobs`` (the per-blob
-        recovery branch inside its nested ``_sync`` closure).
+        async def _stale_list(*_args, **_kwargs):
+            return stale_snapshot
 
-        Contract: primary copy exception is the headline; every cleanup
-        failure is attached as an ``add_note()`` entry naming the orphan
-        blob_id and the underlying exception type.
-        """
-        # Create two source blobs — second create_blob will fail to trigger rollback
-        await blob_service.create_blob(
-            session_id=session_id,
-            filename="first.csv",
-            content=b"first",
-            mime_type="text/csv",
-            created_by="user",
-        )
-        await blob_service.create_blob(
-            session_id=session_id,
-            filename="second.csv",
-            content=b"second",
-            mime_type="text/csv",
-            created_by="user",
-        )
+        monkeypatch.setattr(blob_service, "list_blobs", _stale_list)
+        result = await blob_service.cleanup_blobs_for_fork(session_id, target_session_id)
+
+        assert tuple(result.deleted_ids) == (stale_snapshot[0].id,)
+        assert tuple(result.errors) == ()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_continues_after_item_failure_and_records_residual_metric(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+        target_session_id: UUID,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        await blob_service.create_blob(session_id, "first.csv", b"first", "text/csv")
+        await blob_service.create_blob(session_id, "second.csv", b"second", "text/csv")
+        await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+        target = await blob_service.list_blobs(target_session_id, limit=None)
+        failing_id = target[0].id
 
         orphan_counter = _FakeCounter()
         monkeypatch.setattr(blob_service_module, "_BLOB_COPY_FORK_ORPHAN_ROWS_COUNTER", orphan_counter)
+        original_delete = blob_service._delete_fork_child_blob
 
-        original_create = blob_service.create_blob
-        original_delete = blob_service.delete_blob
-        create_calls = 0
-        orphan_ids: list[UUID] = []
+        async def _fail_one(source_session_id: UUID, target_session_id: UUID, blob_id: UUID) -> None:
+            if blob_id == failing_id:
+                raise OSError(5, "cleanup failed")
+            await original_delete(source_session_id, target_session_id, blob_id)
 
-        async def _failing_create(*args, **kwargs):
-            nonlocal create_calls
-            create_calls += 1
-            if create_calls >= 2:
-                raise RuntimeError("Simulated copy failure on second blob")
-            return await original_create(*args, **kwargs)
+        monkeypatch.setattr(blob_service, "_delete_fork_child_blob", _fail_one)
+        result = await blob_service.cleanup_blobs_for_fork(session_id, target_session_id)
 
-        # Make the rollback delete_blob also fail.  OSError is one of the
-        # narrowly-caught recovery faults; programmer bugs would propagate.
-        delete_failure = OSError(5, "I/O error during cleanup")
-
-        async def _failing_delete(blob_id: UUID, *_args, **_kwargs):
-            orphan_ids.append(blob_id)
-            raise delete_failure
-
-        blob_service.create_blob = _failing_create  # type: ignore[method-assign]
-        blob_service.delete_blob = _failing_delete  # type: ignore[method-assign]
-
-        try:
-            with pytest.raises(RuntimeError, match="Simulated copy failure") as exc_info:
-                await blob_service.copy_blobs_for_fork(session_id, target_session_id)
-        finally:
-            # Restore so cleanup in fixtures doesn't break
-            blob_service.create_blob = original_create  # type: ignore[method-assign]
-            blob_service.delete_blob = original_delete  # type: ignore[method-assign]
-
-        # Headline exception must remain the primary copy failure
-        assert type(exc_info.value) is RuntimeError, f"Cleanup OSError masked primary exception: got {type(exc_info.value).__name__}"
-
-        notes = getattr(exc_info.value, "__notes__", [])
-        assert notes, (
-            "Cleanup failure was silently swallowed — expected add_note() to attach RecoveryFailed diagnostic to primary exception"
-        )
-
-        recovery_notes = [n for n in notes if "RecoveryFailed[OSError]" in n]
-        assert recovery_notes, f"Missing RecoveryFailed[OSError] note in {notes!r}"
-        # Note must identify the orphaned blob_id and target session for triage
-        assert any("manual cleanup" in n.lower() for n in recovery_notes), "Note must direct operator to manual cleanup"
-        assert any(str(target_session_id) in n for n in recovery_notes), "Note must identify the target session containing the orphan row"
+        assert type(result) is BlobForkCleanupResult
+        assert set(result.deleted_ids) == {record.id for record in target if record.id != failing_id}
+        assert len(result.errors) == 1
+        error = result.errors[0]
+        assert type(error) is BlobForkCleanupError
+        assert error.blob_id == failing_id
+        assert error.exc_type == "OSError"
+        assert "cleanup failed" in error.detail
+        assert [blob.id for blob in await blob_service.list_blobs(target_session_id, limit=None)] == [failing_id]
         assert len(orphan_counter.calls) == 1
         amount, attrs, context = orphan_counter.calls[0]
         assert amount == 1
         assert attrs == {
-            "orphan_blob_id": str(orphan_ids[0]),
+            "orphan_blob_id": str(failing_id),
             "target_session_id": str(target_session_id),
             "exc_type": "OSError",
         }
         assert context is None
+
+    @pytest.mark.asyncio
+    async def test_mid_copy_failure_with_successful_cleanup_leaves_no_target_rows_or_files(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+        target_session_id: UUID,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        await blob_service.create_blob(session_id, "first.csv", b"first", "text/csv")
+        await blob_service.create_blob(session_id, "second.csv", b"second", "text/csv")
+        original_persist = blob_service_module._persist_blob_content
+        target_copy_calls = 0
+
+        def _fail_second_target_copy(**kwargs):
+            nonlocal target_copy_calls
+            if str(kwargs["session_id"]) == str(target_session_id) and kwargs["idempotent"] is True:
+                target_copy_calls += 1
+                if target_copy_calls == 2:
+                    raise RuntimeError("mid-copy failure")
+            return original_persist(**kwargs)
+
+        monkeypatch.setattr(blob_service_module, "_persist_blob_content", _fail_second_target_copy)
+
+        with pytest.raises(RuntimeError, match="mid-copy failure"):
+            await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+
+        assert await blob_service.list_blobs(target_session_id, limit=None) == []
+        target_dir = tmp_path.resolve() / "blobs" / str(target_session_id)
+        assert not target_dir.exists() or list(target_dir.iterdir()) == []
+
+    @pytest.mark.asyncio
+    async def test_copy_failure_preserves_primary_exception_and_attaches_cleanup_notes(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+        target_session_id: UUID,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        await blob_service.create_blob(session_id, "first.csv", b"first", "text/csv")
+        await blob_service.create_blob(session_id, "second.csv", b"second", "text/csv")
+        original_persist = blob_service_module._persist_blob_content
+        original_delete = blob_service._delete_fork_child_blob
+        target_copy_calls = 0
+
+        def _fail_second_target_copy(**kwargs):
+            nonlocal target_copy_calls
+            if str(kwargs["session_id"]) == str(target_session_id) and kwargs["idempotent"] is True:
+                target_copy_calls += 1
+                if target_copy_calls == 2:
+                    raise RuntimeError("primary copy failure")
+            return original_persist(**kwargs)
+
+        async def _fail_cleanup(_source_session_id: UUID, _target_session_id: UUID, _blob_id: UUID) -> None:
+            raise OSError(5, "cleanup recovery failed")
+
+        monkeypatch.setattr(blob_service_module, "_persist_blob_content", _fail_second_target_copy)
+        monkeypatch.setattr(blob_service, "_delete_fork_child_blob", _fail_cleanup)
+
+        with pytest.raises(RuntimeError, match="primary copy failure") as exc_info:
+            await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+
+        assert type(exc_info.value) is RuntimeError
+        notes = getattr(exc_info.value, "__notes__", [])
+        assert any("RecoveryFailed[OSError]" in note for note in notes)
+        assert any(str(target_session_id) in note for note in notes)
+        monkeypatch.setattr(blob_service, "_delete_fork_child_blob", original_delete)
 
 
 # ---------------------------------------------------------------------------

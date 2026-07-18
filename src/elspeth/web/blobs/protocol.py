@@ -19,6 +19,8 @@ from elspeth.contracts.blobs import BlobCreator as BlobCreator
 from elspeth.contracts.blobs import BlobError as BlobError
 from elspeth.contracts.blobs import BlobFinalizationError as BlobFinalizationError
 from elspeth.contracts.blobs import BlobFinalizationResult as BlobFinalizationResult
+from elspeth.contracts.blobs import BlobForkCleanupError as BlobForkCleanupError
+from elspeth.contracts.blobs import BlobForkCleanupResult as BlobForkCleanupResult
 from elspeth.contracts.blobs import BlobIntegrityError as BlobIntegrityError
 from elspeth.contracts.blobs import BlobNotFoundError as BlobNotFoundError
 from elspeth.contracts.blobs import BlobPendingProposalError as BlobPendingProposalError

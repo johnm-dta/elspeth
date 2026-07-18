@@ -30,8 +30,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from uuid import UUID
+from unittest.mock import patch
+from uuid import UUID, uuid4
 
+import pytest
+
+from elspeth.contracts.errors import AuditIntegrityError
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 # ---------------------------------------------------------------------------
@@ -51,6 +55,15 @@ def _get_guided(client: TestClient, session_id: str) -> dict:
     resp = client.get(f"/api/sessions/{session_id}/guided")
     assert resp.status_code == 200, resp.json()
     return resp.json()
+
+
+def _start_guided(client: TestClient, session_id: str) -> dict:
+    response = client.post(
+        f"/api/sessions/{session_id}/guided/start",
+        json={"profile": "tutorial", "operation_id": str(uuid4())},
+    )
+    assert response.status_code == 200, response.json()
+    return response.json()
 
 
 def _respond(client: TestClient, session_id: str, **kwargs) -> dict:
@@ -532,6 +545,25 @@ class _FailOncePayloadStore:
         return self._delegate.delete(content_hash)
 
 
+class _CorruptingPayloadStore:
+    def __init__(self, delegate, corrupt_payload_id: str) -> None:
+        self._delegate = delegate
+        self._corrupt_payload_id = corrupt_payload_id
+
+    def store(self, content: bytes) -> str:
+        return self._delegate.store(content)
+
+    def retrieve(self, content_hash: str) -> bytes:
+        content = self._delegate.retrieve(content_hash)
+        return content + b"corrupt" if content_hash == self._corrupt_payload_id else content
+
+    def exists(self, content_hash: str) -> bool:
+        return self._delegate.exists(content_hash)
+
+    def delete(self, content_hash: str) -> bool:
+        return self._delegate.delete(content_hash)
+
+
 def _guided_turn_emitted_args(client: TestClient, session_id: str) -> list[dict]:
     service = client.app.state.session_service
     msgs = asyncio.run(service.get_messages(UUID(session_id), limit=None))
@@ -547,6 +579,47 @@ def _guided_turn_emitted_args(client: TestClient, session_id: str) -> list[dict]
 
 
 class TestGetGuidedAuditPayloadOrdering:
+    def test_persisted_occurrence_projects_exact_cas_across_catalog_availability_drift(
+        self,
+        composer_test_client: TestClient,
+    ) -> None:
+        from dataclasses import replace
+
+        from elspeth.web.auth.models import UserIdentity
+
+        session_id = _create_session(composer_test_client)
+        started = _start_guided(composer_test_client, session_id)
+        snapshot = composer_test_client.app.state.plugin_snapshot_factory(UserIdentity(user_id="alice", username="alice"))
+        composer_test_client.app.state.plugin_snapshot_factory = lambda _user: replace(snapshot, available=frozenset())
+
+        with patch(
+            "elspeth.web.sessions.routes.composer.guided._build_get_guided_turn",
+            side_effect=AssertionError("persisted GET must not consult the live catalog"),
+        ):
+            fetched = _get_guided(composer_test_client, session_id)
+
+        assert fetched["next_turn"] == started["next_turn"]
+        assert fetched["next_turn"]["turn_token"] == started["next_turn"]["turn_token"]
+
+    @pytest.mark.parametrize("failure_mode", ["missing", "corrupt"])
+    def test_persisted_occurrence_cas_failure_is_fail_closed(
+        self,
+        composer_test_client: TestClient,
+        failure_mode: str,
+    ) -> None:
+        session_id = _create_session(composer_test_client)
+        started = _start_guided(composer_test_client, session_id)
+        payload_id = started["guided_session"]["history"][-1]["payload_hash"]
+        payload_store = composer_test_client.app.state.payload_store
+
+        if failure_mode == "missing":
+            assert payload_store.delete(payload_id)
+        else:
+            composer_test_client.app.state.payload_store = _CorruptingPayloadStore(payload_store, payload_id)
+
+        with pytest.raises(AuditIntegrityError, match="Guided replay payload"):
+            composer_test_client.get(f"/api/sessions/{session_id}/guided")
+
     def test_persisted_lazy_get_is_prospective_and_never_splits_history_from_evidence(
         self,
         composer_test_client: TestClient,

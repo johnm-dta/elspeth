@@ -38,6 +38,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
+import pytest
+
 from elspeth.web.composer.redaction import REDACTED_BLOB_SOURCE_PATH
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
@@ -90,7 +92,20 @@ def _confirm_wiring(client: TestClient, session_id: str) -> dict:
     )
 
 
-def test_malformed_edit_target_stable_id_is_http_400(composer_test_client: TestClient) -> None:
+@pytest.mark.parametrize(
+    "stable_id",
+    [
+        "",
+        "0" * 35,
+        "0" * 37,
+        "00000000-0000-4000-8000-00000000000A",
+        "../source",
+    ],
+)
+def test_malformed_edit_target_stable_id_is_http_400(
+    composer_test_client: TestClient,
+    stable_id: str,
+) -> None:
     session_id = _create_session(composer_test_client)
 
     response = composer_test_client.post(
@@ -100,7 +115,7 @@ def test_malformed_edit_target_stable_id_is_http_400(composer_test_client: TestC
             "turn_token": "a" * 64,
             "proposal_id": "00000000-0000-4000-8000-000000000002",
             "draft_hash": "b" * 64,
-            "edit_target": {"kind": "source", "stable_id": "../source"},
+            "edit_target": {"kind": "source", "stable_id": stable_id},
         },
     )
 

@@ -522,10 +522,11 @@ class GuidedEditTargetRequest(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
 
     kind: Literal["source", "node", "edge", "output"]
-    # Kept as a bounded raw string so the route can map malformed structural
-    # identifiers to the operation contract's HTTP 400 response. Pydantic UUID
-    # coercion would turn the same protocol error into a framework-owned 422.
-    stable_id: str = pydantic.Field(min_length=1, max_length=36)
+    # Kept as an unconstrained strict string so every malformed structural ID
+    # reaches the route's canonical-UUID gate and maps to the operation
+    # contract's HTTP 400 response. Shape constraints here would turn empty or
+    # overlong IDs into framework-owned 422 responses instead.
+    stable_id: pydantic.StrictStr
 
 
 class GuidedRespondRequest(_GuidedOperationRequest):

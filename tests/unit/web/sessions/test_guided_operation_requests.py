@@ -163,17 +163,18 @@ def test_guided_respond_validates_closed_future_proposal_bindings() -> None:
     assert request.proposal_id == "00000000-0000-4000-8000-000000000002"
     assert request.edit_target is not None
 
-    malformed_target = GuidedRespondRequest.model_validate(
-        {
-            "operation_id": _OPERATION_ID,
-            "turn_token": "a" * 64,
-            "proposal_id": "00000000-0000-4000-8000-000000000002",
-            "draft_hash": "b" * 64,
-            "edit_target": {"kind": "source", "stable_id": "../source"},
-        }
-    )
-    assert malformed_target.edit_target is not None
-    assert malformed_target.edit_target.stable_id == "../source"
+    for malformed_stable_id in ("", "0" * 35, "0" * 37, "00000000-0000-4000-8000-00000000000A", "../source"):
+        malformed_target = GuidedRespondRequest.model_validate(
+            {
+                "operation_id": _OPERATION_ID,
+                "turn_token": "a" * 64,
+                "proposal_id": "00000000-0000-4000-8000-000000000002",
+                "draft_hash": "b" * 64,
+                "edit_target": {"kind": "source", "stable_id": malformed_stable_id},
+            }
+        )
+        assert malformed_target.edit_target is not None
+        assert malformed_target.edit_target.stable_id == malformed_stable_id
 
     with pytest.raises(ValidationError):
         GuidedRespondRequest.model_validate(

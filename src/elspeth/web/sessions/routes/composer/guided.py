@@ -613,47 +613,47 @@ async def get_guided(
                 else None
             )
 
-            # Build the initial turn for the current step (deterministic from
-            # state + catalog).  Returns None for steps with no rebuildable
-            # initial turn (STEP_3 / no-recipe STEP_2_5 path) or when the
-            # session is already terminal.
+            # A persisted unanswered occurrence is immutable replay authority:
+            # load its purpose-bound CAS payload exactly, without consulting
+            # the live catalog or current plugin availability. Only a missing
+            # occurrence is projected prospectively from live state.
+            turn: Turn | None
             if guided.terminal is None:
-                try:
-                    turn = _build_get_guided_turn(state, guided, catalog=catalog)
-                except InvariantError as exc:
-                    # Same B1-sanitization rationale as the POST /respond
-                    # dispatcher's InvariantError catch: ``str(exc)`` can embed
-                    # ``{d!r}`` of a corrupted Tier-1 record including Tier-3
-                    # sample_rows. Static detail; slog carries exc_class +
-                    # frames only.
-                    slog.error(
-                        "guided.invariant_violated",
-                        session_id=str(session_id),
-                        user_id=user.user_id,
-                        exc_class=type(exc).__name__,
-                        site="get_guided._build_get_guided_turn",
-                        frames=_safe_frame_strings(exc),
+                if existing_record_for_step is not None:
+                    turn, _prepared = _load_durable_current_turn(
+                        guided,
+                        payload_store=request.app.state.payload_store,
                     )
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Server invariant violated. See application audit log for diagnostic detail.",
-                    ) from exc
+                else:
+                    try:
+                        turn = _build_get_guided_turn(state, guided, catalog=catalog)
+                    except InvariantError as exc:
+                        # Same B1-sanitization rationale as the POST /respond
+                        # dispatcher's InvariantError catch: ``str(exc)`` can embed
+                        # ``{d!r}`` of a corrupted Tier-1 record including Tier-3
+                        # sample_rows. Static detail; slog carries exc_class +
+                        # frames only.
+                        slog.error(
+                            "guided.invariant_violated",
+                            session_id=str(session_id),
+                            user_id=user.user_id,
+                            exc_class=type(exc).__name__,
+                            site="get_guided._build_get_guided_turn",
+                            frames=_safe_frame_strings(exc),
+                        )
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Server invariant violated. See application audit log for diagnostic detail.",
+                        ) from exc
+                    if turn is not None:
+                        turn = _finalize_guided_turn(
+                            turn,
+                            shield_available=_resolve_shield_available(plugin_snapshot),
+                        )
             else:
                 turn = None
-            if turn is not None:
-                turn = _finalize_guided_turn(
-                    turn,
-                    shield_available=_resolve_shield_available(plugin_snapshot),
-                )
             turn_type: TurnType | None = TurnType(turn["type"]) if turn is not None else None
             payload_hash: str | None = guided_json_payload_id("turn", turn["payload"]) if turn is not None else None
-
-            if (
-                turn is not None
-                and existing_record_for_step is not None
-                and (existing_record_for_step.turn_type is not turn_type or existing_record_for_step.payload_hash != payload_hash)
-            ):
-                raise InvariantError("GET guided rebuilt turn differs from the persisted unanswered occurrence")
 
             if existing_record_for_step is None and turn is not None:
                 # First fetch for this step AND a turn exists: record TurnRecord,
@@ -1475,6 +1475,8 @@ async def post_guided_respond(
     """
     await _verify_session_ownership(session_id, user, request)
     if body.edit_target is not None:
+        if len(body.edit_target.stable_id) != 36:
+            raise HTTPException(status_code=400, detail="edit_target.stable_id must be a canonical UUID")
         try:
             parsed_edit_target_id = UUID(body.edit_target.stable_id)
         except ValueError as exc:

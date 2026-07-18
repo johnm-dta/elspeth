@@ -10,6 +10,7 @@ from elspeth.web.composer.guided.chat_solver import build_step_chat_context_bloc
 from elspeth.web.composer.guided.errors import WireConfirmRejectedError
 from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE, WorkflowProfileKind, profile_for_kind
 from elspeth.web.composer.guided.protocol import Turn
+from elspeth.web.composer.guided.resolved import SinkResolved
 from elspeth.web.composer.pipeline_proposal import composition_content_hash
 from elspeth.web.composer.protocol import ComposerService
 from elspeth.web.composer.tutorial_sample import (
@@ -101,7 +102,6 @@ from .._helpers import (
     build_step_2_schema_form_turn_from_resolved,
     build_step_2_single_select_turn,
     build_step_3_propose_chain_turn,
-    build_step_3_schema_form_turn,
     build_step_4_wire_turn,
     client_cancelled_progress_event,
     contextlib,
@@ -204,128 +204,70 @@ def _build_get_guided_turn(
     *,
     catalog: Any,
 ) -> Any | None:
-    """Build the turn payload to return from GET /guided for the current step.
+    """Deterministically rebuild a GET/reentry turn from schema-8 custody.
 
-    Called exclusively by ``get_guided`` to determine ``next_turn`` in the
-    response.  Rebuilds the correct turn deterministically from
-    ``(state, guided, catalog)`` alone, including intra-step turns for
-    steps that maintain staging fields on the session.
-
-    Per-step rebuild rules:
-
-    - STEP_1_SOURCE: three sub-cases in priority order:
-      1. ``step_1_source_intent`` is set → the SCHEMA_FORM response was
-         submitted; the session is waiting for INSPECT_AND_CONFIRM
-         confirmation.  Emit ``inspect_and_confirm`` from the intent's
-         observed columns (warnings are not stored on SourceIntent;
-         the rebuild emits an empty warnings list).
-      2. ``step_1_chosen_plugin`` is set → the SINGLE_SELECT response was
-         submitted; the session is waiting for SCHEMA_FORM submission.
-         Emit ``schema_form`` for the chosen plugin with persisted
-         inspection-fact prefill.
-      3. Neither staging field is set → initial state. Fall through to
-         ``build_initial_step_1_turn``.
-
-    - STEP_2_SINK: three sub-cases in priority order:
-      1. ``step_2_sink_intent`` is set → the SCHEMA_FORM response was
-         submitted; the session is waiting for MULTI_SELECT_WITH_CUSTOM
-         confirmation.  Emit ``multi_select_with_custom`` from step_1_result.
-      2. ``step_2_chosen_plugin`` is set → the SINGLE_SELECT response was
-         submitted; the session is waiting for SCHEMA_FORM submission.
-         Emit ``schema_form`` for the chosen plugin.
-      3. Neither is set → initial state.  Emit ``single_select`` listing
-         all registered sink plugins.
-
-    - STEP_2_5_RECIPE_MATCH: vestigial step (the recipe-offer deviation was
-      removed); always returns ``None`` — no live session reaches it.
-
-    - STEP_3_TRANSFORMS: if ``step_3_proposal`` is set, emit
-      ``propose_chain`` from the staged proposal, unless
-      ``step_3_edit_index`` is set AND in range for the current proposal, in
-      which case emit the transform ``schema_form`` for the proposed step
-      being revised.  A stale/out-of-range ``step_3_edit_index`` degrades to
-      the no-edit ``propose_chain`` rebuild rather than raising.  Returns
-      ``None`` if the proposal is absent (LLM call has not completed; should
-      not occur in practice — guarded defensively to avoid a crash).
-
-    - STEP_4_WIRE: rebuild the skeleton ``confirm_wiring`` turn from current
-      validation without mutating history.
-
-    Returns:
-        A ``Turn`` TypedDict, or ``None`` when the step has no rebuildable
-        turn (no-recipe STEP_2_5 path, or STEP_3 without a proposal).
+    Source and output workflows are selected by stable-id order. Pending
+    intent phases identify the exact intra-step turn; an active edit target
+    renders the corresponding reviewed component. Proposal payloads are held
+    by the proposal service rather than in ``GuidedSession``, so STEP_3 has no
+    synchronous checkpoint-only reconstruction here.
     """
     step = guided.step
     if step is GuidedStep.STEP_1_SOURCE:
-        # Finding 3 (Codex #14): if step_1_source_intent is set, the SCHEMA_FORM
-        # was already submitted and the session is waiting for INSPECT_AND_CONFIRM.
-        # Rebuild from the staged intent (observed_columns; warnings default to empty
-        # as they are not stored on SourceIntent).
-        if guided.step_1_source_intent is not None:
-            return build_step_1_inspect_and_confirm_turn_from_intent(guided.step_1_source_intent)
-        if guided.step_1_chosen_plugin is not None:
+        target = guided.active_edit_target
+        if target is not None and target.kind == "source":
+            return build_step_1_schema_form_turn_from_resolved(guided.reviewed_sources[target.stable_id], catalog)
+        pending = next(
+            (guided.pending_source_intents[stable_id] for stable_id in guided.source_order if stable_id in guided.pending_source_intents),
+            None,
+        )
+        if pending is None:
+            return build_initial_step_1_turn(state, blob_inspection=None, catalog=catalog)
+        if pending.phase == "plugin_selection":
+            return build_initial_step_1_turn(state, blob_inspection=None, catalog=catalog)
+        if pending.phase == "plugin_options":
+            if pending.plugin is None:  # pragma: no cover - guarded by SourceIntent
+                raise InvariantError("STEP_1 plugin_options intent requires a plugin")
             return build_step_1_schema_form_turn(
-                guided.step_1_chosen_plugin,
+                pending.plugin,
                 catalog,
-                inspection_facts=guided.step_1_inspection_facts,
+                inspection_facts=pending.inspection_facts,
             )
-        if guided.step_1_result is not None:
-            # In-place applied source (chat apply): re-render the populated form.
-            # Reaches here only when the chat-apply branch (Task 3) cleared the
-            # staging fields after committing — so a manual in-progress plugin
-            # switch (chosen_plugin set) still wins above.
-            return build_step_1_schema_form_turn_from_resolved(guided.step_1_result, catalog)
-        return build_initial_step_1_turn(state, blob_inspection=None, catalog=catalog)
+        if pending.phase == "inspection_review":
+            return build_step_1_inspect_and_confirm_turn_from_intent(pending)
+        raise InvariantError("STEP_1 pending source has an unsupported phase")
     if step is GuidedStep.STEP_2_SINK:
-        # Finding 2 (Codex #10): determine intra-step position and rebuild
-        # the correct turn, not always the initial SINGLE_SELECT.
-        if guided.step_2_sink_intent is not None:
-            # SCHEMA_FORM was submitted; session is waiting for MULTI_SELECT_WITH_CUSTOM.
-            observed_columns: tuple[str, ...] = ()
-            if guided.step_1_result is not None:
-                observed_columns = tuple(guided.step_1_result.observed_columns)
+        target = guided.active_edit_target
+        if target is not None and target.kind == "output":
+            sink = SinkResolved(outputs=(guided.reviewed_outputs[target.stable_id],))
+            return build_step_2_schema_form_turn_from_resolved(sink, catalog)
+        pending = next(
+            (guided.pending_output_intents[stable_id] for stable_id in guided.output_order if stable_id in guided.pending_output_intents),
+            None,
+        )
+        if pending is None or pending.phase == "plugin_selection":
+            return build_step_2_single_select_turn(catalog)
+        if pending.phase == "plugin_options":
+            if pending.plugin is None:  # pragma: no cover - guarded by SinkIntent
+                raise InvariantError("STEP_2 plugin_options intent requires a plugin")
+            return build_step_2_schema_form_turn(pending.plugin, catalog)
+        if pending.phase == "field_review":
+            observed_columns = tuple(
+                dict.fromkeys(
+                    column
+                    for stable_id in guided.source_order
+                    if stable_id in guided.reviewed_sources
+                    for column in guided.reviewed_sources[stable_id].observed_columns
+                )
+            )
             return build_step_2_multi_select_turn(observed_columns)
-        if guided.step_2_chosen_plugin is not None:
-            # SINGLE_SELECT was submitted; session is waiting for SCHEMA_FORM submission.
-            return build_step_2_schema_form_turn(guided.step_2_chosen_plugin, catalog)
-        if guided.step_2_result is not None:
-            # In-place applied sink (chat apply): re-render the populated form.
-            return build_step_2_schema_form_turn_from_resolved(guided.step_2_result, catalog)
-        # Initial state: no plugin chosen yet.  Emit the sink plugin list.
-        return build_step_2_single_select_turn(catalog)
+        raise InvariantError("STEP_2 pending output has an unsupported phase")
     if step is GuidedStep.STEP_2_5_RECIPE_MATCH:
         # Vestigial step — the recipe-offer deviation was removed; the sink
         # commit now hops straight to STEP_3. No live session reaches this step,
         # so there is no rebuildable turn here.
         return None
     if step is GuidedStep.STEP_3_TRANSFORMS:
-        if guided.step_3_proposal is not None:
-            edit_index = guided.step_3_edit_index
-            # A stale edit_index can outlive the proposal it was staged
-            # against (e.g. a chat-revise replaces step_3_proposal with a
-            # shorter chain) if some future call site installs a new
-            # proposal without clearing the index. Degrade to no-edit-in-
-            # progress rather than raising IndexError — GET /guided must
-            # stay reconstructible from whatever was last persisted.
-            if edit_index is not None and 0 <= edit_index < len(guided.step_3_proposal.steps):
-                step_record = dict(guided.step_3_proposal.steps[edit_index])
-                plugin = step_record["plugin"]
-                options = step_record["options"]
-                # ChainProposal.__post_init__ deep-freezes ``steps``, so a
-                # live in-memory or from_dict-reconstructed proposal's
-                # ``options`` is a MappingProxyType, never a plain dict —
-                # isinstance(Mapping) accepts both; build_step_3_schema_form_turn
-                # deep_thaws before use.
-                if type(plugin) is not str or not isinstance(options, Mapping):
-                    raise InvariantError("STEP_3 edit rebuild requires proposal step plugin str and options mapping")
-                return build_step_3_schema_form_turn(
-                    plugin=plugin,
-                    options=options,
-                    catalog=catalog,
-                )
-            return build_step_3_propose_chain_turn(guided.step_3_proposal)
-        # No proposal yet — LLM call has not completed; return None and let the
-        # idempotency machinery handle it (no TurnRecord emitted; client retries).
         return None
     if step is GuidedStep.STEP_4_WIRE:
         policy_validation = catalog.validate_composition_state(state)
@@ -340,21 +282,16 @@ def _build_get_guided_turn(
 
 
 def _step_1_plugin_hint(guided: GuidedSession) -> str | None:
-    """Derive the Step-1 chat resolver's plugin hint from structured state.
-
-    Priority mirrors ``_build_get_guided_turn``'s STEP_1_SOURCE rebuild order:
-    ``step_1_source_intent`` (awaiting INSPECT_AND_CONFIRM) -> ``step_1_chosen_plugin``
-    (awaiting SCHEMA_FORM) -> ``step_1_result`` (already committed, chat-apply
-    re-render). Never parses ``TurnRecord.summary`` — that is denormalised
-    display copy for the client, not structured state, and a copy change to
-    its "Selected: " prefix must not silently break chat resolution.
-    """
-    if guided.step_1_source_intent is not None:
-        return guided.step_1_source_intent.plugin
-    if guided.step_1_chosen_plugin is not None:
-        return guided.step_1_chosen_plugin
-    if guided.step_1_result is not None:
-        return guided.step_1_result.plugin
+    """Derive the Step-1 chat plugin hint from schema-8 structured state."""
+    target = guided.active_edit_target
+    if target is not None and target.kind == "source":
+        return guided.reviewed_sources[target.stable_id].plugin
+    pending = next(
+        (guided.pending_source_intents[stable_id] for stable_id in guided.source_order if stable_id in guided.pending_source_intents),
+        None,
+    )
+    if pending is not None:
+        return pending.plugin
     return None
 
 

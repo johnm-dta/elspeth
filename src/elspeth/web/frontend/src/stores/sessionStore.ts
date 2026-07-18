@@ -30,6 +30,12 @@ import { useBlobStore } from "./blobStore";
 import { useExecutionStore } from "./executionStore";
 import { useInterpretationEventsStore } from "./interpretationEventsStore";
 import { usePreferencesStore } from "./preferencesStore";
+import {
+  acquireGuidedRetry,
+  clearAllGuidedRetries,
+  clearGuidedRetry,
+  isAmbiguousGuidedRetryFailure,
+} from "./guidedOperationRetry";
 
 function getExecutionStore() {
   return useExecutionStore.getState();
@@ -2103,9 +2109,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       throw new Error("reenterGuided called without active session");
     }
     const requestedSessionId = activeSessionId;
-    const operationId = crypto.randomUUID();
+    const retry = acquireGuidedRetry("guided_reenter", activeSessionId, []);
     try {
-      const response = await api.reenterGuided(activeSessionId, operationId);
+      const response = await api.reenterGuided(activeSessionId, retry.operationId);
+      clearGuidedRetry(retry);
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
@@ -2116,7 +2123,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         compositionState: response.composition_state,
         error: null,
       });
-    } catch {
+    } catch (err) {
+      if (!isAmbiguousGuidedRetryFailure(err)) {
+        clearGuidedRetry(retry);
+      }
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
@@ -2295,7 +2305,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   async revertToVersion(stateId: string) {
     const { activeSessionId } = get();
     if (!activeSessionId) return;
-    const operationId = crypto.randomUUID();
+    const retry = acquireGuidedRetry("state_revert", activeSessionId, [stateId]);
 
     try {
       // R4-H3: Clear validation BEFORE updating compositionState
@@ -2305,8 +2315,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const compositionState = await api.revertToVersion(
         activeSessionId,
         stateId,
-        operationId,
+        retry.operationId,
       );
+      clearGuidedRetry(retry);
       // Re-derive the guided surface from the reverted version. A revert can
       // cross the guided/freeform boundary — most visibly the recoverability
       // flow behind convertToGuided ("fresh wizard + consent",
@@ -2332,7 +2343,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedNextTurn: guided?.next_turn ?? null,
         guidedTerminal: guided?.terminal ?? null,
       });
-    } catch {
+    } catch (err) {
+      if (!isAmbiguousGuidedRetryFailure(err)) {
+        clearGuidedRetry(retry);
+      }
       set({ error: "Failed to revert to version. Please try again." });
     }
   },
@@ -2403,6 +2417,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   reset() {
     clearComposerProgressPollTimer();
     clearInflightMessagesPollTimer();
+    clearAllGuidedRetries();
     // composeTimeoutReady resets to false via initialState; App.checkHealth
     // re-latches it on re-authentication. The module ceiling (composeTimeoutMs)
     // is a backend property that harmlessly persists — it is only read while

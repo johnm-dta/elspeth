@@ -86,6 +86,9 @@ const sampleCompositionState = {
   metadata: { name: null, description: null },
 };
 
+const RETRY_SESSION_ID = "00000000-0000-4000-8000-000000000101";
+const RETRY_SESSION_B = "00000000-0000-4000-8000-000000000102";
+
 const sampleGetGuidedResponse: GetGuidedResponse = {
   guided_session: sampleGuidedSession,
   next_turn: sampleNextTurn,
@@ -161,6 +164,7 @@ const sampleExitedGuidedSession: GuidedSession = {
 describe("sessionStore — guided-mode fields and actions", () => {
   beforeEach(async () => {
     vi.resetAllMocks();
+    window.sessionStorage.clear();
     resetStore(useSessionStore);
     // Phase 5b — reseed the listInterpretationEvents mock that
     // vi.resetAllMocks() cleared, so selectSession's fire-and-forget
@@ -369,7 +373,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
     );
 
     useSessionStore.setState({
-      activeSessionId: "sess-1",
+      activeSessionId: RETRY_SESSION_ID,
       guidedSession: sampleExitedGuidedSession,
       guidedNextTurn: null,
       guidedTerminal: sampleExitedGuidedSession.terminal,
@@ -378,12 +382,38 @@ describe("sessionStore — guided-mode fields and actions", () => {
 
     await useSessionStore.getState().reenterGuided();
 
-    expect(reenterGuided).toHaveBeenCalledWith("sess-1", expect.any(String));
+    expect(reenterGuided).toHaveBeenCalledWith(RETRY_SESSION_ID, expect.any(String));
     const state = useSessionStore.getState();
     expect(state.guidedSession).toEqual(sampleGetGuidedResponse.guided_session);
     expect(state.guidedNextTurn).toEqual(sampleGetGuidedResponse.next_turn);
     expect(state.guidedTerminal).toEqual(sampleGetGuidedResponse.terminal);
     expect(state.compositionState).toEqual(sampleGetGuidedResponse.composition_state);
+  });
+
+  it("reenterGuided: reuses the operation id after an ambiguous 5xx and clears it after success", async () => {
+    const { reenterGuided } = await import("@/api/client");
+    const reenterMock = reenterGuided as ReturnType<typeof vi.fn>;
+    reenterMock
+      .mockRejectedValueOnce({ status: 503, detail: "upstream unavailable" })
+      .mockResolvedValueOnce(sampleGetGuidedResponse)
+      .mockResolvedValueOnce(sampleGetGuidedResponse);
+
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: sampleExitedGuidedSession,
+      guidedTerminal: sampleExitedGuidedSession.terminal,
+    });
+
+    await useSessionStore.getState().reenterGuided();
+    await useSessionStore.getState().reenterGuided();
+    await useSessionStore.getState().reenterGuided();
+
+    const firstOperationId = reenterMock.mock.calls[0]?.[1];
+    const retryOperationId = reenterMock.mock.calls[1]?.[1];
+    const nextActionOperationId = reenterMock.mock.calls[2]?.[1];
+    expect(firstOperationId).toEqual(expect.any(String));
+    expect(retryOperationId).toBe(firstOperationId);
+    expect(nextActionOperationId).not.toBe(firstOperationId);
   });
 
   it("reenterGuided: throws when activeSessionId is null", async () => {
@@ -403,7 +433,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
     );
 
     useSessionStore.setState({
-      activeSessionId: "sess-A",
+      activeSessionId: RETRY_SESSION_ID,
       guidedSession: sampleExitedGuidedSession,
       guidedNextTurn: null,
       guidedTerminal: sampleExitedGuidedSession.terminal,
@@ -413,7 +443,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
     const reenterPromise = useSessionStore.getState().reenterGuided();
 
     useSessionStore.setState({
-      activeSessionId: "sess-B",
+      activeSessionId: RETRY_SESSION_B,
       guidedSession: null,
       guidedNextTurn: null,
       guidedTerminal: null,
@@ -535,7 +565,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
 
     // Pre-seed a live guided surface (as if we just converted to guided).
     useSessionStore.setState({
-      activeSessionId: "sess-1",
+      activeSessionId: RETRY_SESSION_ID,
       guidedSession: sampleGuidedSession,
       guidedNextTurn: sampleNextTurn,
       guidedTerminal: null,
@@ -544,7 +574,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
     await useSessionStore.getState().revertToVersion("state-freeform");
 
     expect(revertToVersion).toHaveBeenCalledWith(
-      "sess-1",
+      RETRY_SESSION_ID,
       "state-freeform",
       expect.any(String),
     );
@@ -554,6 +584,30 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(state.guidedNextTurn).toBeNull();
     expect(state.guidedTerminal).toBeNull();
     expect(state.compositionState?.version).toBe(3);
+  });
+
+  it("revertToVersion: reuses the operation id after an ambiguous network failure and clears it after success", async () => {
+    const { revertToVersion, getGuided } = await import("@/api/client");
+    const revertMock = revertToVersion as ReturnType<typeof vi.fn>;
+    revertMock
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce({ ...sampleCompositionState, version: 2 })
+      .mockResolvedValueOnce({ ...sampleCompositionState, version: 3 });
+    (getGuided as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce({ status: 400 })
+      .mockRejectedValueOnce({ status: 400 });
+    useSessionStore.setState({ activeSessionId: RETRY_SESSION_ID });
+
+    await useSessionStore.getState().revertToVersion("state-old");
+    await useSessionStore.getState().revertToVersion("state-old");
+    await useSessionStore.getState().revertToVersion("state-old");
+
+    const firstOperationId = revertMock.mock.calls[0]?.[2];
+    const retryOperationId = revertMock.mock.calls[1]?.[2];
+    const nextActionOperationId = revertMock.mock.calls[2]?.[2];
+    expect(firstOperationId).toEqual(expect.any(String));
+    expect(retryOperationId).toBe(firstOperationId);
+    expect(nextActionOperationId).not.toBe(firstOperationId);
   });
 
   it("revertToVersion: reverting to a guided version restores the guided surface", async () => {
@@ -568,7 +622,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
     );
 
     useSessionStore.setState({
-      activeSessionId: "sess-1",
+      activeSessionId: RETRY_SESSION_ID,
       guidedSession: null,
       guidedNextTurn: null,
       guidedTerminal: null,
@@ -603,7 +657,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
     });
 
     useSessionStore.setState({
-      activeSessionId: "sess-1",
+      activeSessionId: RETRY_SESSION_ID,
       guidedSession: null,
       guidedNextTurn: null,
       guidedTerminal: null,
@@ -623,14 +677,14 @@ describe("sessionStore — guided-mode fields and actions", () => {
     );
 
     useSessionStore.setState({
-      activeSessionId: "sess-1",
+      activeSessionId: RETRY_SESSION_ID,
       guidedSession: sampleExitedGuidedSession,
       guidedTerminal: sampleExitedGuidedSession.terminal,
     });
 
     await useSessionStore.getState().enterGuided();
 
-    expect(reenterGuided).toHaveBeenCalledWith("sess-1", expect.any(String));
+    expect(reenterGuided).toHaveBeenCalledWith(RETRY_SESSION_ID, expect.any(String));
     // startGuided's underlying GET must NOT be called on the reenter path.
     expect(getGuided).not.toHaveBeenCalled();
   });
@@ -652,7 +706,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
     );
 
     useSessionStore.setState({
-      activeSessionId: "sess-1",
+      activeSessionId: RETRY_SESSION_ID,
       guidedSession: sampleExitedGuidedSession,
       guidedTerminal: sampleExitedGuidedSession.terminal,
     });

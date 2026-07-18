@@ -17,6 +17,7 @@ delegators.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import TYPE_CHECKING, Literal, overload
 
 from sqlalchemy.engine import Connection
@@ -46,6 +47,7 @@ from elspeth.contracts import (
     TriggerType,
 )
 from elspeth.contracts.call_data import CallPayload
+from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import ExecutionError, TransformErrorReason
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape.database import LandscapeDB
@@ -56,6 +58,7 @@ from elspeth.core.landscape.execution import (
     NodeStateRepository,
     OperationRepository,
     SinkEffectRepository,
+    SourceCompletionReconciler,
 )
 from elspeth.core.landscape.model_loaders import (
     ArtifactLoader,
@@ -114,6 +117,7 @@ class ExecutionRepository:
             routing_event_loader=routing_event_loader,
             payload_store=payload_store,
         )
+        self.source_completion_recovery = SourceCompletionReconciler(db, node_states=self.node_states)
         self.calls = CallAuditRepository(db, ops, call_loader=call_loader, payload_store=payload_store)
         self.operations = OperationRepository(db, ops, operation_loader=operation_loader, payload_store=payload_store)
         self.batches = BatchRepository(db, ops, batch_loader=batch_loader, batch_member_loader=batch_member_loader)
@@ -184,6 +188,54 @@ class ExecutionRepository:
             quarantined=quarantined,
             success_reason=success_reason,
             context_after=context_after,
+        )
+
+    def record_completed_node_state_on(
+        self,
+        conn: Connection,
+        token_id: str,
+        node_id: str,
+        run_id: str,
+        step_index: int,
+        input_data: Mapping[str, object],
+        output_data: Mapping[str, object] | list[Mapping[str, object]],
+        duration_ms: float,
+        *,
+        state_id: str | None = None,
+        attempt: int = 0,
+        quarantined: bool = False,
+        success_reason: TransformSuccessReason | None = None,
+        context_after: NodeStateContext | None = None,
+    ) -> NodeStateCompleted:
+        """Insert an immediately completed node state on a caller-owned transaction."""
+        return self.node_states.record_completed_node_state_on(
+            conn,
+            token_id,
+            node_id,
+            run_id,
+            step_index,
+            input_data,
+            output_data,
+            duration_ms,
+            state_id=state_id,
+            attempt=attempt,
+            quarantined=quarantined,
+            success_reason=success_reason,
+            context_after=context_after,
+        )
+
+    def reconcile_source_completions_from_scheduler(
+        self,
+        *,
+        run_id: str,
+        coordination_token: CoordinationToken,
+        at: datetime,
+    ) -> int:
+        """Repair fully witnessed pre-fix TS-02 source-completion gaps."""
+        return self.source_completion_recovery.reconcile(
+            run_id=run_id,
+            coordination_token=coordination_token,
+            at=at,
         )
 
     def begin_node_states_many(

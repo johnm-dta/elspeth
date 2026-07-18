@@ -104,6 +104,13 @@ path rejects `None` before opening the scheduler mutation:
   and repair require explicit authority;
 - registered worker claim/disposition paths bind worker membership.
 
+Source completion has a similarly narrow compatibility boundary. Current
+TS-02 ingress writes the exact step-0 source `COMPLETED` witness in the same
+fenced transaction as the row, token, work item, initial lease, and scheduler
+events. `SourceCompletionReconciler` exists only for pre-fix durable images
+that committed TS-02 without that witness. It validates the whole image before
+plugin execution and refuses ambiguity rather than weakening current ingress.
+
 Missing authority never silently selects a weaker production write path.
 Stale epoch, owner, membership, status, subtype, and work-item identity are
 compare-and-swap guards, not advisory observations.
@@ -231,7 +238,7 @@ republication.
 
 ```mermaid
 flowchart LR
-    SRC[Source load] --> INGEST[TS-02 row/token/initial lease]
+    SRC[Source load] --> INGEST[TS-02 row/token/source COMPLETED/initial lease]
     INGEST --> TRAV[Transform or gate traversal]
     TRAV -->|continue/fork| ENQ[TS-00 child READY]
     TRAV -->|terminal/failure| DISP[TS-08 / TS-09]
@@ -249,7 +256,7 @@ flowchart LR
 
 | ID | Boundary | Durable consequence |
 | --- | --- | --- |
-| PB-01 | Source ingress | Accepted rows use TS-02; pre-row and quarantine failures deliberately create no scheduler row. |
+| PB-01 | Source ingress | Accepted rows use TS-02, including the exact source `COMPLETED` witness. Before plugin execution, resume repairs only an exact pre-fix TS-02 image and rejects malformed or conflicting evidence; pre-row and quarantine failures deliberately create no scheduler row. |
 | PB-02 | Transform | Results route to TS-00, TS-07, TS-08, TS-09, or TS-10. |
 | PB-03 | Declarative gate | Engine evaluation routes through the same dispositions. |
 | PB-04 | Aggregation | Barrier adoption, batch plugin execution, consume, and later continuation. |
@@ -286,13 +293,14 @@ positive assertions do not establish a complete read-model claim.
 
 ## Durable transaction boundaries
 
-The following boundaries are intentionally separate transactions and therefore
-need explicit continuation/restart evidence. The sink rows enumerate the PB-07
-case list; that catalog list remains the machine authority.
+The following current boundaries are intentionally separate transactions and
+therefore need explicit continuation/restart evidence. The compatibility row
+records the closed pre-fix TS-02 seam. The sink rows enumerate the PB-07 case
+list; that catalog list remains the machine authority.
 
 | First durable action | Later action | Current status |
 | --- | --- | --- |
-| TS-02 row/token/initial lease | Source node state becomes `COMPLETED` | P1 crash seam; `elspeth-aafba3b298` |
+| Pre-fix TS-02 row/token/initial-claim image without source state | Resume drain and plugin traversal | Closed compatibility seam: before plugin execution, `SourceCompletionReconciler` requires a root `LEASED` work item at attempt 1/step 1, exactly one matching current-work-item `ENQUEUE` and `CLAIM_READY`, matching row/token/ingest/payload hashes, and no conflicting source state. It inserts one exact source `COMPLETED` witness; repeat repair is idempotent and every ambiguity fails closed. Current TS-02 ingress no longer creates this image. |
 | TS-00 child enqueue | Parent disposition | P1 crash seam; `elspeth-7cdc4da434` |
 | Plugin call begins under scheduler lease | Next heartbeat/disposition | P1 long-call characterization; `elspeth-51a4b5c771` |
 | TS-15 aggregation consume | Non-sink child TS-00 scheduling | Durable continuation authority incomplete |

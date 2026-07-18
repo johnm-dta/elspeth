@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Insert, bindparam, func, select
+from sqlalchemy import Insert, bindparam, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
@@ -40,7 +40,12 @@ from elspeth.core.landscape._helpers import now
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapePostCommitError, LandscapeRecordError
 from elspeth.core.landscape.model_loaders import NodeStateLoader, RoutingEventLoader
-from elspeth.core.landscape.schema import edges_table, node_states_table, routing_events_table, tokens_table
+from elspeth.core.landscape.schema import (
+    edges_table,
+    node_states_table,
+    routing_events_table,
+    tokens_table,
+)
 
 if TYPE_CHECKING:
     from elspeth.contracts.errors import TransformSuccessReason
@@ -180,6 +185,47 @@ class NodeStateRepository:
         without writing a transient OPEN row first.
         """
         state_id = state_id or generate_id()
+        try:
+            with self._db.write_connection() as conn:
+                return self.record_completed_node_state_on(
+                    conn,
+                    token_id,
+                    node_id,
+                    run_id,
+                    step_index,
+                    input_data,
+                    output_data,
+                    duration_ms,
+                    state_id=state_id,
+                    attempt=attempt,
+                    quarantined=quarantined,
+                    success_reason=success_reason,
+                    context_after=context_after,
+                )
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(
+                f"record_completed_node_state failed for state_id={state_id} — database rejected audit write: {type(exc).__name__}: {exc}"
+            ) from exc
+
+    def record_completed_node_state_on(
+        self,
+        conn: Connection,
+        token_id: str,
+        node_id: str,
+        run_id: str,
+        step_index: int,
+        input_data: Mapping[str, object],
+        output_data: Mapping[str, object] | list[Mapping[str, object]],
+        duration_ms: float,
+        *,
+        state_id: str | None = None,
+        attempt: int = 0,
+        quarantined: bool = False,
+        success_reason: TransformSuccessReason | None = None,
+        context_after: NodeStateContext | None = None,
+    ) -> NodeStateCompleted:
+        """Insert an immediately completed state on a caller-owned transaction."""
+        state_id = state_id or generate_id()
         if quarantined:
             try:
                 input_hash = stable_hash(input_data)
@@ -194,31 +240,28 @@ class NodeStateRepository:
         context_json = canonical_json(context_after.to_dict()) if context_after is not None else None
 
         try:
-            with self._db.write_connection() as conn:
-                result = conn.execute(
-                    node_states_table.insert().values(
-                        state_id=state_id,
-                        token_id=token_id,
-                        node_id=node_id,
-                        run_id=run_id,
-                        step_index=step_index,
-                        attempt=attempt,
-                        status=NodeStateStatus.COMPLETED.value,
-                        input_hash=input_hash,
-                        output_hash=output_hash,
-                        duration_ms=duration_ms,
-                        error_json=None,
-                        success_reason_json=success_reason_json,
-                        context_after_json=context_json,
-                        started_at=timestamp,
-                        completed_at=timestamp,
-                    )
+            result = conn.execute(
+                node_states_table.insert().values(
+                    state_id=state_id,
+                    token_id=token_id,
+                    node_id=node_id,
+                    run_id=run_id,
+                    step_index=step_index,
+                    attempt=attempt,
+                    status=NodeStateStatus.COMPLETED.value,
+                    input_hash=input_hash,
+                    output_hash=output_hash,
+                    duration_ms=duration_ms,
+                    error_json=None,
+                    success_reason_json=success_reason_json,
+                    context_after_json=context_json,
+                    started_at=timestamp,
+                    completed_at=timestamp,
                 )
-                if result.rowcount == 0:
-                    raise LandscapeRecordError(
-                        f"record_completed_node_state: zero rows affected for state_id={state_id} — audit write failed"
-                    )
-                row = conn.execute(select(node_states_table).where(node_states_table.c.state_id == state_id)).fetchone()
+            )
+            if result.rowcount == 0:
+                raise LandscapeRecordError(f"record_completed_node_state: zero rows affected for state_id={state_id} — audit write failed")
+            row = conn.execute(select(node_states_table).where(node_states_table.c.state_id == state_id)).fetchone()
         except SQLAlchemyError as exc:
             raise LandscapeRecordError(
                 f"record_completed_node_state failed for state_id={state_id} — database rejected audit write: {type(exc).__name__}: {exc}"
@@ -233,6 +276,89 @@ class NodeStateRepository:
         if loaded.status is not NodeStateStatus.COMPLETED:
             raise LandscapePostCommitError(f"NodeState {state_id} should be COMPLETED after atomic insert but has status {loaded.status}")
         return loaded
+
+    def validate_existing_source_completed_node_state_on(
+        self,
+        conn: Connection,
+        *,
+        token_id: str,
+        source_node_id: str,
+        run_id: str,
+        expected_hash: str,
+    ) -> bool:
+        """Return whether the exact source witness exists; reject conflicts."""
+        states = conn.execute(
+            select(node_states_table).where(
+                node_states_table.c.token_id == token_id,
+                node_states_table.c.run_id == run_id,
+                or_(node_states_table.c.node_id == source_node_id, node_states_table.c.step_index == 0),
+            )
+        ).all()
+        if not states:
+            return False
+
+        if len(states) != 1:
+            raise AuditIntegrityError(
+                f"Source completion reconciliation for token {token_id!r} found {len(states)} step-0/source-node states; expected exactly one."
+            )
+        state = states[0]
+        # Do not treat a discriminator-shaped row as valid evidence until the
+        # Tier-1 loader has enforced the persisted completed-state contract.
+        self._node_state_loader.load(state)
+        values = state._mapping
+        expected = {
+            "node_id": source_node_id,
+            "step_index": 0,
+            "attempt": 0,
+            "status": NodeStateStatus.COMPLETED.value,
+            "input_hash": expected_hash,
+            "output_hash": expected_hash,
+            "duration_ms": 0.0,
+            "error_json": None,
+            "context_before_json": None,
+            "context_after_json": None,
+            "success_reason_json": None,
+            "resume_checkpoint_id": None,
+        }
+        mismatches = {field: (values[field], value) for field, value in expected.items() if values[field] != value}
+        if values["started_at"] != values["completed_at"]:
+            mismatches["completed_at"] = (values["completed_at"], values["started_at"])
+        if mismatches:
+            raise AuditIntegrityError(
+                f"Source completion reconciliation for token {token_id!r} found conflicting audit evidence: {mismatches!r}."
+            )
+        return True
+
+    def ensure_source_completed_node_state_on(
+        self,
+        conn: Connection,
+        *,
+        token_id: str,
+        source_node_id: str,
+        run_id: str,
+        source_data: Mapping[str, object],
+    ) -> bool:
+        """Insert a missing source completion or validate the exact existing witness."""
+        expected_hash = stable_hash(source_data)
+        if self.validate_existing_source_completed_node_state_on(
+            conn,
+            token_id=token_id,
+            source_node_id=source_node_id,
+            run_id=run_id,
+            expected_hash=expected_hash,
+        ):
+            return False
+        self.record_completed_node_state_on(
+            conn,
+            token_id=token_id,
+            node_id=source_node_id,
+            run_id=run_id,
+            step_index=0,
+            input_data=source_data,
+            output_data=source_data,
+            duration_ms=0,
+        )
+        return True
 
     def begin_node_states_many(
         self,

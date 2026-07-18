@@ -2235,7 +2235,7 @@ class RowProcessor:
         fields = self._work_codec.ready_fields(item, ingest_sequence=ingest_sequence)
 
         def insert_row_and_token(conn: Connection) -> tuple[AuditRow, AuditToken]:
-            return self._data_flow.insert_row_with_token_on(
+            row_record, token_record = self._data_flow.insert_row_with_token_on(
                 conn,
                 run_id=self._run_id,
                 source_node_id=str(source_node_id),
@@ -2246,6 +2246,17 @@ class RowProcessor:
                 row_id=token.row_id,
                 token_id=token.token_id,
             )
+            self._execution.record_completed_node_state_on(
+                conn,
+                token_id=token.token_id,
+                node_id=str(source_node_id),
+                run_id=self._run_id,
+                step_index=0,
+                input_data=data,
+                output_data=data,
+                duration_ms=0,
+            )
+            return row_record, token_record
 
         _row, _token_record, scheduled = self._scheduler.ingest_row_with_initial_claim(
             coordination_token=coordination_token,
@@ -2388,8 +2399,9 @@ class RowProcessor:
         preclaimed: TokenWorkItem | None = None
         if self._coordination_token is not None:
             # Fenced leader INGEST (§C.4 row 9): rows insert + tokens insert
-            # + initial enqueue-and-claim in ONE IMMEDIATE transaction; a
-            # stale epoch rolls the whole ingest back (no orphan rows row).
+            # + source COMPLETED evidence + initial enqueue-and-claim in ONE
+            # IMMEDIATE transaction; a stale epoch rolls the whole ingest
+            # back (no orphan rows row or unexplained scheduler admission).
             preclaimed = self._ingest_source_row_with_initial_claim(
                 item=initial_item,
                 source_node_id=effective_source_node_id,
@@ -2412,13 +2424,12 @@ class RowProcessor:
                 row_id=token.row_id,
                 token_id=token.token_id,
             )
-
-        self._record_source_node_state(
-            token=token,
-            input_data=source_input,
-            status=NodeStateStatus.COMPLETED,
-            source_node_id=effective_source_node_id,
-        )
+            self._record_source_node_state(
+                token=token,
+                input_data=source_input,
+                status=NodeStateStatus.COMPLETED,
+                source_node_id=effective_source_node_id,
+            )
         return self._drain_work_queue(initial_item, ctx, preclaimed=preclaimed)
 
     def process_existing_row(
@@ -2902,6 +2913,18 @@ class RowProcessor:
         G3 — the original concern was duplicate RowResult emission; the fence CAS
         prevents non-members from claiming, closing that race structurally).
         """
+        repaired_source_states = self._execution.reconcile_source_completions_from_scheduler(
+            run_id=self._run_id,
+            coordination_token=self._require_coordination_token(),
+            at=self._clock.now_utc(),
+        )
+        if repaired_source_states:
+            logger.info(
+                "Reconciled %d source COMPLETED state(s) from fully witnessed scheduler ingress for run_id=%r",
+                repaired_source_states,
+                self._run_id,
+            )
+
         peer_owners = self._scheduler.peer_active_leases(
             run_id=self._run_id,
             caller_owner=self._scheduler_lease_owner,

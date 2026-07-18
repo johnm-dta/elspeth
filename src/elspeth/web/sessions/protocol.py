@@ -11,7 +11,7 @@ CompositionStateData is the input DTO for saving new state versions.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import InitVar, dataclass
 from datetime import datetime
 from types import MappingProxyType
@@ -963,6 +963,15 @@ class SessionServiceProtocol(Protocol):
         failure_code: GuidedOperationFailureCode,
         actor: str,
     ) -> GuidedOperationFailed: ...
+
+    async def revert_state_for_guided_operation(
+        self,
+        fence: GuidedOperationFence,
+        *,
+        state_id: UUID,
+        actor: str,
+        response_hash_factory: Callable[[CompositionStateRecord], str],
+    ) -> CompositionStateRecord: ...
 
     async def update_session_title(self, session_id: UUID, title: str) -> SessionRecord: ...
 

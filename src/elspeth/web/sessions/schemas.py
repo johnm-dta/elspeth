@@ -56,6 +56,25 @@ class _RequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class _GuidedOperationRequest(BaseModel):
+    """Strict boundary shared by retry-safe composer mutations."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    operation_id: str = pydantic.Field(min_length=36, max_length=36)
+
+    @field_validator("operation_id")
+    @classmethod
+    def _validate_operation_id(cls, value: str) -> str:
+        try:
+            parsed = UUID(value)
+        except ValueError as exc:
+            raise ValueError("operation_id must be a canonical UUID") from exc
+        if str(parsed) != value:
+            raise ValueError("operation_id must be a canonical UUID")
+        return value
+
+
 def _require_visible_content(value: str, *, field_label: str) -> str:
     """Reject strings that contain no visible characters."""
     if not has_visible_content(value):
@@ -282,11 +301,26 @@ class CompositionStateResponse(_StrictResponse):
     plugin_policy_findings: list[PluginPolicyFindingResponse] = pydantic.Field(default_factory=list)
 
 
-class ForkSessionRequest(_RequestModel):
+class ForkSessionRequest(_GuidedOperationRequest):
     """Request body for POST /api/sessions/{id}/fork."""
 
     from_message_id: UUID
     new_message_content: str = pydantic.Field(min_length=1)
+
+    @field_validator("from_message_id", mode="before")
+    @classmethod
+    def _parse_from_message_id(cls, value: object) -> UUID:
+        if type(value) is str:
+            try:
+                parsed = UUID(value)
+            except ValueError as exc:
+                raise ValueError("from_message_id must be a canonical UUID") from exc
+            if str(parsed) != value:
+                raise ValueError("from_message_id must be a canonical UUID")
+            return parsed
+        if type(value) is UUID:
+            return value
+        raise ValueError("from_message_id must be a canonical UUID")
 
     @field_validator("new_message_content")
     @classmethod
@@ -302,13 +336,28 @@ class ForkSessionResponse(_StrictResponse):
     composition_state: CompositionStateResponse | None = None
 
 
-class RevertStateRequest(_RequestModel):
+class RevertStateRequest(_GuidedOperationRequest):
     """Request body for POST /api/sessions/{id}/state/revert."""
 
     state_id: UUID
 
+    @field_validator("state_id", mode="before")
+    @classmethod
+    def _parse_state_id(cls, value: object) -> UUID:
+        if type(value) is str:
+            try:
+                parsed = UUID(value)
+            except ValueError as exc:
+                raise ValueError("state_id must be a canonical UUID") from exc
+            if str(parsed) != value:
+                raise ValueError("state_id must be a canonical UUID")
+            return parsed
+        if type(value) is UUID:
+            return value
+        raise ValueError("state_id must be a canonical UUID")
 
-class StartGuidedRequest(_RequestModel):
+
+class StartGuidedRequest(_GuidedOperationRequest):
     """Request body for POST /api/sessions/{session_id}/guided/start.
 
     ``profile`` is a raw boundary value whose valid form is a closed-enum
@@ -322,6 +371,14 @@ class StartGuidedRequest(_RequestModel):
     """
 
     profile: object = "live"
+
+
+class ConvertGuidedRequest(_GuidedOperationRequest):
+    """Request body for POST /api/sessions/{id}/guided/convert."""
+
+
+class ReenterGuidedRequest(_GuidedOperationRequest):
+    """Request body for POST /api/sessions/{id}/guided/reenter."""
 
 
 class RunResponse(_StrictResponse):
@@ -458,7 +515,7 @@ class TutorialSampleResponse(_StrictResponse):
     sample_urls: list[str]
 
 
-class GuidedRespondRequest(_RequestModel):
+class GuidedRespondRequest(_GuidedOperationRequest):
     """Request body for POST /api/sessions/{id}/guided/respond.
 
     Carries the user's typed response to the current guided turn.  All
@@ -498,7 +555,7 @@ class GuidedRespondResponse(_StrictResponse):
     composition_state: CompositionStateResponse | None
 
 
-class GuidedChatRequest(_RequestModel):
+class GuidedChatRequest(_GuidedOperationRequest):
     """Request body for POST /api/sessions/{id}/guided/chat.
 
     Carries a free-text chat message scoped to the user's current wizard

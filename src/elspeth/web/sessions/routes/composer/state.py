@@ -23,6 +23,12 @@ from elspeth.web.interpretation_state import parse_interpretation_requirements
 from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS, allowed_source_directories, resolve_data_path
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId, PluginUnavailableReason
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields
+from elspeth.web.sessions.protocol import GuidedCompositionStateResult
+from elspeth.web.sessions.routes.guided_operations import (
+    GuidedOperationLease,
+    guided_response_hash,
+    reserve_or_replay_guided_operation,
+)
 
 from .._helpers import (
     UTC,
@@ -489,25 +495,45 @@ async def revert_state(
     service = request.app.state.session_service
     catalog, _snapshot = _request_plugin_policy_context(request, user)
 
-    try:
-        new_state = await service.set_active_state(
-            session.id,
-            body.state_id,
-        )
-    except ValueError:
-        raise HTTPException(
-            status_code=404,
-            detail="State not found",
-        ) from None
+    compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session.id))
+    # Resolve the user-supplied target only after entering the same compose
+    # exclusion domain as accept/compose. The state is immutable, so releasing
+    # this lock before joining an already-active operation cannot invalidate
+    # the target; the service repeats ownership validation in the write tx.
+    async with compose_lock:
+        try:
+            target_state = await service.get_state(body.state_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="State not found") from None
+        if target_state.session_id != session.id:
+            raise HTTPException(status_code=404, detail="State not found")
 
-    # Look up the original version number for the system message
-    original_state = await service.get_state(body.state_id)
-    await service.add_message(
-        session.id,
-        role="system",
-        content=f"Pipeline reverted to version {original_state.version}.",
-        writer_principal="route_system_message",
+    async def _replay(result: object) -> CompositionStateResponse:
+        if type(result) is not GuidedCompositionStateResult:
+            raise AuditIntegrityError("State revert replay has a non-state result locator")
+        replay_state = await service.get_state_in_session(result.state_id, session.id)
+        return _state_response(replay_state, policy_catalog=catalog)
+
+    reserved = await reserve_or_replay_guided_operation(
+        service=service,
+        session_id=session.id,
+        kind="state_revert",
+        request=body,
+        replay=_replay,
     )
+    if not isinstance(reserved, GuidedOperationLease):
+        return reserved
+
+    async with compose_lock:
+        try:
+            new_state = await service.revert_state_for_guided_operation(
+                reserved.fence,
+                state_id=body.state_id,
+                actor="composer_route",
+                response_hash_factory=lambda record: guided_response_hash(_state_response(record, policy_catalog=catalog)),
+            )
+        except ValueError:
+            raise HTTPException(status_code=404, detail="State not found") from None
 
     return _state_response(new_state, policy_catalog=catalog)
 

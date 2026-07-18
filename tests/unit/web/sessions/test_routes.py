@@ -5828,9 +5828,10 @@ class TestRevertEndpoint:
         )
 
         # Revert to v1
+        operation_id = str(uuid.uuid4())
         resp = client.post(
             f"/api/sessions/{session.id}/state/revert",
-            json={"state_id": str(v1.id)},
+            json={"operation_id": operation_id, "state_id": str(v1.id)},
         )
         assert resp.status_code == 200
         body = resp.json()
@@ -5839,6 +5840,17 @@ class TestRevertEndpoint:
         assert body["sources"] == {"source": {"type": "csv"}}
         # Lineage: new version derives from v1
         assert body["derived_from_state_id"] == str(v1.id)
+
+        replay = client.post(
+            f"/api/sessions/{session.id}/state/revert",
+            json={"operation_id": operation_id, "state_id": str(v1.id)},
+        )
+        assert replay.status_code == 200
+        assert replay.json() == body
+        versions = await service.get_state_versions(session.id)
+        assert [state.version for state in versions] == [1, 2, 3]
+        messages = await service.get_messages(session.id, limit=None)
+        assert [message.content for message in messages] == ["Pipeline reverted to version 1."]
 
     @pytest.mark.asyncio
     async def test_revert_injects_system_message(self, tmp_path) -> None:
@@ -5851,7 +5863,7 @@ class TestRevertEndpoint:
 
         client.post(
             f"/api/sessions/{session.id}/state/revert",
-            json={"state_id": str(v1.id)},
+            json={"operation_id": str(uuid.uuid4()), "state_id": str(v1.id)},
         )
 
         # Check that a system message was injected
@@ -5911,7 +5923,7 @@ class TestRevertEndpoint:
         # Bob tries to revert -- should be 404
         resp = bob_client.post(
             f"/api/sessions/{session.id}/state/revert",
-            json={"state_id": str(v1.id)},
+            json={"operation_id": str(uuid.uuid4()), "state_id": str(v1.id)},
         )
         assert resp.status_code == 404
 
@@ -5928,7 +5940,7 @@ class TestRevertEndpoint:
         # Try to revert s1 using s2's state -- should fail
         resp = client.post(
             f"/api/sessions/{s1.id}/state/revert",
-            json={"state_id": str(v1_s2.id)},
+            json={"operation_id": str(uuid.uuid4()), "state_id": str(v1_s2.id)},
         )
         assert resp.status_code == 404
 

@@ -1,0 +1,72 @@
+"""Strict HTTP request contracts for retry-safe composer mutations."""
+
+from __future__ import annotations
+
+from uuid import uuid4
+
+import pytest
+from pydantic import ValidationError
+
+from elspeth.web.sessions.guided_operations import guided_operation_request_hash
+from elspeth.web.sessions.schemas import (
+    ConvertGuidedRequest,
+    ForkSessionRequest,
+    GuidedChatRequest,
+    GuidedRespondRequest,
+    ReenterGuidedRequest,
+    RevertStateRequest,
+    StartGuidedRequest,
+)
+
+_OPERATION_ID = "00000000-0000-4000-8000-000000000001"
+
+
+@pytest.mark.parametrize(
+    ("model_type", "payload"),
+    [
+        (StartGuidedRequest, {"profile": "live"}),
+        (GuidedRespondRequest, {"chosen": ["csv"]}),
+        (GuidedChatRequest, {"message": "Use CSV", "step_index": "step_1_source"}),
+        (ConvertGuidedRequest, {}),
+        (ReenterGuidedRequest, {}),
+        (RevertStateRequest, {"state_id": str(uuid4())}),
+        (ForkSessionRequest, {"from_message_id": str(uuid4()), "new_message_content": "Try this"}),
+    ],
+)
+def test_mutating_composer_requests_require_operation_id(model_type, payload) -> None:
+    with pytest.raises(ValidationError, match="operation_id"):
+        model_type.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "model_type",
+    [
+        StartGuidedRequest,
+        GuidedRespondRequest,
+        GuidedChatRequest,
+        ConvertGuidedRequest,
+        ReenterGuidedRequest,
+        RevertStateRequest,
+        ForkSessionRequest,
+    ],
+)
+def test_mutating_composer_requests_are_strict_and_extra_forbid(model_type) -> None:
+    assert model_type.model_config.get("strict") is True
+    assert model_type.model_config.get("extra") == "forbid"
+
+
+def test_operation_id_must_be_a_canonical_uuid() -> None:
+    with pytest.raises(ValidationError, match="canonical UUID"):
+        ConvertGuidedRequest.model_validate({"operation_id": "z" * 36})
+
+
+def test_operation_hash_ignores_retry_id_but_binds_kind_and_session() -> None:
+    session_id = uuid4()
+    request_a = StartGuidedRequest.model_validate({"operation_id": _OPERATION_ID, "profile": "live"})
+    request_b = StartGuidedRequest.model_validate({"operation_id": "00000000-0000-4000-8000-000000000002", "profile": "live"})
+
+    start_hash = guided_operation_request_hash(session_id=session_id, kind="guided_start", request=request_a)
+
+    assert start_hash == guided_operation_request_hash(session_id=session_id, kind="guided_start", request=request_b)
+    assert start_hash != guided_operation_request_hash(session_id=session_id, kind="guided_convert", request=request_a)
+    assert start_hash != guided_operation_request_hash(session_id=uuid4(), kind="guided_start", request=request_a)

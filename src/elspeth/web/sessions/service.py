@@ -6974,6 +6974,94 @@ class SessionServiceImpl:
             composer_meta=self._unwrap_envelope(prior_row.composer_meta),
         )
 
+    async def revert_state_for_guided_operation(
+        self,
+        fence: GuidedOperationFence,
+        *,
+        state_id: UUID,
+        actor: str,
+        response_hash_factory: Callable[[CompositionStateRecord], str],
+    ) -> CompositionStateRecord:
+        """Copy one checkpoint and settle its retry operation atomically.
+
+        The fence check, state copy, system audit message, replay locator, and
+        response-domain hash all share one session lock and one database
+        transaction.  In particular this is not implemented as a public
+        ``require_fence`` followed by ``set_active_state``: takeover between
+        those calls would let a stale worker create a durable version.
+        """
+
+        sid = str(fence.session_id)
+        target_state_id = str(state_id)
+        now = self._now()
+
+        def _sync() -> CompositionStateRecord:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                self.require_guided_operation_fence_on_connection(conn, fence)
+                prior_row = conn.execute(
+                    select(composition_states_table).where(composition_states_table.c.id == target_state_id)
+                ).one_or_none()
+                # User-supplied state ids deliberately collapse absence and
+                # cross-session ownership to the route's same 404 boundary.
+                if prior_row is None or prior_row.session_id != sid:
+                    raise ValueError("State not found")
+
+                new_state_id = self._insert_composition_state(
+                    conn,
+                    session_id=sid,
+                    payload=StatePayload(
+                        data=CompositionStateData(
+                            sources=self._unwrap_envelope(prior_row.sources),
+                            nodes=self._unwrap_envelope(prior_row.nodes),
+                            edges=self._unwrap_envelope(prior_row.edges),
+                            outputs=self._unwrap_envelope(prior_row.outputs),
+                            metadata_=self._unwrap_envelope(prior_row.metadata_),
+                            is_valid=prior_row.is_valid,
+                            validation_errors=prior_row.validation_errors,
+                            composer_meta=self._unwrap_envelope(prior_row.composer_meta),
+                        ),
+                        derived_from_state_id=target_state_id,
+                    ),
+                    provenance="session_seed",
+                    created_at=now,
+                )
+                state_row = conn.execute(select(composition_states_table).where(composition_states_table.c.id == new_state_id)).one()
+                record = self._row_to_state_record(state_row)
+
+                sequence_no = self._reserve_sequence_range(conn, sid, count=1)
+                self._insert_chat_message(
+                    conn,
+                    session_id=sid,
+                    role="system",
+                    content=f"Pipeline reverted to version {prior_row.version}.",
+                    raw_content=None,
+                    tool_calls=None,
+                    sequence_no=sequence_no,
+                    writer_principal="route_system_message",
+                    composition_state_id=None,
+                    tool_call_id=None,
+                    parent_assistant_id=None,
+                    created_at=now,
+                )
+                conn.execute(update(sessions_table).where(sessions_table.c.id == sid).values(updated_at=now))
+
+                response_hash = response_hash_factory(record)
+                self.bind_guided_operation_on_connection(
+                    conn,
+                    fence,
+                    result_state_id=record.id,
+                )
+                self.complete_guided_operation_on_connection(
+                    conn,
+                    fence,
+                    result=GuidedCompositionStateResult(state_id=record.id),
+                    response_hash=response_hash,
+                    actor=actor,
+                )
+                return record
+
+        return cast("CompositionStateRecord", await self._run_sync(_sync))
+
     async def cancel_orphaned_runs(
         self,
         session_id: UUID,

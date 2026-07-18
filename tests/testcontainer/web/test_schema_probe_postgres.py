@@ -385,12 +385,54 @@ def test_postgres_session_audit_triggers_are_installed_and_enforced(postgres_eng
         "trg_composer_completion_events_no_delete",
         "trg_chat_messages_immutable_content",
         "trg_chat_messages_no_delete",
+        "trg_guided_operations_terminal_immutable",
         "trg_guided_operation_events_no_update",
         "trg_guided_operation_events_no_delete",
     }
 
     protected_session = "trigger-protected"
     _seed_postgres_trigger_rows(postgres_engine, session_id=protected_session, include_completion=True)
+
+    # The first in-progress -> completed settlement is legal. Any later update
+    # must be refused by the terminal immutability trigger.
+    with postgres_engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE guided_operations
+                SET status = 'completed', lease_token = NULL,
+                    lease_expires_at = NULL, result_kind = 'composition_state',
+                    result_state_id = :state_id, response_hash = :response_hash,
+                    settled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                WHERE session_id = :session_id AND operation_id = :operation_id
+                """
+            ),
+            {
+                "session_id": protected_session,
+                "operation_id": f"{protected_session}-operation",
+                "state_id": f"{protected_session}-state",
+                "response_hash": "b" * 64,
+            },
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO guided_operations (
+                    session_id, operation_id, kind, status, request_hash,
+                    attempt, failure_code, created_at, updated_at, settled_at
+                ) VALUES (
+                    :session_id, :operation_id, 'guided_start', 'failed',
+                    :request_hash, 1, 'operation_failed', CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                """
+            ),
+            {
+                "session_id": protected_session,
+                "operation_id": f"{protected_session}-failed-operation",
+                "request_hash": "9" * 64,
+            },
+        )
 
     blocked_mutations = (
         ("UPDATE interpretation_events SET actor = 'attacker' WHERE id = :row_id", f"{protected_session}-interpretation"),
@@ -399,12 +441,17 @@ def test_postgres_session_audit_triggers_are_installed_and_enforced(postgres_eng
         ("DELETE FROM composer_completion_events WHERE id = :row_id", f"{protected_session}-completion"),
         ("UPDATE chat_messages SET content = 'tampered' WHERE id = :row_id", f"{protected_session}-message"),
         ("DELETE FROM chat_messages WHERE id = :row_id", f"{protected_session}-message"),
+        ("UPDATE guided_operations SET response_hash = :replacement WHERE operation_id = :row_id", f"{protected_session}-operation"),
+        (
+            "UPDATE guided_operations SET failure_code = 'provider_timeout' WHERE operation_id = :row_id",
+            f"{protected_session}-failed-operation",
+        ),
         ("UPDATE guided_operation_events SET actor = 'attacker' WHERE operation_id = :row_id", f"{protected_session}-operation"),
         ("DELETE FROM guided_operation_events WHERE operation_id = :row_id", f"{protected_session}-operation"),
     )
     for statement, row_id in blocked_mutations:
         with pytest.raises(DBAPIError, match=r"append-only|immutable"), postgres_engine.begin() as conn:
-            conn.execute(text(statement), {"row_id": row_id})
+            conn.execute(text(statement), {"row_id": row_id, "replacement": "c" * 64})
 
     with pytest.raises(DBAPIError, match="append-only"), postgres_engine.begin() as conn:
         conn.execute(text("DELETE FROM sessions WHERE id = :session_id"), {"session_id": protected_session})
@@ -470,6 +517,10 @@ def test_postgres_session_audit_triggers_are_installed_and_enforced(postgres_eng
     [
         "DROP TRIGGER trg_chat_messages_no_delete ON chat_messages",
         "ALTER TABLE chat_messages DISABLE TRIGGER trg_chat_messages_no_delete",
+        "DROP TRIGGER trg_guided_operations_terminal_immutable ON guided_operations",
+        "ALTER TABLE guided_operations DISABLE TRIGGER trg_guided_operations_terminal_immutable",
+        "DROP TRIGGER trg_guided_operation_events_no_update ON guided_operation_events",
+        "ALTER TABLE guided_operation_events DISABLE TRIGGER trg_guided_operation_events_no_update",
         "DROP TRIGGER trg_guided_operation_events_no_delete ON guided_operation_events",
         "ALTER TABLE guided_operation_events DISABLE TRIGGER trg_guided_operation_events_no_delete",
     ],
@@ -485,6 +536,132 @@ def test_missing_or_disabled_postgres_audit_trigger_marks_session_schema_stale(
     assert probe_session_schema(postgres_engine) is SchemaState.STALE
     with pytest.raises(SessionSchemaError, match="trigger"):
         initialize_session_schema(postgres_engine)
+
+
+def test_postgres_guided_operation_locator_constraints_reject_invalid_bundles_and_cross_session_refs(
+    postgres_engine: Engine,
+) -> None:
+    init_session_schema(postgres_engine)
+    session_a = "locator-session-a"
+    session_b = "locator-session-b"
+    _seed_postgres_trigger_rows(postgres_engine, session_id=session_a, include_completion=False)
+    _seed_postgres_trigger_rows(postgres_engine, session_id=session_b, include_completion=False)
+    with postgres_engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO composition_proposals (
+                    id, session_id, tool_call_id, tool_name, status,
+                    summary, rationale, affects, arguments_json,
+                    arguments_redacted_json, created_at, updated_at
+                ) VALUES (
+                    :proposal_id, :session_id, 'cross-session-call',
+                    'set_pipeline', 'pending', 'Cross-session proposal',
+                    'Foreign-key proof', CAST('[]' AS json), CAST('{}' AS json),
+                    CAST('{}' AS json), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                """
+            ),
+            {"proposal_id": f"{session_b}-proposal", "session_id": session_b},
+        )
+
+    completed_insert = """
+        INSERT INTO guided_operations (
+            session_id, operation_id, kind, status, request_hash, attempt,
+            proposal_id, result_kind, result_state_id, result_session_id,
+            response_hash, created_at, updated_at, settled_at
+        ) VALUES (
+            :session_id, :operation_id, :kind, 'completed', :request_hash, 1,
+            :proposal_id, :result_kind, :result_state_id, :result_session_id,
+            :response_hash, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        )
+    """
+    invalid_rows = (
+        (
+            {
+                "session_id": session_a,
+                "operation_id": "invalid-discriminator",
+                "kind": "guided_start",
+                "request_hash": "c" * 64,
+                "proposal_id": None,
+                "result_kind": "arbitrary_json",
+                "result_state_id": f"{session_a}-state",
+                "result_session_id": None,
+                "response_hash": "d" * 64,
+            },
+            "ck_guided_operations_result_kind",
+        ),
+        (
+            {
+                "session_id": session_a,
+                "operation_id": "wrong-kind-bundle",
+                "kind": "session_fork",
+                "request_hash": "e" * 64,
+                "proposal_id": None,
+                "result_kind": "composition_state",
+                "result_state_id": f"{session_a}-state",
+                "result_session_id": None,
+                "response_hash": "f" * 64,
+            },
+            "ck_guided_operations_result_locator",
+        ),
+        (
+            {
+                "session_id": session_a,
+                "operation_id": "cross-session-state",
+                "kind": "guided_start",
+                "request_hash": "1" * 64,
+                "proposal_id": None,
+                "result_kind": "composition_state",
+                "result_state_id": f"{session_b}-state",
+                "result_session_id": None,
+                "response_hash": "2" * 64,
+            },
+            "fk_guided_operations_result_state_session",
+        ),
+        (
+            {
+                "session_id": session_a,
+                "operation_id": "cross-session-proposal",
+                "kind": "guided_plan",
+                "request_hash": "3" * 64,
+                "proposal_id": f"{session_b}-proposal",
+                "result_kind": "proposal",
+                "result_state_id": None,
+                "result_session_id": None,
+                "response_hash": "4" * 64,
+            },
+            "fk_guided_operations_proposal_session",
+        ),
+    )
+    for values, constraint_name in invalid_rows:
+        with pytest.raises(DBAPIError, match=constraint_name), postgres_engine.begin() as conn:
+            conn.execute(text(completed_insert), values)
+
+    with pytest.raises(DBAPIError, match="fk_guided_operations_originating_message_session"), postgres_engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO guided_operations (
+                    session_id, operation_id, kind, status, request_hash,
+                    lease_token, lease_expires_at, attempt,
+                    originating_message_id, created_at, updated_at
+                ) VALUES (
+                    :session_id, 'cross-session-message', 'guided_respond',
+                    'in_progress', :request_hash, 'lease-token',
+                    CURRENT_TIMESTAMP + INTERVAL '1 minute', 1,
+                    :message_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                """
+            ),
+            {
+                "session_id": session_a,
+                "request_hash": "5" * 64,
+                "message_id": f"{session_b}-message",
+            },
+        )
+
+    assert "result_locator_json" not in {column["name"] for column in inspect(postgres_engine).get_columns("guided_operations")}
 
 
 def test_preferences_upsert_round_trips_on_postgres(postgres_engine: Engine) -> None:

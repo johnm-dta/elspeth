@@ -634,9 +634,9 @@ guided_operations_table = Table(
     Column("attempt", Integer, nullable=False),
     Column("originating_message_id", String(128), nullable=True),
     Column("proposal_id", String(128), nullable=True),
+    Column("result_kind", String(32), nullable=True),
     Column("result_state_id", String(128), nullable=True),
     Column("result_session_id", String(128), nullable=True),
-    Column("result_locator_json", Text, nullable=True),
     Column("response_hash", String(64), nullable=True),
     Column("failure_code", String(128), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
@@ -706,8 +706,8 @@ guided_operations_table = Table(
         name="ck_guided_operations_lease_token_bounded",
     ),
     CheckConstraint(
-        "result_locator_json IS NULL OR (length(result_locator_json) >= 2 AND length(result_locator_json) <= 2048)",
-        name="ck_guided_operations_result_locator_bounded",
+        "result_kind IS NULL OR result_kind IN ('composition_state', 'session', 'proposal')",
+        name="ck_guided_operations_result_kind",
     ),
     CheckConstraint(
         "failure_code IS NULL OR failure_code IN ('provider_unavailable', 'provider_timeout', "
@@ -716,12 +716,30 @@ guided_operations_table = Table(
     ),
     CheckConstraint(
         "(status = 'in_progress' AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL "
-        "AND settled_at IS NULL AND result_locator_json IS NULL AND response_hash IS NULL AND failure_code IS NULL) OR "
+        "AND settled_at IS NULL AND result_kind IS NULL AND result_state_id IS NULL "
+        "AND response_hash IS NULL AND failure_code IS NULL) OR "
         "(status = 'completed' AND lease_token IS NULL AND lease_expires_at IS NULL "
-        "AND settled_at IS NOT NULL AND result_locator_json IS NOT NULL AND response_hash IS NOT NULL AND failure_code IS NULL) OR "
+        "AND settled_at IS NOT NULL AND result_kind IS NOT NULL AND response_hash IS NOT NULL AND failure_code IS NULL) OR "
         "(status = 'failed' AND lease_token IS NULL AND lease_expires_at IS NULL "
-        "AND settled_at IS NOT NULL AND result_locator_json IS NULL AND response_hash IS NULL AND failure_code IS NOT NULL)",
+        "AND settled_at IS NOT NULL AND result_kind IS NULL AND result_state_id IS NULL "
+        "AND result_session_id IS NULL AND proposal_id IS NULL AND response_hash IS NULL AND failure_code IS NOT NULL)",
         name="ck_guided_operations_status_bundle",
+    ),
+    CheckConstraint(
+        "(status = 'in_progress' AND "
+        "(result_session_id IS NULL OR kind = 'session_fork') AND "
+        "(proposal_id IS NULL OR kind IN ('guided_respond', 'guided_chat', 'guided_plan'))) OR "
+        "(status = 'completed' AND ("
+        "(kind = 'session_fork' AND result_kind = 'session' AND result_session_id IS NOT NULL "
+        "AND result_state_id IS NULL AND proposal_id IS NULL) OR "
+        "(kind = 'guided_plan' AND result_kind = 'proposal' AND proposal_id IS NOT NULL "
+        "AND result_state_id IS NULL AND result_session_id IS NULL) OR "
+        "(kind NOT IN ('session_fork', 'guided_plan') AND result_kind = 'composition_state' "
+        "AND result_state_id IS NOT NULL AND result_session_id IS NULL "
+        "AND (proposal_id IS NULL OR kind IN ('guided_respond', 'guided_chat'))))) OR "
+        "(status = 'failed' AND result_kind IS NULL AND result_state_id IS NULL "
+        "AND result_session_id IS NULL AND proposal_id IS NULL)",
+        name="ck_guided_operations_result_locator",
     ),
     CheckConstraint(
         "response_hash IS NULL OR (length(response_hash) = 64 AND response_hash NOT GLOB '*[^a-f0-9]*')",
@@ -1347,6 +1365,30 @@ POSTGRESQL_AUDIT_DDL_COHORT: tuple[PostgresqlAuditDDL, ...] = (
         ),
     ),
     PostgresqlAuditDDL(
+        table=guided_operations_table,
+        trigger_name="trg_guided_operations_terminal_immutable",
+        function_name="elspeth_guided_operations_terminal_immutable",
+        function_sql="""
+        CREATE FUNCTION elspeth_guided_operations_terminal_immutable()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF OLD.status IN ('completed', 'failed') THEN
+            RAISE EXCEPTION 'guided_operations terminal rows are immutable'
+              USING ERRCODE = '23000';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """,
+        trigger_sql=(
+            "CREATE TRIGGER trg_guided_operations_terminal_immutable "
+            "BEFORE UPDATE ON guided_operations "
+            "FOR EACH ROW EXECUTE FUNCTION elspeth_guided_operations_terminal_immutable()"
+        ),
+    ),
+    PostgresqlAuditDDL(
         table=guided_operation_events_table,
         trigger_name="trg_guided_operation_events_no_update",
         function_name="elspeth_guided_operation_events_no_update",
@@ -1519,6 +1561,20 @@ event.listen(
         "WHEN EXISTS (SELECT 1 FROM sessions WHERE id = OLD.session_id) "
         "BEGIN "
         "  SELECT RAISE(ABORT, 'chat_messages rows are append-only'); "
+        "END;"
+    ).execute_if(dialect="sqlite"),
+)
+
+event.listen(
+    guided_operations_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER IF NOT EXISTS trg_guided_operations_terminal_immutable "
+        "BEFORE UPDATE ON guided_operations "
+        "FOR EACH ROW "
+        "WHEN OLD.status IN ('completed', 'failed') "
+        "BEGIN "
+        "  SELECT RAISE(ABORT, 'guided_operations terminal rows are immutable'); "
         "END;"
     ).execute_if(dialect="sqlite"),
 )

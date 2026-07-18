@@ -90,6 +90,7 @@ def test_postgres_schema_emits_native_audit_trigger_ddl() -> None:
         "trg_composer_completion_events_no_delete",
         "trg_chat_messages_immutable_content",
         "trg_chat_messages_no_delete",
+        "trg_guided_operations_terminal_immutable",
         "trg_guided_operation_events_no_update",
         "trg_guided_operation_events_no_delete",
     ):

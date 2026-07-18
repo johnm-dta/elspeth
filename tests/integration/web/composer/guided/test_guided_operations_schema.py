@@ -8,6 +8,8 @@ from sqlalchemy.exc import IntegrityError
 
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
+    composition_proposals_table,
+    composition_states_table,
     guided_operation_events_table,
     guided_operations_table,
     metadata,
@@ -17,6 +19,9 @@ from elspeth.web.sessions.schema import SessionSchemaError, initialize_session_s
 
 SESSION_ID = "00000000-0000-4000-8000-000000000001"
 OPERATION_ID = "00000000-0000-4000-8000-000000000002"
+STATE_ID = "00000000-0000-4000-8000-000000000004"
+PROPOSAL_ID = "00000000-0000-4000-8000-000000000008"
+RESULT_SESSION_ID = "00000000-0000-4000-8000-000000000009"
 REQUEST_HASH = "a" * 64
 RESPONSE_HASH = "b" * 64
 NOW = datetime(2026, 7, 18, tzinfo=UTC)
@@ -40,6 +45,45 @@ def engine():
                 interpretation_review_disabled=False,
             )
         )
+        connection.execute(
+            insert(sessions_table).values(
+                id=RESULT_SESSION_ID,
+                user_id="schema-test",
+                auth_provider_type="local",
+                title="Fork result",
+                trust_mode="auto_commit",
+                density_default="high",
+                created_at=NOW,
+                updated_at=NOW,
+                interpretation_review_disabled=False,
+            )
+        )
+        connection.execute(
+            insert(composition_states_table).values(
+                id=STATE_ID,
+                session_id=SESSION_ID,
+                version=1,
+                is_valid=False,
+                provenance="session_seed",
+                created_at=NOW,
+            )
+        )
+        connection.execute(
+            insert(composition_proposals_table).values(
+                id=PROPOSAL_ID,
+                session_id=SESSION_ID,
+                tool_call_id="schema-call",
+                tool_name="set_pipeline",
+                status="pending",
+                summary="Schema proposal",
+                rationale="Schema proof",
+                affects=[],
+                arguments_json={},
+                arguments_redacted_json={},
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
     return engine
 
 
@@ -55,9 +99,9 @@ def _operation(**overrides: object) -> dict[str, object]:
         "attempt": 1,
         "originating_message_id": None,
         "proposal_id": None,
+        "result_kind": None,
         "result_state_id": None,
         "result_session_id": None,
-        "result_locator_json": None,
         "response_hash": None,
         "failure_code": None,
         "created_at": NOW,
@@ -137,8 +181,20 @@ def test_operation_constraints_reject_invalid_values(engine, column: str, value:
         {"status": "in_progress", "lease_expires_at": None},
         {"status": "in_progress", "settled_at": NOW},
         {"status": "completed", "lease_token": "stale", "lease_expires_at": NOW},
-        {"status": "completed", "settled_at": NOW, "result_locator_json": None, "response_hash": RESPONSE_HASH},
-        {"status": "completed", "settled_at": NOW, "result_locator_json": "{}", "response_hash": None},
+        {
+            "status": "completed",
+            "settled_at": NOW,
+            "result_kind": "composition_state",
+            "result_state_id": None,
+            "response_hash": RESPONSE_HASH,
+        },
+        {
+            "status": "completed",
+            "settled_at": NOW,
+            "result_kind": "composition_state",
+            "result_state_id": "00000000-0000-4000-8000-000000000004",
+            "response_hash": None,
+        },
         {"status": "failed", "settled_at": NOW, "failure_code": None, "lease_token": None, "lease_expires_at": None},
         {
             "status": "failed",
@@ -173,7 +229,8 @@ def test_completed_and_failed_terminal_bundles_are_accepted(engine) -> None:
                     status="completed",
                     lease_token=None,
                     lease_expires_at=None,
-                    result_locator_json='{"state_id":"00000000-0000-4000-8000-000000000004"}',
+                    result_kind="composition_state",
+                    result_state_id=STATE_ID,
                     response_hash=RESPONSE_HASH,
                     settled_at=NOW,
                 )
@@ -191,10 +248,71 @@ def test_completed_and_failed_terminal_bundles_are_accepted(engine) -> None:
                 )
             )
         )
+        connection.execute(
+            insert(guided_operations_table).values(
+                **_operation(
+                    operation_id="00000000-0000-4000-8000-000000000005",
+                    kind="session_fork",
+                    status="completed",
+                    lease_token=None,
+                    lease_expires_at=None,
+                    result_kind="session",
+                    result_session_id=RESULT_SESSION_ID,
+                    response_hash="c" * 64,
+                    settled_at=NOW,
+                )
+            )
+        )
+        connection.execute(
+            insert(guided_operations_table).values(
+                **_operation(
+                    operation_id="00000000-0000-4000-8000-000000000006",
+                    kind="guided_plan",
+                    status="completed",
+                    lease_token=None,
+                    lease_expires_at=None,
+                    result_kind="proposal",
+                    proposal_id=PROPOSAL_ID,
+                    response_hash="d" * 64,
+                    settled_at=NOW,
+                )
+            )
+        )
+
+
+def test_in_progress_resumable_refs_are_kind_bound_but_supported(engine) -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            insert(guided_operations_table).values(
+                **_operation(
+                    operation_id="00000000-0000-4000-8000-000000000011",
+                    kind="session_fork",
+                    result_session_id=RESULT_SESSION_ID,
+                )
+            )
+        )
+        connection.execute(
+            insert(guided_operations_table).values(
+                **_operation(
+                    operation_id="00000000-0000-4000-8000-000000000012",
+                    kind="guided_plan",
+                    proposal_id=PROPOSAL_ID,
+                )
+            )
+        )
+        connection.execute(
+            insert(guided_operations_table).values(
+                **_operation(
+                    operation_id="00000000-0000-4000-8000-000000000013",
+                    kind="guided_respond",
+                    proposal_id=PROPOSAL_ID,
+                )
+            )
+        )
 
 
 def test_operation_id_is_scoped_by_session(engine) -> None:
-    second_session = "00000000-0000-4000-8000-000000000009"
+    second_session = "00000000-0000-4000-8000-000000000010"
     with engine.begin() as connection:
         connection.execute(
             insert(sessions_table).values(
@@ -211,6 +329,117 @@ def test_operation_id_is_scoped_by_session(engine) -> None:
         )
         connection.execute(insert(guided_operations_table).values(**_operation()))
         connection.execute(insert(guided_operations_table).values(**_operation(session_id=second_session)))
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"kind": "guided_start", "result_session_id": "00000000-0000-4000-8000-000000000009"},
+        {"kind": "guided_start", "proposal_id": "00000000-0000-4000-8000-000000000008"},
+        {"kind": "session_fork", "proposal_id": "00000000-0000-4000-8000-000000000008"},
+        {"kind": "guided_plan", "result_session_id": "00000000-0000-4000-8000-000000000009"},
+        {"result_kind": "arbitrary_json"},
+        {"result_kind": "composition_state", "result_state_id": "00000000-0000-4000-8000-000000000004"},
+    ],
+)
+def test_in_progress_locator_fields_are_closed_and_kind_bound(engine, values: dict[str, object]) -> None:
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(insert(guided_operations_table).values(**_operation(**values)))
+
+
+@pytest.mark.parametrize(
+    "kind,result_kind,refs",
+    [
+        ("guided_start", "session", {"result_session_id": "00000000-0000-4000-8000-000000000009"}),
+        ("guided_respond", "proposal", {"proposal_id": "00000000-0000-4000-8000-000000000008"}),
+        ("guided_chat", "session", {"result_session_id": "00000000-0000-4000-8000-000000000009"}),
+        ("guided_convert", "proposal", {"proposal_id": "00000000-0000-4000-8000-000000000008"}),
+        ("guided_reenter", "session", {"result_session_id": "00000000-0000-4000-8000-000000000009"}),
+        ("state_revert", "proposal", {"proposal_id": "00000000-0000-4000-8000-000000000008"}),
+        ("session_fork", "composition_state", {"result_state_id": "00000000-0000-4000-8000-000000000004"}),
+        ("guided_plan", "composition_state", {"result_state_id": "00000000-0000-4000-8000-000000000004"}),
+    ],
+)
+def test_completed_locator_discriminator_is_tied_to_operation_kind(
+    engine,
+    kind: str,
+    result_kind: str,
+    refs: dict[str, object],
+) -> None:
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(
+            insert(guided_operations_table).values(
+                **_operation(
+                    kind=kind,
+                    status="completed",
+                    lease_token=None,
+                    lease_expires_at=None,
+                    result_kind=result_kind,
+                    response_hash=RESPONSE_HASH,
+                    settled_at=NOW,
+                    **refs,
+                )
+            )
+        )
+
+
+def test_terminal_operation_allows_settlement_once_then_is_immutable(engine) -> None:
+    state_id = "00000000-0000-4000-8000-000000000004"
+    with engine.begin() as connection:
+        connection.execute(insert(guided_operations_table).values(**_operation()))
+        connection.execute(
+            update(guided_operations_table)
+            .where(guided_operations_table.c.session_id == SESSION_ID)
+            .where(guided_operations_table.c.operation_id == OPERATION_ID)
+            .values(lease_expires_at=NOW + timedelta(minutes=2), updated_at=NOW)
+        )
+        connection.execute(
+            update(guided_operations_table)
+            .where(guided_operations_table.c.session_id == SESSION_ID)
+            .where(guided_operations_table.c.operation_id == OPERATION_ID)
+            .values(
+                status="completed",
+                lease_token=None,
+                lease_expires_at=None,
+                result_kind="composition_state",
+                result_state_id=state_id,
+                response_hash=RESPONSE_HASH,
+                settled_at=NOW,
+            )
+        )
+
+    with pytest.raises(IntegrityError, match="terminal rows are immutable"), engine.begin() as connection:
+        connection.execute(
+            update(guided_operations_table)
+            .where(guided_operations_table.c.session_id == SESSION_ID)
+            .where(guided_operations_table.c.operation_id == OPERATION_ID)
+            .values(response_hash="c" * 64)
+        )
+
+
+def test_failed_terminal_operation_is_immutable(engine) -> None:
+    operation_id = "00000000-0000-4000-8000-000000000014"
+    with engine.begin() as connection:
+        connection.execute(
+            insert(guided_operations_table).values(
+                **_operation(
+                    operation_id=operation_id,
+                    status="failed",
+                    lease_token=None,
+                    lease_expires_at=None,
+                    failure_code="operation_failed",
+                    settled_at=NOW,
+                )
+            )
+        )
+
+    with pytest.raises(IntegrityError, match="terminal rows are immutable"), engine.begin() as connection:
+        connection.execute(
+            update(guided_operations_table)
+            .where(guided_operations_table.c.session_id == SESSION_ID)
+            .where(guided_operations_table.c.operation_id == operation_id)
+            .values(failure_code="provider_timeout")
+        )
 
 
 def test_events_are_append_only_but_whole_session_cascade_is_allowed(engine) -> None:
@@ -248,8 +477,15 @@ def test_event_constraints_and_same_operation_fk(engine, invalid: dict[str, obje
         connection.execute(insert(guided_operation_events_table).values(**invalid))
 
 
-@pytest.mark.parametrize("trigger", ["trg_guided_operation_events_no_update", "trg_guided_operation_events_no_delete"])
-def test_startup_probe_rejects_missing_event_trigger(engine, trigger: str) -> None:
+@pytest.mark.parametrize(
+    "trigger",
+    [
+        "trg_guided_operations_terminal_immutable",
+        "trg_guided_operation_events_no_update",
+        "trg_guided_operation_events_no_delete",
+    ],
+)
+def test_startup_probe_rejects_missing_required_trigger(engine, trigger: str) -> None:
     with engine.begin() as connection:
         connection.execute(text(f"DROP TRIGGER {trigger}"))
     with pytest.raises(SessionSchemaError, match="trigger"):
@@ -259,5 +495,7 @@ def test_startup_probe_rejects_missing_event_trigger(engine, trigger: str) -> No
 def test_schema_has_no_raw_request_or_lease_token_event_columns(engine) -> None:
     operation_columns = {column["name"] for column in inspect(engine).get_columns("guided_operations")}
     event_columns = {column["name"] for column in inspect(engine).get_columns("guided_operation_events")}
+    assert "result_locator_json" not in operation_columns
+    assert "result_kind" in operation_columns
     assert {"raw_body", "raw_intent", "provider_error"}.isdisjoint(operation_columns)
     assert {"lease_token", "raw_body", "raw_intent", "provider_error"}.isdisjoint(event_columns)

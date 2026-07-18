@@ -1052,6 +1052,7 @@ class TestSchemaValidatorCatchesMissingTrigger:
             "trg_interpretation_events_no_delete_resolved",
             "trg_chat_messages_immutable_content",
             "trg_chat_messages_no_delete",
+            "trg_guided_operations_terminal_immutable",
             "trg_guided_operation_events_no_update",
             "trg_guided_operation_events_no_delete",
         ],

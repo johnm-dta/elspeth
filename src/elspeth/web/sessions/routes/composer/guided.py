@@ -1077,6 +1077,13 @@ async def post_guided_start(
             status_code=400,
             detail=(f"Invalid profile discriminator. Valid values: {sorted(k.value for k in WorkflowProfileKind)}."),
         )
+    try:
+        body.profile.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Invalid profile discriminator. Valid values: {sorted(k.value for k in WorkflowProfileKind)}."),
+        ) from exc
 
     from elspeth.web.sessions.guided_operations import guided_operation_request_hash
     from elspeth.web.sessions.protocol import GuidedOperationConflictError

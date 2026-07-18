@@ -348,6 +348,73 @@ async def test_guided_start_hostile_profile_rejected_before_hash_or_reservation(
 
 
 @pytest.mark.asyncio
+async def test_guided_start_surrogate_profile_is_shape_error_without_reservation(tmp_path) -> None:
+    from sqlalchemy import text
+
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    surrogate = "\ud800"
+
+    response = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        content=(f'{{"profile":"\\ud800","operation_id":"{uuid.uuid4()}"}}').encode(),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    assert surrogate not in response.text
+    assert r"\ud800" not in response.text.lower()
+    with service._engine.connect() as conn:
+        operation_count = conn.execute(
+            text("SELECT COUNT(*) FROM guided_operations WHERE session_id = :session_id"),
+            {"session_id": str(session.id)},
+        ).scalar_one()
+    assert operation_count == 0
+
+
+@pytest.mark.asyncio
+async def test_guided_start_same_operation_surrogate_profile_does_not_mutate_operation(tmp_path) -> None:
+    from sqlalchemy import text
+
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    operation_id = str(uuid.uuid4())
+    first = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": "tutorial", "operation_id": operation_id},
+    )
+    assert first.status_code == 200
+    operation_query = text(
+        "SELECT status, request_hash, attempt, response_hash, failure_code "
+        "FROM guided_operations WHERE session_id = :session_id AND operation_id = :operation_id"
+    )
+    with service._engine.connect() as conn:
+        before = conn.execute(
+            operation_query,
+            {"session_id": str(session.id), "operation_id": operation_id},
+        ).one()
+
+    surrogate = "\ud800"
+    response = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        content=(f'{{"profile":"\\ud800","operation_id":"{operation_id}"}}').encode(),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    assert surrogate not in response.text
+    assert r"\ud800" not in response.text.lower()
+    with service._engine.connect() as conn:
+        after = conn.execute(
+            operation_query,
+            {"session_id": str(session.id), "operation_id": operation_id},
+        ).one()
+    assert after == before
+
+
+@pytest.mark.asyncio
 async def test_guided_start_new_operation_returns_exact_existing_guided_head(tmp_path) -> None:
     app, service = _make_app(tmp_path)
     client = TestClient(app)

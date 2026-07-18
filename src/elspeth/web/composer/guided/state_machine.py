@@ -18,11 +18,13 @@ Serialisation:
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Any, cast
+from typing import Any, Literal, TypedDict, TypeVar, cast
+from uuid import UUID
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
+from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.profile import EMPTY_PROFILE, WorkflowProfile
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, Turn, TurnResponse, TurnType
@@ -35,13 +37,121 @@ from elspeth.web.composer.guided.resolved import (
 from elspeth.web.composer.guided.resolved import (
     SourceResolved as SourceResolved,
 )
+from elspeth.web.composer.pipeline_proposal import AbsentBase, PresentBase, ProposalBase, reviewed_anchor_hash
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_from_dict, facts_to_dict
 
-# Pre-v7 persisted sessions are intentionally incompatible with v7: the
-# operator must delete the guided sessions DB before deploying this change.
-# (v6->v7 dropped the vestigial ``entry_seed`` key from the nested
-# WorkflowProfile sub-shape; bumped in lockstep with SESSION_SCHEMA_EPOCH.)
-GUIDED_SESSION_SCHEMA_VERSION = 7
+# Schema 8 is a pre-release hard cut. There is no schema-7 decoder or
+# converter: session epoch 29 owns the corresponding store recreation.
+GUIDED_SESSION_SCHEMA_VERSION = 8
+
+_SHA256_HEX = frozenset("0123456789abcdef")
+_ComponentT = TypeVar("_ComponentT")
+_GUIDED_SESSION_KEYS = frozenset(
+    {
+        "schema_version",
+        "step",
+        "history",
+        "profile",
+        "advisor_checkpoint_passes_used",
+        "advisor_signoff_escape_offered",
+        "terminal",
+        "transition_consumed",
+        "chat_history",
+        "chat_turn_seq",
+        "source_order",
+        "reviewed_sources",
+        "pending_source_intents",
+        "output_order",
+        "reviewed_outputs",
+        "pending_output_intents",
+        "deferred_intents",
+        "active_proposal",
+        "active_edit_target",
+        "root_intent_message_id",
+    }
+)
+
+
+def _require_exact_dict(value: object, expected: frozenset[str], owner: str) -> Mapping[str, Any]:
+    if type(value) is not dict:
+        raise InvariantError(f"{owner}: record must be an exact dict")
+    record = value
+    unexpected = set(record) - expected
+    if unexpected:
+        raise InvariantError(f"{owner}: unexpected keys {sorted(unexpected)!r}")
+    missing = expected - set(record)
+    if missing:
+        raise InvariantError(f"{owner}: missing keys {sorted(missing)!r}")
+    return record
+
+
+def _require_nonempty_str(value: object, field_name: str) -> str:
+    if type(value) is not str or value == "":
+        raise InvariantError(f"{field_name} must be a non-empty exact str")
+    return value
+
+
+def _require_optional_nonempty_str(value: object, field_name: str) -> str | None:
+    if value is None:
+        return None
+    return _require_nonempty_str(value, field_name)
+
+
+def _require_hash(value: object, field_name: str) -> str:
+    if type(value) is not str or len(value) != 64 or any(character not in _SHA256_HEX for character in value):
+        raise InvariantError(f"{field_name} must be exactly 64 lowercase hexadecimal characters")
+    return value
+
+
+def _canonical_uuid_text(value: object, field_name: str) -> str:
+    if type(value) is not str:
+        raise InvariantError(f"{field_name} must be a canonical lowercase UUID string")
+    try:
+        parsed = UUID(value)
+    except ValueError as exc:
+        raise InvariantError(f"{field_name} must be a canonical lowercase UUID string") from exc
+    if str(parsed) != value:
+        raise InvariantError(f"{field_name} must be a canonical lowercase UUID string")
+    return value
+
+
+def _require_uuid(value: object, field_name: str) -> UUID:
+    if type(value) is not UUID:
+        raise InvariantError(f"{field_name} must be a UUID")
+    return value
+
+
+def _uuid_from_text(value: object, field_name: str) -> UUID:
+    return UUID(_canonical_uuid_text(value, field_name))
+
+
+def _require_exact_str_tuple(value: object, field_name: str, *, uuid_items: bool = False) -> tuple[str, ...]:
+    if type(value) is not tuple:
+        raise InvariantError(f"{field_name} must be a tuple[str, ...]")
+    result: list[str] = []
+    for index, item in enumerate(value):
+        parsed = _canonical_uuid_text(item, f"{field_name}[{index}]") if uuid_items else _require_nonempty_str(item, field_name)
+        result.append(parsed)
+    return tuple(result)
+
+
+def _str_tuple_from_list(value: object, field_name: str, *, uuid_items: bool = False) -> tuple[str, ...]:
+    if type(value) is not list:
+        raise InvariantError(f"{field_name} must be a list[str]")
+    result: list[str] = []
+    for index, item in enumerate(value):
+        parsed = _canonical_uuid_text(item, f"{field_name}[{index}]") if uuid_items else _require_nonempty_str(item, field_name)
+        result.append(parsed)
+    return tuple(result)
+
+
+def _require_str_mapping(value: object, field_name: str) -> Mapping[str, Any]:
+    if type(value) is not dict:
+        raise InvariantError(f"{field_name} must be an exact dict")
+    for key in value:
+        if type(key) is not str:
+            raise InvariantError(f"{field_name} keys must be exact str values")
+    return value
 
 
 def _require_guided_int(value: Any, field_name: str) -> int:
@@ -63,14 +173,6 @@ def _require_guided_bool(value: Any, field_name: str) -> bool:
     return value
 
 
-def _require_guided_optional_str(value: Any, field_name: str) -> str | None:
-    if value is None:
-        return None
-    if type(value) is not str:
-        raise InvariantError(f"GuidedSession.from_dict: {field_name} must be str or None")
-    return value
-
-
 def _require_guided_sequence(value: Any, field_name: str) -> list[Any]:
     if type(value) is not list:
         raise InvariantError(f"GuidedSession.from_dict: {field_name} must be a list")
@@ -78,8 +180,21 @@ def _require_guided_sequence(value: Any, field_name: str) -> list[Any]:
 
 
 def _chat_turn_from_guided_dict(entry: Any) -> ChatTurn:
-    if type(entry) is not dict:
-        raise InvariantError("GuidedSession.from_dict: chat_history entries must be dicts")
+    entry = _require_exact_dict(
+        entry,
+        frozenset(
+            {
+                "role",
+                "content",
+                "seq",
+                "step",
+                "ts_iso",
+                "assistant_message_kind",
+                "synthetic_failure_reason",
+            }
+        ),
+        "GuidedSession.from_dict: chat_history entry",
+    )
     role_raw = entry["role"]
     content_raw = entry["content"]
     seq_raw = entry["seq"]
@@ -93,18 +208,10 @@ def _chat_turn_from_guided_dict(entry: Any) -> ChatTurn:
         raise InvariantError("GuidedSession.from_dict: chat_history.content must be str")
     if type(ts_iso_raw) is not str:
         raise InvariantError("GuidedSession.from_dict: chat_history.ts_iso must be str")
-    # assistant_message_kind / synthetic_failure_reason (fp-review C-2
-    # persisted-history closure): genuinely OPTIONAL, unlike every field
-    # above — a turn persisted before this field existed has no key at all.
-    # ``.get()`` (not direct indexing) is the correct read here precisely
-    # because absence is a valid, non-fabricated state, not missing required
-    # data; ChatTurn's own __post_init__ enforces the closed value sets and
-    # the cross-field/role invariants (surfacing as ValueError, caught by the
-    # broad except below like every other malformed-record case).
-    assistant_message_kind_raw = entry["assistant_message_kind"] if "assistant_message_kind" in entry else None
+    assistant_message_kind_raw = entry["assistant_message_kind"]
     if assistant_message_kind_raw is not None and type(assistant_message_kind_raw) is not str:
         raise InvariantError("GuidedSession.from_dict: chat_history.assistant_message_kind must be str or None")
-    synthetic_failure_reason_raw = entry["synthetic_failure_reason"] if "synthetic_failure_reason" in entry else None
+    synthetic_failure_reason_raw = entry["synthetic_failure_reason"]
     if synthetic_failure_reason_raw is not None and type(synthetic_failure_reason_raw) is not str:
         raise InvariantError("GuidedSession.from_dict: chat_history.synthetic_failure_reason must be str or None")
     return ChatTurn(
@@ -142,6 +249,20 @@ class TerminalState:
     reason: TerminalReason | None
     pipeline_yaml: str | None
 
+    def __post_init__(self) -> None:
+        if type(self.kind) is not TerminalKind:
+            raise TypeError("TerminalState.kind must be TerminalKind")
+        if self.kind is TerminalKind.COMPLETED:
+            if self.reason is not None:
+                raise ValueError("TerminalState completed terminal must not carry a reason")
+            if type(self.pipeline_yaml) is not str or self.pipeline_yaml == "":
+                raise ValueError("TerminalState completed terminal requires non-empty pipeline_yaml")
+            return
+        if type(self.reason) is not TerminalReason:
+            raise ValueError("TerminalState exited terminal requires a reason")
+        if self.pipeline_yaml is not None:
+            raise ValueError("TerminalState exited terminal must not carry pipeline_yaml")
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain JSON-serialisable dict."""
         return {
@@ -154,12 +275,13 @@ class TerminalState:
     def from_dict(cls, d: dict[str, Any]) -> TerminalState:
         """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data."""
         try:
+            d = dict(_require_exact_dict(d, frozenset({"kind", "reason", "pipeline_yaml"}), "TerminalState.from_dict"))
             return cls(
                 kind=TerminalKind(d["kind"]),
                 reason=TerminalReason(d["reason"]) if d["reason"] is not None else None,
                 pipeline_yaml=d["pipeline_yaml"],
             )
-        except (KeyError, ValueError) as exc:
+        except (KeyError, ValueError, TypeError) as exc:
             raise InvariantError(f"TerminalState.from_dict: malformed record {d!r}") from exc
 
 
@@ -189,6 +311,13 @@ class TurnRecord:
     def from_dict(cls, d: dict[str, Any]) -> TurnRecord:
         """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data."""
         try:
+            d = dict(
+                _require_exact_dict(
+                    d,
+                    frozenset({"step", "turn_type", "payload_hash", "response_hash", "emitter", "summary"}),
+                    "TurnRecord.from_dict",
+                )
+            )
             return cls(
                 step=GuidedStep(d["step"]),
                 turn_type=TurnType(d["turn_type"]),
@@ -203,34 +332,64 @@ class TurnRecord:
 
 @dataclass(frozen=True, slots=True)
 class SourceIntent:
-    """Source plugin name, options, and observed inspection facts captured during Step 1.
+    """One pending source workflow, keyed externally by a stable UUID."""
 
-    Persisted in GuidedSession.step_1_source_intent as a mid-Step-1 staging
-    field.  The INSPECT_AND_CONFIRM emit site writes it; _advance_step_1 reads it
-    when processing the INSPECT_AND_CONFIRM response to construct SourceResolved.
-
-    It is cleared (set to None) as part of the same atomic replace() that
-    consumes it, so it cannot be misread by a later step.
-
-    Frozen, audit-tier: same freeze contract as SourceResolved and SinkIntent.
-    options is a Mapping because the source schema can contain arbitrary types;
-    observed_columns and sample_rows are Sequences for the same reason;
-    freeze_fields enforces deep immutability on all container fields.
-    """
-
-    plugin: str
-    options: Mapping[str, Any]
+    name: str
+    phase: Literal["plugin_selection", "plugin_options", "inspection_review"]
+    plugin: str | None
+    options: Mapping[str, Any] | None
+    inspection_facts: SourceInspectionFacts | None
     observed_columns: Sequence[str]
     sample_rows: Sequence[Mapping[str, Any]]
 
     def __post_init__(self) -> None:
+        _require_nonempty_str(self.name, "SourceIntent.name")
+        if self.phase not in {"plugin_selection", "plugin_options", "inspection_review"}:
+            raise ValueError("SourceIntent.phase is not in the closed phase vocabulary")
+        if self.plugin is not None:
+            _require_nonempty_str(self.plugin, "SourceIntent.plugin")
+        if self.options is not None and not isinstance(self.options, Mapping):
+            raise TypeError("SourceIntent.options must be a mapping or None")
+        if self.inspection_facts is not None and type(self.inspection_facts) is not SourceInspectionFacts:
+            raise TypeError("SourceIntent.inspection_facts must be SourceInspectionFacts or None")
+        if not isinstance(self.observed_columns, Sequence) or isinstance(self.observed_columns, (str, bytes)):
+            raise TypeError("SourceIntent.observed_columns must be a sequence[str]")
+        if any(type(column) is not str for column in self.observed_columns):
+            raise TypeError("SourceIntent.observed_columns must contain exact str values")
+        if not isinstance(self.sample_rows, Sequence):
+            raise TypeError("SourceIntent.sample_rows must be a sequence[mapping]")
+        if any(not isinstance(row, Mapping) for row in self.sample_rows):
+            raise TypeError("SourceIntent.sample_rows must contain mappings")
+        if self.phase == "plugin_selection":
+            if (
+                self.plugin is not None
+                or self.options is not None
+                or self.inspection_facts is not None
+                or self.observed_columns
+                or self.sample_rows
+            ):
+                raise ValueError("SourceIntent plugin_selection phase cannot carry later-phase values")
+        elif self.phase == "plugin_options":
+            if (
+                self.plugin is None
+                or self.options is not None
+                or self.inspection_facts is not None
+                or self.observed_columns
+                or self.sample_rows
+            ):
+                raise ValueError("SourceIntent plugin_options phase requires only a selected plugin")
+        elif self.plugin is None or self.options is None or self.inspection_facts is None:
+            raise ValueError("SourceIntent inspection_review phase requires plugin, options, and inspection_facts")
         freeze_fields(self, "options", "observed_columns", "sample_rows")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain JSON-serialisable dict."""
         return {
+            "name": self.name,
+            "phase": self.phase,
             "plugin": self.plugin,
-            "options": deep_thaw(self.options),
+            "options": deep_thaw(self.options) if self.options is not None else None,
+            "inspection_facts": facts_to_dict(self.inspection_facts) if self.inspection_facts is not None else None,
             "observed_columns": list(deep_thaw(self.observed_columns)),
             "sample_rows": [dict(deep_thaw(r)) for r in self.sample_rows],
         }
@@ -239,11 +398,49 @@ class SourceIntent:
     def from_dict(cls, d: dict[str, Any]) -> SourceIntent:
         """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data."""
         try:
+            d = dict(
+                _require_exact_dict(
+                    d,
+                    frozenset({"name", "phase", "plugin", "options", "inspection_facts", "observed_columns", "sample_rows"}),
+                    "SourceIntent.from_dict",
+                )
+            )
+            phase_raw = d["phase"]
+            if phase_raw not in {"plugin_selection", "plugin_options", "inspection_review"}:
+                raise InvariantError("SourceIntent.phase is not in the closed phase vocabulary")
+            options_raw = d["options"]
+            if options_raw is not None and type(options_raw) is not dict:
+                raise InvariantError("SourceIntent.options must be an exact dict or None")
+            inspection_raw = d["inspection_facts"]
+            if inspection_raw is not None:
+                _require_exact_dict(
+                    inspection_raw,
+                    frozenset(
+                        {
+                            "source_kind",
+                            "redacted_identity",
+                            "byte_range_inspected",
+                            "sample_row_count",
+                            "observed_headers",
+                            "inferred_types",
+                            "url_candidates",
+                            "warnings",
+                        }
+                    ),
+                    "SourceIntent.inspection_facts",
+                )
+            observed = _str_tuple_from_list(d["observed_columns"], "SourceIntent.observed_columns")
+            samples_raw = d["sample_rows"]
+            if type(samples_raw) is not list or any(type(row) is not dict for row in samples_raw):
+                raise InvariantError("SourceIntent.sample_rows must be a list[dict]")
             return cls(
-                plugin=d["plugin"],
-                options=d["options"],
-                observed_columns=tuple(d["observed_columns"]),
-                sample_rows=tuple(dict(r) for r in d["sample_rows"]),
+                name=_require_nonempty_str(d["name"], "SourceIntent.name"),
+                phase=cast(Any, phase_raw),
+                plugin=_require_optional_nonempty_str(d["plugin"], "SourceIntent.plugin"),
+                options=options_raw,
+                inspection_facts=facts_from_dict(inspection_raw) if inspection_raw is not None else None,
+                observed_columns=observed,
+                sample_rows=tuple(samples_raw),
             )
         except (KeyError, ValueError, TypeError) as exc:
             raise InvariantError(f"SourceIntent.from_dict: malformed record {d!r}") from exc
@@ -251,41 +448,56 @@ class SourceIntent:
 
 @dataclass(frozen=True, slots=True)
 class SinkIntent:
-    """Sink plugin name and options captured during the Step-2 SCHEMA_FORM turn.
+    """One pending output workflow, keyed externally by a stable UUID."""
 
-    Persisted in GuidedSession.step_2_sink_intent as a mid-Step-2 staging
-    field.  The SCHEMA_FORM dispatcher writes it; _advance_step_2 reads it
-    when processing the subsequent MULTI_SELECT_WITH_CUSTOM response to
-    construct the full SinkOutputResolved entry.
-
-    It is cleared (set to None) as part of the same atomic replace() that
-    consumes it, so it cannot be misread by a later step.
-
-    Frozen, audit-tier: same freeze contract as SourceResolved and
-    SinkOutputResolved.  options is a Mapping because the sink schema can
-    contain arbitrary types; freeze_fields enforces deep immutability.
-    """
-
-    plugin: str
-    options: Mapping[str, Any]
+    name: str
+    phase: Literal["plugin_selection", "plugin_options", "field_review"]
+    plugin: str | None
+    options: Mapping[str, Any] | None
 
     def __post_init__(self) -> None:
+        _require_nonempty_str(self.name, "SinkIntent.name")
+        if self.phase not in {"plugin_selection", "plugin_options", "field_review"}:
+            raise ValueError("SinkIntent.phase is not in the closed phase vocabulary")
+        if self.plugin is not None:
+            _require_nonempty_str(self.plugin, "SinkIntent.plugin")
+        if self.options is not None and not isinstance(self.options, Mapping):
+            raise TypeError("SinkIntent.options must be a mapping or None")
+        if self.phase == "plugin_selection":
+            if self.plugin is not None or self.options is not None:
+                raise ValueError("SinkIntent plugin_selection phase cannot carry later-phase values")
+        elif self.phase == "plugin_options":
+            if self.plugin is None or self.options is not None:
+                raise ValueError("SinkIntent plugin_options phase requires only a selected plugin")
+        elif self.plugin is None or self.options is None:
+            raise ValueError("SinkIntent field_review phase requires plugin and options")
         freeze_fields(self, "options")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain JSON-serialisable dict."""
         return {
+            "name": self.name,
+            "phase": self.phase,
             "plugin": self.plugin,
-            "options": deep_thaw(self.options),
+            "options": deep_thaw(self.options) if self.options is not None else None,
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> SinkIntent:
         """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data."""
         try:
+            d = dict(_require_exact_dict(d, frozenset({"name", "phase", "plugin", "options"}), "SinkIntent.from_dict"))
+            phase_raw = d["phase"]
+            if phase_raw not in {"plugin_selection", "plugin_options", "field_review"}:
+                raise InvariantError("SinkIntent.phase is not in the closed phase vocabulary")
+            options_raw = d["options"]
+            if options_raw is not None and type(options_raw) is not dict:
+                raise InvariantError("SinkIntent.options must be an exact dict or None")
             return cls(
-                plugin=d["plugin"],
-                options=d["options"],
+                name=_require_nonempty_str(d["name"], "SinkIntent.name"),
+                phase=cast(Any, phase_raw),
+                plugin=_require_optional_nonempty_str(d["plugin"], "SinkIntent.plugin"),
+                options=options_raw,
             )
         except (KeyError, ValueError, TypeError) as exc:
             raise InvariantError(f"SinkIntent.from_dict: malformed record {d!r}") from exc
@@ -293,9 +505,11 @@ class SinkIntent:
 
 @dataclass(frozen=True, slots=True)
 class ChainProposal:
-    """A transform chain proposed by Step 3 LLM.
+    """Temporary non-persisted construction shim for the cutover cohort.
 
-    Frozen, audit-tier. Stored in GuidedSession.step_3_proposal.
+    Schema 8 has no field, encoder, or decoder for this type. Tasks 3/4 replace
+    its remaining in-process callers and Task 6 deletes the shim with the old
+    protocol arm. It must never regain a persistence path.
     """
 
     steps: Sequence[Mapping[str, Any]]  # each step: {plugin, options, rationale}
@@ -323,130 +537,840 @@ class ChainProposal:
             raise InvariantError(f"ChainProposal.from_dict: malformed record {d!r}") from exc
 
 
+class GuidedProposalRefData(TypedDict):
+    proposal_id: str
+    draft_hash: str
+    base: dict[str, str]
+    reviewed_anchor_hash: str
+    covered_deferred_intent_ids: list[str]
+    creation_event_schema: str
+    supersedes_proposal_id: str | None
+    supersedes_draft_hash: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class GuidedProposalRef:
+    """Verified safe reference to one private durable pipeline proposal."""
+
+    proposal_id: UUID
+    draft_hash: str
+    base: ProposalBase
+    reviewed_anchor_hash: str
+    covered_deferred_intent_ids: tuple[str, ...]
+    creation_event_schema: Literal["pipeline_proposal_created.v1"]
+    supersedes_proposal_id: UUID | None = None
+    supersedes_draft_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_uuid(self.proposal_id, "GuidedProposalRef.proposal_id")
+        _require_hash(self.draft_hash, "GuidedProposalRef.draft_hash")
+        if type(self.base) not in {AbsentBase, PresentBase}:
+            raise InvariantError("GuidedProposalRef.base must be AbsentBase or PresentBase")
+        _require_hash(self.reviewed_anchor_hash, "GuidedProposalRef.reviewed_anchor_hash")
+        covered = _require_exact_str_tuple(
+            self.covered_deferred_intent_ids,
+            "GuidedProposalRef.covered_deferred_intent_ids",
+            uuid_items=True,
+        )
+        if len(set(covered)) != len(covered):
+            raise InvariantError("GuidedProposalRef.covered_deferred_intent_ids must be unique")
+        if self.creation_event_schema != "pipeline_proposal_created.v1":
+            raise InvariantError("GuidedProposalRef.creation_event_schema is unsupported")
+        if (self.supersedes_proposal_id is None) != (self.supersedes_draft_hash is None):
+            raise InvariantError("GuidedProposalRef supersedes fields must be paired")
+        if self.supersedes_proposal_id is not None:
+            _require_uuid(self.supersedes_proposal_id, "GuidedProposalRef.supersedes_proposal_id")
+            _require_hash(self.supersedes_draft_hash, "GuidedProposalRef.supersedes_draft_hash")
+
+    def to_dict(self) -> GuidedProposalRefData:
+        if type(self.base) is AbsentBase:
+            base: dict[str, str] = {"kind": "absent"}
+        elif type(self.base) is PresentBase:
+            base = {
+                "kind": "present",
+                "state_id": str(self.base.state_id),
+                "composition_content_hash": self.base.composition_content_hash,
+            }
+        else:  # pragma: no cover - guarded by __post_init__
+            raise InvariantError("GuidedProposalRef.base has an unsupported type")
+        return {
+            "proposal_id": str(self.proposal_id),
+            "draft_hash": self.draft_hash,
+            "base": base,
+            "reviewed_anchor_hash": self.reviewed_anchor_hash,
+            "covered_deferred_intent_ids": list(self.covered_deferred_intent_ids),
+            "creation_event_schema": self.creation_event_schema,
+            "supersedes_proposal_id": str(self.supersedes_proposal_id) if self.supersedes_proposal_id is not None else None,
+            "supersedes_draft_hash": self.supersedes_draft_hash,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> GuidedProposalRef:
+        record = _require_exact_dict(
+            value,
+            frozenset(
+                {
+                    "proposal_id",
+                    "draft_hash",
+                    "base",
+                    "reviewed_anchor_hash",
+                    "covered_deferred_intent_ids",
+                    "creation_event_schema",
+                    "supersedes_proposal_id",
+                    "supersedes_draft_hash",
+                }
+            ),
+            "GuidedProposalRef.from_dict",
+        )
+        base_raw = _require_str_mapping(record["base"], "GuidedProposalRef.base")
+        kind = base_raw.get("kind")
+        if kind == "absent":
+            _require_exact_dict(base_raw, frozenset({"kind"}), "GuidedProposalRef.base")
+            base: ProposalBase = AbsentBase()
+        elif kind == "present":
+            _require_exact_dict(
+                base_raw,
+                frozenset({"kind", "state_id", "composition_content_hash"}),
+                "GuidedProposalRef.base",
+            )
+            base = PresentBase(
+                state_id=_uuid_from_text(base_raw["state_id"], "GuidedProposalRef.base.state_id"),
+                composition_content_hash=_require_hash(
+                    base_raw["composition_content_hash"],
+                    "GuidedProposalRef.base.composition_content_hash",
+                ),
+            )
+        else:
+            raise InvariantError("GuidedProposalRef.base.kind is unsupported")
+        supersedes_raw = record["supersedes_proposal_id"]
+        creation_schema = record["creation_event_schema"]
+        if creation_schema != "pipeline_proposal_created.v1":
+            raise InvariantError("GuidedProposalRef.creation_event_schema is unsupported")
+        return cls(
+            proposal_id=_uuid_from_text(record["proposal_id"], "GuidedProposalRef.proposal_id"),
+            draft_hash=_require_hash(record["draft_hash"], "GuidedProposalRef.draft_hash"),
+            base=base,
+            reviewed_anchor_hash=_require_hash(record["reviewed_anchor_hash"], "GuidedProposalRef.reviewed_anchor_hash"),
+            covered_deferred_intent_ids=_str_tuple_from_list(
+                record["covered_deferred_intent_ids"],
+                "GuidedProposalRef.covered_deferred_intent_ids",
+                uuid_items=True,
+            ),
+            creation_event_schema=cast(Any, creation_schema),
+            supersedes_proposal_id=(
+                _uuid_from_text(supersedes_raw, "GuidedProposalRef.supersedes_proposal_id") if supersedes_raw is not None else None
+            ),
+            supersedes_draft_hash=(
+                _require_hash(record["supersedes_draft_hash"], "GuidedProposalRef.supersedes_draft_hash")
+                if record["supersedes_draft_hash"] is not None
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ComponentTarget:
+    kind: Literal["source", "node", "edge", "output"]
+    stable_id: str
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"source", "node", "edge", "output"}:
+            raise InvariantError("ComponentTarget.kind is unsupported")
+        _canonical_uuid_text(self.stable_id, "ComponentTarget.stable_id")
+
+    def to_dict(self) -> dict[str, str]:
+        return {"kind": self.kind, "stable_id": self.stable_id}
+
+    @classmethod
+    def from_dict(cls, value: object) -> ComponentTarget:
+        record = _require_exact_dict(value, frozenset({"kind", "stable_id"}), "ComponentTarget.from_dict")
+        kind = record["kind"]
+        if kind not in {"source", "node", "edge", "output"}:
+            raise InvariantError("ComponentTarget.kind is unsupported")
+        return cls(kind=cast(Any, kind), stable_id=_canonical_uuid_text(record["stable_id"], "ComponentTarget.stable_id"))
+
+
+@dataclass(frozen=True, slots=True)
+class StableSubject:
+    kind: Literal["stable"]
+    component_kind: Literal["source", "node", "edge", "output"]
+    stable_id: str
+
+    def __post_init__(self) -> None:
+        if self.kind != "stable":
+            raise InvariantError("StableSubject.kind must be 'stable'")
+        if self.component_kind not in {"source", "node", "edge", "output"}:
+            raise InvariantError("StableSubject.component_kind is unsupported")
+        _canonical_uuid_text(self.stable_id, "StableSubject.stable_id")
+
+    def to_dict(self) -> dict[str, str]:
+        return {"kind": self.kind, "component_kind": self.component_kind, "stable_id": self.stable_id}
+
+
+@dataclass(frozen=True, slots=True)
+class PluginSubject:
+    kind: Literal["plugin"]
+    subject_id: str
+    plugin_kind: Literal["source", "transform", "sink"]
+    plugin_name: str
+
+    def __post_init__(self) -> None:
+        if self.kind != "plugin":
+            raise InvariantError("PluginSubject.kind must be 'plugin'")
+        _canonical_uuid_text(self.subject_id, "PluginSubject.subject_id")
+        if self.plugin_kind not in {"source", "transform", "sink"}:
+            raise InvariantError("PluginSubject.plugin_kind is unsupported")
+        _require_nonempty_str(self.plugin_name, "PluginSubject.plugin_name")
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "kind": self.kind,
+            "subject_id": self.subject_id,
+            "plugin_kind": self.plugin_kind,
+            "plugin_name": self.plugin_name,
+        }
+
+
+type DeferredSubject = StableSubject | PluginSubject
+
+
+class SubjectPresenceConstraintData(TypedDict):
+    kind: str
+    subject: dict[str, str]
+    present: bool
+
+
+def _subject_from_dict(value: object) -> DeferredSubject:
+    if type(value) is not dict:
+        raise InvariantError("Deferred subject must be an exact dict")
+    kind = value.get("kind")
+    if kind == "stable":
+        record = _require_exact_dict(value, frozenset({"kind", "component_kind", "stable_id"}), "StableSubject.from_dict")
+        component_kind = record["component_kind"]
+        if component_kind not in {"source", "node", "edge", "output"}:
+            raise InvariantError("StableSubject.component_kind is unsupported")
+        return StableSubject(
+            kind="stable",
+            component_kind=cast(Any, component_kind),
+            stable_id=_canonical_uuid_text(record["stable_id"], "StableSubject.stable_id"),
+        )
+    if kind == "plugin":
+        record = _require_exact_dict(
+            value,
+            frozenset({"kind", "subject_id", "plugin_kind", "plugin_name"}),
+            "PluginSubject.from_dict",
+        )
+        plugin_kind = record["plugin_kind"]
+        if plugin_kind not in {"source", "transform", "sink"}:
+            raise InvariantError("PluginSubject.plugin_kind is unsupported")
+        return PluginSubject(
+            kind="plugin",
+            subject_id=_canonical_uuid_text(record["subject_id"], "PluginSubject.subject_id"),
+            plugin_kind=cast(Any, plugin_kind),
+            plugin_name=_require_nonempty_str(record["plugin_name"], "PluginSubject.plugin_name"),
+        )
+    raise InvariantError("Deferred subject kind is unsupported")
+
+
+@dataclass(frozen=True, slots=True)
+class SubjectPresenceConstraint:
+    kind: Literal["subject_presence"]
+    subject: DeferredSubject
+    present: bool
+
+    def __post_init__(self) -> None:
+        if self.kind != "subject_presence" or type(self.subject) not in {StableSubject, PluginSubject} or type(self.present) is not bool:
+            raise InvariantError("SubjectPresenceConstraint is malformed")
+
+    def to_dict(self) -> SubjectPresenceConstraintData:
+        return {"kind": self.kind, "subject": self.subject.to_dict(), "present": self.present}
+
+
+type JsonScalar = str | int | float | bool | None
+
+
+class OptionValueConstraintData(TypedDict):
+    kind: str
+    subject: dict[str, str]
+    option_path: list[str]
+    operator: str
+    value: JsonScalar
+
+
+def _require_json_scalar(value: object, field_name: str) -> JsonScalar:
+    if type(value) not in {str, int, float, bool, type(None)}:
+        raise InvariantError(f"{field_name} must be a strict JSON scalar")
+    try:
+        canonical_json(value)
+    except (TypeError, ValueError) as exc:
+        raise InvariantError(f"{field_name} must be in the canonical JSON number domain") from exc
+    return cast(JsonScalar, value)
+
+
+@dataclass(frozen=True, slots=True)
+class OptionValueConstraint:
+    kind: Literal["option_value"]
+    subject: DeferredSubject
+    option_path: tuple[str, ...]
+    operator: Literal["equals", "not_equals"]
+    value: JsonScalar
+
+    def __post_init__(self) -> None:
+        if self.kind != "option_value" or type(self.subject) not in {StableSubject, PluginSubject}:
+            raise InvariantError("OptionValueConstraint is malformed")
+        if type(self.option_path) is not tuple or not 1 <= len(self.option_path) <= 16:
+            raise InvariantError("OptionValueConstraint.option_path must contain 1 to 16 segments")
+        for segment in self.option_path:
+            if type(segment) is not str or not segment or len(segment) > 128:
+                raise InvariantError("OptionValueConstraint.option_path segments must be 1 to 128 characters")
+        if self.operator not in {"equals", "not_equals"}:
+            raise InvariantError("OptionValueConstraint.operator is unsupported")
+        _require_json_scalar(self.value, "OptionValueConstraint.value")
+
+    def to_dict(self) -> OptionValueConstraintData:
+        return {
+            "kind": self.kind,
+            "subject": self.subject.to_dict(),
+            "option_path": list(self.option_path),
+            "operator": self.operator,
+            "value": self.value,
+        }
+
+
+class ComponentCountConstraintData(TypedDict):
+    kind: str
+    component_kind: str
+    plugin_kind: str | None
+    plugin_name: str | None
+    operator: str
+    count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ComponentCountConstraint:
+    kind: Literal["component_count"]
+    component_kind: Literal["source", "node", "edge", "output"]
+    plugin_kind: Literal["source", "transform", "sink"] | None
+    plugin_name: str | None
+    operator: Literal["equals", "at_least", "at_most"]
+    count: int
+
+    def __post_init__(self) -> None:
+        if self.kind != "component_count" or self.component_kind not in {"source", "node", "edge", "output"}:
+            raise InvariantError("ComponentCountConstraint component kind is unsupported")
+        if (self.plugin_kind is None) != (self.plugin_name is None):
+            raise InvariantError("ComponentCountConstraint plugin_kind/plugin_name must be paired")
+        if self.plugin_kind is not None and self.plugin_kind not in {"source", "transform", "sink"}:
+            raise InvariantError("ComponentCountConstraint.plugin_kind is unsupported")
+        if self.plugin_name is not None:
+            _require_nonempty_str(self.plugin_name, "ComponentCountConstraint.plugin_name")
+        if self.operator not in {"equals", "at_least", "at_most"}:
+            raise InvariantError("ComponentCountConstraint.operator is unsupported")
+        if type(self.count) is not int or self.count < 0:
+            raise InvariantError("ComponentCountConstraint.count must be a non-negative exact int")
+
+    def to_dict(self) -> ComponentCountConstraintData:
+        return {
+            "kind": self.kind,
+            "component_kind": self.component_kind,
+            "plugin_kind": self.plugin_kind,
+            "plugin_name": self.plugin_name,
+            "operator": self.operator,
+            "count": self.count,
+        }
+
+
+class EdgeRouteConstraintData(TypedDict):
+    kind: str
+    from_subject: dict[str, str]
+    edge_type: str
+    to_subject: dict[str, str]
+    present: bool
+
+
+@dataclass(frozen=True, slots=True)
+class EdgeRouteConstraint:
+    kind: Literal["edge_route"]
+    from_subject: DeferredSubject
+    edge_type: Literal["on_success", "on_error", "route_true", "route_false", "fork"]
+    to_subject: DeferredSubject
+    present: bool
+
+    def __post_init__(self) -> None:
+        if self.kind != "edge_route":
+            raise InvariantError("EdgeRouteConstraint.kind must be 'edge_route'")
+        if type(self.from_subject) not in {StableSubject, PluginSubject} or type(self.to_subject) not in {StableSubject, PluginSubject}:
+            raise InvariantError("EdgeRouteConstraint subjects are malformed")
+        if self.edge_type not in {"on_success", "on_error", "route_true", "route_false", "fork"}:
+            raise InvariantError("EdgeRouteConstraint.edge_type is unsupported")
+        if type(self.present) is not bool:
+            raise InvariantError("EdgeRouteConstraint.present must be an exact bool")
+
+    def to_dict(self) -> EdgeRouteConstraintData:
+        return {
+            "kind": self.kind,
+            "from_subject": self.from_subject.to_dict(),
+            "edge_type": self.edge_type,
+            "to_subject": self.to_subject.to_dict(),
+            "present": self.present,
+        }
+
+
+type FailureTarget = Literal["discard"] | StableSubject | PluginSubject
+
+
+class FailureRouteConstraintData(TypedDict):
+    kind: str
+    subject: dict[str, str]
+    failure_kind: str
+    operator: str
+    target: str | dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class FailureRouteConstraint:
+    kind: Literal["failure_route"]
+    subject: DeferredSubject
+    failure_kind: Literal["source_validation", "node_error", "output_write"]
+    operator: Literal["equals", "not_equals"]
+    target: FailureTarget
+
+    def __post_init__(self) -> None:
+        if self.kind != "failure_route" or type(self.subject) not in {StableSubject, PluginSubject}:
+            raise InvariantError("FailureRouteConstraint is malformed")
+        if self.failure_kind not in {"source_validation", "node_error", "output_write"}:
+            raise InvariantError("FailureRouteConstraint.failure_kind is unsupported")
+        if self.operator not in {"equals", "not_equals"}:
+            raise InvariantError("FailureRouteConstraint.operator is unsupported")
+        if self.target != "discard" and type(self.target) not in {StableSubject, PluginSubject}:
+            raise InvariantError("FailureRouteConstraint.target must be 'discard' or a closed subject")
+
+    def to_dict(self) -> FailureRouteConstraintData:
+        return {
+            "kind": self.kind,
+            "subject": self.subject.to_dict(),
+            "failure_kind": self.failure_kind,
+            "operator": self.operator,
+            "target": self.target if self.target == "discard" else self.target.to_dict(),
+        }
+
+
+type DeferredConstraint = (
+    SubjectPresenceConstraint | OptionValueConstraint | ComponentCountConstraint | EdgeRouteConstraint | FailureRouteConstraint
+)
+type DeferredConstraintData = (
+    SubjectPresenceConstraintData
+    | OptionValueConstraintData
+    | ComponentCountConstraintData
+    | EdgeRouteConstraintData
+    | FailureRouteConstraintData
+)
+
+
+def _constraint_from_dict(value: object) -> DeferredConstraint:
+    if type(value) is not dict:
+        raise InvariantError("Deferred constraint must be an exact dict")
+    kind = value.get("kind")
+    if kind == "subject_presence":
+        record = _require_exact_dict(value, frozenset({"kind", "subject", "present"}), "SubjectPresenceConstraint.from_dict")
+        if type(record["present"]) is not bool:
+            raise InvariantError("SubjectPresenceConstraint.present must be an exact bool")
+        return SubjectPresenceConstraint(kind="subject_presence", subject=_subject_from_dict(record["subject"]), present=record["present"])
+    if kind == "option_value":
+        record = _require_exact_dict(
+            value,
+            frozenset({"kind", "subject", "option_path", "operator", "value"}),
+            "OptionValueConstraint.from_dict",
+        )
+        operator = record["operator"]
+        if operator not in {"equals", "not_equals"}:
+            raise InvariantError("OptionValueConstraint.operator is unsupported")
+        return OptionValueConstraint(
+            kind="option_value",
+            subject=_subject_from_dict(record["subject"]),
+            option_path=_str_tuple_from_list(record["option_path"], "OptionValueConstraint.option_path"),
+            operator=cast(Any, operator),
+            value=_require_json_scalar(record["value"], "OptionValueConstraint.value"),
+        )
+    if kind == "component_count":
+        record = _require_exact_dict(
+            value,
+            frozenset({"kind", "component_kind", "plugin_kind", "plugin_name", "operator", "count"}),
+            "ComponentCountConstraint.from_dict",
+        )
+        return ComponentCountConstraint(
+            kind="component_count",
+            component_kind=cast(Any, record["component_kind"]),
+            plugin_kind=cast(Any, record["plugin_kind"]),
+            plugin_name=_require_optional_nonempty_str(record["plugin_name"], "ComponentCountConstraint.plugin_name"),
+            operator=cast(Any, record["operator"]),
+            count=record["count"],
+        )
+    if kind == "edge_route":
+        record = _require_exact_dict(
+            value,
+            frozenset({"kind", "from_subject", "edge_type", "to_subject", "present"}),
+            "EdgeRouteConstraint.from_dict",
+        )
+        return EdgeRouteConstraint(
+            kind="edge_route",
+            from_subject=_subject_from_dict(record["from_subject"]),
+            edge_type=cast(Any, record["edge_type"]),
+            to_subject=_subject_from_dict(record["to_subject"]),
+            present=record["present"],
+        )
+    if kind == "failure_route":
+        record = _require_exact_dict(
+            value,
+            frozenset({"kind", "subject", "failure_kind", "operator", "target"}),
+            "FailureRouteConstraint.from_dict",
+        )
+        target_raw = record["target"]
+        target: FailureTarget
+        if target_raw == "discard":
+            target = "discard"
+        else:
+            target = _subject_from_dict(target_raw)
+        return FailureRouteConstraint(
+            kind="failure_route",
+            subject=_subject_from_dict(record["subject"]),
+            failure_kind=cast(Any, record["failure_kind"]),
+            operator=cast(Any, record["operator"]),
+            target=target,
+        )
+    raise InvariantError("Deferred constraint kind is unsupported")
+
+
+_STAGE_ORDINAL = {"source": 0, "output": 1, "topology": 2, "wire_review": 3}
+
+
+class DeferredStageIntentData(TypedDict):
+    intent_id: str
+    receiving_stage: str
+    target_stage: str
+    catalog_kind: str | None
+    catalog_name: str | None
+    redacted_summary: str
+    summary_hash: str
+    originating_message_id: str
+    message_content_hash: str
+    constraints: list[DeferredConstraintData]
+
+
+@dataclass(frozen=True, slots=True)
+class DeferredStageIntent:
+    intent_id: str
+    receiving_stage: Literal["source", "output", "topology", "wire_review"]
+    target_stage: Literal["source", "output", "topology", "wire_review"]
+    catalog_kind: Literal["source", "transform", "sink"] | None
+    catalog_name: str | None
+    redacted_summary: str
+    summary_hash: str
+    originating_message_id: str
+    message_content_hash: str
+    constraints: tuple[DeferredConstraint, ...]
+
+    def __post_init__(self) -> None:
+        _canonical_uuid_text(self.intent_id, "DeferredStageIntent.intent_id")
+        if self.receiving_stage not in _STAGE_ORDINAL or self.target_stage not in _STAGE_ORDINAL:
+            raise InvariantError("DeferredStageIntent stage is unsupported")
+        if _STAGE_ORDINAL[self.receiving_stage] >= _STAGE_ORDINAL[self.target_stage]:
+            raise InvariantError("DeferredStageIntent must move forward to a later stage")
+        if (self.catalog_kind is None) != (self.catalog_name is None):
+            raise InvariantError("DeferredStageIntent catalog fields must be paired")
+        if self.catalog_kind is not None and self.catalog_kind not in {"source", "transform", "sink"}:
+            raise InvariantError("DeferredStageIntent.catalog_kind is unsupported")
+        if self.catalog_name is not None:
+            _require_nonempty_str(self.catalog_name, "DeferredStageIntent.catalog_name")
+        _require_nonempty_str(self.redacted_summary, "DeferredStageIntent.redacted_summary")
+        expected_summary_hash = stable_hash({"schema": "guided.deferred-summary.v1", "summary": self.redacted_summary})
+        if self.summary_hash != expected_summary_hash:
+            raise InvariantError("DeferredStageIntent.summary_hash mismatch")
+        _canonical_uuid_text(self.originating_message_id, "DeferredStageIntent.originating_message_id")
+        _require_hash(self.message_content_hash, "DeferredStageIntent.message_content_hash")
+        if type(self.constraints) is not tuple:
+            raise InvariantError("DeferredStageIntent.constraints must be a tuple")
+        allowed = {
+            SubjectPresenceConstraint,
+            OptionValueConstraint,
+            ComponentCountConstraint,
+            EdgeRouteConstraint,
+            FailureRouteConstraint,
+        }
+        if any(type(constraint) not in allowed for constraint in self.constraints):
+            raise InvariantError("DeferredStageIntent.constraints contains an unsupported constraint")
+        freeze_fields(self, "constraints")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        intent_id: str,
+        receiving_stage: Literal["source", "output", "topology", "wire_review"],
+        target_stage: Literal["source", "output", "topology", "wire_review"],
+        catalog_kind: Literal["source", "transform", "sink"] | None,
+        catalog_name: str | None,
+        redacted_summary: str,
+        originating_message_id: str,
+        message_content_hash: str,
+        constraints: tuple[DeferredConstraint, ...],
+    ) -> DeferredStageIntent:
+        return cls(
+            intent_id=intent_id,
+            receiving_stage=receiving_stage,
+            target_stage=target_stage,
+            catalog_kind=catalog_kind,
+            catalog_name=catalog_name,
+            redacted_summary=redacted_summary,
+            summary_hash=stable_hash({"schema": "guided.deferred-summary.v1", "summary": redacted_summary}),
+            originating_message_id=originating_message_id,
+            message_content_hash=message_content_hash,
+            constraints=constraints,
+        )
+
+    def to_dict(self) -> DeferredStageIntentData:
+        return {
+            "intent_id": self.intent_id,
+            "receiving_stage": self.receiving_stage,
+            "target_stage": self.target_stage,
+            "catalog_kind": self.catalog_kind,
+            "catalog_name": self.catalog_name,
+            "redacted_summary": self.redacted_summary,
+            "summary_hash": self.summary_hash,
+            "originating_message_id": self.originating_message_id,
+            "message_content_hash": self.message_content_hash,
+            "constraints": [constraint.to_dict() for constraint in self.constraints],
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> DeferredStageIntent:
+        record = _require_exact_dict(
+            value,
+            frozenset(
+                {
+                    "intent_id",
+                    "receiving_stage",
+                    "target_stage",
+                    "catalog_kind",
+                    "catalog_name",
+                    "redacted_summary",
+                    "summary_hash",
+                    "originating_message_id",
+                    "message_content_hash",
+                    "constraints",
+                }
+            ),
+            "DeferredStageIntent.from_dict",
+        )
+        constraints_raw = record["constraints"]
+        if type(constraints_raw) is not list:
+            raise InvariantError("DeferredStageIntent.constraints must be a list")
+        return cls(
+            intent_id=_canonical_uuid_text(record["intent_id"], "DeferredStageIntent.intent_id"),
+            receiving_stage=cast(Any, record["receiving_stage"]),
+            target_stage=cast(Any, record["target_stage"]),
+            catalog_kind=cast(Any, record["catalog_kind"]),
+            catalog_name=_require_optional_nonempty_str(record["catalog_name"], "DeferredStageIntent.catalog_name"),
+            redacted_summary=_require_nonempty_str(record["redacted_summary"], "DeferredStageIntent.redacted_summary"),
+            summary_hash=_require_hash(record["summary_hash"], "DeferredStageIntent.summary_hash"),
+            originating_message_id=_canonical_uuid_text(record["originating_message_id"], "DeferredStageIntent.originating_message_id"),
+            message_content_hash=_require_hash(record["message_content_hash"], "DeferredStageIntent.message_content_hash"),
+            constraints=tuple(_constraint_from_dict(constraint) for constraint in constraints_raw),
+        )
+
+
+def guided_reviewed_anchor_hash(
+    *,
+    source_order: tuple[str, ...],
+    reviewed_sources: Mapping[str, SourceResolved],
+    output_order: tuple[str, ...],
+    reviewed_outputs: Mapping[str, SinkOutputResolved],
+) -> str:
+    """Hash the exact ordered reviewed facts bound by a guided proposal."""
+
+    facts = {
+        "source_order": list(source_order),
+        "reviewed_sources": {
+            stable_id: reviewed_sources[stable_id].to_dict() for stable_id in source_order if stable_id in reviewed_sources
+        },
+        "output_order": list(output_order),
+        "reviewed_outputs": {
+            stable_id: reviewed_outputs[stable_id].to_dict() for stable_id in output_order if stable_id in reviewed_outputs
+        },
+    }
+    return reviewed_anchor_hash(facts)
+
+
 @dataclass(frozen=True, slots=True)
 class GuidedSession:
-    """The guided-mode session state.
-
-    Persisted in CompositionState.guided_session. `terminal` becomes non-None
-    when the wizard ends; subsequent freeform turns honour progressive
-    disclosure (see §8.2 of the spec).
-
-    Serialisation: use ``to_dict()`` / ``from_dict()`` for persistence via
-    ``composer_meta["guided_session"]`` (see Task 3.5a implementation notes).
-    The frozen dataclass equality check is the round-trip invariant test.
-
-    ``step_1_source_intent`` is a mid-Step-1 staging field.  The INSPECT_AND_CONFIRM
-    emit site writes the chosen source plugin + options + observed inspection facts
-    into it before emitting the INSPECT_AND_CONFIRM turn.  ``_advance_step_1`` reads
-    it to reconstruct the full SourceResolved and clears it in the same atomic
-    replace(); it is always None after Step 1 completes.
-
-    ``step_1_chosen_plugin`` is a mid-Step-1 staging field. The Step-1
-    SINGLE_SELECT dispatcher writes the selected source plugin name before
-    emitting the SCHEMA_FORM turn. GET /guided uses it with
-    ``step_1_inspection_facts`` to rebuild the same prefilled schema form after
-    refresh. It is cleared when the SCHEMA_FORM response commits Step 1.
-
-    ``step_2_sink_intent`` is a mid-Step-2 staging field.  The SCHEMA_FORM
-    dispatcher writes the chosen sink plugin + options into it before emitting
-    the MULTI_SELECT_WITH_CUSTOM turn.  ``_advance_step_2`` reads it to
-    reconstruct the full SinkOutputResolved and clears it in the same atomic
-    replace(); it is always None after Step 2 completes.
-
-    ``step_2_chosen_plugin`` is a mid-Step-2 staging field.  The Step-2
-    SINGLE_SELECT dispatcher writes the chosen sink plugin name into it
-    immediately before emitting the SCHEMA_FORM turn.  The SCHEMA_FORM
-    dispatcher reads it when rebuilding the SCHEMA_FORM on GET /guided —
-    the chosen plugin is needed to retrieve the correct schema from the
-    catalog.  It is cleared (set to None) in the same atomic replace()
-    that sets ``step_2_sink_intent`` (i.e. when the SCHEMA_FORM response
-    arrives and the MULTI_SELECT_WITH_CUSTOM turn is about to be emitted);
-    it cannot be non-None at the same time as ``step_2_sink_intent``.
-    It is always None outside the SINGLE_SELECT→SCHEMA_FORM intra-step
-    window at STEP_2_SINK.
-    """
+    """The only persisted guided checkpoint shape: closed schema version 8."""
 
     step: GuidedStep
-    history: tuple[TurnRecord, ...]
-    step_1_result: SourceResolved | None
-    step_2_result: SinkResolved | None
-    step_3_proposal: ChainProposal | None
+    history: tuple[TurnRecord, ...] = ()
     profile: WorkflowProfile = EMPTY_PROFILE
     advisor_checkpoint_passes_used: int = 0
     advisor_signoff_escape_offered: bool = False
-    step_1_inspection_facts: SourceInspectionFacts | None = None
-    step_1_chosen_plugin: str | None = None
     terminal: TerminalState | None = None
     transition_consumed: bool = False
-    step_1_source_intent: SourceIntent | None = None
-    step_2_sink_intent: SinkIntent | None = None
-    step_2_chosen_plugin: str | None = None
-    step_3_edit_index: int | None = None
-    # Phase A slice 5 — per-step chat history persistence.
-    # `chat_history` is a tuple of frozen ChatTurn dataclasses containing
-    # scalars and enums only. The tuple plus frozen element type is already
-    # deeply immutable, so GuidedSession does not need a freeze_fields guard
-    # for this field.
-    # `chat_turn_seq` is monotonic per session across all chat turns
-    # (user + assistant share the counter); incremented on every append.
     chat_history: tuple[ChatTurn, ...] = ()
     chat_turn_seq: int = 0
+    source_order: tuple[str, ...] = ()
+    reviewed_sources: Mapping[str, SourceResolved] = field(default_factory=dict)
+    pending_source_intents: Mapping[str, SourceIntent] = field(default_factory=dict)
+    output_order: tuple[str, ...] = ()
+    reviewed_outputs: Mapping[str, SinkOutputResolved] = field(default_factory=dict)
+    pending_output_intents: Mapping[str, SinkIntent] = field(default_factory=dict)
+    deferred_intents: tuple[DeferredStageIntent, ...] = ()
+    active_proposal: GuidedProposalRef | None = None
+    active_edit_target: ComponentTarget | None = None
+    root_intent_message_id: str | None = None
 
     def __post_init__(self) -> None:
+        if type(self.step) is not GuidedStep:
+            raise TypeError(f"step must be GuidedStep, got {type(self.step).__name__}")
+        if type(self.history) is not tuple or any(type(record) is not TurnRecord for record in self.history):
+            raise TypeError("history must be tuple[TurnRecord, ...]")
         if type(self.profile) is not WorkflowProfile:
             raise TypeError(f"profile must be WorkflowProfile, got {type(self.profile).__name__}")
         if type(self.advisor_checkpoint_passes_used) is not int or self.advisor_checkpoint_passes_used < 0:
             raise TypeError("advisor_checkpoint_passes_used must be a non-negative int")
         if type(self.advisor_signoff_escape_offered) is not bool:
             raise TypeError(f"advisor_signoff_escape_offered must be bool, got {type(self.advisor_signoff_escape_offered).__name__}")
-        if self.step_1_inspection_facts is not None and type(self.step_1_inspection_facts) is not SourceInspectionFacts:
-            raise TypeError(
-                f"step_1_inspection_facts must be SourceInspectionFacts or None, got {type(self.step_1_inspection_facts).__name__}"
+        if self.terminal is not None and type(self.terminal) is not TerminalState:
+            raise TypeError("terminal must be TerminalState or None")
+        if type(self.transition_consumed) is not bool:
+            raise TypeError("transition_consumed must be bool")
+        if type(self.chat_history) is not tuple or any(type(turn) is not ChatTurn for turn in self.chat_history):
+            raise TypeError("chat_history must be tuple[ChatTurn, ...]")
+        if type(self.chat_turn_seq) is not int or self.chat_turn_seq < 0:
+            raise TypeError("chat_turn_seq must be a non-negative exact int")
+        if self.root_intent_message_id is not None:
+            _canonical_uuid_text(self.root_intent_message_id, "GuidedSession.root_intent_message_id")
+
+        source_order = _require_exact_str_tuple(self.source_order, "GuidedSession.source_order", uuid_items=True)
+        output_order = _require_exact_str_tuple(self.output_order, "GuidedSession.output_order", uuid_items=True)
+        if len(set(source_order)) != len(source_order):
+            raise InvariantError("GuidedSession.source_order must not contain duplicates")
+        if len(set(output_order)) != len(output_order):
+            raise InvariantError("GuidedSession.output_order must not contain duplicates")
+
+        reviewed_sources = self._validated_component_mapping(self.reviewed_sources, SourceResolved, "reviewed_sources")
+        pending_sources = self._validated_component_mapping(self.pending_source_intents, SourceIntent, "pending_source_intents")
+        reviewed_outputs = self._validated_component_mapping(self.reviewed_outputs, SinkOutputResolved, "reviewed_outputs")
+        pending_outputs = self._validated_component_mapping(self.pending_output_intents, SinkIntent, "pending_output_intents")
+        # Validate and freeze the same detached snapshots. A caller-supplied
+        # Mapping may be a read-only view over mutable storage; retaining it
+        # after validation would create a check/use race at this Tier-1 seam.
+        object.__setattr__(self, "reviewed_sources", reviewed_sources)
+        object.__setattr__(self, "pending_source_intents", pending_sources)
+        object.__setattr__(self, "reviewed_outputs", reviewed_outputs)
+        object.__setattr__(self, "pending_output_intents", pending_outputs)
+        if set(reviewed_sources) & set(pending_sources):
+            raise InvariantError("GuidedSession reviewed and pending source keysets must be disjoint")
+        if set(reviewed_outputs) & set(pending_outputs):
+            raise InvariantError("GuidedSession reviewed and pending output keysets must be disjoint")
+        if set(source_order) != set(reviewed_sources) | set(pending_sources):
+            raise InvariantError("GuidedSession.source_order must be an exact permutation of source keys")
+        if set(output_order) != set(reviewed_outputs) | set(pending_outputs):
+            raise InvariantError("GuidedSession.output_order must be an exact permutation of output keys")
+        if (set(reviewed_sources) | set(pending_sources)) & (set(reviewed_outputs) | set(pending_outputs)):
+            raise InvariantError("GuidedSession stable component IDs must be globally unique")
+
+        source_names = [source.name for source in reviewed_sources.values()] + [intent.name for intent in pending_sources.values()]
+        output_names = [output.name for output in reviewed_outputs.values()] + [intent.name for intent in pending_outputs.values()]
+        if len(set(source_names)) != len(source_names):
+            raise InvariantError("GuidedSession source names must be unique")
+        if len(set(output_names)) != len(output_names):
+            raise InvariantError("GuidedSession output names must be unique")
+
+        if type(self.deferred_intents) is not tuple or any(type(intent) is not DeferredStageIntent for intent in self.deferred_intents):
+            raise TypeError("deferred_intents must be tuple[DeferredStageIntent, ...]")
+        deferred_ids = [intent.intent_id for intent in self.deferred_intents]
+        if len(set(deferred_ids)) != len(deferred_ids):
+            raise InvariantError("GuidedSession deferred intent IDs must be unique")
+
+        if self.active_proposal is not None:
+            if type(self.active_proposal) is not GuidedProposalRef:
+                raise TypeError("active_proposal must be GuidedProposalRef or None")
+            if pending_sources or pending_outputs:
+                raise InvariantError("GuidedSession active_proposal cannot coexist with pending source/output intents")
+            expected_anchor = guided_reviewed_anchor_hash(
+                source_order=source_order,
+                reviewed_sources=reviewed_sources,
+                output_order=output_order,
+                reviewed_outputs=reviewed_outputs,
             )
-        if self.step_1_chosen_plugin is not None and type(self.step_1_chosen_plugin) is not str:
-            raise TypeError(f"step_1_chosen_plugin must be str or None, got {type(self.step_1_chosen_plugin).__name__}")
+            if self.active_proposal.reviewed_anchor_hash != expected_anchor:
+                raise InvariantError("GuidedSession active_proposal reviewed_anchor_hash mismatch")
+            positions = {intent_id: index for index, intent_id in enumerate(deferred_ids)}
+            previous = -1
+            for intent_id in self.active_proposal.covered_deferred_intent_ids:
+                if intent_id not in positions or positions[intent_id] <= previous:
+                    raise InvariantError("GuidedSession active_proposal covered_deferred_intent_ids must be an ordered subsequence")
+                if not self.deferred_intents[positions[intent_id]].constraints:
+                    raise InvariantError("GuidedSession active_proposal cannot cover a deferred intent with empty constraints")
+                previous = positions[intent_id]
+
+        if self.active_edit_target is not None:
+            if type(self.active_edit_target) is not ComponentTarget:
+                raise TypeError("active_edit_target must be ComponentTarget or None")
+            target = self.active_edit_target
+            if target.kind == "source" and target.stable_id not in set(reviewed_sources) | set(pending_sources):
+                raise InvariantError("GuidedSession active_edit_target source does not resolve")
+            if target.kind == "output" and target.stable_id not in set(reviewed_outputs) | set(pending_outputs):
+                raise InvariantError("GuidedSession active_edit_target output does not resolve")
+            if target.kind in {"node", "edge"} and self.active_proposal is None:
+                raise InvariantError("GuidedSession node/edge active_edit_target requires active_proposal")
+        if self.terminal is not None and (self.active_proposal is not None or self.active_edit_target is not None):
+            raise InvariantError("GuidedSession terminal state must clear active_proposal and active_edit_target")
+
+        freeze_fields(
+            self,
+            "history",
+            "chat_history",
+            "source_order",
+            "reviewed_sources",
+            "pending_source_intents",
+            "output_order",
+            "reviewed_outputs",
+            "pending_output_intents",
+            "deferred_intents",
+        )
+
+    @staticmethod
+    def _validated_component_mapping(
+        value: object,
+        item_type: type[_ComponentT],
+        field_name: str,
+    ) -> dict[str, _ComponentT]:
+        if not isinstance(value, Mapping):
+            raise TypeError(f"GuidedSession.{field_name} must be a mapping")
+        result: dict[str, _ComponentT] = {}
+        for stable_id, item in value.items():
+            canonical = _canonical_uuid_text(stable_id, f"GuidedSession.{field_name} key")
+            if type(item) is not item_type:
+                raise TypeError(f"GuidedSession.{field_name} values must be {item_type.__name__}")
+            result[canonical] = item
+        return result
 
     @classmethod
     def initial(cls, profile: WorkflowProfile = EMPTY_PROFILE) -> GuidedSession:
         return cls(
             step=GuidedStep.STEP_1_SOURCE,
-            history=(),
-            step_1_result=None,
-            step_2_result=None,
-            step_3_proposal=None,
             profile=profile,
-            terminal=None,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain JSON-serialisable dict.
-
-        All nested optional types serialise their presence — ``None`` round-
-        trips as ``None`` (never fabricated).
-
-        ``chat_history`` entries are frozen dataclasses; their ``role`` and
-        ``step`` members are ``StrEnum`` instances, which serialise to their
-        string values via the explicit ``.value`` accessors below so JSON
-        output never carries enum reprs.
-        """
+        """Serialize the exact schema-8 keyset to a JSON-safe dictionary."""
         return {
             "schema_version": GUIDED_SESSION_SCHEMA_VERSION,
             "step": self.step.value,
             "history": [r.to_dict() for r in self.history],
-            "step_1_result": self.step_1_result.to_dict() if self.step_1_result is not None else None,
-            "step_2_result": self.step_2_result.to_dict() if self.step_2_result is not None else None,
-            "step_3_proposal": self.step_3_proposal.to_dict() if self.step_3_proposal is not None else None,
             "profile": self.profile.to_dict(),
             "advisor_checkpoint_passes_used": self.advisor_checkpoint_passes_used,
             "advisor_signoff_escape_offered": self.advisor_signoff_escape_offered,
-            "step_1_inspection_facts": facts_to_dict(self.step_1_inspection_facts) if self.step_1_inspection_facts is not None else None,
-            "step_1_chosen_plugin": self.step_1_chosen_plugin,
             "terminal": self.terminal.to_dict() if self.terminal is not None else None,
             "transition_consumed": self.transition_consumed,
-            "step_1_source_intent": self.step_1_source_intent.to_dict() if self.step_1_source_intent is not None else None,
-            "step_2_sink_intent": self.step_2_sink_intent.to_dict() if self.step_2_sink_intent is not None else None,
-            "step_2_chosen_plugin": self.step_2_chosen_plugin,
-            "step_3_edit_index": self.step_3_edit_index,
             "chat_history": [
                 {
                     "role": t.role.value,
@@ -460,23 +1384,30 @@ class GuidedSession:
                 for t in self.chat_history
             ],
             "chat_turn_seq": self.chat_turn_seq,
+            "source_order": list(self.source_order),
+            "reviewed_sources": {stable_id: source.to_dict() for stable_id, source in self.reviewed_sources.items()},
+            "pending_source_intents": {stable_id: intent.to_dict() for stable_id, intent in self.pending_source_intents.items()},
+            "output_order": list(self.output_order),
+            "reviewed_outputs": {stable_id: output.to_dict() for stable_id, output in self.reviewed_outputs.items()},
+            "pending_output_intents": {stable_id: intent.to_dict() for stable_id, intent in self.pending_output_intents.items()},
+            "deferred_intents": [intent.to_dict() for intent in self.deferred_intents],
+            "active_proposal": self.active_proposal.to_dict() if self.active_proposal is not None else None,
+            "active_edit_target": self.active_edit_target.to_dict() if self.active_edit_target is not None else None,
+            "root_intent_message_id": self.root_intent_message_id,
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> GuidedSession:
-        """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data.
-
-        Used when restoring state from ``composer_meta["guided_session"]``.
-        KeyError, ValueError, and TypeError all indicate Tier 1 corruption.
-        """
+        """Restore and revalidate one exact schema-8 checkpoint."""
         try:
+            if type(d) is not dict:
+                raise InvariantError("GuidedSession.from_dict: record must be an exact dict")
             schema_version = _require_guided_int(d["schema_version"], "schema_version")
             if schema_version != GUIDED_SESSION_SCHEMA_VERSION:
                 raise InvariantError(f"GuidedSession.from_dict: unsupported schema_version {schema_version}")
-            history = tuple(TurnRecord.from_dict(r) for r in d["history"])
-            step_1_raw = d["step_1_result"]
-            step_2_raw = d["step_2_result"]
-            step_3_raw = d["step_3_proposal"]
+            d = dict(_require_exact_dict(d, _GUIDED_SESSION_KEYS, "GuidedSession.from_dict"))
+            history_raw = _require_guided_sequence(d["history"], "history")
+            history = tuple(TurnRecord.from_dict(record) for record in history_raw)
             profile_raw = d["profile"]
             advisor_checkpoint_passes_used_raw = d["advisor_checkpoint_passes_used"]
             advisor_signoff_escape_offered_raw = d["advisor_signoff_escape_offered"]
@@ -488,48 +1419,59 @@ class GuidedSession:
                 raise InvariantError("GuidedSession.from_dict: advisor_checkpoint_passes_used must be a non-negative int")
             if type(advisor_signoff_escape_offered_raw) is not bool:
                 raise InvariantError("GuidedSession.from_dict: advisor_signoff_escape_offered must be bool")
-            inspection_facts_raw = d["step_1_inspection_facts"]
-            step_1_chosen_plugin_raw = d["step_1_chosen_plugin"]
             terminal_raw = d["terminal"]
-            source_intent_raw = d["step_1_source_intent"]
-            sink_intent_raw = d["step_2_sink_intent"]
-            step_2_chosen_plugin_raw = d["step_2_chosen_plugin"]
-            step_3_edit_index_raw = d["step_3_edit_index"]
             transition_consumed = _require_guided_bool(d["transition_consumed"], "transition_consumed")
-            step_1_chosen_plugin = _require_guided_optional_str(step_1_chosen_plugin_raw, "step_1_chosen_plugin")
-            step_2_chosen_plugin = _require_guided_optional_str(step_2_chosen_plugin_raw, "step_2_chosen_plugin")
-            step_3_edit_index = (
-                _require_guided_non_negative_int(step_3_edit_index_raw, "step_3_edit_index") if step_3_edit_index_raw is not None else None
-            )
-            # Phase A slice 5 chat-history fields.  Tier-1 strict: every entry
-            # must declare role / content / seq / step / ts_iso.  Per CLAUDE.md
-            # "Our data crash on any anomaly" — no coercion of missing keys
-            # to defaults.  An empty list (default for sessions created before
-            # slice 5 landed in production) is valid; the entries themselves
-            # must be well-formed.
             chat_history_raw = _require_guided_sequence(d["chat_history"], "chat_history")
             chat_turn_seq = _require_guided_non_negative_int(d["chat_turn_seq"], "chat_turn_seq")
             chat_history: tuple[ChatTurn, ...] = tuple(_chat_turn_from_guided_dict(entry) for entry in chat_history_raw)
+            source_order = _str_tuple_from_list(d["source_order"], "GuidedSession.source_order", uuid_items=True)
+            output_order = _str_tuple_from_list(d["output_order"], "GuidedSession.output_order", uuid_items=True)
+            reviewed_sources_raw = _require_str_mapping(d["reviewed_sources"], "GuidedSession.reviewed_sources")
+            pending_sources_raw = _require_str_mapping(d["pending_source_intents"], "GuidedSession.pending_source_intents")
+            reviewed_outputs_raw = _require_str_mapping(d["reviewed_outputs"], "GuidedSession.reviewed_outputs")
+            pending_outputs_raw = _require_str_mapping(d["pending_output_intents"], "GuidedSession.pending_output_intents")
+            deferred_raw = _require_guided_sequence(d["deferred_intents"], "deferred_intents")
+            active_proposal_raw = d["active_proposal"]
+            active_edit_target_raw = d["active_edit_target"]
             return cls(
                 step=GuidedStep(d["step"]),
                 history=history,
-                step_1_result=SourceResolved.from_dict(step_1_raw) if step_1_raw is not None else None,
-                step_2_result=SinkResolved.from_dict(step_2_raw) if step_2_raw is not None else None,
-                step_3_proposal=ChainProposal.from_dict(step_3_raw) if step_3_raw is not None else None,
                 profile=profile,
                 advisor_checkpoint_passes_used=advisor_checkpoint_passes_used_raw,
                 advisor_signoff_escape_offered=advisor_signoff_escape_offered_raw,
-                step_1_inspection_facts=facts_from_dict(inspection_facts_raw) if inspection_facts_raw is not None else None,
-                step_1_chosen_plugin=step_1_chosen_plugin,
                 terminal=TerminalState.from_dict(terminal_raw) if terminal_raw is not None else None,
                 transition_consumed=transition_consumed,
-                step_1_source_intent=SourceIntent.from_dict(source_intent_raw) if source_intent_raw is not None else None,
-                step_2_sink_intent=SinkIntent.from_dict(sink_intent_raw) if sink_intent_raw is not None else None,
-                step_2_chosen_plugin=step_2_chosen_plugin,
-                step_3_edit_index=step_3_edit_index,
                 chat_history=chat_history,
                 chat_turn_seq=chat_turn_seq,
+                source_order=source_order,
+                reviewed_sources={
+                    _canonical_uuid_text(stable_id, "GuidedSession.reviewed_sources key"): SourceResolved.from_dict(source)
+                    for stable_id, source in reviewed_sources_raw.items()
+                },
+                pending_source_intents={
+                    _canonical_uuid_text(stable_id, "GuidedSession.pending_source_intents key"): SourceIntent.from_dict(intent)
+                    for stable_id, intent in pending_sources_raw.items()
+                },
+                output_order=output_order,
+                reviewed_outputs={
+                    _canonical_uuid_text(stable_id, "GuidedSession.reviewed_outputs key"): SinkOutputResolved.from_dict(output)
+                    for stable_id, output in reviewed_outputs_raw.items()
+                },
+                pending_output_intents={
+                    _canonical_uuid_text(stable_id, "GuidedSession.pending_output_intents key"): SinkIntent.from_dict(intent)
+                    for stable_id, intent in pending_outputs_raw.items()
+                },
+                deferred_intents=tuple(DeferredStageIntent.from_dict(intent) for intent in deferred_raw),
+                active_proposal=GuidedProposalRef.from_dict(active_proposal_raw) if active_proposal_raw is not None else None,
+                active_edit_target=ComponentTarget.from_dict(active_edit_target_raw) if active_edit_target_raw is not None else None,
+                root_intent_message_id=(
+                    _canonical_uuid_text(d["root_intent_message_id"], "GuidedSession.root_intent_message_id")
+                    if d["root_intent_message_id"] is not None
+                    else None
+                ),
             )
+        except InvariantError:
+            raise
         except (KeyError, ValueError, TypeError) as exc:
             raise InvariantError(f"GuidedSession.from_dict: malformed record {d!r}") from exc
 
@@ -635,35 +1577,7 @@ def _advance_step_1(
     response: TurnResponse,
     turn_type: TurnType,
 ) -> _StepAdvanceResult:
-    """Handle a Step 1 (source) response. Pure self-loop for every Step 1 turn type.
-
-    Step 1 advancement (the INSPECT_AND_CONFIRM -> STEP_2_SINK transition) is
-    owned entirely by the dispatcher/handler path
-    (``_dispatch_guided_respond``'s STEP_1_SOURCE -> STEP_2_SINK
-    INSPECT_AND_CONFIRM branch in ``sessions/routes/_helpers.py``) — mirroring
-    ``_advance_step_2`` (elspeth-948eb9c0b8 C-3(b)) and how Step 3/Step 4
-    already work: the resolve (``step_1_source_intent`` +
-    ``edited_values["columns"]`` -> ``SourceResolved``) and the source commit
-    via ``handle_step_1_source`` both happen in the dispatcher, and
-    ``step``/``step_1_result`` are only ever set after the commit is known to
-    have succeeded.
-
-    Previously this function unconditionally pre-set ``step_1_result`` and
-    advanced ``step`` to STEP_2_SINK for INSPECT_AND_CONFIRM *before* the
-    source was ever committed via ``handle_step_1_source`` — the same
-    eager-pre-set shape that caused the Step 2 divergence — and even coerced
-    a malformed (non-list) ``columns`` payload silently (iterating a scalar
-    string's characters) before the dispatcher's type guard ever ran. This
-    turn type has no live production emitter today (``_build_get_guided_turn``
-    always passes ``blob_inspection=None``; only the integration test suite's
-    ``_seed_inspect_and_confirm_history`` reaches it), so the defect was
-    latent, not observed — fixed here for the same reason Step 2 was: the
-    commit-then-advance discipline must hold for every step this state
-    machine owns, reachable today or not.
-
-    All other Step 1 turn types (``SINGLE_SELECT``, ``SCHEMA_FORM``) were
-    already pure self-loops here.
-    """
+    """Leave source-stage mutation to the lock-owning dispatcher."""
     return (session, None, None, [])
 
 
@@ -672,28 +1586,7 @@ def _advance_step_2(
     response: TurnResponse,
     turn_type: TurnType,
 ) -> _StepAdvanceResult:
-    """Handle a Step 2 (sink) response. Pure self-loop for every Step 2 turn type.
-
-    Step 2 advancement (the MULTI_SELECT_WITH_CUSTOM -> STEP_3_TRANSFORMS
-    transition) is owned entirely by the dispatcher/handler path
-    (``_dispatch_guided_respond``'s STEP_2_SINK intra-step MULTI_SELECT_WITH_CUSTOM
-    branch in ``sessions/routes/_helpers.py``) — mirroring how Step 3/Step 4
-    already work (``_advance_step_3``/``_advance_step_4`` are pure self-loops;
-    ``handle_step_3_chain_accept`` sets the step pointer itself, atomically
-    with the state mutation).
-
-    Previously this function unconditionally pre-set ``step_2_result`` and
-    advanced ``step`` to STEP_3_TRANSFORMS for MULTI_SELECT_WITH_CUSTOM
-    *before* the sink was ever committed via ``handle_step_2_sink`` — a
-    downstream commit failure then left ``guided_session.step_2_result``
-    (and ``step``) advanced while ``composition_state.outputs`` stayed
-    unchanged, a persisted state-integrity divergence (elspeth-948eb9c0b8
-    C-3(b)). Resolving the sink from ``step_2_sink_intent`` + the response,
-    validating it, and setting ``step``/``step_2_result`` now all happen in
-    the dispatcher, gated on ``handle_step_2_sink`` reporting success — so a
-    failure leaves this pure function's return value (and therefore the
-    persisted session) untouched.
-    """
+    """Leave output-stage mutation to the lock-owning dispatcher."""
     return (session, None, None, [])
 
 

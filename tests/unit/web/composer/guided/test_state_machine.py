@@ -14,12 +14,9 @@ from elspeth.web.composer.guided.profile import EMPTY_PROFILE, TUTORIAL_PROFILE
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.state_machine import (
     GUIDED_SESSION_SCHEMA_VERSION,
-    ChainProposal,
     GuidedSession,
     SinkIntent,
-    SinkResolved,
     SourceIntent,
-    SourceResolved,
     TerminalKind,
     TerminalReason,
     TerminalState,
@@ -28,7 +25,10 @@ from elspeth.web.composer.guided.state_machine import (
     mark_solver_exhausted,
     step_advance,
 )
-from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_from_dict
+from elspeth.web.composer.source_inspection import facts_from_dict
+
+_SOURCE_ID = "11111111-1111-4111-8111-111111111111"
+_OUTPUT_ID = "22222222-2222-4222-8222-222222222222"
 
 
 class TestTerminalState:
@@ -46,7 +46,7 @@ class TestTerminalState:
         assert t.reason is TerminalReason.USER_PRESSED_EXIT
 
     def test_terminal_state_is_frozen(self) -> None:
-        t = TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml=None)
+        t = TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml="pipeline: {}\n")
         with pytest.raises(AttributeError):
             t.kind = TerminalKind.EXITED_TO_FREEFORM  # type: ignore[misc]
 
@@ -241,171 +241,23 @@ class TestGuidedSession:
         s = GuidedSession(
             step=GuidedStep.STEP_3_TRANSFORMS,
             terminal=TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml="x:\n"),
-            history=(),
-            step_1_result=None,
-            step_2_result=None,
-            step_3_proposal=None,
         )
         assert s.terminal is not None
         assert s.terminal.kind is TerminalKind.COMPLETED
 
-    def test_guided_session_roundtrip_with_sink_intent(self) -> None:
-        """GuidedSession with step_2_sink_intent survives to_dict/from_dict round-trip.
-
-        Exercises the Tier-1 serialisation boundary: the session is persisted to
-        composer_meta["guided_session"] between turns, so the new staging field must
-        survive the round-trip without loss or corruption.
-        """
-        intent = SinkIntent(
-            plugin="json",
-            options={"path": "/data/out.jsonl", "schema": {"mode": "observed"}},
-        )
-        sess = GuidedSession(
-            step=GuidedStep.STEP_2_SINK,
-            history=(),
-            step_1_result=SourceResolved(
-                plugin="csv",
-                options={"path": "/data/in.csv"},
-                observed_columns=("col_a", "col_b"),
-                sample_rows=({"col_a": "x", "col_b": "y"},),
-            ),
-            step_2_result=None,
-            step_3_proposal=None,
-            terminal=None,
-            step_2_sink_intent=intent,
-        )
-        d = sess.to_dict()
-        restored = GuidedSession.from_dict(d)
-        assert restored == sess
-        assert restored.step_2_sink_intent is not None
-        assert restored.step_2_sink_intent.plugin == "json"
-        assert restored.step_2_sink_intent.options["path"] == "/data/out.jsonl"
-
-    def test_guided_session_roundtrip_with_sink_intent_none(self) -> None:
-        """GuidedSession with step_2_sink_intent=None round-trips cleanly.
-
-        Ensures the None case is serialised as None and reconstructed as None
-        (not absent or missing), which would crash from_dict's strict key read.
-        """
+    def test_initial_session_has_empty_plural_state(self) -> None:
         sess = GuidedSession.initial()
-        d = sess.to_dict()
-        restored = GuidedSession.from_dict(d)
+        restored = GuidedSession.from_dict(sess.to_dict())
+
         assert restored == sess
-        assert restored.step_2_sink_intent is None
-
-    def test_guided_session_roundtrip_with_source_intent(self) -> None:
-        """GuidedSession with step_1_source_intent survives to_dict/from_dict round-trip.
-
-        Exercises the Tier-1 serialisation boundary: the session is persisted to
-        composer_meta["guided_session"] between turns, so the new staging field must
-        survive the round-trip without loss or corruption.
-        """
-        intent = SourceIntent(
-            plugin="csv",
-            options={"path": "/data/in.csv", "schema": {"mode": "observed"}},
-            observed_columns=("col_a", "col_b"),
-            sample_rows=({"col_a": "x", "col_b": "y"},),
-        )
-        from dataclasses import replace
-
-        sess = replace(GuidedSession.initial(), step_1_source_intent=intent)
-        d = sess.to_dict()
-        restored = GuidedSession.from_dict(d)
-        assert restored == sess
-        assert restored.step_1_source_intent is not None
-        assert restored.step_1_source_intent.plugin == "csv"
-        assert restored.step_1_source_intent.observed_columns == ("col_a", "col_b")
-        assert restored.step_1_source_intent.sample_rows == ({"col_a": "x", "col_b": "y"},)
-
-    def test_guided_session_roundtrip_with_source_intent_none(self) -> None:
-        """GuidedSession with step_1_source_intent=None round-trips cleanly.
-
-        Ensures the None case is serialised as None and reconstructed as None
-        (not absent or missing), which would crash from_dict's strict key read.
-        """
-        sess = GuidedSession.initial()
-        d = sess.to_dict()
-        restored = GuidedSession.from_dict(d)
-        assert restored == sess
-        assert restored.step_1_source_intent is None
-
-    def test_guided_session_roundtrip_with_step_2_chosen_plugin(self) -> None:
-        """GuidedSession with step_2_chosen_plugin survives to_dict/from_dict round-trip.
-
-        Exercises the Tier-1 serialisation boundary for the new staging field.
-        The field is set in the SINGLE_SELECT→SCHEMA_FORM window at STEP_2_SINK;
-        it must survive the persist/restore cycle so GET /guided can rebuild
-        the correct SCHEMA_FORM on refresh.
-        """
-        from dataclasses import replace
-
-        sess = replace(GuidedSession.initial(), step_2_chosen_plugin="json")
-        d = sess.to_dict()
-        assert d["step_2_chosen_plugin"] == "json"  # serialised
-        restored = GuidedSession.from_dict(d)
-        assert restored == sess
-        assert restored.step_2_chosen_plugin == "json"
-
-    def test_guided_session_roundtrip_with_step_2_chosen_plugin_none(self) -> None:
-        """GuidedSession with step_2_chosen_plugin=None round-trips cleanly.
-
-        Ensures the None case is serialised as None (not absent), which would
-        crash from_dict's strict key read.
-        """
-        sess = GuidedSession.initial()
-        d = sess.to_dict()
-        assert d["step_2_chosen_plugin"] is None  # serialised as null
-        restored = GuidedSession.from_dict(d)
-        assert restored == sess
-        assert restored.step_2_chosen_plugin is None
-
-    def test_guided_session_roundtrip_with_step_1_chosen_plugin(self) -> None:
-        from dataclasses import replace
-
-        sess = replace(GuidedSession.initial(), step_1_chosen_plugin="csv")
-        d = sess.to_dict()
-        assert d["step_1_chosen_plugin"] == "csv"
-        restored = GuidedSession.from_dict(d)
-        assert restored == sess
-        assert restored.step_1_chosen_plugin == "csv"
-
-    def test_guided_session_roundtrip_with_step_1_chosen_plugin_none(self) -> None:
-        sess = GuidedSession.initial()
-        d = sess.to_dict()
-        assert d["step_1_chosen_plugin"] is None
-        restored = GuidedSession.from_dict(d)
-        assert restored == sess
-        assert restored.step_1_chosen_plugin is None
-
-    def test_guided_session_rejects_mutable_step_1_chosen_plugin(self) -> None:
-        with pytest.raises(TypeError, match="step_1_chosen_plugin must be str or None"):
-            dataclasses.replace(GuidedSession.initial(), step_1_chosen_plugin=[])
-
-    def test_guided_session_round_trips_inspection_facts(self) -> None:
-        facts = SourceInspectionFacts(
-            source_kind="csv",
-            redacted_identity={"filename": "input.csv"},
-            byte_range_inspected=(0, 128),
-            observed_headers=("name", "age"),
-            inferred_types={"name": "str", "age": "int"},
-            url_candidates=(),
-            sample_row_count=10,
-            warnings=(),
-        )
-        sess = dataclasses.replace(GuidedSession.initial(), step_1_inspection_facts=facts)
-        d = sess.to_dict()
-
-        restored = GuidedSession.from_dict(d)
-
-        assert restored.step_1_inspection_facts == facts
-
-    def test_guided_session_inspection_facts_default_none(self) -> None:
-        sess = GuidedSession.initial()
-        assert sess.step_1_inspection_facts is None
-
-    def test_guided_session_rejects_mutable_inspection_facts(self) -> None:
-        with pytest.raises(TypeError, match="step_1_inspection_facts must be SourceInspectionFacts or None"):
-            dataclasses.replace(GuidedSession.initial(), step_1_inspection_facts={})
+        assert restored.source_order == ()
+        assert restored.reviewed_sources == {}
+        assert restored.pending_source_intents == {}
+        assert restored.output_order == ()
+        assert restored.reviewed_outputs == {}
+        assert restored.pending_output_intents == {}
+        assert restored.active_proposal is None
+        assert restored.active_edit_target is None
 
     def test_source_inspection_facts_from_dict_is_tier1_strict(self) -> None:
         d = {
@@ -421,12 +273,12 @@ class TestGuidedSession:
         restored = facts_from_dict(d)
         assert restored.observed_headers == ("name", "age")
 
-    def test_guided_session_schema_version_is_7(self) -> None:
-        assert GUIDED_SESSION_SCHEMA_VERSION == 7
+    def test_guided_session_schema_version_is_8(self) -> None:
+        assert GUIDED_SESSION_SCHEMA_VERSION == 8
 
     def test_guided_session_to_dict_includes_schema_version(self) -> None:
         sess = GuidedSession.initial()
-        assert sess.to_dict()["schema_version"] == 7
+        assert sess.to_dict()["schema_version"] == 8
 
     def test_guided_session_requires_schema_version(self) -> None:
         current = GuidedSession.initial().to_dict()
@@ -472,9 +324,9 @@ class TestGuidedSession:
         with pytest.raises(InvariantError, match=r"TurnRecord\.from_dict"):
             GuidedSession.from_dict(current)
 
-    def test_guided_session_v3_requires_step_3_edit_index(self) -> None:
+    def test_guided_session_schema8_requires_source_order(self) -> None:
         current = GuidedSession.initial().to_dict()
-        del current["step_3_edit_index"]
+        del current["source_order"]
 
         with pytest.raises(InvariantError, match=r"GuidedSession\.from_dict"):
             GuidedSession.from_dict(current)
@@ -482,16 +334,11 @@ class TestGuidedSession:
     @pytest.mark.parametrize(
         ("field", "bad_value", "match"),
         [
-            ("schema_version", "7", "schema_version"),
-            ("schema_version", 7.0, "schema_version"),
+            ("schema_version", "8", "schema_version"),
+            ("schema_version", 8.0, "schema_version"),
             ("schema_version", True, "schema_version"),
-            ("step_1_chosen_plugin", 123, "step_1_chosen_plugin"),
-            ("step_2_chosen_plugin", ["json"], "step_2_chosen_plugin"),
             ("transition_consumed", "false", "transition_consumed"),
             ("transition_consumed", 1, "transition_consumed"),
-            ("step_3_edit_index", "0", "step_3_edit_index"),
-            ("step_3_edit_index", True, "step_3_edit_index"),
-            ("step_3_edit_index", -1, "step_3_edit_index"),
             ("chat_history", (), "chat_history"),
             ("chat_turn_seq", "0", "chat_turn_seq"),
             ("chat_turn_seq", True, "chat_turn_seq"),
@@ -535,6 +382,8 @@ class TestGuidedSession:
             "seq": 0,
             "step": GuidedStep.STEP_1_SOURCE.value,
             "ts_iso": "2026-05-13T12:00:00+00:00",
+            "assistant_message_kind": None,
+            "synthetic_failure_reason": None,
         }
         chat_entry[field] = bad_value
         d["chat_history"] = [chat_entry]
@@ -562,8 +411,10 @@ class TestGuidedSession:
             "seq": 0,
             "step": GuidedStep.STEP_1_SOURCE.value,
             "ts_iso": "2026-05-13T12:00:00+00:00",
-            field: bad_value,
+            "assistant_message_kind": None,
+            "synthetic_failure_reason": None,
         }
+        chat_entry[field] = bad_value
         d["chat_history"] = [chat_entry]
 
         with pytest.raises(InvariantError, match=r"GuidedSession\.from_dict"):
@@ -581,6 +432,7 @@ class TestGuidedSession:
             "step": GuidedStep.STEP_1_SOURCE.value,
             "ts_iso": "2026-05-13T12:00:00+00:00",
             "assistant_message_kind": "bogus",
+            "synthetic_failure_reason": None,
         }
         d["chat_history"] = [chat_entry]
 
@@ -625,13 +477,8 @@ class TestGuidedSession:
         assert restored.chat_history[1].assistant_message_kind == "synthetic_failure"
         assert restored.chat_history[1].synthetic_failure_reason == "quality_guard"
 
-    def test_guided_session_from_dict_chat_history_legacy_entry_without_kind_fields(self) -> None:
-        """A turn persisted BEFORE this field existed has no key at all.
-
-        Requirement: absence stays absence on the wire — None, never a
-        fabricated default — and from_dict must not crash on the missing keys
-        (unlike role/content/seq/step/ts_iso, these two are genuinely optional).
-        """
+    def test_guided_session_from_dict_rejects_legacy_chat_entry_without_kind_fields(self) -> None:
+        """Schema 8 has no nested compatibility reader for older chat rows."""
         d = GuidedSession.initial().to_dict()
         legacy_entry = {
             "role": ChatRole.ASSISTANT.value,
@@ -643,10 +490,8 @@ class TestGuidedSession:
         }
         d["chat_history"] = [legacy_entry]
 
-        restored = GuidedSession.from_dict(d)
-        assert len(restored.chat_history) == 1
-        assert restored.chat_history[0].assistant_message_kind is None
-        assert restored.chat_history[0].synthetic_failure_reason is None
+        with pytest.raises(InvariantError, match="missing keys"):
+            GuidedSession.from_dict(d)
 
 
 class TestGuidedSessionProfileFields:
@@ -793,14 +638,21 @@ class TestStepAdvance:
         (TestStep1InspectAndConfirmAccept).
         """
         intent = SourceIntent(
+            name="primary",
+            phase="plugin_options",
             plugin="csv",
-            options={"path": "/data/input.csv"},
-            observed_columns=("id", "name", "score"),
-            sample_rows=({"id": 1, "name": "Alice", "score": 99},),
+            options=None,
+            inspection_facts=None,
+            observed_columns=(),
+            sample_rows=(),
         )
         from dataclasses import replace
 
-        session = replace(GuidedSession.initial(), step_1_source_intent=intent)
+        session = replace(
+            GuidedSession.initial(),
+            source_order=(_SOURCE_ID,),
+            pending_source_intents={_SOURCE_ID: intent},
+        )
         response = _make_response(
             edited_values={
                 "columns": ["id", "name", "score"],
@@ -809,8 +661,7 @@ class TestStepAdvance:
         new_sess, next_turn, terminal, directives = step_advance(session, response, current_turn_type=TurnType.INSPECT_AND_CONFIRM)
         assert new_sess is session  # pure: no state change
         assert new_sess.step is GuidedStep.STEP_1_SOURCE
-        assert new_sess.step_1_result is None
-        assert new_sess.step_1_source_intent is intent  # untouched — not consumed here
+        assert new_sess.pending_source_intents[_SOURCE_ID] is intent
         assert terminal is None
         assert next_turn is None
         assert directives == []
@@ -858,20 +709,11 @@ class TestStepAdvance:
         Coverage for the resolve/validate/commit behaviour itself lives in
         tests/integration/web/composer/guided/test_respond.py.
         """
-        intent = SinkIntent(plugin="json", options={"path": "out.jsonl"})
+        intent = SinkIntent(name="main", phase="field_review", plugin="json", options={"path": "out.jsonl"})
         sess = GuidedSession(
             step=GuidedStep.STEP_2_SINK,
-            history=(),
-            step_1_result=SourceResolved(
-                plugin="csv",
-                options={},
-                observed_columns=("a", "b"),
-                sample_rows=({"a": "1", "b": "2"},),
-            ),
-            step_2_result=None,
-            step_3_proposal=None,
-            terminal=None,
-            step_2_sink_intent=intent,
+            output_order=(_OUTPUT_ID,),
+            pending_output_intents={_OUTPUT_ID: intent},
         )
         response: TurnResponse = {
             "chosen": ["a"],
@@ -886,27 +728,14 @@ class TestStepAdvance:
 
         assert new_sess is sess  # pure: no state change
         assert new_sess.step is GuidedStep.STEP_2_SINK
-        assert new_sess.step_2_result is None
-        assert new_sess.step_2_sink_intent is intent  # untouched — not consumed here
+        assert new_sess.pending_output_intents[_OUTPUT_ID] is intent
         assert next_turn is None
         assert terminal is None
         assert directives == []
 
     def test_step_2_single_select_and_schema_form_are_also_intra_step(self) -> None:
         """SINGLE_SELECT and SCHEMA_FORM at STEP_2_SINK are likewise pure self-loops."""
-        sess = GuidedSession(
-            step=GuidedStep.STEP_2_SINK,
-            history=(),
-            step_1_result=SourceResolved(
-                plugin="csv",
-                options={},
-                observed_columns=("a",),
-                sample_rows=({},),
-            ),
-            step_2_result=None,
-            step_3_proposal=None,
-            terminal=None,
-        )
+        sess = GuidedSession(step=GuidedStep.STEP_2_SINK)
         for turn_type in (TurnType.SINGLE_SELECT, TurnType.SCHEMA_FORM):
             response = _make_response(chosen=["json"])
             new_sess, next_turn, terminal, directives = step_advance(sess, response, current_turn_type=turn_type)
@@ -919,30 +748,9 @@ class TestStepAdvance:
     # Task 2.5 tests: Step 3 accept/edit/reject + terminal-failure paths
     # ---------------------------------------------------------------------------
 
-    def test_step_3_accept_chain_marks_session_with_proposal(self) -> None:
-        """PROPOSE_CHAIN at STEP_3: step_advance is a no-op; handler interprets.
-
-        The session must pass through unchanged (step_advance is pure; the
-        endpoint handler runs preview_pipeline and commits via tools.py).
-        The step_3_proposal must remain on the session if it was already set.
-        """
-        proposal = ChainProposal(
-            steps=({"plugin": "rename", "options": {}, "rationale": "normalise names"},),
-            why="The source columns need renaming before sink.",
-        )
-        sess = GuidedSession(
-            step=GuidedStep.STEP_3_TRANSFORMS,
-            history=(),
-            step_1_result=SourceResolved(
-                plugin="csv",
-                options={},
-                observed_columns=("a",),
-                sample_rows=({},),
-            ),
-            step_2_result=SinkResolved(outputs=()),
-            step_3_proposal=proposal,
-            terminal=None,
-        )
+    def test_step_3_legacy_turn_is_still_a_pure_self_loop_during_cutover(self) -> None:
+        """Task 3 replaces the protocol enum; Task 1 keeps the pure dispatcher safe meanwhile."""
+        sess = GuidedSession(step=GuidedStep.STEP_3_TRANSFORMS)
         response = _make_response()
         new_sess, next_turn, terminal, directives = step_advance(
             sess,
@@ -950,7 +758,6 @@ class TestStepAdvance:
             current_turn_type=TurnType.PROPOSE_CHAIN,
         )
         assert new_sess is sess  # pure: no state change
-        assert new_sess.step_3_proposal is proposal
         assert next_turn is None
         assert terminal is None
         assert directives == []
@@ -963,42 +770,13 @@ class TestStepAdvance:
         the emitter stamped an invalid type — that is a server-side bug
         (InvariantError), not a client protocol violation (ValueError).
         """
-        sess = GuidedSession(
-            step=GuidedStep.STEP_3_TRANSFORMS,
-            history=(),
-            step_1_result=SourceResolved(
-                plugin="csv",
-                options={},
-                observed_columns=("a",),
-                sample_rows=({},),
-            ),
-            step_2_result=SinkResolved(outputs=()),
-            step_3_proposal=None,
-            terminal=None,
-        )
+        sess = GuidedSession(step=GuidedStep.STEP_3_TRANSFORMS)
         response = _make_response()
         with pytest.raises(InvariantError, match="_advance_step_3"):
             step_advance(sess, response, current_turn_type=TurnType.MULTI_SELECT_WITH_CUSTOM)
 
     def test_step_3_schema_form_is_intra_step_for_edit_flow(self) -> None:
-        proposal = ChainProposal(
-            steps=({"plugin": "rename", "options": {}, "rationale": "normalise names"},),
-            why="The source columns need renaming before sink.",
-        )
-        sess = GuidedSession(
-            step=GuidedStep.STEP_3_TRANSFORMS,
-            history=(),
-            step_1_result=SourceResolved(
-                plugin="csv",
-                options={},
-                observed_columns=("a",),
-                sample_rows=({},),
-            ),
-            step_2_result=SinkResolved(outputs=()),
-            step_3_proposal=proposal,
-            terminal=None,
-            step_3_edit_index=0,
-        )
+        sess = GuidedSession(step=GuidedStep.STEP_3_TRANSFORMS)
         response = _make_response(edited_values={"plugin": "rename", "options": {}})
 
         new_sess, next_turn, terminal, directives = step_advance(
@@ -1120,14 +898,7 @@ class TestStateMachineInvariants:
         """control_signal='exit_to_freeform' terminates from ANY step, regardless of
         intra-step state. The terminal kind is EXITED_TO_FREEFORM and the reason is
         USER_PRESSED_EXIT — spec §5.3."""
-        sess = GuidedSession(
-            step=starting_step,
-            history=(),
-            step_1_result=None,
-            step_2_result=None,
-            step_3_proposal=None,
-            terminal=None,
-        )
+        sess = GuidedSession(step=starting_step)
         response: TurnResponse = {
             "chosen": None,
             "edited_values": None,

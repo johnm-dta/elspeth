@@ -208,23 +208,12 @@ class ChatTurn:
     the step at *emission* may differ from the step at *display* if the
     user back-buttons.
 
-    ``assistant_message_kind`` / ``synthetic_failure_reason`` (fp-review
-    C-2 persisted-history closure) mirror the discriminator carried on
-    ``GuidedChatResponse.assistant_message_kind`` for the LIVE turn, but
-    persisted per-turn so a reload can still tell a past synthetic failure
-    apart from a real reply. Both are ``None`` on every ``USER`` turn (not
-    applicable) and on any ``ASSISTANT`` turn persisted before this field
-    existed — legacy turns round-trip with both ``None``, never a
-    fabricated value. ``synthetic_failure_reason`` is only ever non-``None``
-    when ``assistant_message_kind == "synthetic_failure"``; it distinguishes
-    a scaffold-leak guard rejection (``"quality_guard"``) from provider /
-    solver unavailability (``"unavailable"``). Commit-seam rejections keep
-    the existing kind-only recovery behavior and leave this field ``None``;
-    their redaction-safe classifier lives in the chat-turn audit row
-    (``error_class="StepHandlerRejected"``). Deliberately asymmetric with the
-    LIVE ``GuidedChatResponse`` (kind-only, no reason field): the live
-    response's recovery affordance doesn't need a reason enum
-    (elspeth-0ff5003755).
+    ``assistant_message_kind`` / ``synthetic_failure_reason`` are an exact
+    persisted discriminator. User turns require both fields to be ``None``.
+    Assistant turns require a kind; real replies require a ``None`` reason,
+    while synthetic failures require one closed reason: quality rejection,
+    provider unavailability, or a safe response that was deliberately not
+    applied. There is no nested compatibility reader for omitted fields.
     """
 
     role: ChatRole
@@ -233,7 +222,7 @@ class ChatTurn:
     step: GuidedStep
     ts_iso: str
     assistant_message_kind: Literal["assistant", "synthetic_failure"] | None = None
-    synthetic_failure_reason: Literal["quality_guard", "unavailable"] | None = None
+    synthetic_failure_reason: Literal["quality_guard", "unavailable", "not_applied"] | None = None
 
     def __post_init__(self) -> None:
         if type(self.role) is not ChatRole:
@@ -246,14 +235,23 @@ class ChatTurn:
             raise ValueError(
                 f"assistant_message_kind must be 'assistant', 'synthetic_failure', or None; got {self.assistant_message_kind!r}"
             )
-        if self.synthetic_failure_reason is not None and self.synthetic_failure_reason not in ("quality_guard", "unavailable"):
+        if self.synthetic_failure_reason is not None and self.synthetic_failure_reason not in (
+            "quality_guard",
+            "unavailable",
+            "not_applied",
+        ):
             raise ValueError(
-                f"synthetic_failure_reason must be 'quality_guard', 'unavailable', or None; got {self.synthetic_failure_reason!r}"
+                "synthetic_failure_reason must be 'quality_guard', 'unavailable', 'not_applied', or None; "
+                f"got {self.synthetic_failure_reason!r}"
             )
         if self.synthetic_failure_reason is not None and self.assistant_message_kind != "synthetic_failure":
             raise ValueError("synthetic_failure_reason is set but assistant_message_kind is not 'synthetic_failure'")
         if self.role is ChatRole.USER and (self.assistant_message_kind is not None or self.synthetic_failure_reason is not None):
             raise ValueError("assistant_message_kind/synthetic_failure_reason are not applicable to a USER turn")
+        if self.role is ChatRole.ASSISTANT and self.assistant_message_kind is None:
+            raise ValueError("assistant_message_kind is required on an ASSISTANT turn")
+        if self.assistant_message_kind == "synthetic_failure" and self.synthetic_failure_reason is None:
+            raise ValueError("synthetic_failure_reason is required for a synthetic failure")
         if self.seq < 0:
             raise ValueError("seq must be >= 0")
         if type(self.content) is not str:

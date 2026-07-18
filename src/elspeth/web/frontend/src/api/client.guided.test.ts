@@ -14,9 +14,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { convertToGuided, getGuided, reenterGuided, respondGuided, revertToVersion, startGuidedSession } from "./client";
+import { chatGuided, convertToGuided, getGuided, reenterGuided, respondGuided, revertToVersion, startGuidedSession } from "./client";
 import type {
   GetGuidedResponse,
+  GuidedChatRequest,
+  GuidedChatResponse,
   GuidedRespondRequest,
   GuidedRespondResponse,
 } from "@/types/guided";
@@ -75,6 +77,7 @@ function makeRespondResponse(): GuidedRespondResponse {
     next_turn: {
       type: "single_select",
       step_index: 1,
+      turn_token: "b".repeat(64),
       payload: { options: ["csv", "json"] },
     },
     terminal: null,
@@ -130,6 +133,52 @@ describe("api/client guided functions", () => {
 
       const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
       expect(init.signal).toBe(controller.signal);
+    });
+  });
+
+  describe("chatGuided", () => {
+    it("sends only the retry identity, current turn token, and visible message", async () => {
+      const body: GuidedChatRequest = {
+        operation_id: "00000000-0000-4000-8000-000000000001",
+        turn_token: "a".repeat(64),
+        message: "Use CSV",
+      };
+      const responseBody: GuidedChatResponse = {
+        assistant_message: "CSV selected.",
+        assistant_message_kind: "assistant",
+        guided_session: makeGetGuidedResponse().guided_session,
+        next_turn: {
+          type: "schema_form",
+          step_index: 0,
+          turn_token: "b".repeat(64),
+          payload: { plugin: "csv" },
+        },
+        terminal: null,
+        composition_state: {
+          id: "state-1",
+          version: 1,
+          nodes: [],
+          edges: [],
+          sources: {},
+          outputs: [],
+          metadata: { name: null, description: null },
+        },
+      };
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => responseBody,
+      } as Response);
+
+      await expect(chatGuided("sess-1", body)).resolves.toEqual(responseBody);
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        "/api/sessions/sess-1/guided/chat",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify(body),
+        }),
+      );
     });
   });
 

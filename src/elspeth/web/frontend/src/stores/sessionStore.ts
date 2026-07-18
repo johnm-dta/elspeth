@@ -400,7 +400,7 @@ async function resyncAfterAbortedGuidedTurn(
     }
     return {
       guidedSession: resynced.guided_session,
-      guidedNextTurn: resynced.next_turn ?? s.guidedNextTurn,
+      guidedNextTurn: resynced.next_turn,
       guidedTerminal: resynced.terminal ?? s.guidedTerminal,
       compositionState: resynced.composition_state ?? s.compositionState,
     };
@@ -2219,7 +2219,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   async chatGuided(message: string, signal?: AbortSignal) {
-    const { activeSessionId, guidedSession } = get();
+    const { activeSessionId, guidedSession, guidedNextTurn } = get();
     // Offensive guards: caller must not invoke without an active session
     // or before guidedSession is loaded.  Per CLAUDE.md "proactively detect
     // invalid states and throw meaningful exceptions" — silent ?. would
@@ -2230,11 +2230,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (guidedSession === null) {
       throw new Error("chatGuided called before guidedSession loaded");
     }
+    if (guidedNextTurn === null) {
+      throw new Error("chatGuided called without a current unanswered turn");
+    }
     // Capture session + step identity before the await (stale-fetch guard
     // mirroring respondGuided / startGuided).  If the user switches
     // session or the wizard advances mid-flight, the response is dropped.
     const requestedSessionId = activeSessionId;
-    const requestedStep = guidedSession.step;
+    const requestedTurnToken = guidedNextTurn.turn_token;
+    const retry = acquireGuidedRetry("guided_chat", requestedSessionId, [
+      requestedTurnToken,
+      message,
+    ]);
 
     // Slice 5: chat history is server-authoritative — no optimistic local
     // append.  The route handler appends both user + assistant turns to
@@ -2261,25 +2268,55 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const response = await api.chatGuided(
         activeSessionId,
         {
+          operation_id: retry.operationId,
+          turn_token: requestedTurnToken,
           message,
-          step_index: requestedStep,
         },
         signal,
       );
+      clearGuidedRetry(retry);
       // Stale-fetch guard: drop the response if session changed mid-flight.
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
       set({
         guidedSession: response.guided_session,
-        guidedNextTurn: response.next_turn ?? get().guidedNextTurn,
-        guidedTerminal: response.terminal ?? get().guidedTerminal,
-        compositionState: response.composition_state ?? get().compositionState,
+        guidedNextTurn: response.next_turn,
+        guidedTerminal: response.terminal,
+        compositionState: response.composition_state,
         guidedChatPending: false,
       });
     } catch (err) {
+      const ambiguous = isAmbiguousGuidedRetryFailure(err);
+      if (!ambiguous) {
+        clearGuidedRetry(retry);
+      }
       if (get().activeSessionId !== requestedSessionId) {
         return;
+      }
+      const apiErr = err as ApiError;
+      if (isHttpConflict(err)) {
+        try {
+          const resynced = await api.getGuided(requestedSessionId);
+          if (get().activeSessionId !== requestedSessionId) {
+            return;
+          }
+          set({
+            guidedSession: resynced.guided_session,
+            guidedNextTurn: resynced.next_turn,
+            guidedTerminal: resynced.terminal,
+            compositionState: resynced.composition_state,
+            error: apiErr.detail ?? "The guided turn changed. Review the refreshed step and try again.",
+            guidedChatPending: false,
+          });
+          return;
+        } catch {
+          if (get().activeSessionId !== requestedSessionId) {
+            return;
+          }
+          // Preserve the original conflict as the actionable failure when the
+          // best-effort authoritative reload is itself unavailable.
+        }
       }
       // Cancellation / client-timeout path (elspeth-fb4464cdf0): the guided
       // ChatInput's Stop button (or the COMPOSE_TIMEOUT_MS guard) aborted the
@@ -2313,7 +2350,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // the cause. Backend details are egress-safe by construction (Tier-3
       // row data is never placed in an HTTP detail — see guided.py); a bare
       // network failure with no structured body falls back to the generic line.
-      const apiErr = err as ApiError;
       set({
         error: apiErr.detail ?? "Failed to send chat message. Please try again.",
         guidedChatPending: false,

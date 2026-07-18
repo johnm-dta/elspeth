@@ -1004,6 +1004,8 @@ describe("ChatPanelTutorialWorkspace", () => {
           seq: 1,
           step: "step_1_source",
           ts_iso: "2026-07-03T00:00:00Z",
+          assistant_message_kind: null,
+          synthetic_failure_reason: null,
         },
         {
           role: "assistant",
@@ -1011,6 +1013,8 @@ describe("ChatPanelTutorialWorkspace", () => {
           seq: 2,
           step: "step_1_source",
           ts_iso: "2026-07-03T00:00:01Z",
+          assistant_message_kind: "assistant",
+          synthetic_failure_reason: null,
         },
         {
           role: "user",
@@ -1018,6 +1022,8 @@ describe("ChatPanelTutorialWorkspace", () => {
           seq: 3,
           step: "step_2_sink",
           ts_iso: "2026-07-03T00:00:02Z",
+          assistant_message_kind: null,
+          synthetic_failure_reason: null,
         },
         {
           role: "assistant",
@@ -1025,6 +1031,8 @@ describe("ChatPanelTutorialWorkspace", () => {
           seq: 4,
           step: "step_2_sink",
           ts_iso: "2026-07-03T00:00:03Z",
+          assistant_message_kind: "assistant",
+          synthetic_failure_reason: null,
         },
       ],
       chat_turn_seq: 4,
@@ -1043,7 +1051,7 @@ describe("ChatPanelTutorialWorkspace", () => {
       },
       prefilled: { path: "results.jsonl" },
     };
-    return { type: "schema_form", step_index: 1, payload };
+    return { type: "schema_form", step_index: 1, turn_token: "a".repeat(64), payload };
   }
 
   it("has no axe violations on the two-column tutorial workspace", async () => {

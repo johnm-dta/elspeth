@@ -448,7 +448,7 @@ describe("ChatPanel mode discriminator", () => {
       ],
       allow_custom: false,
     };
-    return { type: "single_select", step_index: 0, payload };
+    return { type: "single_select", step_index: 0, turn_token: "a".repeat(64), payload };
   }
 
   it("renders guided-active surface (GuidedTurn + ExitToFreeformButton) when guidedSession is active and next turn is present", () => {
@@ -657,6 +657,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "t",
+      assistant_message_kind: null,
+      synthetic_failure_reason: null,
           },
         ],
       },
@@ -787,6 +789,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "t",
+            assistant_message_kind: "assistant",
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -965,6 +969,7 @@ describe("ChatPanel mode discriminator", () => {
       guidedNextTurn: {
         type: "single_select",
         step_index: 1,
+        turn_token: "b".repeat(64),
         payload: {
           question: "Which output plugin should we use?",
           options: [{ id: "json", label: "JSON", hint: null }],
@@ -1340,6 +1345,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "2026-05-12T10:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -1768,6 +1775,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "2026-05-12T10:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -1819,6 +1828,8 @@ describe("ChatPanel mode discriminator", () => {
               seq: 2,
               step: "step_1_source",
               ts_iso: "2026-05-12T10:00:01Z",
+              assistant_message_kind: "assistant",
+              synthetic_failure_reason: null,
             },
           ],
         },
@@ -1843,6 +1854,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "2026-05-12T10:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -1893,6 +1906,8 @@ describe("ChatPanel mode discriminator", () => {
               seq: 2,
               step: "step_1_source",
               ts_iso: "2026-05-12T10:00:01Z",
+              assistant_message_kind: "assistant",
+              synthetic_failure_reason: null,
             },
           ],
         },
@@ -2138,14 +2153,15 @@ describe("ChatPanel mode discriminator", () => {
         history: [],
         terminal: null,
         chat_history: [
-          { role: "user", content: "scrape this page", seq: 1, step: "step_1_source", ts_iso: "t" },
+          { role: "user", content: "scrape this page", seq: 1, step: "step_1_source", ts_iso: "t", assistant_message_kind: null, synthetic_failure_reason: null },
           {
             role: "assistant",
             content: "I'm unavailable right now; you can still use the wizard controls.",
             seq: 2,
             step: "step_1_source",
             ts_iso: "t",
-            assistant_message_kind: "synthetic_failure",
+assistant_message_kind: "synthetic_failure",
+            synthetic_failure_reason: "unavailable",
           },
         ],
         chat_turn_seq: 2,
@@ -2232,7 +2248,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 0,
             step: "step_1_source",
             ts_iso: "t",
-            assistant_message_kind: "synthetic_failure",
+assistant_message_kind: "synthetic_failure",
+            synthetic_failure_reason: "unavailable",
           },
         ],
         chat_turn_seq: 0,
@@ -2311,6 +2328,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "2026-07-03T00:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -2515,6 +2534,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_3_transforms",
             ts_iso: "2026-05-12T10:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -2554,6 +2575,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "2026-05-12T10:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -3286,7 +3309,7 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
       options,
       allow_custom: false,
     };
-    return { type: "single_select", step_index: stepIndex, payload };
+    return { type: "single_select", step_index: stepIndex, turn_token: "a".repeat(64), payload };
   }
 
   it("moves focus to the first button in chat-panel-guided-log when the turn first renders (step 0)", async () => {
@@ -3416,6 +3439,7 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
         guidedNextTurn: {
           type: "schema_form",
           step_index: 0,
+          turn_token: "b".repeat(64),
           payload: {
             mode: "plugin_options",
             plugin: "csv",
@@ -5076,6 +5100,7 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
       guidedNextTurn: {
         type: "single_select",
         step_index: 0,
+        turn_token: "a".repeat(64),
         payload: {
           question: "Pick one",
           options: [{ id: "a", label: "A", hint: null }],

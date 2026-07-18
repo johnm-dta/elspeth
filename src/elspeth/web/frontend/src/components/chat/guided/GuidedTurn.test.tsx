@@ -214,7 +214,7 @@ function makeTurn(
   payload: WireStageData,
 ): TurnPayload;
 function makeTurn(type: TurnPayload["type"], payload: unknown): TurnPayload {
-  return { type, step_index: 0, payload };
+  return { type, step_index: 0, turn_token: "a".repeat(64), payload };
 }
 
 // ── Suite 1: Turn-type routing correctness ───────────────────────────────────

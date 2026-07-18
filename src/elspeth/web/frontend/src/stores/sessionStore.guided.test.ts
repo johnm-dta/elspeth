@@ -68,6 +68,7 @@ const sampleGuidedSession: GuidedSession = {
 const sampleNextTurn: TurnPayload = {
   type: "single_select",
   step_index: 0,
+  turn_token: "a".repeat(64),
   payload: { options: ["csv", "jsonl"] },
 };
 
@@ -99,13 +100,14 @@ const sampleGetGuidedResponse: GetGuidedResponse = {
 
 const sampleRespondResponse: GuidedRespondResponse = {
   guided_session: { ...sampleGuidedSession, step: "step_2_sink" },
-  next_turn: { type: "single_select", step_index: 1, payload: {} },
+  next_turn: { type: "single_select", step_index: 1, turn_token: "b".repeat(64), payload: {} },
   terminal: null,
   composition_state: { ...sampleCompositionState, version: 2 },
 };
 
 const sampleChatResponse: GuidedChatResponse = {
   assistant_message: "Try inspecting the CSV header row.",
+  assistant_message_kind: "assistant",
   guided_session: {
     ...sampleGuidedSession,
     chat_history: [
@@ -115,6 +117,8 @@ const sampleChatResponse: GuidedChatResponse = {
         seq: 0,
         step: "step_1_source",
         ts_iso: "2026-05-13T00:00:00+00:00",
+        assistant_message_kind: null,
+        synthetic_failure_reason: null,
       },
       {
         role: "assistant",
@@ -122,32 +126,32 @@ const sampleChatResponse: GuidedChatResponse = {
         seq: 1,
         step: "step_1_source",
         ts_iso: "2026-05-13T00:00:00+00:00",
+        assistant_message_kind: "assistant",
+        synthetic_failure_reason: null,
       },
     ],
     chat_turn_seq: 2,
   },
-  next_turn: null,
+  next_turn: sampleNextTurn,
   terminal: null,
-  composition_state: null,
+  composition_state: sampleCompositionState,
 };
 
-const sampleSourceResolvingChatResponse: GuidedChatResponse = {
-  assistant_message: "I set this up as a CSV source.",
-  guided_session: { ...sampleGuidedSession, step: "step_2_sink" },
-  next_turn: { type: "single_select", step_index: 1, payload: {} },
+const sampleTransitioningChatResponse: GuidedChatResponse = {
+  assistant_message: "I prepared the CSV source form.",
+  assistant_message_kind: "assistant",
+  guided_session: sampleGuidedSession,
+  next_turn: {
+    type: "schema_form",
+    step_index: 0,
+    turn_token: "b".repeat(64),
+    payload: { plugin: "csv", prefilled: { schema: { mode: "observed" } } },
+  },
   terminal: null,
   composition_state: {
     ...sampleCompositionState,
     version: 2,
-    sources: {
-      source: {
-        plugin: "csv",
-        options: {
-          path: "/tmp/teal_colours.csv",
-          schema: { mode: "observed" },
-        },
-      },
-    },
+    sources: {},
   },
 };
 
@@ -1266,11 +1270,23 @@ describe("sessionStore — guided-mode fields and actions", () => {
     });
 
     it("throws when guidedSession is null", async () => {
-      useSessionStore.setState({ activeSessionId: "sess-1" });
+      useSessionStore.setState({ activeSessionId: RETRY_SESSION_ID });
 
       await expect(
         useSessionStore.getState().chatGuided("What columns are available?"),
       ).rejects.toThrow("chatGuided called before guidedSession loaded");
+    });
+
+    it("throws before transport when there is no current unanswered turn token", async () => {
+      useSessionStore.setState({
+        activeSessionId: RETRY_SESSION_ID,
+        guidedSession: sampleGuidedSession,
+        guidedNextTurn: null,
+      });
+
+      await expect(
+        useSessionStore.getState().chatGuided("What columns are available?"),
+      ).rejects.toThrow("chatGuided called without a current unanswered turn");
     });
 
     it("sets pending while in flight and clears it on success", async () => {
@@ -1282,18 +1298,20 @@ describe("sessionStore — guided-mode fields and actions", () => {
         }),
       );
       useSessionStore.setState({
-        activeSessionId: "sess-1",
+        activeSessionId: RETRY_SESSION_ID,
         guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
       });
 
       const chatPromise = useSessionStore.getState().chatGuided("What columns are available?");
 
       expect(useSessionStore.getState().guidedChatPending).toBe(true);
       expect(chatGuided).toHaveBeenCalledWith(
-        "sess-1",
+        RETRY_SESSION_ID,
         {
+          operation_id: expect.any(String),
+          turn_token: sampleNextTurn.turn_token,
           message: "What columns are available?",
-          step_index: "step_1_source",
         },
         undefined,
       );
@@ -1306,13 +1324,13 @@ describe("sessionStore — guided-mode fields and actions", () => {
       expect(state.guidedSession).toEqual(sampleChatResponse.guided_session);
     });
 
-    it("applies step-advancing chat response fields when source is resolved", async () => {
+    it("applies all authoritative fields from a pure chat transition", async () => {
       const { chatGuided } = await import("@/api/client");
       (chatGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
-        sampleSourceResolvingChatResponse,
+        sampleTransitioningChatResponse,
       );
       useSessionStore.setState({
-        activeSessionId: "sess-1",
+        activeSessionId: RETRY_SESSION_ID,
         guidedSession: sampleGuidedSession,
         guidedNextTurn: sampleNextTurn,
         compositionState: sampleCompositionState,
@@ -1322,18 +1340,42 @@ describe("sessionStore — guided-mode fields and actions", () => {
 
       const state = useSessionStore.getState();
       expect(state.guidedSession).toEqual(
-        sampleSourceResolvingChatResponse.guided_session,
+        sampleTransitioningChatResponse.guided_session,
       );
       expect(state.guidedNextTurn).toEqual(
-        sampleSourceResolvingChatResponse.next_turn,
+        sampleTransitioningChatResponse.next_turn,
       );
       expect(state.guidedTerminal).toEqual(
-        sampleSourceResolvingChatResponse.terminal,
+        sampleTransitioningChatResponse.terminal,
       );
       expect(state.compositionState).toEqual(
-        sampleSourceResolvingChatResponse.composition_state,
+        sampleTransitioningChatResponse.composition_state,
       );
       expect(state.guidedChatPending).toBe(false);
+    });
+
+    it("replaces nullable authoritative fields instead of retaining stale local values", async () => {
+      const { chatGuided } = await import("@/api/client");
+      (chatGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ...sampleChatResponse,
+        next_turn: null,
+        terminal: null,
+        composition_state: null,
+      });
+      useSessionStore.setState({
+        activeSessionId: RETRY_SESSION_ID,
+        guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
+        guidedTerminal: sampleTerminal,
+        compositionState: sampleCompositionState,
+      });
+
+      await useSessionStore.getState().chatGuided("What columns are available?");
+
+      const state = useSessionStore.getState();
+      expect(state.guidedNextTurn).toBeNull();
+      expect(state.guidedTerminal).toBeNull();
+      expect(state.compositionState).toBeNull();
     });
 
     it("drops response when active session changes before resolution", async () => {
@@ -1345,14 +1387,15 @@ describe("sessionStore — guided-mode fields and actions", () => {
         }),
       );
       useSessionStore.setState({
-        activeSessionId: "sess-A",
+        activeSessionId: RETRY_SESSION_ID,
         guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
       });
 
       const chatPromise = useSessionStore.getState().chatGuided("What columns are available?");
 
       useSessionStore.setState({
-        activeSessionId: "sess-B",
+        activeSessionId: RETRY_SESSION_B,
         guidedSession: null,
         guidedChatPending: false,
       });
@@ -1370,8 +1413,9 @@ describe("sessionStore — guided-mode fields and actions", () => {
         new Error("network failed"),
       );
       useSessionStore.setState({
-        activeSessionId: "sess-1",
+        activeSessionId: RETRY_SESSION_ID,
         guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
       });
 
       await useSessionStore.getState().chatGuided("What columns are available?");
@@ -1382,29 +1426,51 @@ describe("sessionStore — guided-mode fields and actions", () => {
       expect(state.guidedSession).toEqual(sampleGuidedSession);
     });
 
-    it("surfaces the backend detail on a structured failure", async () => {
-      // A 409 step-mismatch (the wizard advanced under the user) carries an
-      // actionable, egress-safe detail. Surface it verbatim rather than the
-      // blanket "failed" message, which forced the user to GUESS the cause.
+    it("reuses the operation id for an ambiguous retry of the same token and message", async () => {
       const { chatGuided } = await import("@/api/client");
-      const detail =
-        "step_index 'step_1_source' does not match the session's current step " +
-        "'step_2_sink'. Re-fetch GET /api/sessions/{id}/guided and retry.";
+      (chatGuided as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new TypeError("network failed after send"))
+        .mockResolvedValueOnce(sampleChatResponse);
+      useSessionStore.setState({
+        activeSessionId: RETRY_SESSION_ID,
+        guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
+      });
+
+      await useSessionStore.getState().chatGuided("What columns are available?");
+      await useSessionStore.getState().chatGuided("What columns are available?");
+
+      const requests = (chatGuided as ReturnType<typeof vi.fn>).mock.calls;
+      expect(requests).toHaveLength(2);
+      expect(requests[1][1].operation_id).toBe(requests[0][1].operation_id);
+      expect(requests[1][1].turn_token).toBe(sampleNextTurn.turn_token);
+    });
+
+    it("reloads current guided state on stale 409 without retrying the old token", async () => {
+      const { chatGuided, getGuided } = await import("@/api/client");
+      const detail = "turn_token does not identify the current unanswered turn.";
       (chatGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce({
         status: 409,
         detail,
       });
+      (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ...sampleGetGuidedResponse,
+        next_turn: { ...sampleNextTurn, turn_token: "c".repeat(64) },
+      });
       useSessionStore.setState({
-        activeSessionId: "sess-1",
+        activeSessionId: RETRY_SESSION_ID,
         guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
       });
 
       await useSessionStore.getState().chatGuided("What columns are available?");
 
       const state = useSessionStore.getState();
+      expect(chatGuided).toHaveBeenCalledTimes(1);
+      expect(getGuided).toHaveBeenCalledWith(RETRY_SESSION_ID);
       expect(state.error).toBe(detail);
       expect(state.guidedChatPending).toBe(false);
-      expect(state.guidedSession).toEqual(sampleGuidedSession);
+      expect(state.guidedNextTurn?.turn_token).toBe("c".repeat(64));
     });
 
     it("user cancel: abort resets pending and surfaces the cancelled copy (elspeth-fb4464cdf0)", async () => {
@@ -1419,8 +1485,9 @@ describe("sessionStore — guided-mode fields and actions", () => {
           }),
       );
       useSessionStore.setState({
-        activeSessionId: "sess-1",
+        activeSessionId: RETRY_SESSION_ID,
         guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
       });
 
       const controller = new AbortController();
@@ -1474,6 +1541,8 @@ describe("sessionStore — guided-mode fields and actions", () => {
             seq: 0,
             step: "step_1_source",
             ts_iso: "2026-07-11T00:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
           {
             role: "assistant",
@@ -1481,18 +1550,21 @@ describe("sessionStore — guided-mode fields and actions", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "2026-07-11T00:00:01Z",
+            assistant_message_kind: "assistant",
+            synthetic_failure_reason: null,
           },
         ],
       };
       (getGuided as ReturnType<typeof vi.fn>).mockResolvedValue({
         guided_session: durableGuided,
-        next_turn: null,
+        next_turn: sampleNextTurn,
         terminal: null,
-        composition_state: null,
+        composition_state: sampleCompositionState,
       });
       useSessionStore.setState({
-        activeSessionId: "sess-1",
+        activeSessionId: RETRY_SESSION_ID,
         guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
       });
 
       const controller = new AbortController();
@@ -1503,8 +1575,9 @@ describe("sessionStore — guided-mode fields and actions", () => {
       await chatPromise;
 
       const state = useSessionStore.getState();
-      expect(getGuided).toHaveBeenCalledWith("sess-1");
+      expect(getGuided).toHaveBeenCalledWith(RETRY_SESSION_ID);
       expect(state.guidedSession).toEqual(durableGuided);
+      expect(state.guidedNextTurn).toEqual(sampleNextTurn);
       expect(state.error).toBe(
         "Composition stopped. You can revise your request and send it again.",
       );
@@ -1533,13 +1606,14 @@ describe("sessionStore — guided-mode fields and actions", () => {
         updated_at: "2026-07-10T00:00:00Z",
       });
       useSessionStore.setState({
-        activeSessionId: "sess-1",
+        activeSessionId: RETRY_SESSION_ID,
         guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
       });
 
       await useSessionStore.getState().chatGuided("What columns are available?");
 
-      expect(fetchComposerProgress).toHaveBeenCalledWith("sess-1");
+      expect(fetchComposerProgress).toHaveBeenCalledWith(RETRY_SESSION_ID);
       expect(useSessionStore.getState().composerProgress).toEqual(
         expect.objectContaining({ phase: "calling_model" }),
       );
@@ -1568,8 +1642,9 @@ describe("sessionStore — guided-mode fields and actions", () => {
         updated_at: "2026-07-10T00:00:00Z",
       });
       useSessionStore.setState({
-        activeSessionId: "sess-A",
+        activeSessionId: RETRY_SESSION_ID,
         guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
       });
 
       const chatPromise = useSessionStore
@@ -1577,7 +1652,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
         .chatGuided("What columns are available?");
 
       useSessionStore.setState({
-        activeSessionId: "sess-B",
+        activeSessionId: RETRY_SESSION_B,
         guidedSession: null,
         guidedChatPending: false,
       });
@@ -1588,7 +1663,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
         fetchComposerProgress as ReturnType<typeof vi.fn>
       ).mock.calls.map((call) => call[0]);
       expect(calledSessions.length).toBeGreaterThan(0);
-      expect(calledSessions.every((id) => id === "sess-A")).toBe(true);
+      expect(calledSessions.every((id) => id === RETRY_SESSION_ID)).toBe(true);
     });
 
     it("discards a stale terminal snapshot at poll start; a fresh terminal snapshot after compose settles still surfaces (elspeth-a8eeebb3aa review follow-up)", async () => {
@@ -1644,8 +1719,9 @@ describe("sessionStore — guided-mode fields and actions", () => {
       fetchMock.mockResolvedValueOnce(freshComplete);
 
       useSessionStore.setState({
-        activeSessionId: "sess-1",
+        activeSessionId: RETRY_SESSION_ID,
         guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
       });
 
       const chatPromise = useSessionStore
@@ -1680,8 +1756,9 @@ describe("sessionStore — guided-mode fields and actions", () => {
           }),
       );
       useSessionStore.setState({
-        activeSessionId: "sess-1",
+        activeSessionId: RETRY_SESSION_ID,
         guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
       });
 
       const controller = new AbortController();
@@ -1911,18 +1988,14 @@ describe("sessionStore — guided-mode fields and actions", () => {
       const { respondGuided, getGuided, chatGuided } = await import("@/api/client");
       (respondGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce(turnNotEmittedError);
       (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sampleGetGuidedResponse);
-      (chatGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-        guided_session: sampleGuidedSession,
-        next_turn: null,
-        terminal: null,
-        composition_state: null,
-      });
+      (chatGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sampleChatResponse);
       // Fresh session id: the self-heal budget counter is module-scoped and
       // other tests here consume "sess-1"'s budget, which would skip the
       // self-heal and never set the notice this test needs.
       useSessionStore.setState({
-        activeSessionId: "sess-heal-clear",
+        activeSessionId: RETRY_SESSION_B,
         guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
       });
 
       const body: GuidedRespondRequest = {
@@ -1937,7 +2010,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
       await useSessionStore.getState().respondGuided(body); // sets the notice
       expect(useSessionStore.getState().guidedSelfHealNotice).not.toBeNull();
 
-      // The user sends an advisory chat instead of re-submitting the turn; a
+      // The user sends chat instead of re-submitting the turn; a
       // successful chat must not leave the "we've refreshed — try again" notice
       // pinned above it.
       await useSessionStore.getState().chatGuided("What columns are available?");

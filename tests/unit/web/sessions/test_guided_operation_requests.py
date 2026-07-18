@@ -47,7 +47,6 @@ def test_mutating_composer_requests_are_strict_and_extra_forbid(model_type) -> N
 @pytest.mark.parametrize(
     ("model_type", "payload"),
     [
-        (GuidedChatRequest, {"message": "Use CSV", "step_index": "step_1_source"}),
         (ForkSessionRequest, {"from_message_id": str(uuid4()), "new_message_content": "Try this"}),
     ],
 )
@@ -56,6 +55,27 @@ def test_pending_handlers_do_not_expose_unenforced_operation_id(model_type, payl
 
     assert "operation_id" not in type(request).model_fields
     assert type(request).model_config.get("strict") is not True
+
+
+def test_guided_chat_requires_strict_operation_and_turn_tokens() -> None:
+    valid = {
+        "operation_id": _OPERATION_ID,
+        "turn_token": "a" * 64,
+        "message": "Use CSV",
+    }
+
+    request = GuidedChatRequest.model_validate(valid)
+
+    assert request.model_dump(mode="python") == valid
+    assert type(request).model_config.get("strict") is True
+    assert type(request).model_config.get("extra") == "forbid"
+    for missing in ("operation_id", "turn_token"):
+        with pytest.raises(ValidationError, match=missing):
+            GuidedChatRequest.model_validate({key: value for key, value in valid.items() if key != missing})
+    with pytest.raises(ValidationError, match="turn_token"):
+        GuidedChatRequest.model_validate({**valid, "turn_token": None})
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        GuidedChatRequest.model_validate({**valid, "step_index": "step_1_source"})
 
 
 def test_guided_respond_requires_strict_operation_and_live_turn_tokens() -> None:

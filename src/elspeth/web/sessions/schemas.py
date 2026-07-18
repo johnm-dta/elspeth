@@ -422,12 +422,11 @@ class ChatTurnResponse(_StrictResponse):
     ``"assistant"``, ``step`` is a :class:`GuidedStep` value, ``ts_iso``
     is the ISO 8601 timestamp the turn was appended to ``chat_history``.
 
-    ``assistant_message_kind`` / ``synthetic_failure_reason`` (fp-review C-2
-    persisted-history closure) mirror the same-named fields on
-    :class:`elspeth.web.composer.guided.protocol.ChatTurn` — ``None`` on
-    every ``USER`` turn, on any turn persisted before this field existed, and
-    on commit-seam rejections whose redaction-safe classifier is carried by
-    the chat-turn audit row instead of this closed user-facing reason set.
+    ``assistant_message_kind`` / ``synthetic_failure_reason`` mirror the
+    exact persisted invariant on
+    :class:`elspeth.web.composer.guided.protocol.ChatTurn`: both are ``None``
+    only for user turns; assistant turns always carry a kind, and synthetic
+    failures always carry a closed reason.
     """
 
     role: str
@@ -436,7 +435,7 @@ class ChatTurnResponse(_StrictResponse):
     step: str
     ts_iso: str
     assistant_message_kind: Literal["assistant", "synthetic_failure"] | None
-    synthetic_failure_reason: Literal["quality_guard", "unavailable"] | None
+    synthetic_failure_reason: Literal["quality_guard", "unavailable", "not_applied"] | None
 
 
 class WorkflowProfileResponse(_StrictResponse):
@@ -602,27 +601,17 @@ class GuidedRespondResponse(_StrictResponse):
     composition_state: CompositionStateResponse | None
 
 
-class GuidedChatRequest(_RequestModel):
+class GuidedChatRequest(_GuidedOperationRequest):
     """Request body for POST /api/sessions/{id}/guided/chat.
 
-    Carries a free-text chat message scoped to the user's current wizard
-    step. **Not** a turn-answer — chat does not advance step state. The
-    backend invokes the per-step chat solver with a step-scoped skill
-    briefing and returns the LLM's advisory reply.
-
-    ``step_index`` is a plain string (not the ``GuidedStep`` enum) so a
-    stale client that sends an unknown step value fails with a 400 from
-    the route handler carrying a clear message, rather than a Pydantic
-    422. This mirrors the ``control_signal`` convention in
-    ``GuidedRespondRequest``.
-
-    Length cap of 4096 is enforced at the boundary; ``solve_step_chat``
-    contains a redundant inner empty-check as a defense-in-depth guard
-    against route handler misuse, but length is checked here only.
+    Retry identity and the exact current unanswered turn are mandatory. The
+    server derives the stage from its schema-8 checkpoint; clients cannot
+    restate a positional step. Length and visible-content validation remain at
+    this strict boundary.
     """
 
+    turn_token: str = pydantic.Field(min_length=64, max_length=64, pattern=r"[0-9a-f]{64}")
     message: str = pydantic.Field(min_length=1, max_length=4096)
-    step_index: str
 
     @field_validator("message")
     @classmethod
@@ -633,21 +622,10 @@ class GuidedChatRequest(_RequestModel):
 class GuidedChatResponse(_StrictResponse):
     """Response for POST /api/sessions/{id}/guided/chat.
 
-    ``assistant_message`` is the LLM's reply, or a fallback message on
-    failure. ``assistant_message_kind`` is the wire discriminator that used
-    to be missing (fp-review C-2): ``"assistant"`` for a real LLM reply,
-    ``"synthetic_failure"`` for a fallback message the server generated
-    instead of forwarding a model response. Synthetic-failure causes
-    (scaffold-leak guard rejection, commit-seam rejection, or provider /
-    solver unavailability) render distinct message copy; all surface the same
-    recovery affordance, so this discriminator deliberately stops at kind and
-    does not also carry a reason.
-
-    ``guided_session`` always carries the updated chat history. Most chat
-    remains advisory, but Step 1 schema-form chat may resolve a complete
-    source/data request; in that case ``next_turn`` and
-    ``composition_state`` mirror ``/respond`` so the frontend can advance
-    atomically.
+    ``assistant_message_kind`` distinguishes an assistant reply from a typed
+    synthetic failure. The four state fields are the authoritative result of
+    the atomic Chat settlement; clients replace their local view with them
+    exactly, including explicit nulls.
     """
 
     assistant_message: str

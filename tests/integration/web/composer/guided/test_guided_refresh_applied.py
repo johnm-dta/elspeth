@@ -1,52 +1,66 @@
-"""p1 Task 3 — apply via /guided/chat then GET /guided agree (in-place state)."""
+"""A pure schema-8 Chat transition and GET expose one authoritative turn."""
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from uuid import uuid4
 
-from tests.integration.web.composer.guided.test_step_3_e2e import (
-    _create_session,
-    _get_guided,
-)
-from tests.integration.web.composer.guided.test_step_chat import (
-    _fake_resolve_source_response_csv,
-    _seed_persisted_step1,
-)
+import pytest
+
+from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus
+from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution
+from elspeth.web.sessions._guided_step_chat import StepChatResult
+from elspeth.web.sessions.routes.composer import guided as guided_route
+from tests.integration.web.composer.guided.test_step_chat import _create_session
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
-def _post_chat(client: TestClient, session_id: str, *, message: str, step_index: str):
-    resp = client.post(
-        f"/api/sessions/{session_id}/guided/chat",
-        json={"message": message, "step_index": step_index},
+async def _source_selection_provider(**_kwargs: object) -> tuple[StepChatResult, Step1SourceChatResolution, None]:
+    resolution = Step1SourceChatResolution(
+        assistant_message="I prepared the CSV source form.",
+        plugin="csv",
+        filename="data.csv",
+        mime_type="text/csv",
+        content="name,email\nalice,a@example.test\n",
+        options={"schema": {"mode": "observed"}},
+        observed_columns=("name", "email"),
+        sample_rows=({"name": "alice", "email": "a@example.test"},),
+        on_validation_failure="discard",
     )
-    return resp.status_code, resp.json()
+    return (
+        StepChatResult(
+            assistant_message=resolution.assistant_message,
+            status=ComposerChatTurnStatus.SUCCESS,
+            latency_ms=1,
+            error_class=None,
+        ),
+        resolution,
+        None,
+    )
 
 
-async def _fake_acompletion(*_args: object, **_kwargs: object) -> object:
-    return _fake_resolve_source_response_csv()
-
-
-def test_chat_apply_then_get_render_the_same_step_1_turn(composer_test_client: TestClient) -> None:
+def test_chat_transition_then_get_render_the_same_step_1_turn(
+    composer_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = composer_test_client
     session_id = _create_session(client)
-    # Seed persisted state so GET /guided records the initial SINGLE_SELECT turn.
-    _seed_persisted_step1(client, session_id)
-    _get_guided(client, session_id)  # records the initial SINGLE_SELECT turn
-    with patch(
-        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-        new=_fake_acompletion,
-    ):
-        status, apply_body = _post_chat(client, session_id, message="make a csv source", step_index="step_1_source")
-    assert status == 200, apply_body
-    assert apply_body["guided_session"]["step"] == "step_1_source"
-    apply_turn = apply_body["next_turn"]
-    assert apply_turn["type"] == "schema_form"
-    # Refresh: GET must re-render the SAME populated turn (staging fields cleared,
-    # so _build_get_guided_turn hits the from-resolved sub-case, not the empty form).
-    get_body = _get_guided(client, session_id)
-    assert get_body["guided_session"]["step"] == "step_1_source"
-    assert get_body["next_turn"]["type"] == "schema_form"
-    assert get_body["next_turn"]["step_index"] == apply_turn["step_index"]
-    assert get_body["next_turn"]["payload"]["plugin"] == apply_turn["payload"]["plugin"]
-    assert get_body["next_turn"]["payload"]["prefilled"] == apply_turn["payload"]["prefilled"]
+    initial = client.get(f"/api/sessions/{session_id}/guided").json()
+    monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", _source_selection_provider)
+
+    response = client.post(
+        f"/api/sessions/{session_id}/guided/chat",
+        json={
+            "operation_id": str(uuid4()),
+            "turn_token": initial["next_turn"]["turn_token"],
+            "message": "Use CSV.",
+        },
+    )
+
+    assert response.status_code == 200, response.json()
+    response_json = response.json()
+    assert response_json["guided_session"]["step"] == "step_1_source"
+    assert response_json["next_turn"]["type"] == "schema_form"
+    assert response_json["composition_state"]["sources"] == {}
+    refreshed = client.get(f"/api/sessions/{session_id}/guided").json()
+    assert refreshed["next_turn"] == response_json["next_turn"]
+    assert refreshed["composition_state"] == response_json["composition_state"]

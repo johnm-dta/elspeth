@@ -141,17 +141,15 @@ class TestChatTurn:
                 ts_iso="2026-05-13T12:00:00+00:00",
             )
 
-    def test_assistant_message_kind_and_reason_default_to_none(self) -> None:
-        """Legacy-compatible construction: omitting the new fields is valid."""
-        turn = ChatTurn(
-            role=ChatRole.ASSISTANT,
-            content="Here is some advice.",
-            seq=1,
-            step=GuidedStep.STEP_1_SOURCE,
-            ts_iso="2026-05-13T12:00:00+00:00",
-        )
-        assert turn.assistant_message_kind is None
-        assert turn.synthetic_failure_reason is None
+    def test_assistant_message_kind_is_required(self) -> None:
+        with pytest.raises(ValueError, match="assistant_message_kind is required"):
+            ChatTurn(
+                role=ChatRole.ASSISTANT,
+                content="Here is some advice.",
+                seq=1,
+                step=GuidedStep.STEP_1_SOURCE,
+                ts_iso="2026-05-13T12:00:00+00:00",
+            )
 
     def test_accepts_real_assistant_reply_kind(self) -> None:
         turn = ChatTurn(
@@ -177,6 +175,29 @@ class TestChatTurn:
         )
         assert turn.assistant_message_kind == "synthetic_failure"
         assert turn.synthetic_failure_reason == "quality_guard"
+
+    def test_accepts_not_applied_synthetic_failure_reason(self) -> None:
+        turn = ChatTurn(
+            role=ChatRole.ASSISTANT,
+            content="I did not apply that generated source.",
+            seq=1,
+            step=GuidedStep.STEP_1_SOURCE,
+            ts_iso="2026-05-13T12:00:00+00:00",
+            assistant_message_kind="synthetic_failure",
+            synthetic_failure_reason="not_applied",
+        )
+        assert turn.synthetic_failure_reason == "not_applied"
+
+    def test_rejects_synthetic_failure_without_reason(self) -> None:
+        with pytest.raises(ValueError, match="synthetic_failure_reason is required"):
+            ChatTurn(
+                role=ChatRole.ASSISTANT,
+                content="I could not apply that response.",
+                seq=1,
+                step=GuidedStep.STEP_1_SOURCE,
+                ts_iso="2026-05-13T12:00:00+00:00",
+                assistant_message_kind="synthetic_failure",
+            )
 
     def test_rejects_unknown_assistant_message_kind(self) -> None:
         with pytest.raises(ValueError, match="assistant_message_kind"):
@@ -477,18 +498,18 @@ class TestGuidedSession:
         assert restored.chat_history[1].assistant_message_kind == "synthetic_failure"
         assert restored.chat_history[1].synthetic_failure_reason == "quality_guard"
 
-    def test_guided_session_from_dict_rejects_legacy_chat_entry_without_kind_fields(self) -> None:
-        """Schema 8 has no nested compatibility reader for older chat rows."""
+    def test_guided_session_from_dict_rejects_chat_entry_without_kind_fields(self) -> None:
+        """Missing schema-8 discriminator fields fail the integrity check."""
         d = GuidedSession.initial().to_dict()
-        legacy_entry = {
+        incomplete_entry = {
             "role": ChatRole.ASSISTANT.value,
-            "content": "a pre-migration reply",
+            "content": "an incomplete reply",
             "seq": 0,
             "step": GuidedStep.STEP_1_SOURCE.value,
             "ts_iso": "2026-05-13T12:00:00+00:00",
             # No "assistant_message_kind" / "synthetic_failure_reason" keys.
         }
-        d["chat_history"] = [legacy_entry]
+        d["chat_history"] = [incomplete_entry]
 
         with pytest.raises(InvariantError, match="missing keys"):
             GuidedSession.from_dict(d)
@@ -623,19 +644,11 @@ def _wire_response(control: ControlSignal | None = None) -> TurnResponse:
 
 class TestStepAdvance:
     def test_inspect_and_confirm_is_intra_step_no_advance(self) -> None:
-        """_advance_step_1 is a pure self-loop for INSPECT_AND_CONFIRM — it never
-        advances step or sets step_1_result.
+        """Step 1 remains unchanged until the schema-8 transition is settled.
 
-        elspeth-948eb9c0b8 C-3(b) mirror fix (same shape as the Step 2 fix):
-        resolving step_1_source_intent + edited_values["columns"] into a
-        SourceResolved, and the handle_step_1_source commit, both moved to the
-        dispatcher (_dispatch_guided_respond's STEP_1_SOURCE intra-step
-        INSPECT_AND_CONFIRM branch in sessions/routes/_helpers.py) so that
-        guided.step / step_1_result are only ever set once the commit is known
-        to have succeeded — mirroring _advance_step_2/_advance_step_3/_advance_step_4.
-        Coverage for the resolve/validate/commit behaviour itself lives in
-        tests/integration/web/composer/guided/test_respond.py
-        (TestStep1InspectAndConfirmAccept).
+        ``step_advance`` is pure for this source-stage response. The route
+        projects the response with the source transition authority and commits
+        the resulting guided state through the atomic operation settlement.
         """
         intent = SourceIntent(
             name="primary",
@@ -696,18 +709,11 @@ class TestStepAdvance:
     # ---------------------------------------------------------------------------
 
     def test_step_2_multi_select_is_intra_step_no_advance(self) -> None:
-        """_advance_step_2 is a pure self-loop for MULTI_SELECT_WITH_CUSTOM — it
-        never advances step or sets step_2_result.
+        """Step 2 remains unchanged until the schema-8 transition is settled.
 
-        elspeth-948eb9c0b8 C-3(b): resolving chosen + custom_inputs +
-        step_2_sink_intent into a SinkOutputResolved, the fail-closed
-        passthrough validation, and the handle_step_2_sink commit all moved to
-        the dispatcher (_dispatch_guided_respond's STEP_2_SINK intra-step
-        MULTI_SELECT_WITH_CUSTOM branch in sessions/routes/_helpers.py) so
-        that guided.step / step_2_result are only ever set once the commit is
-        known to have succeeded — mirroring _advance_step_3 / _advance_step_4.
-        Coverage for the resolve/validate/commit behaviour itself lives in
-        tests/integration/web/composer/guided/test_respond.py.
+        ``step_advance`` is pure for this output-stage response. The route
+        projects the response with the sink transition authority and commits
+        the resulting guided state through the atomic operation settlement.
         """
         intent = SinkIntent(name="main", phase="field_review", plugin="json", options={"path": "out.jsonl"})
         sess = GuidedSession(

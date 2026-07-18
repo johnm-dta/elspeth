@@ -88,15 +88,9 @@ export interface TerminalState {
  * failure could become the "Current decision" headline (guidedRationale.ts)
  * or render with the normal "ELSPETH said:" bubble treatment
  * (GuidedChatHistory.tsx). Only meaningful on `role: "assistant"` entries.
- * The backend always emits this key (ChatTurnResponse declares it required
- * with a `| null` domain — schemas.py), so on the wire the value is one of
- * "assistant", "synthetic_failure", or null; the key is never absent. null
- * is what a user turn, and any turn persisted before this field existed,
- * carries. Treat null (and, defensively, an absent key on a client-built
- * turn) as a normal assistant turn — this is documented legacy/user
- * behaviour, not a fabricated default. Detect a real failure with
- * `=== "synthetic_failure"`, never with an absence/`in` check (the wire
- * never omits the key, so an absence check would never fire).
+ * The backend always emits both closed discriminator keys. User turns carry
+ * null for both; real assistant turns carry `"assistant"` and a null reason;
+ * synthetic failures carry their kind and an allowlisted non-null reason.
  */
 export interface ChatTurn {
   role: "user" | "assistant";
@@ -104,7 +98,8 @@ export interface ChatTurn {
   seq: number;
   step: GuidedStep;
   ts_iso: string;
-  assistant_message_kind?: "assistant" | "synthetic_failure" | null;
+  assistant_message_kind: "assistant" | "synthetic_failure" | null;
+  synthetic_failure_reason: "quality_guard" | "unavailable" | "not_applied" | null;
 }
 
 /**
@@ -140,6 +135,7 @@ export interface GuidedSession {
 export interface TurnPayload {
   type: TurnType;
   step_index: number;
+  turn_token: string;
   payload: unknown;
 }
 
@@ -198,22 +194,21 @@ export interface TutorialSampleResponse {
 /**
  * Request body for POST /api/sessions/{id}/guided/chat (schemas.py — GuidedChatRequest).
  *
- * `step_index` is the wire form of the user's current step. The server
- * validates it against the live session.step and returns 409 on mismatch
- * (wizard advanced under the client). `message` is capped at 4096 chars
- * server-side; the frontend lets ChatInput's native maxLength enforce the
- * same limit before submit.
+ * The server derives the stage from the checkpoint occurrence identified by
+ * `turn_token`; the client cannot restate a positional step. `operation_id`
+ * remains stable across an ambiguous transport retry of this exact request.
  */
 export interface GuidedChatRequest {
+  operation_id: string;
+  turn_token: string;
   message: string;
-  step_index: GuidedStep;
 }
 
 /**
  * Response for POST /api/sessions/{id}/guided/chat (schemas.py — GuidedChatResponse).
  *
- * `assistant_message` is the LLM's advisory reply, or the synthetic "I'm
- * unavailable" message on transient LLM failure. `assistant_message_kind`
+ * `assistant_message` is the bounded assistant reply or a synthetic failure
+ * message. `assistant_message_kind`
  * (C-2) is the top-level discriminator for THIS response's reply —
  * `"synthetic_failure"` covers both a scaffold-guard rejection and provider
  * unavailability; the same value is mirrored onto the tail entry of
@@ -221,20 +216,14 @@ export interface GuidedChatRequest {
  * what the UI actually renders from (GuidedChatHistory reads
  * `guidedSession.chat_history`, not this envelope field directly).
  *
- * Typed optional rather than required: the backend field is landing in the
- * same wave as this frontend change, and existing fixtures/tests construct
- * `GuidedChatResponse` literals without it. Absent ⇒ treat as `"assistant"`
- * — the same documented legacy convention as ChatTurn's field, not a
- * fabricated default (a POST response with the discriminator omitted has
- * no failure information to hide; the omission just predates the wave).
- *
- * Most chat is advisory and returns null for the turn/state fields. Step 1
- * source chat may resolve a complete inline source request; then these fields
- * mirror `/guided/respond` so the store can advance atomically.
+ * All four state fields are the server's authoritative post-operation view.
+ * Step 1/2 configuration suggestions may project a pure schema-8 transition;
+ * generated inline source bytes remain non-applying until blob custody can
+ * participate in the same atomic settlement.
  */
 export interface GuidedChatResponse {
   assistant_message: string;
-  assistant_message_kind?: "assistant" | "synthetic_failure";
+  assistant_message_kind: "assistant" | "synthetic_failure";
   guided_session: GuidedSession;
   next_turn: TurnPayload | null;
   terminal: TerminalState | null;

@@ -850,17 +850,14 @@ export async function convertToGuided(
 /**
  * Post a free-text chat message scoped to the user's current wizard step.
  *
- * Most chat is advisory: the server invokes the per-step chat solver with
- * the step-scoped skill briefing and returns the LLM's reply. Step 1 source
- * chat can also resolve a complete inline source request and return updated
- * `next_turn` / `composition_state` fields. Server-side: see
- * _guided_step_chat.solve_step_chat_with_auto_drop; on transient LLM failure
- * the server returns 200 with a synthetic "I'm unavailable" message rather
- * than failing the request.
+ * The server runs bounded Step 1/2 provider work, projects supported results
+ * through the schema-8 transition authority, and returns the authoritative
+ * post-settlement session, turn, terminal, and composition state. Generated
+ * inline source bytes are reported as a typed non-applying failure until blob
+ * custody can join the same atomic settlement.
  *
- * The `step_index` carried in the body lets the server detect that the
- * wizard has advanced under the client (returns 409) so a stale chat
- * does not arrive at the wrong step's skill briefing.
+ * The required turn token binds the request to the server-held current
+ * unanswered occurrence; stale tokens return 409 before provider work.
  */
 export async function chatGuided(
   sessionId: string,

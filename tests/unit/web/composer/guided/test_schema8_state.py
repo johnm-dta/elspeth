@@ -1156,8 +1156,19 @@ def test_chat_history_sequence_is_unique_increasing_and_not_ahead_of_counter() -
         step=GuidedStep.STEP_1_SOURCE,
         ts_iso="2026-07-18T00:00:00Z",
     )
-    duplicate = replace(first, role=ChatRole.ASSISTANT, content="duplicate")
-    earlier = replace(first, role=ChatRole.ASSISTANT, content="earlier", seq=0)
+    duplicate = replace(
+        first,
+        role=ChatRole.ASSISTANT,
+        content="duplicate",
+        assistant_message_kind="assistant",
+    )
+    earlier = replace(
+        first,
+        role=ChatRole.ASSISTANT,
+        content="earlier",
+        seq=0,
+        assistant_message_kind="assistant",
+    )
 
     with pytest.raises(InvariantError, match="strictly increasing"):
         replace(GuidedSession.initial(), chat_history=(first, duplicate), chat_turn_seq=1)

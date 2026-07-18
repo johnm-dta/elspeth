@@ -640,9 +640,11 @@ def test_respond_handler_has_no_legacy_or_unfenced_mutation_calls() -> None:
 
 
 def test_respond_settlement_shares_chat_lock_and_never_polls_under_it() -> None:
+    from elspeth.web.sessions.routes.composer import guided_chat_atomic
+
     tree = ast.parse(inspect.getsource(guided_route.post_guided_respond))
     route = next(node for node in ast.walk(tree) if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)))
-    chat_tree = ast.parse(inspect.getsource(guided_route.post_guided_chat))
+    chat_tree = ast.parse(inspect.getsource(guided_chat_atomic.post_guided_chat_schema8))
     chat_route = next(node for node in ast.walk(chat_tree) if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)))
     offenders: list[int] = []
     settlement_under_compose = False

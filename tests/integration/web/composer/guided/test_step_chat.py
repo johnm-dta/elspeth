@@ -4,9 +4,8 @@ Verifies the end-to-end contract of the per-step chat endpoint:
 
 - Success path: a fresh session at step_1 with a mocked LLM returns the
   assistant message and echoes the unchanged guided_session.
-- Step mismatch: client sends a step_index that doesn't match the
-  session's current step → 409 (the wizard advanced under the user).
-- Unknown step_index value: malformed enum string → 400.
+- Stale turn token: a token that is not the current server-held turn → 409.
+- Legacy step_index field: strict schema-8 request validation → 422.
 - Terminal session: chat against a session in a terminal state → 409.
 - No guided_session attached: 400 with the "use /messages" guidance.
 - Pydantic boundary: empty / oversize message → 422 (the route never
@@ -27,12 +26,11 @@ import json
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from unittest.mock import patch
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
-from elspeth.web.composer.guided.state_machine import GuidedSession, TerminalReason, TerminalState
-from elspeth.web.composer.redaction import REDACTED_BLOB_SOURCE_PATH
+from elspeth.web.composer.guided.state_machine import TerminalReason, TerminalState
 from tests.integration.web.composer.guided.test_step_3_e2e import _outputs_path
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
@@ -103,12 +101,7 @@ def _seed_persisted_state(client: TestClient, session_id: str) -> dict:
     """
     get_resp = client.get(f"/api/sessions/{session_id}/guided")
     assert get_resp.status_code == 200, get_resp.json()
-    respond_resp = client.post(
-        f"/api/sessions/{session_id}/guided/respond",
-        json={"chosen": ["csv"]},
-    )
-    assert respond_resp.status_code == 200, respond_resp.json()
-    return respond_resp.json()
+    return _post_respond(client, session_id, chosen=["csv"])
 
 
 def _seed_persisted_step1(client: TestClient, session_id: str) -> None:
@@ -173,8 +166,34 @@ def _fake_source_resolution_tool_call(arguments: dict) -> SimpleNamespace:
 
 
 def _post_chat(client: TestClient, session_id: str, **kwargs) -> tuple[int, dict]:
+    guided = client.get(f"/api/sessions/{session_id}/guided")
+    next_turn = guided.json().get("next_turn") if guided.status_code == 200 else None
+    kwargs.setdefault("operation_id", str(uuid4()))
+    kwargs.setdefault("turn_token", next_turn["turn_token"] if next_turn is not None else "0" * 64)
     resp = client.post(f"/api/sessions/{session_id}/guided/chat", json=kwargs)
     return resp.status_code, resp.json()
+
+
+def _post_respond(client: TestClient, session_id: str, **kwargs) -> dict:
+    guided = client.get(f"/api/sessions/{session_id}/guided")
+    assert guided.status_code == 200, guided.json()
+    turn = guided.json()["next_turn"]
+    assert turn is not None
+    body = {
+        "operation_id": str(uuid4()),
+        "turn_token": turn["turn_token"],
+        "chosen": None,
+        "edited_values": None,
+        "custom_inputs": None,
+        "control_signal": None,
+        "proposal_id": None,
+        "draft_hash": None,
+        "edit_target": None,
+    }
+    body.update(kwargs)
+    response = client.post(f"/api/sessions/{session_id}/guided/respond", json=body)
+    assert response.status_code == 200, response.json()
+    return response.json()
 
 
 def _chat_turn_audit_bodies(client: TestClient, session_id: str) -> list[dict]:
@@ -257,7 +276,6 @@ class TestStepChatSuccess:
                 composer_test_client,
                 session_id,
                 message="what columns are in this CSV?",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
@@ -286,7 +304,6 @@ class TestStepChatSuccess:
                 composer_test_client,
                 session_id,
                 message="hello",
-                step_index="step_1_source",
             )
 
         assert body["guided_session"]["history"] == history_before
@@ -310,7 +327,6 @@ class TestStepChatSuccess:
                 composer_test_client,
                 session_id,
                 message="any nulls in col_a?",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
@@ -352,7 +368,6 @@ class TestStepChatSuccess:
                 composer_test_client,
                 session_id,
                 message="ping",
-                step_index="step_1_source",
             )
 
         # Force a fresh load via GET /guided (reads through state_from_record).
@@ -386,7 +401,6 @@ class TestStepChatSuccess:
                 composer_test_client,
                 session_id,
                 message="ping",
-                step_index="step_1_source",
             )
 
         # The content carries the slim summary fields.
@@ -421,7 +435,6 @@ class TestStepChatSuccess:
                 composer_test_client,
                 session_id,
                 message="ping",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
@@ -451,7 +464,6 @@ class TestStepChatSuccess:
                 composer_test_client,
                 session_id,
                 message="ping",
-                step_index="step_1_source",
             )
 
         audit_bodies = _chat_turn_audit_bodies(composer_test_client, session_id)
@@ -473,7 +485,7 @@ class TestStepChatSuccess:
             _CHAT_SOLVER_ACOMPLETION,
             new=_ReturningLiteLLMCompletion(_fake_llm_reply("first reply")),
         ):
-            _post_chat(composer_test_client, session_id, message="first", step_index="step_1_source")
+            _post_chat(composer_test_client, session_id, message="first")
         with patch(
             _CHAT_SOLVER_ACOMPLETION,
             new=_ReturningLiteLLMCompletion(_fake_llm_reply("second reply")),
@@ -482,7 +494,6 @@ class TestStepChatSuccess:
                 composer_test_client,
                 session_id,
                 message="second",
-                step_index="step_1_source",
             )
 
         # After two chats: seq advances 0,1,2,3 then next=4.
@@ -495,16 +506,16 @@ class TestStepChatSuccess:
 class TestStep1SourceResolution:
     def _drive_to_step_1_schema_form(self, client: TestClient, session_id: str) -> None:
         _seed_guided_session(client, session_id)
-        resp = client.post(f"/api/sessions/{session_id}/guided/respond", json={"chosen": ["csv"]})
-        assert resp.status_code == 200, resp.json()
-        assert resp.json()["next_turn"]["type"] == "schema_form"
+        body = _post_respond(client, session_id, chosen=["csv"])
+        assert body["next_turn"]["type"] == "schema_form"
 
-    def test_fresh_step_1_chat_uses_source_resolver(self, composer_test_client: TestClient) -> None:
-        """A first chat submit can build the source without a seeded state row."""
+    def test_fresh_step_1_chat_uses_source_resolver_for_current_plugin_turn(self, composer_test_client: TestClient) -> None:
+        """A first Chat can answer only the current schema-8 plugin turn."""
         session_id = _create_session(composer_test_client)
         entry = _seed_guided_session(composer_test_client, session_id)
         assert entry["composition_state"] is None
-        assert entry["guided_session"]["history"] == []
+        assert len(entry["guided_session"]["history"]) == 1
+        assert entry["guided_session"]["history"][0]["response_hash"] is None
 
         completion = _ReturningLiteLLMCompletion(_fake_resolve_source_response_csv())
         with patch(_CHAT_SOLVER_ACOMPLETION, new=completion):
@@ -512,13 +523,14 @@ class TestStep1SourceResolution:
                 composer_test_client,
                 session_id,
                 message="make a csv source with a text column",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
         assert len(completion.calls) == 1
         assert any(tool["function"]["name"] == "resolve_source" for tool in completion.calls[0]["tools"])
-        assert body["composition_state"]["sources"]["source"]["plugin"] == "csv"
+        assert body["next_turn"]["type"] == "schema_form"
+        assert body["next_turn"]["payload"]["plugin"] == "csv"
+        assert not body["composition_state"]["sources"]
 
     def test_step_1_chat_commits_source_in_place_and_rerenders_form(
         self,
@@ -545,40 +557,21 @@ class TestStep1SourceResolution:
                 composer_test_client,
                 session_id,
                 message="can we make it just a list of ten random colours, 5 that go well with teal and 5 that go badly with teal",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
-        assert body["assistant_message"] == "I set this up as a CSV source."
-        # Apply-in-place: the phase stays STEP_1 (revise model), and the form
-        # re-renders populated from the committed source.
+        assert body["assistant_message"] == (
+            "I did not apply generated source content. Review the current source form and submit it through the wizard controls."
+        )
+        assert body["assistant_message_kind"] == "synthetic_failure"
+        assert body["guided_session"]["chat_history"][-1]["synthetic_failure_reason"] == "not_applied"
+        # Applying generated bytes requires a future atomic blob participant.
+        # The current form remains authoritative and no source is committed.
         assert body["guided_session"]["step"] == "step_1_source"
         assert body["next_turn"]["type"] == "schema_form"
         assert body["next_turn"]["step_index"] == 0
-        # The re-rendered form is POPULATED from the committed source (the whole
-        # point of LLM-primary: the form shows what was just built).
         assert body["next_turn"]["payload"]["plugin"] == "csv"
-        # Security: the re-rendered form masks the blob-backed source's absolute
-        # storage_path behind a blob:<ref> sentinel (handle_step_1_source re-resolves
-        # it on commit), so the deploy path + OS username never reach the wire.
-        assert body["next_turn"]["payload"]["prefilled"]["path"].startswith("blob:")
-        assert not body["next_turn"]["payload"]["prefilled"]["path"].endswith("_teal_colours.csv")
-        assert body["composition_state"]["sources"]["source"]["plugin"] == "csv"
-        source_options = body["composition_state"]["sources"]["source"]["options"]
-        assert source_options["schema"]["mode"] == "observed"
-        # composition_state is ALSO an egress surface, on two channels the
-        # source-keyed B4 redaction misses for guided blob sources (the committed
-        # source carries no blob_ref). redact_guided_snapshot_storage_paths closes
-        # both, cross-referencing the GuidedSession snapshot's retained blob_ref:
-        #   1. the committed source path, and
-        #   2. the composer_meta GuidedSession snapshot path.
-        assert source_options["path"] == REDACTED_BLOB_SOURCE_PATH
-        snapshot_options = body["composition_state"]["composer_meta"]["guided_session"]["step_1_result"]["options"]
-        assert snapshot_options["path"] == REDACTED_BLOB_SOURCE_PATH
-        # The snapshot keeps blob_ref (it is the redaction signal, not sensitive).
-        assert snapshot_options["blob_ref"]
-        # Belt-and-braces: the absolute blob path appears NOWHERE in the response
-        # body, at any depth or field.
+        assert not body["composition_state"]["sources"]
         assert "_teal_colours.csv" not in json.dumps(body)
         audits = _llm_call_audit_bodies(composer_test_client, session_id)
         assert len(audits) == 1, audits
@@ -604,25 +597,19 @@ class TestStep1SourceResolution:
                 client,
                 session_id,
                 message="make a csv source with a text column",
-                step_index="step_1_source",
             )
         assert status == 200, body
-        # Drove the phase from entry: committed in place, stayed STEP_1, populated form.
+        # The pure schema-8 transition answers the current plugin turn only.
         assert body["guided_session"]["step"] == "step_1_source"
         assert body["next_turn"]["type"] == "schema_form"
         assert body["next_turn"]["step_index"] == 0
         assert body["next_turn"]["payload"]["plugin"] == "csv"
-        assert body["composition_state"]["sources"]["source"]["plugin"] == "csv"
-        # M6: the SINGLE_SELECT entry record, resolved via chat, carries a DISPLAY
-        # summary so "Decisions so far" reads "Configured: csv" instead of a bare
-        # "Decided". response_hash stays None — the chat IS the answer (recorded as
-        # a ChatTurn), not a widget response, so we do not fabricate one.
+        assert not body["composition_state"]["sources"]
         step1_single_selects = [
             r for r in body["guided_session"]["history"] if r["step"] == "step_1_source" and r["turn_type"] == "single_select"
         ]
         assert step1_single_selects, body["guided_session"]["history"]
-        assert step1_single_selects[-1]["summary"] == "Configured: csv"
-        assert step1_single_selects[-1]["response_hash"] is None
+        assert step1_single_selects[-1]["response_hash"] is not None
 
     def test_step_1_chat_advisory_prose_at_phase_entry_does_not_mutate_source(self, composer_test_client) -> None:
         """Prose-only chat at STEP_1 phase entry (SINGLE_SELECT) stays advisory.
@@ -633,7 +620,7 @@ class TestStep1SourceResolution:
         the route MUST remain advisory:
           (a) ``next_turn`` is None — no re-render
           (b) ``guided.step`` is unchanged (still ``step_1_source``)
-          (c) no source committed (``step_1_result`` unmutated)
+          (c) no source is committed
           (d) the reply lands in ``chat_history``, NOT wizard ``history``
 
         The pin catches a regression where ``if source_resolution is not None:``
@@ -660,11 +647,10 @@ class TestStep1SourceResolution:
                 client,
                 session_id,
                 message="what should I do?",
-                step_index="step_1_source",
             )
         assert status == 200, body
-        # (a) advisory: no re-render
-        assert body["next_turn"] is None
+        # (a) advisory: the same current turn remains authoritative
+        assert body["next_turn"]["turn_token"] == entry["next_turn"]["turn_token"]
         # (b) step unchanged
         assert body["guided_session"]["step"] == "step_1_source"
         # (c) no source committed
@@ -713,7 +699,6 @@ class TestStep1SourceResolution:
                 composer_test_client,
                 session_id,
                 message="I have a CSV, columns are name and email",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
@@ -761,20 +746,23 @@ class TestStep1SourceResolution:
                 composer_test_client,
                 session_id,
                 message=user_message,
-                step_index="step_1_source",
             )
 
         assert status == 200, body
         assert len(calls) == 2
         assert all(any(tool["function"]["name"] == "resolve_source" for tool in call["tools"]) for call in calls)
         assert any("do not ask the user to re-send" in m["content"].lower() for m in calls[1]["messages"])
-        assert body["assistant_message"] == "I set this up as a CSV source."
+        assert body["assistant_message"] == (
+            "I did not apply generated source content. Review the current source form and submit it through the wizard controls."
+        )
+        assert body["assistant_message_kind"] == "synthetic_failure"
+        assert body["guided_session"]["chat_history"][-1]["synthetic_failure_reason"] == "not_applied"
         assert body["next_turn"]["type"] == "schema_form"
-        assert body["composition_state"]["sources"]["source"]["plugin"] == "csv"
+        assert not body["composition_state"]["sources"]
         chat_history = body["guided_session"]["chat_history"]
         assert len(chat_history) == 2
         assert chat_history[0]["content"] == user_message
-        assert chat_history[1]["content"] == "I set this up as a CSV source."
+        assert chat_history[1]["content"] == body["assistant_message"]
         assert false_decline not in [turn["content"] for turn in chat_history]
         audits = _llm_call_audit_bodies(composer_test_client, session_id)
         assert [audit["status"] for audit in audits] == ["success", "success"]
@@ -807,7 +795,6 @@ class TestStep1SourceResolution:
                 composer_test_client,
                 session_id,
                 message="I have a CSV, columns are name and email",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
@@ -819,38 +806,36 @@ class TestStep1SourceResolution:
 
 
 class TestStepChatRejections:
-    def test_step_mismatch_returns_409(self, composer_test_client: TestClient) -> None:
-        """step_index != session.step → wizard advanced under the user → 409."""
+    def test_stale_turn_token_returns_409(self, composer_test_client: TestClient) -> None:
+        """A token other than the current server-held turn fails before provider work."""
         session_id = _create_session(composer_test_client)
         _seed_guided_session(composer_test_client, session_id)
 
-        # No LLM patch — request must fail before the solver runs.
-        status, body = _post_chat(
-            composer_test_client,
-            session_id,
-            message="hi",
-            step_index="step_3_transforms",
+        response = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/chat",
+            json={"operation_id": str(uuid4()), "turn_token": "0" * 64, "message": "hi"},
         )
 
-        assert status == 409, body
-        assert "step_3_transforms" in body["detail"]
-        assert "step_1_source" in body["detail"]
+        assert response.status_code == 409, response.json()
+        assert response.json()["detail"] == "turn_token does not identify the current unanswered turn."
 
-    def test_unknown_step_index_returns_400(self, composer_test_client: TestClient) -> None:
-        """Stale client sends a value not in the GuidedStep enum → 400 with valid list."""
+    def test_step_index_is_rejected_as_an_extra_wire_field(self, composer_test_client: TestClient) -> None:
+        """Schema 8 derives stage server-side and refuses the legacy step index."""
         session_id = _create_session(composer_test_client)
-        _seed_guided_session(composer_test_client, session_id)
+        turn = _seed_guided_session(composer_test_client, session_id)["next_turn"]
 
-        status, body = _post_chat(
-            composer_test_client,
-            session_id,
-            message="hi",
-            step_index="step_42_nope",
+        response = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/chat",
+            json={
+                "operation_id": str(uuid4()),
+                "turn_token": turn["turn_token"],
+                "message": "hi",
+                "step_index": "step_42_nope",
+            },
         )
 
-        assert status == 400, body
-        assert "step_42_nope" in body["detail"]
-        assert "step_1_source" in body["detail"]  # valid options listed
+        assert response.status_code == 422, response.json()
+        assert response.json()["detail"][0]["type"] == "extra_forbidden"
 
     def test_no_guided_session_returns_400(self, composer_test_client: TestClient) -> None:
         """Session with no guided_session attached → 400 with /messages hint.
@@ -887,7 +872,6 @@ class TestStepChatRejections:
             composer_test_client,
             session_id,
             message="hi",
-            step_index="step_1_source",
         )
 
         assert status == 400, body
@@ -938,7 +922,6 @@ class TestStepChatRejections:
             composer_test_client,
             session_id,
             message="hi",
-            step_index="step_1_source",
         )
 
         assert status == 409, body
@@ -962,7 +945,6 @@ class TestStepChatBoundary:
             composer_test_client,
             session_id,
             message="",
-            step_index="step_1_source",
         )
         assert status == 422
 
@@ -975,7 +957,6 @@ class TestStepChatBoundary:
             composer_test_client,
             session_id,
             message="   \t\n",
-            step_index="step_1_source",
         )
         assert status == 422
 
@@ -989,7 +970,6 @@ class TestStepChatBoundary:
             composer_test_client,
             session_id,
             message=oversize,
-            step_index="step_1_source",
         )
         assert status == 422
 
@@ -1014,7 +994,6 @@ class TestStepChatTransientFailure:
                 composer_test_client,
                 session_id,
                 message="anything",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
@@ -1070,7 +1049,6 @@ class TestStepChatTransientFailure:
                 composer_test_client,
                 session_id,
                 message="Read my CSV and count rows per category.",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
@@ -1126,7 +1104,6 @@ class TestStepChatTransientFailure:
                 composer_test_client,
                 session_id,
                 message="Here is my CSV: name,email\nalice,a@x.test",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
@@ -1157,35 +1134,14 @@ class TestStepChatTransientFailure:
             "assistant_message": "Created the source.",
         }
 
-        # Task 1's schema-8 atomic cutover intentionally lands before the
-        # Task 3 route migration. Isolate this parser/side-effect regression
-        # from the still-schema-7 turn-rebuild/context readers while retaining
-        # the real HTTP route, resolver, audit, and blob-service path.
-        with (
-            patch(
-                _CHAT_SOLVER_ACOMPLETION,
-                new=_ReturningLiteLLMCompletion(_fake_source_resolution_tool_call(malformed_args)),
-            ),
-            patch(
-                "elspeth.web.sessions.routes.composer.guided._build_get_guided_turn",
-                return_value={"type": "single_select", "payload": {"options": []}},
-            ),
-            patch(
-                "elspeth.web.sessions.routes.composer.guided.build_step_chat_context_block",
-                return_value="",
-            ),
-            patch(
-                "elspeth.web.sessions.routes.composer.guided._step_1_plugin_hint",
-                return_value=None,
-            ),
-            patch.object(GuidedSession, "step_1_result", new=property(lambda _session: None), create=True),
-            patch.object(GuidedSession, "step_2_result", new=property(lambda _session: None), create=True),
+        with patch(
+            _CHAT_SOLVER_ACOMPLETION,
+            new=_ReturningLiteLLMCompletion(_fake_source_resolution_tool_call(malformed_args)),
         ):
             status, body = _post_chat(
                 composer_test_client,
                 session_id,
                 message="Create a JSON source.",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
@@ -1226,7 +1182,6 @@ class TestStepChatTransientFailure:
                     composer_test_client,
                     session_id,
                     message="anything",
-                    step_index="step_1_source",
                 )
         finally:
             composer_test_client.app.state.settings = settings
@@ -1259,7 +1214,6 @@ class TestStepChatTransientFailure:
                 composer_test_client,
                 session_id,
                 message="anything",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
@@ -1293,7 +1247,6 @@ class TestStepChatTransientFailure:
                 composer_test_client,
                 session_id,
                 message="anything",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
@@ -1321,7 +1274,6 @@ class TestStepChatTransientFailure:
                 composer_test_client,
                 session_id,
                 message="anything",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
@@ -1352,7 +1304,6 @@ class TestStepChatTransientFailure:
                 composer_test_client,
                 session_id,
                 message="anything",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
@@ -1373,7 +1324,6 @@ class TestStepChatTransientFailure:
                 composer_test_client,
                 session_id,
                 message="anything",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
@@ -1381,35 +1331,13 @@ class TestStepChatTransientFailure:
 
 
 class TestStepChatServerInvariants:
-    """Offensive-programming paths — defective LLM responses we cannot recover from.
-
-    Distinct from :class:`TestStepChatTransientFailure`: transient failures
-    (network, auth, malformed-response-shape) are absorbed by
-    ``solve_step_chat_with_auto_drop`` into the synthetic unavailable
-    message and surface as HTTP 200.  Server-invariant violations
-    (empty / whitespace content from an otherwise well-shaped LLM
-    response) are NOT absorbed — they raise :class:`InvariantError` from
-    ``solve_step_chat``, which the route converts to a B1-sanitized HTTP
-    500 with a structured slog event carrying only ``exc_class`` and
-    safe frame strings (no ``str(exc)`` — the InvariantError message
-    embeds the model name + step value).
-
-    Mirror of the ``post_guided_respond`` InvariantError handling at
-    ``routes.py``'s ``step_advance`` call site.
-    """
-
-    _STATIC_DETAIL = "Server invariant violated. See application audit log for diagnostic detail."
+    """Defective successful provider replies fail closed without partial audit state."""
 
     def test_empty_content_returns_sanitized_500(self, composer_test_client: TestClient) -> None:
         """Empty content string → InvariantError → 500 with B1-sanitized detail + slog."""
         from structlog.testing import capture_logs
 
         session_id = _create_session(composer_test_client)
-        # Pre-persist step_1 state so the audit row written on the failure
-        # path can reference a real composition_state_id (the chat
-        # InvariantError handler reads state but does not write — without a
-        # prior persistence the audit row's composition_state_id would be
-        # null, hiding the failure from per-state audit replays).
         _seed_persisted_step1(composer_test_client, session_id)
 
         with (
@@ -1423,64 +1351,43 @@ class TestStepChatServerInvariants:
                 composer_test_client,
                 session_id,
                 message="anything",
-                step_index="step_1_source",
             )
 
         assert status == 500, body
-        assert body["detail"] == self._STATIC_DETAIL
-        # Locate the slog event from the route's InvariantError handler.
-        # Asserting site="solve_step_chat" pins this to the chat path
-        # (the post_guided_respond handler emits site="step_advance"
-        # from an identically named "guided.invariant_violated" event).
-        invariant_events = [e for e in cap_logs if e.get("event") == "guided.invariant_violated" and e.get("site") == "solve_step_chat"]
-        assert len(invariant_events) == 1, f"expected one guided.invariant_violated event from chat path, got: {cap_logs!r}"
+        assert body["detail"]["error_type"] == "guided_operation_terminal_failure"
+        assert body["detail"]["failure_code"] == "integrity_error"
+        invariant_events = [
+            event
+            for event in cap_logs
+            if event.get("event") == "guided.operation_terminal_failure" and event.get("site") == "post_guided_chat"
+        ]
+        assert len(invariant_events) == 1, cap_logs
         event = invariant_events[0]
         assert event["exc_class"] == "InvariantError"
-        # Frames are tuple-shaped and start with the safe-frame format.
-        # No source lines, no locals reprs, no exception message — only
-        # the path:line:func triple (B1 convention).
         assert isinstance(event["frames"], tuple) and len(event["frames"]) > 0
         assert all(f.startswith("frame=") for f in event["frames"])
-        audit_bodies = _chat_turn_audit_bodies(composer_test_client, session_id)
-        assert len(audit_bodies) == 1
-        audit_body = audit_bodies[0]
-        assert audit_body["status"] == "invariant_violated"
-        assert audit_body["initiator"] == "user"
-        assert audit_body["step"] == "step_1_source"
-        assert audit_body["error_class"] == "InvariantError"
+        assert _chat_turn_audit_bodies(composer_test_client, session_id) == []
 
         reloaded = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["guided_session"]
         assert reloaded["chat_history"] == []
         assert reloaded["chat_turn_seq"] == 0
-        audit_rows = _chat_turn_audit_rows(composer_test_client, session_id)
-        assert audit_rows[0].composition_state_id is not None
 
-    def test_chat_audit_unwind_preserves_primary_error_if_slog_raises(
+    def test_terminal_failure_preserves_primary_error_if_slog_raises(
         self,
         composer_test_client: TestClient,
         monkeypatch,
     ) -> None:
-        """A logger failure in the final audit-drain fallback must not replace the primary chat error.
-
-        The route is already unwinding a sanitized HTTPException from the
-        chat solver. If the final ``slog.error`` fallback also raises,
-        Python would otherwise let that secondary logger exception replace
-        the in-flight HTTPException from the ``finally`` block.
-        """
-        from elspeth.web.sessions.routes.composer import guided as composer_module
+        """A logger failure must not replace the typed terminal failure."""
+        from elspeth.web.sessions.routes.composer import guided_chat_atomic
 
         session_id = _create_session(composer_test_client)
         _seed_persisted_step1(composer_test_client, session_id)
 
-        async def _raising_persist_chat_turns(*args: object, **kwargs: object) -> None:
-            raise RuntimeError("simulated chat-audit persist failure")
-
-        def _raising_only_for_unwind_log(event: str, *args: object, **kwargs: object) -> None:
-            if event == "guided.chat_turn_persist_failed_during_exception_handling":
-                raise RuntimeError("simulated logger failure")
-
-        monkeypatch.setattr(composer_module, "_persist_chat_turns", _raising_persist_chat_turns)
-        monkeypatch.setattr(composer_module.slog, "error", _raising_only_for_unwind_log)
+        monkeypatch.setattr(
+            guided_chat_atomic.slog,
+            "error",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("simulated logger failure")),
+        )
 
         with patch(
             _CHAT_SOLVER_ACOMPLETION,
@@ -1490,17 +1397,14 @@ class TestStepChatServerInvariants:
                 composer_test_client,
                 session_id,
                 message="anything",
-                step_index="step_1_source",
             )
 
         assert status == 500, body
-        assert body["detail"] == self._STATIC_DETAIL
+        assert body["detail"]["failure_code"] == "integrity_error"
 
     def test_whitespace_only_content_returns_sanitized_500(self, composer_test_client: TestClient) -> None:
         """Whitespace-only content → same path as empty content (``.strip()`` is empty)."""
         session_id = _create_session(composer_test_client)
-        # See the sibling empty-content test for why pre-persisting is
-        # required on the InvariantError failure path.
         _seed_persisted_step1(composer_test_client, session_id)
 
         with patch(
@@ -1511,24 +1415,15 @@ class TestStepChatServerInvariants:
                 composer_test_client,
                 session_id,
                 message="anything",
-                step_index="step_1_source",
             )
 
         assert status == 500, body
-        assert body["detail"] == "Server invariant violated. See application audit log for diagnostic detail."
-        audit_bodies = _chat_turn_audit_bodies(composer_test_client, session_id)
-        assert len(audit_bodies) == 1
-        audit_body = audit_bodies[0]
-        assert audit_body["status"] == "invariant_violated"
-        assert audit_body["initiator"] == "user"
-        assert audit_body["step"] == "step_1_source"
-        assert audit_body["error_class"] == "InvariantError"
+        assert body["detail"]["failure_code"] == "integrity_error"
+        assert _chat_turn_audit_bodies(composer_test_client, session_id) == []
 
         reloaded = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["guided_session"]
         assert reloaded["chat_history"] == []
         assert reloaded["chat_turn_seq"] == 0
-        audit_rows = _chat_turn_audit_rows(composer_test_client, session_id)
-        assert audit_rows[0].composition_state_id is not None
 
 
 class TestStepChatCrossStep:
@@ -1550,7 +1445,7 @@ class TestStepChatCrossStep:
 
     @staticmethod
     def _seed_csv_blob(client: TestClient, session_id: str) -> str:
-        """Seed an inline CSV blob and return its storage_path on disk."""
+        """Seed an inline CSV blob and return its opaque guided reference."""
         content = "text,note\nHello,world\n"
         resp = client.post(
             f"/api/sessions/{session_id}/blobs/inline",
@@ -1558,21 +1453,32 @@ class TestStepChatCrossStep:
         )
         assert resp.status_code == 201, resp.json()
         blob_id = resp.json()["id"]
-        blob_service = client.app.state.blob_service
-        record = asyncio.run(blob_service.get_blob(UUID(blob_id)))
-        return record.storage_path
+        return f"blob:{blob_id}"
 
     @staticmethod
     def _respond(client: TestClient, session_id: str, **kwargs) -> dict:
-        resp = client.post(f"/api/sessions/{session_id}/guided/respond", json=kwargs)
-        assert resp.status_code == 200, resp.json()
-        return resp.json()
+        return _post_respond(client, session_id, **kwargs)
+
+    @classmethod
+    def _configure_csv_source(cls, client: TestClient, session_id: str) -> dict:
+        """Advance the three current schema-8 Step-1 turns explicitly."""
+        selected = cls._respond(client, session_id, chosen=["csv"])
+        prefilled = selected["next_turn"]["payload"]["prefilled"]
+        cls._respond(
+            client,
+            session_id,
+            edited_values={
+                "plugin": "csv",
+                "options": prefilled,
+            },
+        )
+        return cls._respond(client, session_id, edited_values={"columns": ["text", "note"]})
 
     def test_chat_history_accumulates_across_step_transition(self, composer_test_client: TestClient) -> None:
         """Chat at step_1, advance to step_2, chat at step_2, GET /guided → 4 entries with mixed step values."""
         session_id = _create_session(composer_test_client)
         _seed_guided_session(composer_test_client, session_id)
-        storage_path = self._seed_csv_blob(composer_test_client, session_id)
+        self._seed_csv_blob(composer_test_client, session_id)
 
         # 1. Chat at step_1_source.  This records two ChatTurn entries
         #    (user + assistant, seq 0 + 1, step=step_1_source).
@@ -1584,27 +1490,10 @@ class TestStepChatCrossStep:
                 composer_test_client,
                 session_id,
                 message="how do I describe my CSV?",
-                step_index="step_1_source",
             )
 
-        # 2. Advance through step_1 SINGLE_SELECT → INSPECT_AND_CONFIRM.
-        #    The wizard remains at step_1_source for the INSPECT turn.
-        self._respond(composer_test_client, session_id, chosen=["csv"])
-
-        # 3. Commit the source config — this transitions the wizard to
-        #    step_2_sink SINGLE_SELECT.  The chat_history persisted in
-        #    composer_meta carries through the to_dict / from_dict round
-        #    trip on the GuidedSession update.
-        self._respond(
-            composer_test_client,
-            session_id,
-            edited_values={
-                "plugin": "csv",
-                "options": {"path": storage_path, "schema": {"mode": "observed"}},
-                "observed_columns": ["text", "note"],
-                "sample_rows": [{"text": "Hello", "note": "world"}],
-            },
-        )
+        # 2. Advance the current plugin, schema, and inspection turns.
+        self._configure_csv_source(composer_test_client, session_id)
 
         # Confirm the wizard advanced — load-bearing precondition for
         # the cross-step assertion below.  Without this assertion, a
@@ -1623,7 +1512,6 @@ class TestStepChatCrossStep:
                 composer_test_client,
                 session_id,
                 message="which sink for JSON output?",
-                step_index="step_2_sink",
             )
 
         # 5. GET /guided and assert chat_history has 4 entries with the
@@ -1646,15 +1534,12 @@ class TestStepChatCrossStep:
 
 
 class TestGuidedChatWireDiscriminator:
-    """fp-review C-2: ``assistant_message_kind``.
+    """Live and persisted assistant-turn discriminators.
 
-    The wire payload must carry a machine-readable discriminator so the
-    frontend can tell a real assistant reply apart from a server-generated
-    fallback. Deliberately kind-only, no companion reason: the two
-    synthetic-failure causes (a quality-guard rejection vs genuine provider
-    unavailability) already render distinct message copy, and both surface
-    the same recovery affordance — a reason enum would be wire surface with
-    no behavioural consumer.
+    The POST response carries ``assistant_message_kind`` so the frontend can
+    distinguish a real assistant reply from a synthetic failure. Persisted
+    synthetic-failure turns additionally require a closed reason value so a
+    reload preserves the failure's machine-readable cause.
     """
 
     def test_real_assistant_reply_is_kind_assistant(self, composer_test_client: TestClient) -> None:
@@ -1669,17 +1554,19 @@ class TestGuidedChatWireDiscriminator:
                 composer_test_client,
                 session_id,
                 message="what should I do?",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
         assert body["assistant_message_kind"] == "assistant"
         assert "synthetic_failure_reason" not in body
 
-    def test_committed_source_reply_is_kind_assistant(self, composer_test_client: TestClient) -> None:
-        """A resolve-and-commit apply response (``_build_guided_chat_apply_response``)
-        is unconditionally a real reply — the other response-construction site
-        Task 3 had to cover, not just the advisory tail."""
+    def test_source_selection_transition_reply_is_kind_assistant(self, composer_test_client: TestClient) -> None:
+        """A valid source selection is a real reply.
+
+        The provider result is projected through the schema-8 transition
+        authority, then the next-turn state, chat turns, audit evidence, and
+        operation result are committed by the single atomic settlement.
+        """
         session_id = _create_session(composer_test_client)
         _seed_persisted_step1(composer_test_client, session_id)
         _seed_guided_session(composer_test_client, session_id)
@@ -1706,7 +1593,6 @@ class TestGuidedChatWireDiscriminator:
                 composer_test_client,
                 session_id,
                 message="here is my CSV: name,email\nalice,a@x.test",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
@@ -1725,7 +1611,6 @@ class TestGuidedChatWireDiscriminator:
                 composer_test_client,
                 session_id,
                 message="Read my CSV and count rows per category.",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
@@ -1743,25 +1628,22 @@ class TestGuidedChatWireDiscriminator:
                 composer_test_client,
                 session_id,
                 message="anything",
-                step_index="step_1_source",
             )
 
         assert status == 200, body
         assert body["assistant_message_kind"] == "synthetic_failure"
-        # The two synthetic-failure causes stay distinguishable via message
-        # copy alone (no wire reason field) — pin that the copy still differs.
-        assert "quality check" not in body["assistant_message"]
-        # The two causes are distinct on both the copy AND the wire.
+        # Provider unavailability uses distinct safe copy; the persisted turn
+        # test below pins its required machine-readable reason.
         assert "quality check" not in body["assistant_message"]
 
 
 class TestChatHistoryDiscriminatorPersistence:
-    """fp-review C-2 persisted-history closure.
+    """Strict persisted-history discriminator contract.
 
     The discriminator must survive into the persisted ``chat_history`` a GET
-    /guided reload serves — not just the live POST /chat response — and a
-    turn persisted before the field existed must still serialise cleanly
-    (both new fields ``None``, never a fabricated value).
+    /guided reload serves. User turns carry two explicit null discriminator
+    fields; real assistant turns require ``assistant`` plus a null reason;
+    synthetic failures require ``synthetic_failure`` plus a closed reason.
     """
 
     def test_synthetic_failure_turn_persists_kind_across_get(self, composer_test_client: TestClient) -> None:
@@ -1777,7 +1659,6 @@ class TestChatHistoryDiscriminatorPersistence:
                 composer_test_client,
                 session_id,
                 message="Read my CSV and count rows per category.",
-                step_index="step_1_source",
             )
         assert status == 200, body
         assert body["assistant_message_kind"] == "synthetic_failure"
@@ -1804,7 +1685,6 @@ class TestChatHistoryDiscriminatorPersistence:
                 composer_test_client,
                 session_id,
                 message="what should I do?",
-                step_index="step_1_source",
             )
         assert status == 200, body
         assert body["assistant_message_kind"] == "assistant"
@@ -1815,13 +1695,9 @@ class TestChatHistoryDiscriminatorPersistence:
         assert len(chat_history) == 2
         assert chat_history[1]["assistant_message_kind"] == "assistant"
 
-    def test_legacy_chat_turn_without_kind_field_serializes_cleanly_on_get(self, composer_test_client: TestClient) -> None:
-        """A turn persisted BEFORE this field existed has no key at all.
-
-        GET /guided must serve it with both new fields None, not crash and
-        not fabricate a value — same discipline as the state_machine.py-level
-        round-trip test, exercised through the HTTP surface this time.
-        """
+    def test_chat_turn_without_required_kind_fields_fails_closed_on_get(self, composer_test_client: TestClient) -> None:
+        """An incomplete schema-8 assistant turn is an integrity failure."""
+        from elspeth.web.composer.guided.errors import InvariantError
         from elspeth.web.sessions.protocol import CompositionStateData
         from elspeth.web.sessions.routes import _initial_composition_state_with_guided_session
 
@@ -1834,7 +1710,7 @@ class TestChatHistoryDiscriminatorPersistence:
         guided_dict["chat_history"] = [
             {
                 "role": "assistant",
-                "content": "a pre-migration reply",
+                "content": "an incomplete reply",
                 "seq": 0,
                 "step": "step_1_source",
                 "ts_iso": "2026-05-13T12:00:00+00:00",
@@ -1855,13 +1731,8 @@ class TestChatHistoryDiscriminatorPersistence:
         )
         asyncio.run(service.save_composition_state(session_uuid, state_data, provenance="session_seed"))
 
-        get_resp = composer_test_client.get(f"/api/sessions/{session_id}/guided")
-        assert get_resp.status_code == 200, get_resp.json()
-        chat_history = get_resp.json()["guided_session"]["chat_history"]
-        assert len(chat_history) == 1
-        assert chat_history[0]["content"] == "a pre-migration reply"
-        assert chat_history[0]["assistant_message_kind"] is None
-        assert chat_history[0]["synthetic_failure_reason"] is None
+        with pytest.raises(InvariantError, match="missing keys"):
+            composer_test_client.get(f"/api/sessions/{session_id}/guided")
 
 
 class TestStepChatProgressWiring:
@@ -1903,7 +1774,6 @@ class TestStepChatProgressWiring:
                 composer_test_client,
                 session_id,
                 message="how do I describe my CSV?",
-                step_index="step_1_source",
             )
         assert status == 200
 
@@ -1921,18 +1791,8 @@ class TestStepChatProgressWiring:
         """
         session_id = _create_session(composer_test_client)
         _seed_guided_session(composer_test_client, session_id)
-        storage_path = TestStepChatCrossStep._seed_csv_blob(composer_test_client, session_id)
-        TestStepChatCrossStep._respond(composer_test_client, session_id, chosen=["csv"])
-        TestStepChatCrossStep._respond(
-            composer_test_client,
-            session_id,
-            edited_values={
-                "plugin": "csv",
-                "options": {"path": storage_path, "schema": {"mode": "observed"}},
-                "observed_columns": ["text", "note"],
-                "sample_rows": [{"text": "Hello", "note": "world"}],
-            },
-        )
+        TestStepChatCrossStep._seed_csv_blob(composer_test_client, session_id)
+        TestStepChatCrossStep._configure_csv_source(composer_test_client, session_id)
         guided = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()
         assert guided["guided_session"]["step"] == "step_2_sink", guided
 
@@ -1949,7 +1809,6 @@ class TestStepChatProgressWiring:
                 composer_test_client,
                 session_id,
                 message="which sink for JSON output?",
-                step_index="step_2_sink",
             )
         assert status == 200
 
@@ -1961,42 +1820,22 @@ class TestStepChatProgressWiring:
         assert final_progress["reason"] == "composer_complete"
 
     def test_step_2_sink_resolution_publishes_saving_while_committing(self, composer_test_client: TestClient) -> None:
-        """Advisor-caught gap: the resolver only ever publishes calling_model/
-        using_tools (both substep 1), and the route's "complete" lands in
-        `finally` — AFTER the frontend has already flipped `guidedChatPending`
-        to false and unmounted the pending strip. Without a distinct event
-        while `handle_step_2_sink` commits the resolved sink and
-        `_build_guided_chat_apply_response` persists it, substep 2
-        ("Prepare JSON file") is unreachable while the strip is visible —
-        this is the SAME failure mode as the original ticket, just for the
-        third substep instead of the second. Captures the registry snapshot
-        from inside the persist tail (an async seam, unlike the sync
-        handle_step_2_sink call itself) to prove "saving" is visible during
-        the real DB write, not just theoretically published somewhere.
+        """The saving phase is visible while the atomic settlement runs.
+
+        The sink proposal is projected by the pure schema-8 transition
+        authority. The test captures progress from inside the settlement that
+        commits the next state, chat turns, audit evidence, and operation
+        result together.
         """
         session_id = _create_session(composer_test_client)
         _seed_guided_session(composer_test_client, session_id)
-        storage_path = TestStepChatCrossStep._seed_csv_blob(composer_test_client, session_id)
-        TestStepChatCrossStep._respond(composer_test_client, session_id, chosen=["csv"])
-        TestStepChatCrossStep._respond(
-            composer_test_client,
-            session_id,
-            edited_values={
-                "plugin": "csv",
-                "options": {"path": storage_path, "schema": {"mode": "observed"}},
-                "observed_columns": ["text", "note"],
-                "sample_rows": [{"text": "Hello", "note": "world"}],
-            },
-        )
+        TestStepChatCrossStep._seed_csv_blob(composer_test_client, session_id)
+        TestStepChatCrossStep._configure_csv_source(composer_test_client, session_id)
         guided = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()
         assert guided["guided_session"]["step"] == "step_2_sink", guided
 
-        # Path must resolve inside the session's outputs dir (the same
-        # constraint test_step_chat_apply.py's passing STEP_2 commit test
-        # satisfies via this exact helper) — a bare relative filename fails
-        # handle_step_2_sink's commit validation and silently falls back to
-        # the advisory-rejection branch, which would make this test's
-        # assistant_message_kind precondition assertion the one that fails.
+        # The sink path must remain within the session outputs directory for
+        # the pure transition validator to accept the proposal.
         out_path = _outputs_path(composer_test_client, "chat_out.jsonl")
         resolve_sink_response = SimpleNamespace(
             choices=[
@@ -2034,34 +1873,28 @@ class TestStepChatProgressWiring:
             ]
         )
 
-        from elspeth.web.sessions.routes.composer import guided as guided_module
-
         mid_commit_snapshots: list[dict] = []
-        real_apply_response = guided_module._build_guided_chat_apply_response
+        service = composer_test_client.app.state.session_service
+        real_settlement = service.settle_guided_state_operation
 
-        async def _capturing_apply_response(*args: object, **kwargs: object) -> object:
+        async def _capturing_settlement(*args: object, **kwargs: object) -> object:
             registry = composer_test_client.app.state.composer_progress_registry
             snapshot = await registry.get_latest(session_id)
             mid_commit_snapshots.append(snapshot.model_dump())
-            return await real_apply_response(*args, **kwargs)
+            return await real_settlement(*args, **kwargs)
 
         with (
             patch(_CHAT_SOLVER_ACOMPLETION, new=_ReturningLiteLLMCompletion(resolve_sink_response)),
-            patch.object(guided_module, "_build_guided_chat_apply_response", side_effect=_capturing_apply_response),
+            patch.object(service, "settle_guided_state_operation", side_effect=_capturing_settlement),
         ):
             status, body = _post_chat(
                 composer_test_client,
                 session_id,
                 message="save the results as json",
-                step_index="step_2_sink",
             )
         assert status == 200, body
-        # Load-bearing precondition for the assertion below: a silent
-        # commit-rejection fallback (handle_step_2_sink's strict seam
-        # rejects the proposal) also returns 200, which would mask this
-        # test as passing while never exercising the "saving" publish at
-        # all (mid_commit_snapshots would just stay empty AND
-        # _build_guided_chat_apply_response would never be called).
+        # Pin that this exercised the accepted transition, rather than a
+        # synthetic transition-rejection settlement.
         assert body["assistant_message_kind"] == "assistant", body
         assert body["assistant_message"] == "Output set to JSON."
 

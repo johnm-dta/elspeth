@@ -79,6 +79,17 @@ describe("guided operation retry custody", () => {
     expect(window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY)).toContain('"kind":"guided_convert"');
   });
 
+  it("reuses one guided chat operation for an ambiguous retry without storing the message", () => {
+    const identity = ["a".repeat(64), "use the uploaded customer list"];
+    const first = acquireGuidedRetry("guided_chat", SESSION_A, identity);
+    const retry = acquireGuidedRetry("guided_chat", SESSION_A, identity);
+
+    expect(retry.operationId).toBe(first.operationId);
+    const encoded = window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY) ?? "";
+    expect(encoded).toContain('"kind":"guided_chat"');
+    expect(encoded).not.toContain(identity[1]);
+  });
+
   it("a different action evicts the prior same-kind session descriptor", () => {
     const first = acquireGuidedRetry("state_revert", SESSION_A, ["state-a"]);
     acquireGuidedRetry("state_revert", SESSION_A, ["state-b"]);

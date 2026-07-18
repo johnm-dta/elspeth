@@ -72,7 +72,7 @@ from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
 from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 from elspeth.web.provider_config_policy import AWS_S3_ENDPOINT_URL_POLICY_ERROR
-from elspeth.web.sessions._guided_step_chat import Step1SourceChatResult, StepChatResult
+from elspeth.web.sessions._guided_step_chat import StepChatResult
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import (
     ChatMessageRecord,
@@ -129,6 +129,34 @@ def _async_return(value: Any):
         return value
 
     return _return_value
+
+
+def _guided_chat_body(guided_response: Mapping[str, Any], message: str) -> dict[str, Any]:
+    turn = guided_response["next_turn"]
+    assert turn is not None
+    return {
+        "operation_id": str(uuid.uuid4()),
+        "turn_token": turn["turn_token"],
+        "message": message,
+    }
+
+
+def _guided_respond_body(guided_response: Mapping[str, Any], **overrides: Any) -> dict[str, Any]:
+    turn = guided_response["next_turn"]
+    assert turn is not None
+    body = {
+        "operation_id": str(uuid.uuid4()),
+        "turn_token": turn["turn_token"],
+        "chosen": None,
+        "edited_values": None,
+        "custom_inputs": None,
+        "control_signal": None,
+        "proposal_id": None,
+        "draft_hash": None,
+        "edit_target": None,
+    }
+    body.update(overrides)
+    return body
 
 
 def _ready_readiness() -> ValidationReadiness:
@@ -3165,7 +3193,11 @@ class TestIDORProtection:
         # session AND inject conversational turns into her audit trail.
         resp = bob_client.post(
             f"/api/sessions/{session_id}/guided/chat",
-            json={"message": "hi", "step_index": "step_1_source"},
+            json={
+                "operation_id": str(uuid.uuid4()),
+                "turn_token": "0" * 64,
+                "message": "hi",
+            },
         )
         assert resp.status_code == 404
 
@@ -4244,31 +4276,30 @@ class TestMessageRoutes:
         guided_resp = client.get(f"/api/sessions/{session_id}/guided")
         assert guided_resp.status_code == 200
 
-        original_add_message = service.add_message
+        async def failing_settlement(*args: Any, **kwargs: Any) -> Any:
+            del args, kwargs
+            raise OperationalError("INSERT INTO composer_chat_turns", {}, Exception("db unavailable"))
 
-        async def flaky_add_message(*args: Any, **kwargs: Any) -> ChatMessageRecord:
-            role = args[1]
-            tool_calls = kwargs.get("tool_calls")
-            if role == "audit" and tool_calls and tool_calls[0].get("_kind") == "chat_turn_audit":
-                raise OperationalError("INSERT INTO chat_messages", {}, Exception("db unavailable"))
-            return await original_add_message(*args, **kwargs)
-
-        service.add_message = flaky_add_message  # type: ignore[method-assign]
+        service.settle_guided_state_operation = failing_settlement  # type: ignore[method-assign]
 
         with patch(
-            "elspeth.web.sessions.routes.composer.guided.solve_step_chat_with_auto_drop",
+            "elspeth.web.sessions.routes.composer.guided._run_guided_chat_provider_attempt",
             new=_async_return(
-                StepChatResult(
-                    assistant_message="Use the source form first.",
-                    status=ComposerChatTurnStatus.SUCCESS,
-                    latency_ms=7,
-                    error_class=None,
+                (
+                    StepChatResult(
+                        assistant_message="Use the source form first.",
+                        status=ComposerChatTurnStatus.SUCCESS,
+                        latency_ms=7,
+                        error_class=None,
+                    ),
+                    None,
+                    None,
                 )
             ),
         ):
             send_resp = client.post(
                 f"/api/sessions/{session_id}/guided/chat",
-                json={"message": "help me", "step_index": "step_1_source"},
+                json=_guided_chat_body(guided_resp.json(), "help me"),
             )
 
         assert send_resp.status_code == 500
@@ -4286,7 +4317,7 @@ class TestMessageRoutes:
         the watcher supplies the missing trigger, and the 499 conversion
         keeps the unwind quiet instead of an ASGI crash log per Stop click.
         """
-        app, _service = _make_app(tmp_path)
+        app, service = _make_app(tmp_path)
         catalog = MagicMock(spec=CatalogService)
         catalog.list_sources.return_value = []
         app.state.catalog_service = catalog
@@ -4295,6 +4326,7 @@ class TestMessageRoutes:
         session_id = resp.json()["id"]
         guided_resp = client.get(f"/api/sessions/{session_id}/guided")
         assert guided_resp.status_code == 200
+        chat_body = _guided_chat_body(guided_resp.json(), "help me")
 
         async def drive() -> tuple[list[dict[str, Any]], bool]:
             solver_started = asyncio.Event()
@@ -4313,7 +4345,7 @@ class TestMessageRoutes:
             request_messages = [
                 {
                     "type": "http.request",
-                    "body": json.dumps({"message": "help me", "step_index": "step_1_source"}).encode(),
+                    "body": json.dumps(chat_body).encode(),
                     "more_body": False,
                 }
             ]
@@ -4348,7 +4380,7 @@ class TestMessageRoutes:
                 # The fresh step-1 session takes the step-1 source-chat
                 # resolver (awaited inline in the route task), not the
                 # generic advisory solver.
-                "elspeth.web.sessions.routes.composer.guided.resolve_step_1_source_chat_with_auto_drop",
+                "elspeth.web.sessions.routes.composer.guided._run_guided_chat_provider_attempt",
                 new=hanging_solver,
             ):
                 # Pre-fix behaviour is an unbounded hang (nothing observes
@@ -4367,10 +4399,66 @@ class TestMessageRoutes:
         status = next(m["status"] for m in sent if m["type"] == "http.response.start")
         assert status == 499, f"disconnect-cancel must unwind as a quiet 499, got {status}"
 
+        from sqlalchemy import select
+
+        from elspeth.web.sessions.models import guided_operations_table
+
+        with service._engine.connect() as connection:
+            cancelled_operation = (
+                connection.execute(
+                    select(guided_operations_table).where(
+                        guided_operations_table.c.session_id == session_id,
+                        guided_operations_table.c.operation_id == chat_body["operation_id"],
+                    )
+                )
+                .mappings()
+                .one()
+            )
+        assert cancelled_operation["status"] == "failed"
+        assert cancelled_operation["failure_code"] == "operation_failed"
+        assert cancelled_operation["originating_message_id"] is None
+        assert cancelled_operation["result_state_id"] is None
+        assert cancelled_operation["response_hash"] is None
+        assert asyncio.run(service.get_state_versions(uuid.UUID(session_id))) == []
+        assert asyncio.run(service.get_messages(uuid.UUID(session_id), limit=None)) == []
+
+        old_provider = AsyncMock(side_effect=AssertionError("terminal replay called provider"))
+        with patch(
+            "elspeth.web.sessions.routes.composer.guided._run_guided_chat_provider_attempt",
+            new=old_provider,
+        ):
+            first_replay = client.post(f"/api/sessions/{session_id}/guided/chat", json=chat_body)
+            second_replay = client.post(f"/api/sessions/{session_id}/guided/chat", json=chat_body)
+
+        assert first_replay.status_code == second_replay.status_code == 500
+        assert first_replay.json() == second_replay.json()
+        assert first_replay.json()["detail"]["failure_code"] == "operation_failed"
+        old_provider.assert_not_awaited()
+
+        retry_body = {**chat_body, "operation_id": str(uuid.uuid4())}
+        retry_provider = AsyncMock(
+            return_value=(
+                StepChatResult(
+                    assistant_message="Use the current source form.",
+                    status=ComposerChatTurnStatus.SUCCESS,
+                    latency_ms=1,
+                    error_class=None,
+                ),
+                None,
+                None,
+            )
+        )
+        with patch(
+            "elspeth.web.sessions.routes.composer.guided._run_guided_chat_provider_attempt",
+            new=retry_provider,
+        ):
+            intentional_retry = client.post(f"/api/sessions/{session_id}/guided/chat", json=retry_body)
+
+        assert intentional_retry.status_code == 200, intentional_retry.json()
+        retry_provider.assert_awaited_once()
+
     def test_guided_chat_source_commit_failure_does_not_leak_tool_result_repr(self, tmp_path) -> None:
         """Step-1 chat source commit failures must not return ToolResult reprs."""
-        from elspeth.contracts.blobs import BlobRecord
-        from elspeth.contracts.enums import CreationModality
         from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
         from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution
         from elspeth.web.composer.tools import ToolResult
@@ -4389,41 +4477,12 @@ class TestMessageRoutes:
             knob_schema={"fields": []},
         )
         app.state.catalog_service = catalog
-        app.state.blob_service = MagicMock(spec=BlobServiceProtocol)
-        app.state.blob_service.list_blobs.return_value = []
-        app.state.blob_service.create_blob.return_value = BlobRecord(
-            id=uuid.uuid4(),
-            session_id=uuid.uuid4(),
-            filename="source.csv",
-            mime_type="text/csv",
-            size_bytes=18,
-            content_hash="0" * 64,
-            storage_path="sessions/raw-secret-source.csv",
-            created_at=datetime.now(UTC),
-            created_by="assistant",
-            source_description="test",
-            status="ready",
-            creation_modality=CreationModality.VERBATIM,
-            created_from_message_id=None,
-            creating_model_identifier=None,
-            creating_model_version=None,
-            creating_provider=None,
-            creating_composer_skill_hash=None,
-            creating_arguments_hash=None,
-        )
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.post("/api/sessions", json={"title": "Guided chat source failure"})
         session_id = uuid.UUID(resp.json()["id"])
         guided_resp = client.get(f"/api/sessions/{session_id}/guided")
         assert guided_resp.status_code == 200
-        choose_source_resp = client.post(
-            f"/api/sessions/{session_id}/guided/respond",
-            json={"chosen": ["csv"]},
-        )
-        assert choose_source_resp.status_code == 200
-        assert choose_source_resp.json()["next_turn"]["type"] == "schema_form"
-
         raw_row_secret = "raw-customer-ssn-123-45-6789"
         tool_result_private_detail = "REDACTED tool result detail"
         failing_tool_result = ToolResult(
@@ -4436,21 +4495,16 @@ class TestMessageRoutes:
 
         with (
             patch(
-                "elspeth.web.sessions.routes.composer.guided.solve_step_chat_with_auto_drop",
+                "elspeth.web.sessions.routes.composer.guided._run_guided_chat_provider_attempt",
                 new=_async_return(
-                    StepChatResult(
-                        assistant_message="I can use that source.",
-                        status=ComposerChatTurnStatus.SUCCESS,
-                        latency_ms=5,
-                        error_class=None,
-                    )
-                ),
-            ),
-            patch(
-                "elspeth.web.sessions.routes.composer.guided.resolve_step_1_source_chat_with_auto_drop",
-                new=_async_return(
-                    Step1SourceChatResult(
-                        source_resolution=Step1SourceChatResolution(
+                    (
+                        StepChatResult(
+                            assistant_message="I created the source.",
+                            status=ComposerChatTurnStatus.SUCCESS,
+                            latency_ms=5,
+                            error_class=None,
+                        ),
+                        Step1SourceChatResolution(
                             assistant_message="I created the source.",
                             plugin="csv",
                             filename="source.csv",
@@ -4461,32 +4515,35 @@ class TestMessageRoutes:
                             sample_rows=({"name": raw_row_secret, "value": "1"},),
                             on_validation_failure="discard",
                         ),
-                        fallback_chat=None,
+                        None,
                     )
                 ),
             ),
             patch(
-                "elspeth.web.sessions.routes.composer.guided.handle_step_1_source",
-                return_value=SimpleNamespace(tool_result=failing_tool_result),
+                "elspeth.web.sessions.routes.composer.guided._schema8_answer_and_project_next",
+                side_effect=InvariantError(f"{failing_tool_result!r} {raw_row_secret} {tool_result_private_detail}"),
             ),
         ):
             send_resp = client.post(
                 f"/api/sessions/{session_id}/guided/chat",
-                json={"message": "Use this source", "step_index": "step_1_source"},
+                json=_guided_chat_body(guided_resp.json(), "Use this source"),
             )
 
-        # The strict commit seam rejected the proposal. The source step degrades
-        # to advisory (parity with the sink reject path) instead of a fatal 400,
-        # so a second Send is never terminal. The egress guarantee is unchanged:
-        # the raw tool_result (which can carry Tier-3 row data) must NOT reach the
-        # response body on ANY exit path.
+        # The transition authority rejected the proposal. The atomic settlement
+        # records a typed, non-applying synthetic turn instead of returning a
+        # fatal response. The raw tool result (which can carry Tier-3 row data)
+        # must not reach the response body on any exit path.
         assert send_resp.status_code == 200
+        response_json = send_resp.json()
         body = send_resp.text
         assert "ToolResult(" not in body
         assert raw_row_secret not in body
         assert tool_result_private_detail not in body
         # No mutation: the rejected commit must not advance or apply.
-        assert send_resp.json()["guided_session"]["step"] == "step_1_source"
+        assert response_json["guided_session"]["step"] == "step_1_source"
+        persisted_turn = response_json["guided_session"]["chat_history"][-1]
+        assert persisted_turn["assistant_message_kind"] == "synthetic_failure"
+        assert persisted_turn["synthetic_failure_reason"] == "not_applied"
 
     def test_guided_chat_malformed_source_tool_args_return_synthetic_unavailable(self, tmp_path) -> None:
         """Malformed Step-1 source resolver tool output must not escape as HTTP 500."""
@@ -4516,7 +4573,10 @@ class TestMessageRoutes:
         assert client.get(f"/api/sessions/{session_id}/guided").status_code == 200
         choose_source_resp = client.post(
             f"/api/sessions/{session_id}/guided/respond",
-            json={"chosen": ["csv"]},
+            json=_guided_respond_body(
+                client.get(f"/api/sessions/{session_id}/guided").json(),
+                chosen=["csv"],
+            ),
         )
         assert choose_source_resp.status_code == 200
         assert choose_source_resp.json()["next_turn"]["type"] == "schema_form"
@@ -4544,15 +4604,15 @@ class TestMessageRoutes:
         ):
             send_resp = client.post(
                 f"/api/sessions/{session_id}/guided/chat",
-                json={"message": "Use this CSV: name,value\\nalice,1", "step_index": "step_1_source"},
+                json=_guided_chat_body(choose_source_resp.json(), "Use this CSV: name,value\\nalice,1"),
             )
 
         assert send_resp.status_code == 200
         body = send_resp.json()
         assert body["assistant_message"] == _SYNTHETIC_UNAVAILABLE_MESSAGE
         assert body["guided_session"]["step"] == "step_1_source"
-        assert body["next_turn"] is None
-        app.state.blob_service.create_blob.assert_not_called()
+        assert body["next_turn"]["turn_token"] == choose_source_resp.json()["next_turn"]["turn_token"]
+        app.state.blob_service.reserve_inline_custody.assert_not_called()
 
         loop = asyncio.new_event_loop()
         try:
@@ -4592,7 +4652,10 @@ class TestMessageRoutes:
         assert client.get(f"/api/sessions/{session_id}/guided").status_code == 200
         choose_source_resp = client.post(
             f"/api/sessions/{session_id}/guided/respond",
-            json={"chosen": ["csv"]},
+            json=_guided_respond_body(
+                client.get(f"/api/sessions/{session_id}/guided").json(),
+                chosen=["csv"],
+            ),
         )
         assert choose_source_resp.status_code == 200
 
@@ -4632,15 +4695,15 @@ class TestMessageRoutes:
         ):
             send_resp = client.post(
                 f"/api/sessions/{session_id}/guided/chat",
-                json={"message": "Use this JSON file", "step_index": "step_1_source"},
+                json=_guided_chat_body(choose_source_resp.json(), "Use this JSON file"),
             )
 
         assert send_resp.status_code == 200
         body = send_resp.json()
         assert body["assistant_message"] == _SYNTHETIC_UNAVAILABLE_MESSAGE
         assert body["guided_session"]["step"] == "step_1_source"
-        assert body["next_turn"] is None
-        app.state.blob_service.create_blob.assert_not_called()
+        assert body["next_turn"]["turn_token"] == choose_source_resp.json()["next_turn"]["turn_token"]
+        app.state.blob_service.reserve_inline_custody.assert_not_called()
 
         loop = asyncio.new_event_loop()
         try:

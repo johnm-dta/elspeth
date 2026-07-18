@@ -106,6 +106,7 @@ describe("guided protocol types", () => {
     const payload: TurnPayload = {
       type: "single_select",
       step_index: 0,
+      turn_token: "a".repeat(64),
       payload: {},
     };
     expect(payload.step_index).toBe(0);
@@ -161,7 +162,7 @@ describe("guided protocol types", () => {
     expect(check).toBeTypeOf("function");
   });
 
-  it("ChatTurn.assistant_message_kind is optional (C-2: legacy turns omit it)", () => {
+  it("ChatTurn carries exact required assistant and synthetic-failure discriminators", () => {
     const withKind: ChatTurn = {
       role: "assistant",
       content: "I'm unavailable right now; you can still use the wizard controls.",
@@ -169,20 +170,24 @@ describe("guided protocol types", () => {
       step: "step_1_source",
       ts_iso: "t",
       assistant_message_kind: "synthetic_failure",
-    };
-    const legacy: ChatTurn = {
-      role: "assistant",
-      content: "Source created as a 3-row CSV.",
-      seq: 0,
-      step: "step_1_source",
-      ts_iso: "t",
-      // no assistant_message_kind — compiles: the field is optional.
+      synthetic_failure_reason: "unavailable",
     };
     expect(withKind.assistant_message_kind).toBe("synthetic_failure");
-    expect(legacy.assistant_message_kind).toBeUndefined();
+    expect(withKind.synthetic_failure_reason).toBe("unavailable");
+
+    const notApplied: ChatTurn = {
+      role: "assistant",
+      content: "I did not apply generated source content.",
+      seq: 3,
+      step: "step_1_source",
+      ts_iso: "t",
+      assistant_message_kind: "synthetic_failure",
+      synthetic_failure_reason: "not_applied",
+    };
+    expect(notApplied.synthetic_failure_reason).toBe("not_applied");
   });
 
-  it("GuidedChatResponse.assistant_message_kind is optional and typed to the same two values", () => {
+  it("GuidedChatResponse.assistant_message_kind is required and typed to the same two values", () => {
     const response: GuidedChatResponse = {
       assistant_message: "I'm unavailable right now; you can still use the wizard controls.",
       assistant_message_kind: "synthetic_failure",
@@ -194,9 +199,22 @@ describe("guided protocol types", () => {
         chat_turn_seq: 0,
         profile: null,
       },
-      next_turn: null,
+      next_turn: {
+        type: "single_select",
+        step_index: 0,
+        turn_token: "a".repeat(64),
+        payload: {},
+      },
       terminal: null,
-      composition_state: null,
+      composition_state: {
+        id: "state-1",
+        version: 1,
+        nodes: [],
+        edges: [],
+        sources: {},
+        outputs: [],
+        metadata: { name: null, description: null },
+      },
     };
     expect(response.assistant_message_kind).toBe("synthetic_failure");
   });

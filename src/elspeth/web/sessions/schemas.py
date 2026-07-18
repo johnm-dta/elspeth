@@ -488,6 +488,7 @@ class TurnPayloadResponse(_StrictResponse):
 
     type: str
     step_index: int
+    turn_token: str = pydantic.Field(min_length=64, max_length=64, pattern=r"[0-9a-f]{64}")
     payload: JsonValue
 
 
@@ -515,31 +516,84 @@ class TutorialSampleResponse(_StrictResponse):
     sample_urls: list[str]
 
 
-class GuidedRespondRequest(_RequestModel):
+class GuidedEditTargetRequest(BaseModel):
+    """Closed stable component target reserved for proposal/edit actions."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    kind: Literal["source", "node", "edge", "output"]
+    stable_id: str = pydantic.Field(min_length=36, max_length=36)
+
+    @field_validator("stable_id")
+    @classmethod
+    def _validate_stable_id(cls, value: str) -> str:
+        try:
+            parsed = UUID(value)
+        except ValueError as exc:
+            raise ValueError("edit_target.stable_id must be a canonical UUID") from exc
+        if str(parsed) != value:
+            raise ValueError("edit_target.stable_id must be a canonical UUID")
+        return value
+
+
+class GuidedRespondRequest(_GuidedOperationRequest):
     """Request body for POST /api/sessions/{id}/guided/respond.
 
-    Carries the user's typed response to the current guided turn.  All
-    fields from ``TurnResponse`` are optional at the HTTP boundary (Pydantic
-    coerces absent keys to ``None``); the route handler validates that the
-    combination is consistent with the current turn type.
-
-    ``control_signal`` is a plain string so that stale clients sending an
-    unknown signal value fail gracefully rather than crashing at the HTTP
-    boundary.  The route handler validates the value against the closed
-    ``ControlSignal`` enum.
+    Retry identity and turn occurrence are mandatory for live-turn actions.
+    A null token is admitted only for the closed terminal exit shape. Legacy
+    positional step/edit fields are absent and therefore rejected as extras.
     """
 
+    turn_token: str | None = pydantic.Field(min_length=64, max_length=64, pattern=r"[0-9a-f]{64}")
     chosen: list[str] | None = None
     edited_values: dict[str, Any] | None = None
     custom_inputs: list[str] | None = None
-    accepted_step_index: int | None = None
-    edit_step_index: int | None = None
     control_signal: str | None = None
-    # Optimistic-concurrency token (D16): the client's expected current step.
-    # When present, the route 409s if it does not match the session's live
-    # ``guided.step``. A plain ``str`` (not the enum) makes unknown values fail
-    # with a route-handler 400 rather than a Pydantic 422.
-    step_index: str | None = None
+    proposal_id: str | None = pydantic.Field(default=None, min_length=36, max_length=36)
+    draft_hash: str | None = pydantic.Field(default=None, min_length=64, max_length=64, pattern=r"[0-9a-f]{64}")
+    edit_target: GuidedEditTargetRequest | None = None
+
+    @field_validator("proposal_id")
+    @classmethod
+    def _validate_proposal_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            parsed = UUID(value)
+        except ValueError as exc:
+            raise ValueError("proposal_id must be a canonical UUID") from exc
+        if str(parsed) != value:
+            raise ValueError("proposal_id must be a canonical UUID")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_token_action_shape(self) -> GuidedRespondRequest:
+        turn_response_fields = (
+            self.chosen,
+            self.edited_values,
+            self.custom_inputs,
+        )
+        proposal_fields = (
+            self.proposal_id,
+            self.draft_hash,
+            self.edit_target,
+        )
+        response_fields = (*turn_response_fields, *proposal_fields)
+        if self.turn_token is None:
+            if self.control_signal != "exit_to_freeform" or any(value is not None for value in response_fields):
+                raise ValueError("turn_token is required for live-turn actions")
+            return self
+        if (self.proposal_id is None) != (self.draft_hash is None):
+            raise ValueError("proposal_id and draft_hash must be supplied together")
+        if self.edit_target is not None and self.proposal_id is None:
+            raise ValueError("edit_target requires a complete proposal binding")
+        if self.control_signal is not None and any(value is not None for value in turn_response_fields):
+            raise ValueError("control_signal cannot be combined with turn response fields")
+        if self.control_signal == "exit_to_freeform" and any(value is not None for value in proposal_fields):
+            raise ValueError("exit_to_freeform cannot be combined with proposal fields")
+        if self.control_signal is None and all(value is None for value in response_fields):
+            raise ValueError("a guided response action is required")
+        return self
 
 
 class GuidedRespondResponse(_StrictResponse):

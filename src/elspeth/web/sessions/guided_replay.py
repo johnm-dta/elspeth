@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Any, cast
@@ -10,7 +13,9 @@ from pydantic import BaseModel
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
-from elspeth.contracts.hashing import stable_hash
+from elspeth.contracts.hashing import canonical_json, stable_hash
+from elspeth.contracts.payload_store import IntegrityError as PayloadIntegrityError
+from elspeth.contracts.payload_store import PayloadNotFoundError, PayloadStore
 from elspeth.web.composer.guided.profile import EMPTY_PROFILE
 from elspeth.web.composer.guided.protocol import ChatRole, GuidedStep
 from elspeth.web.composer.guided.state_machine import GuidedSession
@@ -18,6 +23,7 @@ from elspeth.web.composer.redaction import redact_guided_snapshot_storage_paths,
 from elspeth.web.sessions.protocol import (
     CompositionStateData,
     CompositionStateRecord,
+    GuidedJsonPayloadPurpose,
     GuidedResponseDescriptor,
     PreparedGuidedJsonPayload,
 )
@@ -42,6 +48,68 @@ _GUIDED_STEP_INDEX = {
     GuidedStep.STEP_3_TRANSFORMS: 3,
     GuidedStep.STEP_4_WIRE: 4,
 }
+
+
+def guided_turn_token(guided: GuidedSession) -> str:
+    """Bind the current unanswered turn to its persisted history occurrence."""
+
+    if type(guided) is not GuidedSession:
+        raise TypeError("guided must be an exact GuidedSession")
+    if not guided.history:
+        raise AuditIntegrityError("Guided turn token requires a persisted turn record")
+    history_index = len(guided.history) - 1
+    record = guided.history[history_index]
+    if (
+        record.step is not guided.step
+        or record.response_hash is not None
+        or any(previous.response_hash is None for previous in guided.history[:-1])
+    ):
+        raise AuditIntegrityError("Guided turn token requires the final current unanswered turn")
+    return stable_hash(
+        {
+            "schema": "guided.turn-token.v1",
+            "history_index": history_index,
+            "step": record.step.value,
+            "turn_type": record.turn_type.value,
+            "payload_hash": record.payload_hash,
+        }
+    )
+
+
+def load_guided_json_payload(
+    payload_store: PayloadStore,
+    *,
+    payload_id: str,
+    purpose: GuidedJsonPayloadPurpose,
+) -> PreparedGuidedJsonPayload:
+    """Load and fully revalidate one canonical guided JSON payload for replay."""
+
+    if not isinstance(payload_store, PayloadStore):
+        raise TypeError("payload_store must implement PayloadStore")
+    if type(payload_id) is not str or len(payload_id) != 64 or any(char not in "0123456789abcdef" for char in payload_id):
+        raise AuditIntegrityError("Guided replay payload id is malformed")
+    if purpose not in {"turn", "turn_response"}:
+        raise AuditIntegrityError("Guided replay payload purpose is outside the closed vocabulary")
+    try:
+        raw = payload_store.retrieve(payload_id)
+    except (PayloadNotFoundError, PayloadIntegrityError) as exc:
+        raise AuditIntegrityError("Guided replay payload is unavailable or corrupt") from exc
+    if type(raw) is not bytes or not hmac.compare_digest(hashlib.sha256(raw).hexdigest(), payload_id):
+        raise AuditIntegrityError("Guided replay payload bytes do not match the content id")
+    try:
+        decoded = raw.decode("utf-8", errors="strict")
+        envelope = json.loads(decoded)
+        canonical = canonical_json(envelope).encode("utf-8")
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError, OverflowError) as exc:
+        raise AuditIntegrityError("Guided replay payload is not valid canonical JSON") from exc
+    if type(envelope) is not dict or set(envelope) != {"schema", "purpose", "payload"}:
+        raise AuditIntegrityError("Guided replay payload envelope is malformed")
+    if envelope["schema"] != "guided.json-payload.v1" or envelope["purpose"] != purpose:
+        raise AuditIntegrityError("Guided replay payload schema or purpose does not match its reference")
+    payload = envelope["payload"]
+    if type(payload) is not dict or not hmac.compare_digest(raw, canonical):
+        raise AuditIntegrityError("Guided replay payload is not a canonical JSON object")
+    return PreparedGuidedJsonPayload(payload_id=payload_id, purpose=purpose, payload=payload)
 
 
 def with_guided_response_descriptor(
@@ -199,6 +267,7 @@ def _turn_response(
     return TurnPayloadResponse(
         type=turn.turn_type.value,
         step_index=turn.step_index,
+        turn_token=guided_turn_token(guided),
         payload=deep_thaw(matches[0].payload),
     )
 
@@ -263,6 +332,8 @@ def response_json(response: BaseModel) -> Mapping[str, Any]:
 __all__ = [
     "GUIDED_REPLAY_META_KEY",
     "guided_response_projection_hash",
+    "guided_turn_token",
+    "load_guided_json_payload",
     "parse_guided_response_descriptor",
     "project_guided_response",
     "response_json",

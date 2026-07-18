@@ -4,6 +4,7 @@ import asyncio
 import json
 from typing import Literal
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_capabilities import PluginCapability
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.guided.chat_solver import build_step_chat_context_block
@@ -20,6 +21,9 @@ from elspeth.web.composer.tutorial_sample import (
 from elspeth.web.interpretation_state import refine_prompt_shield_warnings_for_availability
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions._guided_step_chat import Step1SourceChatResult
+from elspeth.web.sessions.guided_payloads import prepare_guided_json_payload
+from elspeth.web.sessions.guided_replay import guided_turn_token
+from elspeth.web.sessions.protocol import guided_json_payload_id
 from elspeth.web.sessions.schemas import ConvertGuidedRequest, ReenterGuidedRequest, StartGuidedRequest, TutorialSampleResponse
 
 from .._helpers import (
@@ -169,6 +173,7 @@ def _chat_turn_synthetic_failure_reason(
 def _turn_payload_response(
     turn: Mapping[str, Any] | None,
     *,
+    guided: GuidedSession,
     shield_available: bool,
 ) -> TurnPayloadResponse | None:
     """Build a ``TurnPayloadResponse``, refining shield warnings for B-vs-C state.
@@ -182,6 +187,22 @@ def _turn_payload_response(
     """
     if turn is None:
         return None
+    if not guided.history:
+        raise AuditIntegrityError("Guided turn response has no persisted occurrence")
+    record = guided.history[-1]
+    expected_step_index = {
+        GuidedStep.STEP_1_SOURCE: 0,
+        GuidedStep.STEP_2_SINK: 1,
+        GuidedStep.STEP_2_5_RECIPE_MATCH: 2,
+        GuidedStep.STEP_3_TRANSFORMS: 3,
+        GuidedStep.STEP_4_WIRE: 4,
+    }[record.step]
+    if (
+        record.turn_type.value != turn["type"]
+        or expected_step_index != turn["step_index"]
+        or record.payload_hash != guided_json_payload_id("turn", turn["payload"])
+    ):
+        raise AuditIntegrityError("Guided turn response differs from its persisted occurrence")
     payload = dict(turn["payload"])
     if turn["type"] == TurnType.CONFIRM_WIRING.value:
         payload["warnings"] = refine_prompt_shield_warnings_for_availability(
@@ -191,6 +212,7 @@ def _turn_payload_response(
     return TurnPayloadResponse(
         type=turn["type"],
         step_index=turn["step_index"],
+        turn_token=guided_turn_token(guided),
         payload=payload,
     )
 
@@ -393,8 +415,10 @@ def _append_server_turn_record(
     lets the fresh-session GET /guided path return a deterministic initial
     turn without allocating an empty composition-state version.
     """
+    if any(record.response_hash is None for record in guided.history):
+        raise InvariantError("Cannot append a guided turn while an unanswered occurrence remains")
     turn_type = TurnType(turn["type"])
-    payload_hash = stable_hash(turn["payload"])
+    payload_hash = guided_json_payload_id("turn", turn["payload"])
     new_record = TurnRecord(
         step=current_step,
         turn_type=turn_type,
@@ -485,11 +509,10 @@ async def get_guided(
                     ),
                 )
 
-            # Idempotency check: if this step already has an emitted TurnRecord,
-            # return the existing payload without re-emitting.
-            existing_record_for_step: TurnRecord | None = next(
-                (r for r in reversed(guided.history) if r.step == current_step),
-                None,
+            existing_record_for_step = (
+                guided.history[-1]
+                if guided.history and guided.history[-1].step is current_step and guided.history[-1].response_hash is None
+                else None
             )
 
             # Build the initial turn for the current step (deterministic from
@@ -520,9 +543,16 @@ async def get_guided(
             else:
                 turn = None
             turn_type: TurnType | None = TurnType(turn["type"]) if turn is not None else None
-            payload_hash: str | None = stable_hash(turn["payload"]) if turn is not None else None
+            payload_hash: str | None = guided_json_payload_id("turn", turn["payload"]) if turn is not None else None
 
-            if existing_record_for_step is None and turn is not None and state_record is not None:
+            if (
+                turn is not None
+                and existing_record_for_step is not None
+                and (existing_record_for_step.turn_type is not turn_type or existing_record_for_step.payload_hash != payload_hash)
+            ):
+                raise InvariantError("GET guided rebuilt turn differs from the persisted unanswered occurrence")
+
+            if existing_record_for_step is None and turn is not None:
                 # First fetch for this step AND a turn exists: record TurnRecord,
                 # persist, emit audit.  When turn is None (terminal state, STEP_3,
                 # or no-recipe STEP_2_5 path) there is no turn to record.
@@ -539,60 +569,58 @@ async def get_guided(
                     raise InvariantError(
                         "GET guided: turn is not None but payload_hash is None — stable_hash derivation skipped despite turn being present."
                     )
-                payload_payload_id = _store_guided_audit_payload(request.app.state.payload_store, turn["payload"])
                 new_guided, _new_record, turn_type, payload_hash = _append_server_turn_record(
                     guided,
                     current_step=current_step,
                     turn=turn,
                 )
                 new_state = _replace(state, guided_session=new_guided)
-
-                # Persist state with updated guided_session in composer_meta.
-                # Preserve any existing composer_meta keys (e.g. repair_turns_used).
-                existing_meta: dict[str, Any] = {}
-                if state_record is not None and state_record.composer_meta is not None:
-                    existing_meta = dict(deep_thaw(state_record.composer_meta))
-                new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
-
-                state_d = new_state.to_dict()
-                persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)
-                state_data = CompositionStateData(
-                    sources=state_d["sources"],
-                    nodes=state_d["nodes"],
-                    edges=state_d["edges"],
-                    outputs=state_d["outputs"],
-                    metadata_=state_d["metadata"],
-                    is_valid=persisted_is_valid,
-                    validation_errors=persisted_errors,
-                    composer_meta=new_composer_meta,
-                )
-                state_record_out = await service.save_composition_state(
-                    session_id,
-                    state_data,
-                    # Guided-mode server-emitted turn: the LLM converged on a
-                    # guided step transition and the resulting state is being
-                    # persisted. ``convergence_persist`` is the closest existing
-                    # provenance category. The closed enum does not have a
-                    # ``guided_persist`` value; widening it is out of
-                    # scope here — see merge commit message.
-                    provenance="convergence_persist",
-                )
-
-                # Emit audit event.  Persistence of the buffered invocations
-                # is handled by the finally block below — that way both
-                # success and rejection paths drain identically.
-                emit_turn_emitted(
-                    recorder,
-                    step=current_step,
-                    turn_type=turn_type,
-                    payload_hash=payload_hash,
-                    payload_payload_id=payload_payload_id,
-                    emitter="server",
-                    composition_version=new_state.version,
-                    actor=user.user_id,
-                )
-
                 guided = new_guided
+
+                # A fresh GET remains non-mutating, but its in-memory history
+                # includes the prospective occurrence so the token exactly
+                # matches the occurrence RESPOND will reconstruct. Existing
+                # checkpoints persist the occurrence and its purpose-bound CAS.
+                if state_record is not None:
+                    payload_payload_id = prepare_guided_json_payload(
+                        request.app.state.payload_store,
+                        purpose="turn",
+                        payload=turn["payload"],
+                    ).payload_id
+
+                    # Persist state with updated guided_session in composer_meta.
+                    # Preserve any existing composer_meta keys (e.g. repair_turns_used).
+                    existing_meta = dict(deep_thaw(state_record.composer_meta)) if state_record.composer_meta is not None else {}
+                    new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
+
+                    state_d = new_state.to_dict()
+                    persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)
+                    state_data = CompositionStateData(
+                        sources=state_d["sources"],
+                        nodes=state_d["nodes"],
+                        edges=state_d["edges"],
+                        outputs=state_d["outputs"],
+                        metadata_=state_d["metadata"],
+                        is_valid=persisted_is_valid,
+                        validation_errors=persisted_errors,
+                        composer_meta=new_composer_meta,
+                    )
+                    state_record_out = await service.save_composition_state(
+                        session_id,
+                        state_data,
+                        provenance="convergence_persist",
+                    )
+
+                    emit_turn_emitted(
+                        recorder,
+                        step=current_step,
+                        turn_type=turn_type,
+                        payload_hash=payload_hash,
+                        payload_payload_id=payload_payload_id,
+                        emitter="server",
+                        composition_version=new_state.version,
+                        actor=user.user_id,
+                    )
 
             # Build response.  On re-fetch the same turn is returned (deterministic
             # rebuild) and the payload_hash matches what was recorded on first visit.
@@ -634,7 +662,7 @@ async def get_guided(
                     chat_turn_seq=guided.chat_turn_seq,
                     profile=_workflow_profile_response(guided),
                 ),
-                next_turn=_turn_payload_response(turn, shield_available=shield_available),
+                next_turn=_turn_payload_response(turn, guided=guided, shield_available=shield_available),
                 terminal=TerminalStateResponse(
                     kind=terminal.kind.value,
                     reason=terminal.reason.value if terminal.reason is not None else None,
@@ -863,6 +891,7 @@ async def post_guided_reenter(
             ),
             next_turn=_turn_payload_response(
                 response_turn,
+                guided=response_guided,
                 shield_available=_resolve_shield_available(plugin_snapshot),
             ),
             terminal=terminal_response,
@@ -1182,6 +1211,7 @@ async def post_guided_start(
             ),
             next_turn=_turn_payload_response(
                 turn,
+                guided=guided,
                 shield_available=_resolve_shield_available(plugin_snapshot),
             ),
             terminal=terminal_response,
@@ -1281,6 +1311,22 @@ async def post_guided_start(
                 seeded_guided = new_state.guided_session
                 if seeded_guided is None:  # pragma: no cover - helper contract
                     raise InvariantError("post_guided_start: initial state has no guided_session")
+                seed_turn = _build_get_guided_turn(new_state, seeded_guided, catalog=catalog)
+                if seed_turn is None:  # pragma: no cover - initial STEP_1 always emits
+                    raise InvariantError("post_guided_start: initial guided session has no first turn")
+                seeded_guided, _record, _turn_type, _payload_hash = _append_server_turn_record(
+                    seeded_guided,
+                    current_step=seeded_guided.step,
+                    turn=seed_turn,
+                )
+                prepared_seed_turn = prepare_guided_json_payload(
+                    request.app.state.payload_store,
+                    purpose="turn",
+                    payload=seed_turn["payload"],
+                )
+                if prepared_seed_turn.payload_id != _payload_hash:
+                    raise AuditIntegrityError("Guided start seed turn CAS differs from its history record")
+                new_state = _replace(new_state, guided_session=seeded_guided)
                 state_d = new_state.to_dict()
                 persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)
                 state_data = CompositionStateData(
@@ -2019,7 +2065,7 @@ async def post_guided_respond(
                     chat_turn_seq=guided.chat_turn_seq,
                     profile=_workflow_profile_response(guided),
                 ),
-                next_turn=_turn_payload_response(next_turn, shield_available=shield_available),
+                next_turn=_turn_payload_response(next_turn, guided=guided, shield_available=shield_available),
                 terminal=TerminalStateResponse(
                     kind=terminal.kind.value,
                     reason=terminal.reason.value if terminal.reason is not None else None,
@@ -2207,7 +2253,7 @@ async def _build_guided_chat_apply_response(
             chat_turn_seq=guided.chat_turn_seq,
             profile=_workflow_profile_response(guided),
         ),
-        next_turn=_turn_payload_response(next_turn, shield_available=shield_available),
+        next_turn=_turn_payload_response(next_turn, guided=guided, shield_available=shield_available),
         terminal=None,
         composition_state=_state_response(state_record_out, policy_catalog=policy_catalog),
     )
@@ -3752,6 +3798,7 @@ async def post_guided_convert(
             ),
             next_turn=_turn_payload_response(
                 turn,
+                guided=guided,
                 shield_available=_resolve_shield_available(plugin_snapshot),
             ),
             terminal=terminal_response,
@@ -3800,6 +3847,22 @@ async def post_guided_convert(
             seeded_guided = new_state.guided_session
             if seeded_guided is None:  # pragma: no cover — helper always attaches a guided session
                 raise InvariantError("post_guided_convert: initial state has no guided_session")
+            seed_turn = _build_get_guided_turn(new_state, seeded_guided, catalog=catalog)
+            if seed_turn is None:  # pragma: no cover - initial STEP_1 always emits
+                raise InvariantError("post_guided_convert: initial guided session has no first turn")
+            seeded_guided, _record, _turn_type, _payload_hash = _append_server_turn_record(
+                seeded_guided,
+                current_step=seeded_guided.step,
+                turn=seed_turn,
+            )
+            prepared_seed_turn = prepare_guided_json_payload(
+                request.app.state.payload_store,
+                purpose="turn",
+                payload=seed_turn["payload"],
+            )
+            if prepared_seed_turn.payload_id != _payload_hash:
+                raise AuditIntegrityError("Guided conversion seed turn CAS differs from its history record")
+            new_state = _replace(new_state, guided_session=seeded_guided)
             new_composer_meta = {"guided_session": seeded_guided.to_dict()}
             state_d = new_state.to_dict()
             persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)

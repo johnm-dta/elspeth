@@ -55,6 +55,7 @@ from elspeth.web.sessions.protocol import (
     PreparedGuidedInterpretationDraft,
     PreparedGuidedJsonPayload,
     StaleComposeStateError,
+    guided_json_payload_id,
 )
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
@@ -204,7 +205,7 @@ def test_prepared_payload_hashes_the_detached_frozen_snapshot() -> None:
             return (("value", value),)
 
     payload = PreparedGuidedJsonPayload(
-        payload_id=stable_hash({"value": "first"}),
+        payload_id=guided_json_payload_id("turn", {"value": "first"}),
         purpose="turn",
         payload=_TwoViewMapping(),
     )
@@ -224,6 +225,117 @@ def test_payload_preparation_stores_and_retrieves_the_frozen_canonical_snapshot(
 
     assert store.retrieve(payload.payload_id)
     assert deep_thaw(payload.payload) == {"question": "Choose", "options": ["a", "b"]}
+
+
+def test_guided_turn_token_binds_the_persisted_history_occurrence() -> None:
+    replay = importlib.import_module("elspeth.web.sessions.guided_replay")
+    payload_id = guided_json_payload_id("turn", {"question": "Choose"})
+    unanswered = TurnRecord(
+        step=GuidedStep.STEP_1_SOURCE,
+        turn_type=TurnType.SINGLE_SELECT,
+        payload_hash=payload_id,
+        response_hash=None,
+        emitter="server",
+    )
+    first = replace(GuidedSession.initial(), history=(unanswered,))
+    repeated = replace(
+        first,
+        history=(replace(unanswered, response_hash="b" * 64), unanswered),
+    )
+
+    first_token = replay.guided_turn_token(first)
+    repeated_token = replay.guided_turn_token(repeated)
+
+    assert len(first_token) == 64
+    assert first_token != repeated_token
+
+
+@pytest.mark.parametrize("invalid", ["no_history", "answered", "stale_step"])
+def test_guided_turn_token_requires_the_final_current_unanswered_record(invalid: str) -> None:
+    replay = importlib.import_module("elspeth.web.sessions.guided_replay")
+    guided = GuidedSession.initial()
+    if invalid != "no_history":
+        record = TurnRecord(
+            step=GuidedStep.STEP_1_SOURCE,
+            turn_type=TurnType.SINGLE_SELECT,
+            payload_hash=guided_json_payload_id("turn", {"question": "Choose"}),
+            response_hash="b" * 64 if invalid == "answered" else None,
+            emitter="server",
+        )
+        guided = replace(
+            guided,
+            history=(record,),
+            step=GuidedStep.STEP_2_SINK if invalid == "stale_step" else guided.step,
+        )
+
+    with pytest.raises(AuditIntegrityError):
+        replay.guided_turn_token(guided)
+
+
+def test_guided_turn_token_survives_checkpoint_round_trip() -> None:
+    replay = importlib.import_module("elspeth.web.sessions.guided_replay")
+    guided = _guided_with_next_turn(guided_json_payload_id("turn", {"question": "Choose"}))
+
+    assert replay.guided_turn_token(GuidedSession.from_dict(guided.to_dict())) == replay.guided_turn_token(guided)
+
+
+def test_load_guided_json_payload_revalidates_durable_canonical_bytes(tmp_path: Path) -> None:
+    preparation = importlib.import_module("elspeth.web.sessions.guided_payloads")
+    replay = importlib.import_module("elspeth.web.sessions.guided_replay")
+    store = FilesystemPayloadStore(tmp_path / "guided-payloads")
+    prepared = preparation.prepare_guided_json_payload(
+        store,
+        purpose="turn",
+        payload={"question": "Choose", "options": ["a", "b"]},
+    )
+
+    loaded = replay.load_guided_json_payload(
+        store,
+        payload_id=prepared.payload_id,
+        purpose="turn",
+    )
+
+    assert loaded == prepared
+
+
+def test_load_guided_json_payload_rejects_valid_but_wrong_durable_purpose(tmp_path: Path) -> None:
+    preparation = importlib.import_module("elspeth.web.sessions.guided_payloads")
+    replay = importlib.import_module("elspeth.web.sessions.guided_replay")
+    store = FilesystemPayloadStore(tmp_path / "guided-payload-purpose")
+    prepared = preparation.prepare_guided_json_payload(
+        store,
+        purpose="turn_response",
+        payload={"chosen": ["csv"]},
+    )
+
+    with pytest.raises(AuditIntegrityError, match="purpose"):
+        replay.load_guided_json_payload(
+            store,
+            payload_id=prepared.payload_id,
+            purpose="turn",
+        )
+
+
+@pytest.mark.parametrize("failure", ["missing", "noncanonical", "malformed", "invalid_purpose"])
+def test_load_guided_json_payload_fails_closed_for_invalid_durable_content(tmp_path: Path, failure: str) -> None:
+    replay = importlib.import_module("elspeth.web.sessions.guided_replay")
+    store = FilesystemPayloadStore(tmp_path / f"guided-payloads-{failure}")
+    payload_id = "a" * 64
+    purpose = "turn"
+    if failure == "noncanonical":
+        payload_id = store.store(b'{"question": "Choose"}')
+    elif failure == "malformed":
+        payload_id = store.store(b'{"question":')
+    elif failure == "invalid_purpose":
+        payload_id = store.store(b'{"question":"Choose"}')
+        purpose = "diagnostic"
+
+    with pytest.raises(AuditIntegrityError):
+        replay.load_guided_json_payload(
+            store,
+            payload_id=payload_id,
+            purpose=purpose,
+        )
 
 
 def test_payload_preparation_rejects_store_that_retrieves_altered_bytes() -> None:
@@ -252,7 +364,7 @@ def test_payload_preparation_rejects_store_that_retrieves_altered_bytes() -> Non
 
 def test_next_turn_payload_requires_turn_purpose() -> None:
     payload = PreparedGuidedJsonPayload(
-        payload_id=stable_hash({"question": "Choose"}),
+        payload_id=guided_json_payload_id("turn_response", {"question": "Choose"}),
         purpose="turn_response",
         payload={"question": "Choose"},
     )
@@ -453,7 +565,7 @@ def _replay_record(
 def test_replay_rejects_descriptor_step_index_that_disagrees_with_turn_record() -> None:
     replay = importlib.import_module("elspeth.web.sessions.guided_replay")
     payload = PreparedGuidedJsonPayload(
-        payload_id=stable_hash({"question": "Choose"}),
+        payload_id=guided_json_payload_id("turn", {"question": "Choose"}),
         purpose="turn",
         payload={"question": "Choose"},
     )
@@ -527,12 +639,13 @@ def _guided_with_next_turn(payload_id: str) -> GuidedSession:
 def test_replay_requires_final_turn_to_be_current_and_unanswered(response_kind: str, tamper: str) -> None:
     replay = importlib.import_module("elspeth.web.sessions.guided_replay")
     payload = PreparedGuidedJsonPayload(
-        payload_id=stable_hash(
+        payload_id=guided_json_payload_id(
+            "turn",
             {
                 "question": "Choose a source",
                 "options": [{"id": "csv", "label": "CSV", "hint": None}],
                 "allow_custom": True,
-            }
+            },
         ),
         purpose="turn",
         payload={

@@ -724,6 +724,25 @@ def _require_guided_sha256(value: object, field_name: str) -> None:
         raise AuditIntegrityError(f"{field_name} must be exactly 64 lowercase hexadecimal characters")
 
 
+def guided_json_payload_id(
+    purpose: GuidedJsonPayloadPurpose,
+    payload: Mapping[str, Any],
+) -> str:
+    """Hash one guided payload with its durable purpose binding."""
+
+    if purpose not in {"turn", "turn_response"}:
+        raise AuditIntegrityError("guided JSON payload purpose is outside the closed vocabulary")
+    if not isinstance(payload, Mapping):
+        raise AuditIntegrityError("guided JSON payload must be a mapping")
+    return stable_hash(
+        {
+            "schema": "guided.json-payload.v1",
+            "purpose": purpose,
+            "payload": payload,
+        }
+    )
+
+
 @final
 @dataclass(frozen=True, slots=True)
 class PreparedGuidedJsonPayload:
@@ -738,7 +757,7 @@ class PreparedGuidedJsonPayload:
         if self.purpose not in {"turn", "turn_response"}:
             raise AuditIntegrityError("PreparedGuidedJsonPayload purpose is outside the closed vocabulary")
         freeze_fields(self, "payload")
-        if stable_hash(self.payload) != self.payload_id:
+        if guided_json_payload_id(self.purpose, self.payload) != self.payload_id:
             raise AuditIntegrityError("PreparedGuidedJsonPayload payload hash does not match payload_id")
 
 

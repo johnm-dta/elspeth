@@ -12,6 +12,18 @@ from elspeth.contracts.payload_store import PayloadStore
 from elspeth.web.sessions.protocol import GuidedJsonPayloadPurpose, PreparedGuidedJsonPayload
 
 
+def _guided_payload_envelope(
+    *,
+    purpose: GuidedJsonPayloadPurpose,
+    payload: Mapping[str, object],
+) -> Mapping[str, object]:
+    return {
+        "schema": "guided.json-payload.v1",
+        "purpose": purpose,
+        "payload": payload,
+    }
+
+
 def prepare_guided_json_payload(
     payload_store: PayloadStore,
     *,
@@ -25,7 +37,7 @@ def prepare_guided_json_payload(
     snapshot = deep_freeze(payload)
     if not isinstance(snapshot, Mapping):
         raise TypeError("payload must freeze to a mapping")
-    canonical = canonical_json(snapshot).encode("utf-8")
+    canonical = canonical_json(_guided_payload_envelope(purpose=purpose, payload=snapshot)).encode("utf-8")
     payload_id = payload_store.store(canonical)
     if type(payload_id) is not str or len(payload_id) != 64:
         raise AuditIntegrityError("guided payload store returned a malformed content id")
@@ -46,7 +58,12 @@ def verify_guided_json_payloads(
     if payload_store is None or not isinstance(payload_store, PayloadStore):
         raise AuditIntegrityError("guided payload settlement requires a configured PayloadStore")
     for payload in payloads:
-        expected = canonical_json(payload.payload).encode("utf-8")
+        expected = canonical_json(
+            _guided_payload_envelope(
+                purpose=payload.purpose,
+                payload=payload.payload,
+            )
+        ).encode("utf-8")
         retrieved = payload_store.retrieve(payload.payload_id)
         if not hmac.compare_digest(retrieved, expected):
             raise AuditIntegrityError("guided payload store content differs from the prepared payload")

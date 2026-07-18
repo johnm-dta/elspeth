@@ -34,9 +34,11 @@ from uuid import UUID, uuid4
 import pytest
 
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.state_machine import TerminalKind, TerminalState
 from elspeth.web.sessions.guided_operations import guided_operation_request_hash
+from elspeth.web.sessions.guided_replay import load_guided_json_payload
 from elspeth.web.sessions.protocol import CompositionStateData, GuidedOperationCompleted
 from elspeth.web.sessions.schemas import ConvertGuidedRequest
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
@@ -140,10 +142,17 @@ class TestConvertFreeformWithWork:
         gs = body["guided_session"]
         assert gs is not None
         assert gs["step"] == "step_1_source"
-        assert gs["history"] == []
+        assert len(gs["history"]) == 1
+        assert gs["history"][0]["response_hash"] is None
         assert gs["terminal"] is None
         assert body["terminal"] is None
         assert body["next_turn"] is not None
+        loaded_turn = load_guided_json_payload(
+            client.app.state.payload_store,
+            payload_id=gs["history"][0]["payload_hash"],
+            purpose="turn",
+        )
+        assert deep_thaw(loaded_turn.payload) == body["next_turn"]["payload"]
         # The fresh wizard replaced the freeform graph: the new version carries
         # no source.
         state = body["composition_state"]
@@ -360,7 +369,7 @@ class TestConvertEmptySession:
                 "elspeth.web.sessions.routes.composer.guided._build_get_guided_turn",
                 return_value=drifted_turn,
             ),
-            pytest.raises(AuditIntegrityError, match="response hash"),
+            pytest.raises(AuditIntegrityError, match="persisted occurrence"),
         ):
             _convert_raw(client, session_id, operation_id=operation_id)
 

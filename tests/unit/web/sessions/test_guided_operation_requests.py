@@ -47,7 +47,6 @@ def test_mutating_composer_requests_are_strict_and_extra_forbid(model_type) -> N
 @pytest.mark.parametrize(
     ("model_type", "payload"),
     [
-        (GuidedRespondRequest, {"chosen": ["csv"]}),
         (GuidedChatRequest, {"message": "Use CSV", "step_index": "step_1_source"}),
         (ForkSessionRequest, {"from_message_id": str(uuid4()), "new_message_content": "Try this"}),
     ],
@@ -57,6 +56,123 @@ def test_pending_handlers_do_not_expose_unenforced_operation_id(model_type, payl
 
     assert "operation_id" not in type(request).model_fields
     assert type(request).model_config.get("strict") is not True
+
+
+def test_guided_respond_requires_strict_operation_and_live_turn_tokens() -> None:
+    with pytest.raises(ValidationError, match="operation_id"):
+        GuidedRespondRequest.model_validate({"turn_token": "a" * 64, "chosen": ["csv"]})
+    with pytest.raises(ValidationError, match="turn_token"):
+        GuidedRespondRequest.model_validate({"operation_id": _OPERATION_ID, "chosen": ["csv"]})
+    with pytest.raises(ValidationError, match="turn_token"):
+        GuidedRespondRequest.model_validate({"operation_id": _OPERATION_ID, "turn_token": None, "chosen": ["csv"]})
+
+    request = GuidedRespondRequest.model_validate({"operation_id": _OPERATION_ID, "turn_token": "a" * 64, "chosen": ["csv"]})
+
+    assert request.operation_id == _OPERATION_ID
+    assert request.turn_token == "a" * 64
+    assert type(request).model_config.get("strict") is True
+    assert type(request).model_config.get("extra") == "forbid"
+
+
+def test_guided_respond_terminal_exit_is_the_only_null_token_shape() -> None:
+    request = GuidedRespondRequest.model_validate(
+        {
+            "operation_id": _OPERATION_ID,
+            "turn_token": None,
+            "control_signal": "exit_to_freeform",
+        }
+    )
+
+    assert request.turn_token is None
+
+    with pytest.raises(ValidationError, match="cannot be combined"):
+        GuidedRespondRequest.model_validate(
+            {
+                "operation_id": _OPERATION_ID,
+                "turn_token": "a" * 64,
+                "control_signal": "exit_to_freeform",
+                "chosen": ["csv"],
+            }
+        )
+
+
+def test_guided_respond_rejects_empty_actions_and_mixed_control_shapes() -> None:
+    with pytest.raises(ValidationError, match="action is required"):
+        GuidedRespondRequest.model_validate({"operation_id": _OPERATION_ID, "turn_token": "a" * 64})
+    with pytest.raises(ValidationError, match="control_signal"):
+        GuidedRespondRequest.model_validate(
+            {
+                "operation_id": _OPERATION_ID,
+                "turn_token": "a" * 64,
+                "control_signal": "passthrough",
+                "custom_inputs": ["field"],
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "proposal_fields",
+    [
+        {"proposal_id": "00000000-0000-4000-8000-000000000002"},
+        {"draft_hash": "b" * 64},
+        {
+            "edit_target": {
+                "kind": "source",
+                "stable_id": "00000000-0000-4000-8000-000000000003",
+            }
+        },
+    ],
+)
+def test_guided_respond_rejects_partial_proposal_bindings(proposal_fields: dict[str, object]) -> None:
+    with pytest.raises(ValidationError, match="proposal"):
+        GuidedRespondRequest.model_validate(
+            {
+                "operation_id": _OPERATION_ID,
+                "turn_token": "a" * 64,
+                **proposal_fields,
+            }
+        )
+
+
+@pytest.mark.parametrize("legacy_field", ["step_index", "accepted_step_index", "edit_step_index"])
+def test_guided_respond_rejects_legacy_index_fields(legacy_field: str) -> None:
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        GuidedRespondRequest.model_validate(
+            {
+                "operation_id": _OPERATION_ID,
+                "turn_token": "a" * 64,
+                "chosen": ["csv"],
+                legacy_field: 0,
+            }
+        )
+
+
+def test_guided_respond_validates_closed_future_proposal_bindings() -> None:
+    request = GuidedRespondRequest.model_validate(
+        {
+            "operation_id": _OPERATION_ID,
+            "turn_token": "a" * 64,
+            "proposal_id": "00000000-0000-4000-8000-000000000002",
+            "draft_hash": "b" * 64,
+            "edit_target": {
+                "kind": "source",
+                "stable_id": "00000000-0000-4000-8000-000000000003",
+            },
+        }
+    )
+    assert request.proposal_id == "00000000-0000-4000-8000-000000000002"
+    assert request.edit_target is not None
+
+    with pytest.raises(ValidationError):
+        GuidedRespondRequest.model_validate(
+            {
+                "operation_id": _OPERATION_ID,
+                "turn_token": "a" * 64,
+                "proposal_id": "not-canonical",
+                "draft_hash": "raw-diagnostic",
+                "edit_target": {"kind": "source", "stable_id": "../source"},
+            }
+        )
 
 
 @pytest.mark.parametrize("model_type", [StartGuidedRequest, ReenterGuidedRequest])

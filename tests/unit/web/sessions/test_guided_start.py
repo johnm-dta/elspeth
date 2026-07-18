@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -119,6 +120,24 @@ def _make_app(tmp_path, user_id="alice", database_url: str | None = None):
     return app, service
 
 
+def _materialize_first_turn(state, catalog):
+    from elspeth.web.sessions.routes.composer.guided import (
+        _append_server_turn_record,
+        _build_get_guided_turn,
+    )
+
+    guided = state.guided_session
+    assert guided is not None
+    turn = _build_get_guided_turn(state, guided, catalog=catalog)
+    assert turn is not None
+    guided, _record, _turn_type, _payload_hash = _append_server_turn_record(
+        guided,
+        current_step=guided.step,
+        turn=turn,
+    )
+    return replace(state, guided_session=guided)
+
+
 @pytest.mark.asyncio
 async def test_guided_start_seeds_tutorial_profile_and_persists(tmp_path) -> None:
     app, service = _make_app(tmp_path)
@@ -213,6 +232,44 @@ async def test_guided_start_live_profile_is_empty(tmp_path) -> None:
     assert body["guided_session"]["chat_turn_seq"] == 0
     assert body["composition_state"]["sources"] == {}
     assert body["composition_state"]["nodes"] == []
+
+
+@pytest.mark.asyncio
+async def test_fresh_get_and_start_share_the_same_prospective_turn_token(tmp_path) -> None:
+    from elspeth.contracts.freeze import deep_thaw
+    from elspeth.web.sessions.guided_replay import load_guided_json_payload
+
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    operation_id = str(uuid.uuid4())
+
+    fresh = client.get(f"/api/sessions/{session.id}/guided")
+    started = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": "live", "operation_id": operation_id},
+    )
+    persisted = client.get(f"/api/sessions/{session.id}/guided")
+    replayed = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": "live", "operation_id": operation_id},
+    )
+
+    assert fresh.status_code == started.status_code == persisted.status_code == replayed.status_code == 200
+    assert len(fresh.json()["guided_session"]["history"]) == 1
+    assert (
+        fresh.json()["next_turn"]["turn_token"]
+        == started.json()["next_turn"]["turn_token"]
+        == persisted.json()["next_turn"]["turn_token"]
+        == replayed.json()["next_turn"]["turn_token"]
+    )
+    payload_id = started.json()["guided_session"]["history"][-1]["payload_hash"]
+    loaded = load_guided_json_payload(
+        app.state.payload_store,
+        payload_id=payload_id,
+        purpose="turn",
+    )
+    assert deep_thaw(loaded.payload) == started.json()["next_turn"]["payload"]
 
 
 @pytest.mark.asyncio
@@ -580,7 +637,7 @@ async def test_guided_start_replay_fails_closed_on_response_drift(tmp_path) -> N
             "elspeth.web.sessions.routes.composer.guided._build_get_guided_turn",
             return_value=drifted,
         ),
-        pytest.raises(AuditIntegrityError, match="response hash"),
+        pytest.raises(AuditIntegrityError, match="persisted occurrence"),
     ):
         client.post(f"/api/sessions/{session.id}/guided/start", json=payload)
 
@@ -677,7 +734,10 @@ async def test_guided_start_empty_race_settles_exact_guided_winner(tmp_path) -> 
         nonlocal winner_record
         outcome = await original_reserve(**kwargs)
         if winner_record is None:
-            winner = _initial_composition_state_with_guided_session(profile=TUTORIAL_PROFILE)
+            winner = _materialize_first_turn(
+                _initial_composition_state_with_guided_session(profile=TUTORIAL_PROFILE),
+                app.state.catalog_service,
+            )
             assert winner.guided_session is not None
             winner_data = winner.to_dict()
             winner_record = await service.save_composition_state(
@@ -722,7 +782,10 @@ async def test_guided_start_late_empty_race_converges_inside_atomic_seed(tmp_pat
 
     async def seed_after_late_guided_winner(*args, **kwargs):
         nonlocal winner_record
-        winner = _initial_composition_state_with_guided_session(profile=TUTORIAL_PROFILE)
+        winner = _materialize_first_turn(
+            _initial_composition_state_with_guided_session(profile=TUTORIAL_PROFILE),
+            app.state.catalog_service,
+        )
         assert winner.guided_session is not None
         winner_data = winner.to_dict()
         winner_record = await service.save_composition_state(

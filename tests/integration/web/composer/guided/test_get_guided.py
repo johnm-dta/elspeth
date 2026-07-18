@@ -115,21 +115,20 @@ class TestGetGuidedFirstFetch:
         option_ids = [o["id"] for o in payload["options"]]
         assert "csv" in option_ids, f"csv not in option_ids: {option_ids}"
 
-    def test_history_is_empty_after_first_fetch_non_mutating(self, composer_test_client: TestClient) -> None:
-        """After first fetch on a fresh session, history is empty (non-mutating).
+    def test_history_projects_first_occurrence_without_persisting_state(self, composer_test_client: TestClient) -> None:
+        """A fresh GET projects the exact prospective turn occurrence.
 
-        Commit c4e2f69cd made GET /guided non-mutating on fresh sessions to
-        avoid allocating a v1 composition_state version on the frontend's
-        auto-fetch. ``next_turn`` is returned in memory; ``history`` stays
-        empty until the first mutating respond seeds the TurnRecord.  See
-        ``test_history_has_one_record_after_first_mutation`` for the
-        complementary post-mutation assertion.
+        GET remains non-mutating (no composition-state version), while the
+        response history includes the in-memory occurrence needed to derive
+        the required turn token. RESPOND reconstructs this same occurrence.
         """
         session_id = _create_session(composer_test_client)
         body = _get_guided(composer_test_client, session_id)
 
-        assert body["guided_session"]["history"] == []
+        assert len(body["guided_session"]["history"]) == 1
+        assert body["guided_session"]["history"][0]["response_hash"] is None
         assert body["next_turn"] is not None
+        assert len(body["next_turn"]["turn_token"]) == 64
         assert body["composition_state"] is None
 
     def test_history_has_one_record_after_first_mutation(self, composer_test_client: TestClient) -> None:
@@ -158,12 +157,12 @@ class TestGetGuidedFirstFetch:
         ``stable_hash`` matches the persisted ``payload_hash`` after the
         first mutating respond.
         """
-        from elspeth.core.canonical import stable_hash
+        from elspeth.web.sessions.protocol import guided_json_payload_id
 
         session_id = _create_session(composer_test_client)
         first = _get_guided(composer_test_client, session_id)
         returned_payload = first["next_turn"]["payload"]
-        expected_hash = stable_hash(returned_payload)
+        expected_hash = guided_json_payload_id("turn", returned_payload)
 
         _seed_first_turn(composer_test_client, session_id)
         body = _get_guided(composer_test_client, session_id)
@@ -184,14 +183,16 @@ class TestGetGuidedIdempotency:
         hash2 = next(r for r in body2["guided_session"]["history"] if r["step"] == "step_1_source")["payload_hash"]
         assert hash1 == hash2
 
-    def test_repeated_non_mutating_fetches_leave_history_empty(self, composer_test_client: TestClient) -> None:
-        """Re-fetching a never-mutated session does not grow the history."""
+    def test_repeated_non_mutating_fetches_reuse_prospective_occurrence(self, composer_test_client: TestClient) -> None:
+        """Re-fetching a never-mutated session does not grow or rotate its token."""
         session_id = _create_session(composer_test_client)
 
-        _get_guided(composer_test_client, session_id)
+        body1 = _get_guided(composer_test_client, session_id)
         body2 = _get_guided(composer_test_client, session_id)
 
-        assert body2["guided_session"]["history"] == []
+        assert len(body2["guided_session"]["history"]) == 1
+        assert body2["guided_session"]["history"] == body1["guided_session"]["history"]
+        assert body2["next_turn"]["turn_token"] == body1["next_turn"]["turn_token"]
         assert body2["composition_state"] is None
 
     def test_second_fetch_has_same_turn_type(self, composer_test_client: TestClient) -> None:

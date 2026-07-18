@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { getGuided, reenterGuided, respondGuided, revertToVersion, startGuidedSession } from "./client";
+import { convertToGuided, getGuided, reenterGuided, respondGuided, revertToVersion, startGuidedSession } from "./client";
 import type {
   GetGuidedResponse,
   GuidedRespondRequest,
@@ -221,6 +221,18 @@ describe("api/client guided functions", () => {
   });
 
   describe("retry-safe mutations", () => {
+    it("sends the store-owned operation id for guided conversion", async () => {
+      const body = makeGetGuidedResponse();
+      fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => body } as Response);
+
+      await convertToGuided("sess-1", "00000000-0000-4000-8000-000000000003");
+
+      const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("/api/sessions/sess-1/guided/convert");
+      expect(JSON.parse(init.body as string)).toEqual({
+        operation_id: "00000000-0000-4000-8000-000000000003",
+      });
+    });
     it("sends the store-owned operation id for guided re-entry", async () => {
       const body = makeGetGuidedResponse();
       fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => body } as Response);

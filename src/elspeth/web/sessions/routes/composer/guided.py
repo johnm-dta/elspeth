@@ -20,7 +20,7 @@ from elspeth.web.composer.tutorial_sample import (
 from elspeth.web.interpretation_state import refine_prompt_shield_warnings_for_availability
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions._guided_step_chat import Step1SourceChatResult
-from elspeth.web.sessions.schemas import ReenterGuidedRequest, StartGuidedRequest, TutorialSampleResponse
+from elspeth.web.sessions.schemas import ConvertGuidedRequest, ReenterGuidedRequest, StartGuidedRequest, TutorialSampleResponse
 
 from .._helpers import (
     _COMMIT_REJECTED_MESSAGE,
@@ -3562,6 +3562,7 @@ async def post_guided_chat(
 @router.post("/{session_id}/guided/convert", response_model=GetGuidedResponse)
 async def post_guided_convert(
     session_id: UUID,
+    body: ConvertGuidedRequest,
     request: Request,
     user: UserIdentity = Depends(get_current_user),  # noqa: B008
 ) -> GetGuidedResponse:
@@ -3589,9 +3590,8 @@ async def post_guided_convert(
 
     Idempotent and safe for every entry state, so "Switch to guided" can route
     through it unconditionally:
-      * no persisted state (empty session) -> lazy fresh wizard, NON-persisting
-        (identical to GET /guided's lazy path; an empty graph must not open the
-        version history).
+      * no persisted state (empty session) -> persist a fresh wizard checkpoint
+        so the operation has an immutable replay locator.
       * ``guided_session`` already present -> return it UNCHANGED, including any
         terminal (so a completed / solver-exhausted / protocol-violation surface
         still renders — enterGuided routes those non-exit terminals here).
@@ -3603,6 +3603,97 @@ async def post_guided_convert(
     service: SessionServiceProtocol = request.app.state.session_service
     catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
 
+    from elspeth.contracts.errors import AuditIntegrityError
+    from elspeth.web.sessions.protocol import GuidedCompositionStateResult
+
+    from ..guided_operations import GuidedOperationLease, guided_response_hash, reserve_or_replay_guided_operation
+
+    def _response_from_record(record: CompositionStateRecord) -> GetGuidedResponse:
+        state = _state_from_record(record)
+        guided = state.guided_session
+        if guided is None:
+            raise AuditIntegrityError("Guided conversion result state has no guided checkpoint")
+        terminal = guided.terminal
+        try:
+            turn = None if terminal is not None else _build_get_guided_turn(state, guided, catalog=catalog)
+        except InvariantError as exc:
+            slog.error(
+                "guided.invariant_violated",
+                session_id=str(session_id),
+                user_id=user.user_id,
+                exc_class=type(exc).__name__,
+                site="post_guided_convert._build_get_guided_turn",
+                frames=_safe_frame_strings(exc),
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Server invariant violated. See application audit log for diagnostic detail.",
+            ) from exc
+        terminal_response = (
+            TerminalStateResponse(
+                kind=terminal.kind.value,
+                reason=terminal.reason.value if terminal.reason is not None else None,
+                pipeline_yaml=terminal.pipeline_yaml,
+            )
+            if terminal is not None
+            else None
+        )
+        return GetGuidedResponse(
+            guided_session=GuidedSessionResponse(
+                step=guided.step.value,
+                history=[
+                    TurnRecordResponse(
+                        step=turn_record.step.value,
+                        turn_type=turn_record.turn_type.value,
+                        payload_hash=turn_record.payload_hash,
+                        response_hash=turn_record.response_hash,
+                        summary=turn_record.summary,
+                        emitter=turn_record.emitter,
+                    )
+                    for turn_record in guided.history
+                ],
+                terminal=terminal_response,
+                chat_history=[
+                    ChatTurnResponse(
+                        role=chat_turn.role.value,
+                        content=chat_turn.content,
+                        seq=chat_turn.seq,
+                        step=chat_turn.step.value,
+                        ts_iso=chat_turn.ts_iso,
+                        assistant_message_kind=chat_turn.assistant_message_kind,
+                        synthetic_failure_reason=chat_turn.synthetic_failure_reason,
+                    )
+                    for chat_turn in guided.chat_history
+                ],
+                chat_turn_seq=guided.chat_turn_seq,
+                profile=_workflow_profile_response(guided),
+            ),
+            next_turn=_turn_payload_response(
+                turn,
+                shield_available=_resolve_shield_available(plugin_snapshot),
+            ),
+            terminal=terminal_response,
+            composition_state=_state_response(record, policy_catalog=catalog),
+        )
+
+    async def _replay(result: object) -> GetGuidedResponse:
+        if type(result) is not GuidedCompositionStateResult:
+            raise AuditIntegrityError("Guided conversion replay has a non-state result locator")
+        replay_record = await service.get_state_in_session(result.state_id, session_id)
+        return _response_from_record(replay_record)
+
+    reserved = await reserve_or_replay_guided_operation(
+        service=service,
+        session_id=session_id,
+        kind="guided_convert",
+        request=body,
+        replay=_replay,
+    )
+    if reserved is None:  # pragma: no cover - reserve_if_absent defaults true
+        raise AuditIntegrityError("Guided conversion operation was not reserved")
+    if not isinstance(reserved, GuidedOperationLease):
+        return reserved
+
     compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
     async with compose_lock:
         state_record = await service.get_current_state(session_id)
@@ -3612,154 +3703,46 @@ async def post_guided_convert(
         # Return the existing session UNCHANGED — never reseed. Mirrors
         # post_guided_start's idempotency block, including the terminal payload
         # and the ``next_turn=None`` snapshot semantics.
-        if state_record is not None:
-            existing_state = _state_from_record(state_record)
-            if existing_state.guided_session is not None:
-                guided = existing_state.guided_session
-                terminal = guided.terminal
-                # Rebuild the live turn for a non-terminal step so a double-click
-                # / cross-tab "Switch to guided" that lands here returns the SAME
-                # active turn GET /guided would (elspeth-e2c3dba6b5 review P2).
-                # Reserve next_turn=None only for terminal sessions and steps with
-                # no rebuildable initial turn (STEP_3, no-recipe STEP_2_5) — for
-                # those _build_get_guided_turn returns None, matching GET's
-                # turn/None contract exactly. Without this the frontend keeps
-                # guidedSession but drops guidedNextTurn, isGuidedBuildActive goes
-                # false, and ChatPanel falls back to the freeform surface.
-                if terminal is None:
-                    try:
-                        turn = _build_get_guided_turn(existing_state, guided, catalog=catalog)
-                    except InvariantError as exc:
-                        # Same B1-sanitization rationale as get_guided: str(exc)
-                        # can embed {d!r} of a corrupted Tier-1 record including
-                        # Tier-3 sample_rows. Static detail; slog carries the
-                        # exc_class + frames only.
-                        slog.error(
-                            "guided.invariant_violated",
-                            session_id=str(session_id),
-                            user_id=user.user_id,
-                            exc_class=type(exc).__name__,
-                            site="post_guided_convert._build_get_guided_turn",
-                            frames=_safe_frame_strings(exc),
-                        )
-                        raise HTTPException(
-                            status_code=500,
-                            detail="Server invariant violated. See application audit log for diagnostic detail.",
-                        ) from exc
-                else:
-                    turn = None
-                shield_available = _resolve_shield_available(plugin_snapshot)
-                return GetGuidedResponse(
-                    guided_session=GuidedSessionResponse(
-                        step=guided.step.value,
-                        history=[
-                            TurnRecordResponse(
-                                step=r.step.value,
-                                turn_type=r.turn_type.value,
-                                payload_hash=r.payload_hash,
-                                response_hash=r.response_hash,
-                                summary=r.summary,
-                                emitter=r.emitter,
-                            )
-                            for r in guided.history
-                        ],
-                        terminal=TerminalStateResponse(
-                            kind=terminal.kind.value,
-                            reason=terminal.reason.value if terminal.reason is not None else None,
-                            pipeline_yaml=terminal.pipeline_yaml,
-                        )
-                        if terminal is not None
-                        else None,
-                        chat_history=[
-                            ChatTurnResponse(
-                                role=t.role.value,
-                                content=t.content,
-                                seq=t.seq,
-                                step=t.step.value,
-                                ts_iso=t.ts_iso,
-                                assistant_message_kind=t.assistant_message_kind,
-                                synthetic_failure_reason=t.synthetic_failure_reason,
-                            )
-                            for t in guided.chat_history
-                        ],
-                        chat_turn_seq=guided.chat_turn_seq,
-                        profile=_workflow_profile_response(guided),
-                    ),
-                    next_turn=_turn_payload_response(turn, shield_available=shield_available),
-                    terminal=TerminalStateResponse(
-                        kind=terminal.kind.value,
-                        reason=terminal.reason.value if terminal.reason is not None else None,
-                        pipeline_yaml=terminal.pipeline_yaml,
-                    )
-                    if terminal is not None
-                    else None,
-                    composition_state=_state_response(state_record, policy_catalog=catalog),
-                )
+        if state_record is not None and _state_from_record(state_record).guided_session is not None:
+            settled_record = await service.complete_existing_state_guided_operation(
+                reserved.fence,
+                state_id=state_record.id,
+                actor="composer_route",
+                response_hash_factory=lambda record: guided_response_hash(_response_from_record(record)),
+            )
+            return _response_from_record(settled_record)
 
         # Branches 1 & 3: seed a FRESH guided wizard.
         new_state = _initial_composition_state_with_guided_session()
         seeded_guided = new_state.guided_session
         if seeded_guided is None:  # pragma: no cover — helper always attaches a guided session
             raise InvariantError("post_guided_convert: initial state has no guided_session")
-        turn = _build_get_guided_turn(new_state, seeded_guided, catalog=catalog)
-
-        state_record_out: CompositionStateRecord | None
-        if state_record is None:
-            # Branch 1: empty session — lazy, non-persisting (mirror GET /guided).
-            # The fresh wizard is returned in memory; the first real answer
-            # persists it. An empty graph must not open the version history.
-            state_record_out = None
-        else:
-            # Branch 3: THE CONVERSION. Reseed a fresh wizard as a NEW version,
-            # setting the freeform graph aside. This is user-consented (two-step
-            # confirm) and fully recoverable: the prior freeform version stays in
-            # state/versions and revert restores it (composer_meta copied
-            # verbatim -> back to freeform). ``session_seed`` provenance is reused
-            # deliberately — the closed CompositionStateProvenance enum has no
-            # guided-convert value and widening it is a governance action
-            # (protocol.py), out of scope for this fix; the audit trail for the
-            # graph-discard is the system message emitted just below.
-            prior_version = state_record.version
-            new_composer_meta = {"guided_session": seeded_guided.to_dict()}
-            state_d = new_state.to_dict()
-            persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)
-            state_data = CompositionStateData(
-                sources=state_d["sources"],
-                nodes=state_d["nodes"],
-                edges=state_d["edges"],
-                outputs=state_d["outputs"],
-                metadata_=state_d["metadata"],
-                is_valid=persisted_is_valid,
-                validation_errors=persisted_errors,
-                composer_meta=new_composer_meta,
-            )
-            state_record_out = await service.save_composition_state(
-                session_id,
-                state_data,
-                provenance="session_seed",
-            )
-            await service.add_message(
-                session_id,
-                role="system",
-                content=(
-                    "Switched to guided mode with a fresh wizard. Your previous "
-                    f"freeform pipeline is saved as version {prior_version} and can "
-                    "be restored from version history."
-                ),
-                writer_principal="route_system_message",
-            )
-
-        shield_available = _resolve_shield_available(plugin_snapshot)
-        return GetGuidedResponse(
-            guided_session=GuidedSessionResponse(
-                step=seeded_guided.step.value,
-                history=[],
-                terminal=None,
-                chat_history=[],
-                chat_turn_seq=seeded_guided.chat_turn_seq,
-                profile=_workflow_profile_response(seeded_guided),
-            ),
-            next_turn=_turn_payload_response(turn, shield_available=shield_available),
-            terminal=None,
-            composition_state=_state_response(state_record_out, policy_catalog=catalog) if state_record_out is not None else None,
+        new_composer_meta = {"guided_session": seeded_guided.to_dict()}
+        state_d = new_state.to_dict()
+        persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)
+        state_data = CompositionStateData(
+            sources=state_d["sources"],
+            nodes=state_d["nodes"],
+            edges=state_d["edges"],
+            outputs=state_d["outputs"],
+            metadata_=state_d["metadata"],
+            is_valid=persisted_is_valid,
+            validation_errors=persisted_errors,
+            composer_meta=new_composer_meta,
         )
+        system_message = None
+        if state_record is not None:
+            system_message = (
+                "Switched to guided mode with a fresh wizard. Your previous "
+                f"freeform pipeline is saved as version {state_record.version} and can "
+                "be restored from version history."
+            )
+        state_record_out = await service.save_state_for_guided_operation(
+            reserved.fence,
+            state=state_data,
+            provenance="session_seed",
+            actor="composer_route",
+            response_hash_factory=lambda record: guided_response_hash(_response_from_record(record)),
+            system_message=system_message,
+        )
+        return _response_from_record(state_record_out)

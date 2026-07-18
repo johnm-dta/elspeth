@@ -479,13 +479,13 @@ describe("sessionStore — guided-mode fields and actions", () => {
     );
 
     useSessionStore.setState({
-      activeSessionId: "sess-1",
+      activeSessionId: RETRY_SESSION_ID,
       guidedSession: null,
     });
 
     await useSessionStore.getState().enterGuided();
 
-    expect(convertToGuided).toHaveBeenCalledWith("sess-1");
+    expect(convertToGuided).toHaveBeenCalledWith(RETRY_SESSION_ID, expect.any(String));
     expect(getGuided).not.toHaveBeenCalled();
     const state = useSessionStore.getState();
     expect(state.guidedSession).toEqual(sampleGetGuidedResponse.guided_session);
@@ -497,8 +497,8 @@ describe("sessionStore — guided-mode fields and actions", () => {
       sampleGetGuidedResponse,
     );
 
-    useSessionStore.setState({ activeSessionId: "sess-1" });
-    await useSessionStore.getState().convertToGuided("sess-1");
+    useSessionStore.setState({ activeSessionId: RETRY_SESSION_ID });
+    await useSessionStore.getState().convertToGuided(RETRY_SESSION_ID);
 
     const state = useSessionStore.getState();
     expect(state.guidedSession).toEqual(sampleGetGuidedResponse.guided_session);
@@ -517,12 +517,33 @@ describe("sessionStore — guided-mode fields and actions", () => {
       detail: "You do not own this session.",
     });
 
-    useSessionStore.setState({ activeSessionId: "sess-1" });
-    await useSessionStore.getState().convertToGuided("sess-1");
+    useSessionStore.setState({ activeSessionId: RETRY_SESSION_ID });
+    await useSessionStore.getState().convertToGuided(RETRY_SESSION_ID);
 
     expect(useSessionStore.getState().error).toBe(
       "You do not own this session.",
     );
+  });
+
+  it("convertToGuided: reuses the operation id after an ambiguous failure and clears it after success", async () => {
+    const { convertToGuided } = await import("@/api/client");
+    const convertMock = convertToGuided as ReturnType<typeof vi.fn>;
+    convertMock
+      .mockRejectedValueOnce({ status: 503 })
+      .mockResolvedValueOnce(sampleGetGuidedResponse)
+      .mockResolvedValueOnce(sampleGetGuidedResponse);
+    useSessionStore.setState({ activeSessionId: RETRY_SESSION_ID });
+
+    await useSessionStore.getState().convertToGuided(RETRY_SESSION_ID);
+    await useSessionStore.getState().convertToGuided(RETRY_SESSION_ID);
+    await useSessionStore.getState().convertToGuided(RETRY_SESSION_ID);
+
+    const firstOperationId = convertMock.mock.calls[0]?.[1];
+    const retryOperationId = convertMock.mock.calls[1]?.[1];
+    const nextActionOperationId = convertMock.mock.calls[2]?.[1];
+    expect(firstOperationId).toEqual(expect.any(String));
+    expect(retryOperationId).toBe(firstOperationId);
+    expect(nextActionOperationId).not.toBe(firstOperationId);
   });
 
   it("startGuided: surfaces the backend's typed detail instead of the generic banner", async () => {

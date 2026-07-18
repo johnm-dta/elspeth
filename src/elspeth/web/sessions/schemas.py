@@ -373,7 +373,7 @@ class StartGuidedRequest(_RequestModel):
     profile: object = "live"
 
 
-class ConvertGuidedRequest(_RequestModel):
+class ConvertGuidedRequest(_GuidedOperationRequest):
     """Request body for POST /api/sessions/{id}/guided/convert."""
 
 

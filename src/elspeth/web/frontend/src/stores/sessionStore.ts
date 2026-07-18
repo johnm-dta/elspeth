@@ -1925,8 +1925,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // flight, the response is dropped rather than overwriting the newly active
     // session's guided state.
     const requestedSessionId = sessionId;
+    const retry = acquireGuidedRetry("guided_convert", sessionId, []);
     try {
-      const response = await api.convertToGuided(sessionId);
+      const response = await api.convertToGuided(sessionId, retry.operationId);
+      clearGuidedRetry(retry);
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
@@ -1939,6 +1941,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         error: null,
       });
     } catch (err) {
+      if (!isAmbiguousGuidedRetryFailure(err)) {
+        clearGuidedRetry(retry);
+      }
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }

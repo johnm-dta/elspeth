@@ -834,11 +834,13 @@ export async function reenterGuided(
  */
 export async function convertToGuided(
   sessionId: string,
+  operationId: string,
   signal?: AbortSignal,
 ): Promise<GetGuidedResponse> {
   const response = await fetch(`/api/sessions/${sessionId}/guided/convert`, {
     method: "POST",
-    headers: authHeaders(),
+    headers: authHeaders("application/json"),
+    body: JSON.stringify({ operation_id: operationId }),
     signal,
   });
   return parseResponse<GetGuidedResponse>(response);

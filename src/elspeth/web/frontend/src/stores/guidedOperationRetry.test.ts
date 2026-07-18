@@ -71,6 +71,14 @@ describe("guided operation retry custody", () => {
     expect(encoded).toContain(SESSION_A);
   });
 
+  it("retains guided conversion custody without storing request content", () => {
+    const first = acquireGuidedRetry("guided_convert", SESSION_A, []);
+    const retry = acquireGuidedRetry("guided_convert", SESSION_A, []);
+
+    expect(retry.operationId).toBe(first.operationId);
+    expect(window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY)).toContain('"kind":"guided_convert"');
+  });
+
   it("a different action evicts the prior same-kind session descriptor", () => {
     const first = acquireGuidedRetry("state_revert", SESSION_A, ["state-a"]);
     acquireGuidedRetry("state_revert", SESSION_A, ["state-b"]);

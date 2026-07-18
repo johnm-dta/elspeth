@@ -7062,10 +7062,50 @@ class SessionServiceImpl:
 
         return cast("CompositionStateRecord", await self._run_sync(_sync))
 
+    @staticmethod
+    def _require_guided_expected_current_state_on_connection(
+        conn: Connection,
+        *,
+        session_id: str,
+        expected_state_id: UUID | None,
+        expected_state_version: int | None,
+    ) -> None:
+        """Fence a state-producing operation to the route-observed head.
+
+        The comparison runs under the same session write lock and transaction
+        as the state/message/settlement writes. An empty observation is encoded
+        as ``(None, None)``; a present observation requires both exact UUID and
+        positive version. No stale worker may attach a breadcrumb or locator to
+        a different session head.
+        """
+
+        if (expected_state_id is None) != (expected_state_version is None):
+            raise ValueError("expected guided current state id and version must be both present or both absent")
+        if expected_state_id is not None and type(expected_state_id) is not UUID:
+            raise ValueError("expected guided current state id must be a UUID")
+        if expected_state_version is not None and (
+            not isinstance(expected_state_version, int) or isinstance(expected_state_version, bool) or expected_state_version < 1
+        ):
+            raise ValueError("expected guided current state version must be a positive integer")
+        current = conn.execute(
+            select(composition_states_table.c.id, composition_states_table.c.version)
+            .where(composition_states_table.c.session_id == session_id)
+            .order_by(desc(composition_states_table.c.version))
+            .limit(1)
+        ).one_or_none()
+        if expected_state_id is None:
+            if current is not None:
+                raise AuditIntegrityError("Guided operation current state changed before settlement")
+            return
+        if current is None or current.id != str(expected_state_id) or current.version != expected_state_version:
+            raise AuditIntegrityError("Guided operation current state changed before settlement")
+
     async def save_state_for_guided_operation(
         self,
         fence: GuidedOperationFence,
         *,
+        expected_current_state_id: UUID | None,
+        expected_current_state_version: int | None,
         state: CompositionStateData,
         provenance: CompositionStateProvenance,
         actor: str,
@@ -7082,6 +7122,12 @@ class SessionServiceImpl:
         def _sync() -> CompositionStateRecord:
             with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
                 self.require_guided_operation_fence_on_connection(conn, fence)
+                self._require_guided_expected_current_state_on_connection(
+                    conn,
+                    session_id=sid,
+                    expected_state_id=expected_current_state_id,
+                    expected_state_version=expected_current_state_version,
+                )
                 state_id = self._insert_composition_state(
                     conn,
                     session_id=sid,
@@ -7126,6 +7172,8 @@ class SessionServiceImpl:
         fence: GuidedOperationFence,
         *,
         state_id: UUID,
+        expected_current_state_id: UUID,
+        expected_current_state_version: int,
         actor: str,
         response_hash_factory: Callable[[CompositionStateRecord], str],
     ) -> CompositionStateRecord:
@@ -7136,6 +7184,14 @@ class SessionServiceImpl:
         def _sync() -> CompositionStateRecord:
             with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
                 self.require_guided_operation_fence_on_connection(conn, fence)
+                if state_id != expected_current_state_id:
+                    raise ValueError("existing guided operation result must be the expected current state")
+                self._require_guided_expected_current_state_on_connection(
+                    conn,
+                    session_id=sid,
+                    expected_state_id=expected_current_state_id,
+                    expected_state_version=expected_current_state_version,
+                )
                 row = conn.execute(
                     select(composition_states_table)
                     .where(composition_states_table.c.id == str(state_id))

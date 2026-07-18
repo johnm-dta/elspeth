@@ -24,6 +24,7 @@ _OPERATION_ID = "00000000-0000-4000-8000-000000000001"
 @pytest.mark.parametrize(
     ("model_type", "payload"),
     [
+        (ConvertGuidedRequest, {}),
         (ReenterGuidedRequest, {}),
         (RevertStateRequest, {"state_id": str(uuid4())}),
     ],
@@ -35,7 +36,7 @@ def test_mutating_composer_requests_require_operation_id(model_type, payload) ->
 
 @pytest.mark.parametrize(
     "model_type",
-    [ReenterGuidedRequest, RevertStateRequest],
+    [ConvertGuidedRequest, ReenterGuidedRequest, RevertStateRequest],
 )
 def test_mutating_composer_requests_are_strict_and_extra_forbid(model_type) -> None:
     assert model_type.model_config.get("strict") is True
@@ -48,7 +49,6 @@ def test_mutating_composer_requests_are_strict_and_extra_forbid(model_type) -> N
         (StartGuidedRequest, {"profile": "live"}),
         (GuidedRespondRequest, {"chosen": ["csv"]}),
         (GuidedChatRequest, {"message": "Use CSV", "step_index": "step_1_source"}),
-        (ConvertGuidedRequest, {}),
         (ForkSessionRequest, {"from_message_id": str(uuid4()), "new_message_content": "Try this"}),
     ],
 )

@@ -977,6 +977,8 @@ class SessionServiceProtocol(Protocol):
         self,
         fence: GuidedOperationFence,
         *,
+        expected_current_state_id: UUID | None,
+        expected_current_state_version: int | None,
         state: CompositionStateData,
         provenance: CompositionStateProvenance,
         actor: str,
@@ -989,6 +991,8 @@ class SessionServiceProtocol(Protocol):
         fence: GuidedOperationFence,
         *,
         state_id: UUID,
+        expected_current_state_id: UUID,
+        expected_current_state_version: int,
         actor: str,
         response_hash_factory: Callable[[CompositionStateRecord], str],
     ) -> CompositionStateRecord: ...

@@ -872,7 +872,11 @@ async def post_guided_reenter(
     from elspeth.contracts.errors import AuditIntegrityError
     from elspeth.web.sessions.protocol import GuidedCompositionStateResult
 
-    from ..guided_operations import GuidedOperationLease, guided_response_hash, reserve_or_replay_guided_operation
+    from ..guided_operations import (
+        GuidedOperationLease,
+        guided_response_hash,
+        reserve_or_replay_guided_operation,
+    )
 
     async def _replay(result: object) -> GetGuidedResponse:
         if type(result) is not GuidedCompositionStateResult:
@@ -1043,6 +1047,8 @@ async def post_guided_reenter(
         )
         state_record_out = await service.save_state_for_guided_operation(
             reserved.fence,
+            expected_current_state_id=state_record.id,
+            expected_current_state_version=state_record.version,
             state=state_data,
             provenance="convergence_persist",
             actor="composer_route",
@@ -3604,11 +3610,20 @@ async def post_guided_convert(
     catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
 
     from elspeth.contracts.errors import AuditIntegrityError
-    from elspeth.web.sessions.protocol import GuidedCompositionStateResult
+    from elspeth.web.sessions.protocol import GuidedCompositionStateResult, GuidedOperationFailureCode
 
-    from ..guided_operations import GuidedOperationLease, guided_response_hash, reserve_or_replay_guided_operation
+    from ..guided_operations import (
+        GuidedOperationLease,
+        guided_response_hash,
+        raise_guided_operation_failure,
+        reserve_or_replay_guided_operation,
+    )
 
     def _response_from_record(record: CompositionStateRecord) -> GetGuidedResponse:
+        # Replay deliberately stores no response body or policy snapshot. The
+        # immutable state locator is rebuilt against live policy and checked
+        # against the stored strict response-domain hash; policy projection
+        # drift therefore fails closed instead of silently replaying stale data.
         state = _state_from_record(record)
         guided = state.guided_session
         if guided is None:
@@ -3695,54 +3710,67 @@ async def post_guided_convert(
         return reserved
 
     compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
-    async with compose_lock:
-        state_record = await service.get_current_state(session_id)
+    try:
+        async with compose_lock:
+            state_record = await service.get_current_state(session_id)
 
-        # Branch 2: already guided (idempotent double-click, cross-tab race, or a
-        # terminal session reached via enterGuided's non-exit else-branch).
-        # Return the existing session UNCHANGED — never reseed. Mirrors
-        # post_guided_start's idempotency block, including the terminal payload
-        # and the ``next_turn=None`` snapshot semantics.
-        if state_record is not None and _state_from_record(state_record).guided_session is not None:
-            settled_record = await service.complete_existing_state_guided_operation(
+            # Branch 2: already guided (idempotent double-click, cross-tab race,
+            # or a terminal session reached via enterGuided's non-exit branch).
+            # Return the existing session unchanged and settle its exact head.
+            if state_record is not None and _state_from_record(state_record).guided_session is not None:
+                settled_record = await service.complete_existing_state_guided_operation(
+                    reserved.fence,
+                    state_id=state_record.id,
+                    expected_current_state_id=state_record.id,
+                    expected_current_state_version=state_record.version,
+                    actor="composer_route",
+                    response_hash_factory=lambda record: guided_response_hash(_response_from_record(record)),
+                )
+                return _response_from_record(settled_record)
+
+            # Branches 1 & 3: seed a fresh guided wizard.
+            new_state = _initial_composition_state_with_guided_session()
+            seeded_guided = new_state.guided_session
+            if seeded_guided is None:  # pragma: no cover — helper always attaches a guided session
+                raise InvariantError("post_guided_convert: initial state has no guided_session")
+            new_composer_meta = {"guided_session": seeded_guided.to_dict()}
+            state_d = new_state.to_dict()
+            persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)
+            state_data = CompositionStateData(
+                sources=state_d["sources"],
+                nodes=state_d["nodes"],
+                edges=state_d["edges"],
+                outputs=state_d["outputs"],
+                metadata_=state_d["metadata"],
+                is_valid=persisted_is_valid,
+                validation_errors=persisted_errors,
+                composer_meta=new_composer_meta,
+            )
+            system_message = None
+            if state_record is not None:
+                system_message = (
+                    "Switched to guided mode with a fresh wizard. Your previous "
+                    f"freeform pipeline is saved as version {state_record.version} and can "
+                    "be restored from version history."
+                )
+            state_record_out = await service.save_state_for_guided_operation(
                 reserved.fence,
-                state_id=state_record.id,
+                expected_current_state_id=state_record.id if state_record is not None else None,
+                expected_current_state_version=state_record.version if state_record is not None else None,
+                state=state_data,
+                provenance="session_seed",
                 actor="composer_route",
                 response_hash_factory=lambda record: guided_response_hash(_response_from_record(record)),
+                system_message=system_message,
             )
-            return _response_from_record(settled_record)
-
-        # Branches 1 & 3: seed a FRESH guided wizard.
-        new_state = _initial_composition_state_with_guided_session()
-        seeded_guided = new_state.guided_session
-        if seeded_guided is None:  # pragma: no cover — helper always attaches a guided session
-            raise InvariantError("post_guided_convert: initial state has no guided_session")
-        new_composer_meta = {"guided_session": seeded_guided.to_dict()}
-        state_d = new_state.to_dict()
-        persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)
-        state_data = CompositionStateData(
-            sources=state_d["sources"],
-            nodes=state_d["nodes"],
-            edges=state_d["edges"],
-            outputs=state_d["outputs"],
-            metadata_=state_d["metadata"],
-            is_valid=persisted_is_valid,
-            validation_errors=persisted_errors,
-            composer_meta=new_composer_meta,
-        )
-        system_message = None
-        if state_record is not None:
-            system_message = (
-                "Switched to guided mode with a fresh wizard. Your previous "
-                f"freeform pipeline is saved as version {state_record.version} and can "
-                "be restored from version history."
-            )
-        state_record_out = await service.save_state_for_guided_operation(
+            return _response_from_record(state_record_out)
+    except Exception as exc:
+        failure_code: GuidedOperationFailureCode = "integrity_error" if isinstance(exc, AuditIntegrityError) else "operation_failed"
+        failed = await service.fail_guided_operation(
             reserved.fence,
-            state=state_data,
-            provenance="session_seed",
+            failure_code=failure_code,
             actor="composer_route",
-            response_hash_factory=lambda record: guided_response_hash(_response_from_record(record)),
-            system_message=system_message,
         )
-        return _response_from_record(state_record_out)
+        if isinstance(exc, AuditIntegrityError):
+            raise
+        raise_guided_operation_failure(failed)

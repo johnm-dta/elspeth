@@ -34,6 +34,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.state_machine import TerminalKind, TerminalState
 from elspeth.web.sessions.guided_operations import guided_operation_request_hash
 from elspeth.web.sessions.protocol import CompositionStateData, GuidedOperationCompleted
@@ -297,7 +298,7 @@ class TestConvertIdempotent:
 
 
 # ---------------------------------------------------------------------------
-# Branch 1 — empty session lazy, non-persisting
+# Branch 1 — empty session persisted for immutable replay
 # ---------------------------------------------------------------------------
 
 
@@ -335,6 +336,11 @@ class TestConvertEmptySession:
         assert versions.json() == []
 
     def test_replay_fails_closed_when_located_response_drifts(self, composer_test_client: TestClient) -> None:
+        """Policy/live response drift is intentionally not stored or replayed.
+
+        The operation stores only a state locator and strict response-domain
+        hash. Rebuilding under a changed live projection must fail closed.
+        """
         client = composer_test_client
         session_id = _create_session(client)
         operation_id = str(uuid4())
@@ -354,3 +360,43 @@ class TestConvertEmptySession:
             pytest.raises(AuditIntegrityError, match="response hash"),
         ):
             _convert_raw(client, session_id, operation_id=operation_id)
+
+    def test_deterministic_response_failure_is_settled_and_replayed(self, composer_test_client: TestClient) -> None:
+        client = composer_test_client
+        session_id = _create_session(client)
+        operation_id = str(uuid4())
+
+        with patch(
+            "elspeth.web.sessions.routes.composer.guided._build_get_guided_turn",
+            side_effect=InvariantError("tier-3 diagnostic must not escape"),
+        ):
+            first = _convert_raw(client, session_id, operation_id=operation_id)
+        replay = _convert_raw(client, session_id, operation_id=operation_id)
+
+        assert first.status_code == 500
+        assert replay.status_code == 500
+        assert first.json() == replay.json()
+        assert "tier-3 diagnostic" not in first.text
+
+    def test_audit_integrity_failure_is_settled_without_swallowing_diagnostic(
+        self,
+        composer_test_client: TestClient,
+    ) -> None:
+        client = composer_test_client
+        session_id = _create_session(client)
+        operation_id = str(uuid4())
+        service = client.app.state.session_service
+
+        with (
+            patch.object(
+                service,
+                "save_state_for_guided_operation",
+                side_effect=AuditIntegrityError("diagnostic retained for audit"),
+            ),
+            pytest.raises(AuditIntegrityError, match="diagnostic retained for audit"),
+        ):
+            _convert_raw(client, session_id, operation_id=operation_id)
+
+        replay = _convert_raw(client, session_id, operation_id=operation_id)
+        assert replay.status_code == 500
+        assert replay.json() == {"detail": "The operation failed an integrity check."}

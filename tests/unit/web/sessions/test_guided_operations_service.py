@@ -20,12 +20,14 @@ from elspeth.contracts.hashing import stable_hash
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.guided_operations import guided_operation_request_hash
 from elspeth.web.sessions.models import (
+    chat_messages_table,
     composition_proposals_table,
     composition_states_table,
     guided_operation_events_table,
     guided_operations_table,
 )
 from elspeth.web.sessions.protocol import (
+    CompositionStateData,
     GuidedCompositionStateResult,
     GuidedOperationActive,
     GuidedOperationClaimed,
@@ -434,6 +436,83 @@ async def test_expired_takeover_rotates_fence_and_old_worker_cannot_bind_or_sett
     assert row.attempt == 2
     assert row.result_state_id == str(state_id)
     assert [event.event_kind for event in events] == ["claimed", "taken_over", "completed"]
+
+
+@pytest.mark.asyncio
+async def test_guided_seed_rejects_cross_service_head_drift_before_writes(file_engine) -> None:
+    service_a = _service(file_engine)
+    service_b = _service(file_engine)
+    session_id = await _create_session(service_a)
+    claim = await service_a.reserve_guided_operation(
+        session_id=session_id,
+        operation_id="operation-head-race",
+        kind="guided_convert",
+        request_hash="e" * 64,
+        actor="worker-a",
+        lease_seconds=30,
+    )
+    assert isinstance(claim, GuidedOperationClaimed)
+
+    winning_state = await service_b.save_composition_state(
+        session_id,
+        CompositionStateData(is_valid=True, composer_meta={}),
+        provenance="session_seed",
+    )
+
+    with pytest.raises(AuditIntegrityError, match="current state"):
+        await service_a.save_state_for_guided_operation(
+            claim.fence,
+            expected_current_state_id=None,
+            expected_current_state_version=None,
+            state=CompositionStateData(is_valid=True, composer_meta={"guided_session": {"schema_version": 8}}),
+            provenance="session_seed",
+            actor="worker-a",
+            system_message="Wrong stale breadcrumb.",
+            response_hash_factory=lambda record: stable_hash({"state_id": str(record.id)}),
+        )
+
+    assert [record.id for record in await service_a.get_state_versions(session_id)] == [winning_state.id]
+    with file_engine.connect() as conn:
+        message_count = conn.execute(select(chat_messages_table.c.id).where(chat_messages_table.c.session_id == str(session_id))).all()
+    assert message_count == []
+
+
+@pytest.mark.asyncio
+async def test_existing_guided_settlement_rejects_cross_service_head_drift(file_engine) -> None:
+    service_a = _service(file_engine)
+    service_b = _service(file_engine)
+    session_id = await _create_session(service_a)
+    observed = await service_a.save_composition_state(
+        session_id,
+        CompositionStateData(is_valid=True),
+        provenance="session_seed",
+    )
+    claim = await service_a.reserve_guided_operation(
+        session_id=session_id,
+        operation_id="operation-existing-head-race",
+        kind="guided_convert",
+        request_hash="f" * 64,
+        actor="worker-a",
+        lease_seconds=30,
+    )
+    assert isinstance(claim, GuidedOperationClaimed)
+    winning_state = await service_b.save_composition_state(
+        session_id,
+        CompositionStateData(is_valid=True),
+        provenance="session_seed",
+    )
+
+    with pytest.raises(AuditIntegrityError, match="current state"):
+        await service_a.complete_existing_state_guided_operation(
+            claim.fence,
+            state_id=observed.id,
+            expected_current_state_id=observed.id,
+            expected_current_state_version=observed.version,
+            actor="worker-a",
+            response_hash_factory=lambda record: stable_hash({"state_id": str(record.id)}),
+        )
+
+    assert [record.id for record in await service_a.get_state_versions(session_id)] == [observed.id, winning_state.id]
 
 
 @pytest.mark.asyncio

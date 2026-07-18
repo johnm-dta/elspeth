@@ -151,6 +151,8 @@ async def test_guided_state_save_system_message_and_settlement_are_atomic(servic
 
     saved = await service.save_state_for_guided_operation(
         fence,
+        expected_current_state_id=None,
+        expected_current_state_version=None,
         state=state_data,
         provenance="session_seed",
         actor="route",
@@ -182,6 +184,8 @@ async def test_existing_guided_state_can_settle_without_new_state_version(servic
     settled = await service.complete_existing_state_guided_operation(
         fence,
         state_id=existing.id,
+        expected_current_state_id=existing.id,
+        expected_current_state_version=existing.version,
         actor="route",
         response_hash_factory=lambda state: stable_hash({"state_id": str(state.id)}),
     )

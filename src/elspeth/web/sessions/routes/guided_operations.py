@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Never
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -67,7 +68,9 @@ def guided_response_hash(response: BaseModel) -> str:
     return stable_hash(strict_response.model_dump(mode="json"))
 
 
-def _raise_failed(outcome: GuidedOperationFailed) -> None:
+def raise_guided_operation_failure(outcome: GuidedOperationFailed) -> Never:
+    """Raise the closed HTTP failure represented by a terminal operation."""
+
     safe = _SAFE_FAILURES.get(outcome.failure_code)
     if safe is None:
         raise AuditIntegrityError("Guided operation returned an unknown failure code")
@@ -149,7 +152,7 @@ async def reserve_or_replay_guided_operation[ResponseT: BaseModel](
         if isinstance(outcome, GuidedOperationCompleted):
             return await _replay_completed(outcome, replay)
         if isinstance(outcome, GuidedOperationFailed):
-            _raise_failed(outcome)
+            raise_guided_operation_failure(outcome)
         if not isinstance(outcome, GuidedOperationActive):
             raise AuditIntegrityError("Guided operation reserve returned an unknown outcome")
 

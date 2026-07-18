@@ -147,4 +147,4 @@ versioned release contracts whose regressions block release.
 - [`assessment-framework.md`](assessment-framework.md) defines how to apply these criteria.
 - [`README.md`](README.md) points to the current verdict and assessment history.
 - [`../../contracts/execution-graph.md`](../../contracts/execution-graph.md) describes the execution-graph contract; an assessment checks that contract against live behavior.
-- [`../token-scheduler-state-engine.md`](../token-scheduler-state-engine.md) holds the detailed durable scheduler evidence map.
+- [`../state_engine/README.md`](../state_engine/README.md) is the canonical durable state-engine architecture and assessment authority.

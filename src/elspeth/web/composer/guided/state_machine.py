@@ -404,14 +404,10 @@ class SourceIntent:
             ):
                 raise ValueError("SourceIntent plugin_selection phase cannot carry later-phase values")
         elif self.phase == "plugin_options":
-            if (
-                self.plugin is None
-                or self.options is not None
-                or self.inspection_facts is not None
-                or self.observed_columns
-                or self.sample_rows
-            ):
-                raise ValueError("SourceIntent plugin_options phase requires only a selected plugin")
+            if self.plugin is None or self.options is not None or self.observed_columns or self.sample_rows:
+                raise ValueError(
+                    "SourceIntent plugin_options phase requires a selected plugin, optional inspection_facts, and no resolved values"
+                )
         elif self.plugin is None or self.options is None or self.inspection_facts is None:
             raise ValueError("SourceIntent inspection_review phase requires plugin, options, and inspection_facts")
         json_budget = GuidedJsonBudget()

@@ -69,6 +69,8 @@ _REQUIRED_AUDIT_TRIGGERS: frozenset[str] = frozenset(
         "trg_composer_completion_events_no_delete",
         "trg_chat_messages_immutable_content",
         "trg_chat_messages_no_delete",
+        "trg_guided_operation_events_no_update",
+        "trg_guided_operation_events_no_delete",
     }
 )
 
@@ -358,6 +360,10 @@ def _validate_required_triggers(bind: Engine | Connection) -> None:
                 OR (relation.relname = 'chat_messages' AND trigger.tgname IN (
                   'trg_chat_messages_immutable_content',
                   'trg_chat_messages_no_delete'
+                ))
+                OR (relation.relname = 'guided_operation_events' AND trigger.tgname IN (
+                  'trg_guided_operation_events_no_update',
+                  'trg_guided_operation_events_no_delete'
                 ))
               )
             """

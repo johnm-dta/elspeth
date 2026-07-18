@@ -196,8 +196,8 @@ def _surface_opt_out_row(*, row_id: str, session_id: str, state_id: str) -> dict
     }
 
 
-def test_proposal_provenance_schema_cohort_epoch_is_28() -> None:
-    assert SESSION_SCHEMA_EPOCH == 28
+def test_guided_operations_schema_cohort_epoch_is_29() -> None:
+    assert SESSION_SCHEMA_EPOCH == 29
 
 
 def test_composition_proposal_composer_provenance_is_all_or_none(engine) -> None:
@@ -1052,6 +1052,8 @@ class TestSchemaValidatorCatchesMissingTrigger:
             "trg_interpretation_events_no_delete_resolved",
             "trg_chat_messages_immutable_content",
             "trg_chat_messages_no_delete",
+            "trg_guided_operation_events_no_update",
+            "trg_guided_operation_events_no_delete",
         ],
     )
     def test_validator_raises_when_trigger_dropped(self, trigger_name: str, tmp_path) -> None:

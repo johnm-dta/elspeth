@@ -306,6 +306,36 @@ def _seed_postgres_trigger_rows(postgres_engine: Engine, *, session_id: str, inc
             ),
             {"event_id": f"{session_id}-interpretation", "session_id": session_id},
         )
+        conn.execute(
+            text(
+                """
+                INSERT INTO guided_operations (
+                    session_id, operation_id, kind, status, request_hash,
+                    lease_token, lease_expires_at, attempt, created_at, updated_at
+                ) VALUES (
+                    :session_id, :operation_id, 'guided_start', 'in_progress',
+                    :request_hash, 'lease-token', CURRENT_TIMESTAMP + INTERVAL '1 minute',
+                    1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                """
+            ),
+            {"session_id": session_id, "operation_id": f"{session_id}-operation", "request_hash": "a" * 64},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO guided_operation_events (
+                    session_id, operation_id, sequence, event_kind, actor,
+                    attempt, request_hash, lease_expires_at, occurred_at
+                ) VALUES (
+                    :session_id, :operation_id, 1, 'claimed', 'worker-a',
+                    1, :request_hash, CURRENT_TIMESTAMP + INTERVAL '1 minute',
+                    CURRENT_TIMESTAMP
+                )
+                """
+            ),
+            {"session_id": session_id, "operation_id": f"{session_id}-operation", "request_hash": "a" * 64},
+        )
         if include_completion:
             conn.execute(
                 text(
@@ -355,6 +385,8 @@ def test_postgres_session_audit_triggers_are_installed_and_enforced(postgres_eng
         "trg_composer_completion_events_no_delete",
         "trg_chat_messages_immutable_content",
         "trg_chat_messages_no_delete",
+        "trg_guided_operation_events_no_update",
+        "trg_guided_operation_events_no_delete",
     }
 
     protected_session = "trigger-protected"
@@ -367,6 +399,8 @@ def test_postgres_session_audit_triggers_are_installed_and_enforced(postgres_eng
         ("DELETE FROM composer_completion_events WHERE id = :row_id", f"{protected_session}-completion"),
         ("UPDATE chat_messages SET content = 'tampered' WHERE id = :row_id", f"{protected_session}-message"),
         ("DELETE FROM chat_messages WHERE id = :row_id", f"{protected_session}-message"),
+        ("UPDATE guided_operation_events SET actor = 'attacker' WHERE operation_id = :row_id", f"{protected_session}-operation"),
+        ("DELETE FROM guided_operation_events WHERE operation_id = :row_id", f"{protected_session}-operation"),
     )
     for statement, row_id in blocked_mutations:
         with pytest.raises(DBAPIError, match=r"append-only|immutable"), postgres_engine.begin() as conn:
@@ -422,6 +456,13 @@ def test_postgres_session_audit_triggers_are_installed_and_enforced(postgres_eng
             ).scalar_one()
             == 0
         )
+        assert (
+            conn.execute(
+                text("SELECT count(*) FROM guided_operation_events WHERE session_id = :session_id"),
+                {"session_id": cascade_session},
+            ).scalar_one()
+            == 0
+        )
 
 
 @pytest.mark.parametrize(
@@ -429,6 +470,8 @@ def test_postgres_session_audit_triggers_are_installed_and_enforced(postgres_eng
     [
         "DROP TRIGGER trg_chat_messages_no_delete ON chat_messages",
         "ALTER TABLE chat_messages DISABLE TRIGGER trg_chat_messages_no_delete",
+        "DROP TRIGGER trg_guided_operation_events_no_delete ON guided_operation_events",
+        "ALTER TABLE guided_operation_events DISABLE TRIGGER trg_guided_operation_events_no_delete",
     ],
 )
 def test_missing_or_disabled_postgres_audit_trigger_marks_session_schema_stale(

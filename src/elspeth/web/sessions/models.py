@@ -142,7 +142,11 @@ from elspeth.core.schema_identity import create_schema_identity_table
 #        Pre-release delete-and-recreate policy; see runbook above.
 #   28 -> ``elspeth_schema_identity`` gives SQLite and PostgreSQL the same
 #        application/store/epoch proof, including semantic-only schema bumps.
-SESSION_SCHEMA_EPOCH = 28
+#   29 -> guided schema 8 invalidates schema-7 composer metadata and chain
+#        proposal state and adds durable, fenced guided operation reservations
+#        plus their append-only lease/takeover event history. Pre-release
+#        policy remains delete-and-recreate for stale session databases.
+SESSION_SCHEMA_EPOCH = 29
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 _POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"
@@ -584,6 +588,10 @@ composition_proposals_table = Table(
         "tool_call_id",
         name="uq_composition_proposals_session_tool_call",
     ),
+    # Composite target for guided_operations.proposal_id. The proposal id is
+    # globally unique already; the pair exists to make same-session custody a
+    # database invariant on both SQLite and PostgreSQL.
+    UniqueConstraint("id", "session_id", name="uq_composition_proposals_id_session"),
     CheckConstraint(
         "status IN ('pending', 'committed', 'rejected')",
         name="ck_composition_proposals_status",
@@ -600,6 +608,171 @@ composition_proposals_table = Table(
         _composition_proposals_composer_provenance_check(dialect="postgresql"),
         name="ck_composition_proposals_composer_provenance_all_or_none",
     ).ddl_if(dialect="postgresql"),
+)
+
+
+def _lower_sha256_check(column_name: str, *, dialect: Literal["sqlite", "postgresql"]) -> str:
+    base = f"length({column_name}) = 64"
+    if dialect == "sqlite":
+        return f"{base} AND {column_name} NOT GLOB '*[^a-f0-9]*'"
+    return f"{base} AND {column_name} ~ '^[a-f0-9]+$'"
+
+
+# One bounded reservation row per client-authored mutating action. Raw request
+# bodies, user intent, and provider errors are deliberately absent: replay is
+# bound by a canonical request hash and a small immutable result locator.
+guided_operations_table = Table(
+    "guided_operations",
+    metadata,
+    Column("session_id", String(128), nullable=False),
+    Column("operation_id", String(128), nullable=False),
+    Column("kind", String(32), nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("request_hash", String(64), nullable=False),
+    Column("lease_token", String(256), nullable=True),
+    Column("lease_expires_at", DateTime(timezone=True), nullable=True),
+    Column("attempt", Integer, nullable=False),
+    Column("originating_message_id", String(128), nullable=True),
+    Column("proposal_id", String(128), nullable=True),
+    Column("result_state_id", String(128), nullable=True),
+    Column("result_session_id", String(128), nullable=True),
+    Column("result_locator_json", Text, nullable=True),
+    Column("response_hash", String(64), nullable=True),
+    Column("failure_code", String(128), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column("settled_at", DateTime(timezone=True), nullable=True),
+    PrimaryKeyConstraint("session_id", "operation_id", name="pk_guided_operations"),
+    UniqueConstraint(
+        "session_id",
+        "operation_id",
+        "request_hash",
+        name="uq_guided_operations_request_binding",
+    ),
+    ForeignKeyConstraint(["session_id"], ["sessions.id"], name="fk_guided_operations_session", ondelete="CASCADE"),
+    ForeignKeyConstraint(
+        ["originating_message_id", "session_id"],
+        ["chat_messages.id", "chat_messages.session_id"],
+        name="fk_guided_operations_originating_message_session",
+        ondelete="RESTRICT",
+    ),
+    ForeignKeyConstraint(
+        ["proposal_id", "session_id"],
+        ["composition_proposals.id", "composition_proposals.session_id"],
+        name="fk_guided_operations_proposal_session",
+        ondelete="RESTRICT",
+    ),
+    ForeignKeyConstraint(
+        ["result_state_id", "session_id"],
+        ["composition_states.id", "composition_states.session_id"],
+        name="fk_guided_operations_result_state_session",
+        ondelete="RESTRICT",
+    ),
+    ForeignKeyConstraint(["result_session_id"], ["sessions.id"], name="fk_guided_operations_result_session", ondelete="RESTRICT"),
+    CheckConstraint("length(operation_id) >= 1 AND length(operation_id) <= 128", name="ck_guided_operations_operation_id_bounded"),
+    CheckConstraint(
+        "originating_message_id IS NULL OR (length(originating_message_id) >= 1 AND length(originating_message_id) <= 128)",
+        name="ck_guided_operations_originating_message_id_bounded",
+    ),
+    CheckConstraint(
+        "proposal_id IS NULL OR (length(proposal_id) >= 1 AND length(proposal_id) <= 128)",
+        name="ck_guided_operations_proposal_id_bounded",
+    ),
+    CheckConstraint(
+        "result_state_id IS NULL OR (length(result_state_id) >= 1 AND length(result_state_id) <= 128)",
+        name="ck_guided_operations_result_state_id_bounded",
+    ),
+    CheckConstraint(
+        "result_session_id IS NULL OR (length(result_session_id) >= 1 AND length(result_session_id) <= 128)",
+        name="ck_guided_operations_result_session_id_bounded",
+    ),
+    CheckConstraint(
+        "kind IN ('guided_start', 'guided_respond', 'guided_chat', 'guided_convert', "
+        "'guided_reenter', 'state_revert', 'session_fork', 'guided_plan')",
+        name="ck_guided_operations_kind",
+    ),
+    CheckConstraint("status IN ('in_progress', 'completed', 'failed')", name="ck_guided_operations_status"),
+    CheckConstraint(_lower_sha256_check("request_hash", dialect="sqlite"), name="ck_guided_operations_request_hash").ddl_if(
+        dialect="sqlite"
+    ),
+    CheckConstraint(_lower_sha256_check("request_hash", dialect="postgresql"), name="ck_guided_operations_request_hash").ddl_if(
+        dialect="postgresql"
+    ),
+    CheckConstraint("attempt >= 1", name="ck_guided_operations_attempt"),
+    CheckConstraint("updated_at >= created_at", name="ck_guided_operations_updated_after_created"),
+    CheckConstraint("settled_at IS NULL OR settled_at >= created_at", name="ck_guided_operations_settled_after_created"),
+    CheckConstraint(
+        "lease_token IS NULL OR (length(lease_token) >= 1 AND length(lease_token) <= 256)",
+        name="ck_guided_operations_lease_token_bounded",
+    ),
+    CheckConstraint(
+        "result_locator_json IS NULL OR (length(result_locator_json) >= 2 AND length(result_locator_json) <= 2048)",
+        name="ck_guided_operations_result_locator_bounded",
+    ),
+    CheckConstraint(
+        "failure_code IS NULL OR failure_code IN ('provider_unavailable', 'provider_timeout', "
+        "'invalid_provider_response', 'integrity_error', 'custody_error', 'operation_failed')",
+        name="ck_guided_operations_failure_code",
+    ),
+    CheckConstraint(
+        "(status = 'in_progress' AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL "
+        "AND settled_at IS NULL AND result_locator_json IS NULL AND response_hash IS NULL AND failure_code IS NULL) OR "
+        "(status = 'completed' AND lease_token IS NULL AND lease_expires_at IS NULL "
+        "AND settled_at IS NOT NULL AND result_locator_json IS NOT NULL AND response_hash IS NOT NULL AND failure_code IS NULL) OR "
+        "(status = 'failed' AND lease_token IS NULL AND lease_expires_at IS NULL "
+        "AND settled_at IS NOT NULL AND result_locator_json IS NULL AND response_hash IS NULL AND failure_code IS NOT NULL)",
+        name="ck_guided_operations_status_bundle",
+    ),
+    CheckConstraint(
+        "response_hash IS NULL OR (length(response_hash) = 64 AND response_hash NOT GLOB '*[^a-f0-9]*')",
+        name="ck_guided_operations_response_hash",
+    ).ddl_if(dialect="sqlite"),
+    CheckConstraint(
+        "response_hash IS NULL OR (length(response_hash) = 64 AND response_hash ~ '^[a-f0-9]+$')",
+        name="ck_guided_operations_response_hash",
+    ).ddl_if(dialect="postgresql"),
+)
+Index("ix_guided_operations_status_lease", guided_operations_table.c.status, guided_operations_table.c.lease_expires_at)
+
+
+# Append-only evidence for initial claims, renewals, takeovers, and terminal
+# settlement. Lease tokens and request/provider text never enter this table.
+guided_operation_events_table = Table(
+    "guided_operation_events",
+    metadata,
+    Column("session_id", String(128), nullable=False),
+    Column("operation_id", String(128), nullable=False),
+    Column("sequence", Integer, nullable=False),
+    Column("event_kind", String(16), nullable=False),
+    Column("actor", String(128), nullable=False),
+    Column("attempt", Integer, nullable=False),
+    Column("prior_attempt", Integer, nullable=True),
+    Column("lease_expires_at", DateTime(timezone=True), nullable=True),
+    Column("request_hash", String(64), nullable=False),
+    Column("occurred_at", DateTime(timezone=True), nullable=False),
+    PrimaryKeyConstraint("session_id", "operation_id", "sequence", name="pk_guided_operation_events"),
+    ForeignKeyConstraint(
+        ["session_id", "operation_id", "request_hash"],
+        ["guided_operations.session_id", "guided_operations.operation_id", "guided_operations.request_hash"],
+        name="fk_guided_operation_events_operation",
+        ondelete="CASCADE",
+    ),
+    CheckConstraint("sequence >= 1", name="ck_guided_operation_events_sequence"),
+    CheckConstraint("event_kind IN ('claimed', 'renewed', 'taken_over', 'completed', 'failed')", name="ck_guided_operation_events_kind"),
+    CheckConstraint("length(actor) >= 1 AND length(actor) <= 128", name="ck_guided_operation_events_actor_bounded"),
+    CheckConstraint("attempt >= 1", name="ck_guided_operation_events_attempt"),
+    CheckConstraint(_lower_sha256_check("request_hash", dialect="sqlite"), name="ck_guided_operation_events_request_hash").ddl_if(
+        dialect="sqlite"
+    ),
+    CheckConstraint(_lower_sha256_check("request_hash", dialect="postgresql"), name="ck_guided_operation_events_request_hash").ddl_if(
+        dialect="postgresql"
+    ),
+    CheckConstraint(
+        "(event_kind IN ('claimed', 'renewed') AND prior_attempt IS NULL AND lease_expires_at IS NOT NULL) OR "
+        "(event_kind = 'taken_over' AND prior_attempt IS NOT NULL AND prior_attempt = attempt - 1 AND lease_expires_at IS NOT NULL) OR "
+        "(event_kind IN ('completed', 'failed') AND prior_attempt IS NULL AND lease_expires_at IS NULL)",
+        name="ck_guided_operation_events_bundle",
+    ),
 )
 
 # Per-event ``payload`` JSON contract (Tier-1 schema; CLAUDE.md
@@ -1173,6 +1346,51 @@ POSTGRESQL_AUDIT_DDL_COHORT: tuple[PostgresqlAuditDDL, ...] = (
             "FOR EACH ROW EXECUTE FUNCTION elspeth_chat_messages_no_delete()"
         ),
     ),
+    PostgresqlAuditDDL(
+        table=guided_operation_events_table,
+        trigger_name="trg_guided_operation_events_no_update",
+        function_name="elspeth_guided_operation_events_no_update",
+        function_sql="""
+        CREATE FUNCTION elspeth_guided_operation_events_no_update()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          RAISE EXCEPTION 'guided_operation_events is append-only; UPDATE is forbidden'
+            USING ERRCODE = '23000';
+        END;
+        $$
+        """,
+        trigger_sql=(
+            "CREATE TRIGGER trg_guided_operation_events_no_update "
+            "BEFORE UPDATE ON guided_operation_events "
+            "FOR EACH ROW EXECUTE FUNCTION elspeth_guided_operation_events_no_update()"
+        ),
+    ),
+    PostgresqlAuditDDL(
+        table=guided_operation_events_table,
+        trigger_name="trg_guided_operation_events_no_delete",
+        function_name="elspeth_guided_operation_events_no_delete",
+        function_sql="""
+        CREATE FUNCTION elspeth_guided_operation_events_no_delete()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM sessions WHERE id = OLD.session_id) THEN
+            RAISE EXCEPTION 'guided_operation_events is append-only; DELETE is forbidden'
+              USING ERRCODE = '23000';
+          END IF;
+          RETURN OLD;
+        END;
+        $$
+        """,
+        trigger_sql=(
+            "CREATE TRIGGER trg_guided_operation_events_no_delete "
+            "BEFORE DELETE ON guided_operation_events "
+            "FOR EACH ROW EXECUTE FUNCTION elspeth_guided_operation_events_no_delete()"
+        ),
+    ),
 )
 
 # F-4 / F-23 — append-only triggers.
@@ -1301,6 +1519,32 @@ event.listen(
         "WHEN EXISTS (SELECT 1 FROM sessions WHERE id = OLD.session_id) "
         "BEGIN "
         "  SELECT RAISE(ABORT, 'chat_messages rows are append-only'); "
+        "END;"
+    ).execute_if(dialect="sqlite"),
+)
+
+event.listen(
+    guided_operation_events_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER IF NOT EXISTS trg_guided_operation_events_no_update "
+        "BEFORE UPDATE ON guided_operation_events "
+        "BEGIN "
+        "  SELECT RAISE(ABORT, 'guided_operation_events is append-only; UPDATE is forbidden'); "
+        "END;"
+    ).execute_if(dialect="sqlite"),
+)
+
+event.listen(
+    guided_operation_events_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER IF NOT EXISTS trg_guided_operation_events_no_delete "
+        "BEFORE DELETE ON guided_operation_events "
+        "FOR EACH ROW "
+        "WHEN EXISTS (SELECT 1 FROM sessions WHERE id = OLD.session_id) "
+        "BEGIN "
+        "  SELECT RAISE(ABORT, 'guided_operation_events is append-only; DELETE is forbidden'); "
         "END;"
     ).execute_if(dialect="sqlite"),
 )

@@ -936,24 +936,90 @@ def _enveloped_state_column(value: Any) -> Any:
     return {"_version": 1, "data": raw}
 
 
-def _strip_guided_profile_in_meta(composer_meta: Mapping[str, Any] | None) -> dict[str, Any] | None:
-    """Reset a forked GuidedSession's WorkflowProfile to the empty profile.
+def _strip_guided_profile_in_meta(
+    composer_meta: Mapping[str, Any] | None,
+    source_to_child_message_id: Mapping[str, str],
+    source_messages_by_id: Mapping[str, ChatMessageRecord],
+) -> dict[str, Any] | None:
+    """Prepare one schema-8 guided checkpoint for a child session.
 
-    ``composer_meta`` is copied verbatim on fork. A tutorial profile must not
-    leak into an ordinary forked session, so the strip lives inside
-    ``fork_session`` where the composer_meta copies happen.
+    A fork preserves reviewed facts and deferred intent, but proposal authority
+    and parent-session chat identities cannot cross the session boundary. Parse
+    through the strict schema-8 decoder, rebuild the typed checkpoint, and fail
+    before the fork transaction if any message reference is outside the copied
+    slice.
     """
+    from elspeth.core.canonical import stable_hash as _message_content_hash
     from elspeth.web.composer.guided.profile import EMPTY_PROFILE
+    from elspeth.web.composer.guided.protocol import GuidedStep
+    from elspeth.web.composer.guided.state_machine import GuidedSession
 
     if composer_meta is None:
         return None
     thawed: dict[str, Any] = dict(deep_thaw(composer_meta))
     guided_raw = thawed.get("guided_session")
-    if not isinstance(guided_raw, dict) or "profile" not in guided_raw:
+    if guided_raw is None:
         return thawed
-    guided_copy = dict(guided_raw)
-    guided_copy["profile"] = EMPTY_PROFILE.to_dict()
-    thawed["guided_session"] = guided_copy
+    if type(guided_raw) is not dict:
+        raise AuditIntegrityError("fork guided metadata is not an exact schema-8 object")
+    guided = GuidedSession.from_dict(guided_raw)
+
+    if set(source_to_child_message_id) != set(source_messages_by_id):
+        raise AuditIntegrityError("fork guided message maps have different source keysets")
+
+    def _child_user_message(source_message_id: str, field_name: str) -> tuple[str, ChatMessageRecord]:
+        child_message_id = source_to_child_message_id.get(source_message_id)
+        source_message = source_messages_by_id.get(source_message_id)
+        if child_message_id is None or source_message is None:
+            raise AuditIntegrityError(f"fork guided {field_name} references a message outside copied slice")
+        if source_message.role != "user":
+            raise AuditIntegrityError("fork guided planner lineage must identify user messages")
+        return child_message_id, source_message
+
+    remapped_root = (
+        _child_user_message(guided.root_intent_message_id, "root_intent_message_id")[0]
+        if guided.root_intent_message_id is not None
+        else None
+    )
+    remapped_deferred_list = []
+    for intent in guided.deferred_intents:
+        child_message_id, source_message = _child_user_message(
+            intent.originating_message_id,
+            "deferred_intents.originating_message_id",
+        )
+        if _message_content_hash(source_message.content) != intent.message_content_hash:
+            raise AuditIntegrityError("fork guided deferred intent message content hash mismatch")
+        remapped_deferred_list.append(
+            replace(
+                intent,
+                originating_message_id=child_message_id,
+            )
+        )
+    remapped_deferred = tuple(remapped_deferred_list)
+    rewinds_to_topology = guided.active_proposal is not None or guided.step in {GuidedStep.STEP_3_TRANSFORMS, GuidedStep.STEP_4_WIRE}
+    reconciled_history = guided.history
+    if rewinds_to_topology:
+        unanswered_indices = [index for index, record in enumerate(guided.history) if record.response_hash is None]
+        if len(unanswered_indices) > 1 or (unanswered_indices and unanswered_indices[0] != len(guided.history) - 1):
+            raise AuditIntegrityError("fork guided topology rewind has malformed unanswered history")
+        if unanswered_indices:
+            reconciled_history = guided.history[:-1]
+    forked_step = GuidedStep.STEP_3_TRANSFORMS if rewinds_to_topology else guided.step
+    forked_guided = replace(
+        guided,
+        step=forked_step,
+        history=reconciled_history,
+        profile=EMPTY_PROFILE,
+        advisor_checkpoint_passes_used=0 if rewinds_to_topology else guided.advisor_checkpoint_passes_used,
+        advisor_signoff_escape_offered=False if rewinds_to_topology else guided.advisor_signoff_escape_offered,
+        terminal=None if rewinds_to_topology else guided.terminal,
+        transition_consumed=False if rewinds_to_topology else guided.transition_consumed,
+        deferred_intents=remapped_deferred,
+        active_proposal=None,
+        active_edit_target=None,
+        root_intent_message_id=remapped_root,
+    )
+    thawed["guided_session"] = forked_guided.to_dict()
     return thawed
 
 
@@ -8786,14 +8852,6 @@ class SessionServiceImpl:
                 source_session_id,
             )
 
-        # Profile strip (finding 10, rev 4): never let a tutorial WorkflowProfile
-        # leak into a forked session. Computed once, used by BOTH verbatim
-        # composer_meta copies below (the :5150 persist copy and the :5227 return
-        # copy). The route-layer blob-rewrite save preserves composer_meta
-        # verbatim and never strips the profile (and is not in this service
-        # method's path), so the strip must live here — independent of rewritten.
-        forked_composer_meta = _strip_guided_profile_in_meta(source_state_record.composer_meta) if source_state_record is not None else None
-
         # Prepare IDs and timestamps upfront
         new_session_id = uuid.uuid4()
         new_session_id_str = str(new_session_id)
@@ -8804,16 +8862,23 @@ class SessionServiceImpl:
         copied_state_id = uuid.uuid4() if source_state_record is not None else None
         copied_state_id_str = str(copied_state_id) if copied_state_id else None
 
-        # §14.6: build a source-id → copied-id map for in-slice assistant rows
-        # BEFORE building msg_records_data so tool rows in the slice can rewrite
-        # their ``parent_assistant_id`` to the copied assistant's new id.
-        # Copying the source ``parent_assistant_id`` verbatim would point at
-        # the SOURCE session's assistant; the copied tool row lives in a NEW
-        # session and the FK ``(parent_assistant_id, session_id)`` would fail.
-        source_to_copied_assistant_id: dict[str, str] = {}
-        for msg in messages_to_copy:
-            if msg.role == "assistant":
-                source_to_copied_assistant_id[str(msg.id)] = str(uuid.uuid4())
+        # Allocate every copied chat id before preparing metadata or inserts.
+        # Guided references and tool parents use this one exact map.
+        source_messages_by_id = {str(msg.id): msg for msg in messages_to_copy}
+        source_to_copied_message_id = {str(msg.id): str(uuid.uuid4()) for msg in messages_to_copy}
+        source_assistant_ids = {str(msg.id) for msg in messages_to_copy if msg.role == "assistant"}
+
+        # Strict schema-8 preparation happens before the transaction so an
+        # out-of-slice reference cannot leave any child rows behind.
+        forked_composer_meta = (
+            _strip_guided_profile_in_meta(
+                source_state_record.composer_meta,
+                source_to_copied_message_id,
+                source_messages_by_id,
+            )
+            if source_state_record is not None
+            else None
+        )
 
         # Prepare all message rows upfront — preserve original created_at
         # so get_messages() ordering is deterministic.  Stamping all rows
@@ -8821,10 +8886,7 @@ class SessionServiceImpl:
         # produce non-deterministic ordering on subsequent reads.
         msg_records_data: list[dict[str, Any]] = []
         for msg in messages_to_copy:
-            if msg.role == "assistant":
-                copied_msg_id = source_to_copied_assistant_id[str(msg.id)]
-            else:
-                copied_msg_id = str(uuid.uuid4())
+            copied_msg_id = source_to_copied_message_id[str(msg.id)]
 
             copied_parent_assistant_id: str | None = None
             if msg.role == "tool":
@@ -8837,12 +8899,12 @@ class SessionServiceImpl:
                 if msg.parent_assistant_id is None:
                     raise RuntimeError(f"fork_session: tool message id={msg.id} has no parent assistant")
                 parent_key = str(msg.parent_assistant_id)
-                if parent_key not in source_to_copied_assistant_id:
+                if parent_key not in source_to_copied_message_id or parent_key not in source_assistant_ids:
                     # Slice ``[:fork_idx]`` excluded the assistant message
                     # this tool row depends on. Detect it pre-batch with a
                     # named error per the offensive-programming policy.
                     raise RuntimeError(f"fork slice excludes parent assistant of tool message id={msg.id}")
-                copied_parent_assistant_id = source_to_copied_assistant_id[parent_key]
+                copied_parent_assistant_id = source_to_copied_message_id[parent_key]
 
             msg_records_data.append(
                 {

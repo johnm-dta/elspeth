@@ -8,22 +8,28 @@ Extracted from ``TokenSchedulerRepository`` (filigree elspeth-ef9c36d767).
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import ClassVar
 
 from sqlalchemy import and_, select, update
-from sqlalchemy.engine import RowMapping
+from sqlalchemy.engine import Connection, RowMapping
 
 from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS, CoordinationToken
 from elspeth.contracts.errors import AuditIntegrityError, RunWorkerEvictedError
-from elspeth.contracts.scheduler import BranchLossSpec, SchedulerEventType, TokenWorkItem, TokenWorkStatus
+from elspeth.contracts.scheduler import BarrierEmission, BranchLossSpec, SchedulerEventType, TokenWorkItem, TokenWorkStatus
 from elspeth.core.landscape.database import Tier1Engine, begin_write
 from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
 from elspeth.core.landscape.scheduler.branch_losses import record_coalesce_branch_loss
 from elspeth.core.landscape.scheduler.events import SchedulerEventStore
 from elspeth.core.landscape.scheduler.fencing import fenced_write
 from elspeth.core.landscape.scheduler.payload_codec import scrubbed_row_payload_json
-from elspeth.core.landscape.scheduler.work_items import item_from_mapping
+from elspeth.core.landscape.scheduler.work_items import (
+    insert_work_item_idempotent,
+    item_from_mapping,
+    ready_work_item_values,
+    validate_work_item_references,
+)
 from elspeth.core.landscape.schema import (
     claim_verb_fence_clause,
     pending_sink_bundle_clause,
@@ -119,6 +125,36 @@ class SchedulerDispositionRepository:
             lease_expires_at=None,
         )
 
+    def mark_terminal_with_ready_children(
+        self,
+        *,
+        work_item_id: str,
+        emitted_ready: Sequence[BarrierEmission],
+        now: datetime,
+        expected_lease_owner: str,
+        branch_loss: BranchLossSpec | None = None,
+        worker_id: str | None = None,
+    ) -> tuple[TokenWorkItem, tuple[TokenWorkItem, ...]]:
+        """Atomically enqueue child continuations and terminalize their parent.
+
+        The parent transform result has already produced durable child tokens.
+        This scheduler transaction makes their READY visibility inseparable
+        from the exact parent lease disposition: an event, reference, fence,
+        or insert failure rolls the complete scheduler image back.
+        """
+        return self._transition_with_ready_children(
+            work_item_id=work_item_id,
+            emitted_ready=emitted_ready,
+            now=now,
+            status=TokenWorkStatus.TERMINAL,
+            expected_lease_owner=expected_lease_owner,
+            branch_loss=branch_loss,
+            fenced_worker_id=worker_id,
+            row_payload_json=scrubbed_row_payload_json(work_item_id),
+            lease_owner=None,
+            lease_expires_at=None,
+        )
+
     def mark_failed(
         self,
         *,
@@ -144,6 +180,30 @@ class SchedulerDispositionRepository:
             expected_lease_owner=expected_lease_owner,
             fenced_worker_id=worker_id,
             branch_loss=branch_loss,
+            row_payload_json=scrubbed_row_payload_json(work_item_id),
+            lease_owner=None,
+            lease_expires_at=None,
+        )
+
+    def mark_failed_with_ready_children(
+        self,
+        *,
+        work_item_id: str,
+        emitted_ready: Sequence[BarrierEmission],
+        now: datetime,
+        expected_lease_owner: str,
+        branch_loss: BranchLossSpec | None = None,
+        worker_id: str | None = None,
+    ) -> tuple[TokenWorkItem, tuple[TokenWorkItem, ...]]:
+        """Atomically enqueue child continuations and fail their parent."""
+        return self._transition_with_ready_children(
+            work_item_id=work_item_id,
+            emitted_ready=emitted_ready,
+            now=now,
+            status=TokenWorkStatus.FAILED,
+            expected_lease_owner=expected_lease_owner,
+            branch_loss=branch_loss,
+            fenced_worker_id=worker_id,
             row_payload_json=scrubbed_row_payload_json(work_item_id),
             lease_owner=None,
             lease_expires_at=None,
@@ -182,6 +242,42 @@ class SchedulerDispositionRepository:
         """
         return self._transition(
             work_item_id=work_item_id,
+            now=now,
+            status=TokenWorkStatus.PENDING_SINK,
+            expected_lease_owner=expected_lease_owner,
+            branch_loss=branch_loss,
+            fenced_worker_id=worker_id,
+            require_complete_pending_sink_bundle=True,
+            row_payload_json=row_payload_json,
+            pending_sink_name=sink_name,
+            pending_outcome=outcome,
+            pending_path=path,
+            pending_error_hash=error_hash,
+            pending_error_message=error_message,
+            lease_owner=expected_lease_owner,
+            lease_expires_at=None,
+        )
+
+    def mark_pending_sink_with_ready_children(
+        self,
+        *,
+        work_item_id: str,
+        emitted_ready: Sequence[BarrierEmission],
+        row_payload_json: str,
+        sink_name: str,
+        outcome: str,
+        path: str,
+        error_hash: str | None,
+        error_message: str | None,
+        now: datetime,
+        expected_lease_owner: str,
+        branch_loss: BranchLossSpec | None = None,
+        worker_id: str | None = None,
+    ) -> tuple[TokenWorkItem, tuple[TokenWorkItem, ...]]:
+        """Atomically enqueue children and durably park their parent for a sink."""
+        return self._transition_with_ready_children(
+            work_item_id=work_item_id,
+            emitted_ready=emitted_ready,
             now=now,
             status=TokenWorkStatus.PENDING_SINK,
             expected_lease_owner=expected_lease_owner,
@@ -525,6 +621,155 @@ class SchedulerDispositionRepository:
         require_complete_pending_sink_bundle: bool = False,
         **values: object,
     ) -> TokenWorkItem:
+        with begin_write(self._engine) as conn:
+            after = self._transition_on(
+                conn,
+                work_item_id=work_item_id,
+                now=now,
+                status=status,
+                expected_statuses=expected_statuses,
+                expected_lease_owner=expected_lease_owner,
+                branch_loss=branch_loss,
+                fenced_worker_id=fenced_worker_id,
+                require_complete_pending_sink_bundle=require_complete_pending_sink_bundle,
+                values=values,
+            )
+        return item_from_mapping(after)
+
+    def _transition_with_ready_children(
+        self,
+        *,
+        work_item_id: str,
+        emitted_ready: Sequence[BarrierEmission],
+        now: datetime,
+        status: TokenWorkStatus,
+        expected_lease_owner: str,
+        branch_loss: BranchLossSpec | None,
+        fenced_worker_id: str | None,
+        require_complete_pending_sink_bundle: bool = False,
+        **values: object,
+    ) -> tuple[TokenWorkItem, tuple[TokenWorkItem, ...]]:
+        if not emitted_ready:
+            raise ValueError("atomic child disposition requires at least one READY emission")
+        with begin_write(self._engine) as conn:
+            run_id = self._run_id_for_work_item(conn, work_item_id)
+            child_rows = tuple(
+                self._insert_ready_emission_on(
+                    conn,
+                    parent_work_item_id=work_item_id,
+                    run_id=run_id,
+                    emission=emission,
+                    now=now,
+                )
+                for emission in emitted_ready
+            )
+            parent_row = self._transition_on(
+                conn,
+                work_item_id=work_item_id,
+                now=now,
+                status=status,
+                expected_lease_owner=expected_lease_owner,
+                branch_loss=branch_loss,
+                fenced_worker_id=fenced_worker_id,
+                require_complete_pending_sink_bundle=require_complete_pending_sink_bundle,
+                values=values,
+            )
+        return item_from_mapping(parent_row), tuple(item_from_mapping(row) for row in child_rows)
+
+    def _insert_ready_emission_on(
+        self,
+        conn: Connection,
+        *,
+        parent_work_item_id: str,
+        run_id: str,
+        emission: BarrierEmission,
+        now: datetime,
+    ) -> RowMapping:
+        """Insert or reconcile one child READY cursor on a caller transaction."""
+        if emission.row_id is None or emission.step_index is None or emission.ingest_sequence is None:
+            raise AuditIntegrityError(
+                f"Atomic child enqueue for parent work_item_id={parent_work_item_id!r} token_id={emission.token_id!r} "
+                "requires row_id, step_index and ingest_sequence."
+            )
+        validate_work_item_references(
+            conn,
+            run_id=run_id,
+            token_id=emission.token_id,
+            row_id=emission.row_id,
+            ingest_sequence=emission.ingest_sequence,
+            node_id=emission.node_id,
+            coalesce_node_id=emission.coalesce_node_id,
+        )
+        values = ready_work_item_values(
+            run_id=run_id,
+            token_id=emission.token_id,
+            row_id=emission.row_id,
+            node_id=emission.node_id,
+            step_index=emission.step_index,
+            ingest_sequence=emission.ingest_sequence,
+            row_payload_json=emission.row_payload_json,
+            available_at=now,
+            attempt=emission.attempt,
+            queue_key=emission.queue_key,
+            barrier_key=emission.barrier_key,
+            on_success_sink=emission.on_success_sink,
+            branch_name=emission.branch_name,
+            fork_group_id=emission.fork_group_id,
+            join_group_id=emission.join_group_id,
+            expand_group_id=emission.expand_group_id,
+            coalesce_node_id=emission.coalesce_node_id,
+            coalesce_name=emission.coalesce_name,
+        )
+        inserted = insert_work_item_idempotent(
+            conn,
+            values=values,
+            operation=f"atomic child enqueue for parent work_item_id={parent_work_item_id!r}",
+        )
+        if inserted:
+            self._events.record(
+                conn,
+                event_type=SchedulerEventType.ENQUEUE,
+                run_id=run_id,
+                token_id=emission.token_id,
+                work_item_id=str(values["work_item_id"]),
+                node_id=emission.node_id,
+                from_status=None,
+                to_status=TokenWorkStatus.READY,
+                from_lease_owner=None,
+                to_lease_owner=None,
+                from_attempt=None,
+                to_attempt=emission.attempt,
+                recorded_at=now,
+            )
+        return (
+            conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == values["work_item_id"]))
+            .mappings()
+            .one()
+        )
+
+    @staticmethod
+    def _run_id_for_work_item(conn: Connection, work_item_id: str) -> str:
+        run_id = conn.execute(
+            select(token_work_items_table.c.run_id).where(token_work_items_table.c.work_item_id == work_item_id)
+        ).scalar_one_or_none()
+        if run_id is None:
+            raise AuditIntegrityError(f"Atomic child enqueue parent work_item_id={work_item_id!r} does not exist.")
+        return str(run_id)
+
+    def _transition_on(
+        self,
+        conn: Connection,
+        *,
+        work_item_id: str,
+        now: datetime,
+        status: TokenWorkStatus,
+        expected_statuses: tuple[TokenWorkStatus, ...] = (TokenWorkStatus.LEASED,),
+        expected_lease_owner: str | None = None,
+        branch_loss: BranchLossSpec | None = None,
+        fenced_worker_id: str | None = None,
+        require_complete_pending_sink_bundle: bool = False,
+        values: Mapping[str, object],
+    ) -> RowMapping:
         update_values = {"status": status.value, "updated_at": now, **values}
         expected_status_values = tuple(candidate.value for candidate in expected_statuses)
         expected_status_text = " or ".join(candidate.name for candidate in expected_statuses)
@@ -547,125 +792,117 @@ class SchedulerDispositionRepository:
             # Correlated on the row's own run_id (the work_item_id predicate
             # already pins the row).
             predicates.append(claim_verb_fence_clause(worker_id=fenced_worker_id, run_id=token_work_items_table.c.run_id))
-        with begin_write(self._engine) as conn:
-            before = (
-                conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id))
+        before = (
+            conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id))
+            .mappings()
+            .one_or_none()
+        )
+        result = conn.execute(update(token_work_items_table).where(and_(*predicates)).values(**update_values))
+        if result.rowcount != 1:
+            if fenced_worker_id is not None and before is not None:
+                base_predicates_match = (
+                    before["status"] in expected_status_values
+                    and before["pending_sink_name"] is None
+                    and (expected_lease_owner is None or before["lease_owner"] == expected_lease_owner)
+                )
+                if base_predicates_match:
+                    worker_status = conn.execute(
+                        select(run_workers_table.c.status)
+                        .where(run_workers_table.c.worker_id == fenced_worker_id)
+                        .where(run_workers_table.c.run_id == before["run_id"])
+                    ).scalar()
+                    if worker_status is not None and str(worker_status) != "active":
+                        raise RunWorkerEvictedError(worker_id=fenced_worker_id, run_id=str(before["run_id"]))
+            actual = (
+                conn.execute(
+                    select(
+                        token_work_items_table.c.status,
+                        token_work_items_table.c.lease_owner,
+                        token_work_items_table.c.pending_sink_name,
+                    ).where(token_work_items_table.c.work_item_id == work_item_id)
+                )
                 .mappings()
                 .one_or_none()
             )
-            result = conn.execute(update(token_work_items_table).where(and_(*predicates)).values(**update_values))
-            if result.rowcount != 1:
-                if fenced_worker_id is not None and before is not None:
-                    # The base predicates may still match — then the membership
-                    # fence was the blocker. Mirror claim_ready's re-probe:
-                    # a registered-but-not-active worker raises the canonical
-                    # eviction signal (zero mutation) instead of the generic
-                    # audit-integrity crash.
-                    base_predicates_match = (
-                        before["status"] in expected_status_values
-                        and before["pending_sink_name"] is None
-                        and (expected_lease_owner is None or before["lease_owner"] == expected_lease_owner)
-                    )
-                    if base_predicates_match:
-                        worker_status = conn.execute(
-                            select(run_workers_table.c.status)
-                            .where(run_workers_table.c.worker_id == fenced_worker_id)
-                            .where(run_workers_table.c.run_id == before["run_id"])
-                        ).scalar()
-                        if worker_status is not None and str(worker_status) != "active":
-                            raise RunWorkerEvictedError(worker_id=fenced_worker_id, run_id=str(before["run_id"]))
-                actual = (
-                    conn.execute(
-                        select(
-                            token_work_items_table.c.status,
-                            token_work_items_table.c.lease_owner,
-                            token_work_items_table.c.pending_sink_name,
-                        ).where(token_work_items_table.c.work_item_id == work_item_id)
-                    )
-                    .mappings()
-                    .one_or_none()
+            if actual is None:
+                actual_message = "missing"
+            else:
+                actual_subtype = "transform" if actual["pending_sink_name"] is None else "sink-redrive"
+                actual_message = (
+                    f"actual status {actual['status']}, actual subtype {actual_subtype}, actual lease_owner {actual['lease_owner']!r}"
                 )
-                if actual is None:
-                    actual_message = "missing"
-                else:
-                    actual_subtype = "transform" if actual["pending_sink_name"] is None else "sink-redrive"
-                    actual_message = (
-                        f"actual status {actual['status']}, actual subtype {actual_subtype}, actual lease_owner {actual['lease_owner']!r}"
-                    )
-                expected_owner_message = "" if expected_lease_owner is None else f" and expected lease_owner {expected_lease_owner!r}"
-                fence_message = "" if fenced_worker_id is None else f" under membership fence for worker {fenced_worker_id!r}"
-                raise AuditIntegrityError(
-                    f"Scheduler transition to {status.name!r} for work_item_id={work_item_id!r} "
-                    f"affected {result.rowcount} rows; expected exactly 1 transform-lease row with expected status {expected_status_text}"
-                    f"{expected_owner_message}{fence_message}. Caller assumed ownership but the row is missing or in an "
-                    f"unexpected state ({actual_message})."
-                )
-            after = (
-                conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id)).mappings().one()
+            expected_owner_message = "" if expected_lease_owner is None else f" and expected lease_owner {expected_lease_owner!r}"
+            fence_message = "" if fenced_worker_id is None else f" under membership fence for worker {fenced_worker_id!r}"
+            raise AuditIntegrityError(
+                f"Scheduler transition to {status.name!r} for work_item_id={work_item_id!r} "
+                f"affected {result.rowcount} rows; expected exactly 1 transform-lease row with expected status {expected_status_text}"
+                f"{expected_owner_message}{fence_message}. Caller assumed ownership but the row is missing or in an "
+                f"unexpected state ({actual_message})."
             )
-            if require_complete_pending_sink_bundle:
-                bundle_complete = conn.execute(
-                    select(pending_sink_bundle_clause()).where(token_work_items_table.c.work_item_id == work_item_id)
-                ).scalar_one()
-                if not bundle_complete:
-                    raise AuditIntegrityError(
-                        f"Scheduler transition to PENDING_SINK for work_item_id={work_item_id!r} refused an incomplete "
-                        "durable sink bundle. Required: non-empty row payload and sink name; legal outcome/path pair; "
-                        "pair-specific error evidence; and a join group for COALESCED."
-                    )
-            if before is None:
+        after = conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id)).mappings().one()
+        if require_complete_pending_sink_bundle:
+            bundle_complete = conn.execute(
+                select(pending_sink_bundle_clause()).where(token_work_items_table.c.work_item_id == work_item_id)
+            ).scalar_one()
+            if not bundle_complete:
                 raise AuditIntegrityError(
-                    f"Scheduler transition to {status.name!r} for work_item_id={work_item_id!r} "
-                    "updated a row that could not be read before the write; audit transition history cannot be proven."
+                    f"Scheduler transition to PENDING_SINK for work_item_id={work_item_id!r} refused an incomplete "
+                    "durable sink bundle. Required: non-empty row payload and sink name; legal outcome/path pair; "
+                    "pair-specific error evidence; and a join group for COALESCED."
                 )
-            next_lease_owner = update_values["lease_owner"] if "lease_owner" in update_values else before["lease_owner"]
-            next_lease_expires_at = update_values["lease_expires_at"] if "lease_expires_at" in update_values else before["lease_expires_at"]
-            next_attempt = update_values["attempt"] if "attempt" in update_values else before["attempt"]
-            if next_lease_owner is not None and type(next_lease_owner) is not str:
-                raise AuditIntegrityError(
-                    f"Scheduler transition to {status.name!r} for work_item_id={work_item_id!r} "
-                    f"produced invalid lease_owner type {type(next_lease_owner).__name__}; audit transition history cannot be proven."
-                )
-            if next_lease_expires_at is not None and type(next_lease_expires_at) is not datetime:
-                raise AuditIntegrityError(
-                    f"Scheduler transition to {status.name!r} for work_item_id={work_item_id!r} "
-                    f"produced invalid lease_expires_at type {type(next_lease_expires_at).__name__}; audit transition history cannot be proven."
-                )
-            if type(next_attempt) is not int:
-                raise AuditIntegrityError(
-                    f"Scheduler transition to {status.name!r} for work_item_id={work_item_id!r} "
-                    f"produced invalid attempt type {type(next_attempt).__name__}; audit transition history cannot be proven."
-                )
-            self._events.record(
+        if before is None:
+            raise AuditIntegrityError(
+                f"Scheduler transition to {status.name!r} for work_item_id={work_item_id!r} "
+                "updated a row that could not be read before the write; audit transition history cannot be proven."
+            )
+        next_lease_owner = update_values["lease_owner"] if "lease_owner" in update_values else before["lease_owner"]
+        next_lease_expires_at = update_values["lease_expires_at"] if "lease_expires_at" in update_values else before["lease_expires_at"]
+        next_attempt = update_values["attempt"] if "attempt" in update_values else before["attempt"]
+        if next_lease_owner is not None and type(next_lease_owner) is not str:
+            raise AuditIntegrityError(
+                f"Scheduler transition to {status.name!r} for work_item_id={work_item_id!r} "
+                f"produced invalid lease_owner type {type(next_lease_owner).__name__}; audit transition history cannot be proven."
+            )
+        if next_lease_expires_at is not None and type(next_lease_expires_at) is not datetime:
+            raise AuditIntegrityError(
+                f"Scheduler transition to {status.name!r} for work_item_id={work_item_id!r} "
+                f"produced invalid lease_expires_at type {type(next_lease_expires_at).__name__}; audit transition history cannot be proven."
+            )
+        if type(next_attempt) is not int:
+            raise AuditIntegrityError(
+                f"Scheduler transition to {status.name!r} for work_item_id={work_item_id!r} "
+                f"produced invalid attempt type {type(next_attempt).__name__}; audit transition history cannot be proven."
+            )
+        self._events.record(
+            conn,
+            event_type=self._TRANSITION_EVENT_TYPES[status],
+            run_id=before["run_id"],
+            token_id=before["token_id"],
+            work_item_id=work_item_id,
+            node_id=before["node_id"],
+            from_status=TokenWorkStatus(before["status"]),
+            to_status=status,
+            from_lease_owner=before["lease_owner"],
+            to_lease_owner=next_lease_owner,
+            from_attempt=before["attempt"],
+            to_attempt=next_attempt,
+            recorded_at=now,
+            from_lease_expires_at=before["lease_expires_at"],
+            to_lease_expires_at=next_lease_expires_at,
+            caller_owner=expected_lease_owner,
+        )
+        if branch_loss is not None:
+            # §E.5 record-then-notify: the durable loss record commits iff
+            # this disposition and every child enqueue commit.
+            record_coalesce_branch_loss(
                 conn,
-                event_type=self._TRANSITION_EVENT_TYPES[status],
                 run_id=before["run_id"],
-                token_id=before["token_id"],
-                work_item_id=work_item_id,
-                node_id=before["node_id"],
-                from_status=TokenWorkStatus(before["status"]),
-                to_status=status,
-                from_lease_owner=before["lease_owner"],
-                to_lease_owner=next_lease_owner,
-                from_attempt=before["attempt"],
-                to_attempt=next_attempt,
-                recorded_at=now,
-                from_lease_expires_at=before["lease_expires_at"],
-                to_lease_expires_at=next_lease_expires_at,
-                caller_owner=expected_lease_owner,
+                coalesce_name=branch_loss.coalesce_name,
+                row_id=branch_loss.row_id,
+                branch_name=branch_loss.branch_name,
+                token_id=branch_loss.token_id,
+                reason=branch_loss.reason,
+                recorded_by=branch_loss.recorded_by,
+                now=now,
             )
-            if branch_loss is not None:
-                # §E.5 record-then-notify: the durable loss record commits iff
-                # this disposition commits (one transaction).
-                record_coalesce_branch_loss(
-                    conn,
-                    run_id=before["run_id"],
-                    coalesce_name=branch_loss.coalesce_name,
-                    row_id=branch_loss.row_id,
-                    branch_name=branch_loss.branch_name,
-                    token_id=branch_loss.token_id,
-                    reason=branch_loss.reason,
-                    recorded_by=branch_loss.recorded_by,
-                    now=now,
-                )
-        return item_from_mapping(after)
+        return after

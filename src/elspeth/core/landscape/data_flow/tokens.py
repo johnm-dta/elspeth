@@ -18,7 +18,7 @@ from collections.abc import Mapping, Sequence
 from hashlib import sha256
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.engine import Connection, RowMapping
 
 from elspeth.contracts import CoalesceParentCompletion, Row, Token
@@ -445,10 +445,38 @@ class RowTokenRepository:
         self._ownership.validate_token_run_ownership(parent_ref)
         self._ownership.validate_token_row_ownership(parent_ref.token_id, row_id)
 
-        fork_group_id = generate_id()
-        children = []
+        if self._outcomes is None:
+            raise RuntimeError("fork_token requires the token-outcome repository capability")
 
         with self._db.write_connection() as conn:
+            self._outcomes.lock_token_outcome_dependencies((parent_ref,), conn=conn)
+            existing_terminal = (
+                conn.execute(
+                    select(
+                        token_outcomes_table.c.outcome,
+                        token_outcomes_table.c.path,
+                        token_outcomes_table.c.fork_group_id,
+                        token_outcomes_table.c.expected_branches_json,
+                    )
+                    .where(token_outcomes_table.c.token_id == parent_ref.token_id)
+                    .where(token_outcomes_table.c.run_id == parent_ref.run_id)
+                    .where(token_outcomes_table.c.completed == 1)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if existing_terminal is not None:
+                return self._reconcile_fork_replay(
+                    conn,
+                    parent_ref=parent_ref,
+                    row_id=row_id,
+                    branches=branches,
+                    step_in_pipeline=step_in_pipeline,
+                    outcome=existing_terminal,
+                )
+
+            fork_group_id = generate_id()
+            children = []
             # 1. Create child tokens
             for ordinal, branch_name in enumerate(branches):
                 child_id = generate_id()
@@ -518,6 +546,101 @@ class RowTokenRepository:
                 )
 
         return children, fork_group_id
+
+    def _reconcile_fork_replay(
+        self,
+        conn: Connection,
+        *,
+        parent_ref: TokenRef,
+        row_id: str,
+        branches: Sequence[str],
+        step_in_pipeline: int | None,
+        outcome: RowMapping,
+    ) -> tuple[list[Token], str]:
+        """Return a previously committed exact fork or refuse divergent replay."""
+        fork_group_id = outcome["fork_group_id"]
+        try:
+            recorded_branches = json.loads(outcome["expected_branches_json"])
+        except (TypeError, ValueError):
+            recorded_branches = None
+        children = self._load_children_for_parent(conn, parent_ref=parent_ref)
+        exact = (
+            outcome["outcome"] == TerminalOutcome.TRANSIENT.value
+            and outcome["path"] == TerminalPath.FORK_PARENT.value
+            and isinstance(fork_group_id, str)
+            and bool(fork_group_id)
+            and recorded_branches == list(branches)
+            and len(children) == len(branches)
+            and all(
+                child.row_id == row_id
+                and child.run_id == parent_ref.run_id
+                and child.fork_group_id == fork_group_id
+                and child.join_group_id is None
+                and child.expand_group_id is None
+                and child.branch_name == branch
+                and child.step_in_pipeline == step_in_pipeline
+                and ordinal == expected_ordinal
+                for expected_ordinal, ((child, ordinal), branch) in enumerate(zip(children, branches, strict=True))
+            )
+        )
+        if not exact:
+            raise AuditIntegrityError(
+                f"fork_token: divergent fork replay for parent token {parent_ref.token_id!r}; "
+                "the requested branches or lineage metadata do not match the committed fork"
+            )
+        return [child for child, _ordinal in children], fork_group_id
+
+    @staticmethod
+    def _load_children_for_parent(conn: Connection, *, parent_ref: TokenRef) -> list[tuple[Token, int]]:
+        rows = (
+            conn.execute(
+                select(
+                    tokens_table.c.token_id,
+                    tokens_table.c.row_id,
+                    tokens_table.c.run_id,
+                    tokens_table.c.fork_group_id,
+                    tokens_table.c.join_group_id,
+                    tokens_table.c.expand_group_id,
+                    tokens_table.c.branch_name,
+                    tokens_table.c.step_in_pipeline,
+                    tokens_table.c.token_data_ref,
+                    tokens_table.c.created_at,
+                    token_parents_table.c.ordinal,
+                )
+                .select_from(
+                    token_parents_table.join(
+                        tokens_table,
+                        and_(
+                            tokens_table.c.token_id == token_parents_table.c.token_id,
+                            tokens_table.c.run_id == token_parents_table.c.run_id,
+                        ),
+                    )
+                )
+                .where(token_parents_table.c.parent_token_id == parent_ref.token_id)
+                .where(token_parents_table.c.run_id == parent_ref.run_id)
+                .order_by(token_parents_table.c.ordinal)
+            )
+            .mappings()
+            .all()
+        )
+        return [
+            (
+                Token(
+                    token_id=str(row["token_id"]),
+                    row_id=str(row["row_id"]),
+                    run_id=str(row["run_id"]),
+                    fork_group_id=row["fork_group_id"],
+                    join_group_id=row["join_group_id"],
+                    expand_group_id=row["expand_group_id"],
+                    branch_name=row["branch_name"],
+                    step_in_pipeline=row["step_in_pipeline"],
+                    token_data_ref=row["token_data_ref"],
+                    created_at=row["created_at"],
+                ),
+                int(row["ordinal"]),
+            )
+            for row in rows
+        ]
 
     def coalesce_tokens(
         self,
@@ -1072,20 +1195,21 @@ class RowTokenRepository:
         expand_group_id = generate_id()
         children = []
 
-        # Persist each child's {data, contract} envelope BEFORE the DB transaction so
-        # the token_data_ref values are ready to write atomically at INSERT time.
-        # The envelope is self-contained: recovery can restore a faithful PipelineRow
-        # without any nodes-table lookup (ADDENDUM 3 — nodes.output_contract_json is
-        # NULL for non-source nodes in production).
+        # Prepare each child's self-contained {data, contract} envelope and its
+        # protocol-defined content address before taking the expansion claim.
+        # Exact or divergent replay performs no payload-store writes. A new claim
+        # stores the envelopes after the terminal-outcome lock/check and verifies
+        # that the store returned the required SHA-256 identities before any DB
+        # child insert.
         # checkpoint_dumps is type-faithful (datetime preserved as datetime, not
         # stringified) — canonical_json would destroy Tier-1 fidelity.
         # Crash on store failure: a child token with no persisted payload is
         # unreconstructable on resume (epoch 11 invariant).
         contract_fmt = output_contract.to_checkpoint_format()
-        child_data_refs = [
-            self._payload_store.store(checkpoint_dumps({"data": dict(payload), "contract": contract_fmt}).encode("utf-8"))
-            for payload in child_payloads
+        child_payload_bytes = [
+            checkpoint_dumps({"data": dict(payload), "contract": contract_fmt}).encode("utf-8") for payload in child_payloads
         ]
+        child_data_refs = [sha256(payload_bytes).hexdigest() for payload_bytes in child_payload_bytes]
 
         if self._outcomes is None:
             raise RuntimeError("expand_token requires the token-outcome repository capability")
@@ -1096,15 +1220,65 @@ class RowTokenRepository:
             # completed-outcome check is the durable claim shared by normal and
             # batch expansion paths.
             self._outcomes.lock_token_outcome_dependencies((parent_ref,), conn=conn)
-            existing_terminal = conn.execute(
-                select(token_outcomes_table.c.outcome_id, token_outcomes_table.c.path)
-                .where(token_outcomes_table.c.token_id == parent_ref.token_id)
-                .where(token_outcomes_table.c.run_id == parent_ref.run_id)
-                .where(token_outcomes_table.c.completed == 1)
-            ).one_or_none()
+            existing_terminal = (
+                conn.execute(
+                    select(
+                        token_outcomes_table.c.outcome,
+                        token_outcomes_table.c.path,
+                        token_outcomes_table.c.batch_id,
+                        token_outcomes_table.c.expand_group_id,
+                        token_outcomes_table.c.expected_branches_json,
+                    )
+                    .where(token_outcomes_table.c.token_id == parent_ref.token_id)
+                    .where(token_outcomes_table.c.run_id == parent_ref.run_id)
+                    .where(token_outcomes_table.c.completed == 1)
+                )
+                .mappings()
+                .one_or_none()
+            )
             if existing_terminal is not None:
+                if parent_path == TerminalPath.EXPAND_PARENT and existing_terminal["path"] == TerminalPath.EXPAND_PARENT.value:
+                    return self._reconcile_expansion_replay(
+                        conn,
+                        parent_ref=parent_ref,
+                        row_id=row_id,
+                        child_data_refs=child_data_refs,
+                        step_in_pipeline=step_in_pipeline,
+                        outcome=existing_terminal,
+                        expand_group_id=existing_terminal["expand_group_id"],
+                        expected_path=TerminalPath.EXPAND_PARENT,
+                        require_recorded_count=True,
+                    )
+                if parent_path == TerminalPath.BATCH_CONSUMED and existing_terminal["path"] == TerminalPath.BATCH_CONSUMED.value:
+                    batch_claim = conn.execute(
+                        select(batches_table.c.run_id, batches_table.c.expansion_group_id).where(
+                            batches_table.c.batch_id == parent_batch_id
+                        )
+                    ).one_or_none()
+                    if existing_terminal["batch_id"] != parent_batch_id or batch_claim is None or batch_claim.run_id != parent_ref.run_id:
+                        raise AuditIntegrityError(
+                            f"expand_token: divergent expansion replay for parent token {parent_ref.token_id!r}; "
+                            "the committed batch claim does not match the requested batch"
+                        )
+                    return self._reconcile_expansion_replay(
+                        conn,
+                        parent_ref=parent_ref,
+                        row_id=row_id,
+                        child_data_refs=child_data_refs,
+                        step_in_pipeline=step_in_pipeline,
+                        outcome=existing_terminal,
+                        expand_group_id=batch_claim.expansion_group_id,
+                        expected_path=TerminalPath.BATCH_CONSUMED,
+                        require_recorded_count=False,
+                    )
                 raise AuditIntegrityError(
                     f"expand_token: parent token {parent_ref.token_id!r} already has a terminal outcome ({existing_terminal.path!r})"
+                )
+
+            stored_refs = [self._payload_store.store(payload_bytes) for payload_bytes in child_payload_bytes]
+            if stored_refs != child_data_refs:
+                raise AuditIntegrityError(
+                    "expand_token: payload store returned an identity other than the required SHA-256 content address"
                 )
 
             if parent_path == TerminalPath.BATCH_CONSUMED:
@@ -1224,3 +1398,50 @@ class RowTokenRepository:
                 )
 
         return children, expand_group_id
+
+    def _reconcile_expansion_replay(
+        self,
+        conn: Connection,
+        *,
+        parent_ref: TokenRef,
+        row_id: str,
+        child_data_refs: Sequence[str],
+        step_in_pipeline: int | None,
+        outcome: RowMapping,
+        expand_group_id: object,
+        expected_path: TerminalPath,
+        require_recorded_count: bool,
+    ) -> tuple[list[Token], str]:
+        """Return a previously committed exact expansion or refuse divergence."""
+        try:
+            recorded_contract = json.loads(outcome["expected_branches_json"])
+        except (TypeError, ValueError):
+            recorded_contract = None
+        children = self._load_children_for_parent(conn, parent_ref=parent_ref)
+        exact = (
+            outcome["outcome"] == TerminalOutcome.TRANSIENT.value
+            and outcome["path"] == expected_path.value
+            and isinstance(expand_group_id, str)
+            and bool(expand_group_id)
+            and (not require_recorded_count or recorded_contract == {"count": len(child_data_refs)})
+            and len(children) == len(child_data_refs)
+            and all(
+                child.row_id == row_id
+                and child.run_id == parent_ref.run_id
+                and child.fork_group_id is None
+                and child.join_group_id is None
+                and child.expand_group_id == expand_group_id
+                and child.branch_name is None
+                and child.step_in_pipeline == step_in_pipeline
+                and child.token_data_ref == expected_payload_ref
+                and ordinal == expected_ordinal
+                for expected_ordinal, ((child, ordinal), expected_payload_ref) in enumerate(zip(children, child_data_refs, strict=True))
+            )
+        )
+        if not exact:
+            raise AuditIntegrityError(
+                f"expand_token: divergent expansion replay for parent token {parent_ref.token_id!r}; "
+                "the requested payloads or lineage metadata do not match the committed expansion"
+            )
+        assert isinstance(expand_group_id, str)  # narrowed by the exact-replay predicate above
+        return [child for child, _ordinal in children], expand_group_id

@@ -15,7 +15,7 @@ from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.core.landscape.schema import node_states_table, token_outcomes_table, tokens_table
+from elspeth.core.landscape.schema import node_states_table, token_outcomes_table, token_parents_table, tokens_table
 from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run, register_test_node
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
@@ -410,6 +410,56 @@ class TestForkToken:
         )
         assert all(c.step_in_pipeline == 3 for c in children)
 
+    def test_exact_replay_returns_existing_children_without_reminting(self):
+        db, factory = _setup()
+        row, token = _make_row(factory)
+        first_children, first_group = factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+            row_id=row.row_id,
+            branches=["path-a", "path-b"],
+            step_in_pipeline=3,
+        )
+
+        replayed_children, replayed_group = factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+            row_id=row.row_id,
+            branches=["path-a", "path-b"],
+            step_in_pipeline=3,
+        )
+
+        assert replayed_group == first_group
+        assert [child.token_id for child in replayed_children] == [child.token_id for child in first_children]
+        with db.connection() as conn:
+            assert conn.execute(select(tokens_table.c.token_id).where(tokens_table.c.fork_group_id == first_group)).all() == [
+                (child.token_id,) for child in first_children
+            ]
+            assert len(conn.execute(select(token_parents_table).where(token_parents_table.c.parent_token_id == token.token_id)).all()) == 2
+            assert len(conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.token_id == token.token_id)).all()) == 1
+
+    def test_incompatible_replay_refuses_without_mutation(self):
+        db, factory = _setup()
+        row, token = _make_row(factory)
+        first_children, first_group = factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+            row_id=row.row_id,
+            branches=["path-a", "path-b"],
+            step_in_pipeline=3,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="divergent fork replay"):
+            factory.data_flow.fork_token(
+                parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                row_id=row.row_id,
+                branches=["path-b", "path-a"],
+                step_in_pipeline=3,
+            )
+
+        with db.connection() as conn:
+            assert conn.execute(select(tokens_table.c.token_id).where(tokens_table.c.fork_group_id == first_group)).all() == [
+                (child.token_id,) for child in first_children
+            ]
+            assert len(conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.token_id == token.token_id)).all()) == 1
+
 
 class TestCoalesceTokens:
     """Tests for DataFlowRepository.coalesce_tokens."""
@@ -535,7 +585,7 @@ class TestExpandToken:
                 output_contract=_MINIMAL_CONTRACT,
             )
 
-    def test_batch_expansion_consumes_parent_atomically_and_rejects_replay(self):
+    def test_batch_expansion_consumes_parent_atomically_and_reconciles_exact_replay(self):
         _db, factory = _setup()
         batch_id = _make_batch(factory, batch_id="batch-expand")
         row, token = _make_row(factory)
@@ -555,11 +605,22 @@ class TestExpandToken:
         assert outcome.path == TerminalPath.BATCH_CONSUMED
         assert outcome.batch_id == batch_id
 
-        with pytest.raises(AuditIntegrityError, match="already has a terminal outcome"):
+        replayed_children, replayed_group_id = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+            row_id=row.row_id,
+            child_payloads=[{"item": 1}, {"item": 2}],
+            output_contract=_MINIMAL_CONTRACT,
+            parent_path=TerminalPath.BATCH_CONSUMED,
+            parent_batch_id=batch_id,
+        )
+        assert replayed_group_id == expand_group_id
+        assert [child.token_id for child in replayed_children] == [child.token_id for child in children]
+
+        with pytest.raises(AuditIntegrityError, match="divergent expansion replay"):
             factory.data_flow.expand_token(
                 parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
                 row_id=row.row_id,
-                child_payloads=[{"item": 1}, {"item": 2}],
+                child_payloads=[{"item": 1}, {"item": 3}],
                 output_contract=_MINIMAL_CONTRACT,
                 parent_path=TerminalPath.BATCH_CONSUMED,
                 parent_batch_id=batch_id,
@@ -646,6 +707,61 @@ class TestExpandToken:
             output_contract=_MINIMAL_CONTRACT,
         )
         assert all(c.step_in_pipeline == 7 for c in children)
+
+    def test_exact_replay_returns_existing_children_without_reminting(self):
+        db, factory = _setup()
+        row, token = _make_row(factory)
+        payloads = [{"item": 1}, {"item": 2}]
+        first_children, first_group = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+            row_id=row.row_id,
+            child_payloads=payloads,
+            output_contract=_MINIMAL_CONTRACT,
+            step_in_pipeline=7,
+        )
+
+        replayed_children, replayed_group = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+            row_id=row.row_id,
+            child_payloads=payloads,
+            output_contract=_MINIMAL_CONTRACT,
+            step_in_pipeline=7,
+        )
+
+        assert replayed_group == first_group
+        assert [child.token_id for child in replayed_children] == [child.token_id for child in first_children]
+        with db.connection() as conn:
+            assert conn.execute(select(tokens_table.c.token_id).where(tokens_table.c.expand_group_id == first_group)).all() == [
+                (child.token_id,) for child in first_children
+            ]
+            assert len(conn.execute(select(token_parents_table).where(token_parents_table.c.parent_token_id == token.token_id)).all()) == 2
+            assert len(conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.token_id == token.token_id)).all()) == 1
+
+    def test_incompatible_replay_refuses_without_mutation(self):
+        db, factory = _setup()
+        row, token = _make_row(factory)
+        first_children, first_group = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+            row_id=row.row_id,
+            child_payloads=[{"item": 1}, {"item": 2}],
+            output_contract=_MINIMAL_CONTRACT,
+            step_in_pipeline=7,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="divergent expansion replay"):
+            factory.data_flow.expand_token(
+                parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                row_id=row.row_id,
+                child_payloads=[{"item": 1}, {"item": 3}],
+                output_contract=_MINIMAL_CONTRACT,
+                step_in_pipeline=7,
+            )
+
+        with db.connection() as conn:
+            assert conn.execute(select(tokens_table.c.token_id).where(tokens_table.c.expand_group_id == first_group)).all() == [
+                (child.token_id,) for child in first_children
+            ]
+            assert len(conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.token_id == token.token_id)).all()) == 1
 
     def test_expand_count_one(self):
         _db, factory = _setup()

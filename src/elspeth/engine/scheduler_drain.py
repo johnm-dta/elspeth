@@ -646,10 +646,9 @@ class SchedulerDrainCoordinator:
                 self._active_claim_work_item_id = None
                 self._last_heartbeat_at = None
 
-            for child_item in child_items:
-                self.enqueue_work_item(child_item, pending_items)
-
             if result is not None and is_buffered_scheduler_result(result):
+                for child_item in child_items:
+                    self.enqueue_work_item(child_item, pending_items)
                 self._mark_claimed_scheduler_work_blocked(
                     claimed,
                     item,
@@ -673,36 +672,90 @@ class SchedulerDrainCoordinator:
                 continue
 
             if (sink_bound_result := scheduler_sink_bound_result_for_claimed_token(result, claimed.token_id)) is not None:
-                self._scheduler.mark_pending_sink(
-                    work_item_id=claimed.work_item_id,
-                    row_payload_json=self._scheduler.serialize_row_payload(sink_bound_result.token.row_data),
-                    sink_name=require_scheduler_sink_name(sink_bound_result),
-                    outcome=require_scheduler_outcome(sink_bound_result).value,
-                    path=sink_bound_result.path.value,
-                    error_hash=scheduler_error_hash(sink_bound_result),
-                    error_message=scheduler_error_message(sink_bound_result),
-                    now=self._clock.now_utc(),
-                    expected_lease_owner=claimed_lease_owner,
-                    branch_loss=self.take_claim_branch_loss(claimed.token_id),
-                    worker_id=self._disposition_fence_worker_id(),
-                )
+                row_payload_json = self._scheduler.serialize_row_payload(sink_bound_result.token.row_data)
+                sink_name = require_scheduler_sink_name(sink_bound_result)
+                outcome = require_scheduler_outcome(sink_bound_result).value
+                path = sink_bound_result.path.value
+                error_hash = scheduler_error_hash(sink_bound_result)
+                error_message = scheduler_error_message(sink_bound_result)
+                pending_sink_now = self._clock.now_utc()
+                branch_loss = self.take_claim_branch_loss(claimed.token_id)
+                worker_id = self._disposition_fence_worker_id()
+                if child_items:
+                    _, scheduled_children = self._scheduler.mark_pending_sink_with_ready_children(
+                        work_item_id=claimed.work_item_id,
+                        emitted_ready=tuple(self._work_codec.ready_emission(child_item) for child_item in child_items),
+                        row_payload_json=row_payload_json,
+                        sink_name=sink_name,
+                        outcome=outcome,
+                        path=path,
+                        error_hash=error_hash,
+                        error_message=error_message,
+                        now=pending_sink_now,
+                        expected_lease_owner=claimed_lease_owner,
+                        branch_loss=branch_loss,
+                        worker_id=worker_id,
+                    )
+                    self._retain_scheduled_children(child_items, scheduled_children, pending_items)
+                else:
+                    self._scheduler.mark_pending_sink(
+                        work_item_id=claimed.work_item_id,
+                        row_payload_json=row_payload_json,
+                        sink_name=sink_name,
+                        outcome=outcome,
+                        path=path,
+                        error_hash=error_hash,
+                        error_message=error_message,
+                        now=pending_sink_now,
+                        expected_lease_owner=claimed_lease_owner,
+                        branch_loss=branch_loss,
+                        worker_id=worker_id,
+                    )
                 result = with_scheduler_pending_sink_handoff(result, claimed.token_id)
             elif scheduler_result_failed_claimed_token(result, claimed.token_id):
-                self._scheduler.mark_failed(
-                    work_item_id=claimed.work_item_id,
-                    now=self._clock.now_utc(),
-                    expected_lease_owner=claimed_lease_owner,
-                    branch_loss=self.take_claim_branch_loss(claimed.token_id),
-                    worker_id=self._disposition_fence_worker_id(),
-                )
+                failed_now = self._clock.now_utc()
+                branch_loss = self.take_claim_branch_loss(claimed.token_id)
+                worker_id = self._disposition_fence_worker_id()
+                if child_items:
+                    _, scheduled_children = self._scheduler.mark_failed_with_ready_children(
+                        work_item_id=claimed.work_item_id,
+                        emitted_ready=tuple(self._work_codec.ready_emission(child_item) for child_item in child_items),
+                        now=failed_now,
+                        expected_lease_owner=claimed_lease_owner,
+                        branch_loss=branch_loss,
+                        worker_id=worker_id,
+                    )
+                    self._retain_scheduled_children(child_items, scheduled_children, pending_items)
+                else:
+                    self._scheduler.mark_failed(
+                        work_item_id=claimed.work_item_id,
+                        now=failed_now,
+                        expected_lease_owner=claimed_lease_owner,
+                        branch_loss=branch_loss,
+                        worker_id=worker_id,
+                    )
             else:
-                self._scheduler.mark_terminal(
-                    work_item_id=claimed.work_item_id,
-                    now=self._clock.now_utc(),
-                    expected_lease_owner=claimed_lease_owner,
-                    branch_loss=self.take_claim_branch_loss(claimed.token_id),
-                    worker_id=self._disposition_fence_worker_id(),
-                )
+                terminal_now = self._clock.now_utc()
+                branch_loss = self.take_claim_branch_loss(claimed.token_id)
+                worker_id = self._disposition_fence_worker_id()
+                if child_items:
+                    _, scheduled_children = self._scheduler.mark_terminal_with_ready_children(
+                        work_item_id=claimed.work_item_id,
+                        emitted_ready=tuple(self._work_codec.ready_emission(child_item) for child_item in child_items),
+                        now=terminal_now,
+                        expected_lease_owner=claimed_lease_owner,
+                        branch_loss=branch_loss,
+                        worker_id=worker_id,
+                    )
+                    self._retain_scheduled_children(child_items, scheduled_children, pending_items)
+                else:
+                    self._scheduler.mark_terminal(
+                        work_item_id=claimed.work_item_id,
+                        now=terminal_now,
+                        expected_lease_owner=claimed_lease_owner,
+                        branch_loss=branch_loss,
+                        worker_id=worker_id,
+                    )
 
             if result is not None:
                 if isinstance(result, tuple):
@@ -986,6 +1039,19 @@ class SchedulerDrainCoordinator:
     # ─────────────────────────────────────────────────────────────────────────
     # READY work-item persistence
     # ─────────────────────────────────────────────────────────────────────────
+
+    def _retain_scheduled_children(
+        self,
+        child_items: list[WorkItem],
+        scheduled_children: tuple[TokenWorkItem, ...],
+        pending_items: dict[str, WorkItem],
+    ) -> None:
+        """Retain live payloads for children made durable by an atomic disposition."""
+        for child_item, scheduled in zip(child_items, scheduled_children, strict=True):
+            if scheduled.status is TokenWorkStatus.READY or (
+                scheduled.status is TokenWorkStatus.LEASED and scheduled.lease_owner == self._scheduler_lease_owner
+            ):
+                pending_items[scheduled.work_item_id] = child_item
 
     def enqueue_work_item(
         self,

@@ -2881,8 +2881,8 @@ class RowProcessor:
         """Drain scheduler-backed work, processing tokens until empty.
 
         Each work item is durably persisted and leased before it advances;
-        child continuations are persisted as READY work before the current
-        lease is marked terminal.
+        child continuations become READY in the same transaction that disposes
+        the current parent lease.
 
         ``preclaimed`` (ADR-030 §C.4 row 9): the fenced ingest verb already
         persisted AND claimed the initial item inside its composed

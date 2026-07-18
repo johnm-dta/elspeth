@@ -51,10 +51,11 @@ import pytest
 from sqlalchemy import delete, insert, select
 
 from elspeth.contracts import RowResult, TokenInfo
+from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError, RunWorkerEvictedError, SchedulerLeaseLostError
 from elspeth.contracts.plugin_context import PluginContext
-from elspeth.contracts.scheduler import BranchLossSpec, TokenWorkStatus
+from elspeth.contracts.scheduler import BranchLossSpec, SchedulerEventType, TokenWorkStatus
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
@@ -62,6 +63,7 @@ from elspeth.core.landscape.schema import (
     run_coordination_events_table,
     run_workers_table,
     scheduler_events_table,
+    token_parents_table,
     token_work_items_table,
 )
 from elspeth.engine.clock import MockClock
@@ -463,6 +465,278 @@ def test_non_sink_terminal_marks_terminal_and_unregistered_build_is_unfenced() -
     assert terms[0]["worker_id"] is None
     status, _owner = _row_status(setup, work_item_id)
     assert status == TokenWorkStatus.TERMINAL.value
+
+
+def test_child_ready_enqueue_rolls_back_when_parent_terminal_event_fails() -> None:
+    """TS-00 children and the parent TS-08 disposition are one commit.
+
+    A process can die at any statement boundary.  Model the durable failure
+    point by rejecting the parent's scheduler event after its row UPDATE.  No
+    child READY row or ENQUEUE event may survive while the parent lease stays
+    reprocessable.
+    """
+    processor, spy, setup, clock = _build(lease_owner=LEADER_OWNER)
+    parent_work_item_id, _parent_token = _enqueue_ready(setup, spy, clock, sequence=0)
+    child_item = _unscheduled_work_item(setup, sequence=1)
+
+    def produce_child(**kwargs: Any) -> tuple[RowResult, list[WorkItem]]:
+        return _dropped_result(kwargs["token"]), [child_item]
+
+    real_record = setup.factory.scheduler.events.record
+
+    def reject_parent_terminal_event(conn: Any, *, event_type: SchedulerEventType, **kwargs: Any) -> None:
+        if event_type is SchedulerEventType.MARK_TERMINAL:
+            raise RuntimeError("injected parent terminal event failure")
+        real_record(conn, event_type=event_type, **kwargs)
+
+    with (
+        patch.object(processor, "_process_single_token", new=produce_child),
+        patch.object(setup.factory.scheduler.events, "record", new=reject_parent_terminal_event),
+        pytest.raises(RuntimeError, match="injected parent terminal event failure"),
+    ):
+        processor._drain_scheduler_claims(ctx=_ctx(setup), pending_items={}, recover_pending_sinks=False)
+
+    with setup.db.engine.connect() as conn:
+        parent_status = conn.execute(
+            select(token_work_items_table.c.status).where(token_work_items_table.c.work_item_id == parent_work_item_id)
+        ).scalar_one()
+        child_rows = conn.execute(
+            select(token_work_items_table.c.work_item_id).where(
+                token_work_items_table.c.run_id == setup.run_id,
+                token_work_items_table.c.token_id == child_item.token.token_id,
+            )
+        ).all()
+        child_events = conn.execute(
+            select(scheduler_events_table.c.event_id).where(
+                scheduler_events_table.c.run_id == setup.run_id,
+                scheduler_events_table.c.token_id == child_item.token.token_id,
+            )
+        ).all()
+
+    assert parent_status == TokenWorkStatus.LEASED.value
+    assert child_rows == []
+    assert child_events == []
+
+
+def test_child_and_parent_disposition_roll_back_when_branch_loss_write_fails() -> None:
+    """The child, parent event, and §E.5 loss share one commit boundary."""
+    processor, spy, setup, clock = _build(lease_owner=LEADER_OWNER)
+    parent_work_item_id, parent_token = _enqueue_ready(setup, spy, clock, sequence=0)
+    child_item = _unscheduled_work_item(setup, sequence=1)
+    processor._pending_branch_losses.append(
+        BranchLossSpec(
+            coalesce_name="merge",
+            row_id=parent_token.row_id,
+            branch_name="left",
+            token_id=parent_token.token_id,
+            reason="test branch loss",
+            recorded_by=LEADER_OWNER,
+        )
+    )
+
+    def produce_child(**kwargs: Any) -> tuple[RowResult, list[WorkItem]]:
+        return _dropped_result(kwargs["token"]), [child_item]
+
+    with (
+        patch.object(processor, "_process_single_token", new=produce_child),
+        patch(
+            "elspeth.core.landscape.scheduler.dispositions.record_coalesce_branch_loss",
+            side_effect=RuntimeError("injected branch-loss write failure"),
+        ),
+        pytest.raises(RuntimeError, match="injected branch-loss write failure"),
+    ):
+        processor._drain_scheduler_claims(ctx=_ctx(setup), pending_items={}, recover_pending_sinks=False)
+
+    with setup.db.engine.connect() as conn:
+        parent_status = conn.execute(
+            select(token_work_items_table.c.status).where(token_work_items_table.c.work_item_id == parent_work_item_id)
+        ).scalar_one()
+        child_rows = conn.execute(
+            select(token_work_items_table.c.work_item_id).where(token_work_items_table.c.token_id == child_item.token.token_id)
+        ).all()
+        parent_terminal_events = conn.execute(
+            select(scheduler_events_table.c.event_id).where(
+                scheduler_events_table.c.token_id == parent_token.token_id,
+                scheduler_events_table.c.event_type == SchedulerEventType.MARK_TERMINAL.value,
+            )
+        ).all()
+
+    assert parent_status == TokenWorkStatus.LEASED.value
+    assert child_rows == []
+    assert parent_terminal_events == []
+
+
+@pytest.mark.parametrize(
+    ("parent_result", "rejected_event"),
+    [
+        pytest.param(_failed_result, SchedulerEventType.MARK_FAILED, id="failed"),
+        pytest.param(_sink_bound_result, SchedulerEventType.MARK_PENDING_SINK, id="pending-sink"),
+    ],
+)
+def test_child_ready_enqueue_rolls_back_when_nonterminal_parent_event_fails(
+    parent_result: Any,
+    rejected_event: SchedulerEventType,
+) -> None:
+    """TS-00 children share the TS-09/TS-10 parent commit boundary."""
+    processor, spy, setup, clock = _build(lease_owner=LEADER_OWNER)
+    parent_work_item_id, _parent_token = _enqueue_ready(setup, spy, clock, sequence=0)
+    child_item = _unscheduled_work_item(setup, sequence=1)
+
+    def produce_child(**kwargs: Any) -> tuple[RowResult, list[WorkItem]]:
+        return parent_result(kwargs["token"]), [child_item]
+
+    real_record = setup.factory.scheduler.events.record
+
+    def reject_parent_event(conn: Any, *, event_type: SchedulerEventType, **kwargs: Any) -> None:
+        if event_type is rejected_event:
+            raise RuntimeError("injected parent disposition event failure")
+        real_record(conn, event_type=event_type, **kwargs)
+
+    with (
+        patch.object(processor, "_process_single_token", new=produce_child),
+        patch.object(setup.factory.scheduler.events, "record", new=reject_parent_event),
+        pytest.raises(RuntimeError, match="injected parent disposition event failure"),
+    ):
+        processor._drain_scheduler_claims(ctx=_ctx(setup), pending_items={}, recover_pending_sinks=False)
+
+    with setup.db.engine.connect() as conn:
+        parent_status = conn.execute(
+            select(token_work_items_table.c.status).where(token_work_items_table.c.work_item_id == parent_work_item_id)
+        ).scalar_one()
+        child_rows = conn.execute(
+            select(token_work_items_table.c.work_item_id).where(
+                token_work_items_table.c.run_id == setup.run_id,
+                token_work_items_table.c.token_id == child_item.token.token_id,
+            )
+        ).all()
+        child_events = conn.execute(
+            select(scheduler_events_table.c.event_id).where(
+                scheduler_events_table.c.run_id == setup.run_id,
+                scheduler_events_table.c.token_id == child_item.token.token_id,
+            )
+        ).all()
+
+    assert parent_status == TokenWorkStatus.LEASED.value
+    assert child_rows == []
+    assert child_events == []
+
+
+def test_expansion_restart_reuses_children_and_delivers_each_once() -> None:
+    """Crash/restart proof for the production expansion and scheduler seams."""
+    processor, spy, setup, clock = _build(lease_owner=LEADER_OWNER, bind_leader_token=True)
+    parent_work_item_id, parent_token = _enqueue_ready(setup, spy, clock, sequence=1)
+    parent_calls = 0
+    child_calls: dict[str, int] = {}
+    expansion_ids_by_attempt: list[tuple[str, ...]] = []
+
+    def expand_parent_or_finish_child(**kwargs: Any) -> tuple[RowResult, list[WorkItem]]:
+        nonlocal parent_calls
+        token = cast(TokenInfo, kwargs["token"])
+        if token.token_id != parent_token.token_id:
+            child_calls[token.token_id] = child_calls.get(token.token_id, 0) + 1
+            return _dropped_result(token), []
+
+        parent_calls += 1
+        payloads = ({"item": 1}, {"item": 2})
+        children, _expand_group_id = setup.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=token.token_id, run_id=setup.run_id),
+            row_id=token.row_id,
+            child_payloads=payloads,
+            output_contract=_CONTRACT,
+            step_in_pipeline=1,
+        )
+        expansion_ids_by_attempt.append(tuple(child.token_id for child in children))
+        child_items = [
+            WorkItem(
+                token=TokenInfo(
+                    row_id=child.row_id,
+                    token_id=child.token_id,
+                    row_data=PipelineRow(payload, _CONTRACT),
+                    expand_group_id=child.expand_group_id,
+                ),
+                current_node_id=NodeID(NODE_ID),
+            )
+            for child, payload in zip(children, payloads, strict=True)
+        ]
+        return _dropped_result(token), child_items
+
+    real_record = setup.factory.scheduler.events.record
+
+    def reject_first_parent_event(conn: Any, *, event_type: SchedulerEventType, **kwargs: Any) -> None:
+        if event_type is SchedulerEventType.MARK_TERMINAL:
+            raise RuntimeError("injected crash before parent scheduler commit")
+        real_record(conn, event_type=event_type, **kwargs)
+
+    with (
+        patch.object(processor, "_process_single_token", new=expand_parent_or_finish_child),
+        patch.object(setup.factory.scheduler.events, "record", new=reject_first_parent_event),
+        pytest.raises(RuntimeError, match="injected crash before parent scheduler commit"),
+    ):
+        processor._drain_scheduler_claims(ctx=_ctx(setup), pending_items={}, recover_pending_sinks=False)
+
+    assert parent_calls == 1
+    with setup.db.engine.connect() as conn:
+        assert (
+            conn.execute(
+                select(token_work_items_table.c.status).where(token_work_items_table.c.work_item_id == parent_work_item_id)
+            ).scalar_one()
+            == TokenWorkStatus.LEASED.value
+        )
+        assert (
+            conn.execute(
+                select(token_work_items_table.c.token_id).where(token_work_items_table.c.token_id.in_(expansion_ids_by_attempt[0]))
+            ).all()
+            == []
+        )
+        assert (
+            len(
+                conn.execute(
+                    select(token_parents_table.c.token_id).where(token_parents_table.c.parent_token_id == parent_token.token_id)
+                ).all()
+            )
+            == 2
+        )
+
+    # Model the successor process's lease reap through the repository's named
+    # crash-image adapter, then enter through the production recovery drain.
+    clock.advance(1_000)
+    recovered = setup.factory.scheduler.recover_expired_leases_legacy_unfenced(
+        run_id=setup.run_id,
+        now=clock.now_utc(),
+        caller_owner="restart-reaper",
+    )
+    assert recovered == 1
+    with patch.object(processor, "_process_single_token", new=expand_parent_or_finish_child):
+        results = processor.drain_scheduled_work(_ctx(setup))
+
+    assert parent_calls == 2
+    assert expansion_ids_by_attempt[1] == expansion_ids_by_attempt[0]
+    assert child_calls == dict.fromkeys(expansion_ids_by_attempt[0], 1)
+    assert {result.token.token_id for result in results} == {parent_token.token_id, *expansion_ids_by_attempt[0]}
+
+    with setup.db.engine.connect() as conn:
+        final_rows = conn.execute(
+            select(token_work_items_table.c.token_id, token_work_items_table.c.status).where(
+                token_work_items_table.c.token_id.in_((parent_token.token_id, *expansion_ids_by_attempt[0]))
+            )
+        ).all()
+        enqueue_counts = {
+            token_id: len(
+                conn.execute(
+                    select(scheduler_events_table.c.event_id).where(
+                        scheduler_events_table.c.token_id == token_id,
+                        scheduler_events_table.c.event_type == SchedulerEventType.ENQUEUE.value,
+                    )
+                ).all()
+            )
+            for token_id in expansion_ids_by_attempt[0]
+        }
+
+    assert set(final_rows) == {
+        (parent_token.token_id, TokenWorkStatus.TERMINAL.value),
+        *((token_id, TokenWorkStatus.TERMINAL.value) for token_id in expansion_ids_by_attempt[0]),
+    }
+    assert enqueue_counts == dict.fromkeys(expansion_ids_by_attempt[0], 1)
 
 
 def test_lease_lost_mid_processing_abandons_result_and_writes_no_disposition() -> None:

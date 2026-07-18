@@ -490,6 +490,26 @@ class TokenSchedulerRepository:
             worker_id=worker_id,
         )
 
+    def mark_terminal_with_ready_children(
+        self,
+        *,
+        work_item_id: str,
+        emitted_ready: Sequence[BarrierEmission],
+        now: datetime,
+        expected_lease_owner: str,
+        branch_loss: BranchLossSpec | None = None,
+        worker_id: str | None = None,
+    ) -> tuple[TokenWorkItem, tuple[TokenWorkItem, ...]]:
+        """Atomically enqueue child continuations and terminalize their parent."""
+        return self.dispositions.mark_terminal_with_ready_children(
+            work_item_id=work_item_id,
+            emitted_ready=emitted_ready,
+            now=now,
+            expected_lease_owner=expected_lease_owner,
+            branch_loss=branch_loss,
+            worker_id=worker_id,
+        )
+
     def mark_failed(
         self,
         *,
@@ -502,6 +522,26 @@ class TokenSchedulerRepository:
         """Mark a leased work item failed after retries are exhausted."""
         return self.dispositions.mark_failed(
             work_item_id=work_item_id,
+            now=now,
+            expected_lease_owner=expected_lease_owner,
+            branch_loss=branch_loss,
+            worker_id=worker_id,
+        )
+
+    def mark_failed_with_ready_children(
+        self,
+        *,
+        work_item_id: str,
+        emitted_ready: Sequence[BarrierEmission],
+        now: datetime,
+        expected_lease_owner: str,
+        branch_loss: BranchLossSpec | None = None,
+        worker_id: str | None = None,
+    ) -> tuple[TokenWorkItem, tuple[TokenWorkItem, ...]]:
+        """Atomically enqueue child continuations and fail their parent."""
+        return self.dispositions.mark_failed_with_ready_children(
+            work_item_id=work_item_id,
+            emitted_ready=emitted_ready,
             now=now,
             expected_lease_owner=expected_lease_owner,
             branch_loss=branch_loss,
@@ -526,6 +566,38 @@ class TokenSchedulerRepository:
         """Move a claimed item to a durable sink handoff state."""
         return self.dispositions.mark_pending_sink(
             work_item_id=work_item_id,
+            row_payload_json=row_payload_json,
+            sink_name=sink_name,
+            outcome=outcome,
+            path=path,
+            error_hash=error_hash,
+            error_message=error_message,
+            now=now,
+            expected_lease_owner=expected_lease_owner,
+            branch_loss=branch_loss,
+            worker_id=worker_id,
+        )
+
+    def mark_pending_sink_with_ready_children(
+        self,
+        *,
+        work_item_id: str,
+        emitted_ready: Sequence[BarrierEmission],
+        row_payload_json: str,
+        sink_name: str,
+        outcome: str,
+        path: str,
+        error_hash: str | None,
+        error_message: str | None,
+        now: datetime,
+        expected_lease_owner: str,
+        branch_loss: BranchLossSpec | None = None,
+        worker_id: str | None = None,
+    ) -> tuple[TokenWorkItem, tuple[TokenWorkItem, ...]]:
+        """Atomically enqueue children and durably park their parent for a sink."""
+        return self.dispositions.mark_pending_sink_with_ready_children(
+            work_item_id=work_item_id,
+            emitted_ready=emitted_ready,
             row_payload_json=row_payload_json,
             sink_name=sink_name,
             outcome=outcome,

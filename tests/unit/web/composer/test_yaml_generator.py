@@ -630,7 +630,12 @@ class TestGenerateYaml:
         with pytest.raises(AuditIntegrityError, match="guided blob source mapping"):
             generate_public_yaml(state)
 
-    def test_public_yaml_rejects_noncanonical_reviewed_blob_ref(self) -> None:
+    @pytest.mark.parametrize(
+        "invalid_blob_ref",
+        [None, "", 123, "98B1357D-5AAB-4FB3-85B4-5AD643912E84"],
+        ids=["none", "empty", "wrong_type", "noncanonical_uuid"],
+    )
+    def test_public_yaml_rejects_present_invalid_reviewed_blob_ref(self, invalid_blob_ref: object) -> None:
         blob_path = "/home/john/elspeth/data/blobs/session/source.json"
         stable_id = "11111111-1111-4111-8111-111111111111"
         guided_session = replace(
@@ -640,7 +645,7 @@ class TestGenerateYaml:
                 stable_id: SourceResolved(
                     name="source",
                     plugin="json",
-                    options={"path": blob_path, "blob_ref": "NOT-A-CANONICAL-UUID"},
+                    options={"path": blob_path, "blob_ref": invalid_blob_ref},
                     observed_columns=("value",),
                     sample_rows=(),
                     on_validation_failure="discard",
@@ -666,6 +671,8 @@ class TestGenerateYaml:
 
         with pytest.raises(AuditIntegrityError, match="canonical UUID"):
             generate_public_yaml(state)
+
+        assert state.sources["source"].options == {"path": blob_path}
 
     def test_public_yaml_rejects_reviewed_blob_ref_without_string_path_carrier(self) -> None:
         stable_id = "11111111-1111-4111-8111-111111111111"

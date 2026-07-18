@@ -28,12 +28,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import Any
-from uuid import UUID
 
 import yaml
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.trust_boundary import trust_boundary
+from elspeth.web.composer.guided_blob_refs import validate_guided_reviewed_blob_ref
 from elspeth.web.composer.state import COMPOSER_NODE_TYPES, CompositionState, queue_node_contract_error
 from elspeth.web.interpretation_state import AUTHORING_METADATA_OPTION_KEYS
 from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS
@@ -281,15 +281,9 @@ def reattach_guided_blob_refs_for_public_export(state: CompositionState) -> Comp
     for snapshot in guided.reviewed_sources.values():
         source_name = snapshot.name
         snapshot_options = snapshot.options
-        blob_ref = snapshot_options.get("blob_ref")
-        if type(blob_ref) is not str or not blob_ref:
+        if "blob_ref" not in snapshot_options:
             continue
-        try:
-            parsed_blob_ref = UUID(blob_ref)
-        except ValueError as exc:
-            raise AuditIntegrityError("guided reviewed source blob_ref must be a canonical UUID") from exc
-        if str(parsed_blob_ref) != blob_ref:
-            raise AuditIntegrityError("guided reviewed source blob_ref must be a canonical UUID")
+        blob_ref = validate_guided_reviewed_blob_ref(snapshot_options["blob_ref"])
         blob_backed_paths = {value for key in SOURCE_LOCAL_PATH_OPTION_KEYS if type(value := snapshot_options.get(key)) is str}
         if not blob_backed_paths:
             raise AuditIntegrityError("guided reviewed blob source is missing a string path carrier")

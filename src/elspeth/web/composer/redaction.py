@@ -27,6 +27,7 @@ from elspeth.contracts.blobs import AllowedMimeType
 from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields
+from elspeth.web.composer.guided_blob_refs import validate_guided_reviewed_blob_ref
 from elspeth.web.composer.redaction_telemetry import RedactionTelemetry
 
 REDACTED_BLOB_SOURCE_PATH = "<redacted-blob-source-path>"
@@ -3467,9 +3468,9 @@ def redact_guided_snapshot_storage_paths(
             reviewed_out[stable_id] = snapshot
             continue
 
-        blob_ref = snap_options["blob_ref"]
+        validate_guided_reviewed_blob_ref(snap_options["blob_ref"])
         blob_paths = {value for key in ("path", "file") if key in snap_options and type(value := snap_options[key]) is str}
-        if type(blob_ref) is str and blob_ref and not blob_paths:
+        if not blob_paths:
             raise AuditIntegrityError("guided reviewed blob source is missing a string path carrier")
         snap_options_redacted = dict(snap_options)
         for key in ("path", "file"):

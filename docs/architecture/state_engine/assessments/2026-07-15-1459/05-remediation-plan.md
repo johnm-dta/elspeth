@@ -1,5 +1,12 @@
 # Token Scheduler State Engine Remediation Plan
 
+> **Historical assessment artifact for commit
+> `0dcd61acaa44082d93ec205683700e798748ee6d`. Do not execute this as the
+> current work plan. Use the live [proof matrix](../../proof-matrix.md) for
+> evidence state and Filigree for current work.** Recover the exact map used by
+> this assessment with:
+> `git show 0dcd61acaa44082d93ec205683700e798748ee6d:docs/architecture/token-scheduler-state-engine.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > `superpowers:subagent-driven-development` (recommended) or
 > `superpowers:executing-plans` to implement this plan task-by-task. Steps use

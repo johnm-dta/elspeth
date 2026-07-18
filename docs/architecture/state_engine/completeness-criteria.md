@@ -1,126 +1,150 @@
 # State Engine Completeness Criteria
 
-## Purpose
+## Claim being evaluated
 
-This document defines what Elspeth means when it calls a state engine
-**complete**, **confirmed**, or **production-supported**. It prevents broad test
-counts, method names, or a successful happy path from standing in for durable
-correctness.
+The durable state engine is **complete** only when every mandatory state,
+subtype, boundary, read decision, refusal, and recovery path has current,
+production-representative evidence for every applicable dimension in the v1
+proof catalog.
 
-The first assessed engine is the durable token scheduler. The criteria are
-written so a later web-engine assessment can reuse the evidence discipline while
-defining its own states and boundaries.
+Completeness is binary. A maturity score cannot override a failed or unknown
+mandatory cell.
 
-## Product boundary
+## Boundary
 
-For the token scheduler, the state-engine boundary starts when a source plugin
-produces a row and ends only when every resulting scheduler obligation is
-terminal and its plugin-side durable consequence is recorded.
+The claim includes:
 
-The boundary includes:
+- durable token work from enqueue through terminal disposition;
+- transform and sink-redrive leasing, heartbeat, expiry, reclaim, and fencing;
+- aggregation and coalesce barrier adoption, completion, and continuation;
+- sink-effect reservation, preparation, lease, reconciliation, publication,
+  finalization, and scheduler repair;
+- source, transform, gate, aggregation, coalesce, sink, follower, and lifecycle
+  production boundaries;
+- scheduler events, coordination evidence, node states, token outcomes,
+  branch-loss rows, effect attempts, and artifacts;
+- orchestration read models that decide drain, flush, resume, relinquishment,
+  eviction, or completion;
+- the catalog's exact state-store, deployment, lifecycle, and first-party
+  plugin inventories;
+- fresh, resume, follower, partial-start, normal teardown, exceptional teardown,
+  contention, and process-death behavior.
 
-- source acceptance, rejection, quarantine, and initial scheduling;
-- deterministic work identity, claims, leases, heartbeat, and recovery;
-- transform and gate dispositions;
-- aggregation and coalesce barrier intake, adoption, completion, and replay;
-- sink handoff, external write ordering, durable outcomes, redrive, and repair;
-- worker membership, leader epochs, stale-owner refusal, and run completion;
-- scheduler events, coordination events, branch losses, token outcomes, and
-  every read model that authorizes orchestration progress;
-- fresh execution, resume, follower execution, process death, and contention;
-- production plugin lifecycle at every boundary.
+The web session/execution engine is outside this claim unless it directly calls
+or represents one of these durable state-engine boundaries.
 
-The current assessment excludes the web session engine, UI-only state, and
-third-party plugin internals beyond their declared protocol boundary.
+## Closed result vocabulary
 
-## Evidence vocabulary
+Each required case has exactly one status:
 
-| Verdict | Meaning |
+| Status | Meaning |
 | --- | --- |
-| **Mapped** | The production implementation, callers, guards, and durable effects were located. |
-| **Candidate** | Source or a test suggests a behavior or gap, but the proof package has not been executed. |
-| **Confirmed** | The required positive, negative, rollback, and applicable concurrency/plugin evidence executed against the recorded baseline. |
-| **Gap** | Execution or exhaustive evidence review positively established a defect, an absent proof, or an unresolved policy boundary. |
-| **Intentionally absent** | Production reachability was disproved or an accepted ADR explicitly excludes the path, with a regression preventing accidental use. |
-| **Unknown** | Evidence is absent, skipped, stale, or not representative enough to classify. |
+| `pass` | Current executable evidence proves the complete case at the assessed baseline. |
+| `partial` | Current executable evidence proves only the explicitly stated subset. |
+| `fail` | Current executable evidence demonstrates behavior contrary to the case contract. |
+| `unknown` | Adequate current evidence has not been executed or does not exist. |
+| `not_applicable` | The versioned catalog says the case genuinely does not apply and records why. |
 
-`Unknown` and `Candidate` never count as passing. A closed issue or implementation
-plan is evidence of intent, not evidence of correctness.
+Missing tests, unavailable credentials, skipped suites, unsupported local
+services, time pressure, and absent evidence are `unknown`, never
+`not_applicable`.
 
-## Unit of proof
+Mapping progress such as `mapped` or `candidate` is metadata, not a proof
+status. A narrow passing arm never promotes its containing leg by analogy.
 
-Assess each `TS-*`, `AUX-*`, `PB-*`, `RM-*`, and `F-*` leg independently. A leg
-is Confirmed only when its proof package covers every applicable dimension:
+## Ten mandatory dimensions
 
-1. **Production entry:** call the real public repository, orchestrator, or plugin
-   boundary used at runtime. A private helper test can supplement but not replace
-   this evidence.
-2. **Precondition image:** record the complete relevant row, event, outcome,
-   branch-loss, coordination, and external-effect state before the operation.
-3. **Success effects:** assert the state transition, identity, attempt, lease,
-   payload, subtype bundle, auxiliary rows, and event attribution.
-4. **Guard/refusal:** exercise wrong state, wrong owner, wrong run, missing
-   authority, stale epoch, incomplete subtype, duplicate input, and incompatible
-   replay wherever the contract applies.
-5. **Zero-mutation rollback:** compare complete before/after images when a guard,
-   compare-and-swap, event insert, auxiliary insert, or injected failure refuses
-   the operation.
-6. **Concurrency:** use independent database connections or operating-system
-   processes for any claim about races, unique ownership, fencing, or
-   exactly-once durable effects.
-7. **Crash/restart:** interrupt every cross-transaction seam, restart from the
-   same durable database, and prove the declared replay result.
-8. **Plugin boundary:** use a real protocol implementation when the guarantee
-   crosses source, transform, gate, aggregation, coalesce, or sink execution.
-9. **Read-model truth table:** prove every included state/subtype and every
-   deliberately excluded state/subtype, plus run and owner scoping.
-10. **Maintenance:** bind the proof to a mandatory test suite and a named
-    remediation or ownership surface.
+Every catalog leg accounts for all ten dimensions:
+
+1. `production_entry` — the real caller and trigger reach the leg.
+2. `precondition_image` — exact state, subtype, identity, ownership, evidence,
+   and coordination inputs before the operation.
+3. `success_effects` — exact durable and externally visible success image.
+4. `guard_refusal` — wrong status, owner, membership, subtype, token, epoch,
+   or reference fails closed.
+5. `zero_mutation_rollback` — refused, raised, or interrupted operations leave
+   every affected durable plane unchanged or atomically rolled back.
+6. `concurrency` — independent connections/processes prove winner, loser,
+   ordering, and ABA/generation behavior.
+7. `crash_restart` — a fresh object/process against the same durable store
+   converges after every cross-transaction seam.
+8. `boundary_composition` — real supported plugin, orchestration, repository,
+   lifecycle, and external-effect boundaries preserve the contract.
+9. `read_model_truth_table` — downstream decisions include and exclude every
+   state/subtype/owner/expiry arm correctly.
+10. `maintenance` — exact evidence locators remain collected and run in the
+    maintained verification selection, with coherent actionable gap themes
+    either live-owned in Filigree or explicitly unowned.
+
+Applicability is catalog-owned. An assessor cannot mark a dimension N/A merely
+because it is inconvenient to execute.
+
+## Evidence hierarchy
+
+Behavioral `pass`, `partial`, or `fail` claims require executed evidence:
+
+1. production-path harness or real integration/E2E test;
+2. focused integration test across the real repository and caller boundary;
+3. direct repository test for exact transaction detail;
+4. property/state-machine test for broad invariant exploration.
+
+Source inspection, architecture documents, decisions, plans, tracker state,
+and test names support mapping and interpretation. They cannot independently
+make a behavioral case pass.
+
+Concurrency claims require independent connections and, where the contract is
+process-scoped, independent operating-system processes. In-process exception
+handling does not establish process-death recovery.
 
 ## Hard gates
 
-The state engine is not complete while any of these conditions holds:
+The catalog defines these hard gates:
 
-- a legal production call can create or accept an invalid operational subtype;
-- a missing or stale coordination token can downgrade a protected write;
-- two workers can both win a single-owner transition or durable effect;
-- a refused operation can mutate scheduler state, evidence, or plugin-visible
-  effects;
-- state can commit without its required event or evidence, or vice versa;
-- restart can lose work, duplicate an internal effect, or replay a non-idempotent
-  plugin effect outside a documented recovery window;
-- a read model can permit flush, relinquish, resume, or finalization with an
-  untested state/subtype arm;
-- a plugin lifecycle path can leak resources or bypass required durability;
-- a mandatory leg remains Candidate, Unknown, or Gap;
-- the normative ADR contradicts live code or executed evidence.
+- `HG-01-invalid-subtype` — no malformed state/subtype bundle is admitted.
+- `HG-02-authority-downgrade` — no missing token silently selects a weaker
+  production write path.
+- `HG-03-double-winner` — contention cannot produce two effective winners.
+- `HG-04-refusal-mutation` — every refusal preserves complete durable images.
+- `HG-05-state-evidence-atomicity` — state and mandatory evidence commit or
+  roll back together.
+- `HG-06-restart-loss-or-duplicate` — restart loses or duplicates neither work
+  nor externally visible effect.
+- `HG-07-read-model-unproved-arm` — no orchestration decision relies on an
+  unproved state/subtype arm.
+- `HG-08-plugin-lifecycle-durability` — supported lifecycle paths preserve the
+  same durable contract.
+- `HG-09-mandatory-leg-unresolved` — every mandatory catalog case is resolved.
+- `HG-10-normative-contract-drift` — source, architecture, catalog, assessment,
+  and tracker do not contradict one another.
 
-## Mandatory proof families
+Any open or unknown hard gate prevents a `complete` verdict.
 
-| Family | Required result |
-| --- | --- |
-| Intake and identity | Deterministic enqueue/claim, exact replay, source exclusion, rollback, and real contention. |
-| Leasing and recovery | Subtype-preserving claims, heartbeat, identity/attempt behavior, liveness, ABA protection, and competing recovery. |
-| Claimed dispositions | Exact state/event/effect bundles, owner and membership guards, branch-loss atomicity, and real plugin paths. |
-| Sink durability | External-write ordering, outcome witness, terminal callback, redrive/repair, diversion modes, and declared duplication window. |
-| Barrier machinery | Adoption, reset, branch-loss replay, exhaustive consume/emit, late-arrival isolation, and every crash seam. |
-| Fencing and reads | Membership, epoch, eviction-before-reap, role separation, and complete RM truth tables. |
-| Plugin lifecycle | Fresh, resume, follower, partial-start failure, normal teardown, and exceptional teardown for each plugin kind. |
-| Forbidden paths | Every illegal edge fails closed; every dormant edge is proved unreachable or removed. |
+## Derived verdicts
 
-## Completion rule
+Leg verdicts derive from their expanded cases and assessment gate mapping:
 
-Declare the assessed state engine complete only when:
+- `confirmed`: every required case passes and every N/A is catalog-approved;
+- `gap`: at least one required case fails or an open hard gate's
+  `affected_leg_ids` names the leg;
+- `unknown`: no known failure exists, but required evidence is missing.
 
-- every mandatory leg is Confirmed or Intentionally absent;
-- no state-engine hard gate is open;
-- every confirmed gap has a deduplicated owner and its closing regression passes;
-- every concurrency claim has real independent-connection or process evidence;
-- every cross-transaction seam has a deterministic crash/restart result;
-- the full proof matrix is mandatory in continuous integration;
-- the dated assessment, current hub verdict, live tracker, and source agree; and
-- the comprehensive state-engine ADR is accepted and explicitly reconciles the
-  prior state-machine decisions.
+Overall verdicts:
 
-Completion is binary. Counts and maturity summaries may show progress, but they
-cannot average away a hard-gate failure.
+- `complete`: every mandatory leg is confirmed and all hard gates are closed;
+- `not_complete`: at least one leg has a gap or at least one hard gate is open;
+- `insufficient_evidence`: no demonstrated gap exists, but at least one
+  mandatory leg/gate is unknown or the baseline/manifest is invalid.
+
+## Production-supported claim
+
+`complete` proves the catalog contract at every versioned execution profile.
+`production-supported` additionally requires:
+
+- every state-store, deployment, lifecycle, and first-party plugin named in
+  the catalog's `execution_profiles`;
+- every first-party plugin kind covered at its production boundary;
+- declared scale envelopes and bounded-operation evidence;
+- operator recovery procedures exercised against representative artifacts;
+- current mandatory verification in CI or the release gate.
+
+Do not use “production-assured” as a separate informal category.

@@ -1,171 +1,115 @@
 # State Engine Assessment Framework
 
-## Purpose
+This framework explains how to interpret evidence. Follow the executable
+[assessment program](assessment-program.md) for capture and rerun commands.
 
-Use this framework for every state-engine assessment. It makes later snapshots
-comparable and keeps discovery, execution, remediation, and architectural
-decision-making distinct.
+## Assessment modes
 
-## Required inputs
+### Full
 
-Record these before collecting evidence:
+A full assessment inventories all 68 catalog legs, every required case, and all
+hard gates. It may change the global verdict.
 
-- branch, full commit SHA, local timestamp, Python version, and database mode;
-- complete worktree status, including unrelated user changes;
-- structural-index commit and freshness/disjointness evidence;
-- applicable state-engine ADRs, contracts, runbooks, and prior assessments;
-- live Filigree issues and observations that overlap the assessed legs;
-- production repositories, orchestrators, plugin boundaries, schemas, and read
-  models in scope;
-- exact test commands and environmental limitations.
+### Delta
 
-If the worktree contains unrelated changes, preserve them and record why they do
-not affect the evidence baseline.
+A delta assessment names the changed legs/cases, establishes change impact,
+reruns their evidence and adjacent invariants, and changes only those cells. Its
+manifest still materializes all 68 legs, names the parent digest, and lists the
+changed tuples. It inherits unresolved cells from the preceding full assessment
+and cannot declare the whole engine complete.
 
-## Assessment workflow
+### Historical rerun
 
-### 1. Freeze the baseline
+A historical rerun reconstructs a named baseline and executes recorded command
+vectors in a fresh worktree. It writes a new rerun directory and divergence
+report; it never overwrites the original assessment.
 
-Create `assessments/YYYY-MM-DD-HHMM/` and write `00-coordination.md`. State the
-scope, exclusions, baseline, intended outputs, and whether the assessment may
-modify code or tracker state.
+## Assessment sequence
 
-### 2. Discover production authority
+1. Fix the code baseline and capture the complete worktree identity.
+2. Verify Loomweave freshness and record structural-query limitations.
+3. Load the exact catalog version and verify all 68 legs are present.
+4. Discover production writers, callers, read models, external-effect
+   boundaries, and cross-transaction seams.
+5. Reconcile live Filigree issues without treating issue closure as proof.
+6. Execute evidence from production boundary inward.
+7. Attach evidence only to the cases its assertions establish.
+8. Classify remaining cases and create or update Filigree issues for coherent
+   actionable gap themes, not one issue per unknown cell.
+9. Run independent architecture, evidence, and future-agent reviews.
+10. Resolve material findings, rerun affected evidence, and publish the new
+    dated package and hub pointer.
 
-Trace each public runtime entry to the authoritative state mutation or read. Do
-not infer runtime use from a facade method merely because tests call it. Record:
+## Evidence record
 
-- entry point and caller chain;
-- transaction boundary;
-- state and subtype preconditions;
-- row, event, auxiliary, and plugin-visible consequences;
-- refusal and compatibility arms;
-- subsequent cross-transaction seam.
+Every execution record contains:
 
-Use the structural index when fresh. When it is stale, refresh it or prove that
-the indexed source/test graph is disjoint from the committed drift.
+- a stable evidence and command ID;
+- an argument vector, never an ellipsis or ambiguous prose command;
+- repository-relative working directory;
+- safe environment additions/removals and required resources;
+- start/end times, timeout, exit code, and duration;
+- collected node IDs and pass/fail/error/skip/xfail counts;
+- stdout, stderr, JUnit, and retained artifact paths with SHA-256 when stored;
+- catalog coverage tuples: leg, dimension, and case;
+- `establishes` and `does_not_establish` statements;
+- reproducibility class: `deterministic`, `semantic_comparison`, or
+  `external_observation`.
 
-### 3. Build the leg matrix
+Warnings, skips, xfails, missing credentials, and partial platform coverage are
+evidence facts. Do not omit them to make a run appear cleaner.
 
-Use stable identifiers and one row per leg:
+## Classification rules
 
-| Leg | Production entry | Success image | Refusal image | Rollback | Concurrency | Plugin path | Verdict |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `TS-00` | Exact caller chain | Test/evidence | Test/evidence | Test/evidence | Test/evidence or N/A | Test/evidence or N/A | Mapped/Candidate/Confirmed/Gap |
+- Use `pass` only when executable evidence covers the whole required case at
+  the current code baseline.
+- Use `partial` when evidence is real but narrower than the case. State exactly
+  what remains.
+- Use `fail` only when executable evidence demonstrates contrary behavior.
+- Use `unknown` for absent, stale, unexecuted, mock-only, or unrepresentative
+  evidence.
+- Use `not_applicable` only when the catalog already marks it so.
+- Record an explicit `owner_issue` key for every active gap. `null` means
+  visibly unowned; it does not make the gap disappear.
+- State an observable exit gate. “Add more tests” is not an exit gate.
 
-Never mark a leg Confirmed solely because multiple partial tests collectively
-sound persuasive. The matrix must show every applicable proof dimension.
+## Proof boundaries
 
-### 4. Execute the narrowest representative evidence
+The following substitutions are invalid:
 
-Run production-path tests first, then direct repository tests for atomic detail,
-then property or model tests for breadth. For each command, record:
+- a closed issue for an executed regression;
+- a test name for a passing run;
+- source inspection for runtime composition;
+- a mock plugin for a real external-effect boundary;
+- one connection for a multi-connection race;
+- one process for a process-death claim;
+- caught exceptions for abrupt process loss;
+- state-only assertions for state-plus-event atomicity;
+- a nearby passing leg for the leg under assessment;
+- an older commit's result for the current baseline.
 
-- exact command and node IDs;
-- observed pass/fail/skip counts and duration;
-- what the result proves;
-- what it explicitly does not prove.
+## Review protocol
 
-Mocks may prove orchestration decisions or call ordering. They cannot prove
-database atomicity, process races, external plugin durability, or replay.
+Every full assessment receives three independent lenses:
 
-### 5. Probe candidate defects safely
+1. **Architecture:** Is the state/transaction/boundary model complete and
+   faithful to current source?
+2. **Evidence:** Does each result prove exactly its attached case and preserve
+   limitations?
+3. **Future agent:** Can a new agent reproduce the assessment from the package
+   alone?
 
-For a suspected defect:
-
-1. capture the complete pre-operation durable image;
-2. invoke the real public method with the smallest reproducer;
-3. capture the complete post-operation image;
-4. demonstrate the violated invariant;
-5. rerun a valid positive control;
-6. deduplicate against live Filigree before filing.
-
-Do not weaken a fail-closed invariant merely to make the reproducer pass.
-
-### 6. Classify and reconcile
-
-Classify every finding as one of:
-
-- implementation defect;
-- missing or inadequate evidence;
-- concurrency-bound proof;
-- crash-seam uncertainty;
-- policy/ADR decision;
-- stale documentation or tracker description;
-- intentionally absent behavior.
-
-Link pre-existing tracker ownership. File only positively confirmed gaps that do
-not already have a coherent owner.
-
-### 7. Write the remediation plan
-
-Order work by invariant risk and dependency:
-
-1. fail-closed subtype and fencing defects;
-2. small proof ratchets that reveal the true surface;
-3. cross-transaction crash/restart seams;
-4. real registered multi-process proof;
-5. plugin lifecycle and forbidden-path closure;
-6. comprehensive ADR and CI enforcement.
-
-Each task names exact files, tests, assertions, commands, expected RED behavior,
-exit gates, and tracker ownership.
-
-### 8. Validate and freeze
-
-Before publishing an assessment:
-
-- resolve every relative Markdown link;
-- scan for placeholders and ambiguous verdicts;
-- run `git diff --check`;
-- render or lint Mermaid when tooling is available;
-- verify that test counts match captured outputs;
-- confirm no Candidate or Unknown claim is written as a guarantee;
-- record validation limitations.
-
-After validation, treat the dated directory as immutable.
-
-## Reusable evidence templates
-
-### Verification run
-
-| Field | Value |
-| --- | --- |
-| Command | Exact shell command |
-| Baseline | Full commit SHA |
-| Result | Pass/fail/skip/warning counts and duration |
-| Establishes | Narrow guaranteed conclusion |
-| Does not establish | Explicit remaining boundary |
-
-### Gap record
-
-| Field | Value |
-| --- | --- |
-| Candidate | Stable candidate or leg ID |
-| Classification | Defect/evidence/concurrency/crash/policy/docs |
-| Reproducer | Exact test or probe |
-| Durable consequence | Complete observed before/after difference |
-| Existing owner | Filigree ID or `none found` |
-| Next proof | Exact test to add |
-| Exit gate | Observable condition for closure |
-
-### Crash-seam record
-
-| Field | Value |
-| --- | --- |
-| Durable step A | Last committed state before interruption |
-| Interruption point | Exact call boundary or injected exception |
-| Expected restart authority | Component that must reconcile the state |
-| Allowed replay | Explicitly idempotent work, if any |
-| Forbidden result | Loss, duplicate durable identity, stale mutation, or repeated external effect |
-| Test form | Same-database restart, preferably process death |
+Record every material finding, its severity, disposition, rationale, changed
+files, and re-review outcome. Preserve unresolved dissent. Review is technical
+challenge, not an approval chain or signed receipt.
 
 ## Snapshot policy
 
-- Use local time in `YYYY-MM-DD-HHMM` directory names and record the timezone.
-- Copy evidence outputs or summarize them under `evidence/`; place worker briefs,
-  baseline facts, and tool limitations under `provenance/`.
-- Link source by stable path and symbol. Record line numbers only as baseline
-  hints because later edits may move them.
-- Never delete an old assessment when a verdict improves.
-- Update the hub's current pointer only after the new snapshot passes validation.
+Dated assessments are baseline-bound historical records. Correct a factual
+error with a clearly named erratum; do not silently rewrite the original claim.
+When code, catalog, or evidence changes, create a new assessment.
+
+Git supplies normal document history. Do not add signature chains, sealed
+plans, reviewer receipts, or hash manifests for the documents themselves.
+Hash only retained evidence or overlay artifacts when the digest is needed to
+reproduce the run.

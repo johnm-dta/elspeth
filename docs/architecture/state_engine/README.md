@@ -1,82 +1,116 @@
-# State Engine Assurance Hub
+# State Engine
 
-This directory is the permanent home for analysis, verification, remediation,
-and decision preparation for Elspeth state engines. The current programme covers
-the **durable token scheduler** from source-plugin ingress to sink-plugin
-durability. The web session engine is explicitly out of scope and will receive a
-separate assessment.
+This directory is the sole canonical entrypoint for Elspeth's durable state
+engine architecture, completeness bar, proof inventory, assessment procedure,
+current verdict, and historical assessments.
 
 ## Current verdict
 
-> **Not yet confirmed complete.** The implementation is mapped, Wave 1 has
-> executed evidence, and Wave 2 is edit-ready. Confirmed defects and proof gaps
-> still prevent a complete or production-assured verdict.
-
-| Property | Current value |
+| Field | Current value |
 | --- | --- |
-| Current engine | Durable token scheduler |
-| Current assessment | [2026-07-15 14:59 AEST](assessments/2026-07-15-1459/00-coordination.md) |
-| Repository baseline | `release/0.7.1` at `0dcd61acaa44082d93ec205683700e798748ee6d` |
-| Executed campaign state | Wave 1 complete; Wave 2 reconnaissance complete and test edits planned |
-| Wave 1 result | 3 Confirmed legs; 15 Gap legs across the assessed Wave 1 scope |
-| Current hard blockers | Invalid scheduler subtypes, implicit unfenced writes, and unproved crash/concurrency seams |
-| Normative ADR status | Deferred until the verification campaign resolves every state-engine leg |
+| Assessment | [2026-07-18 16:31 AEST](assessments/2026-07-18-1631/README.md) |
+| Code baseline | `release/0.7.1` at `42241500931926c5fd914ab7d92b479d9da1f8c2` |
+| Catalog | `elspeth-state-engine-v1`, schema 1, 68 legs, 10 dimensions |
+| Verdict | **Not complete** |
+| Strongest evidence | Strict fencing; pending-sink admission; TS-07–TS-10 disposition images; barrier atomicity; built-in sink-effect recovery |
+| Primary gaps | Source-completion crash seam; long plugin/effect calls beyond leases; child-enqueue/parent-disposition seam; aggregation continuation; RC-04/RC-07 repository predicates; production follower and read-model matrices |
 
-The verdict applies only to the named baseline and evidence recorded in the
-current assessment. It is not a release certification.
+The July 2026 implementation is materially stronger than the 2026-07-15
+snapshot. The six concrete hard defects recorded there are fixed at the current
+baseline. The engine still fails the completion bar because mandatory
+crash/restart, concurrency, plugin-boundary, read-model, and maintenance cells
+remain unresolved.
 
-## Evergreen documents
+Do not reuse the historical `3 Confirmed / 15 Gap` count. The v1 catalog closes
+68 legs across ten dimensions, so that older denominator is not comparable.
 
-- [Completeness criteria](completeness-criteria.md) defines the stable boundary,
-  proof standard, hard gates, and completion rule.
-- [Assessment framework](assessment-framework.md) defines how to collect,
-  classify, execute, and preserve evidence.
-- [Legacy canonical scheduler map](../token-scheduler-state-engine.md) is the
-  committed transition-level baseline from which this information area was
-  created. Future assessments live here; the legacy path remains stable while
-  existing documentation still links to it.
+## Authority and precedence
 
-## Current assessment
+Use this order when documents disagree:
 
-- [Coordination and scope](assessments/2026-07-15-1459/00-coordination.md)
-- [Discovery findings](assessments/2026-07-15-1459/01-discovery-findings.md)
-- [State-engine map](assessments/2026-07-15-1459/02-state-engine-map.md)
-- [Executed evidence](assessments/2026-07-15-1459/03-executed-evidence.md)
-- [Gap analysis](assessments/2026-07-15-1459/04-gap-analysis.md)
-- [Remediation plan](assessments/2026-07-15-1459/05-remediation-plan.md)
-- [Evidence inventory](assessments/2026-07-15-1459/evidence/README.md)
-- [Assessment provenance](assessments/2026-07-15-1459/provenance/README.md)
+1. Current source and freshly executed tests establish observed behavior.
+2. [Completeness criteria](completeness-criteria.md) define the claim bar.
+3. [Current architecture](architecture.md) describes the maintained model and
+   known durable seams.
+4. The [v1 proof catalog](proof-catalog/v1/catalog.json) defines the finite leg,
+   dimension, case, and hard-gate universe.
+5. The current dated `assessment.json` binds evidence and findings to one code
+   baseline.
+6. Filigree owns live work status, assignment, priority, and dependencies.
+7. Older dated assessments preserve only their baseline-bound conclusions.
 
-## Document roles
+No other document is canonical for current state-engine status. In particular,
+`docs/architecture/token-scheduler-state-engine.md` is a deprecated pointer.
 
-| Layer | Mutable? | Purpose |
-| --- | --- | --- |
-| This README | Yes | Point to the current verdict and latest assessment. |
-| Completeness criteria | Rarely | Define the contract for declaring a state engine complete. |
-| Assessment framework | Rarely | Define repeatable evidence and scoring practice. |
-| Dated assessments | No | Preserve what was observed, executed, and concluded at one baseline. |
-| Superseding ADR | Versioned decision | State durable guarantees only after the campaign confirms them. |
+## Start here
 
-## Update policy
+- [Architecture](architecture.md) — token scheduler, sink-effect, barrier,
+  fencing, read-model, and transaction-boundary model.
+- [Proof matrix](proof-matrix.md) — human-readable current result and open proof
+  themes. The JSON catalog and dated manifest remain the machine authorities.
+- [Completeness criteria](completeness-criteria.md) — status vocabulary,
+  dimensions, hard gates, and completion tiers.
+- [Assessment program](assessment-program.md) — exact reproducible procedure
+  for full, delta, and historical rerun assessments.
+- [Assessment framework](assessment-framework.md) — evidence and
+  classification rules used while interpreting results.
+- [Proof catalog](proof-catalog/README.md) — schema, stable IDs, and promotion
+  rules.
+- [Assessment history](assessments/README.md) — immutable baseline records and
+  current pointer policy.
 
-1. Never rewrite a completed dated assessment to make it match newer code.
-2. Correct a material error with an explicit addendum in that snapshot, then
-   carry the correction into the next assessment.
-3. Create a new timestamped assessment when code, schema, runtime choreography,
-   proof criteria, or a material verdict changes.
-4. Update this README only after the new assessment passes its validation gate.
-5. Keep observed implementation, executed evidence, remediation intent, and
-   accepted architecture decisions in separate documents.
-6. Promote only positively confirmed, deduplicated gaps into Filigree.
+## Directory model
 
-## Naming
+```text
+docs/architecture/state_engine/
+├── README.md
+├── architecture.md
+├── proof-matrix.md
+├── completeness-criteria.md
+├── assessment-program.md
+├── assessment-framework.md
+├── proof-catalog/
+│   ├── README.md
+│   └── v1/catalog.json
+├── templates/
+│   ├── assessment-readme.md
+│   ├── verification-run.md
+│   └── review-record.md
+└── assessments/
+    ├── README.md
+    └── YYYY-MM-DD-HHMM/
+        ├── README.md
+        ├── assessment.json
+        ├── evidence.md
+        ├── review.md
+        ├── nodes/              # retained exact node IDs when needed
+        └── artifacts/          # retained JUnit/stdout/stderr when executed
+```
 
-- `TS-*`: durable scheduler status transitions.
-- `AUX-*`: state-preserving or adjacent compare-and-swap mutations.
-- `PB-*`: plugin and orchestrator boundary paths.
-- `RM-*`: orchestration read-model predicates or decisions.
-- `F-*`: forbidden, refused, or intentionally absent paths.
+Future assessments stay small. Add raw artifacts only when they preserve a
+material fact that Git, a command vector, or an output digest cannot recover.
+Do not add remediation checklists; create or update Filigree issues instead.
 
-These identifiers remain stable across assessments. If implementation changes a
-leg's meaning, the new assessment records the change instead of silently reusing
-the old definition.
+## When to reassess
+
+Run a full assessment when any of these change:
+
+- the state or subtype vocabulary;
+- a scheduler, sink-effect, barrier, fencing, or read-model contract;
+- transaction boundaries or restart choreography;
+- supported database, worker, plugin, or deployment profiles;
+- the proof catalog, hard gates, or completion semantics.
+
+Run a delta assessment for a bounded implementation or evidence change. A
+delta may update named cells but cannot declare the whole engine complete.
+
+Update this page only after the new assessment passes its direct validation and
+independent review. Never silently rewrite an older assessment to describe new
+code.
+
+## Assessment history
+
+| Date | Baseline | Mode | Verdict | Notes |
+| --- | --- | --- | --- | --- |
+| 2026-07-18 | `422415009` | Full framework reset and conservative evidence import | Not complete | Introduces the 68-leg v1 catalog, explicit coordination state, sink-effect architecture, reproducibility contract, and reviewed authority model. |
+| 2026-07-15 | `0dcd61ac` | Seed assessment | Not complete | Historical 18-leg Wave 1 result; useful evidence, obsolete denominator and blocker list. |

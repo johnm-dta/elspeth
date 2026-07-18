@@ -29,9 +29,9 @@ the following post-seed work at a new baseline:
 
 | Date | Assessment gap | Current result | Maintained evidence |
 |---|---|---|---|
-| 2026-07-17 | R1: normal dispositions accepted a reclaimed sink-redrive lease (`elspeth-f8f9272b68`) | Fixed: TS-07–TS-10 require the transform-lease subtype and preserve the complete durable image on refusal. | [`token-scheduler-state-engine.md`](../token-scheduler-state-engine.md#durable-subtype-admission-truth-table-v1) and the disposition truth-table regression matrix |
+| 2026-07-17 | R1: normal dispositions accepted a reclaimed sink-redrive lease (`elspeth-f8f9272b68`) | Fixed in source: TS-07–TS-10 require the transform-lease subtype and preserve the complete durable image on refusal. The current state-engine assessment conservatively leaves the full legs unresolved until all ten v1 dimensions are freshly attached. | [State-engine proof matrix](../state_engine/proof-matrix.md) and the disposition truth-table regression matrix |
 | 2026-07-17 | R2: malformed `PENDING_SINK` rows were claimable (`elspeth-d8e172676c`) | Fixed: TS-04 uses the complete bundle predicate in both diagnosis and CAS admission. | Pending-sink incomplete/legal/atomic-race parameterizations |
-| 2026-07-17 | TS-07–TS-10 effects, guards, and rollback proof (`elspeth-1076e2716a`) | Verified: exact state, payload, lease, event, branch-loss, owner, membership, subtype, and rollback cells are maintained as one matrix. TS-10 also refuses malformed bundles at the writer boundary. | [Disposition follow-up evidence](../token-scheduler-state-engine.md#disposition-follow-up-executed-evidence--2026-07-17) |
+| 2026-07-17 | TS-07–TS-10 effects, guards, and rollback proof (`elspeth-1076e2716a`) | Verified at the earlier evidence scope: exact state, payload, lease, event, branch-loss, owner, membership, subtype, and rollback cells were maintained as one matrix. The current v1 assessment does not promote that result across unexecuted dimensions. | [Current state-engine assessment](../state_engine/assessments/2026-07-18-1631/README.md) |
 | 2026-07-18 | Expansion replay identity (`elspeth-a25e9c009e`) | Fixed: batch expansion consumes one durable claim, sequential replay is refused, and concurrent PostgreSQL attempts create one child set. | [Integration delta](assessments/2026-07-18-0319/02-scorecard-and-scenario-delta.md#closed-hard-gates) and live `cardinality-identity-09/10/11` evidence |
 | 2026-07-18 | Output-contract serialization (`elspeth-3335de38c2`) | Fixed: compatible observations merge under hash CAS and incompatible state fails closed across SQLite and PostgreSQL. | [Executed evidence](assessments/2026-07-18-0319/01-executed-evidence.md) |
 | 2026-07-18 | Sidecar journal commit ordering (`elspeth-d8d4d2849b`) | Fixed: a committed outbox publishes and recovers idempotently without recording failed transactions. | [Executed evidence](assessments/2026-07-18-0319/01-executed-evidence.md) |
@@ -136,7 +136,7 @@ no-aggregate posture.
 - [`../../contracts/execution-graph.md`](../../contracts/execution-graph.md) is
   the normative execution-graph contract.
 - [`../adr/README.md`](../adr/README.md) indexes accepted architecture decisions.
-- [`../token-scheduler-state-engine.md`](../token-scheduler-state-engine.md)
+- [`../state_engine/README.md`](../state_engine/README.md)
   records the durable scheduler state/evidence model.
 - [`completeness-criteria.md`](completeness-criteria.md) defines the bar for a
   completeness claim.

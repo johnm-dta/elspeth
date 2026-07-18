@@ -1,5 +1,11 @@
 # Token Scheduler State Engine Map
 
+> **Administrative erratum (2026-07-18):** the link below names a mutable path
+> and no longer renders the exact canonical map used for this historical
+> assessment. Recover that baseline-bound map with
+> `git show 0dcd61acaa44082d93ec205683700e798748ee6d:docs/architecture/token-scheduler-state-engine.md`.
+> The body below remains the original assessment record.
+
 ## Purpose and authority
 
 This document is the assessment-level overview of the token scheduler. The

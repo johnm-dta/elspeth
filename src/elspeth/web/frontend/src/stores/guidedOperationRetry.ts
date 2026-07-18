@@ -105,6 +105,7 @@ function readDescriptors(): GuidedRetryDescriptor[] {
     }
     if (!envelope.descriptors.every(isDescriptor)) throw new Error("invalid retry descriptor");
     const descriptors = boundedDescriptors(envelope.descriptors);
+    fallbackDescriptors = [...descriptors];
     if (descriptors.length !== envelope.descriptors.length) writeDescriptors(descriptors);
     return descriptors;
   } catch {
@@ -129,6 +130,12 @@ function writeDescriptors(descriptors: GuidedRetryDescriptor[]): void {
   }
   try {
     if (bounded.length === 0) {
+      // Persist an empty generation before best-effort physical deletion. If
+      // removeItem fails after this write, a fresh module still reads the
+      // tombstone and cannot resurrect completed custody. If setItem itself
+      // is unavailable, only this live tab's bounded memory can remain
+      // authoritative; browser storage offers no durable recovery path.
+      storage.setItem(GUIDED_RETRY_STORAGE_KEY, encodedEnvelope([]));
       storage.removeItem(GUIDED_RETRY_STORAGE_KEY);
       fallbackAuthoritative = false;
       return;

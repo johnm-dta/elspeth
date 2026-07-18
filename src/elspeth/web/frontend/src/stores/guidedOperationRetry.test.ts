@@ -117,19 +117,48 @@ describe("guided operation retry custody", () => {
 
   it("does not resurrect completed custody when removing stale storage fails", () => {
     const completed = acquireGuidedRetry("guided_reenter", SESSION_A, []);
-    const staleEnvelope = window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY);
-    expect(staleEnvelope).not.toBeNull();
     const removeItem = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
       throw new DOMException("blocked", "SecurityError");
     });
 
     clearGuidedRetry(completed);
     expect(removeItem).toHaveBeenCalledWith(GUIDED_RETRY_STORAGE_KEY);
-    expect(window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY)).toBe(staleEnvelope);
+    expect(storedEnvelope().descriptors).toHaveLength(0);
     const nextAction = acquireGuidedRetry("guided_reenter", SESSION_A, []);
 
     expect(nextAction.operationId).not.toBe(completed.operationId);
     removeItem.mockRestore();
+  });
+
+  it("hydrates fallback custody before a later sessionStorage read failure", async () => {
+    const stored = acquireGuidedRetry("guided_reenter", SESSION_A, []);
+    vi.resetModules();
+    const reloaded = await import("./guidedOperationRetry");
+    const hydrated = reloaded.acquireGuidedRetry("guided_reenter", SESSION_A, []);
+    expect(hydrated.operationId).toBe(stored.operationId);
+    const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new DOMException("blocked", "SecurityError");
+    });
+
+    const retry = reloaded.acquireGuidedRetry("guided_reenter", SESSION_A, []);
+
+    expect(retry.operationId).toBe(stored.operationId);
+    getItem.mockRestore();
+  });
+
+  it("persists an empty generation when removal fails so reload cannot resurrect custody", async () => {
+    const completed = acquireGuidedRetry("guided_reenter", SESSION_A, []);
+    const removeItem = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      throw new DOMException("blocked", "SecurityError");
+    });
+
+    clearGuidedRetry(completed);
+    removeItem.mockRestore();
+    vi.resetModules();
+    const reloaded = await import("./guidedOperationRetry");
+    const nextAction = reloaded.acquireGuidedRetry("guided_reenter", SESSION_A, []);
+
+    expect(nextAction.operationId).not.toBe(completed.operationId);
   });
 
   it("rejects non-canonical or oversized session ids", () => {

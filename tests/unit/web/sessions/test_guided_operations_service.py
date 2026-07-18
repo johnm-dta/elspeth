@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -31,6 +32,7 @@ from elspeth.web.sessions.protocol import (
     GuidedOperationCompleted,
     GuidedOperationConflictError,
     GuidedOperationFailed,
+    GuidedOperationFence,
     GuidedOperationFenceLostError,
     GuidedOperationTakenOver,
     GuidedProposalResult,
@@ -69,6 +71,32 @@ def file_engine(tmp_path: Path):
 
 async def _create_session(service: SessionServiceImpl) -> UUID:
     return (await service.create_session("alice", "Guided operation", "local")).id
+
+
+def test_fence_lost_error_never_retains_or_logs_lease_token(caplog: pytest.LogCaptureFixture) -> None:
+    secret = "lease-token-must-not-escape"
+    fence = GuidedOperationFence(
+        session_id=uuid4(),
+        operation_id="operation-safe-error",
+        lease_token=secret,
+        attempt=7,
+    )
+    error = GuidedOperationFenceLostError(fence)
+
+    assert error.args == ("Guided operation fence is no longer current",)
+    assert error.session_id == fence.session_id
+    assert error.operation_id == fence.operation_id
+    assert error.attempt == fence.attempt
+    assert not hasattr(error, "fence")
+    assert secret not in str(error)
+    assert secret not in repr(error)
+    assert secret not in repr(vars(error))
+    with caplog.at_level(logging.ERROR):
+        logging.getLogger("test.guided-fence").error(
+            "guided operation failed",
+            exc_info=(type(error), error, error.__traceback__),
+        )
+    assert secret not in caplog.text
 
 
 def _expire_operation(engine, *, session_id: UUID, operation_id: str) -> None:
@@ -245,6 +273,95 @@ async def test_claim_active_join_and_request_conflict_without_mutation(file_engi
     assert row.request_hash == request_hash
     assert row.attempt == 1
     assert [event.event_kind for event in events] == ["claimed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["reserve", "get"])
+async def test_corrupt_in_progress_row_is_integrity_error_before_conflict(file_engine, surface: str) -> None:
+    service = _service(file_engine)
+    session_id = await _create_session(service)
+    operation_id = "operation-corrupt-active"
+    request_hash = "7" * 64
+    await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id=operation_id,
+        kind="guided_start",
+        request_hash=request_hash,
+        actor="worker-a",
+        lease_seconds=30,
+    )
+    with file_engine.begin() as conn:
+        conn.exec_driver_sql("PRAGMA ignore_check_constraints = ON")
+        conn.execute(
+            update(guided_operations_table)
+            .where(
+                guided_operations_table.c.session_id == str(session_id),
+                guided_operations_table.c.operation_id == operation_id,
+            )
+            .values(kind="corrupt-kind", attempt=0)
+        )
+
+    with pytest.raises(AuditIntegrityError, match=r"guided operation.*(kind|request_hash|attempt)"):
+        if surface == "reserve":
+            await service.reserve_guided_operation(
+                session_id=session_id,
+                operation_id=operation_id,
+                kind="guided_chat",
+                request_hash="8" * 64,
+                actor="worker-b",
+                lease_seconds=30,
+            )
+        else:
+            await service.get_guided_operation(
+                session_id=session_id,
+                operation_id=operation_id,
+                kind="guided_chat",
+                request_hash="8" * 64,
+            )
+
+
+@pytest.mark.asyncio
+async def test_corrupt_terminal_row_is_integrity_error_before_conflict(file_engine) -> None:
+    service = _service(file_engine)
+    session_id = await _create_session(service)
+    state_id = _seed_state(file_engine, session_id=session_id)
+    operation_id = "operation-corrupt-terminal"
+    claimed = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id=operation_id,
+        kind="guided_start",
+        request_hash="9" * 64,
+        actor="worker-a",
+        lease_seconds=30,
+    )
+    assert isinstance(claimed, GuidedOperationClaimed)
+    await service.complete_guided_operation(
+        claimed.fence,
+        result=GuidedCompositionStateResult(state_id=state_id),
+        response_hash="a" * 64,
+        actor="worker-a",
+    )
+    with file_engine.begin() as conn:
+        conn.exec_driver_sql("DROP TRIGGER trg_guided_operations_terminal_immutable")
+        conn.exec_driver_sql("PRAGMA ignore_check_constraints = ON")
+        conn.execute(
+            update(guided_operations_table)
+            .where(
+                guided_operations_table.c.session_id == str(session_id),
+                guided_operations_table.c.operation_id == operation_id,
+            )
+            .values(kind="guided_chat", response_hash="corrupt-response-hash")
+        )
+
+    with pytest.raises(AuditIntegrityError, match=r"guided operation"):
+        await service.reserve_guided_operation(
+            session_id=session_id,
+            operation_id=operation_id,
+            kind="guided_respond",
+            request_hash="b" * 64,
+            actor="worker-b",
+            lease_seconds=30,
+        )
 
 
 @pytest.mark.asyncio
@@ -463,7 +580,14 @@ async def test_terminal_replay_uses_closed_per_kind_locator(file_engine, kind: s
     session_id = await _create_session(service)
     state_id = _seed_state(file_engine, session_id=session_id)
     proposal_id = _seed_proposal(file_engine, session_id=session_id)
-    child_session_id = await _create_session(service)
+    child_session_id = (
+        await service.create_session(
+            "alice",
+            "Fork result",
+            "local",
+            forked_from_session_id=session_id,
+        )
+    ).id
     result = {
         "state": GuidedCompositionStateResult(state_id=state_id),
         "state_with_proposal": GuidedCompositionStateResult(state_id=state_id, proposal_id=proposal_id),
@@ -503,6 +627,55 @@ async def test_terminal_replay_uses_closed_per_kind_locator(file_engine, kind: s
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("target_kind", ["ordinary", "unrelated", "cross_user"])
+async def test_fork_completion_rejects_target_without_exact_lineage_and_principal_custody(file_engine, target_kind: str) -> None:
+    service = _service(file_engine)
+    parent_id = await _create_session(service)
+    if target_kind == "ordinary":
+        target = await service.create_session("alice", "Ordinary", "local")
+    elif target_kind == "unrelated":
+        other_parent = await service.create_session("alice", "Other parent", "local")
+        target = await service.create_session(
+            "alice",
+            "Wrong lineage",
+            "local",
+            forked_from_session_id=other_parent.id,
+        )
+    else:
+        target = await service.create_session(
+            "bob",
+            "Cross-user child",
+            "local",
+            forked_from_session_id=parent_id,
+        )
+    claimed = await service.reserve_guided_operation(
+        session_id=parent_id,
+        operation_id=f"operation-fork-{target_kind}",
+        kind="session_fork",
+        request_hash="c" * 64,
+        actor="worker-a",
+        lease_seconds=30,
+    )
+    assert isinstance(claimed, GuidedOperationClaimed)
+
+    with pytest.raises(AuditIntegrityError, match=r"fork result session.*custody"):
+        await service.complete_guided_operation(
+            claimed.fence,
+            result=GuidedSessionResult(session_id=target.id),
+            response_hash="d" * 64,
+            actor="worker-a",
+        )
+
+    active = await service.get_guided_operation(
+        session_id=parent_id,
+        operation_id=f"operation-fork-{target_kind}",
+        kind="session_fork",
+        request_hash="c" * 64,
+    )
+    assert isinstance(active, GuidedOperationActive)
+
+
+@pytest.mark.asyncio
 async def test_failed_operation_replays_only_closed_safe_failure(file_engine) -> None:
     service = _service(file_engine)
     session_id = await _create_session(service)
@@ -517,8 +690,15 @@ async def test_failed_operation_replays_only_closed_safe_failure(file_engine) ->
         lease_seconds=30,
     )
     assert isinstance(claimed, GuidedOperationClaimed)
+    originating_message = await service.add_message(
+        session_id,
+        "user",
+        "Original guided request",
+        writer_principal="route_user_message",
+    )
     await service.bind_guided_operation(
         claimed.fence,
+        originating_message_id=originating_message.id,
         proposal_id=proposal_id,
         result_state_id=state_id,
     )
@@ -541,7 +721,7 @@ async def test_failed_operation_replays_only_closed_safe_failure(file_engine) ->
 
     with file_engine.connect() as conn:
         row = conn.execute(select(guided_operations_table)).one()
-    assert row.originating_message_id is None
+    assert row.originating_message_id == str(originating_message.id)
     assert row.proposal_id is None
     assert row.result_state_id is None
     assert row.result_session_id is None

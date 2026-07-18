@@ -2523,10 +2523,70 @@ class SessionServiceImpl:
         )
 
     @staticmethod
+    def _validate_guided_operation_row(
+        row: RowMapping,
+        *,
+        expected_session_id: str,
+        expected_operation_id: str,
+    ) -> None:
+        """Validate the complete Tier-1 row before replay/conflict classification."""
+
+        if row["session_id"] != expected_session_id or row["operation_id"] != expected_operation_id:
+            raise AuditIntegrityError("Tier 1: guided operation persisted identity does not match its lookup key")
+        operation_id = row["operation_id"]
+        if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 128:
+            raise AuditIntegrityError("Tier 1: guided operation operation_id is invalid")
+        kind = row["kind"]
+        if kind not in GUIDED_OPERATION_KIND_VALUES:
+            raise AuditIntegrityError("Tier 1: guided operation kind is invalid")
+        status = row["status"]
+        if status not in {"in_progress", "completed", "failed"}:
+            raise AuditIntegrityError("Tier 1: guided operation status is invalid")
+        request_hash = row["request_hash"]
+        try:
+            SessionServiceImpl._validate_guided_hash(request_hash, label="guided operation request_hash")
+        except ValueError as exc:
+            raise AuditIntegrityError("Tier 1: guided operation request_hash is invalid") from exc
+        attempt = row["attempt"]
+        if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+            raise AuditIntegrityError("Tier 1: guided operation attempt is invalid")
+
+        for field in ("originating_message_id", "proposal_id", "result_state_id", "result_session_id"):
+            value = row[field]
+            if value is None:
+                continue
+            try:
+                parsed = UUID(value)
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise AuditIntegrityError(f"Tier 1: guided operation {field} is not a UUID") from exc
+            if str(parsed) != value:
+                raise AuditIntegrityError(f"Tier 1: guided operation {field} is not a canonical UUID")
+
+        created_at = row["created_at"]
+        updated_at = row["updated_at"]
+        if not isinstance(created_at, datetime) or not isinstance(updated_at, datetime):
+            raise AuditIntegrityError("Tier 1: guided operation timestamps are invalid")
+        created_at = SessionServiceImpl._ensure_utc(created_at)
+        updated_at = SessionServiceImpl._ensure_utc(updated_at)
+        if updated_at < created_at:
+            raise AuditIntegrityError("Tier 1: guided operation updated_at predates created_at")
+        settled_at = row["settled_at"]
+        if settled_at is not None:
+            if not isinstance(settled_at, datetime):
+                raise AuditIntegrityError("Tier 1: guided operation settled_at is invalid")
+            if SessionServiceImpl._ensure_utc(settled_at) < created_at:
+                raise AuditIntegrityError("Tier 1: guided operation settled_at predates created_at")
+
+        if status == "in_progress":
+            SessionServiceImpl._guided_in_progress_expiry(row)
+        else:
+            SessionServiceImpl._validate_guided_terminal_bundle(row)
+
+    @staticmethod
     def _guided_in_progress_expiry(row: RowMapping) -> datetime:
         lease_token = row["lease_token"]
         lease_expires_at = row["lease_expires_at"]
-        if not isinstance(lease_token, str) or not lease_token or not isinstance(lease_expires_at, datetime):
+        if not isinstance(lease_token, str) or not 1 <= len(lease_token) <= 256 or not isinstance(lease_expires_at, datetime):
             raise AuditIntegrityError("Tier 1: in-progress guided operation has an invalid lease bundle")
         if any(row[field] is not None for field in ("settled_at", "result_kind", "response_hash", "failure_code")):
             raise AuditIntegrityError("Tier 1: in-progress guided operation retained terminal residue")
@@ -2540,7 +2600,7 @@ class SessionServiceImpl:
         return SessionServiceImpl._ensure_utc(lease_expires_at)
 
     @staticmethod
-    def _guided_terminal_outcome(row: RowMapping) -> GuidedOperationCompleted | GuidedOperationFailed:
+    def _validate_guided_terminal_bundle(row: RowMapping) -> None:
         status = row["status"]
         if status == "failed":
             failure_code = row["failure_code"]
@@ -2561,7 +2621,7 @@ class SessionServiceImpl:
                 raise AuditIntegrityError("Tier 1: failed guided operation retained terminal failure residue")
             if not isinstance(row["settled_at"], datetime):
                 raise AuditIntegrityError("Tier 1: failed guided operation is missing settled_at")
-            return GuidedOperationFailed(failure_code=cast("GuidedOperationFailureCode", failure_code))
+            return
         if status != "completed":
             raise AuditIntegrityError("Tier 1: guided operation terminal decoder received a non-terminal row")
         if row["lease_token"] is not None or row["lease_expires_at"] is not None or row["failure_code"] is not None:
@@ -2581,21 +2641,39 @@ class SessionServiceImpl:
                     raise AuditIntegrityError("Tier 1: state result retained a session locator")
                 if row["proposal_id"] is not None and row["kind"] not in {"guided_respond", "guided_chat"}:
                     raise AuditIntegrityError("Tier 1: state result retained an unsupported proposal locator")
-                state_id = UUID(row["result_state_id"])
-                proposal_id = UUID(row["proposal_id"]) if row["proposal_id"] is not None else None
-                result: GuidedOperationResult = GuidedCompositionStateResult(state_id=state_id, proposal_id=proposal_id)
+                UUID(row["result_state_id"])
+                if row["proposal_id"] is not None:
+                    UUID(row["proposal_id"])
             elif result_kind == "session":
                 if row["kind"] != "session_fork" or row["result_state_id"] is not None or row["proposal_id"] is not None:
                     raise AuditIntegrityError("Tier 1: guided operation kind does not match its result locator")
-                result = GuidedSessionResult(session_id=UUID(row["result_session_id"]))
+                UUID(row["result_session_id"])
             elif result_kind == "proposal":
                 if row["kind"] != "guided_plan" or row["result_state_id"] is not None or row["result_session_id"] is not None:
                     raise AuditIntegrityError("Tier 1: guided operation kind does not match its result locator")
-                result = GuidedProposalResult(proposal_id=UUID(row["proposal_id"]))
+                UUID(row["proposal_id"])
             else:
                 raise AuditIntegrityError("Tier 1: completed guided operation has an invalid result kind")
         except (TypeError, ValueError) as exc:
             raise AuditIntegrityError("Tier 1: completed guided operation has a malformed replay locator") from exc
+
+    @staticmethod
+    def _guided_terminal_outcome(row: RowMapping) -> GuidedOperationCompleted | GuidedOperationFailed:
+        SessionServiceImpl._validate_guided_terminal_bundle(row)
+        if row["status"] == "failed":
+            return GuidedOperationFailed(failure_code=cast("GuidedOperationFailureCode", row["failure_code"]))
+        response_hash = cast("str", row["response_hash"])
+        result_kind = row["result_kind"]
+        if result_kind == "composition_state":
+            result: GuidedOperationResult = GuidedCompositionStateResult(
+                state_id=UUID(row["result_state_id"]),
+                proposal_id=UUID(row["proposal_id"]) if row["proposal_id"] is not None else None,
+            )
+        elif result_kind == "session":
+            result = GuidedSessionResult(session_id=UUID(row["result_session_id"]))
+        else:
+            assert result_kind == "proposal"
+            result = GuidedProposalResult(proposal_id=UUID(row["proposal_id"]))
         return GuidedOperationCompleted(result=result, response_hash=response_hash)
 
     @staticmethod
@@ -2664,6 +2742,11 @@ class SessionServiceImpl:
                         fence=GuidedOperationFence(session_id, operation_id, lease_token, 1),
                         lease_expires_at=lease_expires_at,
                     )
+                self._validate_guided_operation_row(
+                    row,
+                    expected_session_id=sid,
+                    expected_operation_id=operation_id,
+                )
                 if row["kind"] != kind or row["request_hash"] != request_hash:
                     raise self._guided_conflict(session_id=session_id, operation_id=operation_id)
                 if row["status"] in {"completed", "failed"}:
@@ -2746,6 +2829,11 @@ class SessionServiceImpl:
                 )
             if row is None:
                 return None
+            self._validate_guided_operation_row(
+                row,
+                expected_session_id=sid,
+                expected_operation_id=operation_id,
+            )
             if row["kind"] != kind or row["request_hash"] != request_hash:
                 raise self._guided_conflict(session_id=session_id, operation_id=operation_id)
             if row["status"] in {"completed", "failed"}:
@@ -2782,6 +2870,12 @@ class SessionServiceImpl:
             .mappings()
             .one_or_none()
         )
+        if row is not None:
+            self._validate_guided_operation_row(
+                row,
+                expected_session_id=sid,
+                expected_operation_id=fence.operation_id,
+            )
         if (
             row is None
             or row["status"] != "in_progress"
@@ -2996,6 +3090,36 @@ class SessionServiceImpl:
         self._validate_guided_actor(actor)
         self._validate_guided_hash(response_hash, label="guided operation response_hash")
         row, now = self.require_guided_operation_fence_on_connection(conn, fence)
+        if isinstance(result, GuidedSessionResult):
+            parent = (
+                conn.execute(
+                    select(
+                        sessions_table.c.user_id,
+                        sessions_table.c.auth_provider_type,
+                    ).where(sessions_table.c.id == str(fence.session_id))
+                )
+                .mappings()
+                .one_or_none()
+            )
+            child = (
+                conn.execute(
+                    select(
+                        sessions_table.c.user_id,
+                        sessions_table.c.auth_provider_type,
+                        sessions_table.c.forked_from_session_id,
+                    ).where(sessions_table.c.id == str(result.session_id))
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if (
+                parent is None
+                or child is None
+                or child["forked_from_session_id"] != str(fence.session_id)
+                or child["user_id"] != parent["user_id"]
+                or child["auth_provider_type"] != parent["auth_provider_type"]
+            ):
+                raise AuditIntegrityError("Guided fork result session failed lineage or principal custody validation")
         locator_values, normalized = self._guided_completion_values(row=row, result=result)
         changed = conn.execute(
             update(guided_operations_table)
@@ -3083,7 +3207,6 @@ class SessionServiceImpl:
                 status="failed",
                 lease_token=None,
                 lease_expires_at=None,
-                originating_message_id=None,
                 proposal_id=None,
                 result_kind=None,
                 result_state_id=None,

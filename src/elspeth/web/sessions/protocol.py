@@ -272,7 +272,12 @@ class GuidedOperationFenceLostError(RuntimeError):
     """The worker's exact fence is absent, expired, superseded, or terminal."""
 
     def __init__(self, fence: GuidedOperationFence) -> None:
-        self.fence = fence
+        # Never retain the lease token or full fence. Exceptions are routinely
+        # repr'd, logged, and attached to telemetry; only non-secret lookup
+        # context may survive construction.
+        self.session_id = fence.session_id
+        self.operation_id = fence.operation_id
+        self.attempt = fence.attempt
         super().__init__("Guided operation fence is no longer current")
 
 

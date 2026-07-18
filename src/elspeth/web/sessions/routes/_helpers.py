@@ -16,6 +16,7 @@ from dataclasses import replace as _replace
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
+from weakref import WeakValueDictionary
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -257,7 +258,12 @@ class _SessionComposeLockRegistry:
     """
 
     def __init__(self) -> None:
-        self._session_locks: dict[str, asyncio.Lock] = {}
+        # Weak custody is deliberate: every borrower holds the lock strongly
+        # from lookup through acquisition/release, so concurrent borrowers
+        # share one identity. Once no holder, waiter, or pre-acquire borrower
+        # remains, the entry is reclaimed without deletion ever evicting a
+        # still-live lock and splitting a session across two lock objects.
+        self._session_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._locks_lock: asyncio.Lock | None = None
 
     def _ensure_locks_lock(self) -> asyncio.Lock:
@@ -267,14 +273,18 @@ class _SessionComposeLockRegistry:
 
     async def get_lock(self, session_id: str) -> asyncio.Lock:
         async with self._ensure_locks_lock():
-            if session_id not in self._session_locks:
-                self._session_locks[session_id] = asyncio.Lock()
-            return self._session_locks[session_id]
+            lock = self._session_locks.get(session_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._session_locks[session_id] = lock
+            return lock
 
     async def cleanup_session_lock(self, session_id: str) -> None:
+        """Allow weak reclamation without evicting a lock borrowed by a request."""
         async with self._ensure_locks_lock():
-            if session_id in self._session_locks:
-                self._session_locks.pop(session_id)
+            # Iteration commits pending WeakValueDictionary removals while the
+            # registry mutex excludes a simultaneous creator.
+            tuple(self._session_locks)
 
 
 def _get_session_compose_lock_registry(request: Request) -> _SessionComposeLockRegistry:

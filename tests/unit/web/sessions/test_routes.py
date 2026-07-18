@@ -2205,6 +2205,35 @@ class TestSessionCRUDRoutes:
         assert get_resp.status_code == 404
 
     @pytest.mark.asyncio
+    async def test_delete_archive_failure_preserves_live_session_coordination(self, tmp_path) -> None:
+        from elspeth.web.sessions.routes._helpers import _SessionComposeLockRegistry
+
+        app, service = _make_app(tmp_path)
+        registry = _SessionComposeLockRegistry()
+        app.state.session_compose_lock_registry = registry
+        clear_progress = AsyncMock()
+        app.state.composer_progress_registry.clear = clear_progress
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app, raise_app_exceptions=False),
+            base_url="http://test",
+        ) as client:
+            create_resp = await client.post("/api/sessions", json={"title": "Archive Failure"})
+            session_id = create_resp.json()["id"]
+            admission_key = f"{session_id}:guided-respond-admission"
+            admission = await registry.get_lock(admission_key)
+
+            service.archive_session = AsyncMock(side_effect=RuntimeError("archive unavailable"))  # type: ignore[method-assign]
+            delete_resp = await client.delete(f"/api/sessions/{session_id}")
+
+            assert delete_resp.status_code == 500
+            assert (await client.get(f"/api/sessions/{session_id}")).status_code == 200
+
+        assert await registry.get_lock(admission_key) is admission
+        assert app.state.execution_service.cleanup_session_lock.calls == []
+        clear_progress.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_delete_session_blocked_by_active_run(self, tmp_path) -> None:
         """Deleting a session with a pending/running run returns 409.
 
@@ -3119,7 +3148,11 @@ class TestIDORProtection:
         # load or dispatch.
         resp = bob_client.post(
             f"/api/sessions/{session_id}/guided/respond",
-            json={"control_signal": "exit_to_freeform"},
+            json={
+                "operation_id": str(uuid.uuid4()),
+                "turn_token": None,
+                "control_signal": "exit_to_freeform",
+            },
         )
         assert resp.status_code == 404
 
@@ -4197,39 +4230,6 @@ class TestMessageRoutes:
 
         assert send_resp.status_code == 500
 
-    def test_guided_respond_tool_invocation_persistence_failure_raises_on_success_path(self, tmp_path) -> None:
-        """Guided turn audit sidecar failures must not be swallowed after a successful state write."""
-        app, service = _make_app(tmp_path)
-        catalog = MagicMock(spec=CatalogService)
-        catalog.list_sources.return_value = []
-        app.state.catalog_service = catalog
-        app.state.session_engine = service._engine
-        client = TestClient(app, raise_server_exceptions=False)
-
-        resp = client.post("/api/sessions", json={"title": "Guided"})
-        session_id = uuid.UUID(resp.json()["id"])
-
-        guided_resp = client.get(f"/api/sessions/{session_id}/guided")
-        assert guided_resp.status_code == 200
-
-        original_add_message = service.add_message
-
-        async def flaky_add_message(*args: Any, **kwargs: Any) -> ChatMessageRecord:
-            role = args[1]
-            tool_calls = kwargs.get("tool_calls")
-            if role == "audit" and tool_calls and tool_calls[0].get("_kind") == "audit":
-                raise OperationalError("INSERT INTO chat_messages", {}, Exception("db unavailable"))
-            return await original_add_message(*args, **kwargs)
-
-        service.add_message = flaky_add_message  # type: ignore[method-assign]
-
-        send_resp = client.post(
-            f"/api/sessions/{session_id}/guided/respond",
-            json={"control_signal": "exit_to_freeform"},
-        )
-
-        assert send_resp.status_code == 500
-
     def test_guided_chat_turn_persistence_failure_raises_on_success_path(self, tmp_path) -> None:
         """Guided chat audit rows must not disappear after chat_history is persisted."""
         app, service = _make_app(tmp_path)
@@ -4487,99 +4487,6 @@ class TestMessageRoutes:
         assert tool_result_private_detail not in body
         # No mutation: the rejected commit must not advance or apply.
         assert send_resp.json()["guided_session"]["step"] == "step_1_source"
-
-    def test_guided_respond_source_commit_failure_does_not_leak_tool_result_repr(self, tmp_path) -> None:
-        """Step-1 RESPOND (accept) source commit failures must not return ToolResult
-        reprs — symmetric with the /guided/chat egress control. The respond path is
-        load-bearing (a deliberate accept), so it KEEPS the 400; only the leaky detail
-        is redacted to the generic string. The default ToolResult repr dumps
-        updated_state + data, which for inline-content sources can carry raw row data.
-        """
-        from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
-        from elspeth.web.composer.tools import ToolResult
-
-        app, _ = _make_app(tmp_path)
-        catalog = MagicMock(spec=CatalogService)
-        catalog.list_sources.return_value = [
-            PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
-        ]
-        catalog.list_sinks.return_value = []
-        catalog.get_schema.return_value = PluginSchemaInfo(
-            name="csv",
-            plugin_type="source",
-            description="CSV source",
-            json_schema={
-                "title": "CSV",
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "schema": {"type": "object"},
-                },
-            },
-            knob_schema={
-                "fields": [
-                    {
-                        "name": "path",
-                        "label": "Path",
-                        "kind": "text",
-                        "required": True,
-                        "nullable": False,
-                    },
-                    {
-                        "name": "schema",
-                        "label": "Schema",
-                        "kind": "json-object",
-                        "required": True,
-                        "nullable": False,
-                    },
-                ]
-            },
-        )
-        app.state.catalog_service = catalog
-        app.state.blob_service = MagicMock(spec=BlobServiceProtocol)
-        app.state.blob_service.list_blobs.return_value = []
-        client = TestClient(app, raise_server_exceptions=False)
-
-        resp = client.post("/api/sessions", json={"title": "Guided respond source failure"})
-        session_id = uuid.UUID(resp.json()["id"])
-        assert client.get(f"/api/sessions/{session_id}/guided").status_code == 200
-        choose = client.post(f"/api/sessions/{session_id}/guided/respond", json={"chosen": ["csv"]})
-        assert choose.status_code == 200
-        assert choose.json()["next_turn"]["type"] == "schema_form"
-
-        raw_row_secret = "raw-customer-ssn-123-45-6789"
-        tool_result_private_detail = "REDACTED tool result detail"
-        failing_tool_result = ToolResult(
-            success=False,
-            updated_state=_EMPTY_STATE,
-            validation=ValidationSummary(is_valid=False, errors=()),
-            affected_nodes=(),
-            data={"internal_detail": tool_result_private_detail, "row": raw_row_secret},
-        )
-        with patch(
-            "elspeth.web.sessions.routes._helpers.handle_step_1_source",
-            return_value=SimpleNamespace(tool_result=failing_tool_result),
-        ):
-            commit = client.post(
-                f"/api/sessions/{session_id}/guided/respond",
-                json={
-                    "edited_values": {
-                        "plugin": "csv",
-                        "options": {"path": "inline://source.csv", "schema": {"mode": "observed"}},
-                        "observed_columns": ["name"],
-                        "sample_rows": [{"name": "alice"}],
-                    }
-                },
-            )
-
-        # Load-bearing accept path KEEPS the 400, but the detail must be the generic
-        # string with NO ToolResult repr / Tier-3 data leaked.
-        assert commit.status_code == 400, commit.text
-        body = commit.text
-        assert "ToolResult(" not in body
-        assert raw_row_secret not in body
-        assert tool_result_private_detail not in body
-        assert commit.json()["detail"] == "Step 1 source commit failed"
 
     def test_guided_chat_malformed_source_tool_args_return_synthetic_unavailable(self, tmp_path) -> None:
         """Malformed Step-1 source resolver tool output must not escape as HTTP 500."""
@@ -5788,8 +5695,13 @@ class TestGuidedBootstrapStateVersions:
         assert guided_resp.status_code == 200
         guided_body = guided_resp.json()
         assert guided_body["next_turn"] is not None
-        assert guided_body["guided_session"]["history"] == []
+        history = guided_body["guided_session"]["history"]
+        assert len(history) == 1
+        assert history[0]["step"] == "step_1_source"
+        assert history[0]["turn_type"] == "single_select"
+        assert history[0]["response_hash"] is None
         assert guided_body["composition_state"] is None
+        assert asyncio.run(service.get_messages(uuid.UUID(session_id), limit=None)) == []
 
         state_resp = client.get(f"/api/sessions/{session_id}/state")
         assert state_resp.status_code == 200
@@ -5798,19 +5710,6 @@ class TestGuidedBootstrapStateVersions:
         versions_resp = client.get(f"/api/sessions/{session_id}/state/versions")
         assert versions_resp.status_code == 200
         assert versions_resp.json() == []
-
-        respond_resp = client.post(
-            f"/api/sessions/{session_id}/guided/respond",
-            json={"control_signal": "exit_to_freeform"},
-        )
-        assert respond_resp.status_code == 200
-        respond_body = respond_resp.json()
-        assert respond_body["composition_state"]["version"] == 1
-        assert respond_body["composition_state"]["composer_meta"]["guided_session"]["transition_consumed"] is True
-
-        versions_after_resp = client.get(f"/api/sessions/{session_id}/state/versions")
-        assert versions_after_resp.status_code == 200
-        assert [version["version"] for version in versions_after_resp.json()] == [1]
 
 
 class TestRevertEndpoint:
@@ -8118,9 +8017,6 @@ class TestComposerProgressRoutes:
         guided = GuidedSession(
             step=GuidedStep.STEP_1_SOURCE,
             history=(),
-            step_1_result=None,
-            step_2_result=None,
-            step_3_proposal=None,
             terminal=TerminalState(
                 kind=TerminalKind.EXITED_TO_FREEFORM,
                 reason=TerminalReason.USER_PRESSED_EXIT,

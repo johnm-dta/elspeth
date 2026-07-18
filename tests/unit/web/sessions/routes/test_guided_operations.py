@@ -20,6 +20,7 @@ from elspeth.web.sessions.protocol import (
     GuidedOperationFence,
 )
 from elspeth.web.sessions.routes.guided_operations import (
+    GuidedOperationExpired,
     GuidedOperationLease,
     guided_response_hash,
     reserve_or_replay_guided_operation,
@@ -230,6 +231,52 @@ async def test_reserve_result_cannot_authorise_takeover_without_get_confirmation
     assert result == response
     assert service.reserve_calls == 1
     assert service.get_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_replay_only_lookup_returns_none_for_expired_operation_without_takeover() -> None:
+    session_id = uuid4()
+    service = _Service(
+        [
+            GuidedOperationActive(
+                attempt=1,
+                lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+                expired=True,
+            )
+        ]
+    )
+
+    result = await reserve_or_replay_guided_operation(
+        service=service,
+        session_id=session_id,
+        kind="guided_reenter",
+        request=_request(),
+        replay=lambda _locator: _never(),
+        reserve_if_absent=False,
+        takeover_expired=False,
+    )
+
+    assert result == GuidedOperationExpired(attempt=1)
+    assert service.get_calls == 1
+    assert service.reserve_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_non_taking_over_mode_rejects_reserve_if_absent() -> None:
+    service = _Service([])
+
+    with pytest.raises(AuditIntegrityError, match="must not reserve"):
+        await reserve_or_replay_guided_operation(
+            service=service,
+            session_id=uuid4(),
+            kind="guided_reenter",
+            request=_request(),
+            replay=lambda _locator: _never(),
+            takeover_expired=False,
+        )
+
+    assert service.get_calls == 0
+    assert service.reserve_calls == 0
 
 
 @pytest.mark.asyncio

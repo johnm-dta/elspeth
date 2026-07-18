@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Never
+from typing import Literal, Never, overload
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -55,6 +55,13 @@ class GuidedOperationLease:
     fence: GuidedOperationFence
 
 
+@dataclass(frozen=True, slots=True)
+class GuidedOperationExpired:
+    """Replay-only lookup found an existing operation whose lease expired."""
+
+    attempt: int
+
+
 def guided_response_hash(response: BaseModel) -> str:
     """Hash the complete strict HTTP response domain used for replay."""
 
@@ -95,6 +102,20 @@ async def _replay_completed[ResponseT: BaseModel](
     return response
 
 
+@overload
+async def reserve_or_replay_guided_operation[ResponseT: BaseModel](
+    *,
+    service: SessionServiceProtocol,
+    session_id: UUID,
+    kind: GuidedOperationKind,
+    request: BaseModel,
+    replay: Callable[[GuidedOperationResult], Awaitable[ResponseT]],
+    reserve_if_absent: Literal[False],
+    takeover_expired: Literal[False],
+) -> GuidedOperationLease | GuidedOperationExpired | ResponseT | None: ...
+
+
+@overload
 async def reserve_or_replay_guided_operation[ResponseT: BaseModel](
     *,
     service: SessionServiceProtocol,
@@ -103,14 +124,48 @@ async def reserve_or_replay_guided_operation[ResponseT: BaseModel](
     request: BaseModel,
     replay: Callable[[GuidedOperationResult], Awaitable[ResponseT]],
     reserve_if_absent: bool = True,
-) -> GuidedOperationLease | ResponseT | None:
+    takeover_expired: Literal[True] = True,
+) -> GuidedOperationLease | ResponseT | None: ...
+
+
+@overload
+async def reserve_or_replay_guided_operation[ResponseT: BaseModel](
+    *,
+    service: SessionServiceProtocol,
+    session_id: UUID,
+    kind: GuidedOperationKind,
+    request: BaseModel,
+    replay: Callable[[GuidedOperationResult], Awaitable[ResponseT]],
+    reserve_if_absent: Literal[True] = True,
+    takeover_expired: Literal[False],
+) -> Never: ...
+
+
+async def reserve_or_replay_guided_operation[ResponseT: BaseModel](
+    *,
+    service: SessionServiceProtocol,
+    session_id: UUID,
+    kind: GuidedOperationKind,
+    request: BaseModel,
+    replay: Callable[[GuidedOperationResult], Awaitable[ResponseT]],
+    reserve_if_absent: bool = True,
+    takeover_expired: bool = True,
+) -> GuidedOperationLease | GuidedOperationExpired | ResponseT | None:
     """Claim one operation or synchronously join its immutable terminal result.
 
     Active requests are polled to a terminal result.  Once a lease expires the
     caller returns to the atomic reserve primitive, which either performs the
     sole takeover or observes the competing taker's active/terminal outcome.
     The HTTP surface never exposes an intermediate 202 response.
+
+    ``takeover_expired=False`` makes an existing expired operation return a
+    distinct marker so a route can finish live preflight before acquiring a
+    new fence. This mode is valid only with ``reserve_if_absent=False``.
+    Non-expired active operations are still joined outside route state locks.
     """
+
+    if not takeover_expired and reserve_if_absent:
+        raise AuditIntegrityError("Non-taking-over guided operation lookup must not reserve an absent operation")
 
     operation_id = request.model_dump(mode="python").get("operation_id")
     if not isinstance(operation_id, str):
@@ -164,6 +219,8 @@ async def reserve_or_replay_guided_operation[ResponseT: BaseModel](
             raise AuditIntegrityError("Guided operation reserve returned an unknown outcome")
 
         if outcome.expired and observed_by_get:
+            if not takeover_expired:
+                return GuidedOperationExpired(attempt=outcome.attempt)
             # ``expired`` is computed against the database clock by the read
             # primitive. Never compare the persisted timestamp with the web
             # host clock: even modest skew can create a tight reserve loop.

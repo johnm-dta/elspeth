@@ -311,17 +311,16 @@ def register_session_routes(router: APIRouter) -> None:
                     detail="Cannot delete session while a pipeline run is active. Cancel the run first.",
                 )
 
-            try:
-                await service.archive_session(session.id)
-            finally:
-                # Clean up ephemeral per-session state regardless of archive outcome.
-                # If archive fails, the session still exists and a retry will re-enter
-                # this path. The lock cleanup is idempotent.
-                execution_service.cleanup_session_lock(session_key)
-                compose_lock_registry = _get_session_compose_lock_registry(request)
-                await compose_lock_registry.cleanup_session_lock(session_key)
-                progress_registry = _get_composer_progress_registry(request)
-                await progress_registry.clear(session_key)
+            await service.archive_session(session.id)
+            # Archive is the durable boundary: preserve the live session's
+            # ephemeral coordination state when it fails. Registry cleanup
+            # retires held/waited locks only after their current users drain,
+            # so deletion cannot split one session across old and new locks.
+            execution_service.cleanup_session_lock(session_key)
+            compose_lock_registry = _get_session_compose_lock_registry(request)
+            await compose_lock_registry.cleanup_session_lock(session_key)
+            progress_registry = _get_composer_progress_registry(request)
+            await progress_registry.clear(session_key)
 
     @router.post(
         "/{session_id}/fork",

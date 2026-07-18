@@ -1091,7 +1091,7 @@ async def test_guided_start_unowned_session_404(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_guided_respond_stale_step_index_409(tmp_path) -> None:
+async def test_guided_respond_rejects_removed_stale_step_index_field(tmp_path) -> None:
     app, service = _make_app(tmp_path)
     client = TestClient(app)
     session = await service.create_session("alice", "T", "local")
@@ -1105,12 +1105,12 @@ async def test_guided_respond_stale_step_index_409(tmp_path) -> None:
         f"/api/sessions/{session.id}/guided/respond",
         json={"step_index": "step_3_transforms", "chosen": ["csv"]},
     )
-    assert resp.status_code == 409
-    assert "step_index" in resp.json()["detail"]
+    assert resp.status_code == 422
+    assert any(error["loc"][-1] == "step_index" for error in resp.json()["detail"])
 
 
 @pytest.mark.asyncio
-async def test_guided_respond_unknown_step_index_400(tmp_path) -> None:
+async def test_guided_respond_rejects_removed_unknown_step_index_field(tmp_path) -> None:
     app, service = _make_app(tmp_path)
     client = TestClient(app)
     session = await service.create_session("alice", "T", "local")
@@ -1124,8 +1124,8 @@ async def test_guided_respond_unknown_step_index_400(tmp_path) -> None:
         f"/api/sessions/{session.id}/guided/respond",
         json={"step_index": "step_99_bogus", "chosen": ["csv"]},
     )
-    assert resp.status_code == 400
-    assert "step_index" in resp.json()["detail"].lower()
+    assert resp.status_code == 422
+    assert any(error["loc"][-1] == "step_index" for error in resp.json()["detail"])
 
 
 @pytest.mark.asyncio
@@ -1134,15 +1134,19 @@ async def test_guided_respond_success_preserves_tutorial_profile(tmp_path) -> No
     app, service = _make_app(tmp_path)
     client = TestClient(app)
     session = await service.create_session("alice", "T", "local")
-    client.post(
+    started = client.post(
         f"/api/sessions/{session.id}/guided/start",
         json={"profile": "tutorial", "operation_id": str(uuid.uuid4())},
     )
-    client.get(f"/api/sessions/{session.id}/guided")
+    turn = started.json()["next_turn"]
 
     resp = client.post(
         f"/api/sessions/{session.id}/guided/respond",
-        json={"step_index": "step_1_source", "chosen": ["inline_blob"]},
+        json={
+            "operation_id": str(uuid.uuid4()),
+            "turn_token": turn["turn_token"],
+            "chosen": ["inline_blob"],
+        },
     )
     assert resp.status_code == 200
     profile = resp.json()["guided_session"]["profile"]

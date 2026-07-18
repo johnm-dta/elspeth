@@ -29,7 +29,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import UUID
 
-from elspeth.web.composer.guided.state_machine import TerminalReason, TerminalState
+import pytest
+
+from elspeth.web.composer.guided.state_machine import GuidedSession, TerminalReason, TerminalState
 from elspeth.web.composer.redaction import REDACTED_BLOB_SOURCE_PATH
 from tests.integration.web.composer.guided.test_step_3_e2e import _outputs_path
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
@@ -1134,6 +1136,64 @@ class TestStepChatTransientFailure:
         # The scaffold leak aborts before commit — no source lands in state.
         source_slot = (body["composition_state"]["sources"] or {}).get("source")
         assert source_slot is None, f"expected no committed source, got {source_slot!r}"
+
+    @pytest.mark.parametrize("malformed_value", [float("inf"), "\ud800"], ids=["non_finite", "lone_surrogate"])
+    def test_malformed_source_snapshot_auto_drops_before_blob_creation(
+        self,
+        composer_test_client: TestClient,
+        malformed_value: object,
+    ) -> None:
+        session_id = _create_session(composer_test_client)
+        _seed_persisted_step1(composer_test_client, session_id)
+        malformed_args = {
+            "resolution": "source",
+            "plugin": "json",
+            "filename": "rows.json",
+            "mime_type": "application/json",
+            "content": '[{"value": 1}]',
+            "options": {"bad": malformed_value},
+            "observed_columns": ["value"],
+            "sample_rows": [{"value": 1}],
+            "assistant_message": "Created the source.",
+        }
+
+        # Task 1's schema-8 atomic cutover intentionally lands before the
+        # Task 3 route migration. Isolate this parser/side-effect regression
+        # from the still-schema-7 turn-rebuild/context readers while retaining
+        # the real HTTP route, resolver, audit, and blob-service path.
+        with (
+            patch(
+                _CHAT_SOLVER_ACOMPLETION,
+                new=_ReturningLiteLLMCompletion(_fake_source_resolution_tool_call(malformed_args)),
+            ),
+            patch(
+                "elspeth.web.sessions.routes.composer.guided._build_get_guided_turn",
+                return_value={"type": "single_select", "payload": {"options": []}},
+            ),
+            patch(
+                "elspeth.web.sessions.routes.composer.guided.build_step_chat_context_block",
+                return_value="",
+            ),
+            patch(
+                "elspeth.web.sessions.routes.composer.guided._step_1_plugin_hint",
+                return_value=None,
+            ),
+            patch.object(GuidedSession, "step_1_result", new=property(lambda _session: None), create=True),
+            patch.object(GuidedSession, "step_2_result", new=property(lambda _session: None), create=True),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="Create a JSON source.",
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        assert (body["composition_state"]["sources"] or {}).get("source") is None
+        blobs = asyncio.run(composer_test_client.app.state.blob_service.list_blobs(UUID(session_id)))
+        assert blobs == []
+        llm_calls = _llm_call_audit_bodies(composer_test_client, session_id)
+        assert llm_calls[-1]["status"] == "malformed_response"
         assert body["guided_session"]["step"] == "step_1_source"
         assert body["guided_session"]["terminal"] is None
 

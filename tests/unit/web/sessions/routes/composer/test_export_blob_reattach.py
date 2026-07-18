@@ -14,6 +14,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.composer.guided.resolved import SourceResolved
 from elspeth.web.composer.guided.state_machine import GuidedSession
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, SourceSpec
@@ -117,13 +120,13 @@ def test_does_not_touch_operator_typed_source() -> None:
 
 def test_preserves_source_that_already_has_blob_ref() -> None:
     state = _state(
-        source_options={"path": BLOB_PATH, "blob_ref": "already-bound"},
+        source_options={"path": BLOB_PATH, "blob_ref": BLOB_REF},
         guided_session=_guided_with_snapshot(blob_ref=BLOB_REF, path=BLOB_PATH),
     )
     out = _reattach_guided_blob_refs(state)
     # A source that already carries blob_ref needs no reattachment; identity holds.
     assert out is state
-    assert out.sources["source"].options["blob_ref"] == "already-bound"
+    assert out.sources["source"].options["blob_ref"] == BLOB_REF
 
 
 def test_reattaches_each_plural_reviewed_source_by_stable_snapshot_name() -> None:
@@ -139,7 +142,7 @@ def test_reattaches_each_plural_reviewed_source_by_stable_snapshot_name() -> Non
     second = SourceResolved(
         name="second",
         plugin="csv",
-        options={"path": second_path, "blob_ref": "second-ref"},
+        options={"path": second_path, "blob_ref": "def45600-0000-4000-8000-000000000000"},
         observed_columns=("value",),
         sample_rows=(),
         on_validation_failure="discard",
@@ -181,4 +184,73 @@ def test_reattaches_each_plural_reviewed_source_by_stable_snapshot_name() -> Non
     out = _reattach_guided_blob_refs(state)
 
     assert out.sources["first"].options["blob_ref"] == BLOB_REF
-    assert out.sources["second"].options["blob_ref"] == "second-ref"
+    assert out.sources["second"].options["blob_ref"] == "def45600-0000-4000-8000-000000000000"
+
+
+def test_reattaches_two_explicitly_reviewed_sources_sharing_one_blob_path() -> None:
+    stable_ids = (
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+    )
+    reviewed = {
+        stable_id: SourceResolved(
+            name=name,
+            plugin="csv",
+            options={"path": BLOB_PATH, "blob_ref": BLOB_REF},
+            observed_columns=("value",),
+            sample_rows=(),
+            on_validation_failure="discard",
+        )
+        for stable_id, name in zip(stable_ids, ("first", "second"), strict=True)
+    }
+    guided = replace(
+        GuidedSession.initial(),
+        source_order=stable_ids,
+        reviewed_sources=reviewed,
+    )
+    state = CompositionState(
+        sources={
+            name: SourceSpec(
+                plugin="csv",
+                on_success="main",
+                options={"path": BLOB_PATH},
+                on_validation_failure="discard",
+            )
+            for name in ("first", "second")
+        },
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+        guided_session=guided,
+    )
+
+    out = _reattach_guided_blob_refs(state)
+
+    assert out.sources["first"].options["blob_ref"] == BLOB_REF
+    assert out.sources["second"].options["blob_ref"] == BLOB_REF
+
+
+def test_rejects_ambiguous_live_sources_sharing_reviewed_blob_path() -> None:
+    guided = _guided_with_snapshot(blob_ref=BLOB_REF, path=BLOB_PATH, name="missing")
+    state = CompositionState(
+        sources={
+            name: SourceSpec(
+                plugin="csv",
+                on_success="main",
+                options={"path": BLOB_PATH},
+                on_validation_failure="discard",
+            )
+            for name in ("first", "second")
+        },
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+        guided_session=guided,
+    )
+
+    with pytest.raises(AuditIntegrityError, match="guided blob source mapping"):
+        _reattach_guided_blob_refs(state)

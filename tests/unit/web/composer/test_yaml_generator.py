@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 import yaml
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.composer.guided.resolved import SourceResolved
 from elspeth.web.composer.guided.state_machine import GuidedSession
 from elspeth.web.composer.state import (
@@ -591,6 +592,80 @@ class TestGenerateYaml:
         assert "blob_ref" not in public_options
         assert public_options["schema"] == {"mode": "observed"}
         assert blob_path not in public_yaml
+
+    def test_public_yaml_fails_closed_when_reviewed_name_drifts_onto_live_blob_path(self) -> None:
+        blob_path = "/home/john/elspeth/data/blobs/session/renamed.json"
+        stable_id = "11111111-1111-4111-8111-111111111111"
+        guided_session = replace(
+            GuidedSession.initial(),
+            source_order=(stable_id,),
+            reviewed_sources={
+                stable_id: SourceResolved(
+                    name="original",
+                    plugin="json",
+                    options={"path": blob_path, "blob_ref": stable_id},
+                    observed_columns=("value",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
+        )
+        state = CompositionState(
+            sources={
+                "renamed": SourceSpec(
+                    plugin="json",
+                    on_success="out",
+                    options={"path": blob_path},
+                    on_validation_failure="discard",
+                )
+            },
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="json", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+            guided_session=guided_session,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="guided blob source mapping"):
+            generate_public_yaml(state)
+
+    def test_public_yaml_rejects_noncanonical_reviewed_blob_ref(self) -> None:
+        blob_path = "/home/john/elspeth/data/blobs/session/source.json"
+        stable_id = "11111111-1111-4111-8111-111111111111"
+        guided_session = replace(
+            GuidedSession.initial(),
+            source_order=(stable_id,),
+            reviewed_sources={
+                stable_id: SourceResolved(
+                    name="source",
+                    plugin="json",
+                    options={"path": blob_path, "blob_ref": "NOT-A-CANONICAL-UUID"},
+                    observed_columns=("value",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
+        )
+        state = CompositionState(
+            sources={
+                "source": SourceSpec(
+                    plugin="json",
+                    on_success="out",
+                    options={"path": blob_path},
+                    on_validation_failure="discard",
+                )
+            },
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="json", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+            guided_session=guided_session,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="canonical UUID"):
+            generate_public_yaml(state)
 
     def test_mode_retained_when_not_bind_source_marker(self) -> None:
         """A plugin-meaningful ``mode`` option (no blob-bind marker) is engine

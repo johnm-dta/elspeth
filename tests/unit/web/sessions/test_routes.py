@@ -21,7 +21,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
-from elspeth.contracts.blobs import BlobServiceProtocol
+from elspeth.contracts.blobs import BlobNotFoundError, BlobServiceProtocol
 from elspeth.contracts.composer_audit import (
     ComposerToolInvocation,
     ComposerToolStatus,
@@ -6900,6 +6900,16 @@ sinks:
         blob_id = "98b1357d-5aab-4fb3-85b4-5ad643912e84"
 
         session = await service.create_session("alice", "Pipeline", "local")
+        app.state.blob_service = SimpleNamespace(
+            get_blob=AsyncMock(
+                return_value=SimpleNamespace(
+                    id=uuid.UUID(blob_id),
+                    session_id=session.id,
+                    storage_path="/data/blobs/session/contact_form_submissions.csv",
+                    status="ready",
+                )
+            )
+        )
         await service.save_composition_state(
             session.id,
             CompositionStateData(
@@ -6943,6 +6953,73 @@ sinks:
         assert "path" not in exported_source_options
         assert "mode" not in exported_source_options
         assert exported_source_options["schema"] == {"mode": "observed"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "custody_failure",
+        [
+            "foreign_session",
+            "wrong_id",
+            "wrong_path",
+            "non_ready",
+            "missing",
+            "malformed_record",
+            "service_unavailable",
+            "noncanonical",
+        ],
+    )
+    async def test_yaml_export_rejects_invalid_blob_custody_with_safe_500(self, tmp_path, custody_failure: str) -> None:
+        app, service = _make_app(tmp_path)
+        client = TestClient(app, raise_server_exceptions=False)
+        blob_id = uuid.UUID("98b1357d-5aab-4fb3-85b4-5ad643912e84")
+        session = await service.create_session("alice", "Pipeline", "local")
+        foreign_session_id = uuid.uuid4()
+        storage_path = "/data/blobs/foreign/private.csv"
+        get_blob = AsyncMock(
+            return_value=SimpleNamespace(
+                id=uuid.uuid4() if custody_failure == "wrong_id" else blob_id,
+                session_id=foreign_session_id if custody_failure == "foreign_session" else session.id,
+                storage_path="/data/blobs/same-session/wrong.csv" if custody_failure == "wrong_path" else storage_path,
+                status="pending" if custody_failure == "non_ready" else "ready",
+            )
+        )
+        if custody_failure == "missing":
+            get_blob.side_effect = BlobNotFoundError(str(blob_id))
+        if custody_failure == "malformed_record":
+            get_blob.return_value = SimpleNamespace()
+        if custody_failure != "service_unavailable":
+            app.state.blob_service = SimpleNamespace(
+                get_blob=get_blob,
+            )
+        blob_ref = "NOT-A-CANONICAL-UUID" if custody_failure == "noncanonical" else str(blob_id)
+        await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                source={
+                    "plugin": "csv",
+                    "on_success": "out",
+                    "options": {"path": storage_path, "blob_ref": blob_ref, "mode": "bind_source"},
+                    "on_validation_failure": "discard",
+                },
+                outputs=[{"name": "out", "plugin": "csv", "options": {}, "on_write_failure": "discard"}],
+                metadata_={"name": "Foreign binding", "description": ""},
+                is_valid=True,
+            ),
+            provenance="session_seed",
+        )
+
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
+            return ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
+            response = client.get(f"/api/sessions/{session.id}/state/yaml")
+
+        assert response.status_code == 500
+        assert response.text == "Internal Server Error"
+        assert str(blob_id) not in response.text
+        assert storage_path not in response.text
+        if custody_failure in {"noncanonical", "service_unavailable"}:
+            get_blob.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_yaml_allows_connection_valid_state_without_ui_edges(self, tmp_path) -> None:

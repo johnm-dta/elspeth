@@ -15,6 +15,7 @@ from uuid import UUID
 
 import pytest
 
+from elspeth.web.composer.guided import state_machine
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, GuidedStep, TurnType
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SourceResolved
@@ -769,6 +770,48 @@ def test_persisted_json_is_depth_item_and_string_bounded() -> None:
             SinkIntent(name="archive", phase="field_review", plugin="json", options=options)
 
 
+def test_persisted_json_has_shared_aggregate_text_and_utf8_budgets() -> None:
+    legal_piece = "x" * 65_000
+    with pytest.raises(InvariantError, match=r"aggregate.*character"):
+        SourceResolved(
+            name="primary",
+            plugin="csv",
+            options={f"option_{index}": legal_piece for index in range(8)},
+            observed_columns=(),
+            sample_rows=tuple({f"sample_{index}": legal_piece} for index in range(9)),
+            on_validation_failure="discard",
+        )
+
+    emoji_piece = "😀" * 65_000
+    with pytest.raises(InvariantError, match="UTF-8"):
+        SinkIntent(
+            name="archive",
+            phase="field_review",
+            plugin="json",
+            options={f"text_{index}": emoji_piece for index in range(5)},
+        )
+
+    with pytest.raises(InvariantError, match=r"aggregate.*character"):
+        SourceResolved(
+            name="primary",
+            plugin="csv",
+            options={},
+            observed_columns=tuple(f"column-{index}-{'x' * 64_980}" for index in range(17)),
+            sample_rows=(),
+            on_validation_failure="discard",
+        )
+
+    with pytest.raises(InvariantError, match="UTF-8"):
+        SinkOutputResolved(
+            name="archive",
+            plugin="json",
+            options={},
+            required_fields=tuple("😀" * 60_000 for _ in range(5)),
+            schema_mode="observed",
+            on_write_failure="discard",
+        )
+
+
 def test_pending_intent_json_and_inspection_facts_are_detached_snapshots() -> None:
     nested = {"items": [{"value": 1}]}
     headers = ["id"]
@@ -852,6 +895,11 @@ def test_source_and_output_edit_targets_resolve_only_reviewed_components() -> No
 
 
 def test_guided_component_deferred_constraint_and_prose_collections_are_bounded() -> None:
+    with pytest.raises(InvariantError, match="source components"):
+        replace(GuidedSession.initial(), source_order=tuple(object() for _ in range(257)))  # type: ignore[arg-type]
+    with pytest.raises(InvariantError, match="output components"):
+        replace(GuidedSession.initial(), output_order=tuple(object() for _ in range(257)))  # type: ignore[arg-type]
+
     source_ids = tuple(str(UUID(int=index + 1)) for index in range(257))
     pending_sources = {
         stable_id: SourceIntent(
@@ -904,6 +952,144 @@ def test_guided_component_deferred_constraint_and_prose_collections_are_bounded(
             message_content_hash=HASH_A,
             constraints=(),
         )
+
+
+def test_guided_history_and_chat_counts_and_aggregate_prose_are_bounded() -> None:
+    history_record = TurnRecord(
+        step=GuidedStep.STEP_1_SOURCE,
+        turn_type=TurnType.SINGLE_SELECT,
+        payload_hash=HASH_A,
+        response_hash=None,
+        emitter="server",
+        summary="x" * 4_096,
+    )
+    with pytest.raises(InvariantError, match=r"history.*record"):
+        replace(GuidedSession.initial(), history=(history_record,) * 4_097)
+    with pytest.raises(InvariantError, match=r"history.*aggregate"):
+        replace(GuidedSession.initial(), history=(history_record,) * 257)
+
+    chat_turn = ChatTurn(
+        role=ChatRole.USER,
+        content="x",
+        seq=0,
+        step=GuidedStep.STEP_1_SOURCE,
+        ts_iso="2026-07-18T00:00:00Z",
+    )
+    with pytest.raises(InvariantError, match=r"chat_history.*turn"):
+        replace(GuidedSession.initial(), chat_history=(chat_turn,) * 4_097, chat_turn_seq=4_097)
+
+    chat_history = tuple(replace(chat_turn, seq=index, content="x" * 65_536) for index in range(65))
+    with pytest.raises(InvariantError, match=r"chat_history.*aggregate"):
+        replace(GuidedSession.initial(), chat_history=chat_history, chat_turn_seq=65)
+
+
+def test_from_dict_rejects_oversized_collections_before_child_decoders(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _must_not_decode(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("child decoder ran before collection bound")
+
+    monkeypatch.setattr(TurnRecord, "from_dict", classmethod(_must_not_decode))
+    encoded = GuidedSession.initial().to_dict()
+    encoded["history"] = [{}] * 4_097
+    with pytest.raises(InvariantError, match=r"history.*record"):
+        GuidedSession.from_dict(encoded)
+
+    monkeypatch.setattr(state_machine, "_chat_turn_from_guided_dict", _must_not_decode)
+    encoded = GuidedSession.initial().to_dict()
+    encoded["chat_history"] = [{}] * 4_097
+    with pytest.raises(InvariantError, match=r"chat_history.*turn"):
+        GuidedSession.from_dict(encoded)
+
+    encoded = GuidedSession.initial().to_dict()
+    encoded["source_order"] = [None] * 257
+    with pytest.raises(InvariantError, match="source components"):
+        GuidedSession.from_dict(encoded)
+
+    encoded = GuidedSession.initial().to_dict()
+    encoded["output_order"] = [None] * 257
+    with pytest.raises(InvariantError, match="output components"):
+        GuidedSession.from_dict(encoded)
+
+    for field_name, decoder_owner in (
+        ("reviewed_sources", SourceResolved),
+        ("pending_source_intents", SourceIntent),
+        ("reviewed_outputs", SinkOutputResolved),
+        ("pending_output_intents", SinkIntent),
+    ):
+        monkeypatch.setattr(decoder_owner, "from_dict", classmethod(_must_not_decode))
+        encoded = GuidedSession.initial().to_dict()
+        encoded[field_name] = {str(UUID(int=index + 1)): {} for index in range(257)}
+        with pytest.raises(InvariantError, match="components"):
+            GuidedSession.from_dict(encoded)
+
+    monkeypatch.setattr(DeferredStageIntent, "from_dict", classmethod(_must_not_decode))
+    encoded = GuidedSession.initial().to_dict()
+    encoded["deferred_intents"] = [{}] * 257
+    with pytest.raises(InvariantError, match="deferred_intents"):
+        GuidedSession.from_dict(encoded)
+
+
+def test_from_dict_rejects_aggregate_prose_before_child_decoders(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(TurnRecord, "from_dict", classmethod(lambda *_args: pytest.fail("history child decoder ran")))
+    encoded = GuidedSession.initial().to_dict()
+    history_record = TurnRecord(
+        step=GuidedStep.STEP_1_SOURCE,
+        turn_type=TurnType.SINGLE_SELECT,
+        payload_hash=HASH_A,
+        response_hash=None,
+        emitter="server",
+        summary="x" * 4_096,
+    ).to_dict()
+    encoded["history"] = [history_record] * 257
+    with pytest.raises(InvariantError, match=r"history.*aggregate"):
+        GuidedSession.from_dict(encoded)
+
+    monkeypatch.setattr(
+        state_machine,
+        "_chat_turn_from_guided_dict",
+        lambda *_args: pytest.fail("chat child decoder ran"),
+    )
+    encoded = GuidedSession.initial().to_dict()
+    encoded["chat_history"] = [
+        {
+            "role": "user",
+            "content": "x" * 65_536,
+            "seq": index,
+            "step": "step_1_source",
+            "ts_iso": "2026-07-18T00:00:00Z",
+            "assistant_message_kind": None,
+            "synthetic_failure_reason": None,
+        }
+        for index in range(65)
+    ]
+    encoded["chat_turn_seq"] = 65
+    with pytest.raises(InvariantError, match=r"chat_history.*aggregate"):
+        GuidedSession.from_dict(encoded)
+
+
+def test_from_dict_rejects_total_deferred_constraints_before_child_decoder(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        DeferredStageIntent,
+        "from_dict",
+        classmethod(lambda *_args: pytest.fail("deferred child decoder ran")),
+    )
+    encoded = GuidedSession.initial().to_dict()
+    deferred = _deferred().to_dict()
+    constraint = deferred["constraints"][0]
+    encoded["deferred_intents"] = [
+        {**deferred, "intent_id": str(UUID(int=index + 1)), "constraints": [constraint] * 64} for index in range(65)
+    ]
+
+    with pytest.raises(InvariantError, match="deferred constraints"):
+        GuidedSession.from_dict(encoded)
+
+
+def test_deferred_from_dict_rejects_constraint_count_before_child_decoder(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(state_machine, "_constraint_from_dict", lambda _value: pytest.fail("constraint decoder ran"))
+    encoded = _deferred().to_dict()
+    encoded["constraints"] = [{}] * 65
+
+    with pytest.raises(InvariantError, match="constraints"):
+        DeferredStageIntent.from_dict(encoded)
 
 
 def test_reviewed_components_have_no_name_or_failure_compatibility_defaults() -> None:
@@ -981,6 +1167,10 @@ def test_chat_history_sequence_is_unique_increasing_and_not_ahead_of_counter() -
         replace(GuidedSession.initial(), chat_history=(first,), chat_turn_seq=0)
     with pytest.raises(InvariantError, match="chat_turn_seq"):
         replace(GuidedSession.initial(), chat_history=(first,), chat_turn_seq=1)
+    with pytest.raises(InvariantError, match="chat_turn_seq"):
+        replace(GuidedSession.initial(), chat_history=(first,), chat_turn_seq=3)
+    with pytest.raises(InvariantError, match="chat_turn_seq"):
+        replace(GuidedSession.initial(), chat_turn_seq=1)
 
 
 def test_proposal_ref_rejects_self_supersession() -> None:

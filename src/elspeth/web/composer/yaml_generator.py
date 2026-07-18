@@ -28,9 +28,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import Any
+from uuid import UUID
 
 import yaml
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.web.composer.state import COMPOSER_NODE_TYPES, CompositionState, queue_node_contract_error
 from elspeth.web.interpretation_state import AUTHORING_METADATA_OPTION_KEYS
@@ -275,22 +277,47 @@ def reattach_guided_blob_refs_for_public_export(state: CompositionState) -> Comp
     if guided is None or not guided.reviewed_sources:
         return state
 
-    reattached = dict(state.sources)
-    changed = False
+    reviewed_bindings: list[tuple[str, frozenset[str], str]] = []
     for snapshot in guided.reviewed_sources.values():
         source_name = snapshot.name
-        if source_name not in state.sources:
-            continue
         snapshot_options = snapshot.options
         blob_ref = snapshot_options.get("blob_ref")
         if type(blob_ref) is not str or not blob_ref:
             continue
+        try:
+            parsed_blob_ref = UUID(blob_ref)
+        except ValueError as exc:
+            raise AuditIntegrityError("guided reviewed source blob_ref must be a canonical UUID") from exc
+        if str(parsed_blob_ref) != blob_ref:
+            raise AuditIntegrityError("guided reviewed source blob_ref must be a canonical UUID")
         blob_backed_paths = {value for key in SOURCE_LOCAL_PATH_OPTION_KEYS if type(value := snapshot_options.get(key)) is str}
         if not blob_backed_paths:
             continue
-        source = state.sources[source_name]
+        reviewed_bindings.append((source_name, frozenset(blob_backed_paths), blob_ref))
+
+    if not reviewed_bindings:
+        return state
+    all_reviewed_paths = frozenset(path for _name, paths, _blob_ref in reviewed_bindings for path in paths)
+    reattached = dict(state.sources)
+    changed = False
+    for source_name, source in state.sources.items():
+        live_reviewed_paths = {
+            value for key in SOURCE_LOCAL_PATH_OPTION_KEYS if type(value := source.options.get(key)) is str and value in all_reviewed_paths
+        }
+        if not live_reviewed_paths:
+            continue
+        candidates = [
+            (paths, blob_ref)
+            for reviewed_name, paths, blob_ref in reviewed_bindings
+            if reviewed_name == source_name and live_reviewed_paths <= paths
+        ]
+        if len(candidates) != 1:
+            raise AuditIntegrityError("guided blob source mapping is inconsistent")
+        _reviewed_paths, blob_ref = candidates[0]
         options = source.options
-        if "blob_ref" in options or not any(options.get(key) in blob_backed_paths for key in SOURCE_LOCAL_PATH_OPTION_KEYS):
+        if "blob_ref" in options:
+            if options["blob_ref"] != blob_ref:
+                raise AuditIntegrityError("guided blob source mapping is inconsistent")
             continue
         merged = dict(options)
         merged["blob_ref"] = blob_ref

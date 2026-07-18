@@ -6,9 +6,10 @@ from typing import TypedDict
 from pydantic import BaseModel, ConfigDict, Field
 
 from elspeth.contracts.composer_interpretation import InterpretationKind
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.secrets import collect_credential_field_violations
-from elspeth.web.blobs.protocol import BlobNotFoundError
+from elspeth.web.blobs.protocol import BlobNotFoundError, BlobServiceProtocol
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.schemas import PluginKind
 from elspeth.web.composer.state import CompositionState, SourceSpec
@@ -821,6 +822,52 @@ async def _require_yaml_export_preflight(
         )
 
 
+async def _verified_yaml_export_blob_ids(
+    state: CompositionState,
+    *,
+    request: Request,
+    session_id: UUID,
+) -> dict[str, str]:
+    """Verify every public-export blob sidecar entry against live custody."""
+    source_blob_ids: dict[str, str] = {}
+    parsed_blob_ids: list[tuple[SourceSpec, UUID]] = []
+    for source_name, source in state.sources.items():
+        if "blob_ref" not in source.options:
+            continue
+        blob_ref = source.options["blob_ref"]
+        if type(blob_ref) is not str:
+            raise AuditIntegrityError("YAML export source blob_ref must be a canonical UUID")
+        try:
+            blob_id = UUID(blob_ref)
+        except ValueError as exc:
+            raise AuditIntegrityError("YAML export source blob_ref must be a canonical UUID") from exc
+        if str(blob_id) != blob_ref:
+            raise AuditIntegrityError("YAML export source blob_ref must be a canonical UUID")
+        source_blob_ids[source_name] = blob_ref
+        parsed_blob_ids.append((source, blob_id))
+
+    if not parsed_blob_ids:
+        return source_blob_ids
+    blob_service: BlobServiceProtocol | None = getattr(request.app.state, "blob_service", None)
+    if blob_service is None:
+        raise AuditIntegrityError("YAML export blob custody verification is unavailable")
+    for source, blob_id in parsed_blob_ids:
+        try:
+            blob = await blob_service.get_blob(blob_id)
+        except BlobNotFoundError:
+            raise AuditIntegrityError("YAML export blob custody verification failed") from None
+        source_paths = {value for key in SOURCE_LOCAL_PATH_OPTION_KEYS if type(value := source.options.get(key)) is str}
+        if (
+            getattr(blob, "id", None) != blob_id
+            or getattr(blob, "session_id", None) != session_id
+            or getattr(blob, "status", None) != "ready"
+            or type(storage_path := getattr(blob, "storage_path", None)) is not str
+            or storage_path not in source_paths
+        ):
+            raise AuditIntegrityError("YAML export blob custody verification failed")
+    return source_blob_ids
+
+
 @router.get("/{session_id}/state/yaml")
 async def get_state_yaml(
     session_id: UUID,
@@ -864,6 +911,11 @@ async def get_state_yaml(
     # reach plugin instantiation. Preflight ran on the raw `state`; export uses
     # the reattached copy.
     export_state = _reattach_guided_blob_refs(state)
+    source_blob_ids = await _verified_yaml_export_blob_ids(
+        export_state,
+        request=request,
+        session_id=session.id,
+    )
     yaml_str = generate_public_yaml(export_state)
 
     # Phase 6A B3 — sessions-DB audit event for YAML export.
@@ -905,9 +957,6 @@ async def get_state_yaml(
     )
 
     response: StateYamlResponse = {"yaml": yaml_str}
-    source_blob_ids = {
-        source_name: str(source.options["blob_ref"]) for source_name, source in export_state.sources.items() if "blob_ref" in source.options
-    }
     if source_blob_ids:
         response["source_blob_ids"] = source_blob_ids
     return response

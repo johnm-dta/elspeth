@@ -14,11 +14,29 @@ from elspeth.web.composer.guided.errors import InvariantError
 GUIDED_JSON_MAX_DEPTH = 64
 GUIDED_JSON_MAX_ITEMS = 10_000
 GUIDED_JSON_MAX_STRING_CHARS = 65_536
+GUIDED_JSON_MAX_TOTAL_TEXT_CHARS = 1_048_576
+GUIDED_JSON_MAX_TOTAL_UTF8_BYTES = 1_048_576
 
 
 @dataclass(slots=True)
 class GuidedJsonBudget:
     items: int = 0
+    text_chars: int = 0
+    utf8_bytes: int = 0
+
+    def consume_text(self, value: str, field_name: str, path: str) -> None:
+        self.text_chars += len(value)
+        if self.text_chars > GUIDED_JSON_MAX_TOTAL_TEXT_CHARS:
+            raise InvariantError(
+                f"{field_name} exceeds the aggregate JSON text character limit of {GUIDED_JSON_MAX_TOTAL_TEXT_CHARS} at {path}"
+            )
+        try:
+            encoded_length = len(value.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise InvariantError(f"{field_name} contains text that is not valid UTF-8 at {path}") from exc
+        self.utf8_bytes += encoded_length
+        if self.utf8_bytes > GUIDED_JSON_MAX_TOTAL_UTF8_BYTES:
+            raise InvariantError(f"{field_name} exceeds the {GUIDED_JSON_MAX_TOTAL_UTF8_BYTES}-byte aggregate JSON UTF-8 limit at {path}")
 
 
 def _validate_and_freeze_guided_json(
@@ -46,6 +64,7 @@ def _validate_and_freeze_guided_json(
                     raise InvariantError(f"{field_name} key at {path} must be an exact str")
                 if len(key) > GUIDED_JSON_MAX_STRING_CHARS:
                     raise InvariantError(f"{field_name} key at {path} exceeds the JSON string limit")
+                budget.consume_text(key, field_name, path)
                 budget.items += 1
                 if budget.items > GUIDED_JSON_MAX_ITEMS:
                     raise InvariantError(f"{field_name} exceeds the {GUIDED_JSON_MAX_ITEMS}-item JSON limit")
@@ -90,6 +109,8 @@ def _validate_and_freeze_guided_json(
     if value is None or type(value) in {bool, int, float, str}:
         if type(value) is str and len(value) > GUIDED_JSON_MAX_STRING_CHARS:
             raise InvariantError(f"{field_name} JSON string at {path} exceeds {GUIDED_JSON_MAX_STRING_CHARS} characters")
+        if type(value) is str:
+            budget.consume_text(value, field_name, path)
         try:
             canonical_json(value)
         except (TypeError, ValueError) as exc:
@@ -114,18 +135,25 @@ def freeze_guided_json_mapping(value: object, field_name: str, *, budget: Guided
     return cast(Mapping[str, Any], frozen)
 
 
-def freeze_guided_str_sequence(value: object, field_name: str) -> tuple[str, ...]:
+def freeze_guided_str_sequence(
+    value: object,
+    field_name: str,
+    *,
+    budget: GuidedJsonBudget | None = None,
+) -> tuple[str, ...]:
     """Validate and snapshot one bounded sequence of exact strings."""
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         raise TypeError(f"{field_name} must be a sequence[str]")
     if len(value) > GUIDED_JSON_MAX_ITEMS:
         raise InvariantError(f"{field_name} exceeds the {GUIDED_JSON_MAX_ITEMS}-item limit")
+    text_budget = budget if budget is not None else GuidedJsonBudget()
     result: list[str] = []
     for index, item in enumerate(value):
         if type(item) is not str:
             raise TypeError(f"{field_name}[{index}] must be an exact str")
         if len(item) > GUIDED_JSON_MAX_STRING_CHARS:
             raise InvariantError(f"{field_name}[{index}] exceeds {GUIDED_JSON_MAX_STRING_CHARS} characters")
+        text_budget.consume_text(item, field_name, f"$[{index}]")
         result.append(item)
     return tuple(result)
 
@@ -195,7 +223,7 @@ class SourceResolved:
         object.__setattr__(
             self,
             "observed_columns",
-            freeze_guided_str_sequence(self.observed_columns, "SourceResolved.observed_columns"),
+            freeze_guided_str_sequence(self.observed_columns, "SourceResolved.observed_columns", budget=budget),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -250,11 +278,12 @@ class SinkOutputResolved:
         if self.schema_mode not in {"fixed", "flexible", "observed"}:
             raise ValueError("SinkOutputResolved.schema_mode must be fixed, flexible, or observed")
         _require_nonempty_str(self.on_write_failure, "SinkOutputResolved.on_write_failure")
-        object.__setattr__(self, "options", freeze_guided_json_mapping(self.options, "SinkOutputResolved.options"))
+        budget = GuidedJsonBudget()
+        object.__setattr__(self, "options", freeze_guided_json_mapping(self.options, "SinkOutputResolved.options", budget=budget))
         object.__setattr__(
             self,
             "required_fields",
-            freeze_guided_str_sequence(self.required_fields, "SinkOutputResolved.required_fields"),
+            freeze_guided_str_sequence(self.required_fields, "SinkOutputResolved.required_fields", budget=budget),
         )
 
     def to_dict(self) -> dict[str, Any]:

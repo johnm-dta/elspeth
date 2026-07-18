@@ -35,7 +35,15 @@ from elspeth.web.composer.guided._discovery import _assistant_tool_calls_message
 from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError, InvariantError
 from elspeth.web.composer.guided.prompts import _summarize_sample_row, load_step_chat_skill
 from elspeth.web.composer.guided.protocol import GuidedStep
-from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved, SourceResolved
+from elspeth.web.composer.guided.resolved import (
+    GUIDED_JSON_MAX_ITEMS,
+    GuidedJsonBudget,
+    SinkOutputResolved,
+    SinkResolved,
+    SourceResolved,
+    freeze_guided_json_mapping,
+    freeze_guided_str_sequence,
+)
 from elspeth.web.composer.llm_response_parsing import (
     apply_anthropic_cache_markers,
     attach_llm_calls,
@@ -262,7 +270,30 @@ class Step1SourceChatResolution:
     on_validation_failure: str
 
     def __post_init__(self) -> None:
-        freeze_fields(self, "options", "sample_rows")
+        if type(self.sample_rows) is not tuple:
+            raise TypeError("Step1SourceChatResolution.sample_rows must be an exact tuple")
+        if len(self.sample_rows) > GUIDED_JSON_MAX_ITEMS:
+            raise InvariantError(f"Step1SourceChatResolution.sample_rows exceeds the {GUIDED_JSON_MAX_ITEMS}-item limit")
+        budget = GuidedJsonBudget()
+        object.__setattr__(self, "options", freeze_guided_json_mapping(self.options, "Step1SourceChatResolution.options", budget=budget))
+        object.__setattr__(
+            self,
+            "sample_rows",
+            tuple(
+                freeze_guided_json_mapping(row, f"Step1SourceChatResolution.sample_rows[{index}]", budget=budget)
+                for index, row in enumerate(self.sample_rows)
+            ),
+        )
+        object.__setattr__(
+            self,
+            "observed_columns",
+            freeze_guided_str_sequence(
+                self.observed_columns,
+                "Step1SourceChatResolution.observed_columns",
+                budget=budget,
+            ),
+        )
+        freeze_fields(self, "options", "sample_rows", "observed_columns")
 
 
 @dataclass(frozen=True, slots=True)
@@ -585,10 +616,13 @@ def build_step_chat_context_block(
     suppresses=("R1", "R5"),
     invariant=(
         "raises ValueError on non-object decode, missing keys, mistyped fields, or "
-        "scaffold-leaking assistant_message; never coerces malformed model output"
+        "scaffold-leaking assistant_message; options, sample rows, and observed columns "
+        "must satisfy strict depth, item, aggregate text, UTF-8, and finite-JSON bounds"
     ),
-    test_ref="tests/unit/web/composer/guided/test_chat_solver.py::test_parse_non_string_on_validation_failure_raises",
-    test_fingerprint="1ec93dcfde3f57b3111f4ebe31b76a233f12a4490dac93d158cf688b720b083e",
+    test_ref=(
+        "tests/unit/web/composer/guided/test_chat_solver.py::test_parse_step_1_source_translates_strict_snapshot_failures_to_malformed"
+    ),
+    test_fingerprint="880bf7f1287428d74961b7678b23c597adcb9b26660123eaf14cbb02dc4f6792",
 )
 def _parse_step_1_source_tool_arguments(arguments: str, *, plugin_hint: str | None) -> Step1SourceChatResolution:
     """Validate the resolve_source tool arguments from a LiteLLM response."""
@@ -675,17 +709,20 @@ def _parse_step_1_source_tool_arguments(arguments: str, *, plugin_hint: str | No
     else:
         on_validation_failure = on_validation_failure_raw
 
-    return Step1SourceChatResolution(
-        assistant_message=assistant_message,
-        plugin=plugin,
-        filename=filename,
-        mime_type=cast(AllowedMimeType, mime_type),
-        content=content,
-        options=dict(options),
-        observed_columns=tuple(observed_columns),
-        sample_rows=tuple(sample_rows),
-        on_validation_failure=on_validation_failure,
-    )
+    try:
+        return Step1SourceChatResolution(
+            assistant_message=assistant_message,
+            plugin=plugin,
+            filename=filename,
+            mime_type=cast(AllowedMimeType, mime_type),
+            content=content,
+            options=dict(options),
+            observed_columns=tuple(observed_columns),
+            sample_rows=tuple(sample_rows),
+            on_validation_failure=on_validation_failure,
+        )
+    except (InvariantError, TypeError) as exc:
+        raise ValueError("resolve_source snapshot is malformed") from exc
 
 
 async def _bounded_acompletion(kwargs: dict[str, Any], timeout_seconds: float | None) -> Any:
@@ -976,10 +1013,13 @@ def _build_step_2_sink_tool_prompt(*, current_sink: SinkResolved | None) -> str:
     suppresses=("R1", "R5"),
     invariant=(
         "raises ValueError on non-object decode, missing keys, mistyped output entries, "
-        "or more than one output (MVP cap); never coerces malformed model output"
+        "more than one output, or strict snapshot depth/item/aggregate text/UTF-8/finite-JSON "
+        "violations; never coerces malformed model output"
     ),
-    test_ref="tests/unit/web/composer/guided/test_chat_solver.py::test_parse_step_2_sink_rejects_non_object_arguments",
-    test_fingerprint="aabc76735b39fbea9806dfb0c320ad5b74984b74687d075435b5c150854dd8d3",
+    test_ref=(
+        "tests/unit/web/composer/guided/test_chat_solver.py::test_parse_step_2_sink_translates_strict_snapshot_failures_to_malformed"
+    ),
+    test_fingerprint="283f5a4c664af76b2cc2aa111d84d276e17bbbf25e61a1cbec2ce10a39ff7237",
 )
 def _parse_step_2_sink_tool_arguments(arguments: str) -> tuple[SinkResolved, str]:
     """Validate the resolve_sink tool arguments. Returns (sink, assistant_message)."""
@@ -1023,16 +1063,19 @@ def _parse_step_2_sink_tool_arguments(arguments: str) -> tuple[SinkResolved, str
         schema_mode = item.get("schema_mode")
         if schema_mode not in ("fixed", "flexible", "observed"):
             raise ValueError(f"resolve_sink outputs[{idx}].schema_mode must be fixed/flexible/observed; got {schema_mode!r}")
-        outputs.append(
-            SinkOutputResolved(
-                name="main",
-                plugin=plugin,
-                options=dict(options),
-                required_fields=tuple(required_fields),
-                schema_mode=schema_mode,
-                on_write_failure="discard",
+        try:
+            outputs.append(
+                SinkOutputResolved(
+                    name="main",
+                    plugin=plugin,
+                    options=dict(options),
+                    required_fields=tuple(required_fields),
+                    schema_mode=schema_mode,
+                    on_write_failure="discard",
+                )
             )
-        )
+        except (InvariantError, TypeError) as exc:
+            raise ValueError(f"resolve_sink outputs[{idx}] snapshot is malformed") from exc
     assistant_message = _require_prose_assistant_message(data["assistant_message"], tool="resolve_sink")
     return SinkResolved(outputs=tuple(outputs)), assistant_message
 

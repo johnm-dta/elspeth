@@ -325,6 +325,73 @@ def test_parse_step_2_sink_rejects_non_object_arguments() -> None:
         _parse_step_2_sink_tool_arguments('["not", "an", "object"]')
 
 
+@pytest.mark.parametrize("failure_case", ["non_finite", "aggregate", "depth", "surrogate"])
+def test_parse_step_2_sink_translates_strict_snapshot_failures_to_malformed(failure_case: str) -> None:
+    if failure_case == "non_finite":
+        bad_options: dict[str, Any] = {"bad": float("nan")}
+    elif failure_case == "aggregate":
+        bad_options = {f"text_{index}": "x" * 65_000 for index in range(17)}
+    elif failure_case == "surrogate":
+        bad_options = {"bad": "\ud800"}
+    else:
+        bad_options = {}
+        cursor = bad_options
+        for _ in range(65):
+            child: dict[str, Any] = {}
+            cursor["child"] = child
+            cursor = child
+    arguments = json.dumps(
+        {
+            "resolution": "sink",
+            "outputs": [
+                {
+                    "plugin": "json",
+                    "options": bad_options,
+                    "required_fields": [],
+                    "schema_mode": "observed",
+                }
+            ],
+            "assistant_message": "Configured output.",
+        }
+    )
+
+    with pytest.raises(ValueError, match=r"resolve_sink.*malformed"):
+        _parse_step_2_sink_tool_arguments(arguments)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["options", "sample_rows", "sample_rows_count", "observed_columns", "surrogate"],
+)
+def test_parse_step_1_source_translates_strict_snapshot_failures_to_malformed(field_name: str) -> None:
+    payload = json.loads(_source_tool_args())
+    if field_name == "sample_rows":
+        payload[field_name] = [{"bad": float("inf")}]
+    elif field_name == "sample_rows_count":
+        payload["sample_rows"] = [{}] * 10_001
+    elif field_name == "observed_columns":
+        payload[field_name] = [f"column-{index}-{'x' * 64_980}" for index in range(17)]
+    elif field_name == "surrogate":
+        payload["options"] = {"bad": "\ud800"}
+    else:
+        payload[field_name] = {"bad": float("inf")}
+
+    with pytest.raises(ValueError, match=r"resolve_source.*malformed"):
+        _parse_step_1_source_tool_arguments(json.dumps(payload), plugin_hint="json")
+
+
+def test_parse_step_1_source_rejects_deep_snapshot_before_route_side_effects() -> None:
+    deep: dict[str, object] = {}
+    cursor = deep
+    for _ in range(65):
+        child: dict[str, object] = {}
+        cursor["child"] = child
+        cursor = child
+
+    with pytest.raises(ValueError, match=r"resolve_source.*malformed"):
+        _parse_step_1_source_tool_arguments(_source_tool_args(options=deep), plugin_hint="json")
+
+
 def test_parse_rejects_tool_scaffolding_in_assistant_message() -> None:
     """A model that leaks its agentic scratchpad into assistant_message is rejected.
 

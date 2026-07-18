@@ -53,6 +53,10 @@ GUIDED_MAX_COMPONENTS_PER_KIND = 256
 GUIDED_MAX_DEFERRED_INTENTS = 256
 GUIDED_MAX_CONSTRAINTS_PER_INTENT = 64
 GUIDED_MAX_TOTAL_CONSTRAINTS = 4_096
+GUIDED_MAX_HISTORY_RECORDS = 4_096
+GUIDED_MAX_CHAT_TURNS = 4_096
+GUIDED_MAX_HISTORY_SUMMARY_CHARS = 1_048_576
+GUIDED_MAX_CHAT_HISTORY_CHARS = 4_194_304
 GUIDED_MAX_REDACTED_SUMMARY_CHARS = 4_096
 GUIDED_MAX_CHAT_CONTENT_CHARS = 65_536
 GUIDED_MAX_TURN_SUMMARY_CHARS = 4_096
@@ -420,7 +424,7 @@ class SourceIntent:
         object.__setattr__(
             self,
             "observed_columns",
-            freeze_guided_str_sequence(self.observed_columns, "SourceIntent.observed_columns"),
+            freeze_guided_str_sequence(self.observed_columns, "SourceIntent.observed_columns", budget=json_budget),
         )
         object.__setattr__(
             self,
@@ -1258,6 +1262,8 @@ class DeferredStageIntent:
         constraints_raw = record["constraints"]
         if type(constraints_raw) is not list:
             raise InvariantError("DeferredStageIntent.constraints must be a list")
+        if len(constraints_raw) > GUIDED_MAX_CONSTRAINTS_PER_INTENT:
+            raise InvariantError(f"DeferredStageIntent.constraints exceeds the {GUIDED_MAX_CONSTRAINTS_PER_INTENT}-constraint limit")
         return cls(
             intent_id=_canonical_uuid_text(record["intent_id"], "DeferredStageIntent.intent_id"),
             receiving_stage=cast(Any, record["receiving_stage"]),
@@ -1334,8 +1340,14 @@ class GuidedSession:
     def __post_init__(self) -> None:
         if type(self.step) is not GuidedStep:
             raise TypeError(f"step must be GuidedStep, got {type(self.step).__name__}")
-        if type(self.history) is not tuple or any(type(record) is not TurnRecord for record in self.history):
+        if type(self.history) is not tuple:
             raise TypeError("history must be tuple[TurnRecord, ...]")
+        if len(self.history) > GUIDED_MAX_HISTORY_RECORDS:
+            raise InvariantError(f"GuidedSession.history exceeds the {GUIDED_MAX_HISTORY_RECORDS}-record limit")
+        if any(type(record) is not TurnRecord for record in self.history):
+            raise TypeError("history must be tuple[TurnRecord, ...]")
+        if sum(len(record.summary) for record in self.history if record.summary is not None) > GUIDED_MAX_HISTORY_SUMMARY_CHARS:
+            raise InvariantError(f"GuidedSession.history aggregate summaries exceed {GUIDED_MAX_HISTORY_SUMMARY_CHARS} characters")
         if type(self.profile) is not WorkflowProfile:
             raise TypeError(f"profile must be WorkflowProfile, got {type(self.profile).__name__}")
         if type(self.advisor_checkpoint_passes_used) is not int or self.advisor_checkpoint_passes_used < 0:
@@ -1346,7 +1358,11 @@ class GuidedSession:
             raise TypeError("terminal must be TerminalState or None")
         if type(self.transition_consumed) is not bool:
             raise TypeError("transition_consumed must be bool")
-        if type(self.chat_history) is not tuple or any(type(turn) is not ChatTurn for turn in self.chat_history):
+        if type(self.chat_history) is not tuple:
+            raise TypeError("chat_history must be tuple[ChatTurn, ...]")
+        if len(self.chat_history) > GUIDED_MAX_CHAT_TURNS:
+            raise InvariantError(f"GuidedSession.chat_history exceeds the {GUIDED_MAX_CHAT_TURNS}-turn limit")
+        if any(type(turn) is not ChatTurn for turn in self.chat_history):
             raise TypeError("chat_history must be tuple[ChatTurn, ...]")
         if type(self.chat_turn_seq) is not int or self.chat_turn_seq < 0:
             raise TypeError("chat_turn_seq must be a non-negative exact int")
@@ -1357,11 +1373,35 @@ class GuidedSession:
             if len(turn.content) > GUIDED_MAX_CHAT_CONTENT_CHARS:
                 raise InvariantError(f"GuidedSession chat content exceeds {GUIDED_MAX_CHAT_CONTENT_CHARS} characters")
             previous_chat_seq = turn.seq
-        if self.chat_history and self.chat_turn_seq <= self.chat_history[-1].seq:
-            raise InvariantError("GuidedSession.chat_turn_seq must be greater than the maximum persisted chat seq")
+        if sum(len(turn.content) for turn in self.chat_history) > GUIDED_MAX_CHAT_HISTORY_CHARS:
+            raise InvariantError(f"GuidedSession.chat_history aggregate content exceeds {GUIDED_MAX_CHAT_HISTORY_CHARS} characters")
+        expected_chat_turn_seq = self.chat_history[-1].seq + 1 if self.chat_history else 0
+        if self.chat_turn_seq != expected_chat_turn_seq:
+            raise InvariantError("GuidedSession.chat_turn_seq must be the exact next unused persisted chat seq")
         if self.root_intent_message_id is not None:
             _canonical_uuid_text(self.root_intent_message_id, "GuidedSession.root_intent_message_id")
 
+        for mapping, field_name in (
+            (self.reviewed_sources, "reviewed_sources"),
+            (self.pending_source_intents, "pending_source_intents"),
+            (self.reviewed_outputs, "reviewed_outputs"),
+            (self.pending_output_intents, "pending_output_intents"),
+        ):
+            if not isinstance(mapping, Mapping):
+                raise TypeError(f"GuidedSession.{field_name} must be a mapping")
+        if len(self.reviewed_sources) + len(self.pending_source_intents) > GUIDED_MAX_COMPONENTS_PER_KIND:
+            raise InvariantError(f"GuidedSession source components exceed the {GUIDED_MAX_COMPONENTS_PER_KIND}-component limit")
+        if len(self.reviewed_outputs) + len(self.pending_output_intents) > GUIDED_MAX_COMPONENTS_PER_KIND:
+            raise InvariantError(f"GuidedSession output components exceed the {GUIDED_MAX_COMPONENTS_PER_KIND}-component limit")
+
+        if type(self.source_order) is not tuple:
+            raise TypeError("GuidedSession.source_order must be an exact tuple")
+        if type(self.output_order) is not tuple:
+            raise TypeError("GuidedSession.output_order must be an exact tuple")
+        if len(self.source_order) > GUIDED_MAX_COMPONENTS_PER_KIND:
+            raise InvariantError(f"GuidedSession source components exceed the {GUIDED_MAX_COMPONENTS_PER_KIND}-component limit")
+        if len(self.output_order) > GUIDED_MAX_COMPONENTS_PER_KIND:
+            raise InvariantError(f"GuidedSession output components exceed the {GUIDED_MAX_COMPONENTS_PER_KIND}-component limit")
         source_order = _require_exact_str_tuple(self.source_order, "GuidedSession.source_order", uuid_items=True)
         output_order = _require_exact_str_tuple(self.output_order, "GuidedSession.output_order", uuid_items=True)
         if len(set(source_order)) != len(source_order):
@@ -1390,11 +1430,6 @@ class GuidedSession:
             raise InvariantError("GuidedSession.output_order must be an exact permutation of output keys")
         if (set(reviewed_sources) | set(pending_sources)) & (set(reviewed_outputs) | set(pending_outputs)):
             raise InvariantError("GuidedSession stable component IDs must be globally unique")
-        if len(reviewed_sources) + len(pending_sources) > GUIDED_MAX_COMPONENTS_PER_KIND:
-            raise InvariantError(f"GuidedSession source components exceed the {GUIDED_MAX_COMPONENTS_PER_KIND}-component limit")
-        if len(reviewed_outputs) + len(pending_outputs) > GUIDED_MAX_COMPONENTS_PER_KIND:
-            raise InvariantError(f"GuidedSession output components exceed the {GUIDED_MAX_COMPONENTS_PER_KIND}-component limit")
-
         source_names = [source.name for source in reviewed_sources.values()] + [intent.name for intent in pending_sources.values()]
         output_names = [output.name for output in reviewed_outputs.values()] + [intent.name for intent in pending_outputs.values()]
         if len(set(source_names)) != len(source_names):
@@ -1530,6 +1565,21 @@ class GuidedSession:
                 raise InvariantError(f"GuidedSession.from_dict: unsupported schema_version {schema_version}")
             d = dict(_require_exact_dict(d, _GUIDED_SESSION_KEYS, "GuidedSession.from_dict"))
             history_raw = _require_guided_sequence(d["history"], "history")
+            if len(history_raw) > GUIDED_MAX_HISTORY_RECORDS:
+                raise InvariantError(f"GuidedSession.from_dict: history exceeds the {GUIDED_MAX_HISTORY_RECORDS}-record limit")
+            history_summary_chars = 0
+            for index, record in enumerate(history_raw):
+                if type(record) is not dict or "summary" not in record:
+                    raise InvariantError(f"GuidedSession.from_dict: history[{index}] must expose summary in an exact dict")
+                summary_raw = record["summary"]
+                if summary_raw is not None and type(summary_raw) is not str:
+                    raise InvariantError(f"GuidedSession.from_dict: history[{index}].summary must be an exact str or None")
+                if summary_raw is not None:
+                    history_summary_chars += len(summary_raw)
+                    if history_summary_chars > GUIDED_MAX_HISTORY_SUMMARY_CHARS:
+                        raise InvariantError(
+                            f"GuidedSession.from_dict: history aggregate summaries exceed {GUIDED_MAX_HISTORY_SUMMARY_CHARS} characters"
+                        )
             history = tuple(TurnRecord.from_dict(record) for record in history_raw)
             profile_raw = d["profile"]
             advisor_checkpoint_passes_used_raw = d["advisor_checkpoint_passes_used"]
@@ -1545,15 +1595,70 @@ class GuidedSession:
             terminal_raw = d["terminal"]
             transition_consumed = _require_guided_bool(d["transition_consumed"], "transition_consumed")
             chat_history_raw = _require_guided_sequence(d["chat_history"], "chat_history")
+            if len(chat_history_raw) > GUIDED_MAX_CHAT_TURNS:
+                raise InvariantError(f"GuidedSession.from_dict: chat_history exceeds the {GUIDED_MAX_CHAT_TURNS}-turn limit")
+            chat_history_chars = 0
+            for index, turn in enumerate(chat_history_raw):
+                if type(turn) is not dict or "content" not in turn:
+                    raise InvariantError(f"GuidedSession.from_dict: chat_history[{index}] must expose content in an exact dict")
+                content_raw = turn["content"]
+                if type(content_raw) is not str:
+                    raise InvariantError(f"GuidedSession.from_dict: chat_history[{index}].content must be an exact str")
+                chat_history_chars += len(content_raw)
+                if chat_history_chars > GUIDED_MAX_CHAT_HISTORY_CHARS:
+                    raise InvariantError(
+                        f"GuidedSession.from_dict: chat_history aggregate content exceeds {GUIDED_MAX_CHAT_HISTORY_CHARS} characters"
+                    )
             chat_turn_seq = _require_guided_non_negative_int(d["chat_turn_seq"], "chat_turn_seq")
-            chat_history: tuple[ChatTurn, ...] = tuple(_chat_turn_from_guided_dict(entry) for entry in chat_history_raw)
-            source_order = _str_tuple_from_list(d["source_order"], "GuidedSession.source_order", uuid_items=True)
-            output_order = _str_tuple_from_list(d["output_order"], "GuidedSession.output_order", uuid_items=True)
+            source_order_raw = d["source_order"]
+            output_order_raw = d["output_order"]
+            if type(source_order_raw) is not list:
+                raise InvariantError("GuidedSession.from_dict: source_order must be an exact list")
+            if type(output_order_raw) is not list:
+                raise InvariantError("GuidedSession.from_dict: output_order must be an exact list")
+            if len(source_order_raw) > GUIDED_MAX_COMPONENTS_PER_KIND:
+                raise InvariantError(
+                    f"GuidedSession.from_dict: source components exceed the {GUIDED_MAX_COMPONENTS_PER_KIND}-component limit"
+                )
+            if len(output_order_raw) > GUIDED_MAX_COMPONENTS_PER_KIND:
+                raise InvariantError(
+                    f"GuidedSession.from_dict: output components exceed the {GUIDED_MAX_COMPONENTS_PER_KIND}-component limit"
+                )
+            source_order = _str_tuple_from_list(source_order_raw, "GuidedSession.source_order", uuid_items=True)
+            output_order = _str_tuple_from_list(output_order_raw, "GuidedSession.output_order", uuid_items=True)
             reviewed_sources_raw = _require_str_mapping(d["reviewed_sources"], "GuidedSession.reviewed_sources")
             pending_sources_raw = _require_str_mapping(d["pending_source_intents"], "GuidedSession.pending_source_intents")
             reviewed_outputs_raw = _require_str_mapping(d["reviewed_outputs"], "GuidedSession.reviewed_outputs")
             pending_outputs_raw = _require_str_mapping(d["pending_output_intents"], "GuidedSession.pending_output_intents")
+            if len(reviewed_sources_raw) + len(pending_sources_raw) > GUIDED_MAX_COMPONENTS_PER_KIND:
+                raise InvariantError(
+                    f"GuidedSession.from_dict: source components exceed the {GUIDED_MAX_COMPONENTS_PER_KIND}-component limit"
+                )
+            if len(reviewed_outputs_raw) + len(pending_outputs_raw) > GUIDED_MAX_COMPONENTS_PER_KIND:
+                raise InvariantError(
+                    f"GuidedSession.from_dict: output components exceed the {GUIDED_MAX_COMPONENTS_PER_KIND}-component limit"
+                )
             deferred_raw = _require_guided_sequence(d["deferred_intents"], "deferred_intents")
+            if len(deferred_raw) > GUIDED_MAX_DEFERRED_INTENTS:
+                raise InvariantError(f"GuidedSession.from_dict: deferred_intents exceed the {GUIDED_MAX_DEFERRED_INTENTS}-intent limit")
+            deferred_constraint_count = 0
+            for index, intent in enumerate(deferred_raw):
+                if type(intent) is not dict or "constraints" not in intent:
+                    raise InvariantError(f"GuidedSession.from_dict: deferred_intents[{index}] must expose constraints in an exact dict")
+                constraints_raw = intent["constraints"]
+                if type(constraints_raw) is not list:
+                    raise InvariantError(f"GuidedSession.from_dict: deferred_intents[{index}].constraints must be a list")
+                if len(constraints_raw) > GUIDED_MAX_CONSTRAINTS_PER_INTENT:
+                    raise InvariantError(
+                        "GuidedSession.from_dict: deferred_intents constraint list exceeds "
+                        f"the {GUIDED_MAX_CONSTRAINTS_PER_INTENT}-constraint limit"
+                    )
+                deferred_constraint_count += len(constraints_raw)
+                if deferred_constraint_count > GUIDED_MAX_TOTAL_CONSTRAINTS:
+                    raise InvariantError(
+                        f"GuidedSession.from_dict: deferred constraints exceed the {GUIDED_MAX_TOTAL_CONSTRAINTS}-constraint limit"
+                    )
+            chat_history: tuple[ChatTurn, ...] = tuple(_chat_turn_from_guided_dict(entry) for entry in chat_history_raw)
             active_proposal_raw = d["active_proposal"]
             active_edit_target_raw = d["active_edit_target"]
             return cls(

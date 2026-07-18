@@ -10,10 +10,11 @@ from unittest.mock import patch
 
 import pytest
 
-from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus
+from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus, ComposerLLMCallStatus
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import PluginKind
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided.chat_solver import Step2SinkChatOutcome, maybe_resolve_step_2_sink_chat
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
@@ -348,6 +349,45 @@ async def test_sink_wrapper_absorbs_transient_into_synthetic_unavailable() -> No
     assert result.fallback_chat is not None
     assert result.fallback_chat.error_class == "TimeoutError"
     assert result.fallback_chat.status == ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_sink_wrapper_classifies_strict_snapshot_failure_as_malformed_and_auto_drops() -> None:
+    malformed_args = {
+        **_JSON_SINK_ARGS,
+        "outputs": [
+            {
+                **_JSON_SINK_ARGS["outputs"][0],
+                "options": {"bad": float("nan")},
+            }
+        ],
+    }
+
+    async def _return_malformed_sink_response(**_kwargs: object) -> SimpleNamespace:
+        return _fake_resolve_sink_response(malformed_args)
+
+    recorder = BufferingRecorder()
+    with patch(
+        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+        new=_return_malformed_sink_response,
+    ):
+        result = await resolve_step_2_sink_chat_with_auto_drop(
+            site="test",
+            session_id="s1",
+            user_id="u1",
+            model="anthropic/claude-sonnet-4.6",
+            user_message="write a jsonl file",
+            current_sink=None,
+            temperature=None,
+            seed=None,
+            recorder=recorder,
+        )
+
+    assert result.sink_resolution is None
+    assert result.fallback_chat is not None
+    assert result.fallback_chat.error_class == "ValueError"
+    assert result.fallback_chat.status == ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE
+    assert recorder.llm_calls[-1].status is ComposerLLMCallStatus.MALFORMED_RESPONSE
 
 
 @pytest.mark.asyncio

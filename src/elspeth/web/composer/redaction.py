@@ -3445,9 +3445,14 @@ def redact_guided_snapshot_storage_paths(
     reviewed_sources = guided["reviewed_sources"]
     if type(reviewed_sources) is not dict:
         raise ValueError("redact_guided_snapshot_storage_paths: guided_session.reviewed_sources must be a dict")
+    pending_sources = guided["pending_source_intents"]
+    if type(pending_sources) is not dict:
+        raise ValueError("redact_guided_snapshot_storage_paths: guided_session.pending_source_intents must be a dict")
 
     reviewed_out: dict[str, Any] = {}
+    pending_out: dict[str, Any] = {}
     rebuilt_sources = dict(sources) if sources is not None else None
+    reviewed_bindings: list[tuple[str, frozenset[str]]] = []
     changed = False
     for stable_id, snapshot in reviewed_sources.items():
         if type(stable_id) is not str or type(snapshot) is not dict:
@@ -3471,30 +3476,64 @@ def redact_guided_snapshot_storage_paths(
         snapshot_redacted["options"] = snap_options_redacted
         reviewed_out[stable_id] = snapshot_redacted
         changed = True
+        if blob_paths:
+            reviewed_bindings.append((name, frozenset(blob_paths)))
 
-        if rebuilt_sources is None or name not in rebuilt_sources or not blob_paths:
+    if rebuilt_sources is not None and reviewed_bindings:
+        all_reviewed_paths = frozenset(path for _name, paths in reviewed_bindings for path in paths)
+        for live_name, live_source in tuple(rebuilt_sources.items()):
+            if type(live_source) is not dict:
+                raise ValueError("redact_guided_snapshot_storage_paths: source entries must be dicts when guided blob redaction is active")
+            if "options" not in live_source:
+                continue
+            live_options = live_source["options"]
+            if type(live_options) is not dict:
+                raise ValueError("redact_guided_snapshot_storage_paths: source.options must be a dict when guided blob redaction is active")
+            live_reviewed_paths = {
+                value for key in ("path", "file") if type(value := live_options.get(key)) is str and value in all_reviewed_paths
+            }
+            if not live_reviewed_paths:
+                continue
+            candidates = [
+                paths for reviewed_name, paths in reviewed_bindings if reviewed_name == live_name and live_reviewed_paths <= paths
+            ]
+            if len(candidates) != 1:
+                raise AuditIntegrityError("guided blob source mapping is inconsistent")
+            options_redacted = dict(live_options)
+            for key in ("path", "file"):
+                if type(value := live_options.get(key)) is str and value in live_reviewed_paths:
+                    options_redacted[key] = REDACTED_BLOB_SOURCE_PATH
+            source_redacted = dict(live_source)
+            source_redacted["options"] = options_redacted
+            rebuilt_sources[live_name] = source_redacted
+
+    for stable_id, intent in pending_sources.items():
+        if type(stable_id) is not str or type(intent) is not dict:
+            raise ValueError("redact_guided_snapshot_storage_paths: pending_source_intents entries must be string-keyed dicts")
+        intent_options = intent["options"]
+        if intent_options is None:
+            pending_out[stable_id] = intent
             continue
-        source = rebuilt_sources[name]
-        if type(source) is not dict:
-            raise ValueError("redact_guided_snapshot_storage_paths: source entries must be dicts when guided blob redaction is active")
-        if "options" not in source:
+        if type(intent_options) is not dict:
+            raise ValueError(
+                f"redact_guided_snapshot_storage_paths: guided_session.pending_source_intents[{stable_id!r}].options must be a dict or None"
+            )
+        if "blob_ref" not in intent_options:
+            pending_out[stable_id] = intent
             continue
-        options = source["options"]
-        if type(options) is not dict:
-            raise ValueError("redact_guided_snapshot_storage_paths: source.options must be a dict when guided blob redaction is active")
-        matching_keys = [key for key in ("path", "file") if key in options and options[key] in blob_paths]
-        if not matching_keys:
-            continue
-        options_redacted = dict(options)
-        for key in matching_keys:
-            options_redacted[key] = REDACTED_BLOB_SOURCE_PATH
-        source_redacted = dict(source)
-        source_redacted["options"] = options_redacted
-        rebuilt_sources[name] = source_redacted
+        options_redacted = dict(intent_options)
+        for key in ("path", "file"):
+            if key in options_redacted:
+                options_redacted[key] = REDACTED_BLOB_SOURCE_PATH
+        intent_redacted = dict(intent)
+        intent_redacted["options"] = options_redacted
+        pending_out[stable_id] = intent_redacted
+        changed = True
 
     if changed:
         guided_redacted = dict(guided)
         guided_redacted["reviewed_sources"] = reviewed_out
+        guided_redacted["pending_source_intents"] = pending_out
         meta_out = dict(composer_meta)
         meta_out["guided_session"] = guided_redacted
         sources_out = rebuilt_sources

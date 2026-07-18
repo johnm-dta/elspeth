@@ -20,7 +20,7 @@ from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from litellm.exceptions import (
@@ -43,7 +43,10 @@ def _create_session(client: TestClient, *, profile: str | None = None) -> str:
     assert resp.status_code == 201, resp.json()
     session_id = resp.json()["id"]
     if profile is not None:
-        start_resp = client.post(f"/api/sessions/{session_id}/guided/start", json={"profile": profile})
+        start_resp = client.post(
+            f"/api/sessions/{session_id}/guided/start",
+            json={"profile": profile, "operation_id": str(uuid4())},
+        )
         assert start_resp.status_code == 200, start_resp.json()
     return session_id
 

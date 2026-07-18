@@ -206,7 +206,11 @@ describe("api/client guided functions", () => {
         json: async () => body,
       } as Response);
 
-      const result = await startGuidedSession("sess-1", "tutorial");
+      const result = await startGuidedSession(
+        "sess-1",
+        "tutorial",
+        "00000000-0000-4000-8000-000000000001",
+      );
 
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
@@ -215,7 +219,10 @@ describe("api/client guided functions", () => {
       expect((init.headers as Record<string, string>)["Content-Type"]).toBe(
         "application/json",
       );
-      expect(JSON.parse(init.body as string)).toEqual({ profile: "tutorial" });
+      expect(JSON.parse(init.body as string)).toEqual({
+        profile: "tutorial",
+        operation_id: "00000000-0000-4000-8000-000000000001",
+      });
       expect(result.guided_session.profile?.advisor_checkpoints).toBe(true);
     });
   });

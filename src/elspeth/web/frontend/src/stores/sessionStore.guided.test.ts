@@ -27,6 +27,7 @@ vi.mock("@/api/client", () => ({
   fetchStateVersions: vi.fn(),
   archiveSession: vi.fn(),
   getGuided: vi.fn(),
+  startGuidedSession: vi.fn(),
   respondGuided: vi.fn(),
   reenterGuided: vi.fn(),
   convertToGuided: vi.fn(),
@@ -234,6 +235,68 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(typeof state.error).toBe("string");
     // Pre-seeded guided state is preserved (error path doesn't clear it)
     expect(state.guidedSession).toEqual(sampleGuidedSession);
+  });
+
+  it("seedGuided: retries an ambiguous failure with the same operation id and applies the response before clearing", async () => {
+    const { startGuidedSession } = await import("@/api/client");
+    const start = startGuidedSession as ReturnType<typeof vi.fn>;
+    start
+      .mockRejectedValueOnce(new TypeError("network response lost"))
+      .mockResolvedValueOnce(sampleGetGuidedResponse);
+    useSessionStore.setState({ activeSessionId: RETRY_SESSION_ID });
+
+    await expect(
+      useSessionStore.getState().seedGuided(RETRY_SESSION_ID, "tutorial"),
+    ).rejects.toThrow("network response lost");
+    await useSessionStore.getState().seedGuided(RETRY_SESSION_ID, "tutorial");
+
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(start.mock.calls[0]?.[2]).toBe(start.mock.calls[1]?.[2]);
+    expect(useSessionStore.getState().guidedSession).toEqual(
+      sampleGetGuidedResponse.guided_session,
+    );
+    expect(useSessionStore.getState().compositionState).toEqual(
+      sampleGetGuidedResponse.composition_state,
+    );
+  });
+
+  it("seedGuided: clears a typed terminal failure before the next action", async () => {
+    const { startGuidedSession } = await import("@/api/client");
+    const start = startGuidedSession as ReturnType<typeof vi.fn>;
+    start
+      .mockRejectedValueOnce({
+        status: 500,
+        error_type: "guided_operation_terminal_failure",
+        detail: "The operation failed.",
+      })
+      .mockResolvedValueOnce(sampleGetGuidedResponse);
+    useSessionStore.setState({ activeSessionId: RETRY_SESSION_B });
+
+    await expect(
+      useSessionStore.getState().seedGuided(RETRY_SESSION_B, "live"),
+    ).rejects.toMatchObject({ error_type: "guided_operation_terminal_failure" });
+    await useSessionStore.getState().seedGuided(RETRY_SESSION_B, "live");
+
+    expect(start.mock.calls[0]?.[2]).not.toBe(start.mock.calls[1]?.[2]);
+  });
+
+  it("seedGuided: retains the operation id when downstream response application fails", async () => {
+    const { startGuidedSession } = await import("@/api/client");
+    const start = startGuidedSession as ReturnType<typeof vi.fn>;
+    start.mockResolvedValue(sampleGetGuidedResponse);
+    const refreshAll = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("interpretation refresh failed"))
+      .mockResolvedValueOnce(undefined);
+    useInterpretationEventsStore.setState({ refreshAll } as never);
+    useSessionStore.setState({ activeSessionId: RETRY_SESSION_ID });
+
+    await expect(
+      useSessionStore.getState().seedGuided(RETRY_SESSION_ID, "tutorial"),
+    ).rejects.toThrow("interpretation refresh failed");
+    await useSessionStore.getState().seedGuided(RETRY_SESSION_ID, "tutorial");
+
+    expect(start.mock.calls[0]?.[2]).toBe(start.mock.calls[1]?.[2]);
   });
 
   // ── Test 4: respondGuided happy path ─────────────────────────────────────

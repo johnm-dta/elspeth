@@ -747,6 +747,10 @@ interface SessionState {
   guidedSelfHealNotice: string | null;
   // Guided-mode actions
   startGuided: (sessionId: string) => Promise<void>;
+  seedGuided: (
+    sessionId: string,
+    profileKind: "live" | "tutorial",
+  ) => Promise<void>;
   respondGuided: (body: GuidedRespondRequest) => Promise<void>;
   /**
    * Apply a GuidedRespondResponse to the store: atomically replace the 4 wire
@@ -1916,6 +1920,41 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         error:
           apiErr.detail ?? "Failed to load guided session. Please try again.",
       });
+    }
+  },
+
+  async seedGuided(sessionId: string, profileKind: "live" | "tutorial") {
+    const requestedSessionId = sessionId;
+    const retry = acquireGuidedRetry("guided_start", sessionId, [profileKind]);
+    let responseReceived = false;
+    try {
+      const response = await api.startGuidedSession(
+        sessionId,
+        profileKind,
+        retry.operationId,
+      );
+      responseReceived = true;
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
+      await get().applyGuidedResponse(requestedSessionId, response);
+      clearGuidedRetry(retry);
+    } catch (err) {
+      // Once POST returned, any failure is in local response application or
+      // interpretation refresh. Keep the same id so retry exact-replays the
+      // already committed start instead of creating a second operation.
+      if (!responseReceived && !isAmbiguousGuidedRetryFailure(err)) {
+        clearGuidedRetry(retry);
+      }
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
+      const apiErr = err as ApiError;
+      set({
+        error:
+          apiErr.detail ?? "Failed to start guided session. Please try again.",
+      });
+      throw err;
     }
   },
 

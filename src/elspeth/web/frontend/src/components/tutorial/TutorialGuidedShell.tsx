@@ -2,10 +2,8 @@ import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import {
   getTutorialSample,
   respondGuided,
-  startGuidedSession,
 } from "@/api/client";
 import { ChatPanel } from "@/components/chat/ChatPanel";
-import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import {
   EXIT_TO_FREEFORM_REQUEST,
   useSessionStore,
@@ -95,7 +93,7 @@ export function TutorialGuidedShell({
   exitRequestedRef,
 }: TutorialGuidedShellProps): JSX.Element {
   const guidedSession = useSessionStore((s) => s.guidedSession);
-  const startGuided = useSessionStore((s) => s.startGuided);
+  const seedGuided = useSessionStore((s) => s.seedGuided);
   const resetForTutorialSession = useSessionStore(
     (s) => s.resetForTutorialSession,
   );
@@ -130,7 +128,7 @@ export function TutorialGuidedShell({
       setStarting(true);
       setError(null);
       // Bind the store's activeSessionId to this tutorial session BEFORE
-      // startGuided. startGuided (sessionStore.ts) DISCARDS its fetched guided
+      // seedGuided. seedGuided (sessionStore.ts) DISCARDS its fetched guided
       // payload unless get().activeSessionId === the requested id, and ChatPanel
       // renders the empty-session surface (chat-panel--empty) whenever
       // activeSessionId is null. resetForTutorialSession clears the same
@@ -151,7 +149,7 @@ export function TutorialGuidedShell({
         return true;
       };
       try {
-        await startGuidedSession(sessionId, "tutorial");
+        await seedGuided(sessionId, "tutorial");
         if (await exitIfRequested()) {
           return;
         }
@@ -169,22 +167,6 @@ export function TutorialGuidedShell({
         // plugin default `allowed_hosts="public_only"`. The client must never
         // set an allowlist (a client-set allowlist is an SSRF widening vector).
         setSampleUrls(sample.sample_urls);
-        await startGuided(sessionId);
-        if (await exitIfRequested()) {
-          return;
-        }
-        // Rehydrate the interpretation-event projection for THIS session.
-        // Every other route into a session goes through selectSession, which
-        // does this (Phase 5b Task 3) — the tutorial bridge bypasses it, so
-        // without this a mid-Build reload resumed with pendingBySession
-        // EMPTY: no acknowledgement cards rendered, the wire-stage Confirm
-        // was not blocked, and the run then failed server-side with
-        // UnresolvedInterpretationPlaceholderError (the backend run gate is
-        // the final guard; the ack-before-advance UX gate lives client-side).
-        // Awaited, not fire-and-forget: a resume can land DIRECTLY on the
-        // wire stage, where the gate must be up before the first paint of an
-        // enabled Confirm.
-        await useInterpretationEventsStore.getState().refreshAll(sessionId);
       } catch (err) {
         if (isSessionMissingError(err) && onSessionMissing !== undefined) {
           onSessionMissing(sessionId);
@@ -197,7 +179,7 @@ export function TutorialGuidedShell({
     })();
   }, [
     sessionId,
-    startGuided,
+    seedGuided,
     resetForTutorialSession,
     onSessionMissing,
     exitRequestedRef,
@@ -205,8 +187,8 @@ export function TutorialGuidedShell({
 
   // Hand off when guided reaches a terminal — but ONLY on a terminal this
   // mount OBSERVED transition to. The back-nav GET path remounts this shell
-  // against the PERSISTED terminal guided session (startGuided clears
-  // guidedSession to null, then sets it to the terminal payload), so the
+  // against the PERSISTED terminal guided session (the startup reset clears
+  // guidedSession to null, then seedGuided sets the terminal payload), so the
   // shell mounts onto a terminal without ever seeing a live wizard. Firing
   // there bounces the user straight back to run (completed) or re-PATCHes
   // the opt-out on every remount (exited). Gate on sawActiveRef: a terminal

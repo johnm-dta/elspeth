@@ -1,4 +1,8 @@
-type GuidedRetryKind = "guided_convert" | "guided_reenter" | "state_revert";
+type GuidedRetryKind =
+  | "guided_start"
+  | "guided_convert"
+  | "guided_reenter"
+  | "state_revert";
 
 interface GuidedRetryDescriptor {
   kind: GuidedRetryKind;
@@ -39,7 +43,8 @@ function isDescriptor(value: unknown): value is GuidedRetryDescriptor {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
   return (
-    (record.kind === "guided_convert" ||
+    (record.kind === "guided_start" ||
+      record.kind === "guided_convert" ||
       record.kind === "guided_reenter" ||
       record.kind === "state_revert") &&
     typeof record.sessionId === "string" &&

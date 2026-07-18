@@ -357,7 +357,7 @@ class RevertStateRequest(_GuidedOperationRequest):
         raise ValueError("state_id must be a canonical UUID")
 
 
-class StartGuidedRequest(_RequestModel):
+class StartGuidedRequest(_GuidedOperationRequest):
     """Request body for POST /api/sessions/{session_id}/guided/start.
 
     ``profile`` is a raw boundary value whose valid form is a closed-enum

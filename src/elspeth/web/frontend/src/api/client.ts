@@ -769,11 +769,12 @@ export async function getTutorialSample(
 export async function startGuidedSession(
   sessionId: string,
   profileKind: "live" | "tutorial",
+  operationId: string,
 ): Promise<GetGuidedResponse> {
   const response = await fetch(`/api/sessions/${sessionId}/guided/start`, {
     method: "POST",
     headers: authHeaders("application/json"),
-    body: JSON.stringify({ profile: profileKind }),
+    body: JSON.stringify({ profile: profileKind, operation_id: operationId }),
   });
   return parseResponse<GetGuidedResponse>(response);
 }

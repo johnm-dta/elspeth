@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 from elspeth.web.composer.guided.errors import InvariantError
 from tests.integration.web.composer.guided.test_step_3_e2e import (
@@ -132,7 +133,10 @@ class TestGetGuidedInvariantSanitisation:
         session_id = _create_session(client)
         # First GET persists nothing (fresh session is non-mutating) but a
         # started session gives the route a state to rebuild from.
-        start_resp = client.post(f"/api/sessions/{session_id}/guided/start", json={"profile": "live"})
+        start_resp = client.post(
+            f"/api/sessions/{session_id}/guided/start",
+            json={"profile": "live", "operation_id": str(uuid4())},
+        )
         assert start_resp.status_code == 200, start_resp.json()
 
         secret_marker = "TIER3-SAMPLE-ROW-CONTENT"

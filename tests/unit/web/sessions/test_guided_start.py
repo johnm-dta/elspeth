@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
-from unittest.mock import MagicMock
+from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock, patch
 
 import pytest
 import structlog
@@ -67,12 +69,15 @@ class _BlobServiceFake:
         return None
 
 
-def _make_app(tmp_path, user_id="alice"):
-    engine = create_session_engine(
-        "sqlite:///:memory:",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
-    )
+def _make_app(tmp_path, user_id="alice", database_url: str | None = None):
+    if database_url is None:
+        engine = create_session_engine(
+            "sqlite:///:memory:",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+    else:
+        engine = create_session_engine(database_url)
     initialize_session_schema(engine)
     service = SessionServiceImpl(
         engine,
@@ -122,7 +127,7 @@ async def test_guided_start_seeds_tutorial_profile_and_persists(tmp_path) -> Non
 
     resp = client.post(
         f"/api/sessions/{session.id}/guided/start",
-        json={"profile": "tutorial"},
+        json={"profile": "tutorial", "operation_id": str(uuid.uuid4())},
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -152,7 +157,7 @@ async def test_guided_start_persists_profile_without_materializing_topology(tmp_
 
     resp = client.post(
         f"/api/sessions/{session.id}/guided/start",
-        json={"profile": "tutorial"},
+        json={"profile": "tutorial", "operation_id": str(uuid.uuid4())},
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -198,7 +203,7 @@ async def test_guided_start_live_profile_is_empty(tmp_path) -> None:
 
     resp = client.post(
         f"/api/sessions/{session.id}/guided/start",
-        json={"profile": "live"},
+        json={"profile": "live", "operation_id": str(uuid.uuid4())},
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -216,17 +221,19 @@ async def test_guided_start_is_idempotent(tmp_path) -> None:
     client = TestClient(app)
     session = await service.create_session("alice", "T", "local")
 
+    operation_id = str(uuid.uuid4())
     first = client.post(
         f"/api/sessions/{session.id}/guided/start",
-        json={"profile": "tutorial"},
+        json={"profile": "tutorial", "operation_id": operation_id},
     )
     assert first.status_code == 200
 
     second = client.post(
         f"/api/sessions/{session.id}/guided/start",
-        json={"profile": "live"},
+        json={"profile": "tutorial", "operation_id": operation_id},
     )
     assert second.status_code == 200
+    assert second.json() == first.json()
     assert second.json()["guided_session"]["profile"] is not None
     assert second.json()["guided_session"]["profile"]["advisor_checkpoints"] is False
 
@@ -238,6 +245,46 @@ async def test_guided_start_is_idempotent(tmp_path) -> None:
             {"sid": str(session.id)},
         ).scalar()
     assert versions == 1
+
+
+@pytest.mark.asyncio
+async def test_guided_start_same_operation_id_rejects_different_profile(tmp_path) -> None:
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    operation_id = str(uuid.uuid4())
+
+    first = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": "tutorial", "operation_id": operation_id},
+    )
+    conflict = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": "live", "operation_id": operation_id},
+    )
+
+    assert first.status_code == 200
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"] == "Operation id is already bound to a different request."
+
+
+@pytest.mark.asyncio
+async def test_guided_start_new_operation_returns_exact_existing_guided_head(tmp_path) -> None:
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+
+    first = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": "tutorial", "operation_id": str(uuid.uuid4())},
+    )
+    current = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": "live", "operation_id": str(uuid.uuid4())},
+    )
+
+    assert first.status_code == current.status_code == 200
+    assert current.json() == first.json()
 
 
 @pytest.mark.asyncio
@@ -277,7 +324,7 @@ async def test_guided_start_rejects_existing_freeform_state_without_guided_sessi
 
     resp = client.post(
         f"/api/sessions/{session.id}/guided/start",
-        json={"profile": "tutorial"},
+        json={"profile": "tutorial", "operation_id": str(uuid.uuid4())},
     )
     assert resp.status_code == 409
     assert "existing freeform composition state" in resp.json()["detail"]
@@ -297,7 +344,7 @@ async def test_guided_start_rejects_unknown_profile_kind(tmp_path) -> None:
 
     resp = client.post(
         f"/api/sessions/{session.id}/guided/start",
-        json={"profile": "superuser"},
+        json={"profile": "superuser", "operation_id": str(uuid.uuid4())},
     )
     assert resp.status_code == 400
     assert "profile" in resp.json()["detail"].lower()
@@ -313,6 +360,7 @@ async def test_guided_start_rejects_client_supplied_profile_object_without_echo(
     resp = client.post(
         f"/api/sessions/{session.id}/guided/start",
         json={
+            "operation_id": str(uuid.uuid4()),
             "profile": {
                 "kind": "tutorial",
                 "injected": {"sources": {"evil": "client-owned"}},
@@ -328,12 +376,424 @@ async def test_guided_start_rejects_client_supplied_profile_object_without_echo(
 
 
 @pytest.mark.asyncio
+async def test_guided_start_integrity_failure_is_terminal_and_safe_to_replay(tmp_path) -> None:
+    from structlog.testing import capture_logs
+
+    from elspeth.contracts.errors import AuditIntegrityError
+
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    operation_id = str(uuid.uuid4())
+    payload = {"profile": "tutorial", "operation_id": operation_id}
+
+    with (
+        capture_logs() as logs,
+        patch.object(
+            service,
+            "save_state_for_guided_operation",
+            side_effect=AuditIntegrityError("secret diagnostic must not escape"),
+        ),
+    ):
+        first = client.post(f"/api/sessions/{session.id}/guided/start", json=payload)
+    replay = client.post(f"/api/sessions/{session.id}/guided/start", json=payload)
+
+    expected = {
+        "detail": {
+            "error_type": "guided_operation_terminal_failure",
+            "failure_code": "integrity_error",
+            "detail": "The operation failed an integrity check.",
+        }
+    }
+    assert first.status_code == replay.status_code == 500
+    assert first.json() == replay.json() == expected
+    event = next(entry for entry in logs if entry.get("event") == "guided.operation_terminal_failure")
+    assert event["exc_class"] == "AuditIntegrityError"
+    assert event["site"] == "post_guided_start"
+    assert "secret diagnostic" not in repr(event)
+
+
+@pytest.mark.asyncio
+async def test_guided_start_replay_fails_closed_on_response_drift(tmp_path) -> None:
+    from elspeth.contracts.errors import AuditIntegrityError
+
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    operation_id = str(uuid.uuid4())
+    payload = {"profile": "tutorial", "operation_id": operation_id}
+    first = client.post(f"/api/sessions/{session.id}/guided/start", json=payload)
+    assert first.status_code == 200
+    drifted = {
+        **first.json()["next_turn"],
+        "payload": {**first.json()["next_turn"]["payload"], "question": "drifted"},
+    }
+
+    with (
+        patch(
+            "elspeth.web.sessions.routes.composer.guided._build_get_guided_turn",
+            return_value=drifted,
+        ),
+        pytest.raises(AuditIntegrityError, match="response hash"),
+    ):
+        client.post(f"/api/sessions/{session.id}/guided/start", json=payload)
+
+
+@pytest.mark.asyncio
+async def test_guided_start_does_not_overwrite_head_changed_after_preflight(tmp_path) -> None:
+    from elspeth.web.sessions.protocol import CompositionStateData
+
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    original_reserve = service.reserve_guided_operation
+    raced_record = None
+
+    async def reserve_after_freeform_race(**kwargs):
+        nonlocal raced_record
+        outcome = await original_reserve(**kwargs)
+        if raced_record is None:
+            raced_record = await service.save_composition_state(
+                session.id,
+                CompositionStateData(
+                    sources={},
+                    nodes={},
+                    edges={},
+                    outputs={},
+                    metadata_={"name": "Raced freeform", "description": ""},
+                    composer_meta=None,
+                ),
+                provenance="post_compose",
+            )
+        return outcome
+
+    with patch.object(service, "reserve_guided_operation", side_effect=reserve_after_freeform_race):
+        response = client.post(
+            f"/api/sessions/{session.id}/guided/start",
+            json={"profile": "tutorial", "operation_id": str(uuid.uuid4())},
+        )
+
+    assert response.status_code == 500
+    assert response.json()["detail"]["failure_code"] == "integrity_error"
+    persisted = await service.get_current_state(session.id)
+    assert raced_record is not None
+    assert persisted is not None
+    assert persisted.id == raced_record.id
+    assert persisted.composer_meta is None or "guided_session" not in persisted.composer_meta
+
+
+@pytest.mark.asyncio
+async def test_guided_start_completed_retry_replays_after_later_freeform_head(tmp_path) -> None:
+    from elspeth.web.sessions.protocol import CompositionStateData
+
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    operation_id = str(uuid.uuid4())
+    payload = {"profile": "tutorial", "operation_id": operation_id}
+    committed = client.post(f"/api/sessions/{session.id}/guided/start", json=payload)
+    assert committed.status_code == 200
+    later_freeform = await service.save_composition_state(
+        session.id,
+        CompositionStateData(
+            sources={},
+            nodes={},
+            edges={},
+            outputs={},
+            metadata_={"name": "Later freeform", "description": ""},
+            composer_meta=None,
+        ),
+        provenance="post_compose",
+    )
+
+    replay = client.post(f"/api/sessions/{session.id}/guided/start", json=payload)
+
+    assert replay.status_code == 200
+    assert replay.json() == committed.json()
+    current = await service.get_current_state(session.id)
+    assert current is not None
+    assert current.id == later_freeform.id
+
+
+@pytest.mark.asyncio
+async def test_guided_start_empty_race_settles_exact_guided_winner(tmp_path) -> None:
+    from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE
+    from elspeth.web.sessions.protocol import CompositionStateData
+    from elspeth.web.sessions.routes._helpers import _initial_composition_state_with_guided_session
+
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    original_reserve = service.reserve_guided_operation
+    winner_record = None
+
+    async def reserve_after_guided_winner(**kwargs):
+        nonlocal winner_record
+        outcome = await original_reserve(**kwargs)
+        if winner_record is None:
+            winner = _initial_composition_state_with_guided_session(profile=TUTORIAL_PROFILE)
+            assert winner.guided_session is not None
+            winner_data = winner.to_dict()
+            winner_record = await service.save_composition_state(
+                session.id,
+                CompositionStateData(
+                    sources=winner_data["sources"],
+                    nodes=winner_data["nodes"],
+                    edges=winner_data["edges"],
+                    outputs=winner_data["outputs"],
+                    metadata_=winner_data["metadata"],
+                    composer_meta={"guided_session": winner.guided_session.to_dict()},
+                ),
+                provenance="session_seed",
+            )
+        return outcome
+
+    with patch.object(service, "reserve_guided_operation", side_effect=reserve_after_guided_winner):
+        response = client.post(
+            f"/api/sessions/{session.id}/guided/start",
+            json={"profile": "tutorial", "operation_id": str(uuid.uuid4())},
+        )
+
+    assert response.status_code == 200
+    assert winner_record is not None
+    assert response.json()["composition_state"]["id"] == str(winner_record.id)
+    current = await service.get_current_state(session.id)
+    assert current is not None
+    assert current.id == winner_record.id
+
+
+@pytest.mark.asyncio
+async def test_guided_start_replay_rejects_cross_session_result_locator(tmp_path) -> None:
+    from elspeth.contracts.errors import AuditIntegrityError
+    from elspeth.web.sessions.guided_operations import guided_operation_request_hash
+    from elspeth.web.sessions.protocol import (
+        CompositionStateData,
+        GuidedCompositionStateResult,
+        GuidedOperationCompleted,
+    )
+    from elspeth.web.sessions.schemas import StartGuidedRequest
+
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    foreign = await service.create_session("alice", "Other", "local")
+    foreign_state = await service.save_composition_state(
+        foreign.id,
+        CompositionStateData(
+            sources={},
+            nodes={},
+            edges={},
+            outputs={},
+            metadata_={"name": "Foreign", "description": ""},
+            composer_meta=None,
+        ),
+        provenance="post_compose",
+    )
+    operation_id = str(uuid.uuid4())
+    payload = {"profile": "tutorial", "operation_id": operation_id}
+    first = client.post(f"/api/sessions/{session.id}/guided/start", json=payload)
+    assert first.status_code == 200
+    request_model = StartGuidedRequest.model_validate(payload)
+    completed = await service.reserve_guided_operation(
+        session_id=session.id,
+        operation_id=operation_id,
+        kind="guided_start",
+        request_hash=guided_operation_request_hash(
+            session_id=session.id,
+            kind="guided_start",
+            request=request_model,
+        ),
+        actor="composer_route",
+        lease_seconds=300,
+    )
+    assert isinstance(completed, GuidedOperationCompleted)
+    corrupt_outcome = GuidedOperationCompleted(
+        result=GuidedCompositionStateResult(state_id=foreign_state.id),
+        response_hash=completed.response_hash,
+    )
+
+    with (
+        patch.object(service, "get_guided_operation", return_value=corrupt_outcome),
+        pytest.raises(AuditIntegrityError, match="Cross-session state reference rejected"),
+    ):
+        client.post(f"/api/sessions/{session.id}/guided/start", json=payload)
+
+
+@pytest.mark.asyncio
+async def test_guided_start_joins_active_operation_outside_compose_lock(tmp_path) -> None:
+    from elspeth.web.sessions.guided_operations import guided_operation_request_hash
+    from elspeth.web.sessions.protocol import GuidedOperationClaimed
+    from elspeth.web.sessions.routes.guided_operations import guided_response_hash
+    from elspeth.web.sessions.schemas import GetGuidedResponse, StartGuidedRequest
+
+    app, service = _make_app(tmp_path, database_url=f"sqlite:///{tmp_path / 'active-join.db'}")
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    seeded = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": "tutorial", "operation_id": str(uuid.uuid4())},
+    )
+    assert seeded.status_code == 200
+    current = await service.get_current_state(session.id)
+    assert current is not None
+    operation_id = str(uuid.uuid4())
+    payload = {"profile": "tutorial", "operation_id": operation_id}
+    request_model = StartGuidedRequest.model_validate(payload)
+    claim = await service.reserve_guided_operation(
+        session_id=session.id,
+        operation_id=operation_id,
+        kind="guided_start",
+        request_hash=guided_operation_request_hash(
+            session_id=session.id,
+            kind="guided_start",
+            request=request_model,
+        ),
+        actor="composer_route",
+        lease_seconds=300,
+    )
+    assert isinstance(claim, GuidedOperationClaimed)
+
+    joining = asyncio.create_task(
+        asyncio.to_thread(
+            client.post,
+            f"/api/sessions/{session.id}/guided/start",
+            json=payload,
+        )
+    )
+    await asyncio.sleep(0.1)
+    expected_response = GetGuidedResponse.model_validate_json(seeded.content)
+    await service.complete_existing_state_guided_operation(
+        claim.fence,
+        state_id=current.id,
+        expected_current_state_id=current.id,
+        expected_current_state_version=current.version,
+        actor="composer_route",
+        response_hash_factory=lambda _record: guided_response_hash(expected_response),
+    )
+    joined = await asyncio.wait_for(joining, timeout=2)
+
+    assert joined.status_code == 200
+    assert joined.json() == seeded.json()
+
+
+@pytest.mark.asyncio
+async def test_guided_start_takes_over_expired_lease_and_stale_worker_cannot_settle(tmp_path) -> None:
+    from sqlalchemy import text
+
+    from elspeth.web.sessions.guided_operations import guided_operation_request_hash
+    from elspeth.web.sessions.protocol import (
+        GuidedOperationClaimed,
+        GuidedOperationFenceLostError,
+    )
+    from elspeth.web.sessions.schemas import StartGuidedRequest
+
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    seeded = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": "tutorial", "operation_id": str(uuid.uuid4())},
+    )
+    assert seeded.status_code == 200
+    operation_id = str(uuid.uuid4())
+    payload = {"profile": "tutorial", "operation_id": operation_id}
+    request_model = StartGuidedRequest.model_validate(payload)
+    stale = await service.reserve_guided_operation(
+        session_id=session.id,
+        operation_id=operation_id,
+        kind="guided_start",
+        request_hash=guided_operation_request_hash(
+            session_id=session.id,
+            kind="guided_start",
+            request=request_model,
+        ),
+        actor="composer_route",
+        lease_seconds=300,
+    )
+    assert isinstance(stale, GuidedOperationClaimed)
+    with service._engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE guided_operations SET lease_expires_at = :expired WHERE session_id = :session_id AND operation_id = :operation_id"
+            ),
+            {
+                "expired": datetime.now(UTC) - timedelta(seconds=1),
+                "session_id": str(session.id),
+                "operation_id": operation_id,
+            },
+        )
+
+    with patch.object(service, "renew_guided_operation", wraps=service.renew_guided_operation) as renew:
+        takeover = client.post(f"/api/sessions/{session.id}/guided/start", json=payload)
+
+    assert takeover.status_code == 200
+    assert takeover.json() == seeded.json()
+    assert renew.await_count == 1
+    with pytest.raises(GuidedOperationFenceLostError):
+        await service.complete_existing_state_guided_operation(
+            stale.fence,
+            state_id=uuid.UUID(seeded.json()["composition_state"]["id"]),
+            expected_current_state_id=uuid.UUID(seeded.json()["composition_state"]["id"]),
+            expected_current_state_version=seeded.json()["composition_state"]["version"],
+            actor="composer_route",
+            response_hash_factory=lambda _record: "0" * 64,
+        )
+
+
+@pytest.mark.asyncio
+async def test_guided_start_rejoins_after_fence_loss_without_polling_under_lock(tmp_path) -> None:
+    from sqlalchemy import text
+
+    from elspeth.web.sessions.protocol import GuidedOperationFenceLostError
+
+    app, service = _make_app(tmp_path, database_url=f"sqlite:///{tmp_path / 'fence-loss.db'}")
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    original_renew = service.renew_guided_operation
+    renew_calls = 0
+
+    async def lose_first_fence(fence, *, actor, lease_seconds):
+        nonlocal renew_calls
+        renew_calls += 1
+        if renew_calls == 1:
+            with service._engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "UPDATE guided_operations SET lease_expires_at = :expired "
+                        "WHERE session_id = :session_id AND operation_id = :operation_id"
+                    ),
+                    {
+                        "expired": datetime.now(UTC) - timedelta(seconds=1),
+                        "session_id": str(fence.session_id),
+                        "operation_id": fence.operation_id,
+                    },
+                )
+            raise GuidedOperationFenceLostError(fence)
+        return await original_renew(fence, actor=actor, lease_seconds=lease_seconds)
+
+    with patch.object(service, "renew_guided_operation", side_effect=lose_first_fence):
+        response = client.post(
+            f"/api/sessions/{session.id}/guided/start",
+            json={"profile": "tutorial", "operation_id": str(uuid.uuid4())},
+        )
+
+    assert response.status_code == 200
+    assert renew_calls == 2
+    with service._engine.connect() as conn:
+        attempt = conn.execute(
+            text("SELECT attempt FROM guided_operations WHERE session_id = :session_id AND kind = 'guided_start'"),
+            {"session_id": str(session.id)},
+        ).scalar_one()
+    assert attempt == 2
+
+
+@pytest.mark.asyncio
 async def test_guided_start_unowned_session_404(tmp_path) -> None:
     app, _service = _make_app(tmp_path, user_id="alice")
     client = TestClient(app)
     resp = client.post(
         f"/api/sessions/{uuid.uuid4()}/guided/start",
-        json={"profile": "tutorial"},
+        json={"profile": "tutorial", "operation_id": str(uuid.uuid4())},
     )
     assert resp.status_code == 404
 
@@ -343,7 +803,10 @@ async def test_guided_respond_stale_step_index_409(tmp_path) -> None:
     app, service = _make_app(tmp_path)
     client = TestClient(app)
     session = await service.create_session("alice", "T", "local")
-    client.post(f"/api/sessions/{session.id}/guided/start", json={"profile": "tutorial"})
+    client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": "tutorial", "operation_id": str(uuid.uuid4())},
+    )
     client.get(f"/api/sessions/{session.id}/guided")
 
     resp = client.post(
@@ -359,7 +822,10 @@ async def test_guided_respond_unknown_step_index_400(tmp_path) -> None:
     app, service = _make_app(tmp_path)
     client = TestClient(app)
     session = await service.create_session("alice", "T", "local")
-    client.post(f"/api/sessions/{session.id}/guided/start", json={"profile": "tutorial"})
+    client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": "tutorial", "operation_id": str(uuid.uuid4())},
+    )
     client.get(f"/api/sessions/{session.id}/guided")
 
     resp = client.post(
@@ -376,7 +842,10 @@ async def test_guided_respond_success_preserves_tutorial_profile(tmp_path) -> No
     app, service = _make_app(tmp_path)
     client = TestClient(app)
     session = await service.create_session("alice", "T", "local")
-    client.post(f"/api/sessions/{session.id}/guided/start", json={"profile": "tutorial"})
+    client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": "tutorial", "operation_id": str(uuid.uuid4())},
+    )
     client.get(f"/api/sessions/{session.id}/guided")
 
     resp = client.post(

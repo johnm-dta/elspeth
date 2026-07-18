@@ -9,6 +9,8 @@ on the plugin default ``allowed_hosts="public_only"``).
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
@@ -19,7 +21,10 @@ def _create_session(client: TestClient) -> str:
 
 
 def _start(client: TestClient, session_id: str, profile: str) -> None:
-    resp = client.post(f"/api/sessions/{session_id}/guided/start", json={"profile": profile})
+    resp = client.post(
+        f"/api/sessions/{session_id}/guided/start",
+        json={"profile": profile, "operation_id": str(uuid4())},
+    )
     assert resp.status_code == 200, resp.text
 
 

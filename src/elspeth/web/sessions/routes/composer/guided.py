@@ -1064,31 +1064,7 @@ async def post_guided_start(
     request: Request,
     user: UserIdentity = Depends(get_current_user),  # noqa: B008
 ) -> GetGuidedResponse:
-    """Seed a guided session with a server-owned WorkflowProfile.
-
-    The client supplies a closed-enum ``profile`` discriminator
-    (``WorkflowProfileKind``); the SERVER maps it to the concrete profile
-    object and persists the resulting GuidedSession, so a client cannot
-    inject an arbitrary profile or weaken the advisor gate (D13/§4.3).
-
-    **Idempotent (D16):** a second start for a session that ALREADY has a
-    persisted GuidedSession returns the existing session unchanged — it
-    never re-initialises or double-creates.
-    GET /api/sessions/{session_id}/guided then reads the
-    persisted ``GuidedSession.profile``; the lazy no-arg GET default path
-    stays for live guided (empty profile).
-
-    Decision D: ``start`` persists the SERVER-owned profile only (the behavior
-    flags) and does not fabricate any source/topology into the CompositionState;
-    the concrete pipeline is built downstream by the guided wizard + web-scrape
-    recipe match.
-
-    Raises 404 if the session does not exist or belong to the requester.
-    Raises 409 if the session already has a freeform composition state with
-    no GuidedSession; this route does not convert or discard freeform state.
-    Raises 400 if ``profile`` is not a recognised WorkflowProfileKind or if
-    a client sends anything other than a short discriminator string.
-    """
+    """Seed or replay one profile-owned guided session under operation custody."""
     await _verify_session_ownership(session_id, user, request)
     service: SessionServiceProtocol = request.app.state.session_service
     catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
@@ -1111,153 +1087,215 @@ async def post_guided_start(
             status_code=400,
             detail=(f"Unknown profile discriminator. Valid values: {sorted(k.value for k in WorkflowProfileKind)}."),
         ) from exc
-    # Map the validated kind to its SERVER-owned profile constant via the closed
-    # mapper (profile.py): a future third kind raises InvariantError here instead
-    # of silently mapping to EMPTY.
     profile = profile_for_kind(profile_kind)
 
-    compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
-    async with compose_lock:
-        # Idempotency (D16): if a guided session is already persisted, return
-        # it UNCHANGED — never re-init (a second start must not clobber the
-        # learner's in-progress wizard or re-seed a fresh profile).
-        existing_record = await service.get_current_state(session_id)
-        if existing_record is not None:
-            existing_state = _state_from_record(existing_record)
-            if existing_state.guided_session is not None:
-                guided = existing_state.guided_session
-                terminal = guided.terminal
-                return GetGuidedResponse(
-                    guided_session=GuidedSessionResponse(
-                        step=guided.step.value,
-                        history=[
-                            TurnRecordResponse(
-                                step=r.step.value,
-                                turn_type=r.turn_type.value,
-                                payload_hash=r.payload_hash,
-                                response_hash=r.response_hash,
-                                summary=r.summary,
-                                emitter=r.emitter,
-                            )
-                            for r in guided.history
-                        ],
-                        terminal=TerminalStateResponse(
-                            kind=terminal.kind.value,
-                            reason=terminal.reason.value if terminal.reason is not None else None,
-                            pipeline_yaml=terminal.pipeline_yaml,
-                        )
-                        if terminal is not None
-                        else None,
-                        chat_history=[
-                            ChatTurnResponse(
-                                role=t.role.value,
-                                content=t.content,
-                                seq=t.seq,
-                                step=t.step.value,
-                                ts_iso=t.ts_iso,
-                                assistant_message_kind=t.assistant_message_kind,
-                                synthetic_failure_reason=t.synthetic_failure_reason,
-                            )
-                            for t in guided.chat_history
-                        ],
-                        chat_turn_seq=guided.chat_turn_seq,
-                        profile=_workflow_profile_response(guided),
-                    ),
-                    # next_turn=None is safe HERE (unlike post_guided_convert's
-                    # idempotency branch, elspeth-e2c3dba6b5 review P2): the start
-                    # response is always followed by a GET /guided that rebuilds
-                    # the live turn, whereas convert feeds the store directly via
-                    # enterGuided. If start ever stops being GET-followed, this
-                    # needs the same non-terminal rebuild convert now does.
-                    next_turn=None,
-                    terminal=TerminalStateResponse(
-                        kind=terminal.kind.value,
-                        reason=terminal.reason.value if terminal.reason is not None else None,
-                        pipeline_yaml=terminal.pipeline_yaml,
-                    )
-                    if terminal is not None
-                    else None,
-                    composition_state=_state_response(existing_record, policy_catalog=catalog),
-                )
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Cannot start guided on a session that already has existing "
-                    "freeform composition state. Create a new session or fork before "
-                    "starting the tutorial profile."
-                ),
+    from elspeth.contracts.errors import AuditIntegrityError
+    from elspeth.web.sessions.protocol import (
+        GuidedCompositionStateResult,
+        GuidedOperationFailureCode,
+        GuidedOperationFenceLostError,
+    )
+
+    from ..guided_operations import (
+        GuidedOperationLease,
+        guided_response_hash,
+        raise_guided_operation_failure,
+        reserve_or_replay_guided_operation,
+    )
+
+    def _response_from_record(record: CompositionStateRecord) -> GetGuidedResponse:
+        state = _state_from_record(record)
+        guided = state.guided_session
+        if guided is None:
+            raise AuditIntegrityError("Guided start result state has no guided checkpoint")
+        terminal = guided.terminal
+        turn = None if terminal is not None else _build_get_guided_turn(state, guided, catalog=catalog)
+        terminal_response = (
+            TerminalStateResponse(
+                kind=terminal.kind.value,
+                reason=terminal.reason.value if terminal.reason is not None else None,
+                pipeline_yaml=terminal.pipeline_yaml,
             )
-
-        # No persisted guided session yet: attach the server-owned profile to a
-        # fresh guided state and PERSIST it (so GET /api/sessions/{session_id}/guided
-        # reads the profile back). Decision D: this attaches the profile only — it
-        # does not fabricate any source/topology into the CompositionState; the
-        # concrete pipeline is wizard/recipe-built downstream. For the live profile
-        # this is the existing empty guided state.
-        new_state = _initial_composition_state_with_guided_session(profile=profile)
-        seeded_guided = new_state.guided_session
-        if seeded_guided is None:  # pragma: no cover — helper always attaches a guided session
-            raise InvariantError("post_guided_start: initial state has no guided_session")
-        turn = _build_get_guided_turn(new_state, seeded_guided, catalog=catalog)
-
-        new_composer_meta = {"guided_session": seeded_guided.to_dict()}
-        state_d = new_state.to_dict()
-        persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)
-        state_data = CompositionStateData(
-            sources=state_d["sources"],
-            nodes=state_d["nodes"],
-            edges=state_d["edges"],
-            outputs=state_d["outputs"],
-            metadata_=state_d["metadata"],
-            is_valid=persisted_is_valid,
-            validation_errors=persisted_errors,
-            composer_meta=new_composer_meta,
+            if terminal is not None
+            else None
         )
-        state_record_out = await service.save_composition_state(
-            session_id,
-            state_data,
-            # Start endpoint seeds the canonical guided session for a profile;
-            # ``session_seed`` is the closest existing provenance category for
-            # a fresh server-authored seed state (the closed enum has no
-            # guided-specific value — see merge commit message).
-            provenance="session_seed",
-        )
-
-        shield_available = _resolve_shield_available(plugin_snapshot)
         return GetGuidedResponse(
             guided_session=GuidedSessionResponse(
-                step=seeded_guided.step.value,
+                step=guided.step.value,
                 history=[
                     TurnRecordResponse(
-                        step=r.step.value,
-                        turn_type=r.turn_type.value,
-                        payload_hash=r.payload_hash,
-                        response_hash=r.response_hash,
-                        summary=r.summary,
-                        emitter=r.emitter,
+                        step=turn_record.step.value,
+                        turn_type=turn_record.turn_type.value,
+                        payload_hash=turn_record.payload_hash,
+                        response_hash=turn_record.response_hash,
+                        summary=turn_record.summary,
+                        emitter=turn_record.emitter,
                     )
-                    for r in seeded_guided.history
+                    for turn_record in guided.history
                 ],
-                terminal=None,
+                terminal=terminal_response,
                 chat_history=[
                     ChatTurnResponse(
-                        role=t.role.value,
-                        content=t.content,
-                        seq=t.seq,
-                        step=t.step.value,
-                        ts_iso=t.ts_iso,
-                        assistant_message_kind=t.assistant_message_kind,
-                        synthetic_failure_reason=t.synthetic_failure_reason,
+                        role=chat_turn.role.value,
+                        content=chat_turn.content,
+                        seq=chat_turn.seq,
+                        step=chat_turn.step.value,
+                        ts_iso=chat_turn.ts_iso,
+                        assistant_message_kind=chat_turn.assistant_message_kind,
+                        synthetic_failure_reason=chat_turn.synthetic_failure_reason,
                     )
-                    for t in seeded_guided.chat_history
+                    for chat_turn in guided.chat_history
                 ],
-                chat_turn_seq=seeded_guided.chat_turn_seq,
-                profile=_workflow_profile_response(seeded_guided),
+                chat_turn_seq=guided.chat_turn_seq,
+                profile=_workflow_profile_response(guided),
             ),
-            next_turn=_turn_payload_response(turn, shield_available=shield_available),
-            terminal=None,
-            composition_state=_state_response(state_record_out, policy_catalog=catalog),
+            next_turn=_turn_payload_response(
+                turn,
+                shield_available=_resolve_shield_available(plugin_snapshot),
+            ),
+            terminal=terminal_response,
+            composition_state=_state_response(record, policy_catalog=catalog),
         )
+
+    async def _replay(result: object) -> GetGuidedResponse:
+        if type(result) is not GuidedCompositionStateResult:
+            raise AuditIntegrityError("Guided start replay has a non-state result locator")
+        replay_record = await service.get_state_in_session(result.state_id, session_id)
+        return _response_from_record(replay_record)
+
+    # Existing operations are immutable protocol facts. Resolve them before
+    # classifying the mutable current head so a committed retry still replays
+    # its located result after later session work changes modes.
+    pending = await reserve_or_replay_guided_operation(
+        service=service,
+        session_id=session_id,
+        kind="guided_start",
+        request=body,
+        replay=_replay,
+        reserve_if_absent=False,
+    )
+    if pending is not None and not isinstance(pending, GuidedOperationLease):
+        return pending
+
+    compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
+    # Classify the exact head before allocating an operation row. Invalid
+    # freeform starts remain ordinary 409s and leave no retry artefact behind.
+    async with compose_lock:
+        observed_record = await service.get_current_state(session_id)
+        if observed_record is not None:
+            observed_state = _state_from_record(observed_record)
+            if observed_state.guided_session is None and pending is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Cannot start guided on a session that already has existing "
+                        "freeform composition state. Create a new session or fork before "
+                        "starting the tutorial profile."
+                    ),
+                )
+            observed_head: tuple[UUID, int] | None = (observed_record.id, observed_record.version)
+        else:
+            observed_head = None
+
+    while True:
+        if pending is None:
+            reserved = await reserve_or_replay_guided_operation(
+                service=service,
+                session_id=session_id,
+                kind="guided_start",
+                request=body,
+                replay=_replay,
+            )
+        else:
+            reserved = pending
+            pending = None
+        if reserved is None:  # pragma: no cover - reserve_if_absent defaults true
+            raise AuditIntegrityError("Guided start operation was not reserved")
+        if not isinstance(reserved, GuidedOperationLease):
+            return reserved
+
+        try:
+            async with compose_lock:
+                # Waiting for the compose lock may consume most of a lease.
+                # Renewal under the lock establishes fresh write authority
+                # before the exact head is inspected or settled.
+                renewed_fence = await service.renew_guided_operation(
+                    reserved.fence,
+                    actor="composer_route",
+                    lease_seconds=300,
+                )
+                current_record = await service.get_current_state(session_id)
+                if current_record is not None:
+                    current_state = _state_from_record(current_record)
+                    if current_state.guided_session is None:
+                        raise AuditIntegrityError("Guided start head is freeform after reservation")
+                    # A distinct start may have won after both requests
+                    # preflighted an empty head. Settle the exact current guided
+                    # checkpoint as an idempotent no-op; the service CAS prevents
+                    # it from blessing a stale head.
+                    settled_record = await service.complete_existing_state_guided_operation(
+                        renewed_fence,
+                        state_id=current_record.id,
+                        expected_current_state_id=current_record.id,
+                        expected_current_state_version=current_record.version,
+                        actor="composer_route",
+                        response_hash_factory=lambda record: guided_response_hash(_response_from_record(record)),
+                    )
+                    return _response_from_record(settled_record)
+
+                if observed_head is not None:
+                    raise AuditIntegrityError("Guided start head disappeared after preflight")
+
+                new_state = _initial_composition_state_with_guided_session(profile=profile)
+                seeded_guided = new_state.guided_session
+                if seeded_guided is None:  # pragma: no cover - helper contract
+                    raise InvariantError("post_guided_start: initial state has no guided_session")
+                state_d = new_state.to_dict()
+                persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state, catalog=catalog)
+                state_data = CompositionStateData(
+                    sources=state_d["sources"],
+                    nodes=state_d["nodes"],
+                    edges=state_d["edges"],
+                    outputs=state_d["outputs"],
+                    metadata_=state_d["metadata"],
+                    is_valid=persisted_is_valid,
+                    validation_errors=persisted_errors,
+                    composer_meta={"guided_session": seeded_guided.to_dict()},
+                )
+                seeded_record = await service.save_state_for_guided_operation(
+                    renewed_fence,
+                    expected_current_state_id=None,
+                    expected_current_state_version=None,
+                    state=state_data,
+                    provenance="session_seed",
+                    actor="composer_route",
+                    response_hash_factory=lambda record: guided_response_hash(_response_from_record(record)),
+                )
+                return _response_from_record(seeded_record)
+        except GuidedOperationFenceLostError:
+            # Never poll while holding the compose lock. Rejoin outside it;
+            # reserve either observes the winner or performs the sole takeover.
+            continue
+        except Exception as exc:
+            failure_code: GuidedOperationFailureCode = "integrity_error" if isinstance(exc, AuditIntegrityError) else "operation_failed"
+            if isinstance(exc, AuditIntegrityError):
+                slog.error(
+                    "guided.operation_terminal_failure",
+                    session_id=str(session_id),
+                    user_id=user.user_id,
+                    exc_class=type(exc).__name__,
+                    site="post_guided_start",
+                    frames=_safe_frame_strings(exc),
+                )
+            try:
+                failed = await service.fail_guided_operation(
+                    reserved.fence,
+                    failure_code=failure_code,
+                    actor="composer_route",
+                )
+            except GuidedOperationFenceLostError:
+                continue
+            raise_guided_operation_failure(failed)
 
 
 @router.post("/{session_id}/guided/respond", response_model=GuidedRespondResponse)

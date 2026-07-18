@@ -24,6 +24,7 @@ _OPERATION_ID = "00000000-0000-4000-8000-000000000001"
 @pytest.mark.parametrize(
     ("model_type", "payload"),
     [
+        (StartGuidedRequest, {"profile": "live"}),
         (ConvertGuidedRequest, {}),
         (ReenterGuidedRequest, {}),
         (RevertStateRequest, {"state_id": str(uuid4())}),
@@ -36,7 +37,7 @@ def test_mutating_composer_requests_require_operation_id(model_type, payload) ->
 
 @pytest.mark.parametrize(
     "model_type",
-    [ConvertGuidedRequest, ReenterGuidedRequest, RevertStateRequest],
+    [StartGuidedRequest, ConvertGuidedRequest, ReenterGuidedRequest, RevertStateRequest],
 )
 def test_mutating_composer_requests_are_strict_and_extra_forbid(model_type) -> None:
     assert model_type.model_config.get("strict") is True
@@ -46,7 +47,6 @@ def test_mutating_composer_requests_are_strict_and_extra_forbid(model_type) -> N
 @pytest.mark.parametrize(
     ("model_type", "payload"),
     [
-        (StartGuidedRequest, {"profile": "live"}),
         (GuidedRespondRequest, {"chosen": ["csv"]}),
         (GuidedChatRequest, {"message": "Use CSV", "step_index": "step_1_source"}),
         (ForkSessionRequest, {"from_message_id": str(uuid4()), "new_message_content": "Try this"}),
@@ -59,9 +59,10 @@ def test_pending_handlers_do_not_expose_unenforced_operation_id(model_type, payl
     assert type(request).model_config.get("strict") is not True
 
 
-def test_operation_id_must_be_a_canonical_uuid() -> None:
+@pytest.mark.parametrize("model_type", [StartGuidedRequest, ReenterGuidedRequest])
+def test_operation_id_must_be_a_canonical_uuid(model_type) -> None:
     with pytest.raises(ValidationError, match="canonical UUID"):
-        ReenterGuidedRequest.model_validate({"operation_id": "z" * 36})
+        model_type.model_validate({"operation_id": "z" * 36})
 
 
 def test_operation_hash_ignores_retry_id_but_binds_kind_and_session() -> None:

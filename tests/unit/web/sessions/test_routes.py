@@ -3098,7 +3098,7 @@ class TestIDORProtection:
         # valid body, the ownership check returns 404 for the non-owner.
         resp = bob_client.post(
             f"/api/sessions/{session_id}/guided/start",
-            json={"profile": "live"},
+            json={"profile": "live", "operation_id": str(uuid.uuid4())},
         )
         assert resp.status_code == 404
 

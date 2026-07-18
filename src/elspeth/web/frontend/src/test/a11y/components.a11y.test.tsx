@@ -962,7 +962,10 @@ describe("TutorialGuidedShell", () => {
       new Promise<never>(() => {}),
     );
     const { container } = render(
-      <TutorialGuidedShell sessionId="sess-a11y" onCompleted={() => {}} />,
+      <TutorialGuidedShell
+        sessionId="00000000-0000-4000-8000-000000000999"
+        onCompleted={() => {}}
+      />,
     );
     screen.getByText(/Preparing the tutorial's sample pages/);
     expect(await axe(container)).toHaveNoViolations();

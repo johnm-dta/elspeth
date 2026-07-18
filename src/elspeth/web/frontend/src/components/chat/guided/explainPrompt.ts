@@ -8,7 +8,7 @@
  * locked prompt box leaves learners no way to ask "why?".
  *
  * ChatPanel's tutorialStepBuilt check EXCLUDES turns with exactly this
- * content: on confirm-only tutorial steps (recipe/wire) an Explain send must
+ * content: on the confirm-only tutorial wire step an Explain send must
  * not read as "the step's prompt was sent" and prematurely swap the locked
  * box for the Sent line. Exact string identity is the filter — change the
  * copy here and nowhere else.

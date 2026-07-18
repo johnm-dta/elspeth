@@ -1233,24 +1233,6 @@ describe("ChatPanel mode discriminator", () => {
     );
   });
 
-  it("renders the per-step placeholder for STEP_2_5_RECIPE_MATCH", () => {
-    useSessionStore.setState({
-      activeSessionId: "session-guided",
-      sessions: [guidedSessionFixture],
-      messages: [],
-      // The placeholder keys on guidedSession.step (not the turn type), so
-      // singleSelectTurn() is fine regardless of step (verified ChatPanel.tsx:1375).
-      guidedSession: { ...activeGuidedSession(), step: "step_2_5_recipe_match" },
-      guidedNextTurn: singleSelectTurn(),
-    });
-
-    render(<ChatPanel />);
-
-    expect(screen.getByTestId("chat-input").dataset.placeholder).toBe(
-      "Describe how this recipe should change, or accept it as proposed…",
-    );
-  });
-
   it("renders the per-step placeholder for STEP_3_TRANSFORMS", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
@@ -2517,9 +2499,9 @@ assistant_message_kind: "synthetic_failure",
   });
 
   it("tutorial: keeps the retry chat box (not the 'Sent' line) when a Send-driven step was sent but produced no forward affordance", () => {
-    // Regression: a transient chain-solve failure at step_3 appends a user turn
-    // but returns next_turn=null. The 'Sent' line must NOT replace the box, or
-    // the passive learner is stranded with no widget and no exit.
+    // Regression: a transient step-3 chat failure appends a user turn but
+    // returns next_turn=null. The 'Sent' line must NOT replace the box, or the
+    // passive learner is stranded with no widget and no exit.
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -2936,70 +2918,6 @@ assistant_message_kind: "synthetic_failure",
     ).toBeNull();
   });
 
-  // C-4b (composer first-principles review 2026-07-04): "Switch to guided"
-  // must not silently no-op on a permanently-terminal guided session.
-  it("disables 'Switch to guided' with an explanation when guided ended via solver_exhausted", () => {
-    const terminal: TerminalState = {
-      kind: "exited_to_freeform",
-      reason: "solver_exhausted",
-      pipeline_yaml: null,
-    };
-
-    useSessionStore.setState({
-      activeSessionId: "session-guided",
-      sessions: [guidedSessionFixture],
-      messages: [],
-      guidedSession: {
-        step: "step_1_source",
-        history: [],
-        terminal,
-        chat_history: [],
-        chat_turn_seq: 0,
-        profile: null,
-      },
-      guidedNextTurn: null,
-      guidedTerminal: terminal,
-    });
-
-    render(<ChatPanel />);
-
-    const button = screen.getByRole("button", { name: "Switch to guided" });
-    expect(button).toBeDisabled();
-    expect(
-      screen.getByText(
-        "Guided ended for this session — start a new session to use guided.",
-      ),
-    ).toBeInTheDocument();
-  });
-
-  it("disables 'Switch to guided' with an explanation when guided ended via protocol_violation", () => {
-    const terminal: TerminalState = {
-      kind: "exited_to_freeform",
-      reason: "protocol_violation",
-      pipeline_yaml: null,
-    };
-
-    useSessionStore.setState({
-      activeSessionId: "session-guided",
-      sessions: [guidedSessionFixture],
-      messages: [],
-      guidedSession: {
-        step: "step_1_source",
-        history: [],
-        terminal,
-        chat_history: [],
-        chat_turn_seq: 0,
-        profile: null,
-      },
-      guidedNextTurn: null,
-      guidedTerminal: terminal,
-    });
-
-    render(<ChatPanel />);
-
-    expect(screen.getByRole("button", { name: "Switch to guided" })).toBeDisabled();
-  });
-
   it("keeps 'Switch to guided' enabled (reenterable) when the terminal reason is user_pressed_exit", () => {
     // Reversible operator exit — POST /guided/reenter still honours it
     // (routes/composer/guided.py post_guided_reenter). Disabling here would
@@ -3411,7 +3329,7 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
     // The composer now docks at the BOTTOM for every session (tutorial
     // included). A same-step `/guided/chat` Send replaces the turn with a
     // different TYPE without advancing the step (single_select → schema_form at
-    // step 1; null → propose_chain at step 3). The just-built decision lands
+    // step 1; null at a server-owned later stage). The just-built decision lands
     // ABOVE the box the user Sent from, so the focus effect must re-fire on the
     // type change and bring it into view — otherwise the passive learner is left
     // looking at the docked box with the decision off-screen above it. This is

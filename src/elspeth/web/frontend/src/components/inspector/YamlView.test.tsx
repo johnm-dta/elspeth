@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { YamlView } from "./YamlView";
 import { useSessionStore } from "@/stores/sessionStore";
 import type { CompositionProposal } from "@/types/api";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 vi.mock("@/api/client", () => ({
   fetchYaml: vi.fn(),
@@ -12,6 +13,7 @@ vi.mock("@/api/client", () => ({
 function makeState(version = 1) {
   return {
     id: "state-1",
+    ...compositionStateAuthorityFields,
     version,
     sources: { source: { plugin: "text", options: { content: "hello" } } },
     nodes: [],

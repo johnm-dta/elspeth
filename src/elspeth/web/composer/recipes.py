@@ -653,8 +653,8 @@ def _build_web_scrape_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
     (elspeth-abb2cb0931); the existing medium-severity prompt-shield advisory
     is left to fire from validate() — the recipe MUST NOT suppress it.
     """
-    # Function-level imports: recipes.py is imported by recipe_match.py and the
-    # tools plane; hoisting these to module scope risks a circular import.
+    # Function-level imports keep the recipe builder's dependency boundary
+    # narrow and avoid circular imports with the tools plane.
     from elspeth.contracts.composer_interpretation import InterpretationKind
     from elspeth.web.composer.tools._common import _pending_interpretation_requirement
     from elspeth.web.interpretation_state import (

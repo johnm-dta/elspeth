@@ -22,60 +22,7 @@ function field(overrides: Partial<KnobField> & Pick<KnobField, "name" | "kind">)
   };
 }
 
-function recipeDecisionPayload(
-  fields: KnobField[],
-  prefilled: Record<string, unknown> = {},
-): SchemaFormPayload {
-  return {
-    mode: "recipe_decision",
-    knobs: { fields },
-    prefilled,
-    recipe_context: {
-      recipe_name: "web-scrape-llm-rate-jsonl",
-      description: "Scrape URLs, rate with an LLM, write JSONL.",
-      alternatives: ["build_manually"],
-    },
-  };
-}
-
 describe("SchemaFormTurn", () => {
-  it("renders an enabled Apply recipe and submits the prefilled slots when knobs are empty", async () => {
-    // The passive tutorial web-scrape offer prefills ALL required slots, so the
-    // emitted offer has knobs.fields == []. Pin that the recipe_decision widget
-    // still renders a usable, enabled "Apply recipe" and resubmits the prefilled
-    // slots verbatim (the accept-seam binding check requires every prefilled
-    // slot be echoed) — the state the passive learner hits at STEP_2.5.
-    const user = userEvent.setup();
-    const onSubmit = vi.fn();
-    const prefilled = {
-      source_blob_id: "blob-123",
-      source_plugin: "json",
-      output_path: "outputs/ratings.jsonl",
-      model: "anthropic/claude-sonnet-4.6",
-      api_key_secret: "OPENROUTER_API_KEY",
-      abuse_contact: "noreply@demo.com",
-      scraping_reason: "demo",
-    };
-    render(
-      <SchemaFormTurn
-        payload={recipeDecisionPayload([], prefilled)}
-        onSubmit={onSubmit}
-      />,
-    );
-    const button = screen.getByRole("button", { name: "Apply recipe" });
-    expect(button).toBeEnabled();
-    await user.click(button);
-    expect(onSubmit).toHaveBeenCalledWith(
-      expect.objectContaining({
-        chosen: ["accept"],
-        edited_values: {
-          recipe_name: "web-scrape-llm-rate-jsonl",
-          slots: prefilled,
-        },
-      }),
-    );
-  });
-
   it.each([
     ["text", "textbox"],
     ["number-int", "spinbutton"],
@@ -289,76 +236,6 @@ describe("SchemaFormTurn", () => {
         }),
       }),
     );
-  });
-
-  it("renders recipe context and submits recipe slot decisions", async () => {
-    const user = userEvent.setup();
-    const onSubmit = vi.fn();
-    render(
-      <SchemaFormTurn
-        payload={{
-          mode: "recipe_decision",
-          knobs: {
-            fields: [field({ name: "threshold", label: "Threshold", kind: "number-float", required: true })],
-          },
-          prefilled: { source_blob_id: "blob-1" },
-          recipe_context: {
-            recipe_name: "split-by-score",
-            description: "Split rows by score",
-            alternatives: ["build_manually"],
-          },
-        }}
-        onSubmit={onSubmit}
-      />,
-    );
-
-    expect(screen.getByRole("heading", { level: 3, name: "split-by-score" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Edit" }));
-    // `Threshold` is required, so its accessible name now carries the
-    // "(required)" cue — match on the base label.
-    await user.type(screen.getByRole("spinbutton", { name: /Threshold/ }), "0.9");
-    await user.click(screen.getByRole("button", { name: "Apply recipe" }));
-
-    expect(onSubmit).toHaveBeenCalledWith(
-      expect.objectContaining({
-        chosen: ["accept"],
-        edited_values: {
-          recipe_name: "split-by-score",
-          slots: { source_blob_id: "blob-1", threshold: 0.9 },
-        },
-      }),
-    );
-  });
-
-  it("submits build_manually for recipe alternatives", async () => {
-    const user = userEvent.setup();
-    const onSubmit = vi.fn();
-    render(
-      <SchemaFormTurn
-        payload={{
-          mode: "recipe_decision",
-          knobs: { fields: [] },
-          prefilled: {},
-          recipe_context: {
-            recipe_name: "split-by-score",
-            description: "Split rows by score",
-            alternatives: ["build_manually"],
-          },
-        }}
-        onSubmit={onSubmit}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: "Build manually" }));
-
-    expect(onSubmit).toHaveBeenCalledWith({
-      chosen: ["build_manually"],
-      edited_values: null,
-      custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
-      control_signal: null,
-    });
   });
 
   // M14 (WCAG 3.3.1 / 3.3.2): required fields must announce themselves

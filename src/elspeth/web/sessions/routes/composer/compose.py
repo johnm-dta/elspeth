@@ -59,6 +59,7 @@ from .._helpers import (
     get_rate_limiter,
     merge_composer_meta_updates,
     slog,
+    validation_errors_for_composer_surface,
 )
 from .pipeline_settlement import settle_pipeline_proposal_under_compose_lock
 
@@ -545,7 +546,11 @@ async def recompose(
                     outputs=_transition_state_d["outputs"],
                     metadata_=_transition_state_d["metadata"],
                     is_valid=False,
-                    validation_errors=None,
+                    validation_errors=validation_errors_for_composer_surface(
+                        composer_meta=_post_compose_meta,
+                        is_valid=False,
+                        validation_errors=None,
+                    ),
                     composer_meta=_post_compose_meta,
                 )
                 _transition_record = await service.save_composition_state(

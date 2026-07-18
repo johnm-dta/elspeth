@@ -74,14 +74,14 @@ def _fake_resolve_sink_response(args: dict) -> SimpleNamespace:
 
 _JSON_SINK_ARGS = {
     "resolution": "sink",
-    "outputs": [
-        {
-            "plugin": "json",
-            "options": {"path": "out.jsonl", "schema": {"mode": "observed"}},
-            "required_fields": [],
-            "schema_mode": "observed",
-        }
-    ],
+    "output": {
+        "name": "results",
+        "plugin": "json",
+        "options": {"path": "out.jsonl", "schema": {"mode": "observed"}},
+        "required_fields": [],
+        "schema_mode": "observed",
+        "on_write_failure": "discard",
+    },
     "assistant_message": "I set the output to a JSON Lines file.",
 }
 
@@ -101,6 +101,7 @@ async def test_sink_driver_resolves_json_output() -> None:
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
     sink = outcome.sink
     assert sink is not None
@@ -133,6 +134,7 @@ async def test_sink_driver_captures_prose_reply_on_decline() -> None:
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
     assert outcome.sink is None
     assert outcome.assistant_message == "A sink writes rows out."
@@ -167,6 +169,7 @@ async def test_sink_driver_returns_both_none_on_hallucinated_tool_call() -> None
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
     assert outcome.sink is None
     assert outcome.assistant_message is None
@@ -210,6 +213,7 @@ async def test_sink_driver_rejects_scaffold_leak_in_declined_prose() -> None:
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
 
 
@@ -243,6 +247,7 @@ async def test_sink_driver_revise_threads_current_sink() -> None:
             current_sink=current,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
     system_prompt = captured["messages"][0]["content"]
     assert '"plugin": "json"' in system_prompt
@@ -281,6 +286,7 @@ async def test_sink_wrapper_carries_declined_prose_as_prose_chat() -> None:
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
     assert isinstance(result, Step2SinkChatResult)
     assert result.sink_resolution is None
@@ -320,6 +326,7 @@ async def test_sink_wrapper_threads_progress_sink_to_driver() -> None:
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
             progress=_progress_sink,
         )
     assert captured_kwargs["progress"] is _progress_sink
@@ -343,6 +350,7 @@ async def test_sink_wrapper_absorbs_transient_into_synthetic_unavailable() -> No
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
     assert isinstance(result, Step2SinkChatResult)
     assert result.sink_resolution is None
@@ -355,12 +363,10 @@ async def test_sink_wrapper_absorbs_transient_into_synthetic_unavailable() -> No
 async def test_sink_wrapper_classifies_strict_snapshot_failure_as_malformed_and_auto_drops() -> None:
     malformed_args = {
         **_JSON_SINK_ARGS,
-        "outputs": [
-            {
-                **_JSON_SINK_ARGS["outputs"][0],
-                "options": {"bad": float("nan")},
-            }
-        ],
+        "output": {
+            **_JSON_SINK_ARGS["output"],
+            "options": {"bad": float("nan")},
+        },
     }
 
     async def _return_malformed_sink_response(**_kwargs: object) -> SimpleNamespace:
@@ -380,6 +386,7 @@ async def test_sink_wrapper_classifies_strict_snapshot_failure_as_malformed_and_
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
             recorder=recorder,
         )
 
@@ -393,11 +400,11 @@ async def test_sink_wrapper_classifies_strict_snapshot_failure_as_malformed_and_
 @pytest.mark.asyncio
 async def test_sink_wrapper_absorbs_malformed_discovery_args_into_synthetic_unavailable() -> None:
     """A malformed discovery call (non-object arguments) raises
-    ``ChainSolverResponseShapeError`` deep in the sink discovery loop; the
+    ``GuidedSolverResponseShapeError`` deep in the sink discovery loop; the
     wrapper must absorb it into the synthetic-unavailable fallback — exactly
-    like ``solve_chain``'s auto-drop path — not let it escape as a 500.
+    like ``guided solver``'s auto-drop path — not let it escape as a 500.
 
-    Regression for the sink/chain asymmetry: ``solve_chain`` lists the class in
+    Regression for the sink/chain asymmetry: ``guided solver`` lists the class in
     its transient set but the sink twin did not, so a model that emitted an
     *allowed* discovery tool with garbage arguments crashed the request.
     """
@@ -409,7 +416,7 @@ async def test_sink_wrapper_absorbs_malformed_discovery_args_into_synthetic_unav
     state = CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1)
     # ``list_sinks`` is an allowed discovery tool, but its arguments decode to a
     # non-object, so the production ``_execute_discovery_call`` raises
-    # ``ChainSolverResponseShapeError`` when the loop dispatches it.
+    # ``GuidedSolverResponseShapeError`` when the loop dispatches it.
     malformed = SimpleNamespace(
         choices=[
             SimpleNamespace(
@@ -442,6 +449,7 @@ async def test_sink_wrapper_absorbs_malformed_discovery_args_into_synthetic_unav
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
             state=state,
             catalog=catalog,
             plugin_snapshot=plugin_snapshot,
@@ -449,5 +457,5 @@ async def test_sink_wrapper_absorbs_malformed_discovery_args_into_synthetic_unav
     assert isinstance(result, Step2SinkChatResult)
     assert result.sink_resolution is None
     assert result.fallback_chat is not None
-    assert result.fallback_chat.error_class == "ChainSolverResponseShapeError"
+    assert result.fallback_chat.error_class == "GuidedSolverResponseShapeError"
     assert result.fallback_chat.status == ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE

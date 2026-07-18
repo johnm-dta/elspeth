@@ -550,7 +550,7 @@ def test_completed_and_exited_states_round_trip(terminal: TerminalState) -> None
 
 def test_terminal_state_cross_field_rules_are_enforced() -> None:
     with pytest.raises((InvariantError, ValueError)):
-        TerminalState(kind=TerminalKind.COMPLETED, reason=TerminalReason.SOLVER_EXHAUSTED, pipeline_yaml="pipeline: {}\n")
+        TerminalState(kind=TerminalKind.COMPLETED, reason=TerminalReason.USER_PRESSED_EXIT, pipeline_yaml="pipeline: {}\n")
     with pytest.raises((InvariantError, ValueError)):
         TerminalState(kind=TerminalKind.EXITED_TO_FREEFORM, reason=None, pipeline_yaml=None)
     with pytest.raises((InvariantError, ValueError)):

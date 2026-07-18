@@ -16,7 +16,8 @@ Verifies the end-to-end contract of the per-step chat endpoint:
 HTTP transport: SyncASGITestClient (in-process, synchronous — same
 pattern as the other guided integration tests). Patch target convention:
 ``elspeth.web.composer.guided.chat_solver._litellm_acompletion`` —
-mirrors the chain-solver test convention (see test_auto_drop.py).
+patch the symbol where ``chat_solver`` resolves it rather than patching the
+provider library globally.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import UUID, uuid4
@@ -31,7 +33,6 @@ from uuid import UUID, uuid4
 import pytest
 
 from elspeth.web.composer.guided.state_machine import TerminalReason, TerminalState
-from tests.integration.web.composer.guided.test_step_3_e2e import _outputs_path
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 # ---------------------------------------------------------------------------
@@ -65,6 +66,13 @@ def _create_session(client: TestClient) -> str:
     resp = client.post("/api/sessions", json={"title": "step-chat-test"})
     assert resp.status_code == 201, resp.json()
     return resp.json()["id"]
+
+
+def _outputs_path(client: TestClient, filename: str) -> str:
+    data_dir: Path = client.app.state.settings.data_dir
+    outputs_dir = data_dir / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    return str(outputs_dir / filename)
 
 
 def _seed_guided_session(client: TestClient, session_id: str) -> dict:
@@ -979,8 +987,7 @@ class TestStepChatTransientFailure:
         """TimeoutError from the LLM seam → 200 with the synthetic unavailable message.
 
         The session must NOT be terminated — chat is a non-load-bearing
-        helper, unlike the chain solver's auto-drop which marks the
-        session ``solver_exhausted``.
+        helper, so the session remains active for a later retry.
         """
         session_id = _create_session(composer_test_client)
         _seed_persisted_step1(composer_test_client, session_id)
@@ -1849,19 +1856,19 @@ class TestStepChatProgressWiring:
                                     arguments=json.dumps(
                                         {
                                             "resolution": "sink",
-                                            "outputs": [
-                                                {
-                                                    "plugin": "json",
-                                                    "options": {
-                                                        "path": out_path,
-                                                        "schema": {"mode": "observed"},
-                                                        "mode": "write",
-                                                        "collision_policy": "auto_increment",
-                                                    },
-                                                    "required_fields": [],
-                                                    "schema_mode": "observed",
-                                                }
-                                            ],
+                                            "output": {
+                                                "name": "main",
+                                                "plugin": "json",
+                                                "options": {
+                                                    "path": out_path,
+                                                    "schema": {"mode": "observed"},
+                                                    "mode": "write",
+                                                    "collision_policy": "auto_increment",
+                                                },
+                                                "required_fields": [],
+                                                "schema_mode": "observed",
+                                                "on_write_failure": "discard",
+                                            },
                                             "assistant_message": "Output set to JSON.",
                                         }
                                     ),

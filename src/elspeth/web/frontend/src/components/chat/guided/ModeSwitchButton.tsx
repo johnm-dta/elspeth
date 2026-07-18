@@ -23,16 +23,7 @@ import { useSessionStore } from "@/stores/sessionStore";
 interface ModeSwitchButtonProps {
   target: "guided" | "freeform";
   hasWork: boolean;
-  /**
-   * C-4b (composer first-principles review 2026-07-04): set when the
-   * session's guided state is permanently terminal (exited_to_freeform with
-   * reason solver_exhausted or protocol_violation — NOT user_pressed_exit,
-   * which the backend's POST /guided/reenter still honours). Renders the
-   * button disabled with this plain-language explanation instead of the
-   * normal switch/confirm flow — clicking must never silently no-op (the
-   * old behaviour: the client re-fetched guided state, saw the same
-   * terminal, and stayed in freeform with zero feedback).
-   */
+  /** Optional caller-owned explanation for a disabled mode transition. */
   disabledReason?: string;
 }
 

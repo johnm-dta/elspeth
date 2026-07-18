@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { useSessionStore } from "./sessionStore";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { resetStore } from "@/test/store-helpers";
-import type { GuidedSession, TurnPayload, TerminalState, GetGuidedResponse, GuidedRespondRequest, GuidedRespondResponse, GuidedChatResponse } from "@/types/guided";
+import type { GuidedSession, TurnPayload, TerminalState, GetGuidedResponse, GuidedRespondAction, GuidedRespondResponse, GuidedChatResponse } from "@/types/guided";
 
 // Mock the API client — store tests verify state logic, not HTTP calls.
 // Must include all exports used by sessionStore (not just guided ones).
@@ -69,7 +69,14 @@ const sampleNextTurn: TurnPayload = {
   type: "single_select",
   step_index: 0,
   turn_token: "a".repeat(64),
-  payload: { options: ["csv", "jsonl"] },
+  payload: {
+    question: "Choose a source",
+    options: [
+      { id: "csv", label: "CSV", hint: null },
+      { id: "jsonl", label: "JSONL", hint: null },
+    ],
+    allow_custom: false,
+  },
 };
 
 const sampleTerminal: TerminalState = {
@@ -80,12 +87,21 @@ const sampleTerminal: TerminalState = {
 
 const sampleCompositionState = {
   id: "state-1",
+  session_id: "00000000-0000-4000-8000-000000000101",
   version: 1,
   nodes: [],
   edges: [],
   sources: {},
   outputs: [],
   metadata: { name: null, description: null },
+  is_valid: true,
+  validation_errors: null,
+  validation_warnings: null,
+  validation_suggestions: null,
+  derived_from_state_id: null,
+  created_at: "2026-07-19T00:00:00Z",
+  composer_meta: null,
+  plugin_policy_findings: [],
 };
 
 const RETRY_SESSION_ID = "00000000-0000-4000-8000-000000000101";
@@ -100,7 +116,12 @@ const sampleGetGuidedResponse: GetGuidedResponse = {
 
 const sampleRespondResponse: GuidedRespondResponse = {
   guided_session: { ...sampleGuidedSession, step: "step_2_sink" },
-  next_turn: { type: "single_select", step_index: 1, turn_token: "b".repeat(64), payload: {} },
+  next_turn: {
+    type: "single_select",
+    step_index: 1,
+    turn_token: "b".repeat(64),
+    payload: { question: "Choose a sink", options: [], allow_custom: false },
+  },
   terminal: null,
   composition_state: { ...sampleCompositionState, version: 2 },
 };
@@ -145,7 +166,12 @@ const sampleTransitioningChatResponse: GuidedChatResponse = {
     type: "schema_form",
     step_index: 0,
     turn_token: "b".repeat(64),
-    payload: { plugin: "csv", prefilled: { schema: { mode: "observed" } } },
+    payload: {
+      mode: "plugin_options",
+      plugin: "csv",
+      knobs: { fields: [] },
+      prefilled: { schema: { mode: "observed" } },
+    },
   },
   terminal: null,
   composition_state: {
@@ -202,9 +228,13 @@ describe("sessionStore — guided-mode fields and actions", () => {
     // assertions below would fail.  Real callers (createSession, selectSession,
     // forkFromMessage) always set activeSessionId synchronously before firing
     // startGuided, so this invariant holds in production.
-    useSessionStore.setState({ activeSessionId: "sess-1" });
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+    });
 
-    await useSessionStore.getState().startGuided("sess-1");
+    await useSessionStore.getState().startGuided(RETRY_SESSION_ID);
 
     const state = useSessionStore.getState();
     expect(state.guidedSession).toEqual(sampleGetGuidedResponse.guided_session);
@@ -340,14 +370,19 @@ describe("sessionStore — guided-mode fields and actions", () => {
     );
 
     // Pre-seed active session
-    useSessionStore.setState({ activeSessionId: "sess-1" });
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+    });
 
     await useSessionStore.getState().respondGuided({
       chosen: ["csv"],
       edited_values: null,
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: null,
     });
 
@@ -358,6 +393,157 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(state.compositionState).toEqual(
       sampleRespondResponse.composition_state,
     );
+  });
+
+  it("respondGuided: reuses one operation id for an ambiguous retry of the exact action and turn", async () => {
+    const { respondGuided } = await import("@/api/client");
+    const respondMock = respondGuided as ReturnType<typeof vi.fn>;
+    respondMock
+      .mockRejectedValueOnce({ status: 503, detail: "upstream unavailable" })
+      .mockResolvedValueOnce(sampleRespondResponse);
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+    });
+    const action: GuidedRespondAction = {
+      chosen: ["csv"],
+      edited_values: null,
+      custom_inputs: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
+      control_signal: null,
+    };
+
+    await useSessionStore.getState().respondGuided(action);
+    await useSessionStore.getState().respondGuided(action);
+
+    const firstRequest = respondMock.mock.calls[0]?.[1];
+    const retryRequest = respondMock.mock.calls[1]?.[1];
+    expect(respondMock).toHaveBeenCalledTimes(2);
+    expect(retryRequest.operation_id).toBe(firstRequest.operation_id);
+    expect(retryRequest.turn_token).toBe(firstRequest.turn_token);
+    expect(retryRequest.turn_token).toBe(sampleNextTurn.turn_token);
+  });
+
+  it("respondGuided: leaves the old turn intact and replayable when interpretation refresh fails", async () => {
+    const { respondGuided } = await import("@/api/client");
+    const respondMock = respondGuided as ReturnType<typeof vi.fn>;
+    respondMock
+      .mockResolvedValueOnce(sampleRespondResponse)
+      .mockResolvedValueOnce(sampleRespondResponse);
+    const refreshAll = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("interpretation refresh interrupted"))
+      .mockResolvedValueOnce(undefined);
+    vi.spyOn(useInterpretationEventsStore, "getState").mockReturnValue({
+      ...useInterpretationEventsStore.getState(),
+      refreshAll,
+    });
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+      guidedTerminal: null,
+      compositionState: sampleCompositionState,
+    });
+    const action: GuidedRespondAction = {
+      chosen: ["csv"],
+      edited_values: null,
+      custom_inputs: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
+      control_signal: null,
+    };
+
+    await useSessionStore.getState().respondGuided(action);
+
+    const failedState = useSessionStore.getState();
+    expect(failedState.guidedSession).toEqual(sampleGuidedSession);
+    expect(failedState.guidedNextTurn).toEqual(sampleNextTurn);
+    expect(failedState.guidedTerminal).toBeNull();
+    expect(failedState.compositionState).toEqual(sampleCompositionState);
+    expect(failedState.guidedResponsePending).toBe(false);
+
+    await useSessionStore.getState().respondGuided(action);
+
+    const firstRequest = respondMock.mock.calls[0]?.[1];
+    const retryRequest = respondMock.mock.calls[1]?.[1];
+    expect(refreshAll).toHaveBeenCalledTimes(2);
+    expect(retryRequest.operation_id).toBe(firstRequest.operation_id);
+    expect(retryRequest.turn_token).toBe(firstRequest.turn_token);
+    expect(useSessionStore.getState().guidedNextTurn).toEqual(sampleRespondResponse.next_turn);
+  });
+
+  it("respondGuided: resyncs a proposal-binding 409 without replaying the rejected action", async () => {
+    const { getGuided, respondGuided } = await import("@/api/client");
+    const respondMock = respondGuided as ReturnType<typeof vi.fn>;
+    const getMock = getGuided as ReturnType<typeof vi.fn>;
+    const detail = "proposal_id and draft_hash do not identify the active guided proposal";
+    respondMock.mockRejectedValueOnce({ status: 409, detail });
+    getMock.mockResolvedValueOnce({
+      ...sampleGetGuidedResponse,
+      next_turn: { ...sampleNextTurn, turn_token: "c".repeat(64) },
+    });
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+    });
+    const action: GuidedRespondAction = {
+      chosen: ["accept"],
+      edited_values: null,
+      custom_inputs: null,
+      proposal_id: "00000000-0000-4000-8000-000000000501",
+      draft_hash: "d".repeat(64),
+      edit_target: null,
+      control_signal: null,
+    };
+
+    await useSessionStore.getState().respondGuided(action);
+
+    expect(respondMock).toHaveBeenCalledTimes(1);
+    expect(getMock).toHaveBeenCalledWith(RETRY_SESSION_ID);
+    expect(useSessionStore.getState().guidedNextTurn?.turn_token).toBe("c".repeat(64));
+    expect(useSessionStore.getState().error).toBe(detail);
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it("respondGuided: does not publish proposal resync when interpretation refresh fails", async () => {
+    const { getGuided, respondGuided } = await import("@/api/client");
+    const detail = "proposal_id and draft_hash do not identify the active guided proposal";
+    (respondGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce({ status: 409, detail });
+    (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ...sampleGetGuidedResponse,
+      next_turn: { ...sampleNextTurn, turn_token: "c".repeat(64) },
+    });
+    const refreshAll = vi.fn().mockRejectedValueOnce(new Error("review refresh failed"));
+    useInterpretationEventsStore.setState({ refreshAll } as never);
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+      compositionState: sampleCompositionState,
+    });
+
+    await useSessionStore.getState().respondGuided({
+      chosen: ["accept"],
+      edited_values: null,
+      custom_inputs: null,
+      proposal_id: "00000000-0000-4000-8000-000000000501",
+      draft_hash: "d".repeat(64),
+      edit_target: null,
+      control_signal: null,
+    });
+
+    const state = useSessionStore.getState();
+    expect(refreshAll).toHaveBeenCalledWith(RETRY_SESSION_ID);
+    expect(state.guidedNextTurn).toEqual(sampleNextTurn);
+    expect(state.compositionState).toEqual(sampleCompositionState);
+    expect(state.error).toBe(detail);
+    expect(state.guidedResponsePending).toBe(false);
   });
 
   // ── Test 4b: respondGuided refreshes the interpretation-event store (B1/D12) ─
@@ -379,18 +565,23 @@ describe("sessionStore — guided-mode fields and actions", () => {
       refreshAll,
     });
     // Pre-seed the active session (same as the happy-path test above).
-    useSessionStore.setState({ activeSessionId: "sess-1" });
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+    });
 
     await useSessionStore.getState().respondGuided({
       chosen: ["csv"],
       edited_values: null,
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: null,
     });
 
-    expect(refreshAll).toHaveBeenCalledWith("sess-1");
+    expect(refreshAll).toHaveBeenCalledWith(RETRY_SESSION_ID);
     expect(useSessionStore.getState().guidedResponsePending).toBe(false);
   });
 
@@ -410,18 +601,23 @@ describe("sessionStore — guided-mode fields and actions", () => {
       ...useInterpretationEventsStore.getState(),
       refreshAll,
     });
-    useSessionStore.setState({ activeSessionId: "sess-1" });
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+    });
 
     const promise = useSessionStore.getState().respondGuided({
       chosen: ["csv"],
       edited_values: null,
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: null,
     });
 
-    await vi.waitFor(() => expect(refreshAll).toHaveBeenCalledWith("sess-1"));
+    await vi.waitFor(() => expect(refreshAll).toHaveBeenCalledWith(RETRY_SESSION_ID));
     expect(useSessionStore.getState().guidedResponsePending).toBe(true);
     releaseRefresh();
     await promise;
@@ -434,11 +630,12 @@ describe("sessionStore — guided-mode fields and actions", () => {
     // activeSessionId is null from resetStore
     await expect(
       useSessionStore.getState().respondGuided({
-        chosen: null,
+        chosen: ["csv"],
         edited_values: null,
         custom_inputs: null,
-        accepted_step_index: null,
-        edit_step_index: null,
+        proposal_id: null,
+        draft_hash: null,
+        edit_target: null,
         control_signal: null,
       }),
     ).rejects.toThrow("respondGuided called without active session");
@@ -452,11 +649,15 @@ describe("sessionStore — guided-mode fields and actions", () => {
       sampleRespondResponse,
     );
 
-    useSessionStore.setState({ activeSessionId: "sess-1" });
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+    });
     await useSessionStore.getState().exitToFreeform();
 
     expect(respondGuided).toHaveBeenCalledWith(
-      "sess-1",
+      RETRY_SESSION_ID,
       expect.objectContaining({ control_signal: "exit_to_freeform" }),
     );
   });
@@ -855,7 +1056,6 @@ describe("sessionStore — guided-mode fields and actions", () => {
   // stayed in freeform with zero feedback) instead of actually re-entering.
   // sampleExitedGuidedSession's terminal.reason IS "user_pressed_exit" — the
   // one reason POST /guided/reenter honours (routes/composer/guided.py's
-  // post_guided_reenter guard rejects solver_exhausted/protocol_violation
   // with a 409). This test pins the full round-trip: enterGuided() reaches
   // reenterGuided(), and the resulting state is a RESUMED, non-terminal
   // guided session — not just "the right API got called".
@@ -1084,7 +1284,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
     );
 
     useSessionStore.setState({
-      activeSessionId: "sess-A",
+      activeSessionId: RETRY_SESSION_ID,
       guidedSession: sampleGuidedSession,
       guidedNextTurn: sampleNextTurn,
       guidedTerminal: null,
@@ -1094,7 +1294,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
     const startPromise = useSessionStore.getState().startGuided("sess-A");
 
     useSessionStore.setState({
-      activeSessionId: "sess-B",
+      activeSessionId: RETRY_SESSION_B,
       guidedSession: null,
       guidedNextTurn: null,
       guidedTerminal: null,
@@ -1129,7 +1329,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
 
     // Pre-seed: sess-A has existing guided state before the respond call.
     useSessionStore.setState({
-      activeSessionId: "sess-A",
+      activeSessionId: RETRY_SESSION_ID,
       guidedSession: sampleGuidedSession,
       guidedNextTurn: sampleNextTurn,
       guidedTerminal: null,
@@ -1139,14 +1339,15 @@ describe("sessionStore — guided-mode fields and actions", () => {
       chosen: ["csv"],
       edited_values: null,
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: null,
     });
 
     // Simulate a session switch before the response arrives.
     useSessionStore.setState({
-      activeSessionId: "sess-B",
+      activeSessionId: RETRY_SESSION_B,
       guidedSession: null,
       guidedNextTurn: null,
       guidedTerminal: null,
@@ -1177,7 +1378,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
     );
 
     useSessionStore.setState({
-      activeSessionId: "sess-A",
+      activeSessionId: RETRY_SESSION_ID,
       guidedSession: sampleGuidedSession,
       guidedNextTurn: sampleNextTurn,
       guidedTerminal: null,
@@ -1188,13 +1389,14 @@ describe("sessionStore — guided-mode fields and actions", () => {
       chosen: ["csv"],
       edited_values: null,
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: null,
     });
 
     useSessionStore.setState({
-      activeSessionId: "sess-B",
+      activeSessionId: RETRY_SESSION_B,
       guidedSession: null,
       guidedNextTurn: null,
       guidedTerminal: null,
@@ -1777,7 +1979,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
 
   describe("respondGuided rejection surfacing (elspeth-3b35abf148 variant 3)", () => {
     it("surfaces a structured wire_confirm_rejected 409 as error + errorDetails", async () => {
-      const { respondGuided } = await import("@/api/client");
+      const { getGuided, respondGuided } = await import("@/api/client");
       (respondGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce({
         status: 409,
         detail:
@@ -1788,17 +1990,20 @@ describe("sessionStore — guided-mode fields and actions", () => {
           { component: "node:rater", message: "Missing input.", severity: "high" },
         ],
       });
+      (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sampleGetGuidedResponse);
       useSessionStore.setState({
-        activeSessionId: "sess-1",
+        activeSessionId: RETRY_SESSION_ID,
         guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
       });
 
       await useSessionStore.getState().respondGuided({
         chosen: ["confirm"],
         edited_values: null,
         custom_inputs: null,
-        accepted_step_index: null,
-        edit_step_index: null,
+        proposal_id: null,
+        draft_hash: null,
+        edit_target: null,
         control_signal: null,
       });
 
@@ -1808,6 +2013,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
         "pipeline: No sinks configured.",
         "node:rater: Missing input.",
       ]);
+      expect(getGuided).not.toHaveBeenCalled();
       expect(state.guidedResponsePending).toBe(false);
     });
 
@@ -1817,16 +2023,18 @@ describe("sessionStore — guided-mode fields and actions", () => {
         new Error("network down"),
       );
       useSessionStore.setState({
-        activeSessionId: "sess-1",
+        activeSessionId: RETRY_SESSION_ID,
         guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
       });
 
       await useSessionStore.getState().respondGuided({
         chosen: ["confirm"],
         edited_values: null,
         custom_inputs: null,
-        accepted_step_index: null,
-        edit_step_index: null,
+        proposal_id: null,
+        draft_hash: null,
+        edit_target: null,
         control_signal: null,
       });
 
@@ -1857,16 +2065,18 @@ describe("sessionStore — guided-mode fields and actions", () => {
         sampleGetGuidedResponse,
       );
       useSessionStore.setState({
-        activeSessionId: "sess-1",
+        activeSessionId: RETRY_SESSION_ID,
         guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
       });
 
       await useSessionStore.getState().respondGuided({
         chosen: ["csv"],
         edited_values: null,
         custom_inputs: null,
-        accepted_step_index: null,
-        edit_step_index: null,
+        proposal_id: null,
+        draft_hash: null,
+        edit_target: null,
         control_signal: null,
       });
 
@@ -1891,16 +2101,18 @@ describe("sessionStore — guided-mode fields and actions", () => {
         new Error("network down"),
       );
       useSessionStore.setState({
-        activeSessionId: "sess-1",
+        activeSessionId: RETRY_SESSION_ID,
         guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
       });
 
       await useSessionStore.getState().respondGuided({
         chosen: ["csv"],
         edited_values: null,
         custom_inputs: null,
-        accepted_step_index: null,
-        edit_step_index: null,
+        proposal_id: null,
+        draft_hash: null,
+        edit_target: null,
         control_signal: null,
       });
 
@@ -1922,16 +2134,18 @@ describe("sessionStore — guided-mode fields and actions", () => {
         sampleGetGuidedResponse,
       );
       useSessionStore.setState({
-        activeSessionId: "sess-1",
+        activeSessionId: RETRY_SESSION_ID,
         guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
       });
 
-      const body: GuidedRespondRequest = {
+      const body: GuidedRespondAction = {
         chosen: ["csv"],
         edited_values: null,
         custom_inputs: null,
-        accepted_step_index: null,
-        edit_step_index: null,
+        proposal_id: null,
+        draft_hash: null,
+        edit_target: null,
         control_signal: null,
       };
 
@@ -1961,16 +2175,18 @@ describe("sessionStore — guided-mode fields and actions", () => {
         .mockResolvedValueOnce(sampleGetGuidedResponse)
         .mockResolvedValueOnce(sampleGetGuidedResponse);
       useSessionStore.setState({
-        activeSessionId: "sess-1",
+        activeSessionId: RETRY_SESSION_ID,
         guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
       });
 
-      const body: GuidedRespondRequest = {
+      const body: GuidedRespondAction = {
         chosen: ["csv"],
         edited_values: null,
         custom_inputs: null,
-        accepted_step_index: null,
-        edit_step_index: null,
+        proposal_id: null,
+        draft_hash: null,
+        edit_target: null,
         control_signal: null,
       };
 
@@ -1998,12 +2214,13 @@ describe("sessionStore — guided-mode fields and actions", () => {
         guidedNextTurn: sampleNextTurn,
       });
 
-      const body: GuidedRespondRequest = {
+      const body: GuidedRespondAction = {
         chosen: ["csv"],
         edited_values: null,
         custom_inputs: null,
-        accepted_step_index: null,
-        edit_step_index: null,
+        proposal_id: null,
+        draft_hash: null,
+        edit_target: null,
         control_signal: null,
       };
 

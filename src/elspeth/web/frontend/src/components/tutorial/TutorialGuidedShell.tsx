@@ -1,13 +1,18 @@
 import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import {
+  getGuided,
   getTutorialSample,
   respondGuided,
 } from "@/api/client";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import {
-  EXIT_TO_FREEFORM_REQUEST,
+  EXIT_TO_FREEFORM_ACTION,
   useSessionStore,
 } from "@/stores/sessionStore";
+import {
+  acquireGuidedRetry,
+  clearGuidedRetriesForSession,
+} from "@/stores/guidedOperationRetry";
 import type { GuidedStep } from "@/types/guided";
 import {
   TUTORIAL_SINK_PROMPT,
@@ -22,7 +27,7 @@ import {
  * URLs in its constant — the LLM cannot guess the runtime-served addresses, so
  * the resolved synthetic URLs (fetched per-session from the 8a GET surface) are
  * appended to the source prompt only (the sink/transforms phases don't need
- * them). Recipe and Wire are confirm-only (no chat prompt).
+ * them). Wire is confirm-only (no chat prompt).
  */
 function buildLockedPrompts(
   sampleUrls: string[],
@@ -49,7 +54,7 @@ interface TutorialGuidedShellProps {
   onExited?: (sessionId: string) => void;
   /**
    * The persisted resume session no longer exists server-side (404 from the
-   * start chain). Without this the shell dead-ends on a "Session not found"
+   * startup sequence). Without this the shell dead-ends on a "Session not found"
    * error with NO forward affordance — the tutorial suppresses skip/exit, so
    * the learner is stranded on an empty page. The parent resets to a fresh
    * Welcome and clears the stale resume fields.
@@ -64,7 +69,7 @@ interface TutorialGuidedShellProps {
   exitRequestedRef?: MutableRefObject<boolean>;
 }
 
-/** The start chain 404s when the persisted resume session was swept/archived. */
+/** Startup 404s when the persisted resume session was swept or archived. */
 function isSessionMissingError(err: unknown): boolean {
   return (
     typeof err === "object" &&
@@ -294,6 +299,7 @@ async function exitStartedGuidedSession(sessionId: string): Promise<void> {
     current.activeSessionId === sessionId &&
     current.guidedSession?.terminal?.kind === "exited_to_freeform"
   ) {
+    clearGuidedRetriesForSession("guided_respond", sessionId);
     return;
   }
   if (current.activeSessionId === sessionId && current.guidedSession !== null) {
@@ -309,6 +315,35 @@ async function exitStartedGuidedSession(sessionId: string): Promise<void> {
   // applyGuidedResponse in sessionStore.ts), so the interpretation-event
   // refresh and turn_not_emitted self-heal bookkeeping stay in lockstep with
   // the store instead of forking into a separately-maintained copy.
-  const response = await respondGuided(sessionId, EXIT_TO_FREEFORM_REQUEST);
-  await useSessionStore.getState().applyGuidedResponse(sessionId, response);
+  const guided = await getGuided(sessionId);
+  if (guided.terminal?.kind === "exited_to_freeform") {
+    const applied = await useSessionStore
+      .getState()
+      .applyGuidedResponse(sessionId, guided);
+    if (!applied) {
+      throw new Error("Cannot apply the authoritative guided tutorial exit to an inactive session");
+    }
+    clearGuidedRetriesForSession("guided_respond", sessionId);
+    return;
+  }
+  const turnToken = guided.terminal === null ? guided.next_turn?.turn_token : null;
+  if (guided.terminal === null && turnToken === undefined) {
+    throw new Error("Cannot exit guided tutorial without a current turn token");
+  }
+  const retry = acquireGuidedRetry("guided_respond", sessionId, [
+    turnToken ?? "terminal",
+    EXIT_TO_FREEFORM_ACTION,
+  ]);
+  const response = await respondGuided(sessionId, {
+    ...EXIT_TO_FREEFORM_ACTION,
+    operation_id: retry.operationId,
+    turn_token: turnToken ?? null,
+  });
+  const applied = await useSessionStore
+    .getState()
+    .applyGuidedResponse(sessionId, response);
+  if (!applied) {
+    throw new Error("Cannot apply the authoritative guided tutorial exit to an inactive session");
+  }
+  clearGuidedRetriesForSession("guided_respond", sessionId);
 }

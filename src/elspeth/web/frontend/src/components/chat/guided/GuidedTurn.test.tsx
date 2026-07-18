@@ -18,8 +18,7 @@
 //   inspect_and_confirm   -- "Looks right" button (inspect-view action)
 //   multi_select_with_custom -- payload.question text (legend text)
 //   schema_form           -- "Continue" button (submit action, present when canSubmit)
-//   propose_chain         -- "Accept proposal" button
-//   recipe_offer          -- SchemaFormTurn recipe-decision renderer
+//   propose_pipeline      -- deterministic unsupported error until Task 4
 //   confirm_wiring        -- WireStageTurn review heading + "Confirm wiring" button
 // ============================================================================
 
@@ -34,7 +33,6 @@ import type {
   InspectAndConfirmPayload,
   MultiSelectWithCustomPayload,
   SchemaFormPayload,
-  ProposeChainPayload,
   WireStageData,
 } from "@/types/guided";
 
@@ -81,29 +79,6 @@ const SCHEMA_FORM_PAYLOAD: SchemaFormPayload = {
     ],
   },
   prefilled: { path: "/data/file.csv" },
-};
-
-const PROPOSE_CHAIN_PAYLOAD: ProposeChainPayload = {
-  steps: [
-    {
-      plugin: "llm_classify",
-      options: {},
-      rationale: "Classifies rows using an LLM.",
-    },
-  ],
-  why: "This chain addresses the stated classification goal.",
-  blockers: [],
-};
-
-const RECIPE_OFFER_PAYLOAD: SchemaFormPayload = {
-  mode: "recipe_decision",
-  knobs: { fields: [] },
-  prefilled: {},
-  recipe_context: {
-    recipe_name: "csv_to_json",
-    description: "Convert CSV rows to JSON.",
-    alternatives: ["build_manually"],
-  },
 };
 
 const WIRE_STAGE_PAYLOAD: WireStageData = {
@@ -202,19 +177,15 @@ function makeTurn(
   payload: SchemaFormPayload,
 ): TurnPayload;
 function makeTurn(
-  type: "propose_chain",
-  payload: ProposeChainPayload,
-): TurnPayload;
-function makeTurn(
-  type: "recipe_offer",
-  payload: SchemaFormPayload,
+  type: "propose_pipeline",
+  payload: Record<string, never>,
 ): TurnPayload;
 function makeTurn(
   type: "confirm_wiring",
   payload: WireStageData,
 ): TurnPayload;
 function makeTurn(type: TurnPayload["type"], payload: unknown): TurnPayload {
-  return { type, step_index: 0, turn_token: "a".repeat(64), payload };
+  return { type, step_index: 0, turn_token: "a".repeat(64), payload } as TurnPayload;
 }
 
 // ── Suite 1: Turn-type routing correctness ───────────────────────────────────
@@ -285,27 +256,15 @@ describe("GuidedTurn dispatcher — routing", () => {
     expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
   });
 
-  it("propose_chain: renders ProposeChainTurn ('Accept all steps' button)", () => {
-    render(
-      <GuidedTurn
-        turn={makeTurn("propose_chain", PROPOSE_CHAIN_PAYLOAD)}
-        onSubmit={vi.fn()}
-      />,
-    );
-    expect(
-      screen.getByRole("button", { name: "Accept all steps" }),
-    ).toBeTruthy();
-  });
-
-  it("recipe_offer: renders SchemaFormTurn recipe decision", () => {
-    render(
-      <GuidedTurn
-        turn={makeTurn("recipe_offer", RECIPE_OFFER_PAYLOAD)}
-        onSubmit={vi.fn()}
-      />,
-    );
-    expect(screen.getByRole("heading", { level: 3, name: "csv_to_json" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Apply recipe" })).toBeTruthy();
+  it("propose_pipeline: fails closed until the durable renderer lands", () => {
+    expect(() =>
+      render(
+        <GuidedTurn
+          turn={makeTurn("propose_pipeline", {})}
+          onSubmit={vi.fn()}
+        />,
+      ),
+    ).toThrow(/durable proposal routing/);
   });
 
   it("confirm_wiring: renders WireStageTurn UI", () => {
@@ -365,8 +324,9 @@ describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
       chosen: ["confirm"],
       edited_values: null,
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: null,
     });
   });
@@ -395,8 +355,9 @@ describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
       chosen: null,
       edited_values: null,
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: "request_advisor",
     });
   });
@@ -423,8 +384,9 @@ describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
       chosen: null,
       edited_values: null,
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: "exit_to_freeform",
     });
   });
@@ -457,8 +419,9 @@ describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
       chosen: ["complete_without_signoff"],
       edited_values: null,
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: null,
     });
   });

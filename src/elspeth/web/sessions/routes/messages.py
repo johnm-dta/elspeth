@@ -70,6 +70,7 @@ from ._helpers import (
     maybe_auto_title_session,
     merge_composer_meta_updates,
     slog,
+    validation_errors_for_composer_surface,
 )
 from .composer.pipeline_settlement import settle_pipeline_proposal_under_compose_lock
 
@@ -750,7 +751,11 @@ def register_message_routes(router: APIRouter) -> None:
                         outputs=_transition_state_d["outputs"],
                         metadata_=_transition_state_d["metadata"],
                         is_valid=False,
-                        validation_errors=None,
+                        validation_errors=validation_errors_for_composer_surface(
+                            composer_meta=_post_compose_meta,
+                            is_valid=False,
+                            validation_errors=None,
+                        ),
                         composer_meta=_post_compose_meta,
                     )
                     _transition_record = await service.save_composition_state(
@@ -830,7 +835,7 @@ def register_message_routes(router: APIRouter) -> None:
                 return response
             except InvariantError as exc:
                 # Same B1-sanitization rationale as the /guided/respond
-                # step_advance and dispatch handlers: server-invariant
+                # transition and settlement handlers: server-invariant
                 # violations route through a static 500 detail and a
                 # structured slog event so on-call dashboards can filter on
                 # ``guided.invariant_violated``.  Without this handler an

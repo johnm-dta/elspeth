@@ -7,8 +7,6 @@ export const ACKNOWLEDGEMENT_PRIMARY_ACTION_NAMES = [
 ];
 
 export const GUIDED_STAGE_PRIMARY_ACTION_NAMES = [
-  "Accept all steps",
-  "Apply recipe",
   "Confirm wiring",
   "Continue",
   "Let source decide (pass all fields through)",

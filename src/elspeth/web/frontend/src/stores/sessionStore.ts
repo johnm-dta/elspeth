@@ -18,6 +18,7 @@ import type {
   GuidedSession,
   TurnPayload,
   TerminalState,
+  GuidedRespondAction,
   GuidedRespondRequest,
   GuidedRespondResponse,
 } from "@/types/guided";
@@ -34,6 +35,7 @@ import {
   acquireGuidedRetry,
   clearAllGuidedRetries,
   clearGuidedRetry,
+  clearGuidedRetriesForSession,
   isAmbiguousGuidedRetryFailure,
 } from "./guidedOperationRetry";
 
@@ -446,14 +448,15 @@ const MAX_TURN_NOT_EMITTED_SELF_HEALS = 1;
  * active session (see applyGuidedResponse) and so must call the raw
  * api.respondGuided directly with the same body.
  */
-export const EXIT_TO_FREEFORM_REQUEST = Object.freeze({
+export const EXIT_TO_FREEFORM_ACTION = Object.freeze({
   chosen: null,
   edited_values: null,
   custom_inputs: null,
-  accepted_step_index: null,
-  edit_step_index: null,
+  proposal_id: null,
+  draft_hash: null,
+  edit_target: null,
   control_signal: "exit_to_freeform",
-} satisfies GuidedRespondRequest);
+} satisfies GuidedRespondAction);
 
 // Resetting guided-mode state landed in five places: initialState plus
 // the four navigation actions that switch session context (createSession,
@@ -751,7 +754,7 @@ interface SessionState {
     sessionId: string,
     profileKind: "live" | "tutorial",
   ) => Promise<void>;
-  respondGuided: (body: GuidedRespondRequest) => Promise<void>;
+  respondGuided: (body: GuidedRespondAction) => Promise<void>;
   /**
    * Apply a GuidedRespondResponse to the store: atomically replace the 4 wire
    * fields, await the B1/D12 interpretation-event refresh, and clear the C-3
@@ -767,7 +770,7 @@ interface SessionState {
   applyGuidedResponse: (
     sessionId: string,
     response: GuidedRespondResponse,
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   reenterGuided: () => Promise<void>;
   // Convert a freeform session into guided mode (POST /guided/convert). Unlike
   // startGuided's GET, this works for a session that has done freeform work
@@ -1998,8 +2001,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
-  async respondGuided(body: GuidedRespondRequest) {
-    const { activeSessionId } = get();
+  async respondGuided(body: GuidedRespondAction) {
+    const { activeSessionId, guidedNextTurn, guidedTerminal } = get();
     // Offensive guard — caller must not invoke this without an active session.
     // Per CLAUDE.md: "Proactively detect invalid states and throw meaningful
     // exceptions." Using ?. to silently skip would mask a programmer error.
@@ -2009,12 +2012,27 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // Capture the session identity before the await (Codex #4 stale-fetch guard).
     // Mirrors the active-session guard in loadComposerProgress.
     const requestedSessionId = activeSessionId;
+    const requestedTurnToken = guidedTerminal === null ? guidedNextTurn?.turn_token : null;
+    if (guidedTerminal === null && requestedTurnToken === undefined) {
+      throw new Error("respondGuided called without a current unanswered turn");
+    }
+    const retry = acquireGuidedRetry("guided_respond", requestedSessionId, [
+      requestedTurnToken ?? "terminal",
+      body,
+    ]);
+    const request: GuidedRespondRequest = {
+      ...body,
+      operation_id: retry.operationId,
+      turn_token: requestedTurnToken ?? null,
+    };
     // Clear any stale self-heal notice at the start of the next attempt, per
     // its documented lifecycle (the resync notice describes the PREVIOUS
     // desync, not this one).
     set({ guidedResponsePending: true, guidedSelfHealNotice: null });
+    let responseReceived = false;
     try {
-      const response = await api.respondGuided(activeSessionId, body);
+      const response = await api.respondGuided(activeSessionId, request);
+      responseReceived = true;
       // Stale-fetch guard (Codex #4): drop the response if the active session
       // changed while the request was in flight.
       if (get().activeSessionId !== requestedSessionId) {
@@ -2024,8 +2042,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // refresh + C-3 self-heal bookkeeping) via the shared helper — see
       // applyGuidedResponse below, also used by TutorialGuidedShell's
       // not-yet-active exit path.
-      await get().applyGuidedResponse(requestedSessionId, response);
+      const applied = await get().applyGuidedResponse(requestedSessionId, response);
+      if (!applied) {
+        return;
+      }
+      clearGuidedRetriesForSession("guided_respond", requestedSessionId);
     } catch (err) {
+      if (!responseReceived && !isAmbiguousGuidedRetryFailure(err)) {
+        clearGuidedRetry(retry);
+      }
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
@@ -2088,6 +2113,55 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         }
       }
 
+      // A proposal-authority conflict means the bound proposal changed before
+      // settlement (or the server now requires a binding). Discard operation
+      // custody and replace the actionable projection from GET; never replay
+      // the rejected body against whatever proposal is current now. Other
+      // 409s are actionable failures, not resync signals — notably a
+      // wire_confirm_rejected response must retain its structured validation
+      // details even when an authoritative GET would succeed.
+      const isProposalAuthorityConflict =
+        isHttpConflict(err) &&
+        (body.proposal_id !== null ||
+          apiErr.detail ===
+            "the active guided proposal requires proposal_id and draft_hash" ||
+          apiErr.detail ===
+            "proposal_id and draft_hash do not identify the active guided proposal");
+      if (isProposalAuthorityConflict) {
+        clearGuidedRetry(retry);
+        try {
+          const resynced = await api.getGuided(requestedSessionId);
+          if (get().activeSessionId !== requestedSessionId) {
+            return;
+          }
+          await useInterpretationEventsStore
+            .getState()
+            .refreshAll(requestedSessionId);
+          if (get().activeSessionId !== requestedSessionId) {
+            return;
+          }
+          set({
+            guidedSession: resynced.guided_session,
+            guidedNextTurn: resynced.next_turn,
+            guidedTerminal: resynced.terminal,
+            compositionState: resynced.composition_state,
+            error:
+              apiErr.detail ??
+              "The guided proposal changed. Review the refreshed step and try again.",
+            errorDetails: null,
+            guidedResponsePending: false,
+            guidedSelfHealNotice: null,
+          });
+          return;
+        } catch {
+          if (get().activeSessionId !== requestedSessionId) {
+            return;
+          }
+          // Preserve the original conflict as the actionable failure when the
+          // authoritative reload is itself unavailable.
+        }
+      }
+
       // Surface the backend's structured rejection when present — a wire-stage
       // confirm against an invalid pipeline returns 409 with a nested detail
       // ({code: "wire_confirm_rejected", detail, validation_errors}); showing
@@ -2123,34 +2197,30 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // for a session that is no longer active must not clobber whatever the
     // user has since switched to.
     if (get().activeSessionId !== sessionId) {
-      return;
+      return false;
     }
-    // Atomically replace all 4 wire fields — no optimistic updates (spec §7.3)
+    // B1 (spec §5/D12): backend-surfaced pending interpretation cards must be
+    // in interpretationEventsStore before the new turn is published. If this
+    // refresh fails, the old token and retry custody stay aligned so the exact
+    // action remains replayable.
+    await refreshInterpretationEventsForSession(sessionId);
+    if (get().activeSessionId !== sessionId) {
+      return false;
+    }
+    // Publish the four authoritative fields atomically only after the
+    // interpretation projection is ready.
+    turnNotEmittedSelfHealCounts.delete(sessionId);
     set({
       guidedSession: response.guided_session,
       guidedNextTurn: response.next_turn,
       guidedTerminal: response.terminal,
       compositionState: response.composition_state,
-    });
-    // B1 (spec §5/D12): backend-surfaced pending interpretation cards must be
-    // in interpretationEventsStore before guidedResponsePending clears, else
-    // the submit button can briefly re-enable before the card-block arrives.
-    // Keep guidedResponsePending true across this await so the guided turn
-    // stays disabled until the pending-card projection has refreshed.
-    await refreshInterpretationEventsForSession(sessionId);
-    if (get().activeSessionId !== sessionId) {
-      return;
-    }
-    // A successful respond clears any earlier rejection surfaced near the
-    // turn widget (e.g. a wire_confirm_rejected 409) — the mirror of
-    // reenterGuided's error:null on success.
-    turnNotEmittedSelfHealCounts.delete(sessionId);
-    set({
       guidedResponsePending: false,
       error: null,
       errorDetails: null,
       guidedSelfHealNotice: null,
     });
+    return true;
   },
 
   async reenterGuided() {
@@ -2199,14 +2269,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     //                                        whole point of this action
     //                                        (elspeth-e2c3dba6b5)
     //   * already-guided, non-terminal    => returned unchanged (idempotent)
-    //   * completed / solver-exhausted /
-    //     protocol-violation terminals    => returned unchanged, so the
-    //                                        discriminator at ChatPanel still
-    //                                        routes completed → CompletionSummary
-    //                                        and others → freeform. These are NOT
-    //                                        re-entrable by design (reenter's
-    //                                        closed-list policy), which is why
-    //                                        they take convert, not reenter.
+    //   * completed terminal              => returned unchanged, so ChatPanel
+    //                                        continues to render the completion
+    //                                        summary. It is not re-entrable.
     const { activeSessionId, guidedSession } = get();
     if (activeSessionId === null) {
       throw new Error("enterGuided called without active session");
@@ -2371,7 +2436,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   async exitToFreeform() {
     // Sugar over respondGuided — sets control_signal and nulls all choice fields.
     // All state mutation is handled by respondGuided (via applyGuidedResponse).
-    await get().respondGuided(EXIT_TO_FREEFORM_REQUEST);
+    await get().respondGuided(EXIT_TO_FREEFORM_ACTION);
   },
 
   async loadStateVersions() {

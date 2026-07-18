@@ -4,6 +4,7 @@ import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { RecoveryPanel } from "./RecoveryPanel";
 import type { CompositionState, ComposerRecoveryError } from "@/types/api";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 vi.mock("./RecoveryTranscript", () => ({
   RecoveryTranscript: () => <div>Tool transcript</div>,
@@ -12,6 +13,7 @@ vi.mock("./RecoveryTranscript", () => ({
 function makeState(version = 2): CompositionState {
   return {
     id: `state-${version}`,
+    ...compositionStateAuthorityFields,
     version,
     sources: {},
     nodes: [],

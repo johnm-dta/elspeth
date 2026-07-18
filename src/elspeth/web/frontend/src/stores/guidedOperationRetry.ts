@@ -1,5 +1,6 @@
 type GuidedRetryKind =
   | "guided_start"
+  | "guided_respond"
   | "guided_chat"
   | "guided_convert"
   | "guided_reenter"
@@ -45,6 +46,7 @@ function isDescriptor(value: unknown): value is GuidedRetryDescriptor {
   const record = value as Record<string, unknown>;
   return (
     (record.kind === "guided_start" ||
+      record.kind === "guided_respond" ||
       record.kind === "guided_chat" ||
       record.kind === "guided_convert" ||
       record.kind === "guided_reenter" ||
@@ -191,16 +193,43 @@ function requestFingerprint(value: string): string {
   return lanes.join("");
 }
 
+function canonicalIdentity(value: unknown): unknown {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("guided retry identity numbers must be finite");
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(canonicalIdentity);
+  if (typeof value === "object") {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error("guided retry identity objects must be plain records");
+    }
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+        .map(([key, item]) => [key, canonicalIdentity(item)]),
+    );
+  }
+  throw new Error("guided retry identity must be JSON-compatible");
+}
+
 export function acquireGuidedRetry(
   kind: GuidedRetryKind,
   sessionId: string,
-  requestIdentity: readonly string[],
+  requestIdentity: readonly unknown[],
 ): GuidedRetryHandle {
   if (!SESSION_UUID_PATTERN.test(sessionId)) {
     throw new Error("guided retry sessionId must be a canonical UUID");
   }
   const fingerprint = requestFingerprint(
-    JSON.stringify({ schema: "guided-operation-request-fingerprint.v1", kind, requestIdentity }),
+    JSON.stringify(canonicalIdentity({ schema: "guided-operation-request-fingerprint.v1", kind, requestIdentity })),
   );
   const descriptors = readDescriptors();
   const existing = descriptors.find(
@@ -235,6 +264,18 @@ export function clearGuidedRetry(handle: GuidedRetryHandle): void {
           descriptor.requestFingerprint === handle.requestFingerprint &&
           descriptor.operationId === handle.operationId
         ),
+    ),
+  );
+}
+
+export function clearGuidedRetriesForSession(
+  kind: GuidedRetryKind,
+  sessionId: string,
+): void {
+  writeDescriptors(
+    readDescriptors().filter(
+      (descriptor) =>
+        descriptor.kind !== kind || descriptor.sessionId !== sessionId,
     ),
   );
 }

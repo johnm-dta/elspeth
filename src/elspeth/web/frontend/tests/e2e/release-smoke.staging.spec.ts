@@ -18,7 +18,7 @@
 //     up), so a stale or shape-skewed bundle fails it.
 //
 // It makes NO LLM calls: it stops at the deterministic source review card,
-// before the recipe-offer / apply (LLM) step.
+// before the transform proposal (LLM) step.
 //
 // Wiring: `*.staging.spec.ts` is ignored by the local/CI config and run only by
 // playwright.staging.config.ts via `npm run test:e2e:staging:smoke`.

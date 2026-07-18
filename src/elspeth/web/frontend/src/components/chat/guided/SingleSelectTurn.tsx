@@ -2,9 +2,9 @@
 //
 // Template widget for the guided-mode protocol (Task 7.2).
 // Conventions established here will be replicated by Tasks 7.3-7.7:
-//   - Props: { payload: <WidgetPayload>; onSubmit: (body: GuidedRespondRequest) => void }
+//   - Props: { payload: <WidgetPayload>; onSubmit: (body: GuidedRespondAction) => void }
 //   - onSubmit is SYNC — the widget constructs the body; the store awaits the round-trip
-//   - All 6 GuidedRespondRequest fields set explicitly; unused ones = null (no omission)
+//   - Every GuidedRespondAction field is explicit; unused ones are null
 //   - <fieldset>+<legend> for chip groups; <button type="button"> (never <div onClick>)
 //   - aria-describedby only wired when hint is non-null (no dangling IDs)
 //   - DOM IDs prefixed with React 18 useId() — multiple turn instances coexist in
@@ -16,15 +16,15 @@
 //
 // SHAPE NOTE for Tasks 7.3-7.7:
 // The chip-group structure (<fieldset>+<legend>+chip-button-group) applies to
-// single_select, multi_select_with_custom, and recipe_offer. schema_form and
-// propose_chain establish their own structures — do not blindly copy this layout.
+// single_select and multi_select_with_custom. Schema-form and
+// pipeline-proposal turns establish their own structures.
 
 import { useId, useState } from "react";
-import type { GuidedRespondRequest, SingleSelectPayload } from "@/types/guided";
+import type { GuidedRespondAction, SingleSelectPayload } from "@/types/guided";
 
 interface SingleSelectTurnProps {
   payload: SingleSelectPayload;
-  onSubmit: (body: GuidedRespondRequest) => void;
+  onSubmit: (body: GuidedRespondAction) => void;
   disabled?: boolean;
   /**
    * Tutorial mode is passive — the per-stage prompt is built by pressing Send,
@@ -56,8 +56,9 @@ export function SingleSelectTurn({
       chosen: [optionId],
       edited_values: null,
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: null,
     });
   }
@@ -69,8 +70,9 @@ export function SingleSelectTurn({
       chosen: null,
       edited_values: null,
       custom_inputs: [trimmed],
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: null,
     });
   }

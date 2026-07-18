@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
@@ -21,6 +22,7 @@ from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution
 from elspeth.web.composer.guided.protocol import GuidedStep
+from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved
 from elspeth.web.composer.guided.state_machine import GuidedSession
 from elspeth.web.sessions._guided_step_chat import StepChatResult
 from elspeth.web.sessions.engine import create_session_engine
@@ -29,6 +31,7 @@ from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.sessions.routes._helpers import _initial_composition_state_with_guided_session
 from elspeth.web.sessions.routes.composer import guided as guided_route
 from elspeth.web.sessions.schema import initialize_session_schema
+from elspeth.web.sessions.schemas import GuidedChatRequest
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
@@ -77,6 +80,42 @@ def _chat_operation_count(client: TestClient, session_id: str) -> int:
                 )
             ).scalar_one()
         )
+
+
+def test_step_2_singular_sink_resolution_maps_to_the_live_transition() -> None:
+    from elspeth.web.sessions.routes.composer.guided_chat_atomic import _transition_request
+
+    body = GuidedChatRequest.model_validate(
+        {
+            "operation_id": str(uuid4()),
+            "turn_token": "a" * 64,
+            "message": "Use JSON",
+        },
+        strict=True,
+    )
+    sink = SinkResolved(
+        outputs=(
+            SinkOutputResolved(
+                name="result",
+                plugin="json",
+                options={"path": "out.jsonl"},
+                required_fields=(),
+                schema_mode="observed",
+                on_write_failure="discard",
+            ),
+        )
+    )
+
+    request = _transition_request(
+        body=body,
+        guided=SimpleNamespace(step=GuidedStep.STEP_2_SINK),
+        current_turn={"type": "single_select", "step_index": 1, "payload": {}},
+        source_resolution=None,
+        sink_resolution=sink,
+    )
+
+    assert request is not None
+    assert request.chosen == ["json"]
 
 
 def _choose_source(client: TestClient, session_id: str, turn: dict, plugin: str = "csv") -> dict:

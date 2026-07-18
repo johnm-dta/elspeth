@@ -18,7 +18,7 @@ Serialisation:
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, TypedDict, TypeVar, cast
 from uuid import UUID
@@ -27,7 +27,7 @@ from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.profile import EMPTY_PROFILE, WorkflowProfile
-from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, Turn, TurnResponse, TurnType
+from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, GuidedStep, TurnType
 from elspeth.web.composer.guided.resolved import (
     GUIDED_JSON_MAX_ITEMS,
     GuidedJsonBudget,
@@ -253,8 +253,6 @@ class TerminalKind(StrEnum):
 
 class TerminalReason(StrEnum):
     USER_PRESSED_EXIT = "user_pressed_exit"
-    PROTOCOL_VIOLATION = "protocol_violation"
-    SOLVER_EXHAUSTED = "solver_exhausted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,7 +261,7 @@ class TerminalState:
 
     `reason` is None when `kind == COMPLETED`; required when
     `kind == EXITED_TO_FREEFORM`. `pipeline_yaml` is set only on COMPLETED.
-    Callers must construct consistently — invariants enforced by step_advance().
+    Construction invariants are enforced by ``__post_init__``.
     """
 
     kind: TerminalKind
@@ -555,40 +553,6 @@ class SinkIntent:
             )
         except (KeyError, ValueError, TypeError) as exc:
             raise InvariantError(f"SinkIntent.from_dict: malformed record {d!r}") from exc
-
-
-@dataclass(frozen=True, slots=True)
-class ChainProposal:
-    """Temporary non-persisted construction shim for the cutover cohort.
-
-    Schema 8 has no field, encoder, or decoder for this type. Tasks 3/4 replace
-    its remaining in-process callers and Task 6 deletes the shim with the old
-    protocol arm. It must never regain a persistence path.
-    """
-
-    steps: Sequence[Mapping[str, Any]]  # each step: {plugin, options, rationale}
-    why: str
-
-    def __post_init__(self) -> None:
-        freeze_fields(self, "steps")
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain JSON-serialisable dict."""
-        return {
-            "steps": [dict(deep_thaw(s)) for s in self.steps],
-            "why": self.why,
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> ChainProposal:
-        """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data."""
-        try:
-            return cls(
-                steps=tuple(dict(s) for s in d["steps"]),
-                why=d["why"],
-            )
-        except (KeyError, ValueError, TypeError) as exc:
-            raise InvariantError(f"ChainProposal.from_dict: malformed record {d!r}") from exc
 
 
 class GuidedProposalRefData(TypedDict):
@@ -1698,249 +1662,3 @@ class GuidedSession:
             raise
         except (KeyError, ValueError, TypeError) as exc:
             raise InvariantError(f"GuidedSession.from_dict: malformed record {d!r}") from exc
-
-
-# ---------------------------------------------------------------------------
-# GuidedAuditDirective — L3-internal coordination type
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class GuidedAuditDirective:
-    """Pure-function directive: "fire this guided audit event."
-
-    ``step_advance()`` is pure (no uuid, no clock, no recorder), so it
-    cannot construct ``ComposerToolInvocation`` records directly — those
-    need a tool_call_id, timestamps, version snapshot, and operator
-    actor that only the route handler has. Instead, step_advance returns
-    a list of directives; the route handler (Phase 3) maps each
-    directive's ``tool_name`` to the corresponding ``emit_*`` helper in
-    ``composer/guided/audit.py`` and calls it with the live recorder,
-    composition version, and actor.
-
-    Per Errata C4: no new audit primitive at L0. ``GuidedAuditDirective``
-    is L3-internal coordination only. The on-the-wire record is still
-    ``ComposerToolInvocation``.
-
-    Allowed ``tool_name`` values (closed list):
-    - ``guided_turn_emitted``
-    - ``guided_turn_answered``
-    - ``guided_step_advanced``
-    - ``guided_dropped_to_freeform``
-
-    ``arguments`` is a payload dict; the Phase 3 route handler will
-    translate it into the matching ``emit_*`` keyword arguments.
-    """
-
-    tool_name: str  # one of: guided_turn_emitted, guided_turn_answered,
-    #                          guided_step_advanced, guided_dropped_to_freeform
-    arguments: Mapping[str, Any]
-
-    def __post_init__(self) -> None:
-        freeze_fields(self, "arguments")
-
-
-# ---------------------------------------------------------------------------
-# step_advance — pure function, no I/O, no clock, no uuid
-# ---------------------------------------------------------------------------
-
-_StepAdvanceResult = tuple[GuidedSession, Turn | None, TerminalState | None, list[GuidedAuditDirective]]
-
-
-def step_advance(
-    session: GuidedSession,
-    response: TurnResponse,
-    *,
-    current_turn_type: TurnType,
-) -> _StepAdvanceResult:
-    """Apply *response* to *session*. Pure function (no I/O, no clock, no uuid).
-
-    Returns ``(new_session, next_turn_or_None, terminal_or_None, directives)``.
-    The caller (route handler) emits each directive via the matching
-    ``emit_*`` helper in ``composer.guided.audit``.
-
-    Per spec §5.3:
-    - A ``control_signal`` of ``ControlSignal.EXIT_TO_FREEFORM`` terminates the wizard with
-      ``TerminalKind.EXITED_TO_FREEFORM / TerminalReason.USER_PRESSED_EXIT``
-      and produces a ``guided_dropped_to_freeform`` directive.
-    - Otherwise, the current ``session.step`` selects the branch handler.
-    """
-    directives: list[GuidedAuditDirective] = []
-
-    if response["control_signal"] is ControlSignal.EXIT_TO_FREEFORM:
-        directives.append(
-            GuidedAuditDirective(
-                tool_name="guided_dropped_to_freeform",
-                arguments={
-                    "prev_step": session.step.value,
-                    "drop_reason": TerminalReason.USER_PRESSED_EXIT.value,
-                    "validation_result": None,
-                },
-            )
-        )
-        terminal = TerminalState(
-            kind=TerminalKind.EXITED_TO_FREEFORM,
-            reason=TerminalReason.USER_PRESSED_EXIT,
-            pipeline_yaml=None,
-        )
-        return (replace(session, terminal=terminal), None, terminal, directives)
-
-    if session.step is GuidedStep.STEP_1_SOURCE:
-        return _advance_step_1(session, response, current_turn_type)
-    if session.step is GuidedStep.STEP_2_SINK:
-        return _advance_step_2(session, response, current_turn_type)
-    if session.step is GuidedStep.STEP_3_TRANSFORMS:
-        return _advance_step_3(session, response, current_turn_type)
-    if session.step is GuidedStep.STEP_4_WIRE:
-        return _advance_step_4(session, response, current_turn_type)
-    raise InvariantError(f"unhandled step: {session.step}")
-
-
-def _advance_step_1(
-    session: GuidedSession,
-    response: TurnResponse,
-    turn_type: TurnType,
-) -> _StepAdvanceResult:
-    """Leave source-stage mutation to the lock-owning dispatcher."""
-    return (session, None, None, [])
-
-
-def _advance_step_2(
-    session: GuidedSession,
-    response: TurnResponse,
-    turn_type: TurnType,
-) -> _StepAdvanceResult:
-    """Leave output-stage mutation to the lock-owning dispatcher."""
-    return (session, None, None, [])
-
-
-def _advance_step_3(
-    session: GuidedSession,
-    response: TurnResponse,
-    turn_type: TurnType,
-) -> _StepAdvanceResult:
-    """Handle a Step 3 (transform chain) response.
-
-    Acceptance/rejection of a chain proposal is interpreted by the endpoint
-    handler (Task 4.4), which runs preview_pipeline and commits via tools.py.
-    step_advance is pure and does not mutate state on accept; the handler does.
-
-    Legal turn types at Step 3:
-    - PROPOSE_CHAIN: The LLM has proposed a chain. Accept/reject is decided
-      by the endpoint handler after running preview_pipeline. step_advance
-      passes through unchanged.
-    - SINGLE_SELECT: A clarifying question was answered — no step change.
-      The handler interprets the response and either re-emits propose_chain
-      or asks another question.
-    - SCHEMA_FORM: The operator edited one proposed transform's options.
-      The handler patches the staged proposal and re-emits propose_chain.
-
-    Any other turn type is a server-side invariant violation: Step 3 only ever
-    emits PROPOSE_CHAIN or SINGLE_SELECT turns, so a different turn type in
-    ``current_turn_type`` means the emitter stamped an invalid type on the
-    history record — raises InvariantError (server bug, not client fault).
-    """
-    if turn_type is TurnType.PROPOSE_CHAIN:
-        return (session, None, None, [])
-    if turn_type is TurnType.SINGLE_SELECT:
-        # Clarifying question answered — no step change. The handler interprets
-        # the response and either re-emits propose_chain or asks another question.
-        return (session, None, None, [])
-    if turn_type is TurnType.SCHEMA_FORM:
-        return (session, None, None, [])
-    raise InvariantError(
-        f"_advance_step_3: unexpected turn_type {turn_type!r} — Step 3 only "
-        "emits PROPOSE_CHAIN, SINGLE_SELECT, and SCHEMA_FORM turns; any other type in the "
-        "history record indicates a server-side emitter bug."
-    )
-
-
-def _advance_step_4(
-    session: GuidedSession,
-    response: TurnResponse,
-    turn_type: TurnType,
-) -> _StepAdvanceResult:
-    """Handle Step 4 (wire skeleton) responses.
-
-    Step 4 advancement is owned by the dispatcher/handler path in later work.
-    The state-machine branch is intentionally a pure self-loop for the
-    CONFIRM_WIRING turn and must not stamp terminal state.
-    """
-    if turn_type is TurnType.CONFIRM_WIRING:
-        return (session, None, None, [])
-    raise InvariantError(
-        f"_advance_step_4: unexpected turn_type {turn_type!r} for {GuidedStep.STEP_4_WIRE.name}; Step 4 only emits CONFIRM_WIRING turns."
-    )
-
-
-# ---------------------------------------------------------------------------
-# Terminal-failure helpers — standalone endpoint helpers for spec §5.4
-# ---------------------------------------------------------------------------
-
-
-def mark_solver_exhausted(
-    session: GuidedSession,
-    *,
-    validation_result: Mapping[str, Any] | None,
-) -> tuple[GuidedSession, TerminalState, list[GuidedAuditDirective]]:
-    """Endpoint helper: stamp the session as solver-exhausted and emit a directive.
-
-    Called by the Step 3 endpoint handler after repair attempt + advisor
-    consultation both fail (spec §5.4). Pure function; the route handler
-    fans the directive out to emit_dropped_to_freeform.
-
-    Returns ``(new_session, terminal, directives)`` where ``directives`` is
-    a ``list[GuidedAuditDirective]`` carrying the ``guided_dropped_to_freeform``
-    event (Errata C4). The route handler maps each directive to the matching
-    ``emit_*`` helper in ``composer/guided/audit.py``.
-    """
-    directives: list[GuidedAuditDirective] = [
-        GuidedAuditDirective(
-            tool_name="guided_dropped_to_freeform",
-            arguments={
-                "prev_step": session.step.value,
-                "drop_reason": TerminalReason.SOLVER_EXHAUSTED.value,
-                "validation_result": (dict(validation_result) if validation_result is not None else None),
-            },
-        ),
-    ]
-    terminal = TerminalState(
-        kind=TerminalKind.EXITED_TO_FREEFORM,
-        reason=TerminalReason.SOLVER_EXHAUSTED,
-        pipeline_yaml=None,
-    )
-    new_sess = replace(session, terminal=terminal)
-    return (new_sess, terminal, directives)
-
-
-def mark_protocol_violation(
-    session: GuidedSession,
-) -> tuple[GuidedSession, TerminalState, list[GuidedAuditDirective]]:
-    """Endpoint helper: stamp the session as protocol-violated and emit a directive.
-
-    Called by the route handler after the LLM emits an illegal turn type
-    twice in a row (spec §5.4). ``validation_result`` is ``None`` — the
-    violation is at the turn-type level, not the schema level.
-
-    Returns ``(new_session, terminal, directives)`` where ``directives`` is
-    a ``list[GuidedAuditDirective]`` carrying the ``guided_dropped_to_freeform``
-    event (Errata C4). The route handler maps each directive to the matching
-    ``emit_*`` helper in ``composer/guided/audit.py``.
-    """
-    directives: list[GuidedAuditDirective] = [
-        GuidedAuditDirective(
-            tool_name="guided_dropped_to_freeform",
-            arguments={
-                "prev_step": session.step.value,
-                "drop_reason": TerminalReason.PROTOCOL_VIOLATION.value,
-                "validation_result": None,
-            },
-        ),
-    ]
-    terminal = TerminalState(
-        kind=TerminalKind.EXITED_TO_FREEFORM,
-        reason=TerminalReason.PROTOCOL_VIOLATION,
-        pipeline_yaml=None,
-    )
-    new_sess = replace(session, terminal=terminal)
-    return (new_sess, terminal, directives)

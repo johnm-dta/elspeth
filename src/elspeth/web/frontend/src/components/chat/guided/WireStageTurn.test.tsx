@@ -974,7 +974,7 @@ describe("client-known invalid chain (elspeth-3b35abf148 variant 3)", () => {
         data={canonicalData()}
         onConfirm={onConfirm}
         confirmDisabled={false}
-        invalidChainIssues={[
+        validationIssues={[
           "Pipeline has no outputs configured.",
           "Node 'mapper' input label is not produced by any step.",
         ]}
@@ -1006,7 +1006,7 @@ describe("client-known invalid chain (elspeth-3b35abf148 variant 3)", () => {
         onConfirm={vi.fn()}
         confirmDisabled={false}
         onExitToFreeform={onExitToFreeform}
-        invalidChainIssues={["Source -> Output is missing field line."]}
+        validationIssues={["Source -> Output is missing field line."]}
       />,
     );
 

@@ -1060,11 +1060,11 @@ class TestBuildMessagesGuidedTerminal:
             state,
             "continue",
             catalog,
-            guided_terminal=_exited_terminal(TerminalReason.SOLVER_EXHAUSTED),
+            guided_terminal=_exited_terminal(TerminalReason.USER_PRESSED_EXIT),
         )
 
         system_content = messages[0]["content"]
-        assert "solver_exhausted" in system_content
+        assert "user_pressed_exit" in system_content
 
     def test_guided_terminal_exited_without_reason_raises_invariant_error_no_leak(self) -> None:
         """obs-ae69e10e00 regression: an EXITED_TO_FREEFORM TerminalState with
@@ -1084,8 +1084,8 @@ class TestBuildMessagesGuidedTerminal:
         """
         state = _empty_state()
         catalog = _stub_catalog()
-        # Construct an invalid TerminalState directly — bypass the step_advance
-        # invariant that would normally prevent this combination.  Sentinel
+        # Construct an invalid TerminalState directly to bypass its normal
+        # construction invariant. Sentinel
         # strings in pipeline_yaml pin the no-leak assertion: if the {!r}
         # interpolation regresses, the assertion fires.
         sentinel_yaml = "source:\n  options:\n    secret_ref: env://LEAKED_SECRET_SENTINEL_AE69E10E00\n"

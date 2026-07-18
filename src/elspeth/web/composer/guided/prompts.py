@@ -1,17 +1,12 @@
-"""Guided-mode skill loading + Step 3 context-block construction.
+"""Guided per-step chat skill loading and sample-value redaction.
 
 Skills are split per step:
 
   skills/base.md                  Always-applies preamble + hard rules.
   skills/step_1_source.md         Step-1 playbook.
   skills/step_2_sink.md           Step-2 playbook.
-  skills/step_2_5_recipe_match.md Step-2.5 playbook.
   skills/step_3_transforms.md     Step-3 playbook + sample-value eyeballing.
   skills/step_4_wire.md           Step-4 wiring constraints.
-
-``load_guided_skill()`` composes all five (base + every step) and is consumed
-by the chain solver, which serves Step 3 but historically receives the full
-playbook for breadth.
 
 ``load_step_chat_skill(step)`` composes base + one step, scoped to the user's
 current wizard position. Consumed by the per-step chat solver.
@@ -23,20 +18,12 @@ effect.
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from elspeth.web.composer.guided.protocol import GuidedStep
-
-if TYPE_CHECKING:
-    from elspeth.web.composer.guided.state_machine import (
-        SinkResolved,
-        SourceResolved,
-    )
 
 _SKILLS_DIR = Path(__file__).parent / "skills"
 
@@ -45,21 +32,9 @@ _SKILLS_DIR = Path(__file__).parent / "skills"
 _STEP_FILE_NAMES: dict[GuidedStep, str] = {
     GuidedStep.STEP_1_SOURCE: "step_1_source.md",
     GuidedStep.STEP_2_SINK: "step_2_sink.md",
-    GuidedStep.STEP_2_5_RECIPE_MATCH: "step_2_5_recipe_match.md",
     GuidedStep.STEP_3_TRANSFORMS: "step_3_transforms.md",
     GuidedStep.STEP_4_WIRE: "step_4_wire.md",
 }
-
-# Playbook order — the order steps appear when composing the full skill.
-# Mirrors the natural wizard progression and is asserted at module import to
-# match the GuidedStep enum membership exactly (see assertion below).
-_STEP_PLAYBOOK_ORDER: tuple[GuidedStep, ...] = (
-    GuidedStep.STEP_1_SOURCE,
-    GuidedStep.STEP_2_SINK,
-    GuidedStep.STEP_2_5_RECIPE_MATCH,
-    GuidedStep.STEP_3_TRANSFORMS,
-    GuidedStep.STEP_4_WIRE,
-)
 
 # Discoverability invariant: the per-step file map and the playbook order
 # must cover every GuidedStep member.  If GuidedStep gains a new member and
@@ -69,11 +44,6 @@ assert set(_STEP_FILE_NAMES.keys()) == set(GuidedStep), (
     f"_STEP_FILE_NAMES out of sync with GuidedStep: "
     f"missing {set(GuidedStep) - set(_STEP_FILE_NAMES)}, "
     f"extra {set(_STEP_FILE_NAMES) - set(GuidedStep)}"
-)
-assert set(_STEP_PLAYBOOK_ORDER) == set(GuidedStep), (
-    f"_STEP_PLAYBOOK_ORDER out of sync with GuidedStep: "
-    f"missing {set(GuidedStep) - set(_STEP_PLAYBOOK_ORDER)}, "
-    f"extra {set(_STEP_PLAYBOOK_ORDER) - set(GuidedStep)}"
 )
 
 
@@ -87,19 +57,6 @@ def _load_base() -> str:
 def _load_step(step: GuidedStep) -> str:
     """Load the per-step playbook fragment for *step*."""
     return (_SKILLS_DIR / _STEP_FILE_NAMES[step]).read_text(encoding="utf-8")
-
-
-@lru_cache(maxsize=1)
-def load_guided_skill() -> str:
-    """Compose the full guided skill (base + every step in playbook order).
-
-    Used by the chain solver, which historically receives the full playbook
-    for breadth even though it only acts on Step 3.  Cached per process;
-    restart elspeth-web.service after editing any skill markdown.
-    """
-    parts = [_load_base()]
-    parts.extend(_load_step(step) for step in _STEP_PLAYBOOK_ORDER)
-    return "\n\n".join(part.rstrip() for part in parts) + "\n"
 
 
 @lru_cache(maxsize=len(GuidedStep))
@@ -142,40 +99,6 @@ def build_mode_transition_system_prompt(*, terminal_reason: str, freeform_skill:
         "do not re-run any work it already accomplished."
     )
     return f"{freeform_skill}\n\n{transition}"
-
-
-def build_repair_addendum(*, validation_error: str) -> str:
-    """Render the REPAIR ATTEMPT addendum appended to a repair solve_chain call.
-
-    Args:
-        validation_error: Validation error text, taken verbatim from the failing
-            ToolResult; Tier 1 audit data, no paraphrasing.
-    """
-    return (
-        "REPAIR ATTEMPT — your previous proposal failed validation:\n"
-        f"{validation_error}\n\n"
-        "Propose a corrected chain that fixes the named validation errors."
-    )
-
-
-def build_revise_addendum(*, revise_instruction: str) -> str:
-    """Render the REVISE REQUEST addendum appended to a revise solve_chain call.
-
-    Distinct from :func:`build_repair_addendum`: a revise is a user instruction
-    to CHANGE the current proposal, not a report that the proposal failed
-    validation. Framing it as the latter (the repair addendum) misleads the
-    model into "correcting errors" that do not exist.
-
-    Args:
-        revise_instruction: The user's revise message, verbatim; Tier 1 audit
-            data, no paraphrasing.
-    """
-    return (
-        "REVISE REQUEST — the user wants to change the current proposal as "
-        "follows:\n"
-        f"{revise_instruction}\n\n"
-        "Propose an updated chain that applies this change."
-    )
 
 
 def _looks_secret_like_sample(value: str) -> bool:
@@ -222,45 +145,3 @@ def _summarize_sample_value(value: Any) -> str:
 
 def _summarize_sample_row(row: Mapping[str, Any]) -> dict[str, str]:
     return {str(key): _summarize_sample_value(value) for key, value in row.items()}
-
-
-def build_step_3_context_block(
-    *,
-    source: SourceResolved,
-    sink: SinkResolved,
-) -> str:
-    """Render the GUIDED CONTEXT block for the Step 3 LLM prompt."""
-    src_payload = {
-        "plugin": source.plugin,
-        "columns": list(source.observed_columns),
-        "sample": [_summarize_sample_row(r) for r in source.sample_rows[:3]],
-    }
-    sink_payload = {
-        "outputs": [
-            {
-                "plugin": o.plugin,
-                "required_fields": list(o.required_fields),
-                "schema_mode": o.schema_mode,
-            }
-            for o in sink.outputs
-        ],
-    }
-    return f"GUIDED CONTEXT (server-resolved):\nsource: {json.dumps(src_payload)}\nsink: {json.dumps(sink_payload)}\n"
-
-
-@lru_cache(maxsize=1)
-def guided_staged_skill_hash() -> str:
-    """Hex SHA-256 over base.md + every step playbook in _STEP_PLAYBOOK_ORDER.
-
-    Enumerating the playbook order means appending a GuidedStep member (and
-    its skill file) automatically extends the hashed input set — the
-    step_4_wire.md add (P1) shifts this hash with no edit needed here.
-
-    Cached per process; restart elspeth-web.service after editing skill
-    markdown (same lifecycle caveat as the other loaders in this module).
-    """
-    digest = hashlib.sha256()
-    digest.update((_SKILLS_DIR / "base.md").read_bytes())
-    for step in _STEP_PLAYBOOK_ORDER:
-        digest.update((_SKILLS_DIR / _STEP_FILE_NAMES[step]).read_bytes())
-    return digest.hexdigest()

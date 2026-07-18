@@ -12,8 +12,7 @@ from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved
 from elspeth.web.sessions._guided_step_chat import StepChatResult
 from elspeth.web.sessions.routes.composer import guided as guided_route
-from tests.integration.web.composer.guided.test_step_3_e2e import _outputs_path
-from tests.integration.web.composer.guided.test_step_chat import TestStepChatCrossStep, _create_session
+from tests.integration.web.composer.guided.test_step_chat import TestStepChatCrossStep, _create_session, _outputs_path
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 

@@ -14,7 +14,7 @@ from elspeth.web.composer.guided.chat_solver import (
     build_step_chat_context_block,  # noqa: F401  # Preserve signed module statement positions.
 )
 from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE, WorkflowProfileKind, profile_for_kind
-from elspeth.web.composer.guided.protocol import Turn
+from elspeth.web.composer.guided.protocol import Turn, validate_current_turn
 from elspeth.web.composer.guided.resolved import SinkResolved
 from elspeth.web.composer.guided.stage_transitions import (
     AnsweredTurn,
@@ -192,9 +192,8 @@ def _turn_payload_response(
     expected_step_index = {
         GuidedStep.STEP_1_SOURCE: 0,
         GuidedStep.STEP_2_SINK: 1,
-        GuidedStep.STEP_2_5_RECIPE_MATCH: 2,
-        GuidedStep.STEP_3_TRANSFORMS: 3,
-        GuidedStep.STEP_4_WIRE: 4,
+        GuidedStep.STEP_3_TRANSFORMS: 2,
+        GuidedStep.STEP_4_WIRE: 3,
     }[record.step]
     if (
         record.turn_type.value != turn["type"]
@@ -243,18 +242,19 @@ def _load_durable_current_turn(
     step_index = {
         GuidedStep.STEP_1_SOURCE: 0,
         GuidedStep.STEP_2_SINK: 1,
-        GuidedStep.STEP_2_5_RECIPE_MATCH: 2,
-        GuidedStep.STEP_3_TRANSFORMS: 3,
-        GuidedStep.STEP_4_WIRE: 4,
+        GuidedStep.STEP_3_TRANSFORMS: 2,
+        GuidedStep.STEP_4_WIRE: 3,
     }[record.step]
-    return (
-        Turn(
-            type=record.turn_type.value,
-            step_index=step_index,
-            payload=dict(deep_thaw(prepared.payload)),
-        ),
-        prepared,
+    turn = Turn(
+        type=record.turn_type.value,
+        step_index=step_index,
+        payload=dict(deep_thaw(prepared.payload)),
     )
+    try:
+        validate_current_turn(record.step, turn)
+    except ValueError as exc:
+        raise AuditIntegrityError(f"Persisted current-schema turn is invalid: {exc}") from exc
+    return turn, prepared
 
 
 def _prepare_server_turn_occurrence(
@@ -264,7 +264,12 @@ def _prepare_server_turn_occurrence(
     turn: Turn,
     payload_store: Any,
 ) -> tuple[GuidedSession, TurnRecord, TurnType, PreparedGuidedJsonPayload]:
-    """Prepare CAS first, then append a record bound to that exact payload ID."""
+    """Validate first, then prepare CAS and append its exact occurrence."""
+
+    try:
+        validate_current_turn(current_step, turn)
+    except ValueError as exc:
+        raise InvariantError(f"Constructed current-schema turn is invalid: {exc}") from exc
 
     prepared = prepare_guided_json_payload(
         payload_store,
@@ -370,11 +375,6 @@ def _build_get_guided_turn(
             )
             return build_step_2_multi_select_turn(observed_columns)
         raise InvariantError("STEP_2 pending output has an unsupported phase")
-    if step is GuidedStep.STEP_2_5_RECIPE_MATCH:
-        # Vestigial step — the recipe-offer deviation was removed; the sink
-        # commit now hops straight to STEP_3. No live session reaches this step,
-        # so there is no rebuildable turn here.
-        return None
     if step is GuidedStep.STEP_3_TRANSFORMS:
         return None
     if step is GuidedStep.STEP_4_WIRE:
@@ -430,8 +430,8 @@ async def _source_from_latest_uploaded_blob_for_step_1_chat(
     carries no blob id, so letting the LLM resolve it invites invented schema.
     When the session is already on a Step-1 schema form with a concrete plugin,
     bind the newest ready session blob through the same inspection prefill used
-    by the visible form, then let ``handle_step_1_source`` resolve the masked
-    ``blob:<id>`` sentinel authoritatively.
+    by the visible form. The proposal custody boundary later resolves the
+    masked ``blob:<id>`` sentinel authoritatively.
     """
     uploaded_filename = _step_1_uploaded_input_filename(message)
     if plugin_hint is None or uploaded_filename is None:
@@ -485,8 +485,12 @@ def _guided_persisted_validity(
     Stage-1-only check reports.
     """
     summary = catalog.validate_composition_state(state).validation
-    messages = [error.message for error in summary.errors]
-    return summary.is_valid, messages or None
+    if summary.is_valid:
+        return True, None
+    # Validator prose may contain paths, provider diagnostics, or operator
+    # input. Guided checkpoints persist a closed status instead: this retains
+    # truthful validity without widening the replay egress surface.
+    return False, ["guided_composition_invalid"]
 
 
 def _append_server_turn_record(
@@ -503,7 +507,10 @@ def _append_server_turn_record(
     """
     if any(record.response_hash is None for record in guided.history):
         raise InvariantError("Cannot append a guided turn while an unanswered occurrence remains")
-    turn_type = TurnType(turn["type"])
+    try:
+        turn_type = validate_current_turn(current_step, turn)
+    except ValueError as exc:
+        raise InvariantError(f"Constructed current-schema turn is invalid: {exc}") from exc
     payload_hash = guided_json_payload_id("turn", turn["payload"])
     new_record = TurnRecord(
         step=current_step,
@@ -574,26 +581,6 @@ async def get_guided(
             guided = state.guided_session
             current_step = guided.step
 
-            # Orphaned pre-change sessions: STEP_2_5_RECIPE_MATCH was retired as a
-            # live step (the recipe-offer interstitial is gone — sink commit now
-            # hops straight to STEP_3). A session persisted at this step before
-            # that change has no rebuildable turn (``_build_get_guided_turn``
-            # returns None, so GET would otherwise render a blank turn) and no POST
-            # dispatch branch (a non-exit response hits ``step_advance``'s
-            # unhandled-step InvariantError → 500). Reject with a clear, structured
-            # 409 that points at the salvage path rather than silently returning no
-            # turn. A session that has already exited (terminal set) is left alone.
-            if guided.terminal is None and current_step is GuidedStep.STEP_2_5_RECIPE_MATCH:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "This guided session was started before a composer update and can no "
-                        "longer continue from its current step (step_2_5_recipe_match). POST "
-                        "control_signal=exit_to_freeform to keep your work in freeform, or "
-                        "start a new guided session."
-                    ),
-                )
-
             existing_record_for_step = (
                 guided.history[-1]
                 if guided.history and guided.history[-1].step is current_step and guided.history[-1].response_hash is None
@@ -644,8 +631,8 @@ async def get_guided(
 
             if existing_record_for_step is None and turn is not None:
                 # First fetch for this step AND a turn exists: record TurnRecord,
-                # persist, emit audit.  When turn is None (terminal state, STEP_3,
-                # or no-recipe STEP_2_5 path) there is no turn to record.
+                # persist, emit audit. When turn is None (terminal state or
+                # STEP_3) there is no turn to record.
                 # Guaranteed by the conditional assignments above: turn is not
                 # None on this branch, so both turn_type and payload_hash were
                 # populated from turn["type"] / stable_hash(turn["payload"]).
@@ -740,8 +727,8 @@ async def get_guided(
             # The two recorder channels (tool invocations and LLM calls)
             # drain through TWO separate try blocks so that a failure
             # persisting one does not skip the other.  ``_persist_llm_calls``
-            # covers the :class:`ComposerLLMCall` rows that ``solve_chain``
-            # buffers during guided Step 3 (chain solver) invocations.
+            # covers any :class:`ComposerLLMCall` rows buffered during guided
+            # model invocations.
             # Without the second drain the LLM-call audit would be
             # garbage-collected with the recorder at function exit.
             primary_exc = sys.exception()
@@ -1438,6 +1425,25 @@ def _schema8_unsupported_stage(step: GuidedStep) -> HTTPException:
     )
 
 
+def _verify_schema8_proposal_binding(guided: GuidedSession, body: GuidedRespondRequest) -> None:
+    """Fail closed when a response names anything but the active proposal."""
+    if body.control_signal == ControlSignal.EXIT_TO_FREEFORM.value:
+        return
+    if body.proposal_id is None:
+        if guided.active_proposal is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="the active guided proposal requires proposal_id and draft_hash",
+            )
+        return
+    active = guided.active_proposal
+    if active is None or body.proposal_id != str(active.proposal_id) or body.draft_hash != active.draft_hash:
+        raise HTTPException(
+            status_code=409,
+            detail="proposal_id and draft_hash do not identify the active guided proposal",
+        )
+
+
 def _schema8_prospective_occurrence(
     state: CompositionState,
     guided: GuidedSession,
@@ -1729,6 +1735,15 @@ async def post_guided_respond(
 ) -> GuidedRespondResponse:
     """Settle one schema-8 guided response as a fenced atomic cohort."""
     await _verify_session_ownership(session_id, user, request)
+    if body.proposal_id is not None:
+        try:
+            parsed_proposal = UUID(body.proposal_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="proposal_id must be a canonical UUID") from exc
+        if str(parsed_proposal) != body.proposal_id:
+            raise HTTPException(status_code=400, detail="proposal_id must be a canonical UUID")
+    if body.draft_hash is not None and (len(body.draft_hash) != 64 or any(char not in "0123456789abcdef" for char in body.draft_hash)):
+        raise HTTPException(status_code=400, detail="draft_hash must be 64 lowercase hexadecimal characters")
     if body.edit_target is not None:
         try:
             parsed_target = UUID(body.edit_target.stable_id)
@@ -1785,6 +1800,7 @@ async def post_guided_respond(
             ):
                 raise HTTPException(status_code=409, detail="Guided session is already terminal.")
             return None
+        _verify_schema8_proposal_binding(observed_guided, body)
         is_active_exit = body.control_signal == ControlSignal.EXIT_TO_FREEFORM.value
         if not is_active_exit and observed_guided.step not in {GuidedStep.STEP_1_SOURCE, GuidedStep.STEP_2_SINK}:
             raise _schema8_unsupported_stage(observed_guided.step)
@@ -1965,7 +1981,6 @@ async def post_guided_respond(
                             recorder,
                             prev=guided.step,
                             drop_reason=TerminalReason.USER_PRESSED_EXIT,
-                            validation_result=None,
                             composition_version=state.version,
                             actor=user.user_id,
                         )
@@ -2047,7 +2062,6 @@ async def post_guided_respond(
                                 recorder,
                                 prev=prior_step,
                                 drop_reason=TerminalReason.USER_PRESSED_EXIT,
-                                validation_result=None,
                                 composition_version=state.version,
                                 actor=user.user_id,
                             )

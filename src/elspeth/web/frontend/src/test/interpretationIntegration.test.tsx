@@ -37,6 +37,7 @@ import type {
   InterpretationResolveResponse,
 } from "@/types/interpretation";
 import type { CompositionState } from "@/types/index";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 vi.mock("@/api/client", () => ({
   listInterpretationEvents: vi.fn(),
@@ -56,6 +57,7 @@ const LLM_NODE_ID = "llm_rate_coolness";
 function makeCompositionStateAfter5a(): CompositionState {
   return {
     id: "state-2",
+    ...compositionStateAuthorityFields,
     version: 2,
     sources: {
       source: { plugin: "inline_blob", options: { blob_ref: "blob-1" } },

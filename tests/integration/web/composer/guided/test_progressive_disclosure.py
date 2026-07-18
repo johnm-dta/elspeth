@@ -333,7 +333,7 @@ class TestSecondFreeformTurnAfterTransition:
 
         terminal = TerminalState(
             kind=TerminalKind.EXITED_TO_FREEFORM,
-            reason=TerminalReason.PROTOCOL_VIOLATION,
+            reason=TerminalReason.USER_PRESSED_EXIT,
             pipeline_yaml=None,
         )
         _seed_terminal_guided_session(composer_freeform_client, session_id, terminal)
@@ -471,10 +471,11 @@ class TestRecomposeTransitionPrompt:
             "elspeth.web.composer.service._litellm_acompletion",
             side_effect=_fake_acompletion,
         ):
-            _recompose(composer_freeform_client, session_id)
+            body = _recompose(composer_freeform_client, session_id)
 
         gs_dict = _get_current_guided_session(composer_freeform_client, session_id)
         assert gs_dict.get("transition_consumed") is True, f"transition_consumed not set to True after recompose. GuidedSession: {gs_dict}"
+        assert body["state"]["validation_errors"] == ["guided_composition_invalid"]
 
     def test_recompose_guided_session_persisted_in_composer_meta(self, composer_freeform_client: TestClient) -> None:
         """guided_session is included in composer_meta after recompose, not silently dropped."""

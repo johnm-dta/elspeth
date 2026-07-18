@@ -7,6 +7,8 @@ from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -26,9 +28,11 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import stable_hash
 from elspeth.core.payload_store import FilesystemPayloadStore
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, GuidedStep, TurnType
 from elspeth.web.composer.guided.state_machine import GuidedSession, TurnRecord
 from elspeth.web.composer.pipeline_proposal import composition_content_hash
+from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.interpretation_state import PROMPT_SHIELD_AVAILABLE_DRAFT, PROMPT_SHIELD_WARNING_DRAFT
 from elspeth.web.plugin_policy.models import PluginId, PluginUnavailableReason
 from elspeth.web.sessions.converters import state_from_record
@@ -61,6 +65,54 @@ from elspeth.web.sessions.protocol import (
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
+
+
+def _empty_composition_state() -> CompositionState:
+    return CompositionState(
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+_MALFORMED_CURRENT_TURNS: tuple[tuple[GuidedStep, TurnType, Mapping[str, object]], ...] = (
+    (
+        GuidedStep.STEP_1_SOURCE,
+        TurnType.SINGLE_SELECT,
+        {
+            "question": "Choose",
+            "options": [{"id": "csv", "label": "CSV", "hint": None, "canary": True}],
+            "allow_custom": False,
+        },
+    ),
+    (
+        GuidedStep.STEP_1_SOURCE,
+        TurnType.INSPECT_AND_CONFIRM,
+        {"observed": {"columns": [1], "samples": [], "warnings": []}},
+    ),
+    (
+        GuidedStep.STEP_1_SOURCE,
+        TurnType.SCHEMA_FORM,
+        {
+            "mode": "plugin_options",
+            "plugin": "csv",
+            "knobs": {
+                "fields": [
+                    {
+                        "name": "path",
+                        "label": "Path",
+                        "kind": "credential-canary",
+                        "required": True,
+                        "nullable": False,
+                    }
+                ]
+            },
+            "prefilled": {},
+        },
+    ),
+)
 
 
 def _audit_evidence() -> tuple[ComposerToolInvocation, ComposerLLMCall, ComposerChatTurn]:
@@ -147,7 +199,7 @@ def test_confirm_wiring_cas_is_exact_finalized_wire_authority(
     store = FilesystemPayloadStore(tmp_path / "wire-authority")
     raw_turn = {
         "type": "confirm_wiring",
-        "step_index": 4,
+        "step_index": 3,
         "payload": {
             "topology": {"sources": {}, "nodes": [], "outputs": []},
             "edge_contracts": [],
@@ -181,6 +233,211 @@ def test_confirm_wiring_cas_is_exact_finalized_wire_authority(
     messages = [warning["message"] for warning in response.payload["warnings"]]
     assert any(expected_fragment in message for message in messages)
     assert not any(forbidden_fragment in message for message in messages)
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        {
+            "type": "single_select",
+            "step_index": 0,
+            "payload": {"question": "Choose", "options": [], "allow_custom": False},
+            "credential_canary": "MUST-NOT-ENTER-CAS",
+        },
+        {
+            "type": "confirm_wiring",
+            "step_index": 0,
+            "payload": {
+                "topology": {"sources": {}, "nodes": [], "outputs": []},
+                "edge_contracts": [],
+                "semantic_contracts": [],
+                "warnings": [],
+            },
+        },
+    ],
+)
+def test_turn_construction_rejects_extra_keys_and_wrong_step_matrix(tmp_path: Path, turn: Mapping[str, object]) -> None:
+    from elspeth.web.sessions.routes.composer.guided import _prepare_server_turn_occurrence
+
+    store = FilesystemPayloadStore(tmp_path / "invalid-turn-construction")
+    with pytest.raises(InvariantError):
+        _prepare_server_turn_occurrence(
+            GuidedSession.initial(),
+            current_step=GuidedStep.STEP_1_SOURCE,
+            turn=turn,
+            payload_store=store,
+        )
+    assert not tuple((tmp_path / "invalid-turn-construction").glob("**/*"))
+
+
+@pytest.mark.parametrize(("step", "turn_type", "payload"), _MALFORMED_CURRENT_TURNS)
+def test_turn_construction_rejects_recursively_malformed_payload_before_cas(
+    tmp_path: Path,
+    step: GuidedStep,
+    turn_type: TurnType,
+    payload: Mapping[str, object],
+) -> None:
+    from elspeth.web.sessions.routes.composer.guided import _prepare_server_turn_occurrence
+
+    store = FilesystemPayloadStore(tmp_path / f"invalid-recursive-{turn_type.value}")
+    with pytest.raises(InvariantError, match="Constructed current-schema turn is invalid"):
+        _prepare_server_turn_occurrence(
+            GuidedSession.initial(),
+            current_step=step,
+            turn={"type": turn_type.value, "step_index": 0, "payload": payload},
+            payload_store=store,
+        )
+    assert not tuple((tmp_path / f"invalid-recursive-{turn_type.value}").glob("**/*"))
+
+
+def test_direct_turn_append_rejects_unvalidated_turn() -> None:
+    from elspeth.web.sessions.routes.composer.guided import _append_server_turn_record
+
+    invalid_turn = {
+        "type": "single_select",
+        "step_index": 0,
+        "payload": {
+            "question": "Choose",
+            "options": [],
+            "allow_custom": False,
+            "credential_canary": "MUST-NOT-ENTER-HISTORY",
+        },
+    }
+
+    with pytest.raises(InvariantError, match="Constructed current-schema turn is invalid"):
+        _append_server_turn_record(
+            GuidedSession.initial(),
+            current_step=GuidedStep.STEP_1_SOURCE,
+            turn=invalid_turn,
+        )
+
+
+def test_schema8_prospective_occurrence_validates_before_history_or_cas(tmp_path: Path, monkeypatch) -> None:
+    guided_route = importlib.import_module("elspeth.web.sessions.routes.composer.guided")
+    store = FilesystemPayloadStore(tmp_path / "prospective-invalid")
+    invalid_turn = {
+        "type": "single_select",
+        "step_index": 0,
+        "payload": {
+            "question": "Choose",
+            "options": [],
+            "allow_custom": False,
+            "credential_canary": "MUST-NOT-ENTER-CAS",
+        },
+    }
+    monkeypatch.setattr(guided_route, "_build_get_guided_turn", lambda *_args, **_kwargs: invalid_turn)
+
+    with pytest.raises(InvariantError, match="Constructed current-schema turn is invalid"):
+        guided_route._schema8_prospective_occurrence(
+            _empty_composition_state(),
+            GuidedSession.initial(),
+            catalog=cast(Any, object()),
+            shield_available=False,
+            payload_store=store,
+        )
+    assert not tuple((tmp_path / "prospective-invalid").glob("**/*"))
+
+
+def test_schema8_projected_next_turn_validates_before_history(monkeypatch) -> None:
+    guided_route = importlib.import_module("elspeth.web.sessions.routes.composer.guided")
+    current_turn = {
+        "type": "single_select",
+        "step_index": 0,
+        "payload": {"question": "Choose", "options": [], "allow_custom": False},
+    }
+    guided = replace(
+        GuidedSession.initial(),
+        history=(
+            TurnRecord(
+                step=GuidedStep.STEP_1_SOURCE,
+                turn_type=TurnType.SINGLE_SELECT,
+                payload_hash="a" * 64,
+                response_hash=None,
+                emitter="server",
+            ),
+        ),
+    )
+    invalid_next = {
+        **current_turn,
+        "payload": {**current_turn["payload"], "credential_canary": "MUST-NOT-ENTER-HISTORY"},
+    }
+    monkeypatch.setattr(
+        guided_route,
+        "_schema8_transition",
+        lambda *_args, **_kwargs: (guided, {"chosen": ["csv"]}),
+    )
+    monkeypatch.setattr(guided_route, "_build_get_guided_turn", lambda *_args, **_kwargs: invalid_next)
+    body = SimpleNamespace(control_signal=None)
+
+    with pytest.raises(InvariantError, match="Constructed current-schema turn is invalid"):
+        guided_route._schema8_answer_and_project_next(
+            _empty_composition_state(),
+            guided,
+            current_turn,
+            body,
+            catalog=cast(Any, object()),
+            shield_available=False,
+            new_stable_id=uuid4(),
+        )
+
+
+def test_durable_current_turn_rejects_wrong_step_type_matrix(tmp_path: Path) -> None:
+    preparation = importlib.import_module("elspeth.web.sessions.guided_payloads")
+    from elspeth.web.sessions.routes.composer.guided import _load_durable_current_turn
+
+    store = FilesystemPayloadStore(tmp_path / "wrong-turn-matrix")
+    payload = {
+        "topology": {"sources": {}, "nodes": [], "outputs": []},
+        "edge_contracts": [],
+        "semantic_contracts": [],
+        "warnings": [],
+    }
+    prepared = preparation.prepare_guided_json_payload(store, purpose="turn", payload=payload)
+    guided = replace(
+        GuidedSession.initial(),
+        history=(
+            TurnRecord(
+                step=GuidedStep.STEP_1_SOURCE,
+                turn_type=TurnType.CONFIRM_WIRING,
+                payload_hash=prepared.payload_id,
+                response_hash=None,
+                emitter="server",
+            ),
+        ),
+    )
+
+    with pytest.raises(AuditIntegrityError, match="current-schema turn"):
+        _load_durable_current_turn(guided, payload_store=store)
+
+
+@pytest.mark.parametrize(("step", "turn_type", "payload"), _MALFORMED_CURRENT_TURNS)
+def test_durable_current_turn_rejects_recursively_malformed_payload(
+    tmp_path: Path,
+    step: GuidedStep,
+    turn_type: TurnType,
+    payload: Mapping[str, object],
+) -> None:
+    preparation = importlib.import_module("elspeth.web.sessions.guided_payloads")
+    from elspeth.web.sessions.routes.composer.guided import _load_durable_current_turn
+
+    store = FilesystemPayloadStore(tmp_path / f"invalid-durable-{turn_type.value}")
+    prepared = preparation.prepare_guided_json_payload(store, purpose="turn", payload=payload)
+    guided = replace(
+        GuidedSession.initial(),
+        step=step,
+        history=(
+            TurnRecord(
+                step=step,
+                turn_type=turn_type,
+                payload_hash=prepared.payload_id,
+                response_hash=None,
+                emitter="server",
+            ),
+        ),
+    )
+
+    with pytest.raises(AuditIntegrityError, match="current-schema turn"):
+        _load_durable_current_turn(guided, payload_store=store)
 
 
 def _turn_emitted_evidence(payload_id: str) -> ComposerToolInvocation:
@@ -452,7 +709,7 @@ def test_next_turn_payload_requires_turn_purpose() -> None:
         )
 
 
-def test_guided_checkpoint_omits_raw_validation_text_from_storage_and_replay() -> None:
+def test_guided_checkpoint_replaces_raw_validation_text_with_closed_status() -> None:
     replay = importlib.import_module("elspeth.web.sessions.guided_replay")
     state = CompositionStateData(
         is_valid=False,
@@ -464,7 +721,23 @@ def test_guided_checkpoint_omits_raw_validation_text_from_storage_and_replay() -
         GuidedResponseDescriptor(kind="guided_respond", next_turn=None, assistant_turn_seq=None),
     )
 
-    assert prepared.validation_errors is None
+    assert prepared.validation_errors == ("guided_composition_invalid",)
+    assert "VALIDATION-CREDENTIAL-CANARY" not in repr(prepared.validation_errors)
+
+
+def test_guided_checkpoint_preserves_closed_validation_status() -> None:
+    replay = importlib.import_module("elspeth.web.sessions.guided_replay")
+    state = CompositionStateData(
+        is_valid=False,
+        validation_errors=["guided_composition_invalid"],
+    )
+
+    prepared = replay.with_guided_response_descriptor(
+        state,
+        GuidedResponseDescriptor(kind="guided_respond", next_turn=None, assistant_turn_seq=None),
+    )
+
+    assert prepared.validation_errors == ("guided_composition_invalid",)
 
 
 def test_audit_preparation_uses_real_typed_evidence_and_omits_hidden_provider_data() -> None:
@@ -574,7 +847,7 @@ def test_respond_replay_projection_uses_persisted_descriptor_not_live_policy() -
         outputs=None,
         metadata_=None,
         is_valid=False,
-        validation_errors=None,
+        validation_errors=state.validation_errors,
         created_at=datetime.now(UTC),
         derived_from_state_id=None,
         composer_meta=state.composer_meta,
@@ -692,6 +965,76 @@ def _guided_with_next_turn(payload_id: str) -> GuidedSession:
             ),
         ),
     )
+
+
+def test_replay_rejects_turn_payload_with_extra_key() -> None:
+    replay = importlib.import_module("elspeth.web.sessions.guided_replay")
+    payload_data = {
+        "question": "Choose a source",
+        "options": [],
+        "allow_custom": False,
+        "credential_canary": "MUST-NOT-REPLAY",
+    }
+    payload = PreparedGuidedJsonPayload(
+        payload_id=guided_json_payload_id("turn", payload_data),
+        purpose="turn",
+        payload=payload_data,
+    )
+    guided = _guided_with_next_turn(payload.payload_id)
+    descriptor = GuidedResponseDescriptor(
+        kind="guided_respond",
+        next_turn=GuidedReplayTurn(
+            turn_type=TurnType.SINGLE_SELECT,
+            step_index=0,
+            payload_id=payload.payload_id,
+        ),
+        assistant_turn_seq=None,
+    )
+
+    with pytest.raises(AuditIntegrityError, match="current-schema turn"):
+        replay.project_guided_response(_replay_record(descriptor=descriptor, guided=guided), payloads=(payload,))
+
+
+@pytest.mark.parametrize(("step", "turn_type", "payload_data"), _MALFORMED_CURRENT_TURNS)
+def test_replay_rejects_recursively_malformed_current_turn(
+    step: GuidedStep,
+    turn_type: TurnType,
+    payload_data: Mapping[str, object],
+) -> None:
+    replay = importlib.import_module("elspeth.web.sessions.guided_replay")
+    payload = PreparedGuidedJsonPayload(
+        payload_id=guided_json_payload_id("turn", payload_data),
+        purpose="turn",
+        payload=payload_data,
+    )
+    guided = replace(
+        GuidedSession.initial(),
+        step=step,
+        history=(
+            TurnRecord(
+                step=step,
+                turn_type=turn_type,
+                payload_hash=payload.payload_id,
+                response_hash=None,
+                emitter="server",
+            ),
+        ),
+    )
+    descriptor = GuidedResponseDescriptor(
+        kind="guided_respond",
+        next_turn=GuidedReplayTurn(
+            turn_type=turn_type,
+            step_index=0,
+            payload_id=payload.payload_id,
+        ),
+        assistant_turn_seq=None,
+    )
+
+    with pytest.raises(AuditIntegrityError, match="current-schema turn"):
+        replay.project_guided_response(
+            _replay_record(descriptor=descriptor, guided=guided),
+            payloads=(payload,),
+        )
 
 
 @pytest.mark.parametrize("response_kind", ["guided_respond", "guided_chat"])

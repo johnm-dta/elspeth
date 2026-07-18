@@ -12,7 +12,7 @@ from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.state_machine import GuidedSession
 from elspeth.web.sessions.routes.composer import guided as guided_route
 from tests.integration.web.composer.guided.test_chat_schema8_atomic import _chat_operation_count, _persist_guided
-from tests.integration.web.composer.guided.test_step_3_e2e import _create_session
+from tests.integration.web.composer.guided.test_step_chat import _create_session
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 

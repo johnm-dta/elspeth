@@ -11,6 +11,7 @@ import type {
   InterpretationEvent,
   InterpretationResolveResponse,
 } from "@/types/interpretation";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 vi.mock("@/api/client", () => ({
   listInterpretationEvents: vi.fn(),
@@ -72,6 +73,7 @@ function makeEvent(
 function makeCompositionState(id: string, version: number): CompositionState {
   return {
     id,
+    ...compositionStateAuthorityFields,
     version,
     sources: {},
     nodes: [],

@@ -169,7 +169,7 @@ export interface WireStageTurnProps {
   /** Client-known validation blockers (the persisted composition is invalid).
    *  Non-empty DISABLES confirm — a confirm the server must reject is never
    *  offered as a live button (elspeth-3b35abf148 variant 3, client side). */
-  invalidChainIssues?: string[];
+  validationIssues?: string[];
 }
 
 /**
@@ -255,7 +255,7 @@ export function WireStageTurn({
   onExitToFreeform,
   onCompleteWithoutSignoff,
   pendingAcknowledgements,
-  invalidChainIssues,
+  validationIssues,
 }: WireStageTurnProps) {
   const edges = reconstructWireEdges(data);
   const entityNames = buildEntityNames(data);
@@ -265,15 +265,16 @@ export function WireStageTurn({
   const blockersId = useId();
 
   const acknowledgements = pendingAcknowledgements ?? [];
-  const chainIssues = invalidChainIssues ?? [];
-  const hasBlockers = acknowledgements.length > 0 || chainIssues.length > 0;
+  const blockingValidationIssues = validationIssues ?? [];
+  const hasBlockers =
+    acknowledgements.length > 0 || blockingValidationIssues.length > 0;
 
   const confirmButton = (
     <button
       type="button"
       className="guided-turn-primary"
       onClick={onConfirm}
-      disabled={confirmDisabled || chainIssues.length > 0}
+      disabled={confirmDisabled || blockingValidationIssues.length > 0}
       aria-describedby={hasBlockers ? blockersId : undefined}
     >
       Confirm wiring
@@ -308,13 +309,13 @@ export function WireStageTurn({
           </ul>
         </>
       )}
-      {chainIssues.length > 0 && (
+      {blockingValidationIssues.length > 0 && (
         <>
           <p className="wire-stage__blockers-heading">
             The pipeline isn't ready to confirm:
           </p>
           <ul className="wire-stage__blockers-list wire-stage__blockers-list--issues">
-            {chainIssues.map((issue, index) => (
+            {blockingValidationIssues.map((issue, index) => (
               <li key={index}>{issue}</li>
             ))}
           </ul>
@@ -347,7 +348,7 @@ export function WireStageTurn({
           <>
             <div className="wire-stage__actions">
               {confirmButton}
-              {chainIssues.length > 0 && onExitToFreeform !== undefined
+              {blockingValidationIssues.length > 0 && onExitToFreeform !== undefined
                 ? exitButton
                 : null}
             </div>

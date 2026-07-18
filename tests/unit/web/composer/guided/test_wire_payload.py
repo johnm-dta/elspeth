@@ -412,7 +412,7 @@ class TestBuildStep4WireTurn:
         turn = build_step_4_wire_turn(_canonical_state())
 
         assert turn["type"] == TurnType.CONFIRM_WIRING.value
-        assert turn["step_index"] == 4
+        assert turn["step_index"] == 3
 
     def test_payload_merges_topology_and_contracts(self) -> None:
         state = _contract_state()

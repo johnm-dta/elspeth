@@ -167,7 +167,7 @@ def test_guided_respond_rejects_legacy_index_fields(legacy_field: str) -> None:
         )
 
 
-def test_guided_respond_validates_closed_future_proposal_bindings() -> None:
+def test_guided_respond_preserves_closed_proposal_bindings_for_route_validation() -> None:
     request = GuidedRespondRequest.model_validate(
         {
             "operation_id": _OPERATION_ID,
@@ -196,16 +196,19 @@ def test_guided_respond_validates_closed_future_proposal_bindings() -> None:
         assert malformed_target.edit_target is not None
         assert malformed_target.edit_target.stable_id == malformed_stable_id
 
-    with pytest.raises(ValidationError):
-        GuidedRespondRequest.model_validate(
-            {
-                "operation_id": _OPERATION_ID,
-                "turn_token": "a" * 64,
-                "proposal_id": "not-canonical",
-                "draft_hash": "raw-diagnostic",
-                "edit_target": {"kind": "source", "stable_id": "../source"},
-            }
-        )
+    malformed = GuidedRespondRequest.model_validate(
+        {
+            "operation_id": _OPERATION_ID,
+            "turn_token": "a" * 64,
+            "proposal_id": "not-canonical",
+            "draft_hash": "raw-diagnostic",
+            "edit_target": {"kind": "source", "stable_id": "../source"},
+        }
+    )
+    assert malformed.proposal_id == "not-canonical"
+    assert malformed.draft_hash == "raw-diagnostic"
+    assert malformed.edit_target is not None
+    assert malformed.edit_target.stable_id == "../source"
 
 
 @pytest.mark.parametrize("model_type", [StartGuidedRequest, ReenterGuidedRequest])

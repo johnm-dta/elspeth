@@ -328,6 +328,7 @@ import type {
   WireStageData,
 } from "@/types/guided";
 import type { InterpretationEvent } from "@/types/interpretation";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 // --- Shared store reset ----------------------------------------------------
 
@@ -386,6 +387,7 @@ beforeEach(() => {
 function makeFullCompositionState(): CompositionState {
   return {
     id: "state-a11y",
+    ...compositionStateAuthorityFields,
     version: 1,
     sources: {
       pages: {

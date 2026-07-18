@@ -111,7 +111,6 @@ test("probe: walk the staged guided tutorial", async ({ page }) => {
   const acceptButtons = page.getByRole("button", { name: /^Accept /i });
   const promptRegions = page.getByRole("region", { name: "Prompt template review" });
   const primaries = [
-    page.getByRole("button", { name: "Apply recipe", exact: true }),
     page.getByRole("button", { name: "Confirm wiring", exact: true }),
     page.getByRole("button", { name: "Continue", exact: true }),
     // Output required-fields turn: the LLM-built sink is observed-mode, so the
@@ -121,7 +120,7 @@ test("probe: walk the staged guided tutorial", async ({ page }) => {
 
   // The tutorial prompt is prelocked at every phase; the learner drives each
   // LLM-built phase (Source/Output/Transforms) by pressing Send ONCE per phase
-  // (re-sending mid-build re-triggers the driver). Recipe + Wire are confirm-only.
+  // (re-sending mid-build re-triggers the driver). Wire is confirm-only.
   // Mirrors tutorial-reliability's driveGuidedWalk.
   const drivenPhases = new Set(["Source", "Output", "Transforms"]);
   const currentPhase = async (): Promise<string | null> => {

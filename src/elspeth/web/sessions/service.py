@@ -83,6 +83,7 @@ from elspeth.web.sessions.guided_replay import (
     guided_response_projection_hash,
     project_guided_response,
     response_json,
+    validation_errors_for_composer_surface,
     with_guided_response_descriptor,
 )
 from elspeth.web.sessions.locking import (
@@ -5391,7 +5392,12 @@ class SessionServiceImpl:
                     # Free-form validator text can echo filesystem paths,
                     # credentials, and provider diagnostics. The state keeps
                     # the structured validity bit, not those raw messages.
-                    patched_validation_errors = None
+                    raw_validation_errors = [error.message for error in patched_validation.errors] or None
+                    patched_validation_errors = validation_errors_for_composer_surface(
+                        composer_meta=live_state_record.composer_meta,
+                        is_valid=patched_validation.is_valid,
+                        validation_errors=raw_validation_errors,
+                    )
                     conn.execute(
                         insert(interpretation_events_table).values(
                             id=event_id,
@@ -5733,7 +5739,12 @@ class SessionServiceImpl:
                     state_from_record(patched_state_record),
                     plugin_snapshot=plugin_snapshot,
                 )
-                patched_validation_errors = [error.message for error in patched_validation.errors] or None
+                raw_validation_errors = [error.message for error in patched_validation.errors] or None
+                patched_validation_errors = validation_errors_for_composer_surface(
+                    composer_meta=state_record.composer_meta,
+                    is_valid=patched_validation.is_valid,
+                    validation_errors=raw_validation_errors,
+                )
 
                 # Compute arguments_hash over the INTERPRETATION_HASH_DOMAIN_V2
                 # field set. The closed domain is the source of truth — read

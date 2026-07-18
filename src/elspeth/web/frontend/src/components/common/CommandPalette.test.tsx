@@ -77,26 +77,6 @@ describe("CommandPalette guided-mode commands", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("does not offer Re-enter guided mode for solver auto-drops", () => {
-    useSessionStore.setState({
-      activeSessionId: "session-1",
-      guidedSession: {
-        ...exitedGuidedSession,
-        terminal: {
-          kind: "exited_to_freeform",
-          reason: "solver_exhausted",
-          pipeline_yaml: null,
-        },
-      },
-    });
-
-    render(<CommandPalette isOpen onClose={vi.fn()} />);
-
-    expect(
-      screen.queryByRole("option", { name: /re-enter guided mode/i }),
-    ).toBeNull();
-  });
-
   it("does not offer navigation to the removed Runs tab", () => {
     render(<CommandPalette isOpen onClose={vi.fn()} />);
 

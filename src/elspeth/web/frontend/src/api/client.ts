@@ -48,6 +48,11 @@ import type {
   GuidedRespondResponse,
   TutorialSampleResponse,
 } from "@/types/guided";
+import {
+  decodeGetGuidedResponse,
+  decodeGuidedChatResponse,
+  decodeGuidedRespondResponse,
+} from "./guidedDecoder";
 import type {
   InterpretationEvent,
   InterpretationOptOutResponse,
@@ -730,7 +735,7 @@ export async function getGuided(
     headers: authHeaders(),
     signal,
   });
-  return parseResponse<GetGuidedResponse>(response);
+  return decodeGetGuidedResponse(await parseResponse<unknown>(response));
 }
 
 /**
@@ -776,7 +781,7 @@ export async function startGuidedSession(
     headers: authHeaders("application/json"),
     body: JSON.stringify({ profile: profileKind, operation_id: operationId }),
   });
-  return parseResponse<GetGuidedResponse>(response);
+  return decodeGetGuidedResponse(await parseResponse<unknown>(response));
 }
 
 /**
@@ -798,7 +803,7 @@ export async function respondGuided(
     body: JSON.stringify(body),
     signal,
   });
-  return parseResponse<GuidedRespondResponse>(response);
+  return decodeGuidedRespondResponse(await parseResponse<unknown>(response));
 }
 
 /**
@@ -818,7 +823,7 @@ export async function reenterGuided(
     body: JSON.stringify({ operation_id: operationId }),
     signal,
   });
-  return parseResponse<GetGuidedResponse>(response);
+  return decodeGetGuidedResponse(await parseResponse<unknown>(response));
 }
 
 /**
@@ -844,7 +849,7 @@ export async function convertToGuided(
     body: JSON.stringify({ operation_id: operationId }),
     signal,
   });
-  return parseResponse<GetGuidedResponse>(response);
+  return decodeGetGuidedResponse(await parseResponse<unknown>(response));
 }
 
 /**
@@ -870,7 +875,7 @@ export async function chatGuided(
     body: JSON.stringify(body),
     signal,
   });
-  return parseResponse<GuidedChatResponse>(response);
+  return decodeGuidedChatResponse(await parseResponse<unknown>(response));
 }
 
 /** Fork a session from a specific user message. */

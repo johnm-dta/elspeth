@@ -56,11 +56,11 @@
 //   warnings come from SourceInspectionFacts at emit time (advisory only, not stored in intent).
 
 import { useEffect, useId, useRef, useState } from "react";
-import type { GuidedRespondRequest, InspectAndConfirmPayload } from "@/types/guided";
+import type { GuidedRespondAction, InspectAndConfirmPayload } from "@/types/guided";
 
 interface InspectAndConfirmTurnProps {
   payload: InspectAndConfirmPayload;
-  onSubmit: (body: GuidedRespondRequest) => void;
+  onSubmit: (body: GuidedRespondAction) => void;
   disabled?: boolean;
   /** Tutorial passive mode: hide the "Edit columns…" editor entry; the learner
    *  only confirms with "Looks right". */
@@ -117,8 +117,9 @@ export function InspectAndConfirmTurn({
         columns: payload.observed.columns,
       },
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: null,
     });
   }
@@ -163,8 +164,9 @@ export function InspectAndConfirmTurn({
         columns: editorState.columns,
       },
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: null,
     });
   }

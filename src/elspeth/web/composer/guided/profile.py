@@ -20,7 +20,6 @@ _PROFILE_KEYS = frozenset(
     {
         "coaching",
         "advisor_checkpoints",
-        "recipe_match",
         "bookends",
     }
 )
@@ -32,11 +31,10 @@ class WorkflowProfile:
 
     coaching: bool
     advisor_checkpoints: bool
-    recipe_match: bool
     bookends: bool
 
     def __post_init__(self) -> None:
-        for field_name in ("coaching", "advisor_checkpoints", "recipe_match", "bookends"):
+        for field_name in ("coaching", "advisor_checkpoints", "bookends"):
             value = getattr(self, field_name)
             if type(value) is not bool:
                 raise TypeError(f"{field_name} must be bool, got {type(value).__name__}")
@@ -47,7 +45,6 @@ class WorkflowProfile:
         return {
             "coaching": self.coaching,
             "advisor_checkpoints": self.advisor_checkpoints,
-            "recipe_match": self.recipe_match,
             "bookends": self.bookends,
         }
 
@@ -71,7 +68,6 @@ class WorkflowProfile:
             return cls(
                 coaching=d["coaching"],
                 advisor_checkpoints=d["advisor_checkpoints"],
-                recipe_match=d["recipe_match"],
                 bookends=d["bookends"],
             )
         except (TypeError, ValueError) as exc:
@@ -81,7 +77,6 @@ class WorkflowProfile:
 EMPTY_PROFILE = WorkflowProfile(
     coaching=False,
     advisor_checkpoints=True,
-    recipe_match=True,
     bookends=False,
 )
 
@@ -92,7 +87,6 @@ TUTORIAL_PROFILE = WorkflowProfile(
     # known-good pipeline (e.g. the web->LLM prompt-injection-shield
     # recommendation), blocking wire completion with no harness-reachable escape.
     advisor_checkpoints=False,
-    recipe_match=True,
     bookends=True,
 )
 

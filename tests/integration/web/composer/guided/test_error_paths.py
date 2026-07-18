@@ -16,7 +16,6 @@ from elspeth.web.composer.guided.state_machine import (
     GuidedSession,
     GuidedStep,
     TerminalKind,
-    TerminalReason,
     TerminalState,
     TurnRecord,
 )
@@ -225,9 +224,9 @@ def test_reentry_rejects_non_user_terminal(composer_test_client: TestClient) -> 
         composer_test_client,
         session_id,
         TerminalState(
-            kind=TerminalKind.EXITED_TO_FREEFORM,
-            reason=TerminalReason.SOLVER_EXHAUSTED,
-            pipeline_yaml=None,
+            kind=TerminalKind.COMPLETED,
+            reason=None,
+            pipeline_yaml="pipeline: {}",
         ),
     )
 

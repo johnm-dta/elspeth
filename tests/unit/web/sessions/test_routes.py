@@ -30,6 +30,7 @@ from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus, ComposerLLMCall, ComposerLLMCallStatus
 from elspeth.contracts.composer_progress import ComposerProgressEvent
 from elspeth.contracts.enums import CreationModality, TerminalOutcome, TerminalPath
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import stable_hash
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
@@ -46,7 +47,6 @@ from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.guided.errors import InvariantError
-from elspeth.web.composer.guided.protocol import TurnResponse, TurnType
 from elspeth.web.composer.guided.resolved import SourceResolved
 from elspeth.web.composer.guided.state_machine import GuidedSession, GuidedStep, TerminalKind, TerminalReason, TerminalState
 from elspeth.web.composer.progress import ComposerProgressRegistry
@@ -81,7 +81,7 @@ from elspeth.web.sessions.protocol import (
     CompositionStateRecord,
     SessionRecord,
 )
-from elspeth.web.sessions.routes import _summarize_guided_response, create_session_router
+from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
@@ -182,20 +182,6 @@ def ValidationResult(
         readiness=readiness or (_ready_readiness() if is_valid else _blocked_readiness()),
         **kwargs,
     )
-
-
-def test_summarize_guided_response_rejects_unhandled_turn_type() -> None:
-    response: TurnResponse = {
-        "chosen": None,
-        "edited_values": None,
-        "custom_inputs": None,
-        "accepted_step_index": None,
-        "edit_step_index": None,
-        "control_signal": None,
-    }
-
-    with pytest.raises(InvariantError, match="unhandled turn_type"):
-        _summarize_guided_response(cast(TurnType, object()), response)
 
 
 def _make_composer_mock(
@@ -8144,6 +8130,7 @@ class TestComposerProgressRoutes:
         assert body["state"] is not None
         assert body["state"]["version"] == 2
         assert body["state"]["id"] == messages[-1]["composition_state_id"]
+        assert body["state"]["validation_errors"] == ["guided_composition_invalid"]
         assert body["state"]["composer_meta"]["guided_session"]["transition_consumed"] is True
 
     @pytest.mark.asyncio
@@ -11006,6 +10993,7 @@ def test_handle_convergence_error_persists_convergence_persist_provenance(tmp_pa
     """
     from elspeth.web.composer.protocol import ComposerConvergenceError
 
+    guided = GuidedSession.initial()
     partial = CompositionState(
         source=None,
         nodes=(),
@@ -11013,6 +11001,7 @@ def test_handle_convergence_error_persists_convergence_persist_provenance(tmp_pa
         outputs=(),
         metadata=PipelineMetadata(name="convergence-partial"),
         version=2,
+        guided_session=guided,
     )
     mock_composer = SimpleNamespace()
     mock_composer.compose = AsyncMock(
@@ -11036,6 +11025,11 @@ def test_handle_convergence_error_persists_convergence_persist_provenance(tmp_pa
         json={"content": "Build me a pipeline"},
     )
     assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["partial_state"]["validation_errors"] == ["guided_composition_invalid"]
+    current = asyncio.run(service.get_current_state(uuid.UUID(session_id)))
+    assert current is not None
+    assert deep_thaw(current.composer_meta["guided_session"]) == guided.to_dict()
 
     assert _read_persisted_provenance(service, session_id) == "convergence_persist"
 
@@ -11046,6 +11040,7 @@ def test_handle_plugin_crash_persists_plugin_crash_persist_provenance(tmp_path: 
     preflight partial-state captures so remediation triage can discriminate
     bug-fix-required from retry/budget-tunable.
     """
+    guided = GuidedSession.initial()
     partial = CompositionState(
         source=None,
         nodes=(),
@@ -11053,6 +11048,7 @@ def test_handle_plugin_crash_persists_plugin_crash_persist_provenance(tmp_path: 
         outputs=(),
         metadata=PipelineMetadata(name="plugin-crash-partial"),
         version=3,
+        guided_session=guided,
     )
     mock_composer = SimpleNamespace()
     mock_composer.compose = AsyncMock(
@@ -11078,6 +11074,10 @@ def test_handle_plugin_crash_persists_plugin_crash_persist_provenance(tmp_path: 
     persisted_id, persisted_version = _read_persisted_state_identity(service, session_id)
     assert detail["partial_state"]["id"] == persisted_id
     assert detail["partial_state"]["version"] == persisted_version
+    assert detail["partial_state"]["validation_errors"] == ["guided_composition_invalid"]
+    current = asyncio.run(service.get_current_state(uuid.UUID(session_id)))
+    assert current is not None
+    assert deep_thaw(current.composer_meta["guided_session"]) == guided.to_dict()
     assert _read_persisted_provenance(service, session_id) == "plugin_crash_persist"
 
 
@@ -11095,6 +11095,7 @@ def test_handle_runtime_preflight_failure_persists_preflight_persist_provenance(
     """
     from elspeth.web.composer.protocol import ComposerRuntimePreflightError
 
+    guided = GuidedSession.initial()
     partial = CompositionState(
         source=None,
         nodes=(),
@@ -11102,6 +11103,7 @@ def test_handle_runtime_preflight_failure_persists_preflight_persist_provenance(
         outputs=(),
         metadata=PipelineMetadata(name="preflight-partial"),
         version=4,
+        guided_session=guided,
     )
     advanced_state = CompositionState(
         source=None,
@@ -11144,6 +11146,10 @@ def test_handle_runtime_preflight_failure_persists_preflight_persist_provenance(
     persisted_id, persisted_version = _read_persisted_state_identity(service, session_id)
     assert detail["partial_state"]["id"] == persisted_id
     assert detail["partial_state"]["version"] == persisted_version
+    assert detail["partial_state"]["validation_errors"] == ["guided_composition_invalid"]
+    current = asyncio.run(service.get_current_state(uuid.UUID(session_id)))
+    assert current is not None
+    assert deep_thaw(current.composer_meta["guided_session"]) == guided.to_dict()
     assert _read_persisted_provenance(service, session_id) == "preflight_persist"
 
 
@@ -11222,6 +11228,7 @@ def test_send_message_state_advance_preserves_existing_composer_meta(tmp_path: P
     assert response.status_code == 200
     current = asyncio.run(service.get_current_state(uuid.UUID(session_id)))
     assert current is not None
+    assert current.validation_errors == ("guided_composition_invalid",)
     assert current.composer_meta["guided_completed_terminal_before_user_exit"] == marker
 
 

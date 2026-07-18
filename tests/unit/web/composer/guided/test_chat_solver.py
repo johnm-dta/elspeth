@@ -90,7 +90,14 @@ async def test_solver_sends_step_scoped_system_prompt(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
 
-    reply = await solve_step_chat(model="test/model", step=step, user_message="hi", temperature=None, seed=None)
+    reply = await solve_step_chat(
+        model="test/model",
+        step=step,
+        user_message="hi",
+        temperature=None,
+        seed=None,
+        timeout_seconds=30.0,
+    )
 
     assert reply == "here's some advice"
     messages = captured["messages"]
@@ -118,6 +125,7 @@ async def test_empty_user_message_raises(monkeypatch: pytest.MonkeyPatch) -> Non
             user_message="",
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
 
 
@@ -137,6 +145,7 @@ async def test_missing_response_content_raises(monkeypatch: pytest.MonkeyPatch) 
             user_message="hello",
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
 
 
@@ -156,6 +165,7 @@ async def test_whitespace_only_response_raises(monkeypatch: pytest.MonkeyPatch) 
             user_message="hello",
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
 
 
@@ -214,7 +224,7 @@ def test_build_step_chat_context_block_is_honest_when_nothing_is_built() -> None
         state=None,
     )
     assert "Applied source: none yet." in block
-    assert "Applied output(s): none yet." in block
+    assert "Applied output: none yet." in block
 
 
 @pytest.mark.asyncio
@@ -238,6 +248,7 @@ async def test_solve_step_chat_threads_context_block_as_third_message(
         user_message="explain this",
         temperature=None,
         seed=None,
+        timeout_seconds=30.0,
         context_block="## Current build\n\nApplied source: none yet.\n",
     )
 
@@ -275,6 +286,7 @@ async def test_solve_step_chat_rejects_tool_scaffolding_in_reply(monkeypatch: py
             user_message="read my csv",
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
 
 
@@ -325,6 +337,47 @@ def test_parse_step_2_sink_rejects_non_object_arguments() -> None:
         _parse_step_2_sink_tool_arguments('["not", "an", "object"]')
 
 
+def test_step_2_sink_tool_schema_and_parser_are_exactly_singular() -> None:
+    parameters = chat_solver._STEP_2_SINK_TOOL["function"]["parameters"]
+    assert parameters["required"] == ["resolution", "output", "assistant_message"]
+    assert "outputs" not in parameters["properties"]
+    assert parameters["properties"]["output"]["type"] == "object"
+
+    sink, message = _parse_step_2_sink_tool_arguments(
+        json.dumps(
+            {
+                "resolution": "sink",
+                "output": {
+                    "name": "accepted",
+                    "plugin": "json",
+                    "options": {"path": "accepted.jsonl"},
+                    "required_fields": ["id"],
+                    "schema_mode": "fixed",
+                    "on_write_failure": "discard",
+                },
+                "assistant_message": "Configured the output.",
+            }
+        )
+    )
+
+    assert message == "Configured the output."
+    assert [output.name for output in sink.outputs] == ["accepted"]
+    assert [output.on_write_failure for output in sink.outputs] == ["discard"]
+
+
+def test_parse_step_2_sink_rejects_legacy_plural_outputs_field() -> None:
+    with pytest.raises(ValueError, match="must contain exactly"):
+        _parse_step_2_sink_tool_arguments(
+            json.dumps(
+                {
+                    "resolution": "sink",
+                    "outputs": [],
+                    "assistant_message": "Configured outputs.",
+                }
+            )
+        )
+
+
 @pytest.mark.parametrize("failure_case", ["non_finite", "aggregate", "depth", "surrogate"])
 def test_parse_step_2_sink_translates_strict_snapshot_failures_to_malformed(failure_case: str) -> None:
     if failure_case == "non_finite":
@@ -343,14 +396,14 @@ def test_parse_step_2_sink_translates_strict_snapshot_failures_to_malformed(fail
     arguments = json.dumps(
         {
             "resolution": "sink",
-            "outputs": [
-                {
-                    "plugin": "json",
-                    "options": bad_options,
-                    "required_fields": [],
-                    "schema_mode": "observed",
-                }
-            ],
+            "output": {
+                "name": "results",
+                "plugin": "json",
+                "options": bad_options,
+                "required_fields": [],
+                "schema_mode": "observed",
+                "on_write_failure": "discard",
+            },
             "assistant_message": "Configured output.",
         }
     )
@@ -491,8 +544,7 @@ async def test_solve_step_chat_timeout_seconds_bounds_the_llm_call(monkeypatch: 
 
     A hung provider call must raise TimeoutError once ``timeout_seconds``
     elapses — the same freeform-compose bound (asyncio.wait_for on
-    ``composer_timeout_seconds``). The routes thread the settings value;
-    ``None`` (legacy/test callers) stays unbounded.
+    ``composer_timeout_seconds``).
     """
     import asyncio
 
@@ -514,19 +566,11 @@ async def test_solve_step_chat_timeout_seconds_bounds_the_llm_call(monkeypatch: 
 
 
 @pytest.mark.asyncio
-async def test_solve_step_chat_without_timeout_stays_unbounded_contract(monkeypatch: pytest.MonkeyPatch) -> None:
-    """timeout_seconds=None (default) does not wrap the call — direct callers keep the legacy contract."""
+async def test_bounded_acompletion_rejects_absent_or_invalid_timeout() -> None:
+    import inspect
 
-    async def fake_acompletion(**_kwargs: Any) -> _FakeLLMResponse:
-        return _ok_response("advice")
-
-    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
-
-    reply = await solve_step_chat(
-        model="test/model",
-        step=GuidedStep.STEP_1_SOURCE,
-        user_message="hello",
-        temperature=None,
-        seed=None,
-    )
-    assert reply == "advice"
+    assert inspect.signature(solve_step_chat).parameters["timeout_seconds"].default is inspect.Parameter.empty
+    with pytest.raises(TypeError, match="finite positive"):
+        await chat_solver._bounded_acompletion({}, None)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="finite positive"):
+        await chat_solver._bounded_acompletion({}, 0)

@@ -20,8 +20,7 @@ export type TurnType =
   | "single_select"
   | "multi_select_with_custom"
   | "schema_form"
-  | "propose_chain"
-  | "recipe_offer"
+  | "propose_pipeline"
   | "confirm_wiring";
 
 /**
@@ -44,16 +43,12 @@ export type ControlSignal =
 export type GuidedStep =
   | "step_1_source"
   | "step_2_sink"
-  | "step_2_5_recipe_match"
   | "step_3_transforms"
   | "step_4_wire";
 
 export type TerminalKind = "completed" | "exited_to_freeform";
 
-export type TerminalReason =
-  | "user_pressed_exit"
-  | "protocol_violation"
-  | "solver_exhausted";
+export type TerminalReason = "user_pressed_exit";
 
 // ── Domain shapes ─────────────────────────────────────────────────────────────
 
@@ -68,12 +63,18 @@ export interface TurnRecord {
   emitter: "server" | "llm";
 }
 
-/** Wire: TerminalStateResponse (schemas.py:223-228). */
-export interface TerminalState {
-  kind: TerminalKind;
-  reason: TerminalReason | null;
-  pipeline_yaml: string | null;
-}
+/** Wire: TerminalStateResponse with its runtime cross-field invariant. */
+export type TerminalState =
+  | {
+      kind: "completed";
+      reason: null;
+      pipeline_yaml: string;
+    }
+  | {
+      kind: "exited_to_freeform";
+      reason: "user_pressed_exit";
+      pipeline_yaml: null;
+    };
 
 /**
  * Wire: ChatTurnResponse (schemas.py — Phase A slice 5).  Mirrors a single
@@ -110,7 +111,6 @@ export interface ChatTurn {
 export interface WorkflowProfile {
   coaching: boolean;
   bookends: boolean;
-  recipe_match: boolean;
   advisor_checkpoints: boolean;
 }
 
@@ -131,13 +131,21 @@ export interface GuidedSession {
   profile: WorkflowProfile | null;
 }
 
-/** Wire: TurnPayloadResponse (schemas.py:239-252). step_index is 0-based ordinal (number). */
-export interface TurnPayload {
-  type: TurnType;
+interface TurnPayloadEnvelope<TType extends TurnType, TPayload> {
+  type: TType;
   step_index: number;
   turn_token: string;
-  payload: unknown;
+  payload: TPayload;
 }
+
+/** Closed wire union for TurnPayloadResponse. */
+export type TurnPayload =
+  | TurnPayloadEnvelope<"inspect_and_confirm", InspectAndConfirmPayload>
+  | TurnPayloadEnvelope<"single_select", SingleSelectPayload>
+  | TurnPayloadEnvelope<"multi_select_with_custom", MultiSelectWithCustomPayload>
+  | TurnPayloadEnvelope<"schema_form", SchemaFormPayload>
+  | TurnPayloadEnvelope<"propose_pipeline", ProposePipelinePayload>
+  | TurnPayloadEnvelope<"confirm_wiring", WireStageData>;
 
 // ── Endpoint envelopes ───────────────────────────────────────────────────────
 
@@ -149,22 +157,83 @@ export interface GetGuidedResponse {
   composition_state: CompositionState | null;
 }
 
-/** Request body for POST /api/sessions/{id}/guided/respond (schemas.py:264-283). */
-export interface GuidedRespondRequest {
-  chosen: string[] | null;
-  edited_values: Record<string, unknown> | null;
-  custom_inputs: string[] | null;
-  accepted_step_index: number | null;
-  edit_step_index: number | null;
-  /** Typed as closed enum client-side; server validates and accepts str for graceful stale-client failure. */
-  control_signal: ControlSignal | null;
-  /**
-   * Optimistic-concurrency token: the client's expected current step. When
-   * present the server 409s on mismatch (the wizard advanced under the
-   * client). Optional — omit for non-wire turns that don't carry a step.
-   */
-  step_index?: GuidedStep | null;
+export interface GuidedEditTarget {
+  kind: "source" | "node" | "edge" | "output";
+  stable_id: string;
 }
+
+interface UnboundProposalFields {
+  proposal_id: null;
+  draft_hash: null;
+  edit_target: null;
+}
+
+interface BoundProposalFields {
+  proposal_id: string;
+  draft_hash: string;
+}
+
+export type NonEmptyStringArray = [string, ...string[]];
+
+/** One exact legal response action before retry/turn identity is attached. */
+export type GuidedRespondAction =
+  | (UnboundProposalFields & {
+      chosen: NonEmptyStringArray;
+      edited_values: null;
+      custom_inputs: null;
+      control_signal: null;
+    })
+  | (UnboundProposalFields & {
+      chosen: null;
+      edited_values: null;
+      custom_inputs: NonEmptyStringArray;
+      control_signal: null;
+    })
+  | (UnboundProposalFields & {
+      chosen: NonEmptyStringArray;
+      edited_values: null;
+      custom_inputs: NonEmptyStringArray;
+      control_signal: null;
+    })
+  | (UnboundProposalFields & {
+      chosen: null;
+      edited_values: Record<string, unknown>;
+      custom_inputs: null;
+      control_signal: null;
+    })
+  | (UnboundProposalFields & {
+      chosen: null;
+      edited_values: null;
+      custom_inputs: null;
+      control_signal: Exclude<ControlSignal, "reject">;
+    })
+  | (BoundProposalFields & {
+      chosen: ["accept"];
+      edited_values: null;
+      custom_inputs: null;
+      edit_target: null;
+      control_signal: null;
+    })
+  | (BoundProposalFields & {
+      chosen: null;
+      edited_values: null;
+      custom_inputs: null;
+      edit_target: null;
+      control_signal: "reject";
+    })
+  | (BoundProposalFields & {
+      chosen: null;
+      edited_values: Record<string, unknown>;
+      custom_inputs: null;
+      edit_target: GuidedEditTarget;
+      control_signal: null;
+    });
+
+/** Exact request body for POST /api/sessions/{id}/guided/respond. */
+export type GuidedRespondRequest = GuidedRespondAction & {
+  operation_id: string;
+  turn_token: string | null;
+};
 
 /** Response for POST /api/sessions/{id}/guided/respond (schemas.py:286-296). */
 export interface GuidedRespondResponse {
@@ -259,9 +328,8 @@ export interface MultiSelectWithCustomPayload {
    * Server-emitted label for the "let source decide" escape button, or null.
    *
    * The frontend renders this as a first-class escape choice. Submitting it
-   * sends `chosen: []` and `custom_inputs: []`; the backend combines that with
-   * the persisted sink intent and records schema_mode="observed", meaning the
-   * source decides the pass-through field set.
+   * sends the standalone `passthrough` control signal; the backend combines
+   * that with the persisted sink intent and records schema_mode="observed".
    */
   escape_label: string | null;
 }
@@ -315,55 +383,123 @@ export interface KnobSchema {
   fields: KnobField[];
 }
 
-export interface RecipeContext {
-  recipe_name: string;
-  description: string;
-  alternatives: string[];
+export interface SchemaFormPayload {
+  mode: "plugin_options";
+  plugin: string;
+  knobs: KnobSchema;
+  prefilled: Record<string, unknown>;
 }
 
-export type SchemaFormPayload =
+/**
+ * Closed, non-executable projection of a durable pipeline proposal. There are
+ * no plugin options, paths, prompts, secret values, or model-authored text in
+ * this surface.
+ */
+export type ProposalBlockerCode =
+  | "pipeline_invalid"
+  | "policy_review_required"
+  | "plugin_unavailable"
+  | "interpretation_required";
+
+export type ProposalBlockerCategory =
+  | "validation"
+  | "policy"
+  | "availability"
+  | "interpretation";
+
+export interface ProposalBlocker {
+  code: ProposalBlockerCode;
+  category: ProposalBlockerCategory;
+  summary: string;
+  edit_target: GuidedEditTarget | null;
+}
+
+export interface ProposalPluginRef {
+  kind: "source" | "transform" | "sink";
+  id: string;
+}
+
+export type ProposalEndpoint = {
+  kind: "source" | "node" | "output";
+  stable_id: string;
+};
+
+export type ProposalTargetEndpoint = ProposalEndpoint | { kind: "discard" };
+
+export type ProposalFlow =
+  | { kind: "source_success"; branch: string | null }
+  | { kind: "source_validation_failure" }
+  | { kind: "node_success"; branch: string | null }
+  | { kind: "node_error" }
+  | { kind: "gate_route"; route: string; branch: string | null }
+  | { kind: "gate_fork"; routes: string[]; branch: string }
+  | { kind: "queue_continue"; branch: string | null }
+  | { kind: "coalesce_success"; branch: string | null }
+  | { kind: "output_write_failure" };
+
+export type ProposalNodeBehavior =
+  | { kind: "transform" }
   | {
-      mode: "plugin_options";
-      plugin: string;
-      knobs: KnobSchema;
-      prefilled: Record<string, unknown>;
+      kind: "gate";
+      route_aliases: string[];
+      fork_branches: Array<{ routes: string[]; branch: string }>;
     }
   | {
-      mode: "recipe_decision";
-      knobs: KnobSchema;
-      prefilled: Record<string, unknown>;
-      recipe_context: RecipeContext;
+      kind: "aggregation";
+      trigger_kinds: Array<"count" | "timeout" | "condition">;
+      /** Canonical decimal strings preserve Python integers beyond JS safe range. */
+      count: string | null;
+      timeout_seconds: number | null;
+      output_mode: "default" | "passthrough" | "transform";
+      /** Canonical signed decimal string; null mirrors an omitted runtime value. */
+      expected_output_count: string | null;
+    }
+  | { kind: "queue" }
+  | {
+      kind: "coalesce";
+      branch_aliases: string[];
+      policy: "require_all" | "quorum" | "best_effort" | "first";
+      merge: "union" | "nested" | "select";
     };
 
-/**
- * Wire: _ProposedStep (protocol.py:59-62). One step in a proposed chain.
- *
- * options is an arbitrary plugin options dict (Mapping[str, Any] on the wire);
- * typed as Record<string, unknown> -- callers must not assume any specific shape.
- */
-export interface ProposedStep {
-  plugin: string;
-  options: Record<string, unknown>;
+export interface ProposePipelinePayload {
+  proposal_id: string;
+  draft_hash: string;
+  summary: string;
   rationale: string;
-}
-
-/**
- * Wire: ProposeChainPayload (protocol.py:64-68).
- *
- * steps    -- ordered list of proposed transforms.
- * why      -- LLM's overall rationale for the proposal.
- * blockers -- obstacles identified by the LLM (may be empty).
- *
- * Submit shape (verified against routes.py:2030-2137):
- *   Accept all: { chosen: ["accept"], ... all other fields null }
- *   Reject / per-step Edit / Ask advisor: NOT wired in Phase 4.
- *
- * Tracker: filigree elspeth-2c08408170 (Step-3 backend handler completion).
- */
-export interface ProposeChainPayload {
-  steps: ProposedStep[];
-  why: string;
-  blockers: string[];
+  component_counts: {
+    sources: number;
+    nodes: number;
+    edges: number;
+    outputs: number;
+  };
+  blockers: ProposalBlocker[];
+  graph: {
+    sources: Array<{
+      stable_id: string;
+      label: string;
+      plugin: ProposalPluginRef;
+    }>;
+    edges: Array<{
+      stable_id: string;
+      from_endpoint: ProposalEndpoint;
+      to_endpoint: ProposalTargetEndpoint;
+      flow: ProposalFlow;
+    }>;
+  };
+  nodes: Array<{
+    stable_id: string;
+    label: string;
+    node_type: "transform" | "gate" | "aggregation" | "queue" | "coalesce";
+    plugin: ProposalPluginRef | null;
+    behavior: ProposalNodeBehavior;
+  }>;
+  outputs: Array<{
+    stable_id: string;
+    label: string;
+    plugin: ProposalPluginRef;
+  }>;
+  edit_targets: GuidedEditTarget[];
 }
 
 /**

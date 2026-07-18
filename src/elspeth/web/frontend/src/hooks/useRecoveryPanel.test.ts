@@ -3,10 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import { useRecoveryPanel } from "./useRecoveryPanel";
 import type { ApiError, CompositionState, FailedTurn } from "@/types/api";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 function makePartialState(version = 7): CompositionState {
   return {
     id: `state-${version}`,
+    ...compositionStateAuthorityFields,
     version,
     sources: {},
     nodes: [],

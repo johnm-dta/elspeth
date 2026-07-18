@@ -41,7 +41,16 @@ from elspeth.contracts.composer_interpretation import (
 )
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.hashing import stable_hash
-from elspeth.web.composer.state import CompositionState, NodeSpec, OutputSpec, PipelineMetadata, SourceSpec
+from elspeth.web.composer.guided.state_machine import GuidedSession
+from elspeth.web.composer.state import (
+    CompositionState,
+    NodeSpec,
+    OutputSpec,
+    PipelineMetadata,
+    SourceSpec,
+    ValidationEntry,
+    ValidationSummary,
+)
 from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
     PROMPT_TEMPLATE_PARTS_KEY,
@@ -942,6 +951,68 @@ async def test_03b_resolve_recomputes_validation_for_patched_live_state(service)
     )
 
     assert stale_error not in list(new_state.validation_errors or ())
+
+
+@pytest.mark.parametrize(
+    ("composer_meta", "expected_errors"),
+    [
+        ({"guided_session": GuidedSession.initial().to_dict()}, ("guided_composition_invalid",)),
+        (None, ("/home/operator/private.csv token=VALIDATION-CREDENTIAL-CANARY",)),
+    ],
+    ids=("guided-closes-validator-text", "freeform-preserves-validator-text"),
+)
+@pytest.mark.asyncio
+async def test_resolve_interpretation_normalizes_validation_for_its_composer_surface(
+    service,
+    monkeypatch,
+    composer_meta,
+    expected_errors,
+) -> None:
+    session_id = uuid4()
+    surfacing_state = await _seed_state_with_llm_node(service, session_id=session_id)
+    event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=surfacing_state.id,
+        affected_node_id="llm_transform_1",
+        tool_call_id="call_closed_validation",
+        user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
+        llm_draft="Innovative and creative",
+        model_identifier="test-model",
+        model_version="v1",
+        provider="test-provider",
+        composer_skill_hash="a" * 64,
+    )
+    await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            nodes=[_llm_node()],
+            metadata_={"name": "Phase 5b Test", "description": ""},
+            is_valid=False,
+            validation_errors=["stale unresolved placeholder"],
+            composer_meta=composer_meta,
+        ),
+        provenance="session_seed",
+    )
+    canary = "/home/operator/private.csv token=VALIDATION-CREDENTIAL-CANARY"
+    monkeypatch.setattr(
+        service,
+        "_validate_patched_composition_state",
+        lambda _state, *, plugin_snapshot: ValidationSummary(
+            is_valid=False,
+            errors=(ValidationEntry(component="node", message=canary, severity="high"),),
+        ),
+    )
+
+    _resolved, new_state = await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=event.id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+    )
+
+    assert new_state.validation_errors == expected_errors
 
 
 @pytest.mark.asyncio

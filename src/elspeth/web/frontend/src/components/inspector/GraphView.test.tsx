@@ -6,6 +6,7 @@ import { GraphView } from "./GraphView";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useExecutionStore } from "@/stores/executionStore";
 import type { CompositionProposal, CompositionState, NodeSpec, EdgeSpec } from "@/types/index";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 // Mock @xyflow/react — jsdom cannot do DOM measurements required by React Flow.
 // Render nodes and edges as simple divs so we can assert on their presence.
@@ -144,6 +145,7 @@ function makeEdge(overrides: Partial<EdgeSpec> = {}): EdgeSpec {
 function makeState(overrides: Partial<CompositionState> = {}): CompositionState {
   return {
     id: "test-session",
+    ...compositionStateAuthorityFields,
     version: 1,
     sources: {},
     nodes: [],

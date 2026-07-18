@@ -68,27 +68,11 @@ class KnobSchema(TypedDict):
     fields: list[KnobField]
 
 
-class RecipeContext(TypedDict):
-    recipe_name: str
-    description: str
-    alternatives: list[str]
-
-
-class _PluginOptionsPayload(TypedDict):
+class SchemaFormPayload(TypedDict):
     mode: Literal["plugin_options"]
     plugin: str
     knobs: KnobSchema
     prefilled: dict[str, object]
-
-
-class _RecipeDecisionPayload(TypedDict):
-    mode: Literal["recipe_decision"]
-    knobs: KnobSchema
-    prefilled: dict[str, object]
-    recipe_context: RecipeContext
-
-
-SchemaFormPayload = _PluginOptionsPayload | _RecipeDecisionPayload
 
 
 class KnobSchemaLoweringError(Exception):

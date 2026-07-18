@@ -11,8 +11,7 @@
 //   POST /api/sessions                         → {id} (tutorial then graduation session)
 //   POST /api/sessions/{id}/guided/start       → 200, idempotent (profile seed)
 //   GET  /api/sessions/{id}/guided             → step_1_source turn
-//   POST /api/sessions/{id}/guided/respond     → walks source → sink →
-//                                                recipe-apply → step_4_wire,
+//   POST /api/sessions/{id}/guided/respond     → walks source → sink → step_4_wire,
 //                                                then wire-confirm → completed
 //   POST /api/tutorial/run                     → the canonical run result
 //   GET  .../runs/{id}/audit-story             → the audit story
@@ -99,7 +98,6 @@ function guidedSession(step: string): Record<string, unknown> {
     profile: {
       coaching: true,
       bookends: true,
-      recipe_match: true,
       advisor_checkpoints: true,
     },
   };
@@ -388,21 +386,8 @@ async function installTutorialRoutes(
           ["json", "json"],
         ]);
       } else {
-        next = {
-          type: "recipe_offer",
-          step_index: 2,
-          payload: {
-            mode: "recipe_decision",
-            knobs: { fields: [] },
-            prefilled: {},
-            recipe_context: {
-              recipe_name: "web-scrape-llm-rate-jsonl",
-              description: "Scrape each URL and rate the page.",
-              alternatives: [],
-            },
-          },
-        };
-        session = guidedSession("step_2_5_recipe_match");
+        next = wireTurn;
+        session = guidedSession("step_4_wire");
       }
       await route.fulfill({
         json: {
@@ -427,8 +412,8 @@ async function installTutorialRoutes(
       state.guidedRespondCount += 1;
       const n = state.guidedRespondCount;
       state.requestLog.push(`guided-respond:${n}`);
-      // Drive a deterministic walk: source → sink → recipe-apply → wire →
-      // completed. The mock ignores the request body and advances by count.
+      // Drive a deterministic walk: source → sink → wire → completed. The
+      // mock ignores the request body and advances by count.
       let next: Record<string, unknown> | null;
       let session = guidedSession("step_2_sink");
       if (n === 1) {
@@ -439,24 +424,7 @@ async function installTutorialRoutes(
         ]);
         session = guidedSession("step_2_sink");
       } else if (n === 2) {
-        // after sink pick → recipe offer
-        next = {
-          type: "recipe_offer",
-          step_index: 2,
-          payload: {
-            mode: "recipe_decision",
-            knobs: { fields: [] },
-            prefilled: {},
-            recipe_context: {
-              recipe_name: "web-scrape-llm-rate-jsonl",
-              description: "Scrape each URL and rate the page.",
-              alternatives: [],
-            },
-          },
-        };
-        session = guidedSession("step_2_5_recipe_match");
-      } else if (n === 3) {
-        // after apply recipe → wire turn
+        // after sink pick → wire turn
         next = wireTurn;
         session = guidedSession("step_4_wire");
       } else {
@@ -659,7 +627,7 @@ async function installTutorialRoutes(
 }
 
 test.describe("first-run tutorial (staged guided flow)", () => {
-  test("welcome → guided (source/sink/recipe/wire) → run → audit → graduation", async ({
+  test("welcome → guided (source/sink/wire) → run → audit → graduation", async ({
     page,
   }) => {
     const state: GuidedFixtureState = {
@@ -687,12 +655,6 @@ test.describe("first-run tutorial (staged guided flow)", () => {
     // ── Step 2 sink ──────────────────────────────────────────────────────────
     await expect(page.getByText(/Save the pipeline's results/i)).toBeVisible();
     await page.getByRole("button", { name: "Send message", exact: true }).click();
-    // ── Step 2.5 recipe-apply ────────────────────────────────────────────────
-    await expect(
-      page.getByRole("button", { name: "Apply recipe", exact: true }),
-    ).toBeVisible();
-    await page.getByRole("button", { name: "Apply recipe", exact: true }).click();
-
     // ── Step 4 wire stage: topology + edge-contract overlay (M1 from/to) ─────
     await expect(page.getByRole("heading", { name: "Review wiring" })).toBeVisible();
     await expect(

@@ -261,6 +261,7 @@ async def _plan(
     originating_message: PlannerOriginatingMessage | None = None,
     custody_config: PlannerCustodyConfig | None = None,
     current_state: CompositionState | None = None,
+    intent: str = "Build the requested pipeline.",
 ) -> Any:
     # Candidate validation needs the real plugin contracts.  ``tool_context``
     # remains in the test signature so the standard composer fixture proves
@@ -271,7 +272,7 @@ async def _plan(
     plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(full_catalog)
     policy_catalog = PolicyCatalogView.for_trained_operator(full_catalog, plugin_snapshot)
     return await plan_pipeline(
-        intent="Build the requested pipeline.",
+        intent=intent,
         current_state=current_state or _empty_state(),
         reviewed_facts={"request": "Build the requested pipeline."},
         surface=PlannerSurface.FREEFORM,
@@ -386,6 +387,269 @@ async def test_discovery_round_uses_real_read_only_tool_then_terminal(
     assert len(recorder.invocations) == 1
     assert recorder.invocations[0].tool_name == "list_sources"
     assert [call.planner_call_ordinal for call in recorder.llm_calls] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_parallel_discovery_results_remain_correlated_by_tool_call_id(
+    tmp_path: Path,
+    tool_context: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import elspeth.web.composer.pipeline_planner as planner_module
+
+    original = planner_module.execute_discovery_tool_with_context
+    rendezvous = threading.Barrier(2)
+
+    def synchronized_discovery(*args: Any, **kwargs: Any) -> Any:
+        tool_name = args[0]
+        rendezvous.wait(timeout=2)
+        result = original(*args, **kwargs)
+        return replace(result, data={"marker": tool_name})
+
+    monkeypatch.setattr(planner_module, "execute_discovery_tool_with_context", synchronized_discovery)
+    completion = _ScriptedCompletion(
+        _response(("list_sources", {}), ("list_sinks", {})),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+    recorder = BufferingRecorder()
+
+    await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion, recorder=recorder)
+
+    tool_messages = [message for message in completion.requests[1]["messages"] if message["role"] == "tool"]
+    assert [(message["tool_call_id"], json.loads(message["content"])["data"]["marker"]) for message in tool_messages] == [
+        ("call-1", "list_sources"),
+        ("call-2", "list_sinks"),
+    ]
+    assert {call.tool_call_id: call.tool_name for call in recorder.invocations} == {
+        "call-1": "list_sources",
+        "call-2": "list_sinks",
+    }
+
+
+@pytest.mark.asyncio
+async def test_parallel_discovery_failure_closes_every_audit_before_return(
+    tmp_path: Path,
+    tool_context: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import elspeth.web.composer.pipeline_planner as planner_module
+
+    original = planner_module.execute_discovery_tool_with_context
+    rendezvous = threading.Barrier(2)
+    release_sibling = threading.Event()
+    sibling_worker_finished = threading.Event()
+
+    def controlled_discovery(*args: Any, **kwargs: Any) -> Any:
+        tool_name = args[0]
+        rendezvous.wait(timeout=2)
+        if tool_name == "list_sources":
+            raise RuntimeError("deterministic-primary-discovery-failure")
+        release_sibling.wait(timeout=5)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            sibling_worker_finished.set()
+
+    monkeypatch.setattr(planner_module, "execute_discovery_tool_with_context", controlled_discovery)
+    completion = _ScriptedCompletion(_response(("list_sources", {}), ("list_sinks", {})))
+    recorder = BufferingRecorder()
+    events: list[str] = []
+
+    try:
+        with pytest.raises(RuntimeError, match="deterministic-primary-discovery-failure"):
+            await _plan(
+                tmp_path=tmp_path,
+                tool_context=tool_context,
+                completion=completion,
+                recorder=recorder,
+                lifecycle=_lifecycle(events),
+            )
+        assert len(recorder.invocations) == 2
+        closed_snapshot = tuple(call.to_dict() for call in recorder.invocations)
+        assert events[-1] == "settled:failed"
+    finally:
+        release_sibling.set()
+
+    for _attempt in range(200):
+        if sibling_worker_finished.is_set():
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0)
+    assert sibling_worker_finished.is_set()
+    assert tuple(call.to_dict() for call in recorder.invocations) == closed_snapshot
+
+
+@pytest.mark.asyncio
+async def test_parallel_discovery_cancellation_closes_every_audit_before_return(
+    tmp_path: Path,
+    tool_context: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import elspeth.web.composer.pipeline_planner as planner_module
+
+    original = planner_module.execute_discovery_tool_with_context
+    rendezvous = threading.Barrier(2)
+    both_workers_entered = threading.Event()
+    release_workers = threading.Event()
+    finished_count = 0
+    finished_lock = threading.Lock()
+
+    def controlled_discovery(*args: Any, **kwargs: Any) -> Any:
+        nonlocal finished_count
+        rendezvous.wait(timeout=2)
+        both_workers_entered.set()
+        release_workers.wait(timeout=5)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            with finished_lock:
+                finished_count += 1
+
+    monkeypatch.setattr(planner_module, "execute_discovery_tool_with_context", controlled_discovery)
+    recorder = BufferingRecorder()
+    events: list[str] = []
+    task = asyncio.create_task(
+        _plan(
+            tmp_path=tmp_path,
+            tool_context=tool_context,
+            completion=_ScriptedCompletion(_response(("list_sources", {}), ("list_sinks", {}))),
+            recorder=recorder,
+            lifecycle=_lifecycle(events),
+        )
+    )
+    try:
+        await asyncio.wait_for(asyncio.to_thread(both_workers_entered.wait, 2), timeout=3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert len(recorder.invocations) == 2
+        closed_snapshot = tuple(call.to_dict() for call in recorder.invocations)
+        assert events[-1] == "settled:cancelled"
+    finally:
+        release_workers.set()
+
+    for _attempt in range(200):
+        with finished_lock:
+            if finished_count == 2:
+                break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0)
+    with finished_lock:
+        assert finished_count == 2
+    assert tuple(call.to_dict() for call in recorder.invocations) == closed_snapshot
+
+
+@pytest.mark.asyncio
+async def test_exact_intent_appears_in_the_sole_user_role_message(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    exact_intent = "Read the audited input and write the canonical report."
+    completion = _ScriptedCompletion(_response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})))
+
+    await _plan(
+        tmp_path=tmp_path,
+        tool_context=tool_context,
+        completion=completion,
+        intent=exact_intent,
+    )
+
+    user_messages = [message for message in completion.requests[0]["messages"] if message["role"] == "user"]
+    assert len(user_messages) == 1
+    assert json.loads(user_messages[0]["content"])["intent"] == exact_intent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("temperature", "seed", "expected"),
+    [
+        (None, None, {}),
+        (0.25, 1234, {"temperature": 0.25, "seed": 1234}),
+    ],
+)
+async def test_temperature_and_seed_are_omitted_or_passed_exactly(
+    tmp_path: Path,
+    tool_context: ToolContext,
+    temperature: float | None,
+    seed: int | None,
+    expected: dict[str, object],
+) -> None:
+    completion = _ScriptedCompletion(_response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})))
+
+    await _plan(
+        tmp_path=tmp_path,
+        tool_context=tool_context,
+        completion=completion,
+        model_overrides={"temperature": temperature, "seed": seed},
+    )
+
+    actual = {key: completion.requests[0][key] for key in ("temperature", "seed") if key in completion.requests[0]}
+    assert actual == expected
+
+
+@pytest.mark.asyncio
+async def test_non_anthropic_requests_have_no_cache_markers(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    completion = _ScriptedCompletion(
+        _response(("list_sources", {})),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+
+    await _plan(
+        tmp_path=tmp_path,
+        tool_context=tool_context,
+        completion=completion,
+        model_overrides={"model_identifier": "openai/gpt-5"},
+    )
+
+    for request in completion.requests:
+        assert all("cache_control" not in message for message in request["messages"])
+        assert all("cache_control" not in tool for tool in request["tools"])
+
+
+@pytest.mark.asyncio
+async def test_anthropic_cache_markers_stay_stable_across_discovery_rounds(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    completion = _ScriptedCompletion(
+        _response(("list_sources", {})),
+        _response(("list_sinks", {})),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+
+    await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion)
+
+    marked_system = [request["messages"][0] for request in completion.requests]
+    marked_tools = [request["tools"] for request in completion.requests]
+    assert all(message["cache_control"] == {"type": "ephemeral"} for message in marked_system)
+    assert marked_system[0] == marked_system[1] == marked_system[2]
+    assert marked_tools[0] == marked_tools[1] == marked_tools[2]
+    assert all(tools[-1]["cache_control"] == {"type": "ephemeral"} for tools in marked_tools)
+
+
+@pytest.mark.asyncio
+async def test_missing_source_candidate_fails_closed_before_full_candidate_is_accepted(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    missing_source = _pipeline(tmp_path)
+    del missing_source["source"]
+    completion = _ScriptedCompletion(
+        _response(("emit_pipeline_proposal", {"pipeline": missing_source})),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+
+    proposal = await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion)
+
+    assert proposal.proposal.repair_count == 1
+    feedback = json.loads(completion.requests[1]["messages"][-1]["content"])
+    assert feedback["success"] is False
+    assert feedback["validation"]["is_valid"] is False
+    assert any(error["component"] == "source" for error in feedback["validation"]["errors"])
+    assert all(error["error_class"] == "ValidationError" for error in feedback["validation"]["errors"])
 
 
 @pytest.mark.asyncio

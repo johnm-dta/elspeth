@@ -194,11 +194,10 @@ def _sync_get_blob_by_storage_path(
 ) -> BlobToolRecord | None:
     """Look up a blob by its canonical storage_path within a session.
 
-    Used by ``handle_step_1_source`` (steps.py) to detect whether a path
-    supplied via the guided SchemaForm resolves to an already-uploaded blob.
+    Used by guided proposal preparation to detect whether a reviewed path
+    resolves to an already-uploaded blob.
     When it does, the blob_id (= blob["id"]) can be injected as ``blob_ref``
-    into ``SourceResolved.options`` so that the recipe slot resolvers in
-    ``recipe_match.py`` have access to the UUID they need.
+    into the reviewed source facts used by proposal custody.
 
     Returns None if no blob row matches the path, which is the correct
     representation for path-based sources that are not blob-backed.
@@ -218,8 +217,8 @@ def _sync_get_blob_by_id(
 ) -> BlobToolRecord | None:
     """Look up a blob by its UUID within a session (authoritative DB query).
 
-    The inverse of :func:`_sync_get_blob_by_storage_path`: used by
-    ``handle_step_1_source`` (steps.py) to resolve a ``blob:<ref>`` path sentinel
+    The inverse of :func:`_sync_get_blob_by_storage_path`: used to resolve a
+    ``blob:<ref>`` path sentinel
     — emitted by ``build_step_1_schema_form_turn_from_resolved`` to keep the
     absolute storage_path off the wire — back to the blob's real ``storage_path``
     before the source is committed. Session-scoped so a blob ref cannot resolve

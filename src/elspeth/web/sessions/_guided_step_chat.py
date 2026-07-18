@@ -1,22 +1,10 @@
 """Transient-LLM-failure wrapper for ``solve_step_chat`` (Phase A slice 3).
 
-Lives outside ``routes.py`` for the same reason as
-:mod:`elspeth.web.sessions._guided_solve_chain`:
-the ``trust_tier.tier_model`` analyzer fingerprints findings by AST sibling
-index from the module root. Adding a new top-level function to ``routes.py``
-would shift the indices of every allowlisted ``isinstance`` check in that
-file and force unrelated allowlist churn. Extracting the helper into its own
-module is the structural fix.
-
 Contract: see :func:`solve_step_chat_with_auto_drop`.
 
-Difference from ``solve_chain_with_auto_drop``: chat is a **non-load-bearing**
-helper. A failed chain solver blocks the wizard, so its auto-drop marks the
-session ``solver_exhausted`` and exits to freeform. Chat failure must NOT
-terminate the session — the user can still drive the wizard via widgets.
-Instead, the helper returns a synthetic "I'm unavailable" message; the
-session is unchanged. The Phase-A.5 plan extends this to proactive openers
-with the same contract.
+Chat failure must not terminate the session because the user can still drive
+the wizard via widgets. The helper returns a synthetic unavailable message and
+leaves the session unchanged.
 """
 
 from __future__ import annotations
@@ -39,7 +27,7 @@ from elspeth.web.composer.guided.chat_solver import (
     maybe_resolve_step_2_sink_chat,
     solve_step_chat,
 )
-from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError
+from elspeth.web.composer.guided.errors import GuidedSolverResponseShapeError
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import SinkResolved, SourceResolved
 from elspeth.web.composer.state import CompositionState
@@ -129,7 +117,7 @@ def _safe_frame_strings(
     *,
     max_frames: int = 16,
 ) -> tuple[str, ...]:
-    """Frame-only traceback strings; mirror of the routes.py / _guided_solve_chain helper.
+    """Frame-only traceback strings matching the guided route diagnostic boundary.
 
     Duplicated here rather than imported from ``routes.py`` to avoid a layer
     cycle (this module is imported by ``routes.py``). The capture rule is
@@ -166,7 +154,7 @@ async def resolve_step_1_source_chat_with_auto_drop(
     temperature: float | None,
     seed: int | None,
     recorder: BufferingRecorder | None = None,
-    timeout_seconds: float | None = None,
+    timeout_seconds: float,
     context_block: str | None = None,
 ) -> Step1SourceChatResult:
     """Wrap Step-1 ``resolve_source`` chat with the guided-chat fallback contract.
@@ -326,7 +314,7 @@ async def resolve_step_2_sink_chat_with_auto_drop(
     plugin_snapshot: PluginAvailabilitySnapshot | None = None,
     secret_service: WebSecretResolver | None = None,
     max_discovery_iters: int | None = None,
-    timeout_seconds: float | None = None,
+    timeout_seconds: float,
     context_block: str | None = None,
     progress: ComposerProgressSink | None = None,
 ) -> Step2SinkChatResult:
@@ -439,9 +427,8 @@ async def resolve_step_2_sink_chat_with_auto_drop(
         ValueError,
         # A malformed discovery-tool dispatch deep in the sink loop raises this
         # (via ``_execute_discovery_call``); absorb it into the advisory fallback
-        # exactly like ``solve_chain``'s auto-drop path, instead of letting it
-        # escape as a 500.
-        ChainSolverResponseShapeError,
+        # instead of letting malformed model output escape as a 500.
+        GuidedSolverResponseShapeError,
     ) as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
         slog.error(
@@ -477,7 +464,7 @@ async def solve_step_chat_with_auto_drop(
     temperature: float | None,
     seed: int | None,
     recorder: BufferingRecorder | None = None,
-    timeout_seconds: float | None = None,
+    timeout_seconds: float,
     context_block: str | None = None,
 ) -> StepChatResult:
     """Wrap ``solve_step_chat`` with the synthetic-message-on-transient contract.
@@ -486,8 +473,8 @@ async def solve_step_chat_with_auto_drop(
     LLM failure (LiteLLM API/auth/bad-request, timeouts, malformed-response
     shape from ``response.choices[0].message``), returns the synthetic
     unavailable message and emits a slog event with safe frame strings.
-    **The session is not modified** — unlike the chain-solver auto-drop,
-    chat failure does not terminate guided mode.
+    **The session is not modified**: advisory chat failure does not terminate
+    guided mode.
 
     ``InvariantError`` and bare ``ValueError`` from ``solve_step_chat`` are
     NOT absorbed — they propagate so real programming bugs (the solver
@@ -501,8 +488,8 @@ async def solve_step_chat_with_auto_drop(
     instead of 500ing (observed live 2026-07-03, guided step_1 advisory
     reply).
 
-    The transient exception set mirrors the project canonical at
-    ``composer/service.py`` / ``_guided_solve_chain.py``:
+    The transient exception set mirrors the project canonical in
+    ``composer/service.py``:
     ``LiteLLMAPIError``, ``LiteLLMAuthError``, ``LiteLLMBadRequestError``,
     plus the non-``APIError`` operational classes ``BudgetExceededError``,
     ``BlockedPiiEntityError``, ``GuardrailRaisedException`` and

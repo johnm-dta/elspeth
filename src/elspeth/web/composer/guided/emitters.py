@@ -12,8 +12,6 @@ Exported:
     build_step_2_single_select_turn — single_select for sink plugin selection.
     build_step_2_schema_form_turn — schema_form for a chosen sink plugin.
     build_step_2_multi_select_turn — multi_select_with_custom for required fields.
-    build_step_3_propose_chain_turn — propose_chain from a ChainProposal.
-    build_step_3_schema_form_turn — schema_form for editing one proposed transform.
     build_step_4_wire_turn — confirm_wiring turn with topology + validation two-read merge.
 
 Trust tier: L3 web layer.  No upward imports.  Payloads are Tier 2 pipeline
@@ -24,7 +22,7 @@ data constructed from system-owned state; the Turn dict itself is not persisted
 from __future__ import annotations
 
 import keyword
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from elspeth.web.catalog.knob_schema import KnobSchema
@@ -36,7 +34,6 @@ from elspeth.web.composer.guided.protocol import (
     GuidedStep,
     InspectAndConfirmPayload,
     MultiSelectWithCustomPayload,
-    ProposeChainPayload,
     SchemaFormPayload,
     SingleSelectPayload,
     Turn,
@@ -51,7 +48,7 @@ from elspeth.web.composer.tools._common import _semantic_contracts_payload, _ser
 if TYPE_CHECKING:
     from elspeth.web.catalog.protocol import CatalogService as CatalogServiceProtocol
     from elspeth.web.composer.guided.resolved import SinkResolved, SourceResolved
-    from elspeth.web.composer.guided.state_machine import ChainProposal, SourceIntent
+    from elspeth.web.composer.guided.state_machine import SourceIntent
     from elspeth.web.composer.source_inspection import SourceInspectionFacts
     from elspeth.web.composer.state import CompositionState, ValidationSummary
 
@@ -296,8 +293,8 @@ def build_step_1_schema_form_turn_from_resolved(
     Unlike :func:`build_step_1_schema_form_turn` (which seeds an empty
     ``prefilled``), this renders the committed ``source.options`` so the
     editable form shows what the LLM (or the manual path) built. Used by the
-    chat-apply in-place re-render and by GET /guided when ``step_1_result`` is
-    set on a STEP_1 session.
+    chat-apply in-place re-render and by GET /guided when editing a reviewed
+    source.
     """
     from elspeth.contracts.freeze import deep_thaw
 
@@ -306,9 +303,9 @@ def build_step_1_schema_form_turn_from_resolved(
     # Mask a blob-backed source's absolute storage_path behind a stable
     # ``blob:<ref>`` sentinel so the deploy dir + OS username never reach the wire
     # (the un-gated egress that bypasses the blobs/schemas.py "storage_path is
-    # never exposed" doctrine). handle_step_1_source re-resolves the sentinel to
-    # the real path on commit. Gated on blob_ref so an operator-typed path knob is
-    # left untouched.
+    # never exposed" doctrine). The proposal custody boundary re-resolves the
+    # sentinel before commit. Gated on blob_ref so an operator-typed path knob
+    # is left untouched.
     blob_ref = source.options.get("blob_ref")
     if blob_ref is not None and isinstance(prefilled.get("path"), str):
         prefilled["path"] = f"{BLOB_REF_PATH_PREFIX}{blob_ref}"
@@ -336,10 +333,9 @@ def build_step_2_schema_form_turn_from_resolved(
 ) -> Turn:
     """Build the STEP_2 ``schema_form`` populated from an APPLIED sink.
 
-    Renders the first output's committed ``options`` (MVP single-output
-    constraint, matching ``handle_step_2_sink``'s ``sink_name="main"`` loop).
-    Used by the chat-apply in-place re-render and by GET /guided when
-    ``step_2_result`` is set on a STEP_2 session.
+    Renders the first reviewed output's committed ``options``. Used by the
+    chat-apply in-place re-render and by GET /guided when editing a reviewed
+    output.
     """
     from elspeth.contracts.freeze import deep_thaw
 
@@ -380,17 +376,16 @@ def build_step_2_multi_select_turn(
     ``custom_inputs: []``. A bare empty ``chosen``/``custom_inputs`` pair
     *without* the signal is fail-closed rejected with a structured 400
     (``code: "guided_step2_no_fields_selected"``) — it is indistinguishable
-    on the wire from a stale/buggy client submitting nothing, so the
-    dispatcher (``_dispatch_guided_respond``'s STEP_2_SINK
-    MULTI_SELECT_WITH_CUSTOM branch, ``sessions/routes/_helpers.py``) refuses
-    to guess. Sending ``control_signal: "passthrough"`` together with a
+    on the wire from a stale/buggy client submitting nothing, so the current
+    STEP_2_SINK field-review transition refuses to guess. Sending
+    ``control_signal: "passthrough"`` together with a
     non-empty ``chosen``/``custom_inputs`` is likewise rejected (400,
     ``code: "guided_step2_passthrough_conflict"``) as a contradictory
     payload.
 
     Args:
         observed_columns: The columns observed from the source in Step 1.
-            Comes from ``GuidedSession.step_1_result.observed_columns``.
+            Comes from the reviewed source's observed columns.
 
     Returns:
         A ``Turn`` TypedDict ready for serialisation and hash.
@@ -405,79 +400,6 @@ def build_step_2_multi_select_turn(
     return Turn(
         type=TurnType.MULTI_SELECT_WITH_CUSTOM.value,
         step_index=_step_index(GuidedStep.STEP_2_SINK),
-        payload=payload,
-    )
-
-
-def build_step_3_propose_chain_turn(
-    proposal: ChainProposal,
-) -> Turn:
-    """Build a ``propose_chain`` Turn from a ChainProposal.
-
-    Emitted at Step 3 after ``solve_chain`` returns a complete chain proposal.
-
-    The ``blockers`` field is always ``[]`` for chain proposals emitted
-    server-side after a successful ``solve_chain`` call.  The LLM may use
-    ``blockers`` when it can only produce a partial chain; for the MVP we
-    do not surface that path — ``solve_chain`` either returns a complete
-    proposal or raises (so the dispatcher punts).
-
-    Args:
-        proposal: The chain proposal returned by ``solve_chain``.
-
-    Returns:
-        A ``Turn`` TypedDict ready for serialisation and hash.
-    """
-    from elspeth.contracts.freeze import deep_thaw
-    from elspeth.web.composer.guided.protocol import _ProposedStep
-
-    # Thaw the frozen ChainProposal step mappings into plain dicts so the
-    # payload is JSON-serialisable.  ``_ProposedStep`` is a TypedDict so
-    # mypy needs the explicit shape — the chain solver guarantees these
-    # keys (validate against the LLM tool schema at solve_chain time).
-    thawed_steps: list[_ProposedStep] = [
-        _ProposedStep(
-            plugin=str(s["plugin"]),
-            options=dict(deep_thaw(s["options"])),
-            rationale=str(s["rationale"]),
-        )
-        for s in proposal.steps
-    ]
-    payload: ProposeChainPayload = {
-        "steps": thawed_steps,
-        "why": proposal.why,
-        "blockers": [],
-    }
-    return Turn(
-        type=TurnType.PROPOSE_CHAIN.value,
-        step_index=_step_index(GuidedStep.STEP_3_TRANSFORMS),
-        payload=payload,
-    )
-
-
-def build_step_3_schema_form_turn(
-    *,
-    plugin: str,
-    options: Mapping[str, Any],
-    catalog: CatalogServiceProtocol,
-) -> Turn:
-    """Build a ``schema_form`` Turn for editing a proposed transform step."""
-    from elspeth.contracts.freeze import deep_thaw
-
-    schema_info = catalog.get_schema("transform", plugin)
-    # ``options`` may be a proposal step's frozen mapping (nested values are
-    # MappingProxyType) — deep_thaw before dict() so nested dicts survive
-    # pydantic JSON serialisation of TurnPayloadResponse. Mirrors the same
-    # thaw in build_step_3_propose_chain_turn above.
-    payload: SchemaFormPayload = {
-        "mode": "plugin_options",
-        "plugin": plugin,
-        "knobs": cast(KnobSchema, schema_info.knob_schema),
-        "prefilled": dict(deep_thaw(options)),
-    }
-    return Turn(
-        type=TurnType.SCHEMA_FORM.value,
-        step_index=_step_index(GuidedStep.STEP_3_TRANSFORMS),
         payload=payload,
     )
 
@@ -632,7 +554,6 @@ def _step_index(step: GuidedStep) -> int:
     _ORDER: tuple[GuidedStep, ...] = (
         GuidedStep.STEP_1_SOURCE,
         GuidedStep.STEP_2_SINK,
-        GuidedStep.STEP_2_5_RECIPE_MATCH,
         GuidedStep.STEP_3_TRANSFORMS,
         GuidedStep.STEP_4_WIRE,
     )

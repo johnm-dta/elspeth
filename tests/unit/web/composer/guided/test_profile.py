@@ -24,7 +24,6 @@ class TestWorkflowProfileShape:
     def test_empty_profile_is_live_guided_default(self) -> None:
         assert EMPTY_PROFILE.coaching is False
         assert EMPTY_PROFILE.advisor_checkpoints is True
-        assert EMPTY_PROFILE.recipe_match is True
         assert EMPTY_PROFILE.bookends is False
 
     def test_tutorial_profile_enables_coaching_bookends(self) -> None:
@@ -32,7 +31,6 @@ class TestWorkflowProfileShape:
         # Tutorial is the explicit demo bypass: it skips the nondeterministic
         # terminal advisor sign-off for a known-good passive walkthrough.
         assert TUTORIAL_PROFILE.advisor_checkpoints is False
-        assert TUTORIAL_PROFILE.recipe_match is True
         assert TUTORIAL_PROFILE.bookends is True
 
 
@@ -60,11 +58,10 @@ class TestWorkflowProfileSerialisation:
     def test_tutorial_profile_round_trips(self) -> None:
         assert WorkflowProfile.from_dict(TUTORIAL_PROFILE.to_dict()) == TUTORIAL_PROFILE
 
-    def test_to_dict_emits_all_four_keys(self) -> None:
+    def test_to_dict_emits_all_three_keys(self) -> None:
         assert set(EMPTY_PROFILE.to_dict()) == {
             "coaching",
             "advisor_checkpoints",
-            "recipe_match",
             "bookends",
         }
 

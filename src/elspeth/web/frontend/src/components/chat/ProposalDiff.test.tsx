@@ -7,10 +7,12 @@ import {
   ProposalChanges,
 } from "./ProposalDiff";
 import type { CompositionState } from "@/types/api";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 function makeState(overrides: Partial<CompositionState> = {}): CompositionState {
   return {
     id: "state-1",
+    ...compositionStateAuthorityFields,
     version: 3,
     sources: {
       source: {

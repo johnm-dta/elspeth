@@ -146,97 +146,22 @@ class TestEmitStepAdvanced:
 
 
 class TestEmitDroppedToFreeform:
-    def test_records_drop_reason(self) -> None:
-        rec = _FakeRecorder()
-        emit_dropped_to_freeform(
-            rec,
-            prev=GuidedStep.STEP_3_TRANSFORMS,
-            drop_reason=TerminalReason.SOLVER_EXHAUSTED,
-            # Realistic shape: ValidationSummary -> {"is_valid", "errors":[ValidationEntry.to_dict()]}.
-            validation_result={
-                "is_valid": False,
-                "errors": [{"component": "source", "message": "schema mismatch", "severity": "high"}],
-            },
-            composition_version=5,
-            actor="test-actor",
-        )
-        assert len(rec.invocations) == 1
-        inv = rec.invocations[0]
-        assert inv.tool_name == "guided_dropped_to_freeform"
-        decoded: dict[str, Any] = json.loads(inv.arguments_canonical)
-        assert decoded["drop_reason"] == "solver_exhausted"
-        assert decoded["prev_step"] == "step_3_transforms"
-        # Structured outcome retained; free-form ``message`` stripped by allowlist.
-        assert decoded["validation_result"] == {
-            "is_valid": False,
-            "errors": [{"component": "source", "severity": "high"}],
-        }
-        assert inv.result_canonical is None
-
-    def test_redacts_validation_error_message_egress(self) -> None:
-        """Free-form validator ``message`` text MUST NOT reach the audit record.
-
-        The guided-event channel is structurally exempt from the redaction
-        MANIFEST (the persistence projection at sessions/routes/_helpers.py
-        fail-opens for non-MANIFEST tool_names), so this synthetic event must
-        be safe by construction. ``ValidationEntry.message`` echoes filesystem
-        paths and raw plugin/pydantic exception text (see _common.py path / exc
-        messages); only the structured outcome (``is_valid`` + per-error
-        ``component`` / ``severity``) is safe to persist.
-        """
-        rec = _FakeRecorder()
-        emit_dropped_to_freeform(
-            rec,
-            prev=GuidedStep.STEP_3_TRANSFORMS,
-            drop_reason=TerminalReason.SOLVER_EXHAUSTED,
-            validation_result={
-                "is_valid": False,
-                "errors": [
-                    {
-                        "component": "source",
-                        "message": "Path violation (S2): '/etc/secrets/db.pem' is outside the data dir",
-                        "severity": "high",
-                    },
-                    {
-                        "component": "node:enrich",
-                        "message": "Invalid options for transform 'llm': api_key=sk-LEAKED-7f3a unauthorized",
-                        "severity": "high",
-                    },
-                ],
-            },
-            composition_version=5,
-            actor="test-actor",
-        )
-        inv = rec.invocations[0]
-        decoded: dict[str, Any] = json.loads(inv.arguments_canonical)
-        # Structured outcome survives; component attribution + severity kept.
-        assert decoded["validation_result"] == {
-            "is_valid": False,
-            "errors": [
-                {"component": "source", "severity": "high"},
-                {"component": "node:enrich", "severity": "high"},
-            ],
-        }
-        # The whole canonical record (hashed into the Tier-1 audit trail) is
-        # free of the sensitive free-form text.
-        blob = inv.arguments_canonical
-        for leaked in ("/etc/secrets/db.pem", "sk-LEAKED-7f3a", "Path violation", "Invalid options"):
-            assert leaked not in blob, leaked
-
-    def test_user_pressed_exit_has_no_validation_result(self) -> None:
+    def test_records_user_exit_without_validation_payload(self) -> None:
         rec = _FakeRecorder()
         emit_dropped_to_freeform(
             rec,
             prev=GuidedStep.STEP_2_SINK,
             drop_reason=TerminalReason.USER_PRESSED_EXIT,
-            validation_result=None,
             composition_version=1,
             actor="test-actor",
         )
+
         inv = rec.invocations[0]
-        decoded: dict[str, Any] = json.loads(inv.arguments_canonical)
-        # validation_result must be absent (None means "never sent"), not present-as-null
-        assert "validation_result" not in decoded
+        assert inv.tool_name == "guided_dropped_to_freeform"
+        assert json.loads(inv.arguments_canonical) == {
+            "drop_reason": "user_pressed_exit",
+            "prev_step": "step_2_sink",
+        }
 
 
 class TestArgumentsHashInvariant:

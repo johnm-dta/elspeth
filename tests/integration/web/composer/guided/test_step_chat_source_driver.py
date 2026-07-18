@@ -79,6 +79,7 @@ async def test_source_driver_retries_inline_json_control_advice_into_tool_call()
             current_source=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
 
     assert len(calls) == 2
@@ -127,6 +128,7 @@ async def test_source_driver_includes_current_source_in_prompt() -> None:
             current_source=current,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
 
     result = outcome.resolution
@@ -209,6 +211,7 @@ async def test_source_driver_strips_echoed_server_owned_keys() -> None:
             current_source=current,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
 
     result = outcome.resolution
@@ -263,6 +266,7 @@ async def test_source_driver_captures_prose_reply_on_decline() -> None:
             current_source=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
     assert outcome.resolution is None
     assert outcome.prose_reply == "Here is some advice."
@@ -307,6 +311,7 @@ async def test_source_driver_rejects_scaffold_leak_in_declined_prose() -> None:
             current_source=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
 
 
@@ -347,6 +352,7 @@ async def test_source_driver_declines_prose_beside_hallucinated_tool_call() -> N
             current_source=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
     assert outcome.resolution is None
     assert outcome.prose_reply is None
@@ -373,6 +379,7 @@ async def test_source_driver_returns_both_none_on_empty_response() -> None:
             current_source=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
     assert outcome.resolution is None
     assert outcome.prose_reply is None

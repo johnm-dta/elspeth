@@ -19,8 +19,8 @@ Two semantically distinct exception categories arise in guided mode:
     frames only, under the CLAUDE.md audit-system-failure logging exemption.
     Examples: a ``from_dict`` method read a malformed Tier-1 record, a staging
     field that should have been set before the current code path was reached
-    is ``None``, or the recipe-predicate registry references a recipe that
-    isn't registered.
+    is ``None``, or a current guided-state discriminator names an unsupported
+    state.
 
 Both exception types extend ``Exception`` directly (not ``AssertionError``).
 ``AssertionError`` is elided by ``python -O`` and therefore cannot be relied
@@ -53,14 +53,8 @@ class InvariantError(Exception):
     ``extra="forbid"`` and ``with_metadata`` writes ``state.metadata``, never
     ``composer_meta``); ``composer_meta`` appears on the *response* schema, not
     on any request body; and session fork copies our own prior ``to_dict()``
-    output under Tier-1 ``AuditIntegrityError`` guards. The blob *carries*
-    Tier-3 content (the LLM-authored ``ChainProposal``), but the courier is
-    ours — per the CLAUDE.md container-vs-values rule, trust attaches to the
-    value's *author*, not its carrier, and the envelope that ``from_dict``
-    validates is the part we authored. ``ChainProposal.from_dict`` is permissive
-    on the LLM content itself (its shape was already checked in-flight at
-    ``chain_solver``); it only re-checks the envelope we wrote. A failure there
-    therefore means our serialization contract was violated, the DB is corrupt,
+    output under Tier-1 ``AuditIntegrityError`` guards. A failure in strict
+    checkpoint decoding therefore means our serialization contract was violated, the DB is corrupt,
     or the record was tampered with — all Tier-1 anomalies. The web-appropriate
     expression of "crash on a Tier-1 anomaly" (``raise`` ≠ process-kill) is
     exactly this sanitized 500: the server stays up, there is no silent recovery
@@ -105,19 +99,14 @@ class WireConfirmRejectedError(Exception):
         super().__init__(f"wire confirm rejected at {step}: {len(issues)} validation issue(s)")
 
 
-class ChainSolverResponseShapeError(Exception):
-    """The LLM produced a tool-call/response that violated the chain solver's
-    contract — either an ``emit_turn`` of the wrong tool name / turn_type /
-    malformed payload, OR a discovery tool call whose arguments did not decode
-    to a JSON object.
+class GuidedSolverResponseShapeError(Exception):
+    """The LLM produced a guided tool call with an invalid response shape.
 
     Distinct from :class:`InvariantError` (server-side bug) and ``ValueError``
     (client-payload bug): this exception means an *external system* (the LLM)
-    produced an unexpected response shape. ``solve_chain_with_auto_drop``
-    catches this class and routes the request through the SOLVER_EXHAUSTED
-    auto-drop path -- the same bucket as other malformed-response-shape
-    failures (``IndexError`` from empty ``choices``, ``json.JSONDecodeError``
-    on tool-call arguments, etc.).
+    produced malformed discovery-tool arguments or another unexpected guided
+    response. Current step-chat callers convert it to their closed synthetic
+    failure response.
 
     NOT a subclass of ``ValueError`` because the auto-drop wrapper docstring
     explicitly excludes ``ValueError`` to preserve client-payload-bug routing.
@@ -125,21 +114,7 @@ class ChainSolverResponseShapeError(Exception):
     "server invariant violated" -- the wrong category for "external LLM
     misbehaved."
 
-    Inside ``solve_chain`` the audit wrap's typed-except clause maps this
-    class to :attr:`ComposerLLMCallStatus.MALFORMED_RESPONSE` -- semantically
-    the LLM did respond, but the response failed contract.
-
-    Lives here (the guided exception taxonomy), NOT in ``chain_solver``, so the
-    discovery loop (``_discovery``, which ``chain_solver`` imports) can raise it
-    on malformed tool-call arguments without a circular import. ``chain_solver``
-    re-exports it for backward compatibility.
-
-    Spec gap (tracked separately):
-        Spec §5.4 case 1 calls for "reject + grant one retry → second illegal
-        emission triggers auto-drop with reason=protocol_violation."  The
-        current implementation single-shots the auto-drop with
-        reason=solver_exhausted (the existing wrapper's outcome) because
-        wiring the retry state machine is feature work, not a bug fix.  The
-        spec-mandated retry-then-PROTOCOL_VIOLATION flow is filed as a
-        follow-up observation.
+    It is not a ``ValueError`` because client payloads are a separate trust
+    boundary, and not an :class:`InvariantError` because malformed model output
+    is not server corruption.
     """

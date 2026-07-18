@@ -1,6 +1,6 @@
 """Pure D13 verdict-class classifier for the STEP_4_WIRE advisor sign-off.
 
-No ``self`` dependency: the wire-stage dispatcher (``_dispatch_guided_respond``)
+No ``self`` dependency: the wire-stage settlement path
 and the unit tests both consume :func:`classify_signoff_verdict`. It maps an
 :class:`AdvisorCheckpointVerdict` (the non-raising verdict produced by
 ``ComposerService.run_signoff_checkpoint``) to a terminal/redirect decision,

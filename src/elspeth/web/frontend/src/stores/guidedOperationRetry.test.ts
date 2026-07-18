@@ -4,6 +4,7 @@ import {
   acquireGuidedRetry,
   clearAllGuidedRetries,
   clearGuidedRetry,
+  clearGuidedRetriesForSession,
   GUIDED_RETRY_STORAGE_KEY,
   isAmbiguousGuidedRetryFailure,
 } from "./guidedOperationRetry";
@@ -88,6 +89,73 @@ describe("guided operation retry custody", () => {
     const encoded = window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY) ?? "";
     expect(encoded).toContain('"kind":"guided_chat"');
     expect(encoded).not.toContain(identity[1]);
+  });
+
+  it("canonicalizes object key order before deriving retry identity", () => {
+    const first = acquireGuidedRetry("guided_respond", SESSION_A, [
+      "a".repeat(64),
+      { chosen: ["csv"], edited_values: null },
+    ]);
+    const retry = acquireGuidedRetry("guided_respond", SESSION_A, [
+      "a".repeat(64),
+      { edited_values: null, chosen: ["csv"] },
+    ]);
+
+    expect(retry.operationId).toBe(first.operationId);
+  });
+
+  it("derives canonical identity without locale-sensitive key ordering", () => {
+    const localeCompare = vi
+      .spyOn(String.prototype, "localeCompare")
+      .mockImplementation(() => {
+        throw new Error("locale ordering must not participate");
+      });
+
+    const first = acquireGuidedRetry("guided_respond", SESSION_A, [
+      { z: true, a: false },
+    ]);
+    const retry = acquireGuidedRetry("guided_respond", SESSION_A, [
+      { a: false, z: true },
+    ]);
+
+    expect(retry.operationId).toBe(first.operationId);
+    localeCompare.mockRestore();
+  });
+
+  it("rejects non-plain objects that would collapse to an empty JSON record", () => {
+    expect(() => acquireGuidedRetry("guided_respond", SESSION_A, [new Date(0)])).toThrow(
+      "plain records",
+    );
+  });
+
+  it("clears every descriptor of one kind for one authoritative session", () => {
+    const createdAt = Date.now();
+    const descriptor = (kind: string, sessionId: string, suffix: string, fingerprint: string) => ({
+      kind,
+      sessionId,
+      requestFingerprint: fingerprint.repeat(64),
+      operationId: `00000000-0000-4000-8000-${suffix.padStart(12, "0")}`,
+      createdAt,
+    });
+    window.sessionStorage.setItem(
+      GUIDED_RETRY_STORAGE_KEY,
+      JSON.stringify({
+        schema: "guided-operation-retries.v1",
+        descriptors: [
+          descriptor("guided_respond", SESSION_A, "301", "a"),
+          descriptor("guided_respond", SESSION_A, "302", "b"),
+          descriptor("guided_reenter", SESSION_A, "303", "c"),
+          descriptor("guided_respond", SESSION_B, "304", "d"),
+        ],
+      }),
+    );
+
+    clearGuidedRetriesForSession("guided_respond", SESSION_A);
+
+    expect(storedEnvelope().descriptors).toEqual([
+      descriptor("guided_reenter", SESSION_A, "303", "c"),
+      descriptor("guided_respond", SESSION_B, "304", "d"),
+    ]);
   });
 
   it("a different action evicts the prior same-kind session descriptor", () => {

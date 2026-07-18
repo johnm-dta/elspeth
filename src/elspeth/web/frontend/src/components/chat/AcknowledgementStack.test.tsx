@@ -17,6 +17,7 @@ import { useSessionStore } from "@/stores/sessionStore";
 import { resetStore } from "@/test/store-helpers";
 import type { InterpretationEvent } from "@/types/interpretation";
 import type { CompositionState, NodeSpec } from "@/types/index";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 expect.extend(toHaveNoViolations);
 
@@ -78,6 +79,7 @@ function makeNode(id: string, plugin: string): NodeSpec {
 function makeCompositionState(nodes: NodeSpec[]): CompositionState {
   return {
     id: "state-1",
+    ...compositionStateAuthorityFields,
     version: 1,
     sources: {},
     nodes,

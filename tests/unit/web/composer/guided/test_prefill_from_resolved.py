@@ -118,19 +118,3 @@ def test_sink_prefill_carries_applied_options() -> None:
     assert turn["payload"]["plugin"] == "json"
     assert turn["payload"]["prefilled"]["path"] == "/out/y.jsonl"
     assert turn["payload"]["prefilled"]["collision_policy"] == "auto_increment"
-
-
-def test_resolve_blob_ref_path_raises_on_unresolvable_blob_ref() -> None:
-    """A blob:<ref> sentinel path with no session engine to resolve it must crash, not commit."""
-    from elspeth.web.composer.guided.steps import _resolve_blob_ref_path
-
-    resolved = SourceResolved(
-        name="source",
-        plugin="csv",
-        options={"path": "blob:deadbeef-0000-0000-0000-000000000000"},
-        observed_columns=(),
-        sample_rows=(),
-        on_validation_failure="discard",
-    )
-    with pytest.raises(InvariantError, match="blob:<ref>"):
-        _resolve_blob_ref_path(resolved, session_engine=None, session_id=None)

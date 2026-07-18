@@ -17,7 +17,7 @@ from elspeth.contracts.hashing import canonical_json, stable_hash
 from elspeth.contracts.payload_store import IntegrityError as PayloadIntegrityError
 from elspeth.contracts.payload_store import PayloadNotFoundError, PayloadStore
 from elspeth.web.composer.guided.profile import EMPTY_PROFILE
-from elspeth.web.composer.guided.protocol import ChatRole, GuidedStep
+from elspeth.web.composer.guided.protocol import ChatRole, GuidedStep, validate_current_turn
 from elspeth.web.composer.guided.state_machine import GuidedSession
 from elspeth.web.composer.redaction import redact_guided_snapshot_storage_paths, redact_source_storage_path
 from elspeth.web.sessions.protocol import (
@@ -42,12 +42,35 @@ from elspeth.web.sessions.schemas import (
 )
 
 GUIDED_REPLAY_META_KEY = "guided_operation_replay"
+_GUIDED_INVALID_STATUS = ("guided_composition_invalid",)
+
+
+def guided_validation_errors(*, is_valid: bool) -> tuple[str, ...] | None:
+    """Return the closed persisted validity status for a guided state."""
+
+    if type(is_valid) is not bool:
+        raise TypeError("is_valid must be an exact bool")
+    return None if is_valid else _GUIDED_INVALID_STATUS
+
+
+def validation_errors_for_composer_surface(
+    *,
+    composer_meta: Mapping[str, Any] | None,
+    is_valid: bool,
+    validation_errors: Sequence[str] | None,
+) -> Sequence[str] | None:
+    """Close validator text only for states that carry guided custody."""
+
+    if composer_meta is not None and ("guided_session" in composer_meta or GUIDED_REPLAY_META_KEY in composer_meta):
+        return guided_validation_errors(is_valid=is_valid)
+    return validation_errors
+
+
 _GUIDED_STEP_INDEX = {
     GuidedStep.STEP_1_SOURCE: 0,
     GuidedStep.STEP_2_SINK: 1,
-    GuidedStep.STEP_2_5_RECIPE_MATCH: 2,
-    GuidedStep.STEP_3_TRANSFORMS: 3,
-    GuidedStep.STEP_4_WIRE: 4,
+    GuidedStep.STEP_3_TRANSFORMS: 2,
+    GuidedStep.STEP_4_WIRE: 3,
 }
 
 
@@ -126,9 +149,10 @@ def with_guided_response_descriptor(
     composer_meta = deep_thaw(state.composer_meta) if state.composer_meta is not None else {}
     composer_meta[GUIDED_REPLAY_META_KEY] = descriptor.to_dict()
     # Free-form validator messages can echo paths, credentials, and provider
-    # diagnostics. The guided replay contract carries structured policy facts;
-    # it never persists or projects those raw messages.
-    return replace(state, composer_meta=composer_meta, validation_errors=None)
+    # diagnostics. Persist only the closed guided status while retaining the
+    # truthful relationship between ``is_valid`` and ``validation_errors``.
+    validation_errors = guided_validation_errors(is_valid=state.is_valid)
+    return replace(state, composer_meta=composer_meta, validation_errors=validation_errors)
 
 
 def parse_guided_response_descriptor(record: CompositionStateRecord) -> GuidedResponseDescriptor:
@@ -169,7 +193,6 @@ def _profile_response(guided: GuidedSession) -> WorkflowProfileResponse | None:
     return WorkflowProfileResponse(
         coaching=guided.profile.coaching,
         bookends=guided.profile.bookends,
-        recipe_match=guided.profile.recipe_match,
         advisor_checkpoints=guided.profile.advisor_checkpoints,
     )
 
@@ -215,6 +238,9 @@ def _composition_state_response(
         sources = redact_source_storage_path({"sources": sources})["sources"]
     composer_meta = deep_thaw(state.composer_meta) if state.composer_meta is not None else None
     sources, composer_meta = redact_guided_snapshot_storage_paths(sources, composer_meta)
+    expected_errors = guided_validation_errors(is_valid=state.is_valid)
+    if state.validation_errors != expected_errors:
+        raise AuditIntegrityError("Guided result state has an invalid closed validation status")
     return CompositionStateResponse(
         id=str(state.id),
         session_id=str(state.session_id),
@@ -225,7 +251,7 @@ def _composition_state_response(
         outputs=deep_thaw(state.outputs),
         metadata=deep_thaw(state.metadata_),
         is_valid=state.is_valid,
-        validation_errors=None,
+        validation_errors=list(expected_errors) if expected_errors is not None else None,
         validation_warnings=None,
         validation_suggestions=None,
         derived_from_state_id=str(state.derived_from_state_id) if state.derived_from_state_id is not None else None,
@@ -265,6 +291,15 @@ def _turn_response(
         raise AuditIntegrityError("Guided replay turn does not match the persisted turn record")
     if turn_record.step is not guided.step or turn_record.response_hash is not None:
         raise AuditIntegrityError("Guided replay turn record is not the final current unanswered turn")
+    projected_turn = {
+        "type": turn.turn_type.value,
+        "step_index": turn.step_index,
+        "payload": matches[0].payload,
+    }
+    try:
+        validate_current_turn(turn_record.step, projected_turn)
+    except ValueError as exc:
+        raise AuditIntegrityError(f"Guided replay current-schema turn is invalid: {exc}") from exc
     return TurnPayloadResponse(
         type=turn.turn_type.value,
         step_index=turn.step_index,
@@ -342,9 +377,11 @@ __all__ = [
     "GUIDED_REPLAY_META_KEY",
     "guided_response_projection_hash",
     "guided_turn_token",
+    "guided_validation_errors",
     "load_guided_json_payload",
     "parse_guided_response_descriptor",
     "project_guided_response",
     "response_json",
+    "validation_errors_for_composer_surface",
     "with_guided_response_descriptor",
 ]

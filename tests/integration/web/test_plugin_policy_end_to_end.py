@@ -7,7 +7,7 @@ import asyncio
 import inspect
 import json
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,10 +30,6 @@ from elspeth.web.catalog import routes as catalog_routes
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginKind, PluginPolicyResponse, PluginSchemaInfo, PluginSummary
-from elspeth.web.composer.audit import BufferingRecorder
-from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
-from elspeth.web.composer.guided.state_machine import ChainProposal, GuidedSession
-from elspeth.web.composer.guided.steps import handle_step_3_chain_accept
 from elspeth.web.composer.prompts import build_context_string
 from elspeth.web.composer.recipes import get_recipe
 from elspeth.web.composer.state import CompositionState, NodeSpec, OutputSpec, PipelineMetadata, SourceSpec
@@ -66,9 +62,7 @@ from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
 from elspeth.web.secrets.user_store import UserSecretStore
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, sessions_table
-from elspeth.web.sessions.routes._helpers import _dispatch_guided_respond
 from elspeth.web.sessions.schema import initialize_session_schema
-from tests.fixtures.stores import MockPayloadStore
 
 _ROOT = Path(__file__).resolve().parents[3]
 _MATRIX_FIXTURE = _ROOT / "src/elspeth/web/frontend/src/stores/__fixtures__/pluginPolicyMatrix.json"
@@ -404,44 +398,6 @@ def _seed_recipe_blob(tmp_path: Path) -> tuple[sa.engine.Engine, str, str]:
     return engine, session_id, blob_id
 
 
-def _guided_base_state() -> CompositionState:
-    return CompositionState(
-        source=SourceSpec(
-            plugin="csv",
-            on_success="main",
-            options={"path": "input.csv", "schema": {"mode": "observed", "guaranteed_fields": ["text"]}},
-            on_validation_failure="discard",
-        ),
-        nodes=(),
-        edges=(),
-        outputs=(
-            OutputSpec(
-                name="output",
-                plugin="json",
-                options={"path": "output.jsonl", "schema": {"mode": "observed"}},
-                on_write_failure="discard",
-            ),
-        ),
-        metadata=PipelineMetadata(),
-        version=1,
-    )
-
-
-def _proposal(plugin_id: PluginId | None) -> ChainProposal:
-    steps = (
-        ()
-        if plugin_id is None
-        else (
-            {
-                "plugin": plugin_id.name,
-                "options": deepcopy(_CONTROL_OPTIONS[plugin_id.name]),
-                "rationale": "screen text without claiming row filtering",
-            },
-        )
-    )
-    return ChainProposal(steps=steps, why="five-configuration policy matrix")
-
-
 @pytest.mark.parametrize("case", _CASES, ids=lambda case: case.name)
 def test_policy_surface_parity_matrix(case: _MatrixCase, tmp_path: Path) -> None:
     policy = _policy(case)
@@ -590,13 +546,6 @@ def test_policy_surface_parity_matrix(case: _MatrixCase, tmp_path: Path) -> None
             empty_state,
             context,
         )
-        guided_result = handle_step_3_chain_accept(
-            state=_guided_base_state(),
-            session=replace(GuidedSession.initial(), step=GuidedStep.STEP_3_TRANSFORMS),
-            proposal=_proposal(plugin_id),
-            catalog=view,
-            plugin_snapshot=snapshot,
-        )
         runtime_settings = SimpleNamespace(
             sources={},
             transforms=(SimpleNamespace(plugin=plugin_id.name),),
@@ -609,7 +558,6 @@ def test_policy_surface_parity_matrix(case: _MatrixCase, tmp_path: Path) -> None
             assert imported_validation.findings_for("plugin_enablement") == ()
             assert imported_validation.findings_for("operator_profile_options") == ()
             assert direct_tool.success is True
-            assert guided_result.tool_result.success is True
             assert direct_tool.updated_state.nodes[0].options == probe.nodes[0].options
             if plugin_id in _AWS_CONTROLS:
                 assert "profile" in probe.nodes[0].options
@@ -629,48 +577,8 @@ def test_policy_surface_parity_matrix(case: _MatrixCase, tmp_path: Path) -> None
             assert [finding.error_code for finding in imported_validation.findings_for("plugin_enablement")] == [expected_code]
             assert direct_tool.success is False
             assert direct_tool.data["error_code"] == expected_code
-            assert guided_result.tool_result.success is False
-            assert guided_result.tool_result.data["error_code"] == expected_code
             with pytest.raises(ValueError, match="not available"):
                 require_settings_plugins_available(runtime_settings, snapshot)
-
-    dispatch_proposal = _proposal(case.selected_prompt)
-    dispatch_session = replace(
-        GuidedSession.initial(),
-        step=GuidedStep.STEP_3_TRANSFORMS,
-        step_3_proposal=dispatch_proposal,
-    )
-    dispatched_state, dispatched_session, next_turn = asyncio.run(
-        _dispatch_guided_respond(
-            state=_guided_base_state(),
-            guided=dispatch_session,
-            current_step=GuidedStep.STEP_3_TRANSFORMS,
-            current_turn_type=TurnType.PROPOSE_CHAIN,
-            turn_response={
-                "chosen": ["accept"],
-                "edited_values": None,
-                "custom_inputs": None,
-                "accepted_step_index": None,
-                "edit_step_index": None,
-                "control_signal": None,
-            },
-            catalog=view,
-            plugin_snapshot=snapshot,
-            recorder=BufferingRecorder(),
-            user_id="matrix-user",
-            data_dir=None,
-            session_engine=None,
-            session_id=session_id,
-            blob_service=None,
-            payload_store=MockPayloadStore(),
-            model="matrix-model",
-            temperature=None,
-            seed=None,
-        )
-    )
-    assert dispatched_session.step is GuidedStep.STEP_4_WIRE
-    assert next_turn["type"] == TurnType.CONFIRM_WIRING.value
-    assert [node.plugin for node in dispatched_state.nodes] == ([] if case.selected_prompt is None else [case.selected_prompt.name])
 
     delayed_sinks = {name: SimpleNamespace(plugin=name) for name in ("csv", "json", "text")}
     delayed_sinks["disabled"] = SimpleNamespace(plugin="azure_blob")

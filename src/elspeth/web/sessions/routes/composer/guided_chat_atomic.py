@@ -264,9 +264,7 @@ def _transition_request(
         return None
 
     if sink_resolution is not None and guided.step is GuidedStep.STEP_2_SINK:
-        if len(sink_resolution.outputs) != 1:
-            return None
-        output = sink_resolution.outputs[0]
+        (output,) = sink_resolution.outputs
         if turn_type is TurnType.SINGLE_SELECT:
             return GuidedRespondRequest.model_validate({**common, "chosen": [output.plugin]}, strict=True)
         if turn_type is TurnType.SCHEMA_FORM:

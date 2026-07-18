@@ -465,12 +465,11 @@ class TestSessionResponseHappyPath:
 def test_workflow_profile_response_wire_subset_and_strict() -> None:
     from elspeth.web.sessions.schemas import WorkflowProfileResponse
 
-    model = WorkflowProfileResponse(coaching=True, bookends=True, recipe_match=True, advisor_checkpoints=True)
+    model = WorkflowProfileResponse(coaching=True, bookends=True, advisor_checkpoints=True)
     dumped = model.model_dump()
     assert set(dumped.keys()) == {
         "coaching",
         "bookends",
-        "recipe_match",
         "advisor_checkpoints",
     }
 
@@ -480,7 +479,6 @@ def test_workflow_profile_response_wire_subset_and_strict() -> None:
         WorkflowProfileResponse(
             coaching=True,
             bookends=True,
-            recipe_match=True,
             advisor_checkpoints=True,
             injected="leak",
         )
@@ -489,6 +487,5 @@ def test_workflow_profile_response_wire_subset_and_strict() -> None:
         WorkflowProfileResponse(
             coaching="yes",
             bookends=True,
-            recipe_match=True,
             advisor_checkpoints=True,
         )

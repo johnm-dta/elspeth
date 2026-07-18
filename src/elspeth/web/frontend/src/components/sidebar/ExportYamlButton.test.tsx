@@ -7,11 +7,13 @@ import {
 import { OPEN_YAML_MODAL_EVENT } from "@/lib/composer-events";
 import { useSessionStore } from "@/stores/sessionStore";
 import type { CompositionState } from "@/types/index";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 /** Minimal composition with content (one source) — export is meaningful. */
 function nonEmptyState(): CompositionState {
   return {
     id: "state-1",
+    ...compositionStateAuthorityFields,
     version: 1,
     sources: { source: { plugin: "csv", options: {} } },
     nodes: [],
@@ -25,6 +27,7 @@ function nonEmptyState(): CompositionState {
 function emptyState(): CompositionState {
   return {
     id: "state-0",
+    ...compositionStateAuthorityFields,
     version: 1,
     sources: {},
     nodes: [],

@@ -11,6 +11,7 @@ import type {
   CompositionProposal,
 } from "@/types/api";
 import type { InterpretationEvent } from "@/types/interpretation";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 const clearValidationMock = vi.hoisted(() => vi.fn());
 const validateMock = vi.hoisted(() => vi.fn());
@@ -71,6 +72,7 @@ vi.mock("./executionStore", () => ({
 function makeCompositionState(version: number, nodeIds: string[] = []): CompositionState {
   return {
     id: `state-${version}`,
+    ...compositionStateAuthorityFields,
     version,
     sources: {},
     nodes: nodeIds.map((id) => ({

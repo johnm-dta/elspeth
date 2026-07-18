@@ -9,54 +9,21 @@
 //   "inspect_and_confirm"     -> InspectAndConfirmTurn
 //   "multi_select_with_custom"-> MultiSelectWithCustomTurn
 //   "schema_form"             -> SchemaFormTurn
-//   "propose_chain"           -> ProposeChainTurn
-//   "recipe_offer"            -> SchemaFormTurn (mode="recipe_decision")
+//   "propose_pipeline"        -> unavailable until the durable Task 4 adapter
 //   "confirm_wiring"          -> WireStageTurn
 //
-// Exhaustiveness assertion:
-//   The `default:` branch contains `const _exhaustive: never = turn.type`.
-//   TypeScript will refuse to compile if a new TurnType is added to
-//   guided.ts without a matching case here -- making future omissions a
-//   build failure rather than a silent runtime gap.  The throw is also
-//   retained for the runtime path (belt-and-suspenders against a JS caller
-//   that bypasses type checking).
-//
-// A/B decision -- Option A (payload: unknown, per-case casts):
-//   TurnPayload.payload remains typed as `unknown` in guided.ts.  Each case
-//   casts to the appropriate per-type interface (e.g. `as SingleSelectPayload`).
-//   Option B (discriminated union) was evaluated but rejected because the
-//   existing test fixtures in client.guided.test.ts (line 71) and
-//   sessionStore.guided.test.ts (line 54-56) use partial payload literals
-//   that do not conform to the full per-type payload shapes (missing required
-//   fields such as `question` and `allow_custom` on SingleSelectPayload).
-//   Updating those fixtures would be a non-trivial cascade across multiple
-//   test files with no correctness gain: `payload: unknown` at the store and
-//   API layer is intentional (the dispatcher is the first consumer that needs
-//   typed payloads).  Option A limits the cast surface to this one file, where
-//   a backend schema mismatch will surface immediately as a runtime render
-//   failure rather than silently producing wrong output.
 // ============================================================================
 
-import type {
-  TurnPayload,
-  GuidedRespondRequest,
-  SingleSelectPayload,
-  InspectAndConfirmPayload,
-  MultiSelectWithCustomPayload,
-  SchemaFormPayload,
-  ProposeChainPayload,
-  WireStageData,
-} from "@/types/guided";
+import type { TurnPayload, GuidedRespondAction } from "@/types/guided";
 import { SingleSelectTurn } from "./SingleSelectTurn";
 import { InspectAndConfirmTurn } from "./InspectAndConfirmTurn";
 import { MultiSelectWithCustomTurn } from "./MultiSelectWithCustomTurn";
 import { SchemaFormTurn } from "./SchemaFormTurn";
-import { ProposeChainTurn } from "./ProposeChainTurn";
 import { WireStageTurn, type WireBlockerLink } from "./WireStageTurn";
 
 interface GuidedTurnProps {
   turn: TurnPayload;
-  onSubmit: (body: GuidedRespondRequest) => void;
+  onSubmit: (body: GuidedRespondAction) => void;
   disabled?: boolean;
   /** Tutorial mode — forwarded to leaf widgets that surface worked-example
    * teaching copy (e.g. SchemaFormTurn's on_validation_failure caveat). */
@@ -67,7 +34,7 @@ interface GuidedTurnProps {
   wirePendingAcknowledgements?: WireBlockerLink[];
   /** Client-known validation blockers for confirm_wiring (persisted
    * composition invalid) — forwarded to WireStageTurn. */
-  wireInvalidChainIssues?: string[];
+  wireValidationIssues?: string[];
 }
 
 function guidedTurnInstanceKey(turn: TurnPayload): string {
@@ -80,9 +47,9 @@ export function GuidedTurn({
   disabled = false,
   isTutorial = false,
   wirePendingAcknowledgements,
-  wireInvalidChainIssues,
+  wireValidationIssues,
 }: GuidedTurnProps) {
-  const guardedSubmit = (body: GuidedRespondRequest) => {
+  const guardedSubmit = (body: GuidedRespondAction) => {
     if (disabled) return;
     onSubmit(body);
   };
@@ -105,7 +72,7 @@ export function GuidedTurn({
       return (
         <SingleSelectTurn
           key={turnInstanceKey}
-          payload={turn.payload as SingleSelectPayload}
+          payload={turn.payload}
           onSubmit={guardedSubmit}
           disabled={disabled}
           isTutorial={isTutorial}
@@ -115,7 +82,7 @@ export function GuidedTurn({
       return (
         <InspectAndConfirmTurn
           key={turnInstanceKey}
-          payload={turn.payload as InspectAndConfirmPayload}
+          payload={turn.payload}
           onSubmit={guardedSubmit}
           disabled={disabled}
           isTutorial={isTutorial}
@@ -125,7 +92,7 @@ export function GuidedTurn({
       return (
         <MultiSelectWithCustomTurn
           key={turnInstanceKey}
-          payload={turn.payload as MultiSelectWithCustomPayload}
+          payload={turn.payload}
           onSubmit={guardedSubmit}
           disabled={disabled}
           isTutorial={isTutorial}
@@ -135,47 +102,32 @@ export function GuidedTurn({
       return (
         <SchemaFormTurn
           key={turnInstanceKey}
-          payload={turn.payload as SchemaFormPayload}
+          payload={turn.payload}
           onSubmit={guardedSubmit}
           disabled={disabled}
           isTutorial={isTutorial}
         />
       );
-    case "propose_chain":
-      return (
-        <ProposeChainTurn
-          key={turnInstanceKey}
-          payload={turn.payload as ProposeChainPayload}
-          onSubmit={guardedSubmit}
-          disabled={disabled}
-          isTutorial={isTutorial}
-        />
-      );
-    case "recipe_offer":
-      return (
-        <SchemaFormTurn
-          key={turnInstanceKey}
-          payload={turn.payload as SchemaFormPayload}
-          onSubmit={guardedSubmit}
-          disabled={disabled}
-          isTutorial={isTutorial}
-        />
+    case "propose_pipeline":
+      throw new Error(
+        "GuidedTurn: propose_pipeline rendering is unavailable until durable proposal routing is enabled",
       );
     case "confirm_wiring":
       return (
         <WireStageTurn
           key={turnInstanceKey}
-          data={turn.payload as WireStageData}
+          data={turn.payload}
           confirmDisabled={disabled}
           pendingAcknowledgements={wirePendingAcknowledgements}
-          invalidChainIssues={wireInvalidChainIssues}
+          validationIssues={wireValidationIssues}
           onConfirm={() =>
             guardedSubmit({
               chosen: ["confirm"],
               edited_values: null,
               custom_inputs: null,
-              accepted_step_index: null,
-              edit_step_index: null,
+              proposal_id: null,
+              draft_hash: null,
+              edit_target: null,
               control_signal: null,
             })
           }
@@ -184,8 +136,9 @@ export function GuidedTurn({
               chosen: null,
               edited_values: null,
               custom_inputs: null,
-              accepted_step_index: null,
-              edit_step_index: null,
+              proposal_id: null,
+              draft_hash: null,
+              edit_target: null,
               control_signal: "request_advisor",
             })
           }
@@ -194,8 +147,9 @@ export function GuidedTurn({
               chosen: null,
               edited_values: null,
               custom_inputs: null,
-              accepted_step_index: null,
-              edit_step_index: null,
+              proposal_id: null,
+              draft_hash: null,
+              edit_target: null,
               control_signal: "exit_to_freeform",
             })
           }
@@ -204,8 +158,9 @@ export function GuidedTurn({
               chosen: ["complete_without_signoff"],
               edited_values: null,
               custom_inputs: null,
-              accepted_step_index: null,
-              edit_step_index: null,
+              proposal_id: null,
+              draft_hash: null,
+              edit_target: null,
               control_signal: null,
             })
           }
@@ -217,9 +172,9 @@ export function GuidedTurn({
       // line because `turn.type` narrows to `never` only when all cases are
       // handled.  The throw is retained for the runtime path (JS callers,
       // stale type declarations) per the CLAUDE.md offensive-programming rule.
-      const _exhaustive: never = turn.type;
+      const _exhaustive: never = turn;
       throw new Error(
-        `GuidedTurn: unknown turn type: ${String(_exhaustive)} (exhaustiveness check failed)`,
+        `GuidedTurn: unknown turn: ${String(_exhaustive)} (exhaustiveness check failed)`,
       );
     }
   }

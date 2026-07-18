@@ -24,6 +24,7 @@ import { resetStore } from "@/test/store-helpers";
 import { PREFILL_CHAT_INPUT_EVENT } from "@/components/catalog/PluginCard";
 import type { ChatMessage, CompositionState } from "@/types";
 import type { InterpretationEvent } from "@/types/interpretation";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 describe("ChatInput — controlled-mode prefill listener", () => {
   beforeEach(() => {
@@ -214,6 +215,7 @@ describe("ChatInput empty-state placeholder", () => {
   function makeCompositionState(version: number): CompositionState {
     return {
       id: "comp-1",
+      ...compositionStateAuthorityFields,
       version,
       sources: {},
       nodes: [],

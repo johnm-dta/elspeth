@@ -1,5 +1,28 @@
 import type { CompositionState } from "../types/api";
 
+export const compositionStateAuthorityFields = {
+  session_id: "session-1",
+  is_valid: true,
+  validation_errors: null,
+  validation_warnings: null,
+  validation_suggestions: null,
+  derived_from_state_id: null,
+  created_at: "2026-07-19T00:00:00Z",
+  composer_meta: null,
+  plugin_policy_findings: [],
+} satisfies Pick<
+  CompositionState,
+  | "session_id"
+  | "is_valid"
+  | "validation_errors"
+  | "validation_warnings"
+  | "validation_suggestions"
+  | "derived_from_state_id"
+  | "created_at"
+  | "composer_meta"
+  | "plugin_policy_findings"
+>;
+
 /**
  * Canonical test fixture for CompositionState.
  *
@@ -19,6 +42,7 @@ export function makeComposition(
 ): CompositionState {
   return {
     id: "comp-1",
+    ...compositionStateAuthorityFields,
     version,
     sources: { source: { plugin: "csv_file", options: { path: "x.csv" } } },
     nodes: [

@@ -31,49 +31,7 @@ from elspeth.web.composer.guided.state_machine import TerminalReason
 # Closed allowlists for discriminator fields. Checked before construction so
 # the audit trail never records a record with an invalid discriminator value.
 _VALID_EMITTERS: frozenset[str] = frozenset({"server", "llm"})
-_VALID_ADVANCE_REASONS: frozenset[str] = frozenset({"recipe_applied", "user_advanced", "auto_advanced"})
-
-# Allowlist of the per-error fields safe to persist from a validation_result
-# entry. Two producer shapes feed this channel:
-#   * pipeline ``ValidationEntry`` (``…composer.state.ValidationEntry`` →
-#     ``{component, message, severity}``) from the repair-validation drop path;
-#   * the chain-solver auto-drop path, which records ``{error_class}`` only.
-# ``component`` is a composition node id (structural, already surfaced in the
-# composer UI), ``severity`` is a closed enum, and ``error_class`` is a Python
-# exception class name (``type(exc).__name__``) — all safe. ``message`` is
-# deliberately EXCLUDED: it is free-form validator text that echoes filesystem
-# paths and raw plugin / pydantic exception strings (see ``tools/_common.py``
-# path / ``{exc}`` messages).
-_SAFE_VALIDATION_ERROR_KEYS: frozenset[str] = frozenset({"component", "severity", "error_code", "error_class"})
-
-
-def _redacted_validation_result(validation_result: Mapping[str, Any]) -> dict[str, Any]:
-    """Reconstruct a ``validation_result`` payload by allowlist for the audit trail.
-
-    The guided synthetic-event channel is structurally exempt from the composer
-    redaction MANIFEST: its ``tool_name``s are not registered, and the chat-
-    message persistence projection (``sessions/routes/_helpers.py``) fail-OPENS
-    for any non-MANIFEST tool, returning ``arguments_canonical`` verbatim. So
-    this payload must be safe BY CONSTRUCTION here, at emission.
-
-    Reconstruct rather than blocklist: keep only ``is_valid`` plus each error's
-    allowlisted structured fields (``component``/``severity``), dropping the
-    free-form ``message``. Allowlisting bounds the egress to known-safe keys, so
-    a future ``ValidationEntry`` field cannot silently re-open the leak. A
-    non-mapping error entry is unexpected (our own ``ValidationSummary`` always
-    serialises mappings) and is recorded as an opaque marker rather than echoed,
-    so an anomalous shape can never carry raw text through.
-    """
-    redacted: dict[str, Any] = {}
-    if "is_valid" in validation_result:
-        redacted["is_valid"] = validation_result["is_valid"]
-    errors = validation_result["errors"] if "errors" in validation_result else None
-    if isinstance(errors, (list, tuple)):
-        redacted["errors"] = [
-            {key: entry[key] for key in _SAFE_VALIDATION_ERROR_KEYS if key in entry} if isinstance(entry, Mapping) else {"redacted": True}
-            for entry in errors
-        ]
-    return redacted
+_VALID_ADVANCE_REASONS: frozenset[str] = frozenset({"user_advanced", "auto_advanced"})
 
 
 def _build_invocation(
@@ -233,7 +191,7 @@ def emit_step_advanced(
         prev: The step the wizard is leaving.
         next_: The step the wizard is entering.
         reason: Why the advance happened. Must be one of
-            ``{"recipe_applied", "user_advanced", "auto_advanced"}``.
+            ``{"user_advanced", "auto_advanced"}``.
         composition_version: Current ``CompositionState.version``.
         actor: Stable identity of the driving actor.
 
@@ -263,23 +221,17 @@ def emit_dropped_to_freeform(
     *,
     prev: GuidedStep,
     drop_reason: TerminalReason,
-    validation_result: Mapping[str, Any] | None,
     composition_version: int,
     actor: str,
 ) -> None:
     """Record a ``guided_dropped_to_freeform`` audit event.
 
-    Fires when the guided wizard exits to freeform composition, for any
-    reason (user exit, protocol violation, solver exhaustion).
+    Fires when the operator explicitly exits guided mode.
 
     Args:
         recorder: The composition session's active recorder.
         prev: The step at which the wizard exited.
         drop_reason: Why guided mode was abandoned.
-        validation_result: Pipeline validation output at exit time, when
-            present (e.g. for SOLVER_EXHAUSTED). ``None`` is recorded as
-            absent — the absence is meaningful (no validation was run),
-            not a gap to fill with a fabricated default.
         composition_version: Current ``CompositionState.version``.
         actor: Stable identity of the driving actor.
     """
@@ -287,8 +239,6 @@ def emit_dropped_to_freeform(
         "prev_step": prev.value,
         "drop_reason": drop_reason.value,
     }
-    if validation_result is not None:
-        payload["validation_result"] = _redacted_validation_result(validation_result)
     now = datetime.now(UTC)
     invocation = _build_invocation(
         tool_name="guided_dropped_to_freeform",
@@ -326,42 +276,6 @@ def emit_signoff_decision(
     now = datetime.now(UTC)
     invocation = _build_invocation(
         tool_name=event_name,
-        payload=payload,
-        composition_version=composition_version,
-        actor=actor,
-        now=now,
-    )
-    recorder.record(invocation)
-
-
-def emit_hidden_field_rejected(
-    recorder: ComposerToolRecorder,
-    *,
-    session_id: str,
-    plugin_kind: str,
-    plugin_name: str,
-    field: str,
-    predicate: Mapping[str, Any],
-    actual_state: Mapping[str, Any],
-    composition_version: int,
-    actor: str,
-) -> None:
-    """Record a ``guided_hidden_field_rejected`` audit event.
-
-    Fires before returning HTTP 400 when a schema-form submission includes a
-    field hidden by its ``visible_when`` predicate.
-    """
-    payload: dict[str, Any] = {
-        "session_id": session_id,
-        "plugin_kind": plugin_kind,
-        "plugin_name": plugin_name,
-        "field": field,
-        "predicate": dict(predicate),
-        "actual_state": dict(actual_state),
-    }
-    now = datetime.now(UTC)
-    invocation = _build_invocation(
-        tool_name="guided_hidden_field_rejected",
         payload=payload,
         composition_version=composition_version,
         actor=actor,

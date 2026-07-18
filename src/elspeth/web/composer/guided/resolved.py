@@ -320,7 +320,7 @@ class SinkOutputResolved:
 
 @dataclass(frozen=True, slots=True)
 class SinkResolved:
-    """Temporary non-persisted compatibility carrier for pre-cutover callers."""
+    """Non-persisted grouping of reviewed named outputs."""
 
     outputs: Sequence[SinkOutputResolved]
 

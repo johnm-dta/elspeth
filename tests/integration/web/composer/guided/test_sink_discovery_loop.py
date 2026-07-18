@@ -88,14 +88,14 @@ def _response(*, content: str | None = None, tool_calls: list[SimpleNamespace] |
 
 _RESOLVE_SINK_ARGS = {
     "resolution": "sink",
-    "outputs": [
-        {
-            "plugin": "json",
-            "options": {"path": "out.jsonl", "schema": {"mode": "observed"}},
-            "required_fields": [],
-            "schema_mode": "observed",
-        }
-    ],
+    "output": {
+        "name": "results",
+        "plugin": "json",
+        "options": {"path": "out.jsonl", "schema": {"mode": "observed"}},
+        "required_fields": [],
+        "schema_mode": "observed",
+        "on_write_failure": "discard",
+    },
     "assistant_message": "Saved the results as a JSON Lines file.",
 }
 
@@ -121,6 +121,7 @@ async def test_sink_loop_lists_sinks_then_resolves() -> None:
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
             recorder=recorder,
             state=_empty_state(),
             catalog=_POLICY_CATALOG,
@@ -174,6 +175,7 @@ async def test_sink_loop_refuses_to_dispatch_mutation_tool() -> None:
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
             state=_empty_state(),
             catalog=_POLICY_CATALOG,
             plugin_snapshot=_PLUGIN_SNAPSHOT,
@@ -216,6 +218,7 @@ async def test_sink_loop_threads_parallel_tool_calls() -> None:
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
             recorder=recorder,
             state=_empty_state(),
             catalog=_POLICY_CATALOG,
@@ -252,6 +255,7 @@ async def test_sink_loop_returns_none_at_iteration_cap() -> None:
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
             recorder=recorder,
             state=_empty_state(),
             catalog=_POLICY_CATALOG,
@@ -270,18 +274,18 @@ async def test_sink_loop_malformed_discovery_args_classify_malformed_response() 
     """A malformed discovery call classifies MALFORMED_RESPONSE, not API_ERROR.
 
     An *allowed* discovery tool whose ``arguments`` decode to a non-object makes
-    the production ``_execute_discovery_call`` raise ``ChainSolverResponseShapeError``.
+    the production ``_execute_discovery_call`` raise ``GuidedSolverResponseShapeError``.
     The loop must list that class in its typed shape-failure except (mirroring
-    ``solve_chain``'s ``chain_solver.py`` clause) so the audit row records
+    ``guided solver``'s ``chain_solver.py`` clause) so the audit row records
     MALFORMED_RESPONSE — not fall through to the API_ERROR catch-all. The class
     still re-raises; the wrapper turns it into the advisory fallback.
     """
     from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
-    from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError
+    from elspeth.web.composer.guided.errors import GuidedSolverResponseShapeError
 
     recorder = BufferingRecorder()
     # ``list_sinks`` is allowed (passes the dispatch gate), but its arguments
-    # decode to a non-object, so dispatch raises ChainSolverResponseShapeError.
+    # decode to a non-object, so dispatch raises GuidedSolverResponseShapeError.
     malformed = _response(tool_calls=[SimpleNamespace(id="c1", function=SimpleNamespace(name="list_sinks", arguments="[1, 2, 3]"))])
 
     async def _fake(**kwargs: Any) -> SimpleNamespace:
@@ -289,7 +293,7 @@ async def test_sink_loop_malformed_discovery_args_classify_malformed_response() 
 
     with (
         patch("elspeth.web.composer.guided.chat_solver._litellm_acompletion", side_effect=_fake),
-        pytest.raises(ChainSolverResponseShapeError),
+        pytest.raises(GuidedSolverResponseShapeError),
     ):
         await maybe_resolve_step_2_sink_chat(
             model="m",
@@ -297,6 +301,7 @@ async def test_sink_loop_malformed_discovery_args_classify_malformed_response() 
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
             recorder=recorder,
             state=_empty_state(),
             catalog=_POLICY_CATALOG,
@@ -338,6 +343,7 @@ async def test_sink_loop_progress_events_advance_through_discovery_and_resolve()
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
             state=_empty_state(),
             catalog=_POLICY_CATALOG,
             plugin_snapshot=_PLUGIN_SNAPSHOT,
@@ -374,6 +380,7 @@ async def test_sink_loop_progress_single_shot_resolve_emits_calling_model_only()
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
             progress=_capture_progress,
         )
 
@@ -398,6 +405,7 @@ async def test_sink_loop_single_shot_when_no_catalog() -> None:
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
 
     assert result.sink is not None

@@ -24,21 +24,13 @@ _GUIDED_SYNTHETIC_TOOLS = frozenset(
         "guided_turn_answered",
         "guided_step_advanced",
         "guided_dropped_to_freeform",
-        "guided_hidden_field_rejected",
     }
 )
-_ADVANCE_REASONS = frozenset({"recipe_applied", "user_advanced", "auto_advanced"})
-_SAFE_VALIDATION_KEYS = frozenset({"component", "severity", "error_code", "error_class"})
+_ADVANCE_REASONS = frozenset({"user_advanced", "auto_advanced"})
 
 
 def _is_sha256(value: object) -> bool:
     return type(value) is str and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
-
-
-def _is_structural_id(value: object, *, maximum: int = 256) -> bool:
-    return (
-        type(value) is str and 1 <= len(value) <= maximum and all(char.isascii() and (char.isalnum() or char in "_.:-") for char in value)
-    )
 
 
 def _valid_guided_synthetic_payload(tool_name: str, payload: object) -> bool:
@@ -76,35 +68,10 @@ def _valid_guided_synthetic_payload(tool_name: str, payload: object) -> bool:
             and value["reason"] in _ADVANCE_REASONS
         )
     if tool_name == "guided_dropped_to_freeform":
-        if set(value) not in (
-            {"prev_step", "drop_reason"},
-            {"prev_step", "drop_reason", "validation_result"},
-        ):
-            return False
-        if value["prev_step"] not in steps or value["drop_reason"] not in {member.value for member in TerminalReason}:
-            return False
-        if "validation_result" not in value:
-            return True
-        validation = value["validation_result"]
-        if type(validation) is not dict or set(validation) - {"is_valid", "errors"}:
-            return False
-        if "is_valid" in validation and type(validation["is_valid"]) is not bool:
-            return False
-        errors = validation.get("errors", [])
-        return type(errors) is list and all(
-            type(entry) is dict
-            and not set(entry) - _SAFE_VALIDATION_KEYS
-            and all(_is_structural_id(item, maximum=128) for item in entry.values())
-            for entry in errors
-        )
-    if tool_name == "guided_hidden_field_rejected":
-        # Predicate values and actual state can contain credentials. Preserve
-        # this event only when every retained field is a bounded identifier.
         return (
-            set(value) == {"session_id", "plugin_kind", "plugin_name", "field", "predicate", "actual_state"}
-            and all(_is_structural_id(value[key]) for key in ("session_id", "plugin_kind", "plugin_name", "field"))
-            and value["predicate"] == {}
-            and value["actual_state"] == {}
+            set(value) == {"prev_step", "drop_reason"}
+            and value["prev_step"] in steps
+            and value["drop_reason"] == TerminalReason.USER_PRESSED_EXIT.value
         )
     return False
 

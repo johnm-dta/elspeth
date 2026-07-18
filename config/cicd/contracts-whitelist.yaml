@@ -646,8 +646,6 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/guided/state_machine.py:SourceIntent.from_dict:d"
   - "src/elspeth/web/composer/guided/state_machine.py:SinkIntent.to_dict:return"
   - "src/elspeth/web/composer/guided/state_machine.py:SinkIntent.from_dict:d"
-  - "src/elspeth/web/composer/guided/state_machine.py:ChainProposal.to_dict:return"
-  - "src/elspeth/web/composer/guided/state_machine.py:ChainProposal.from_dict:d"
   - "src/elspeth/web/composer/guided/state_machine.py:GuidedSession.to_dict:return"
   - "src/elspeth/web/composer/guided/state_machine.py:GuidedSession.from_dict:d"
   # YAML generator — strips web-specific metadata from plugin options dicts
@@ -691,15 +689,6 @@ allowed_dict_patterns:
   # ═══════════════════════════════════════════════════════════════════════════
   - "src/elspeth/web/interpretation_state.py:strip_authoring_options:return"
   - "src/elspeth/web/sessions/service.py:_patch_structured_interpretation_prompt:return"
-
-  # WEB GUIDED COMPOSER — Step-specific option patching (Tier 3 sink options dict)
-  # Sink options are open-ended plugin configuration; this helper only overlays
-  # the Step-2 schema contract before passing the dict back to composer state.
-  - "src/elspeth/web/composer/guided/steps.py:_sink_options_with_step_2_schema_contract:return"
-  # Profiled options are likewise open-ended across plugin JSON schemas. This
-  # helper removes private binding fields and overlays the opaque profile alias
-  # while preserving the selected plugin's public option keys in flat form.
-  - "src/elspeth/web/composer/guided/steps.py:_normalize_profiled_options:return"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # WEB COMPOSER — Compose-loop helpers (Tier 3 LiteLLM API shapes)
@@ -998,7 +987,6 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/guided/chat_solver.py:_llm_safe_schema_option:return"
   - "src/elspeth/web/composer/guided/chat_solver.py:_source_revision_context_for_llm:return"
   - "src/elspeth/web/composer/guided/chat_solver.py:_sink_revision_context_for_llm:return"
-  - "src/elspeth/web/composer/guided/audit.py:_redacted_validation_result:return"
   - "src/elspeth/web/composer/guided/profile.py:WorkflowProfile.to_dict:return"
   - "src/elspeth/web/composer/guided/profile.py:WorkflowProfile.from_dict:d"
   - "src/elspeth/web/composer/guided/_discovery.py:_assistant_tool_calls_message:return"

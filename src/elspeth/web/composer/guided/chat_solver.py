@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import sys
 import time
 from collections.abc import Mapping
@@ -32,7 +33,7 @@ from elspeth.web.blobs.protocol import ALLOWED_MIME_TYPES, AllowedMimeType
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided._discovery import _assistant_tool_calls_message, _execute_discovery_call
-from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError, InvariantError
+from elspeth.web.composer.guided.errors import GuidedSolverResponseShapeError, InvariantError
 from elspeth.web.composer.guided.prompts import _summarize_sample_row, load_step_chat_skill
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import (
@@ -58,7 +59,7 @@ from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 # Server-owned source-option keys that the LLM must NEVER author. Both are
-# stamped authoritatively at commit (``blob_ref`` by ``handle_step_1_source``,
+# stamped authoritatively at proposal settlement (including ``blob_ref``),
 # ``source_authoring`` by ``set_source_from_blob`` for LLM-authored/dynamic
 # sources) and REJECTED by ``set_source`` if caller-supplied. On an in-place
 # re-resolve the committed source is threaded into the resolver prompt, so the
@@ -543,18 +544,19 @@ def _source_revision_context_for_llm(current_source: SourceResolved) -> dict[str
 
 
 def _sink_revision_context_for_llm(current_sink: SinkResolved) -> dict[str, Any]:
-    outputs: list[dict[str, Any]] = []
-    for output in current_sink.outputs:
-        options = output.options if isinstance(output.options, Mapping) else {}
-        outputs.append(
-            {
-                "plugin": output.plugin,
-                "required_fields": list(output.required_fields),
-                "schema_mode": output.schema_mode,
-                "option_count": len(options),
-            }
-        )
-    return {"outputs": outputs}
+    try:
+        (output,) = current_sink.outputs
+    except ValueError as exc:
+        raise InvariantError("Step 2 chat requires exactly one current output") from exc
+    options = output.options if isinstance(output.options, Mapping) else {}
+    return {
+        "output": {
+            "plugin": output.plugin,
+            "required_fields": list(output.required_fields),
+            "schema_mode": output.schema_mode,
+            "option_count": len(options),
+        }
+    }
 
 
 def build_step_chat_context_block(
@@ -592,9 +594,9 @@ def build_step_chat_context_block(
     else:
         lines.append("Applied source: none yet.")
     if current_sink is not None:
-        lines.append(f"Applied output(s): {json.dumps(_sink_revision_context_for_llm(current_sink), sort_keys=True)}")
+        lines.append(f"Applied output: {json.dumps(_sink_revision_context_for_llm(current_sink), sort_keys=True)}")
     else:
-        lines.append("Applied output(s): none yet.")
+        lines.append("Applied output: none yet.")
     if state is not None:
         source_plugins = sorted({spec.plugin for spec in state.sources.values()})
         node_plugins = [node.plugin if node.plugin is not None else "(gate/coalesce)" for node in state.nodes]
@@ -725,20 +727,16 @@ def _parse_step_1_source_tool_arguments(arguments: str, *, plugin_hint: str | No
         raise ValueError("resolve_source snapshot is malformed") from exc
 
 
-async def _bounded_acompletion(kwargs: dict[str, Any], timeout_seconds: float | None) -> Any:
+async def _bounded_acompletion(kwargs: dict[str, Any], timeout_seconds: float) -> Any:
     """Run ``_litellm_acompletion`` under an ``asyncio.wait_for`` bound.
 
-    ``timeout_seconds=None`` preserves the unbounded legacy behaviour for
-    direct callers/tests; the guided routes thread
-    ``settings.composer_timeout_seconds`` so a guided LLM call is bounded the
-    same way freeform compose bounds its calls (``composer/service.py``
-    ``asyncio.wait_for(..., timeout=self._timeout_seconds)``). The raised
-    ``TimeoutError`` lands in each solver's existing ``except TimeoutError``
-    audit branch (status=TIMEOUT) and the auto-drop wrappers turn it into the
-    synthetic-unavailable / advisory-fallback contract.
+    Every call supplies the current composer timeout. Invalid bounds fail at
+    this seam rather than silently creating an unbounded provider request.
     """
-    if timeout_seconds is None:
-        return await _litellm_acompletion(**kwargs)
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int | float):
+        raise TypeError("timeout_seconds must be a finite positive number")
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be a finite positive number")
     return await asyncio.wait_for(_litellm_acompletion(**kwargs), timeout=timeout_seconds)
 
 
@@ -751,7 +749,7 @@ async def maybe_resolve_step_1_source_chat(
     temperature: float | None,
     seed: int | None,
     recorder: BufferingRecorder | None = None,
-    timeout_seconds: float | None = None,
+    timeout_seconds: float,
     context_block: str | None = None,
 ) -> Step1SourceChatOutcome:
     """Try to resolve a Step-1 schema-form chat message into source data.
@@ -944,36 +942,27 @@ _STEP_2_SINK_TOOL: dict[str, Any] = {
     "function": {
         "name": "resolve_sink",
         "description": (
-            "Use when the Step 2 chat message contains enough information to "
-            "configure the pipeline output(s). Do not use for general advice."
+            "Use when the Step 2 chat message contains enough information to configure the pipeline output. Do not use for general advice."
         ),
         "parameters": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["resolution", "outputs", "assistant_message"],
+            "required": ["resolution", "output", "assistant_message"],
             "properties": {
                 "resolution": {"type": "string", "enum": ["sink"]},
-                "outputs": {
-                    "type": "array",
-                    "minItems": 1,
-                    # MVP single-output constraint enforced at the schema boundary:
-                    # handle_step_2_sink loops outputs as sink_name="main"
-                    # (last-write-wins) and the from-resolved re-render shows
-                    # outputs[0] — so >1 output would silently disagree. Cap at 1.
-                    "maxItems": 1,
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["plugin", "options", "required_fields", "schema_mode"],
-                        "properties": {
-                            "plugin": {"type": "string", "minLength": 1},
-                            # Bare object: option shape varies by sink plugin.
-                            # Validated downstream by handle_step_2_sink ->
-                            # _execute_set_output.
-                            "options": {"type": "object"},
-                            "required_fields": {"type": "array", "items": {"type": "string"}},
-                            "schema_mode": {"type": "string", "enum": ["fixed", "flexible", "observed"]},
-                        },
+                "output": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["name", "plugin", "options", "required_fields", "schema_mode", "on_write_failure"],
+                    "properties": {
+                        "name": {"type": "string", "minLength": 1},
+                        "plugin": {"type": "string", "minLength": 1},
+                        # Bare object: option shape varies by sink plugin.
+                        # Validated by the canonical proposal candidate.
+                        "options": {"type": "object"},
+                        "required_fields": {"type": "array", "items": {"type": "string"}},
+                        "schema_mode": {"type": "string", "enum": ["fixed", "flexible", "observed"]},
+                        "on_write_failure": {"type": "string", "minLength": 1},
                     },
                 },
                 "assistant_message": {"type": "string", "minLength": 1},
@@ -990,7 +979,7 @@ def _build_step_2_sink_tool_prompt(*, current_sink: SinkResolved | None) -> str:
         revise_block = (
             "\n## Current applied sink (revise relative to this)\n\n"
             "A sink has already been applied. The user's message is a REVISION "
-            "instruction against it — re-emit the COMPLETE updated outputs (not a "
+            "instruction against it — re-emit the COMPLETE updated output (not a "
             "diff). Current sink:\n"
             f"{json.dumps(_sink_revision_context_for_llm(current_sink), sort_keys=True)}\n"
         )
@@ -999,8 +988,9 @@ def _build_step_2_sink_tool_prompt(*, current_sink: SinkResolved | None) -> str:
         "## Step 2 Sink Tool\n\n"
         f"{revise_block}"
         "If the user's message provides enough information to configure the "
-        "pipeline output, call `resolve_sink` with the complete list of outputs "
-        "(plugin, options, required_fields, schema_mode) and a brief "
+        "pipeline output, call `resolve_sink` with the complete output "
+        "(name, plugin, options, required_fields, schema_mode, "
+        "on_write_failure) and a brief "
         "assistant_message. If the message is only a question or lacks enough "
         "detail, reply in prose and do not call a tool.\n"
     )
@@ -1013,7 +1003,7 @@ def _build_step_2_sink_tool_prompt(*, current_sink: SinkResolved | None) -> str:
     suppresses=("R1", "R5"),
     invariant=(
         "raises ValueError on non-object decode, missing keys, mistyped output entries, "
-        "more than one output, or strict snapshot depth/item/aggregate text/UTF-8/finite-JSON "
+        "or strict snapshot depth/item/aggregate text/UTF-8/finite-JSON "
         "violations; never coerces malformed model output"
     ),
     test_ref=(
@@ -1026,58 +1016,53 @@ def _parse_step_2_sink_tool_arguments(arguments: str) -> tuple[SinkResolved, str
     data = json.loads(arguments)
     if not isinstance(data, Mapping):
         raise ValueError(f"resolve_sink arguments must decode to an object; got {type(data).__name__}")
-    missing = {"resolution", "outputs", "assistant_message"} - set(data.keys())
-    if missing:
-        raise ValueError(f"resolve_sink arguments missing required keys: {sorted(missing)}")
+    expected_top = {"resolution", "output", "assistant_message"}
+    if set(data) != expected_top:
+        raise ValueError(f"resolve_sink arguments must contain exactly {sorted(expected_top)}")
     if data["resolution"] != "sink":
         raise ValueError(f"resolve_sink resolution must be 'sink'; got {data['resolution']!r}")
-    outputs_raw = data["outputs"]
-    if not isinstance(outputs_raw, list) or not outputs_raw:
-        raise ValueError("resolve_sink outputs must be a non-empty list")
-    # Enforce the MVP single-output cap SERVER-SIDE, not only via the schema's
-    # advisory `maxItems: 1`. A model emitting 2 outputs would otherwise sail
-    # through here and handle_step_2_sink would silently last-write-wins on
-    # sink_name="main" — the "silently disagree" the schema comment warns about.
-    # ELSPETH doctrine: strict validation at the parse boundary for Tier-3
-    # LLM-originated input. The ValueError routes to MALFORMED_RESPONSE -> advisory.
-    if len(outputs_raw) > 1:
-        raise ValueError(f"resolve_sink accepts at most one output (MVP single-output cap); got {len(outputs_raw)}")
-    outputs: list[SinkOutputResolved] = []
-    for idx, item in enumerate(outputs_raw):
-        if not isinstance(item, Mapping):
-            raise ValueError(f"resolve_sink outputs[{idx}] must be an object; got {type(item).__name__}")
-        plugin = item.get("plugin")
-        if not isinstance(plugin, str) or not plugin:
-            raise ValueError(f"resolve_sink outputs[{idx}].plugin must be a non-empty string; got {plugin!r}")
-        options = item.get("options")
-        if not isinstance(options, Mapping):
-            raise ValueError(f"resolve_sink outputs[{idx}].options must be an object")
-        required_fields_raw = item.get("required_fields")
-        if not isinstance(required_fields_raw, list):
-            raise ValueError(f"resolve_sink outputs[{idx}].required_fields must be a list")
-        required_fields: list[str] = []
-        for col_idx, col in enumerate(required_fields_raw):
-            if not isinstance(col, str) or not col:
-                raise ValueError(f"resolve_sink outputs[{idx}].required_fields[{col_idx}] must be a non-empty string")
-            required_fields.append(col)
-        schema_mode = item.get("schema_mode")
-        if schema_mode not in ("fixed", "flexible", "observed"):
-            raise ValueError(f"resolve_sink outputs[{idx}].schema_mode must be fixed/flexible/observed; got {schema_mode!r}")
-        try:
-            outputs.append(
-                SinkOutputResolved(
-                    name="main",
-                    plugin=plugin,
-                    options=dict(options),
-                    required_fields=tuple(required_fields),
-                    schema_mode=schema_mode,
-                    on_write_failure="discard",
-                )
-            )
-        except (InvariantError, TypeError) as exc:
-            raise ValueError(f"resolve_sink outputs[{idx}] snapshot is malformed") from exc
+    item = data["output"]
+    if not isinstance(item, Mapping):
+        raise ValueError(f"resolve_sink output must be an object; got {type(item).__name__}")
+    expected = {"name", "plugin", "options", "required_fields", "schema_mode", "on_write_failure"}
+    if set(item) != expected:
+        raise ValueError(f"resolve_sink output must contain exactly {sorted(expected)}")
+    name = item["name"]
+    if type(name) is not str or not name:
+        raise ValueError("resolve_sink output.name must be a non-empty string")
+    plugin = item.get("plugin")
+    if not isinstance(plugin, str) or not plugin:
+        raise ValueError(f"resolve_sink output.plugin must be a non-empty string; got {plugin!r}")
+    options = item.get("options")
+    if not isinstance(options, Mapping):
+        raise ValueError("resolve_sink output.options must be an object")
+    required_fields_raw = item.get("required_fields")
+    if not isinstance(required_fields_raw, list):
+        raise ValueError("resolve_sink output.required_fields must be a list")
+    required_fields: list[str] = []
+    for col_idx, col in enumerate(required_fields_raw):
+        if not isinstance(col, str) or not col:
+            raise ValueError(f"resolve_sink output.required_fields[{col_idx}] must be a non-empty string")
+        required_fields.append(col)
+    schema_mode = item.get("schema_mode")
+    if schema_mode not in ("fixed", "flexible", "observed"):
+        raise ValueError(f"resolve_sink output.schema_mode must be fixed/flexible/observed; got {schema_mode!r}")
+    on_write_failure = item["on_write_failure"]
+    if type(on_write_failure) is not str or not on_write_failure:
+        raise ValueError("resolve_sink output.on_write_failure must be a non-empty string")
+    try:
+        output = SinkOutputResolved(
+            name=name,
+            plugin=plugin,
+            options=dict(options),
+            required_fields=tuple(required_fields),
+            schema_mode=schema_mode,
+            on_write_failure=on_write_failure,
+        )
+    except (InvariantError, TypeError) as exc:
+        raise ValueError("resolve_sink output snapshot is malformed") from exc
     assistant_message = _require_prose_assistant_message(data["assistant_message"], tool="resolve_sink")
-    return SinkResolved(outputs=tuple(outputs)), assistant_message
+    return SinkResolved(outputs=(output,)), assistant_message
 
 
 _STEP_2_SINK_DISCOVERY_TOOL_NAMES: Final[frozenset[str]] = frozenset({"list_sinks", "get_plugin_schema"})
@@ -1133,7 +1118,7 @@ async def maybe_resolve_step_2_sink_chat(
     secret_service: WebSecretResolver | None = None,
     user_id: str | None = None,
     max_discovery_iters: int | None = None,
-    timeout_seconds: float | None = None,
+    timeout_seconds: float,
     context_block: str | None = None,
     progress: ComposerProgressSink | None = None,
 ) -> Step2SinkChatOutcome:
@@ -1310,12 +1295,11 @@ async def maybe_resolve_step_2_sink_chat(
             error_class = type(exc).__name__
             error_message = type(exc).__name__
             raise
-        except (IndexError, AttributeError, json.JSONDecodeError, ValueError, ChainSolverResponseShapeError) as exc:
-            # ``ChainSolverResponseShapeError`` from a malformed discovery-tool
+        except (IndexError, AttributeError, json.JSONDecodeError, ValueError, GuidedSolverResponseShapeError) as exc:
+            # ``GuidedSolverResponseShapeError`` from a malformed discovery-tool
             # dispatch (``_execute_discovery_call``) is a response-shape failure,
-            # not an unknown server error — classify it MALFORMED_RESPONSE like
-            # ``solve_chain`` (chain_solver.py), instead of falling through to the
-            # API_ERROR catch-all. It still re-raises; the auto-drop wrapper
+            # not an unknown server error — classify it MALFORMED_RESPONSE
+            # instead of falling through to the API_ERROR catch-all. It still re-raises; the auto-drop wrapper
             # (``resolve_step_2_sink_chat_with_auto_drop``) turns it into the
             # advisory fallback.
             status = ComposerLLMCallStatus.MALFORMED_RESPONSE
@@ -1355,14 +1339,14 @@ async def solve_step_chat(
     temperature: float | None,
     seed: int | None,
     recorder: BufferingRecorder | None = None,
-    timeout_seconds: float | None = None,
+    timeout_seconds: float,
     context_block: str | None = None,
 ) -> str:
     """Send a user chat message to the LLM scoped to *step*; return the assistant reply.
 
     Args:
         model: LiteLLM model identifier from settings.composer_model.  Required —
-            callers must be explicit; no hard-coded default (mirrors solve_chain).
+            callers must be explicit; there is no hard-coded model default.
         step: The user's current wizard step.  Determines which playbook the
             LLM receives via ``load_step_chat_skill(step)``.
         user_message: The user's typed message.  Tier 3 by trust model — the

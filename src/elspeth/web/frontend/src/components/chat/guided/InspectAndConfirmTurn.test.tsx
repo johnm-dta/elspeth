@@ -32,7 +32,7 @@ import userEvent from "@testing-library/user-event";
 import { InspectAndConfirmTurn } from "./InspectAndConfirmTurn";
 import { nullResponse } from "@/test/guided-fixtures";
 import type { InspectAndConfirmPayload } from "@/types/guided";
-import type { GuidedRespondRequest } from "@/types/guided";
+import type { GuidedRespondAction } from "@/types/guided";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -153,9 +153,9 @@ describe("InspectAndConfirmTurn — Looks right submit", () => {
     await user.click(screen.getByRole("button", { name: "Looks right" }));
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
-    const body: GuidedRespondRequest = onSubmit.mock.calls[0][0];
+    const body: GuidedRespondAction = onSubmit.mock.calls[0][0];
     // nullResponse() spread comes first so edited_values is not overridden by it.
-    expect(body).toEqual<GuidedRespondRequest>({
+    expect(body).toEqual<GuidedRespondAction>({
       ...nullResponse(),
       chosen: null,
       custom_inputs: null,
@@ -174,7 +174,7 @@ describe("InspectAndConfirmTurn — Looks right submit", () => {
 
     await user.click(screen.getByRole("button", { name: "Looks right" }));
 
-    const body: GuidedRespondRequest = onSubmit.mock.calls[0][0];
+    const body: GuidedRespondAction = onSubmit.mock.calls[0][0];
     const ev = body.edited_values as Record<string, unknown>;
     expect("samples" in ev).toBe(false);
     expect("warnings" in ev).toBe(false);
@@ -187,9 +187,10 @@ describe("InspectAndConfirmTurn — Looks right submit", () => {
 
     await user.click(screen.getByRole("button", { name: "Looks right" }));
 
-    const body: GuidedRespondRequest = onSubmit.mock.calls[0][0];
-    expect(body.accepted_step_index).toBeNull();
-    expect(body.edit_step_index).toBeNull();
+    const body: GuidedRespondAction = onSubmit.mock.calls[0][0];
+    expect(body.proposal_id).toBeNull();
+    expect(body.draft_hash).toBeNull();
+    expect(body.edit_target).toBeNull();
     expect(body.control_signal).toBeNull();
   });
 });
@@ -260,9 +261,9 @@ describe("InspectAndConfirmTurn — edit submit with rename", () => {
     await user.click(screen.getByRole("button", { name: "Apply edits" }));
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
-    const body: GuidedRespondRequest = onSubmit.mock.calls[0][0];
+    const body: GuidedRespondAction = onSubmit.mock.calls[0][0];
     // nullResponse() spread comes first so edited_values is not overridden by it.
-    expect(body).toEqual<GuidedRespondRequest>({
+    expect(body).toEqual<GuidedRespondAction>({
       ...nullResponse(),
       chosen: null,
       custom_inputs: null,
@@ -281,7 +282,7 @@ describe("InspectAndConfirmTurn — edit submit with rename", () => {
     await user.click(screen.getByRole("button", { name: "Edit columns..." }));
     await user.click(screen.getByRole("button", { name: "Apply edits" }));
 
-    const body: GuidedRespondRequest = onSubmit.mock.calls[0][0];
+    const body: GuidedRespondAction = onSubmit.mock.calls[0][0];
     const ev = body.edited_values as Record<string, unknown>;
     expect("samples" in ev).toBe(false);
     expect("warnings" in ev).toBe(false);
@@ -304,7 +305,7 @@ describe("InspectAndConfirmTurn — edit submit with remove", () => {
 
     await user.click(screen.getByRole("button", { name: "Apply edits" }));
 
-    const body: GuidedRespondRequest = onSubmit.mock.calls[0][0];
+    const body: GuidedRespondAction = onSubmit.mock.calls[0][0];
     const ev = body.edited_values as { columns: string[] };
     expect(ev.columns).toEqual(["name", "city"]);
     // Narrow contract: only columns in edited_values.

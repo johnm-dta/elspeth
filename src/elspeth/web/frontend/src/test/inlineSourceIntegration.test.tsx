@@ -56,6 +56,7 @@ import type {
   SystemStatus,
   UserProfile,
 } from "../types/index";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 const READY_READINESS = {
   authoring_valid: true,
@@ -239,6 +240,7 @@ const LLM_INLINE_SOURCE_HASH =
 function makeCompositionStateWithInlineBlob(): CompositionState {
   return {
     id: "state-2",
+    ...compositionStateAuthorityFields,
     version: 2,
     sources: {
       source: {
@@ -394,6 +396,7 @@ describe("Phase 5a Task 6 — chat input → set_pipeline → inline-source widg
       ],
       compositionState: {
         id: "state-1",
+        ...compositionStateAuthorityFields,
         version: 1,
         sources: {},
         nodes: [],

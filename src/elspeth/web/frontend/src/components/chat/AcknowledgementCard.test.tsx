@@ -20,6 +20,7 @@ import type {
 } from "@/types/interpretation";
 import type { CompositionState } from "@/types/api";
 import type { ApiError } from "@/types/index";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 vi.mock("@/api/client", () => ({
   listInterpretationEvents: vi.fn(),
@@ -64,6 +65,7 @@ function makeEvent(
 function makeCompositionState(version = 2): CompositionState {
   return {
     id: `state-${version}`,
+    ...compositionStateAuthorityFields,
     version,
     sources: {},
     nodes: [],

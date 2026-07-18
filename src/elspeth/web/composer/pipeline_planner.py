@@ -1063,6 +1063,8 @@ async def _plan_pipeline_inner(
         messages.append(_assistant_tool_calls_message(message, calls))
         for call in calls:
             await emit_progress(lifecycle.progress, tool_started_progress_event(call.name))
+
+        async def execute_one_discovery(call: _ParsedToolCall) -> tuple[_ParsedToolCall, ToolResult]:
             dispatch = begin_dispatch(
                 call.call_id,
                 call.name,
@@ -1097,6 +1099,44 @@ async def _plan_pipeline_inner(
                 },
             )
             result = cast(_AuditedDiscoveryResult, audited.result).result
+            return call, result
+
+        discovery_tasks = [asyncio.create_task(execute_one_discovery(call)) for call in calls]
+        try:
+            done, pending = await asyncio.wait(discovery_tasks, return_when=asyncio.FIRST_EXCEPTION)
+        except BaseException:
+            for task in discovery_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*discovery_tasks, return_exceptions=True)
+            raise
+
+        primary_error: BaseException | None = None
+        for task in discovery_tasks:
+            if task not in done:
+                continue
+            try:
+                task_error = task.exception()
+            except asyncio.CancelledError as exc:  # pragma: no cover - only external cancellation reaches here
+                task_error = exc
+            if task_error is not None:
+                primary_error = task_error
+                break
+        if primary_error is not None:
+            for task in pending:
+                task.cancel()
+            # Every dispatch owns one audit record in its finally block. Do not
+            # let the planner settle or return until all sibling tasks have
+            # reached that terminal recorder state. Cancelled sync workers may
+            # continue privately, but their abandoned results cannot mutate the
+            # recorder after this drain.
+            await asyncio.gather(*discovery_tasks, return_exceptions=True)
+            raise primary_error
+
+        if pending:
+            await asyncio.gather(*pending)
+        discovery_results = [task.result() for task in discovery_tasks]
+        for call, result in discovery_results:
             messages.append({"role": "tool", "tool_call_id": call.call_id, "content": serialize_tool_result(result)})
             await emit_progress(lifecycle.progress, tool_completed_progress_event(call.name, result.success))
 

@@ -668,10 +668,6 @@ class TestGetGuidedFullStateRebuild:
             "on_validation_failure": "discard",
         }
 
-    # ------------------------------------------------------------------
-    # M3: Step 3 propose_chain rebuild (Codex #5)
-    # ------------------------------------------------------------------
-
     def test_step_3_checkpoint_does_not_rebuild_external_proposal(self, composer_test_client: TestClient) -> None:
         """Schema 8 does not duplicate proposal payloads in guided custody.
 
@@ -707,7 +703,7 @@ class TestGetGuidedFullStateRebuild:
         assert first["guided_session"]["step"] == "step_4_wire"
         assert first["next_turn"] is not None
         assert first["next_turn"]["type"] == "confirm_wiring"
-        assert first["next_turn"]["step_index"] == 4
+        assert first["next_turn"]["step_index"] == 3
         assert set(first["next_turn"]["payload"]) == {
             "topology",
             "edge_contracts",

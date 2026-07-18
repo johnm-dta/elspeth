@@ -21,8 +21,15 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.payload_store import PayloadNotFoundError
 from elspeth.web.composer.guided.errors import InvariantError
-from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
+from elspeth.web.composer.guided.protocol import (
+    PROPOSAL_RATIONALE_TEMPLATE,
+    PROPOSAL_SUMMARY_TEMPLATE,
+    GuidedStep,
+    TurnType,
+    proposal_component_label,
+)
 from elspeth.web.composer.guided.state_machine import (
+    GuidedProposalRef,
     GuidedSession,
     SinkIntent,
     SourceIntent,
@@ -30,7 +37,9 @@ from elspeth.web.composer.guided.state_machine import (
     TerminalReason,
     TerminalState,
     TurnRecord,
+    guided_reviewed_anchor_hash,
 )
+from elspeth.web.composer.pipeline_proposal import AbsentBase
 from elspeth.web.composer.source_inspection import SourceInspectionFacts
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.guided_replay import guided_turn_token, load_guided_json_payload
@@ -39,6 +48,7 @@ from elspeth.web.sessions.protocol import CompositionStateData, GuidedOperationT
 from elspeth.web.sessions.routes._helpers import _initial_composition_state_with_guided_session
 from elspeth.web.sessions.routes.composer import guided as guided_route
 from elspeth.web.sessions.schema import initialize_session_schema
+from elspeth.web.sessions.schemas import GuidedRespondRequest
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
@@ -291,6 +301,8 @@ def test_preflight_and_settlement_share_one_server_identity_and_inspection_autho
         ({"turn_token": "0" * 64}, 409),
         ({"chosen": ["csv"], "edited_values": {"plugin": "csv", "options": {}}}, 400),
         ({"chosen": ["not-server-permitted"]}, 400),
+        ({"proposal_id": "not-canonical", "draft_hash": "a" * 64}, 400),
+        ({"proposal_id": str(uuid4()), "draft_hash": "A" * 64}, 400),
         ({"chosen": ["csv"], "proposal_id": str(uuid4()), "draft_hash": "a" * 64}, 409),
         (
             {
@@ -323,6 +335,152 @@ def test_invalid_live_response_never_reserves_an_operation(
     assert asyncio.run(composer_test_client.app.state.session_service.get_state_versions(UUID(session_id))) == versions_before
     assert asyncio.run(composer_test_client.app.state.session_service.get_messages(UUID(session_id), limit=None)) == messages_before
     assert _payload_file_count(composer_test_client) == payloads_before
+
+
+def test_step3_rejects_mismatched_proposal_binding_before_stage_dispatch_or_reservation(
+    composer_test_client: TestClient,
+) -> None:
+    session_id = _create_session(composer_test_client)
+    proposal_id = uuid4()
+    draft_hash = "b" * 64
+    initial = _initial_composition_state_with_guided_session().guided_session
+    assert initial is not None
+    active = GuidedProposalRef(
+        proposal_id=proposal_id,
+        draft_hash=draft_hash,
+        base=AbsentBase(),
+        reviewed_anchor_hash=guided_reviewed_anchor_hash(
+            source_order=(),
+            reviewed_sources={},
+            output_order=(),
+            reviewed_outputs={},
+        ),
+        covered_deferred_intent_ids=(),
+        creation_event_schema="pipeline_proposal_created.v1",
+    )
+    guided = replace(initial, step=GuidedStep.STEP_3_TRANSFORMS, active_proposal=active)
+    _persist_guided(composer_test_client, session_id, guided)
+    versions_before = asyncio.run(composer_test_client.app.state.session_service.get_state_versions(UUID(session_id)))
+
+    response = composer_test_client.post(
+        f"/api/sessions/{session_id}/guided/respond",
+        json={
+            "operation_id": str(uuid4()),
+            "turn_token": "a" * 64,
+            "chosen": ["accept"],
+            "proposal_id": str(proposal_id),
+            "draft_hash": "c" * 64,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "proposal_id and draft_hash do not identify the active guided proposal"
+    assert _respond_operation_count(composer_test_client, session_id) == 0
+    assert asyncio.run(composer_test_client.app.state.session_service.get_state_versions(UUID(session_id))) == versions_before
+
+
+def test_step3_matching_proposal_binding_reaches_only_the_durable_adapter_gate(
+    composer_test_client: TestClient,
+) -> None:
+    session_id = _create_session(composer_test_client)
+    proposal_id = uuid4()
+    draft_hash = "b" * 64
+    initial = _initial_composition_state_with_guided_session().guided_session
+    assert initial is not None
+    active = GuidedProposalRef(
+        proposal_id=proposal_id,
+        draft_hash=draft_hash,
+        base=AbsentBase(),
+        reviewed_anchor_hash=guided_reviewed_anchor_hash(
+            source_order=(),
+            reviewed_sources={},
+            output_order=(),
+            reviewed_outputs={},
+        ),
+        covered_deferred_intent_ids=(),
+        creation_event_schema="pipeline_proposal_created.v1",
+    )
+    guided = replace(initial, step=GuidedStep.STEP_3_TRANSFORMS, active_proposal=active)
+    _persist_guided(composer_test_client, session_id, guided)
+
+    response = composer_test_client.post(
+        f"/api/sessions/{session_id}/guided/respond",
+        json={
+            "operation_id": str(uuid4()),
+            "turn_token": "a" * 64,
+            "chosen": ["accept"],
+            "proposal_id": str(proposal_id),
+            "draft_hash": draft_hash,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "guided_respond_stage_unsupported"
+    assert _respond_operation_count(composer_test_client, session_id) == 0
+
+
+def test_step3_active_proposal_requires_binding_for_every_non_exit_action(
+    composer_test_client: TestClient,
+) -> None:
+    session_id = _create_session(composer_test_client)
+    initial = _initial_composition_state_with_guided_session().guided_session
+    assert initial is not None
+    active = GuidedProposalRef(
+        proposal_id=uuid4(),
+        draft_hash="b" * 64,
+        base=AbsentBase(),
+        reviewed_anchor_hash=guided_reviewed_anchor_hash(
+            source_order=(),
+            reviewed_sources={},
+            output_order=(),
+            reviewed_outputs={},
+        ),
+        covered_deferred_intent_ids=(),
+        creation_event_schema="pipeline_proposal_created.v1",
+    )
+    guided = replace(initial, step=GuidedStep.STEP_3_TRANSFORMS, active_proposal=active)
+    _persist_guided(composer_test_client, session_id, guided)
+
+    response = composer_test_client.post(
+        f"/api/sessions/{session_id}/guided/respond",
+        json={
+            "operation_id": str(uuid4()),
+            "turn_token": "a" * 64,
+            "chosen": ["accept"],
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "the active guided proposal requires proposal_id and draft_hash"
+    assert _respond_operation_count(composer_test_client, session_id) == 0
+
+
+def test_active_proposal_binding_gate_preserves_unbound_exit() -> None:
+    initial = _initial_composition_state_with_guided_session().guided_session
+    assert initial is not None
+    active = GuidedProposalRef(
+        proposal_id=uuid4(),
+        draft_hash="b" * 64,
+        base=AbsentBase(),
+        reviewed_anchor_hash=guided_reviewed_anchor_hash(
+            source_order=(),
+            reviewed_sources={},
+            output_order=(),
+            reviewed_outputs={},
+        ),
+        covered_deferred_intent_ids=(),
+        creation_event_schema="pipeline_proposal_created.v1",
+    )
+    guided = replace(initial, step=GuidedStep.STEP_3_TRANSFORMS, active_proposal=active)
+    body = GuidedRespondRequest.model_validate(
+        {
+            "operation_id": str(uuid4()),
+            "turn_token": "a" * 64,
+            "control_signal": "exit_to_freeform",
+        }
+    )
+
+    guided_route._verify_schema8_proposal_binding(guided, body)
 
 
 def test_completed_operation_id_reused_with_different_body_conflicts_without_mutation(
@@ -477,26 +635,95 @@ def test_preflight_invariant_is_sanitized_without_reservation_or_mutation(
 
 
 @pytest.mark.parametrize(
-    ("step", "turn_type", "step_index"),
+    ("step", "turn"),
     [
-        (GuidedStep.STEP_2_5_RECIPE_MATCH, TurnType.SINGLE_SELECT, 2),
-        (GuidedStep.STEP_3_TRANSFORMS, TurnType.PROPOSE_CHAIN, 3),
-        (GuidedStep.STEP_4_WIRE, TurnType.CONFIRM_WIRING, 4),
+        (
+            GuidedStep.STEP_3_TRANSFORMS,
+            {
+                "type": TurnType.PROPOSE_PIPELINE.value,
+                "step_index": 2,
+                "payload": {
+                    "proposal_id": "00000000-0000-4000-8000-000000000401",
+                    "draft_hash": "d" * 64,
+                    "summary": PROPOSAL_SUMMARY_TEMPLATE,
+                    "rationale": PROPOSAL_RATIONALE_TEMPLATE,
+                    "component_counts": {"sources": 1, "nodes": 0, "edges": 3, "outputs": 1},
+                    "blockers": [],
+                    "graph": {
+                        "sources": [
+                            {
+                                "stable_id": "00000000-0000-4000-8000-000000000402",
+                                "label": proposal_component_label("source", 0),
+                                "plugin": {"kind": "source", "id": "csv"},
+                            }
+                        ],
+                        "edges": [
+                            {
+                                "stable_id": "00000000-0000-4000-8000-000000000403",
+                                "from_endpoint": {
+                                    "kind": "source",
+                                    "stable_id": "00000000-0000-4000-8000-000000000402",
+                                },
+                                "to_endpoint": {
+                                    "kind": "output",
+                                    "stable_id": "00000000-0000-4000-8000-000000000405",
+                                },
+                                "flow": {"kind": "source_success", "branch": None},
+                            },
+                            {
+                                "stable_id": "00000000-0000-4000-8000-000000000406",
+                                "from_endpoint": {
+                                    "kind": "source",
+                                    "stable_id": "00000000-0000-4000-8000-000000000402",
+                                },
+                                "to_endpoint": {"kind": "discard"},
+                                "flow": {"kind": "source_validation_failure"},
+                            },
+                            {
+                                "stable_id": "00000000-0000-4000-8000-000000000407",
+                                "from_endpoint": {
+                                    "kind": "output",
+                                    "stable_id": "00000000-0000-4000-8000-000000000405",
+                                },
+                                "to_endpoint": {"kind": "discard"},
+                                "flow": {"kind": "output_write_failure"},
+                            },
+                        ],
+                    },
+                    "nodes": [],
+                    "outputs": [
+                        {
+                            "stable_id": "00000000-0000-4000-8000-000000000405",
+                            "label": proposal_component_label("output", 0),
+                            "plugin": {"kind": "sink", "id": "json"},
+                        }
+                    ],
+                    "edit_targets": [],
+                },
+            },
+        ),
+        (
+            GuidedStep.STEP_4_WIRE,
+            {
+                "type": TurnType.CONFIRM_WIRING.value,
+                "step_index": 3,
+                "payload": {
+                    "topology": {"sources": {}, "nodes": [], "outputs": []},
+                    "edge_contracts": [],
+                    "semantic_contracts": [],
+                    "warnings": [],
+                },
+            },
+        ),
     ],
 )
 def test_unsupported_schema8_stage_rejects_before_reservation_or_mutation(
     composer_test_client: TestClient,
     step: GuidedStep,
-    turn_type: TurnType,
-    step_index: int,
+    turn: dict[str, object],
 ) -> None:
     session_id = _create_session(composer_test_client)
     guided = replace(GuidedSession.initial(), step=step)
-    turn = {
-        "type": turn_type.value,
-        "step_index": step_index,
-        "payload": {},
-    }
     guided, _record, _turn_type, _prepared = guided_route._prepare_server_turn_occurrence(
         guided,
         current_step=guided.step,

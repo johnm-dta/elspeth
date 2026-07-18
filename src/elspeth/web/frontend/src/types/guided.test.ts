@@ -8,12 +8,14 @@ import type {
   ChatTurn,
   ControlSignal,
   GuidedChatResponse,
+  GuidedRespondAction,
   GuidedRespondRequest,
   GuidedRespondResponse,
   GuidedSession,
   GuidedStep,
   GetGuidedResponse,
   TerminalKind,
+  TerminalState,
   TerminalReason,
   TurnPayload,
   TurnRecord,
@@ -26,15 +28,14 @@ import type {
 type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 
 describe("guided protocol types", () => {
-  it("TurnType union has exactly 7 values", () => {
+  it("TurnType union has exactly 6 values", () => {
     const _exact: Equals<
       TurnType,
       | "inspect_and_confirm"
       | "single_select"
       | "multi_select_with_custom"
       | "schema_form"
-      | "propose_chain"
-      | "recipe_offer"
+      | "propose_pipeline"
       | "confirm_wiring"
     > = true;
     const all: TurnType[] = [
@@ -42,12 +43,11 @@ describe("guided protocol types", () => {
       "single_select",
       "multi_select_with_custom",
       "schema_form",
-      "propose_chain",
-      "recipe_offer",
+      "propose_pipeline",
       "confirm_wiring",
     ];
     expect(_exact).toBe(true);
-    expect(all).toHaveLength(7);
+    expect(all).toHaveLength(6);
   });
 
   it("ControlSignal union has 5 values (C-3: added back + passthrough, fixing pre-existing drift from protocol.py)", () => {
@@ -66,24 +66,22 @@ describe("guided protocol types", () => {
     expect(all).toHaveLength(5);
   });
 
-  it("GuidedStep union has exactly 5 values", () => {
+  it("GuidedStep union has exactly 4 values", () => {
     const _exact: Equals<
       GuidedStep,
       | "step_1_source"
       | "step_2_sink"
-      | "step_2_5_recipe_match"
       | "step_3_transforms"
       | "step_4_wire"
     > = true;
     const all: GuidedStep[] = [
       "step_1_source",
       "step_2_sink",
-      "step_2_5_recipe_match",
       "step_3_transforms",
       "step_4_wire",
     ];
     expect(_exact).toBe(true);
-    expect(all).toHaveLength(5);
+    expect(all).toHaveLength(4);
   });
 
   it("TerminalKind union has 2 values", () => {
@@ -91,25 +89,30 @@ describe("guided protocol types", () => {
     expect(all).toHaveLength(2);
   });
 
-  it("TerminalReason union has 3 values (no completed_pipeline)", () => {
-    const all: TerminalReason[] = [
-      "user_pressed_exit",
-      "protocol_violation",
-      "solver_exhausted",
-    ];
-    expect(all).toHaveLength(3);
+  it("TerminalReason has only the reversible user exit", () => {
+    const all: TerminalReason[] = ["user_pressed_exit"];
+    expect(all).toHaveLength(1);
     // Type-level negative: "completed_pipeline" is not in the union — any
     // attempt to assign it would be a TS compile error.
   });
 
-  it("TurnPayload.step_index is number (compile-time) and 0-based ordinal", () => {
+  it("TurnPayload is discriminated by an exact type/payload pair", () => {
     const payload: TurnPayload = {
       type: "single_select",
       step_index: 0,
       turn_token: "a".repeat(64),
-      payload: {},
+      payload: { question: "Choose", options: [], allow_custom: false },
     };
     expect(payload.step_index).toBe(0);
+
+    const mismatched: TurnPayload = {
+      type: "single_select",
+      step_index: 0,
+      turn_token: "a".repeat(64),
+      // @ts-expect-error inspect payloads cannot ride the single-select discriminator
+      payload: { observed: { columns: [], samples: [], warnings: [] } },
+    };
+    expect(mismatched.type).toBe("single_select");
   });
 
   it("GuidedSession has exactly step, history, terminal, chat_history, chat_turn_seq, profile — exhaustive", () => {
@@ -140,16 +143,109 @@ describe("guided protocol types", () => {
     expect(rec.response_hash).toBeNull();
   });
 
-  it("GuidedRespondRequest compiles with all-null body", () => {
-    const req: GuidedRespondRequest = {
+  it("GuidedRespondRequest rejects an all-null live action", () => {
+    // @ts-expect-error a live request must name one closed legal action
+    const invalid: GuidedRespondRequest = {
+      operation_id: "00000000-0000-4000-8000-000000000601",
+      turn_token: "a".repeat(64),
       chosen: null,
       edited_values: null,
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: null,
     };
-    expect(req.chosen).toBeNull();
+    expect(invalid.chosen).toBeNull();
+  });
+
+  it("GuidedRespondAction rejects empty selection and custom semantic no-ops", () => {
+    const emptyChosen: GuidedRespondAction = {
+      // @ts-expect-error an empty chosen action without non-empty custom input is not actionable
+      chosen: [],
+      edited_values: null,
+      custom_inputs: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
+      control_signal: null,
+    };
+    const emptyCustom: GuidedRespondAction = {
+      chosen: null,
+      edited_values: null,
+      // @ts-expect-error an empty custom-only action is not actionable
+      custom_inputs: [],
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
+      control_signal: null,
+    };
+    expect(emptyChosen.chosen).toEqual([]);
+    expect(emptyCustom.custom_inputs).toEqual([]);
+  });
+
+  it("GuidedRespondAction closes unrelated fields for every exact response action", () => {
+    // @ts-expect-error chosen and edited_values are mutually exclusive actions
+    const chosenAndEdited: GuidedRespondAction = {
+      chosen: ["csv"],
+      edited_values: { plugin: "csv", options: {} },
+      custom_inputs: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
+      control_signal: null,
+    };
+    const chosenAndCustom: GuidedRespondAction = {
+      chosen: ["name"],
+      edited_values: null,
+      custom_inputs: ["extra"],
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
+      control_signal: null,
+    };
+    // @ts-expect-error edited_values cannot be combined with custom_inputs
+    const editedAndCustom: GuidedRespondAction = {
+      chosen: null,
+      edited_values: { plugin: "csv", options: {} },
+      custom_inputs: ["extra"],
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
+      control_signal: null,
+    };
+    expect(chosenAndEdited.chosen).toEqual(["csv"]);
+    expect(chosenAndCustom.custom_inputs).toEqual(["extra"]);
+    expect(editedAndCustom.edited_values).toEqual({ plugin: "csv", options: {} });
+  });
+
+  it("TerminalState is discriminated by kind and its cross-fields", () => {
+    const completed: TerminalState = {
+      kind: "completed",
+      reason: null,
+      pipeline_yaml: "sources: {}",
+    };
+    const exited: TerminalState = {
+      kind: "exited_to_freeform",
+      reason: "user_pressed_exit",
+      pipeline_yaml: null,
+    };
+    const completedWithReason: TerminalState = {
+      kind: "completed",
+      // @ts-expect-error completed terminals never carry an exit reason
+      reason: "user_pressed_exit",
+      pipeline_yaml: "sources: {}",
+    };
+    // @ts-expect-error exited terminals never carry pipeline YAML
+    const exitedWithYaml: TerminalState = {
+      kind: "exited_to_freeform",
+      reason: "user_pressed_exit",
+      pipeline_yaml: "sources: {}",
+    };
+    expect(completed.kind).toBe("completed");
+    expect(exited.kind).toBe("exited_to_freeform");
+    expect(completedWithReason.reason).toBe("user_pressed_exit");
+    expect(exitedWithYaml.pipeline_yaml).toBe("sources: {}");
   });
 
   it("GetGuidedResponse and GuidedRespondResponse include composition_state", () => {
@@ -203,17 +299,26 @@ describe("guided protocol types", () => {
         type: "single_select",
         step_index: 0,
         turn_token: "a".repeat(64),
-        payload: {},
+        payload: { question: "Choose", options: [], allow_custom: false },
       },
       terminal: null,
       composition_state: {
         id: "state-1",
+        session_id: "session-1",
         version: 1,
         nodes: [],
         edges: [],
         sources: {},
         outputs: [],
         metadata: { name: null, description: null },
+        is_valid: true,
+        validation_errors: null,
+        validation_warnings: null,
+        validation_suggestions: null,
+        derived_from_state_id: null,
+        created_at: "2026-07-19T00:00:00Z",
+        composer_meta: null,
+        plugin_policy_findings: [],
       },
     };
     expect(response.assistant_message_kind).toBe("synthetic_failure");
@@ -221,17 +326,16 @@ describe("guided protocol types", () => {
 });
 
 describe("WorkflowProfile wire type", () => {
-  it("carries exactly the four wire-visible boolean flags", () => {
-    // Compile-time exhaustive check: the wire profile is exactly these four
+  it("carries exactly the three wire-visible boolean flags", () => {
+    // Compile-time exhaustive check: the wire profile is exactly these three
     // behavior flags — adding any other key here would fail tsc.
     const _exact: Equals<
       keyof WorkflowProfile,
-      "coaching" | "bookends" | "recipe_match" | "advisor_checkpoints"
+      "coaching" | "bookends" | "advisor_checkpoints"
     > = true;
     const profile: WorkflowProfile = {
       coaching: true,
       bookends: true,
-      recipe_match: true,
       advisor_checkpoints: true,
     };
     expect(_exact).toBe(true);
@@ -242,7 +346,6 @@ describe("WorkflowProfile wire type", () => {
     const profile: WorkflowProfile = {
       coaching: false,
       bookends: false,
-      recipe_match: false,
       advisor_checkpoints: false,
     };
     const seeded: Pick<GuidedSession, "profile"> = { profile };

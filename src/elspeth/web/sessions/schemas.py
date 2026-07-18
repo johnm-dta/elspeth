@@ -442,13 +442,12 @@ class WorkflowProfileResponse(_StrictResponse):
     """Wire-visible subset of a server-owned WorkflowProfile.
 
     Mirrors :class:`elspeth.web.composer.guided.profile.WorkflowProfile`
-    (the four behavior flags). ``None`` at the parent
+    (the three behavior flags). ``None`` at the parent
     ``GuidedSessionResponse.profile`` level means the empty/live-guided profile.
     """
 
     coaching: bool
     bookends: bool
-    recipe_match: bool
     advisor_checkpoints: bool
 
 
@@ -541,22 +540,12 @@ class GuidedRespondRequest(_GuidedOperationRequest):
     edited_values: dict[str, Any] | None = None
     custom_inputs: list[str] | None = None
     control_signal: str | None = None
-    proposal_id: str | None = pydantic.Field(default=None, min_length=36, max_length=36)
-    draft_hash: str | None = pydantic.Field(default=None, min_length=64, max_length=64, pattern=r"[0-9a-f]{64}")
+    # Structural parsing is deliberately permissive for these two scalar
+    # bindings so malformed client identifiers reach the route's stable HTTP
+    # 400 gate instead of being converted into framework-owned 422 responses.
+    proposal_id: pydantic.StrictStr | None = None
+    draft_hash: pydantic.StrictStr | None = None
     edit_target: GuidedEditTargetRequest | None = None
-
-    @field_validator("proposal_id")
-    @classmethod
-    def _validate_proposal_id(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        try:
-            parsed = UUID(value)
-        except ValueError as exc:
-            raise ValueError("proposal_id must be a canonical UUID") from exc
-        if str(parsed) != value:
-            raise ValueError("proposal_id must be a canonical UUID")
-        return value
 
     @model_validator(mode="after")
     def _validate_token_action_shape(self) -> GuidedRespondRequest:

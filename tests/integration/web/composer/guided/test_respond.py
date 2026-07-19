@@ -81,6 +81,15 @@ def _respond(client: TestClient, session_id: str, **kwargs) -> dict:
     return resp.json()
 
 
+def _finish_review(client: TestClient, session_id: str, component_kind: str) -> dict:
+    """Explicitly finish the current plural component-review stage."""
+    return _respond(
+        client,
+        session_id,
+        component_action={"action": "finish", "component_kind": component_kind},
+    )
+
+
 def _full_guided_session(body: dict) -> dict:
     """The top-level ``guided_session`` wire projection (``GuidedSessionResponse``)
     deliberately omits Tier-3-bearing reviewed source/output options. The full
@@ -290,7 +299,8 @@ class TestStep1IntraStep:
             edited_values={"columns": ["sku", "color", "quantity"]},
         )
 
-        assert advanced["guided_session"]["step"] == "step_2_sink"
+        assert advanced["guided_session"]["step"] == "step_1_source"
+        assert advanced["next_turn"]["type"] == "review_components"
         reviewed_sources = _full_guided_session(advanced)["reviewed_sources"]
         assert len(reviewed_sources) == 1
         source = next(iter(reviewed_sources.values()))
@@ -309,8 +319,8 @@ class TestStep1Advance:
         _get_guided(client, session_id)
         return _respond(client, session_id, chosen=["csv"])
 
-    def test_schema_form_response_advances_to_step_2(self, composer_test_client: TestClient) -> None:
-        """A SCHEMA_FORM response calls handle_step_1_source and advances to STEP_2_SINK."""
+    def test_schema_form_response_requires_explicit_finish_to_advance_to_step_2(self, composer_test_client: TestClient) -> None:
+        """A resolved source remains reviewable until the operator finishes."""
         session_id = _create_session(composer_test_client)
         self._drive_to_schema_form(composer_test_client, session_id)
 
@@ -328,10 +338,12 @@ class TestStep1Advance:
             },
         )
 
-        assert body["guided_session"]["step"] == "step_2_sink"
-        assert body["next_turn"] is not None
-        assert body["next_turn"]["type"] == "single_select"
-        assert body["next_turn"]["step_index"] == 1  # STEP_2_SINK is index 1
+        assert body["guided_session"]["step"] == "step_1_source"
+        assert body["next_turn"]["type"] == "review_components"
+        finished = _finish_review(composer_test_client, session_id, "source")
+        assert finished["guided_session"]["step"] == "step_2_sink"
+        assert finished["next_turn"]["type"] == "single_select"
+        assert finished["next_turn"]["step_index"] == 1
 
     def test_schema_form_response_reviews_source_without_writing_topology(self, composer_test_client: TestClient) -> None:
         """Step 1 stores reviewed facts; proposal commit owns topology writes."""
@@ -405,6 +417,7 @@ class TestStep1Advance:
             },
         )
 
+        body = _finish_review(composer_test_client, session_id, "source")
         options = body["next_turn"]["payload"]["options"]
         ids = [o["id"] for o in options]
         assert "json" in ids, f"json sink not found in options: {ids}"
@@ -437,7 +450,8 @@ class TestStep2IntraStep:
             },
         )
         assert inspected["next_turn"]["type"] == "inspect_and_confirm"
-        return _respond(client, session_id, edited_values={"columns": ["text", "category"]})
+        _respond(client, session_id, edited_values={"columns": ["text", "category"]})
+        return _finish_review(client, session_id, "source")
 
     def _stage_proposal(
         self,
@@ -462,7 +476,8 @@ class TestStep2IntraStep:
                 },
             },
         )
-        return _respond(client, session_id, chosen=["text"], custom_inputs=[])
+        _respond(client, session_id, chosen=["text"], custom_inputs=[])
+        return _finish_review(client, session_id, "output")
 
     def test_step_2_single_select_response_emits_schema_form(self, composer_test_client: TestClient) -> None:
         """Picking a sink plugin emits SCHEMA_FORM for the sink options."""
@@ -533,6 +548,7 @@ class TestStep2IntraStep:
             chosen=["text", "category"],
             custom_inputs=[],
         )
+        body = _finish_review(composer_test_client, session_id, "output")
         assert body["guided_session"]["step"] == "step_3_transforms"
         assert body["next_turn"]["type"] == "propose_pipeline"
         proposal = body["next_turn"]["payload"]
@@ -568,9 +584,8 @@ class TestStep2IntraStep:
             custom_inputs=[],
         )
 
-        # Step advanced to 3.
-        assert body["guided_session"]["step"] == "step_3_transforms"
-        assert body["next_turn"]["type"] == "propose_pipeline"
+        assert body["guided_session"]["step"] == "step_2_sink"
+        assert body["next_turn"]["type"] == "review_components"
 
         cs = body["composition_state"]
         assert cs is not None, "composition_state missing from response"
@@ -601,7 +616,8 @@ class TestStep2IntraStep:
                 },
             },
         )
-        staged = _respond(composer_test_client, session_id, chosen=["text"], custom_inputs=[])
+        _respond(composer_test_client, session_id, chosen=["text"], custom_inputs=[])
+        staged = _finish_review(composer_test_client, session_id, "output")
         turn = staged["next_turn"]
 
         rejected = composer_test_client.post(
@@ -645,7 +661,8 @@ class TestStep2IntraStep:
                 },
             },
         )
-        assert source_reviewed["next_turn"]["type"] == "single_select"
+        assert source_reviewed["next_turn"]["type"] == "review_components"
+        _finish_review(composer_test_client, session_id, "source")
         _respond(composer_test_client, session_id, chosen=["json"])
         _respond(
             composer_test_client,
@@ -660,7 +677,8 @@ class TestStep2IntraStep:
                 },
             },
         )
-        staged = _respond(composer_test_client, session_id, chosen=[], custom_inputs=["text"])
+        _respond(composer_test_client, session_id, chosen=[], custom_inputs=["text"])
+        staged = _finish_review(composer_test_client, session_id, "output")
         proposal = staged["next_turn"]["payload"]
 
         accepted = _post_current_response(
@@ -923,11 +941,16 @@ class TestStep2IntraStep:
             "plan_guided_pipeline",
             fail_planner,
         )
-        failed = _post_current_response(
+        _respond(
             composer_test_client,
             session_id,
             chosen=["text"],
             custom_inputs=[],
+        )
+        failed = _post_current_response(
+            composer_test_client,
+            session_id,
+            component_action={"action": "finish", "component_kind": "output"},
         )
         assert failed.status_code == 500, failed.json()
         restored = _get_guided(composer_test_client, session_id)
@@ -989,6 +1012,7 @@ class TestStep2IntraStep:
                 },
             },
         )
+        _respond(composer_test_client, session_id, chosen=["text"], custom_inputs=[])
         messages_before = asyncio.run(composer_test_client.app.state.session_service.get_messages(UUID(session_id), limit=None))
 
         async def fail_planner(*, recorder, **_kwargs):
@@ -1040,8 +1064,7 @@ class TestStep2IntraStep:
                 json={
                     "operation_id": operation_id,
                     "turn_token": current["next_turn"]["turn_token"],
-                    "chosen": ["text"],
-                    "custom_inputs": [],
+                    "component_action": {"action": "finish", "component_kind": "output"},
                 },
             )
 
@@ -1460,7 +1483,8 @@ class TestStep2IntraStep:
                 },
             },
         )
-        staged = _respond(composer_test_client, session_id, chosen=["text"], custom_inputs=[])
+        _respond(composer_test_client, session_id, chosen=["text"], custom_inputs=[])
+        staged = _finish_review(composer_test_client, session_id, "output")
         turn = staged["next_turn"]
         with composer_test_client.app.state.session_engine.connect() as conn:
             storage_paths = tuple(conn.execute(select(blobs_table.c.storage_path).where(blobs_table.c.session_id == session_id)).scalars())
@@ -1700,6 +1724,7 @@ class TestStep2IntraStep:
             session_id,
             control_signal="passthrough",
         )
+        body = _finish_review(composer_test_client, session_id, "output")
 
         assert body["guided_session"]["step"] == "step_3_transforms"
         output = next(iter(_full_guided_session(body)["reviewed_outputs"].values()))
@@ -1799,9 +1824,16 @@ class TestStep2IntraStep:
             },
         )
 
+        _respond(
+            composer_test_client,
+            session_id,
+            chosen=["text", "category"],
+            custom_inputs=[],
+        )
         before = _get_guided(composer_test_client, session_id)
         assert before["guided_session"]["step"] == "step_2_sink"
-        assert _full_guided_session(before)["reviewed_outputs"] == {}
+        before_reviewed_outputs = _full_guided_session(before)["reviewed_outputs"]
+        assert before_reviewed_outputs
         before_outputs = before["composition_state"]["outputs"]
 
         async def fail_settlement(*_args: object, **_kwargs: object) -> None:
@@ -1815,15 +1847,14 @@ class TestStep2IntraStep:
         resp = _post_current_response(
             composer_test_client,
             session_id,
-            chosen=["text", "category"],
-            custom_inputs=[],
+            component_action={"action": "finish", "component_kind": "output"},
         )
         assert resp.status_code == 500, resp.json()
         assert resp.json()["detail"]["failure_code"] == "operation_failed"
 
         after = _get_guided(composer_test_client, session_id)
         assert after["guided_session"]["step"] == "step_2_sink"
-        assert _full_guided_session(after)["reviewed_outputs"] == {}
+        assert _full_guided_session(after)["reviewed_outputs"] == before_reviewed_outputs
         assert after["composition_state"]["outputs"] == before_outputs
 
 
@@ -1901,6 +1932,7 @@ class TestStep2SchemaFormAccept:
             },
         )
         _respond(client, session_id, edited_values={"columns": ["text", "category"]})
+        _finish_review(client, session_id, "source")
         _respond(client, session_id, chosen=["json"])
 
     def _assert_invalid(self, client: TestClient, session_id: str, edited_values: object) -> None:
@@ -1982,16 +2014,18 @@ class TestStep1InspectAndConfirmAccept:
         assert resp.status_code == 400, resp.json()
         assert resp.json()["detail"] == "Guided response does not satisfy the current turn contract."
 
-    def test_inspect_and_confirm_commits_source_and_advances_to_step_2(self, composer_test_client: TestClient) -> None:
-        """Success path: a valid INSPECT_AND_CONFIRM commits the source and
-        advances to STEP_2_SINK, with both authoritative surfaces agreeing
+    def test_inspect_and_confirm_commits_source_then_finish_advances_to_step_2(self, composer_test_client: TestClient) -> None:
+        """A valid inspection commits review custody; explicit finish advances.
+
+        Both authoritative surfaces agree after the inspection response
         (elspeth-948eb9c0b8 C-3(b), Step-1 mirror of the Step-2 fix).
         """
         session_id = _create_session(composer_test_client)
         self._seed_inspect_and_confirm_history(composer_test_client, session_id)
         body = _respond(composer_test_client, session_id, edited_values={"columns": ["text", "category"]})
 
-        assert body["guided_session"]["step"] == "step_2_sink"
+        assert body["guided_session"]["step"] == "step_1_source"
+        assert body["next_turn"]["type"] == "review_components"
         full_guided = _full_guided_session(body)
         assert full_guided["pending_source_intents"] == {}
         assert len(full_guided["reviewed_sources"]) == 1
@@ -2002,6 +2036,8 @@ class TestStep1InspectAndConfirmAccept:
         cs = body["composition_state"]
         assert cs is not None, "composition_state missing from response"
         assert cs["sources"] == {}
+        finished = _finish_review(composer_test_client, session_id, "source")
+        assert finished["guided_session"]["step"] == "step_2_sink"
 
     def test_inspect_and_confirm_commit_failure_does_not_diverge_guided_session_from_state(
         self,

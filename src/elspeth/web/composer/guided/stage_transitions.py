@@ -522,6 +522,12 @@ def _validated_merged_options(
     submitted = cast(dict[str, Any], deep_thaw(response.options))
     server_options = cast(dict[str, Any], deep_thaw(authority.server_options))
     for option_name, option_value in submitted.items():
+        if option_name in structural_defaults:
+            if any(field["name"] == option_name for field in fields):
+                _validate_visible_option(option_name, option_value, submitted=submitted, fields=fields)
+            elif option_value != structural_defaults[option_name]:
+                raise ValueError(f"client altered server-held structural policy {option_name!r}")
+            continue
         _validate_visible_option(option_name, option_value, submitted=submitted, fields=fields)
     for option_name, server_value in server_options.items():
         if option_name in submitted and stable_hash(submitted[option_name]) != stable_hash(server_value):
@@ -535,11 +541,13 @@ def _validated_merged_options(
     _validate_required_options(merged, fields)
     structural: dict[str, str] = {}
     for option_name, default_value in structural_defaults.items():
-        if option_name in merged:
+        exposed = any(field["name"] == option_name for field in fields)
+        if exposed and option_name in merged:
             structural[option_name] = _require_nonempty_exact_str(merged[option_name], f"structural policy {option_name!r}")
-            del merged[option_name]
         else:
             structural[option_name] = default_value
+        if option_name in merged:
+            del merged[option_name]
     model_validated = cast(dict[str, Any], deep_thaw(authority.model_validated_options))
     for policy_name, policy_value in structural.items():
         if policy_name not in model_validated:
@@ -795,6 +803,7 @@ def transition_source_schema_form(
     turn: AnsweredTurn,
     response: SchemaFormResponse,
     authority: SchemaFormAuthority,
+    edit_inspection_facts: SourceInspectionFacts | None = None,
 ) -> GuidedSession:
     """Validate source options and either review inspection or finish Step 1."""
 
@@ -804,7 +813,27 @@ def transition_source_schema_form(
         expected_step=GuidedStep.STEP_1_SOURCE,
         expected_turn_type=TurnType.SCHEMA_FORM,
     )
-    stable_id, intent = _require_source_intent(session, target_id, "plugin_options")
+    stable_id = _canonical_uuid(target_id, "source target_id")
+    active_edit = session.active_edit_target
+    if active_edit is not None and active_edit.kind == "source":
+        is_edit = True
+        if active_edit.stable_id != stable_id or stable_id not in session.reviewed_sources:
+            raise ValueError("source schema-form target does not match the active reviewed edit target")
+        reviewed_source = session.reviewed_sources[stable_id]
+        intent = SourceIntent(
+            name=reviewed_source.name,
+            phase="plugin_options",
+            plugin=reviewed_source.plugin,
+            options=None,
+            inspection_facts=edit_inspection_facts,
+            observed_columns=(),
+            sample_rows=(),
+        )
+    else:
+        is_edit = False
+        if edit_inspection_facts is not None:
+            raise ValueError("source inspection edit facts require an active source edit target")
+        stable_id, intent = _require_source_intent(session, stable_id, "plugin_options")
     if response.plugin != intent.plugin:
         raise ValueError("source schema-form plugin echo does not match the server-held source intent")
     if intent.plugin is None:
@@ -848,12 +877,13 @@ def transition_source_schema_form(
         on_validation_failure=structural["on_validation_failure"],
     )
     pending = dict(session.pending_source_intents)
-    del pending[stable_id]
+    if stable_id in pending:
+        del pending[stable_id]
     return replace(
         session,
-        step=GuidedStep.STEP_2_SINK,
         reviewed_sources=reviewed,
         pending_source_intents=pending,
+        active_edit_target=None if is_edit else session.active_edit_target,
     )
 
 
@@ -906,9 +936,15 @@ def transition_source_inspection_review(
     del pending[stable_id]
     return replace(
         session,
-        step=GuidedStep.STEP_2_SINK,
         reviewed_sources=reviewed,
         pending_source_intents=pending,
+        active_edit_target=(
+            None
+            if session.active_edit_target is not None
+            and session.active_edit_target.kind == "source"
+            and session.active_edit_target.stable_id == stable_id
+            else session.active_edit_target
+        ),
     )
 
 
@@ -960,7 +996,22 @@ def transition_sink_schema_form(
         expected_step=GuidedStep.STEP_2_SINK,
         expected_turn_type=TurnType.SCHEMA_FORM,
     )
-    stable_id, intent = _require_sink_intent(session, target_id, "plugin_options")
+    stable_id = _canonical_uuid(target_id, "sink target_id")
+    active_edit = session.active_edit_target
+    on_write_failure = "discard"
+    if active_edit is not None and active_edit.kind == "output":
+        if active_edit.stable_id != stable_id or stable_id not in session.reviewed_outputs:
+            raise ValueError("sink schema-form target does not match the active reviewed edit target")
+        reviewed_output = session.reviewed_outputs[stable_id]
+        on_write_failure = reviewed_output.on_write_failure
+        intent = SinkIntent(
+            name=reviewed_output.name,
+            phase="plugin_options",
+            plugin=reviewed_output.plugin,
+            options=None,
+        )
+    else:
+        stable_id, intent = _require_sink_intent(session, stable_id, "plugin_options")
     if response.plugin != intent.plugin:
         raise ValueError("sink schema-form plugin echo does not match the server-held output intent")
     if intent.plugin is None:
@@ -970,7 +1021,7 @@ def transition_sink_schema_form(
         authority,
         plugin_kind="sink",
         plugin_name=intent.plugin,
-        structural_defaults={"on_write_failure": "discard"},
+        structural_defaults={"on_write_failure": on_write_failure},
     )
     pending = dict(session.pending_output_intents)
     pending[stable_id] = SinkIntent(
@@ -1041,9 +1092,15 @@ def transition_sink_field_review(
     del pending[stable_id]
     return replace(
         session,
-        step=GuidedStep.STEP_3_TRANSFORMS,
         reviewed_outputs=reviewed,
         pending_output_intents=pending,
+        active_edit_target=(
+            None
+            if session.active_edit_target is not None
+            and session.active_edit_target.kind == "output"
+            and session.active_edit_target.stable_id == stable_id
+            else session.active_edit_target
+        ),
     )
 
 

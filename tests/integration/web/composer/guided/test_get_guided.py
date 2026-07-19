@@ -392,8 +392,9 @@ class TestGetGuidedAfterStepAdvance:
         2. GET /guided → step-1 single_select.
         3. POST /respond chosen=["csv"] → intra-step schema_form.
         4. POST /respond with the server-prefilled source form.
-        5. POST /respond with reviewed inspection columns → advance to step 2.
-        6. GET /guided → must return step-2 single_select (sink plugins), NOT step-1.
+        5. POST /respond with reviewed inspection columns → source review.
+        6. POST /respond finish source review → advance to step 2.
+        7. GET /guided → must return step-2 single_select (sink plugins), NOT step-1.
 
         Distinguishes step-1 from step-2 single_select via step_index (0 vs 1)
         and payload.question text; both must indicate step 2 (index=1, sink list).
@@ -421,6 +422,11 @@ class TestGetGuidedAfterStepAdvance:
         observed_columns = inspected["next_turn"]["payload"]["observed"]["columns"]
         assert observed_columns == ["col_a", "col_b"]
         _respond(composer_test_client, session_id, edited_values={"columns": observed_columns})
+        _respond(
+            composer_test_client,
+            session_id,
+            component_action={"action": "finish", "component_kind": "source"},
+        )
 
         # GET /guided after step advance must reflect step 2, not step 1.
         get2 = _get_guided(composer_test_client, session_id)
@@ -464,6 +470,11 @@ class TestGetGuidedAfterStepAdvance:
         observed_columns = inspected["next_turn"]["payload"]["observed"]["columns"]
         assert observed_columns == ["col_a", "col_b"]
         _respond(composer_test_client, session_id, edited_values={"columns": observed_columns})
+        _respond(
+            composer_test_client,
+            session_id,
+            component_action={"action": "finish", "component_kind": "source"},
+        )
 
         get_a = _get_guided(composer_test_client, session_id)
         get_b = _get_guided(composer_test_client, session_id)

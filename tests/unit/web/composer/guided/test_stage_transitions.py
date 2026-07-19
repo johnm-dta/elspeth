@@ -379,7 +379,7 @@ def test_inspection_facts_survive_restart_between_selection_form_and_review() ->
     assert review_intent.observed_columns == facts.observed_headers
 
 
-def test_source_schema_form_without_inspection_reviews_same_id_and_advances() -> None:
+def test_source_schema_form_without_inspection_reviews_same_id_and_stays_in_source_stage() -> None:
     session, turn = _source_options_session(facts=None)
 
     result = transition_source_schema_form(
@@ -393,7 +393,7 @@ def test_source_schema_form_without_inspection_reviews_same_id_and_advances() ->
         ),
     )
 
-    assert result.step is GuidedStep.STEP_2_SINK
+    assert result.step is GuidedStep.STEP_1_SOURCE
     assert result.source_order == (SOURCE_A,)
     assert not result.pending_source_intents
     assert not result.pending_output_intents
@@ -456,7 +456,7 @@ def test_inspection_review_uses_only_edited_columns_and_held_intent() -> None:
         response=InspectionResponse(columns=("record_id", "display_name")),
     )
 
-    assert result.step is GuidedStep.STEP_2_SINK
+    assert result.step is GuidedStep.STEP_1_SOURCE
     assert result.source_order == (SOURCE_A,)
     assert not result.pending_source_intents
     assert not result.pending_output_intents
@@ -779,7 +779,7 @@ def test_sink_schema_mode_is_preserved_from_validated_options() -> None:
     assert resolved.reviewed_outputs[OUTPUT_A].schema_mode == "flexible"
 
 
-def test_sink_field_review_resolves_same_id_and_advances_without_topology() -> None:
+def test_sink_field_review_resolves_same_id_and_stays_in_output_stage() -> None:
     session, turn = _sink_review_session()
 
     result = transition_sink_field_review(
@@ -790,7 +790,7 @@ def test_sink_field_review_resolves_same_id_and_advances_without_topology() -> N
     )
 
     assert session.pending_output_intents[OUTPUT_A].phase == "field_review"
-    assert result.step is GuidedStep.STEP_3_TRANSFORMS
+    assert result.step is GuidedStep.STEP_2_SINK
     assert result.output_order == (OUTPUT_A,)
     assert not result.pending_output_intents
     output = result.reviewed_outputs[OUTPUT_A]
@@ -1017,6 +1017,190 @@ def test_begin_component_edit_preserves_reviewed_record_as_prefill_authority(
         assert result.reviewed_outputs[OUTPUT_A] is session.reviewed_outputs[OUTPUT_A]
     assert result.active_edit_target == target
     assert session.to_dict() == original_dict
+
+
+def test_source_edit_replaces_same_reviewed_id_and_clears_target_after_direct_review() -> None:
+    session = _review_session(step=GuidedStep.STEP_1_SOURCE)
+    target = ComponentTarget(kind="source", stable_id=SOURCE_A)
+    editing = begin_component_edit(session, target)
+    editing, turn = _with_unanswered_turn(editing, TurnType.SCHEMA_FORM)
+    policy_knobs = {
+        "fields": [
+            *SOURCE_KNOBS["fields"],
+            {
+                "name": "on_validation_failure",
+                "kind": "enum",
+                "enum": ["discard", "quarantine"],
+                "required": False,
+                "nullable": False,
+            },
+        ]
+    }
+
+    result = transition_source_schema_form(
+        editing,
+        target_id=SOURCE_A,
+        turn=turn,
+        response=SchemaFormResponse(
+            plugin="csv",
+            options={"mode": "csv", "path": "/data/revised.csv", "on_validation_failure": "quarantine"},
+        ),
+        authority=SchemaFormAuthority(
+            knobs=policy_knobs,
+            model_validated_options={
+                "mode": "csv",
+                "path": "/data/revised.csv",
+                "on_validation_failure": "quarantine",
+            },
+        ),
+    )
+
+    assert result.step is GuidedStep.STEP_1_SOURCE
+    assert result.source_order == editing.source_order
+    assert result.reviewed_sources[SOURCE_B] is editing.reviewed_sources[SOURCE_B]
+    revised = result.reviewed_sources[SOURCE_A]
+    assert revised.name == "source"
+    assert dict(revised.options) == {"mode": "csv", "path": "/data/revised.csv"}
+    assert revised.on_validation_failure == "quarantine"
+    assert result.active_edit_target is None
+    assert not result.pending_source_intents
+
+
+def test_inspection_backed_source_edit_survives_restart_until_final_review() -> None:
+    session = _review_session(step=GuidedStep.STEP_1_SOURCE)
+    target = ComponentTarget(kind="source", stable_id=SOURCE_A)
+    editing = begin_component_edit(session, target)
+    editing, turn = _with_unanswered_turn(editing, TurnType.SCHEMA_FORM)
+    policy_knobs = {
+        "fields": [
+            *SOURCE_KNOBS["fields"],
+            {
+                "name": "on_validation_failure",
+                "kind": "enum",
+                "enum": ["discard", "quarantine"],
+                "required": False,
+                "nullable": False,
+            },
+        ]
+    }
+
+    staged = transition_source_schema_form(
+        editing,
+        target_id=SOURCE_A,
+        turn=turn,
+        response=SchemaFormResponse(
+            plugin="csv",
+            options={
+                "mode": "csv",
+                "path": "blob:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "on_validation_failure": "quarantine",
+            },
+        ),
+        authority=SchemaFormAuthority(
+            knobs=policy_knobs,
+            model_validated_options={
+                "mode": "csv",
+                "path": "blob:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "on_validation_failure": "quarantine",
+            },
+            server_options={"path": "blob:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+        ),
+        edit_inspection_facts=_inspection(),
+    )
+
+    assert staged.active_edit_target == target
+    assert staged.reviewed_sources[SOURCE_A] is editing.reviewed_sources[SOURCE_A]
+    assert staged.pending_source_intents[SOURCE_A].phase == "inspection_review"
+    restored = GuidedSession.from_dict(staged.to_dict())
+    restored = replace(restored, history=())
+    restored, inspection_turn = _with_unanswered_turn(restored, TurnType.INSPECT_AND_CONFIRM)
+    result = transition_source_inspection_review(
+        restored,
+        target_id=SOURCE_A,
+        turn=inspection_turn,
+        response=InspectionResponse(columns=("record_id", "display_name")),
+    )
+
+    assert result.step is GuidedStep.STEP_1_SOURCE
+    assert result.source_order == session.source_order
+    assert result.reviewed_sources[SOURCE_B] == session.reviewed_sources[SOURCE_B]
+    revised = result.reviewed_sources[SOURCE_A]
+    assert revised.name == "source"
+    assert revised.observed_columns == ("record_id", "display_name")
+    assert revised.on_validation_failure == "quarantine"
+    assert result.active_edit_target is None
+    assert not result.pending_source_intents
+
+
+def test_output_edit_preserves_identity_policy_and_target_until_field_review() -> None:
+    session = _review_session(step=GuidedStep.STEP_2_SINK)
+    reviewed_outputs = dict(session.reviewed_outputs)
+    reviewed_outputs[OUTPUT_A] = replace(reviewed_outputs[OUTPUT_A], on_write_failure="failures")
+    session = replace(session, reviewed_outputs=reviewed_outputs)
+    target = ComponentTarget(kind="output", stable_id=OUTPUT_A)
+    editing = begin_component_edit(session, target)
+    editing, turn = _with_unanswered_turn(editing, TurnType.SCHEMA_FORM)
+    staged = transition_sink_schema_form(
+        editing,
+        target_id=OUTPUT_A,
+        turn=turn,
+        response=SchemaFormResponse(
+            plugin="json",
+            options={"path": "/data/revised.jsonl"},
+        ),
+        authority=SchemaFormAuthority(
+            knobs=SINK_KNOBS,
+            model_validated_options={"path": "/data/revised.jsonl"},
+        ),
+    )
+
+    assert staged.active_edit_target == target
+    assert staged.reviewed_outputs[OUTPUT_A] is editing.reviewed_outputs[OUTPUT_A]
+    assert staged.pending_output_intents[OUTPUT_A].phase == "field_review"
+    restored = GuidedSession.from_dict(staged.to_dict())
+    restored = replace(restored, history=())
+    restored, field_turn = _with_unanswered_turn(restored, TurnType.MULTI_SELECT_WITH_CUSTOM)
+    result = transition_sink_field_review(
+        restored,
+        target_id=OUTPUT_A,
+        turn=field_turn,
+        response=FieldSelectionResponse(chosen=("id", "name"), custom_inputs=(), control_signal=None),
+    )
+
+    assert result.step is GuidedStep.STEP_2_SINK
+    assert result.output_order == session.output_order
+    assert result.reviewed_outputs[OUTPUT_B] == session.reviewed_outputs[OUTPUT_B]
+    revised = result.reviewed_outputs[OUTPUT_A]
+    assert revised.name == "output"
+    assert dict(revised.options) == {"path": "/data/revised.jsonl"}
+    assert revised.required_fields == ("id", "name")
+    assert revised.on_write_failure == "failures"
+    assert result.active_edit_target is None
+    assert not result.pending_output_intents
+
+
+def test_output_edit_rejects_hidden_structural_policy_override() -> None:
+    session = _review_session(step=GuidedStep.STEP_2_SINK)
+    reviewed_outputs = dict(session.reviewed_outputs)
+    reviewed_outputs[OUTPUT_A] = replace(reviewed_outputs[OUTPUT_A], on_write_failure="failures")
+    session = replace(session, reviewed_outputs=reviewed_outputs)
+    editing = begin_component_edit(session, ComponentTarget(kind="output", stable_id=OUTPUT_A))
+    editing, turn = _with_unanswered_turn(editing, TurnType.SCHEMA_FORM)
+
+    with pytest.raises(ValueError, match="server-held structural policy"):
+        transition_sink_schema_form(
+            editing,
+            target_id=OUTPUT_A,
+            turn=turn,
+            response=SchemaFormResponse(
+                plugin="json",
+                options={"path": "/data/revised.jsonl", "on_write_failure": "discard"},
+            ),
+            authority=SchemaFormAuthority(
+                knobs=SINK_KNOBS,
+                model_validated_options={"path": "/data/revised.jsonl", "on_write_failure": "discard"},
+            ),
+        )
 
 
 def test_begin_component_edit_rejects_node_edge_cross_kind_missing_and_pending() -> None:

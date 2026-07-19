@@ -79,6 +79,8 @@ def composer_test_client(request: pytest.FixtureRequest, tmp_path: Path) -> Iter
     else:  # pragma: no cover - fixture contract
         raise AssertionError(f"unsupported guided integration backend: {backend}")
     initialize_session_schema(engine)
+    database_url = str(engine.url)
+    engines_to_dispose = [engine]
 
     # Session and blob services
     session_service = SessionServiceImpl(
@@ -129,16 +131,16 @@ def composer_test_client(request: pytest.FixtureRequest, tmp_path: Path) -> Iter
         """Explicit test double for the shared planner route seam."""
 
         async def plan_guided_pipeline(self, *, guided, base, supersedes_draft_hash, recorder, **_kwargs):
-            output_name = guided.reviewed_outputs[guided.output_order[0]].name
+            output_names = [guided.reviewed_outputs[stable_id].name for stable_id in guided.output_order]
             pipeline = {
                 "sources": {
                     guided.reviewed_sources[stable_id].name: {
                         "plugin": guided.reviewed_sources[stable_id].plugin,
                         "options": deep_thaw(guided.reviewed_sources[stable_id].options),
-                        "on_success": output_name,
+                        "on_success": output_names[index % len(output_names)],
                         "on_validation_failure": guided.reviewed_sources[stable_id].on_validation_failure,
                     }
-                    for stable_id in guided.source_order
+                    for index, stable_id in enumerate(guided.source_order)
                 },
                 "nodes": [],
                 "edges": [],
@@ -201,6 +203,12 @@ def composer_test_client(request: pytest.FixtureRequest, tmp_path: Path) -> Iter
         def has_ref(self, principal: str, name: str) -> bool:
             return False
 
+        def server_generation(self, name: str) -> str | None:
+            return None
+
+        def user_generation(self, principal: str, name: str) -> str | None:
+            return None
+
     app.state.plugin_snapshot_factory = lambda user: build_plugin_snapshot(
         policy=app.state.web_plugin_policy,
         catalog=app.state.catalog_service,
@@ -228,12 +236,65 @@ def composer_test_client(request: pytest.FixtureRequest, tmp_path: Path) -> Iter
     blobs_router = create_blobs_router()
     app.include_router(blobs_router)
 
-    # Wrap in TestClient and yield
+    def restart_test_client() -> TestClient:
+        """Rebuild the HTTP stack over the fixture's persisted stores."""
+        engines_to_dispose[-1].dispose()
+        restarted_engine = create_session_engine(database_url)
+        initialize_session_schema(restarted_engine)
+        engines_to_dispose.append(restarted_engine)
+
+        restarted_app = FastAPI()
+
+        async def restarted_mock_user() -> UserIdentity:
+            return UserIdentity(user_id="alice", username="alice")
+
+        restarted_app.dependency_overrides[get_current_user] = restarted_mock_user
+        restarted_app.state.session_service = SessionServiceImpl(
+            restarted_engine,
+            telemetry=build_sessions_telemetry(),
+            log=structlog.get_logger("test.guided.conftest.restarted"),
+        )
+        restarted_app.state.session_engine = restarted_engine
+        restarted_app.state.blob_service = BlobServiceImpl(restarted_engine, tmp_path)
+        restarted_app.state.payload_store = FilesystemPayloadStore(tmp_path / "payloads")
+        restarted_app.state.scoped_secret_resolver = None
+        restarted_app.state.settings = app.state.settings
+        restarted_app.state.composer_service = type(app.state.composer_service)()
+        restarted_app.state.rate_limiter = ComposerRateLimiter(limit=100)
+        restarted_app.state.catalog_service = create_catalog_service()
+        restarted_runtime_policy = RuntimeWebPluginConfig.from_settings(restarted_app.state.settings)
+        restarted_app.state.web_plugin_policy = compile_web_plugin_policy(
+            registry=get_shared_plugin_manager(),
+            settings=restarted_runtime_policy,
+        )
+        restarted_app.state.operator_profile_registry = OperatorProfileRegistry(
+            policy=restarted_app.state.web_plugin_policy,
+            settings=restarted_runtime_policy,
+        )
+        restarted_app.state.plugin_snapshot_factory = lambda user: build_plugin_snapshot(
+            policy=restarted_app.state.web_plugin_policy,
+            catalog=restarted_app.state.catalog_service,
+            profiles=restarted_app.state.operator_profile_registry,
+            principal_scope=f"local:{user.user_id}",
+            secret_inventory=_EmptyInventory(),
+            generation_key=b"guided-integration-policy-key",
+        )
+        restarted_app.state.composer_recorder = BufferingRecorder()
+        restarted_app.state.composer_progress_registry = ComposerProgressRegistry()
+        restarted_app.state.restart_test_client = restart_test_client
+        restarted_app.include_router(create_session_router())
+        restarted_app.include_router(create_blobs_router())
+        return TestClient(restarted_app)
+
+    # Wrap in TestClient and yield. Tests that need to prove durable recovery
+    # can replace it with a wholly new client/app/service stack mid-journey.
+    app.state.restart_test_client = restart_test_client
     client = TestClient(app)
     try:
         yield client
     finally:
-        engine.dispose()
+        for fixture_engine in engines_to_dispose:
+            fixture_engine.dispose()
         if postgres is not None:
             postgres.stop()
 

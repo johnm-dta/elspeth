@@ -894,6 +894,105 @@ def test_source_and_output_edit_targets_resolve_only_reviewed_components() -> No
         replace(pending_output_session, active_edit_target=ComponentTarget(kind="output", stable_id=OUTPUT_A))
 
 
+@pytest.mark.parametrize(
+    ("active_kind", "pending_kind", "pending_id", "pending_phase"),
+    [
+        ("source", "source", SOURCE_B, "inspection_review"),
+        ("source", "output", OUTPUT_B, "field_review"),
+        ("source", "source", SOURCE_A, "plugin_options"),
+        ("output", "output", OUTPUT_B, "field_review"),
+        ("output", "source", SOURCE_B, "inspection_review"),
+        ("output", "output", OUTPUT_A, "plugin_options"),
+    ],
+)
+def test_active_component_edit_rejects_unrelated_or_wrong_phase_pending_intent(
+    active_kind: str,
+    pending_kind: str,
+    pending_id: str,
+    pending_phase: str,
+) -> None:
+    source = _source("primary", "/data/primary.csv")
+    output = _output("archive", "/data/archive.jsonl")
+    source_order = [SOURCE_A]
+    output_order = [OUTPUT_A]
+    pending_sources: dict[str, SourceIntent] = {}
+    pending_outputs: dict[str, SinkIntent] = {}
+    if pending_kind == "source":
+        if pending_id not in source_order:
+            source_order.append(pending_id)
+        pending_sources[pending_id] = SourceIntent(
+            name="primary" if pending_id == SOURCE_A else "secondary",
+            phase=pending_phase,  # type: ignore[arg-type]
+            plugin="csv",
+            options=None if pending_phase == "plugin_options" else {"path": "/data/pending.csv"},
+            inspection_facts=None if pending_phase == "plugin_options" else _inspection(),
+            observed_columns=(),
+            sample_rows=(),
+        )
+    else:
+        if pending_id not in output_order:
+            output_order.append(pending_id)
+        pending_outputs[pending_id] = SinkIntent(
+            name="archive" if pending_id == OUTPUT_A else "errors",
+            phase=pending_phase,  # type: ignore[arg-type]
+            plugin="json",
+            options=None if pending_phase == "plugin_options" else {"path": "/data/pending.jsonl"},
+        )
+
+    with pytest.raises(InvariantError, match=r"active .* edit"):
+        GuidedSession(
+            step=GuidedStep.STEP_1_SOURCE if active_kind == "source" else GuidedStep.STEP_2_SINK,
+            source_order=tuple(source_order),
+            reviewed_sources={SOURCE_A: source},
+            pending_source_intents=pending_sources,
+            output_order=tuple(output_order),
+            reviewed_outputs={OUTPUT_A: output},
+            pending_output_intents=pending_outputs,
+            active_edit_target=ComponentTarget(kind=active_kind, stable_id=SOURCE_A if active_kind == "source" else OUTPUT_A),
+        )
+
+
+def test_legal_active_component_edit_overlaps_roundtrip_exactly() -> None:
+    source = _source("primary", "/data/primary.csv")
+    source_edit = GuidedSession(
+        step=GuidedStep.STEP_1_SOURCE,
+        source_order=(SOURCE_A,),
+        reviewed_sources={SOURCE_A: source},
+        pending_source_intents={
+            SOURCE_A: SourceIntent(
+                name=source.name,
+                phase="inspection_review",
+                plugin=source.plugin,
+                options={"path": "/data/revised.csv", "on_validation_failure": "discard"},
+                inspection_facts=_inspection(),
+                observed_columns=("id", "name"),
+                sample_rows=(),
+            )
+        },
+        active_edit_target=ComponentTarget(kind="source", stable_id=SOURCE_A),
+    )
+    output = _output("archive", "/data/archive.jsonl")
+    output_edit = GuidedSession(
+        step=GuidedStep.STEP_2_SINK,
+        output_order=(OUTPUT_A,),
+        reviewed_outputs={OUTPUT_A: output},
+        pending_output_intents={
+            OUTPUT_A: SinkIntent(
+                name=output.name,
+                phase="field_review",
+                plugin=output.plugin,
+                options={"path": "/data/revised.jsonl", "on_write_failure": "discard"},
+            )
+        },
+        active_edit_target=ComponentTarget(kind="output", stable_id=OUTPUT_A),
+    )
+
+    for legal_overlap in (source_edit, output_edit):
+        restored = GuidedSession.from_dict(legal_overlap.to_dict())
+        assert restored == legal_overlap
+        assert restored.to_dict() == legal_overlap.to_dict()
+
+
 def test_guided_component_deferred_constraint_and_prose_collections_are_bounded() -> None:
     with pytest.raises(InvariantError, match="source components"):
         replace(GuidedSession.initial(), source_order=tuple(object() for _ in range(257)))  # type: ignore[arg-type]

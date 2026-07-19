@@ -1349,9 +1349,9 @@ class GuidedSession:
         ):
             if not isinstance(mapping, Mapping):
                 raise TypeError(f"GuidedSession.{field_name} must be a mapping")
-        if len(self.reviewed_sources) + len(self.pending_source_intents) > GUIDED_MAX_COMPONENTS_PER_KIND:
+        if len(set(self.reviewed_sources) | set(self.pending_source_intents)) > GUIDED_MAX_COMPONENTS_PER_KIND:
             raise InvariantError(f"GuidedSession source components exceed the {GUIDED_MAX_COMPONENTS_PER_KIND}-component limit")
-        if len(self.reviewed_outputs) + len(self.pending_output_intents) > GUIDED_MAX_COMPONENTS_PER_KIND:
+        if len(set(self.reviewed_outputs) | set(self.pending_output_intents)) > GUIDED_MAX_COMPONENTS_PER_KIND:
             raise InvariantError(f"GuidedSession output components exceed the {GUIDED_MAX_COMPONENTS_PER_KIND}-component limit")
 
         if type(self.source_order) is not tuple:
@@ -1380,18 +1380,59 @@ class GuidedSession:
         object.__setattr__(self, "pending_source_intents", pending_sources)
         object.__setattr__(self, "reviewed_outputs", reviewed_outputs)
         object.__setattr__(self, "pending_output_intents", pending_outputs)
-        if set(reviewed_sources) & set(pending_sources):
-            raise InvariantError("GuidedSession reviewed and pending source keysets must be disjoint")
-        if set(reviewed_outputs) & set(pending_outputs):
-            raise InvariantError("GuidedSession reviewed and pending output keysets must be disjoint")
+        source_overlap = set(reviewed_sources) & set(pending_sources)
+        output_overlap = set(reviewed_outputs) & set(pending_outputs)
+        active_target = self.active_edit_target if type(self.active_edit_target) is ComponentTarget else None
+        if active_target is not None and active_target.kind == "source":
+            if pending_outputs or (pending_sources and set(pending_sources) != {active_target.stable_id}):
+                raise InvariantError("GuidedSession active source edit may only coexist with its own inspection_review intent")
+            if pending_sources and pending_sources[active_target.stable_id].phase != "inspection_review":
+                raise InvariantError("GuidedSession active source edit may only coexist with its own inspection_review intent")
+        if active_target is not None and active_target.kind == "output":
+            if pending_sources or (pending_outputs and set(pending_outputs) != {active_target.stable_id}):
+                raise InvariantError("GuidedSession active output edit may only coexist with its own field_review intent")
+            if pending_outputs and pending_outputs[active_target.stable_id].phase != "field_review":
+                raise InvariantError("GuidedSession active output edit may only coexist with its own field_review intent")
+        allowed_source_overlap = {active_target.stable_id} if active_target is not None and active_target.kind == "source" else set()
+        allowed_output_overlap = {active_target.stable_id} if active_target is not None and active_target.kind == "output" else set()
+        if source_overlap - allowed_source_overlap:
+            raise InvariantError(
+                "GuidedSession reviewed and pending source keysets must be disjoint except for the active source edit target"
+            )
+        if output_overlap - allowed_output_overlap:
+            raise InvariantError(
+                "GuidedSession reviewed and pending output keysets must be disjoint except for the active output edit target"
+            )
+        for stable_id in source_overlap:
+            source_intent = pending_sources[stable_id]
+            reviewed_source = reviewed_sources[stable_id]
+            if (
+                source_intent.phase != "inspection_review"
+                or source_intent.name != reviewed_source.name
+                or source_intent.plugin != reviewed_source.plugin
+            ):
+                raise InvariantError("GuidedSession active source edit overlap has inconsistent review custody")
+        for stable_id in output_overlap:
+            output_intent = pending_outputs[stable_id]
+            reviewed_output = reviewed_outputs[stable_id]
+            if (
+                output_intent.phase != "field_review"
+                or output_intent.name != reviewed_output.name
+                or output_intent.plugin != reviewed_output.plugin
+            ):
+                raise InvariantError("GuidedSession active output edit overlap has inconsistent review custody")
         if set(source_order) != set(reviewed_sources) | set(pending_sources):
             raise InvariantError("GuidedSession.source_order must be an exact permutation of source keys")
         if set(output_order) != set(reviewed_outputs) | set(pending_outputs):
             raise InvariantError("GuidedSession.output_order must be an exact permutation of output keys")
         if (set(reviewed_sources) | set(pending_sources)) & (set(reviewed_outputs) | set(pending_outputs)):
             raise InvariantError("GuidedSession stable component IDs must be globally unique")
-        source_names = [source.name for source in reviewed_sources.values()] + [intent.name for intent in pending_sources.values()]
-        output_names = [output.name for output in reviewed_outputs.values()] + [intent.name for intent in pending_outputs.values()]
+        source_names = [source.name for source in reviewed_sources.values()] + [
+            intent.name for stable_id, intent in pending_sources.items() if stable_id not in source_overlap
+        ]
+        output_names = [output.name for output in reviewed_outputs.values()] + [
+            intent.name for stable_id, intent in pending_outputs.items() if stable_id not in output_overlap
+        ]
         if len(set(source_names)) != len(source_names):
             raise InvariantError("GuidedSession source names must be unique")
         if len(set(output_names)) != len(output_names):

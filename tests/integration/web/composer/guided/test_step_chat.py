@@ -1479,7 +1479,12 @@ class TestStepChatCrossStep:
                 "options": prefilled,
             },
         )
-        return cls._respond(client, session_id, edited_values={"columns": ["text", "note"]})
+        cls._respond(client, session_id, edited_values={"columns": ["text", "note"]})
+        return cls._respond(
+            client,
+            session_id,
+            component_action={"action": "finish", "component_kind": "source"},
+        )
 
     def test_chat_history_accumulates_across_step_transition(self, composer_test_client: TestClient) -> None:
         """Chat at step_1, advance to step_2, chat at step_2, GET /guided → 4 entries with mixed step values."""

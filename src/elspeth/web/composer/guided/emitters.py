@@ -22,8 +22,8 @@ data constructed from system-owned state; the Turn dict itself is not persisted
 from __future__ import annotations
 
 import keyword
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from elspeth.web.catalog.knob_schema import KnobSchema
 from elspeth.web.composer._producer_resolver import source_producer_id
@@ -47,8 +47,8 @@ from elspeth.web.composer.tools._common import _semantic_contracts_payload, _ser
 
 if TYPE_CHECKING:
     from elspeth.web.catalog.protocol import CatalogService as CatalogServiceProtocol
-    from elspeth.web.composer.guided.resolved import SinkResolved, SourceResolved
-    from elspeth.web.composer.guided.state_machine import SourceIntent
+    from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved, SourceResolved
+    from elspeth.web.composer.guided.state_machine import GuidedSession, SourceIntent
     from elspeth.web.composer.source_inspection import SourceInspectionFacts
     from elspeth.web.composer.state import CompositionState, ValidationSummary
 
@@ -284,6 +284,51 @@ def build_step_2_schema_form_turn(
     )
 
 
+def build_component_review_turn(
+    guided: GuidedSession,
+    component_kind: Literal["source", "output"],
+) -> Turn:
+    """Build the public plural-component controller from reviewed custody."""
+
+    expected_step = GuidedStep.STEP_1_SOURCE if component_kind == "source" else GuidedStep.STEP_2_SINK
+    if guided.step is not expected_step:
+        raise InvariantError(f"{component_kind} component review is not legal at {guided.step.value}")
+    reviewed: Mapping[str, SourceResolved | SinkOutputResolved]
+    if component_kind == "source":
+        order = guided.source_order
+        reviewed = guided.reviewed_sources
+        if guided.pending_source_intents:
+            raise InvariantError("source component review requires no pending source intents")
+    else:
+        order = guided.output_order
+        reviewed = guided.reviewed_outputs
+        if guided.pending_output_intents:
+            raise InvariantError("output component review requires no pending output intents")
+    if not reviewed or set(order) != set(reviewed):
+        raise InvariantError(f"{component_kind} component review requires a complete reviewed collection")
+    actions = ["add", "edit"]
+    if len(order) > 1:
+        actions.append("remove")
+    actions.extend(("reorder", "finish"))
+    return Turn(
+        type=TurnType.REVIEW_COMPONENTS.value,
+        step_index=_step_index(expected_step),
+        payload={
+            "component_kind": component_kind,
+            "items": [
+                {
+                    "stable_id": stable_id,
+                    "name": reviewed[stable_id].name,
+                    "plugin": reviewed[stable_id].plugin,
+                    "status": "reviewed",
+                }
+                for stable_id in order
+            ],
+            "allowed_actions": actions,
+        },
+    )
+
+
 def build_step_1_schema_form_turn_from_resolved(
     source: SourceResolved,
     catalog: CatalogServiceProtocol,
@@ -347,6 +392,7 @@ def build_step_2_schema_form_turn_from_resolved(
     # deep-frozen ``mappingproxy`` options whose NESTED maps (e.g. ``schema``)
     # Pydantic rejects on serialisation. Mirror the step_1 builder's thaw.
     prefilled: dict[str, Any] = {"schema": {"mode": "observed"}, **dict(deep_thaw(output.options))}
+    prefilled["on_write_failure"] = output.on_write_failure
     payload: SchemaFormPayload = {
         "mode": "plugin_options",
         "plugin": output.plugin,

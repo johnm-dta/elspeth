@@ -25,7 +25,9 @@ from elspeth.web.composer.guided.protocol import (
     GuidedStep,
     TurnType,
 )
+from elspeth.web.composer.guided.resolved import SinkOutputResolved, SourceResolved
 from elspeth.web.composer.guided.state_machine import (
+    ComponentTarget,
     GuidedProposalRef,
     GuidedSession,
     SinkIntent,
@@ -164,6 +166,94 @@ def _with_route_turn(guided: GuidedSession, turn_type: TurnType) -> GuidedSessio
             ),
         ),
     )
+
+
+def test_http_output_edit_omits_hidden_policy_and_preserves_server_reviewed_value(
+    composer_test_client: TestClient,
+) -> None:
+    client = composer_test_client
+    session_id = _create_session(client)
+    source_id = "11111111-1111-4111-8111-111111111111"
+    output_id = "33333333-3333-4333-8333-333333333333"
+    guided = GuidedSession(
+        step=GuidedStep.STEP_2_SINK,
+        source_order=(source_id,),
+        reviewed_sources={
+            source_id: SourceResolved(
+                name="source",
+                plugin="csv",
+                options={"path": "input.csv"},
+                observed_columns=("id", "name"),
+                sample_rows=(),
+                on_validation_failure="discard",
+            )
+        },
+        output_order=(output_id,),
+        reviewed_outputs={
+            output_id: SinkOutputResolved(
+                name="output",
+                plugin="json",
+                options={"path": "old.jsonl"},
+                required_fields=("id",),
+                schema_mode="observed",
+                on_write_failure="failures",
+            )
+        },
+    )
+    _persist_guided(client, session_id, guided)
+
+    review = client.get(f"/api/sessions/{session_id}/guided")
+    assert review.status_code == 200, review.json()
+    review_turn = review.json()["next_turn"]
+    assert review_turn["type"] == "review_components"
+    editing = client.post(
+        f"/api/sessions/{session_id}/guided/respond",
+        json=_live_body(
+            review_turn,
+            component_action={"action": "edit", "target": {"kind": "output", "stable_id": output_id}},
+        ),
+    )
+    assert editing.status_code == 200, editing.json()
+    form_turn = editing.json()["next_turn"]
+    assert form_turn["type"] == "schema_form"
+    assert form_turn["payload"]["prefilled"]["on_write_failure"] == "failures"
+
+    output_path = Path(client.app.state.settings.data_dir) / "outputs" / "revised.jsonl"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    submitted_options = {
+        "path": str(output_path),
+        "schema": {"mode": "observed"},
+        "mode": "write",
+        "collision_policy": "auto_increment",
+    }
+    staged = client.post(
+        f"/api/sessions/{session_id}/guided/respond",
+        json=_live_body(
+            form_turn,
+            edited_values={"plugin": "json", "options": submitted_options},
+        ),
+    )
+    assert staged.status_code == 200, staged.json()
+    staged_record = asyncio.run(client.app.state.session_service.get_current_state(UUID(session_id)))
+    assert staged_record is not None and staged_record.composer_meta is not None
+    staged_guided = GuidedSession.from_dict(deep_thaw(staged_record.composer_meta)["guided_session"])
+    staged_options = staged_guided.pending_output_intents[output_id].options
+    assert staged_options is not None
+    assert staged_options["on_write_failure"] == "failures"
+
+    field_turn = staged.json()["next_turn"]
+    assert field_turn["type"] == "multi_select_with_custom"
+    reviewed = client.post(
+        f"/api/sessions/{session_id}/guided/respond",
+        json=_live_body(field_turn, control_signal="passthrough"),
+    )
+    assert reviewed.status_code == 200, reviewed.json()
+    reviewed_record = asyncio.run(client.app.state.session_service.get_current_state(UUID(session_id)))
+    assert reviewed_record is not None and reviewed_record.composer_meta is not None
+    reviewed_guided = GuidedSession.from_dict(deep_thaw(reviewed_record.composer_meta)["guided_session"])
+    resolved = reviewed_guided.reviewed_outputs[output_id]
+    assert resolved.options["path"] == str(output_path)
+    assert resolved.on_write_failure == "failures"
 
 
 def test_first_prospective_response_settles_schema8_and_replays_exactly_after_drift(
@@ -1301,6 +1391,109 @@ def test_route_adapter_dispatches_all_six_schema8_stage_transitions(
         assert captured["new_stable_id"] != UUID(operation_id)
     if case in {"source_form", "source_inspect", "sink_form", "sink_field"}:
         assert captured["target_id"] == stable_id
+
+
+@pytest.mark.parametrize(
+    ("action", "transition_name"),
+    [
+        ({"action": "add", "component_kind": "source"}, "add_component_intent"),
+        (
+            {"action": "edit", "target": {"kind": "source", "stable_id": "11111111-1111-4111-8111-111111111111"}},
+            "begin_component_edit",
+        ),
+        (
+            {"action": "remove", "target": {"kind": "source", "stable_id": "11111111-1111-4111-8111-111111111111"}},
+            "remove_reviewed_component",
+        ),
+        (
+            {
+                "action": "reorder",
+                "component_kind": "source",
+                "stable_ids": [
+                    "22222222-2222-4222-8222-222222222222",
+                    "11111111-1111-4111-8111-111111111111",
+                ],
+            },
+            "reorder_reviewed_components",
+        ),
+        ({"action": "finish", "component_kind": "source"}, "finish_component_review"),
+    ],
+)
+def test_route_adapter_dispatches_closed_component_review_actions(
+    monkeypatch: pytest.MonkeyPatch,
+    action: dict[str, object],
+    transition_name: str,
+) -> None:
+    first_id = "11111111-1111-4111-8111-111111111111"
+    second_id = "22222222-2222-4222-8222-222222222222"
+    guided = _with_route_turn(
+        GuidedSession(
+            step=GuidedStep.STEP_1_SOURCE,
+            source_order=(first_id, second_id),
+            reviewed_sources={
+                first_id: SourceResolved(
+                    name="source",
+                    plugin="csv",
+                    options={"path": "a.csv"},
+                    observed_columns=("id",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                ),
+                second_id: SourceResolved(
+                    name="source_2",
+                    plugin="json",
+                    options={"path": "b.json"},
+                    observed_columns=("id",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                ),
+            },
+        ),
+        TurnType.REVIEW_COMPONENTS,
+    )
+    turn = {
+        "type": "review_components",
+        "step_index": 0,
+        "payload": {
+            "component_kind": "source",
+            "items": [],
+            "allowed_actions": ["add", "edit", "remove", "reorder", "finish"],
+        },
+    }
+    request = GuidedRespondRequest.model_validate(
+        {
+            "operation_id": "44444444-4444-4444-8444-444444444444",
+            "turn_token": "a" * 64,
+            "component_action": action,
+        },
+        strict=True,
+    )
+    captured: list[tuple[object, ...]] = []
+
+    def transition(*args: object) -> GuidedSession:
+        captured.append(args)
+        return guided
+
+    monkeypatch.setattr(guided_route, transition_name, transition)
+
+    updated, response_payload = guided_route._schema8_transition(
+        guided,
+        turn,
+        request,
+        new_stable_id=UUID("33333333-3333-4333-8333-333333333333"),
+    )
+
+    assert updated is guided
+    assert captured and captured[0][0] is guided
+    assert deep_thaw(response_payload) == {"component_action": action}
+    if action["action"] == "add":
+        assert captured[0][1:] == ("source", UUID("33333333-3333-4333-8333-333333333333"))
+    elif action["action"] in {"edit", "remove"}:
+        assert captured[0][1] == ComponentTarget(kind="source", stable_id=first_id)
+    elif action["action"] == "reorder":
+        assert captured[0][1:] == ("source", (UUID(second_id), UUID(first_id)))
+    else:
+        assert captured[0][1:] == ("source",)
 
 
 def test_route_takeover_uses_live_fence_and_stale_worker_joins_winner(

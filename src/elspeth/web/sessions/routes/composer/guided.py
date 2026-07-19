@@ -13,6 +13,7 @@ from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.guided.chat_solver import (
     build_step_chat_context_block,  # noqa: F401  # Preserve signed module statement positions.
 )
+from elspeth.web.composer.guided.emitters import build_component_review_turn
 from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE, WorkflowProfileKind, profile_for_kind
 from elspeth.web.composer.guided.protocol import Turn, validate_current_turn
 from elspeth.web.composer.guided.resolved import SinkResolved
@@ -23,6 +24,11 @@ from elspeth.web.composer.guided.stage_transitions import (
     PluginSelectionResponse,
     SchemaFormAuthority,
     SchemaFormResponse,
+    add_component_intent,
+    begin_component_edit,
+    finish_component_review,
+    remove_reviewed_component,
+    reorder_reviewed_components,
     transition_sink_field_review,
     transition_sink_plugin_selection,
     transition_sink_schema_form,
@@ -30,8 +36,9 @@ from elspeth.web.composer.guided.stage_transitions import (
     transition_source_plugin_selection,
     transition_source_schema_form,
 )
+from elspeth.web.composer.guided.state_machine import ComponentTarget
 from elspeth.web.composer.pipeline_proposal import composition_content_hash
-from elspeth.web.composer.source_inspection import SourceInspectionFacts
+from elspeth.web.composer.source_inspection import SourceInspectionFacts, inspect_blob_content
 from elspeth.web.composer.tutorial_sample import (
     resolve_tutorial_sample_urls,
     tutorial_sample_base_url,
@@ -54,7 +61,17 @@ from elspeth.web.sessions.protocol import (
     PreparedGuidedJsonPayload,
     guided_json_payload_id,
 )
-from elspeth.web.sessions.schemas import ConvertGuidedRequest, ReenterGuidedRequest, StartGuidedRequest, TutorialSampleResponse
+from elspeth.web.sessions.schemas import (
+    AddComponentAction,
+    ConvertGuidedRequest,
+    EditComponentAction,
+    FinishComponentsAction,
+    ReenterGuidedRequest,
+    RemoveComponentAction,
+    ReorderComponentsAction,
+    StartGuidedRequest,
+    TutorialSampleResponse,
+)
 
 from .._helpers import (
     UUID,
@@ -329,12 +346,19 @@ def _build_get_guided_turn(
     if step is GuidedStep.STEP_1_SOURCE:
         target = guided.active_edit_target
         if target is not None and target.kind == "source":
+            edit_intent = guided.pending_source_intents.get(target.stable_id)
+            if edit_intent is not None:
+                if edit_intent.phase != "inspection_review":
+                    raise InvariantError("active source edit has unsupported pending review custody")
+                return build_step_1_inspect_and_confirm_turn_from_intent(edit_intent)
             return build_step_1_schema_form_turn_from_resolved(guided.reviewed_sources[target.stable_id], catalog)
         pending = next(
             (guided.pending_source_intents[stable_id] for stable_id in guided.source_order if stable_id in guided.pending_source_intents),
             None,
         )
         if pending is None:
+            if guided.reviewed_sources:
+                return build_component_review_turn(guided, "source")
             return build_initial_step_1_turn(state, blob_inspection=None, catalog=catalog)
         if pending.phase == "plugin_selection":
             return build_initial_step_1_turn(state, blob_inspection=None, catalog=catalog)
@@ -352,13 +376,30 @@ def _build_get_guided_turn(
     if step is GuidedStep.STEP_2_SINK:
         target = guided.active_edit_target
         if target is not None and target.kind == "output":
+            edit_intent = guided.pending_output_intents.get(target.stable_id)
+            if edit_intent is not None:
+                if edit_intent.phase != "field_review":
+                    raise InvariantError("active output edit has unsupported pending review custody")
+                observed_columns = tuple(
+                    dict.fromkeys(
+                        column
+                        for stable_id in guided.source_order
+                        if stable_id in guided.reviewed_sources
+                        for column in guided.reviewed_sources[stable_id].observed_columns
+                    )
+                )
+                return build_step_2_multi_select_turn(observed_columns)
             sink = SinkResolved(outputs=(guided.reviewed_outputs[target.stable_id],))
             return build_step_2_schema_form_turn_from_resolved(sink, catalog)
         pending = next(
             (guided.pending_output_intents[stable_id] for stable_id in guided.output_order if stable_id in guided.pending_output_intents),
             None,
         )
-        if pending is None or pending.phase == "plugin_selection":
+        if pending is None:
+            if guided.reviewed_outputs:
+                return build_component_review_turn(guided, "output")
+            return build_step_2_single_select_turn(catalog)
+        if pending.phase == "plugin_selection":
             return build_step_2_single_select_turn(catalog)
         if pending.phase == "plugin_options":
             if pending.plugin is None:  # pragma: no cover - guarded by SinkIntent
@@ -1589,6 +1630,81 @@ def _schema8_pending_target(guided: GuidedSession, *, source: bool, phase: str) 
     return matches[0]
 
 
+def _schema8_form_target(guided: GuidedSession, *, source: bool) -> tuple[str, str]:
+    """Return the server-held schema-form target and plugin.
+
+    New components hold that authority in a pending intent. An edit instead
+    holds it in the reviewed component named by ``active_edit_target`` until
+    the edited form needs a follow-up inspection/field-review turn.
+    """
+
+    intents = guided.pending_source_intents if source else guided.pending_output_intents
+    reviewed = guided.reviewed_sources if source else guided.reviewed_outputs
+    matches = [stable_id for stable_id, intent in intents.items() if intent.phase == "plugin_options"]
+    if len(matches) == 1:
+        target = matches[0]
+        plugin = intents[target].plugin
+    elif not matches:
+        active = guided.active_edit_target
+        expected_kind = "source" if source else "output"
+        if active is None or active.kind != expected_kind or active.stable_id not in reviewed:
+            raise InvariantError("guided schema-form turn does not have exactly one server-held target")
+        target = active.stable_id
+        plugin = reviewed[target].plugin
+    else:
+        raise InvariantError("guided schema-form turn does not have exactly one server-held target")
+    if type(plugin) is not str:
+        raise InvariantError("guided schema-form target has no server-held plugin")
+    return target, plugin
+
+
+def _schema8_active_source_edit_blob_id(guided: GuidedSession) -> UUID | None:
+    """Resolve exact blob custody for an active reviewed-source edit."""
+
+    active = guided.active_edit_target
+    if active is None or active.kind != "source":
+        return None
+    source = guided.reviewed_sources.get(active.stable_id)
+    if source is None:
+        raise InvariantError("active source edit target is not reviewed")
+    raw_blob_id = source.options.get("blob_ref")
+    if raw_blob_id is None:
+        path = source.options.get("path")
+        raw_blob_id = path.removeprefix("blob:") if type(path) is str and path.startswith("blob:") else None
+    if raw_blob_id is None:
+        return None
+    try:
+        blob_id = UUID(str(raw_blob_id))
+    except (TypeError, ValueError) as exc:
+        raise InvariantError("active source edit has a malformed blob custody id") from exc
+    if str(blob_id) != str(raw_blob_id):
+        raise InvariantError("active source edit blob custody id is not canonical")
+    return blob_id
+
+
+async def _schema8_active_source_edit_inspection(
+    blob_service: BlobServiceProtocol,
+    session_id: UUID,
+    guided: GuidedSession,
+) -> SourceInspectionFacts | None:
+    """Re-inspect the exact blob owned by the active source edit target."""
+
+    blob_id = _schema8_active_source_edit_blob_id(guided)
+    if blob_id is None:
+        return None
+    record = await blob_service.get_blob(blob_id)
+    if record.session_id != session_id or record.status != "ready":
+        raise InvariantError("active source edit blob is not a ready blob owned by this session")
+    content = await blob_service.read_blob_content(blob_id)
+    return inspect_blob_content(
+        content=content,
+        filename=record.filename,
+        mime_type=record.mime_type,
+        blob_id=record.id,
+        content_hash=record.content_hash,
+    )
+
+
 def _schema8_server_options(prefilled: Mapping[str, Any]) -> dict[str, object]:
     return {
         name: deep_thaw(value)
@@ -1615,7 +1731,13 @@ def _schema8_schema_authority(
     config_model = get_source_config_model(plugin) if source else get_sink_config_model(plugin)
     model_validated = merged
     if config_model is not None:
-        config = config_model.from_dict(merged, plugin_name=plugin)
+        # Node failure policies are server-owned structural fields rather than
+        # plugin config. Keep them in transition authority, but do not feed
+        # them into strict plugin models that correctly reject extra keys.
+        # Source config models own ``on_validation_failure`` directly. Sink
+        # ``on_write_failure`` belongs to the node wrapper, not the plugin.
+        plugin_options = merged if source else {name: value for name, value in merged.items() if name != "on_write_failure"}
+        config = config_model.from_dict(plugin_options, plugin_name=plugin)
         model_validated = config.model_dump(mode="json", by_alias=True)
         # Pydantic expands nested semantic values (notably
         # ``schema: {mode: observed}``) with nullable defaults.  The pure
@@ -1638,6 +1760,38 @@ def _schema8_transition(
         raise _schema8_unsupported_stage(guided.step)
     answered = AnsweredTurn(history_index=len(guided.history) - 1)
     turn_type = TurnType(turn["type"])
+
+    if body.component_action is not None:
+        if turn_type is not TurnType.REVIEW_COMPONENTS:
+            raise ValueError("component_action is legal only for a component review turn")
+        review_kind = turn["payload"].get("component_kind")
+        if type(review_kind) is not str or review_kind not in {"source", "output"}:
+            raise InvariantError("component review turn has no valid server-held component kind")
+        action = body.component_action
+        action_kind = action.target.kind if isinstance(action, (EditComponentAction, RemoveComponentAction)) else action.component_kind
+        if action_kind != review_kind:
+            raise ValueError("component action kind does not match the current review stage")
+        if isinstance(action, AddComponentAction):
+            updated = add_component_intent(guided, action.component_kind, new_stable_id)
+        elif isinstance(action, EditComponentAction):
+            updated = begin_component_edit(
+                guided,
+                ComponentTarget(kind=action.target.kind, stable_id=str(action.target.stable_id)),
+            )
+        elif isinstance(action, RemoveComponentAction):
+            updated = remove_reviewed_component(
+                guided,
+                ComponentTarget(kind=action.target.kind, stable_id=str(action.target.stable_id)),
+            )
+        elif isinstance(action, ReorderComponentsAction):
+            updated = reorder_reviewed_components(guided, action.component_kind, tuple(action.stable_ids))
+        elif isinstance(action, FinishComponentsAction):
+            updated = finish_component_review(guided, action.component_kind)
+        else:  # pragma: no cover - closed discriminated request union
+            raise InvariantError("component review received an unsupported action model")
+        return updated, {"component_action": action.model_dump(mode="json")}
+    if turn_type is TurnType.REVIEW_COMPONENTS:
+        raise ValueError("component review turns require component_action")
 
     if turn_type is TurnType.SINGLE_SELECT:
         _schema8_only_response_fields(body, "chosen")
@@ -1684,24 +1838,24 @@ def _schema8_transition(
             raise ValueError("schema_form plugin and options have invalid types")
         form_response = SchemaFormResponse(plugin=plugin, options=options)
         if guided.step is GuidedStep.STEP_1_SOURCE:
-            target = _schema8_pending_target(guided, source=True, phase="plugin_options")
-            held_plugin = guided.pending_source_intents[target].plugin
-            if type(held_plugin) is not str:
-                raise InvariantError("source schema-form target has no server-held plugin")
+            target, held_plugin = _schema8_form_target(guided, source=True)
             if plugin != held_plugin:
                 raise ValueError("schema-form plugin does not echo the server-held source plugin")
+            is_edit = (
+                guided.active_edit_target is not None
+                and guided.active_edit_target.kind == "source"
+                and guided.active_edit_target.stable_id == target
+            )
             updated = transition_source_schema_form(
                 guided,
                 target_id=target,
                 turn=answered,
                 response=form_response,
                 authority=_schema8_schema_authority(turn=turn, plugin=held_plugin, options=options, source=True),
+                edit_inspection_facts=source_inspection_facts if is_edit else None,
             )
         elif guided.step is GuidedStep.STEP_2_SINK:
-            target = _schema8_pending_target(guided, source=False, phase="plugin_options")
-            held_plugin = guided.pending_output_intents[target].plugin
-            if type(held_plugin) is not str:
-                raise InvariantError("sink schema-form target has no server-held plugin")
+            target, held_plugin = _schema8_form_target(guided, source=False)
             if plugin != held_plugin:
                 raise ValueError("schema-form plugin does not echo the server-held sink plugin")
             updated = transition_sink_schema_form(
@@ -1965,8 +2119,6 @@ async def post_guided_respond(
             return None
         if not is_active_exit and observed_guided.step not in {GuidedStep.STEP_1_SOURCE, GuidedStep.STEP_2_SINK}:
             raise _schema8_unsupported_stage(observed_guided.step)
-        if not is_active_exit and observed_guided.active_edit_target is not None:
-            raise _schema8_unsupported_stage(observed_guided.step)
         prospective, current_turn, _prepared_current = _schema8_prospective_occurrence(
             observed_state,
             observed_guided,
@@ -1976,11 +2128,16 @@ async def post_guided_respond(
         )
         if body.turn_token != guided_turn_token(prospective):
             raise HTTPException(status_code=409, detail="turn_token does not identify the current unanswered turn.")
-        inspection_facts = (
-            await _inspect_latest_ready_session_blob(request.app.state.blob_service, session_id)
-            if observed_guided.step is GuidedStep.STEP_1_SOURCE and current_turn["type"] == TurnType.SINGLE_SELECT.value
-            else None
-        )
+        inspection_facts: SourceInspectionFacts | None = None
+        if observed_guided.step is GuidedStep.STEP_1_SOURCE:
+            if current_turn["type"] == TurnType.SINGLE_SELECT.value:
+                inspection_facts = await _inspect_latest_ready_session_blob(request.app.state.blob_service, session_id)
+            elif current_turn["type"] == TurnType.SCHEMA_FORM.value:
+                inspection_facts = await _schema8_active_source_edit_inspection(
+                    request.app.state.blob_service,
+                    session_id,
+                    observed_guided,
+                )
         try:
             _schema8_answer_and_project_next(
                 observed_state,

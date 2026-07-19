@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Literal
 
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
-from elspeth.web.composer.guided.resolved import SourceResolved
+from elspeth.web.composer.guided.resolved import SinkOutputResolved, SourceResolved
 from elspeth.web.composer.guided.state_machine import (
     ComponentTarget,
     GuidedSession,
@@ -19,6 +19,7 @@ from elspeth.web.sessions.routes.composer.guided import (
 )
 
 SOURCE_ID = "00000000-0000-4000-8000-000000000401"
+OUTPUT_ID = "00000000-0000-4000-8000-000000000402"
 
 
 def _history_with_changed_copy() -> tuple[TurnRecord, ...]:
@@ -120,6 +121,63 @@ def test_hint_from_reviewed_source_requires_active_edit_target() -> None:
 
     assert _step_1_plugin_hint(without_edit) is None
     assert _step_1_plugin_hint(with_edit) == "json"
+
+
+def test_reviewed_source_collection_rebuilds_component_review() -> None:
+    guided = GuidedSession(
+        step=GuidedStep.STEP_1_SOURCE,
+        source_order=(SOURCE_ID,),
+        reviewed_sources={
+            SOURCE_ID: SourceResolved(
+                name="source",
+                plugin="csv",
+                options={"path": "/data/input.csv"},
+                observed_columns=("id",),
+                sample_rows=(),
+                on_validation_failure="discard",
+            )
+        },
+    )
+
+    turn = _build_get_guided_turn(None, guided, catalog=None)
+
+    assert turn is not None
+    assert turn["type"] == "review_components"
+    assert turn["payload"]["component_kind"] == "source"
+
+
+def test_reviewed_output_collection_rebuilds_component_review() -> None:
+    guided = GuidedSession(
+        step=GuidedStep.STEP_2_SINK,
+        source_order=(SOURCE_ID,),
+        reviewed_sources={
+            SOURCE_ID: SourceResolved(
+                name="source",
+                plugin="csv",
+                options={"path": "/data/input.csv"},
+                observed_columns=("id",),
+                sample_rows=(),
+                on_validation_failure="discard",
+            )
+        },
+        output_order=(OUTPUT_ID,),
+        reviewed_outputs={
+            OUTPUT_ID: SinkOutputResolved(
+                name="output",
+                plugin="json",
+                options={"path": "/data/output.json"},
+                required_fields=("id",),
+                schema_mode="observed",
+                on_write_failure="discard",
+            )
+        },
+    )
+
+    turn = _build_get_guided_turn(None, guided, catalog=None)
+
+    assert turn is not None
+    assert turn["type"] == "review_components"
+    assert turn["payload"]["component_kind"] == "output"
 
 
 def test_step_3_checkpoint_does_not_read_removed_schema_7_proposal_fields() -> None:

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from elspeth.web.composer.guided.emitters import (
     _step_index,
+    build_component_review_turn,
     build_initial_step_1_turn,
     build_step_1_schema_form_turn,
     build_step_1_schema_form_turn_from_resolved,
@@ -13,7 +14,8 @@ from elspeth.web.composer.guided.emitters import (
     build_step_4_wire_turn,
 )
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnType, validate_payload
-from elspeth.web.composer.guided.state_machine import SourceResolved
+from elspeth.web.composer.guided.resolved import SinkOutputResolved, SourceResolved
+from elspeth.web.composer.guided.state_machine import GuidedSession
 from elspeth.web.composer.source_inspection import SourceInspectionFacts
 from elspeth.web.composer.state import (
     CompositionState,
@@ -191,6 +193,103 @@ class TestBuildSchemaFormTurns:
         assert payload["plugin"] == "json"
         assert payload["knobs"]["fields"][0]["label"] == "Path"
         assert payload["prefilled"] == {"schema": {"mode": "observed"}}
+
+
+class TestComponentReviewTurn:
+    def test_source_review_is_server_authored_in_persisted_order(self) -> None:
+        first_id = "11111111-1111-4111-8111-111111111111"
+        second_id = "22222222-2222-4222-8222-222222222222"
+        guided = GuidedSession(
+            step=GuidedStep.STEP_1_SOURCE,
+            source_order=(second_id, first_id),
+            reviewed_sources={
+                first_id: SourceResolved(
+                    name="orders",
+                    plugin="csv",
+                    options={"path": "/private/orders.csv"},
+                    observed_columns=("id",),
+                    sample_rows=(),
+                    on_validation_failure="quarantine",
+                ),
+                second_id: SourceResolved(
+                    name="refunds",
+                    plugin="json",
+                    options={"path": "/private/refunds.json"},
+                    observed_columns=("id",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                ),
+            },
+        )
+
+        turn = build_component_review_turn(guided, "source")
+
+        assert turn == {
+            "type": "review_components",
+            "step_index": 0,
+            "payload": {
+                "component_kind": "source",
+                "items": [
+                    {
+                        "stable_id": second_id,
+                        "name": "refunds",
+                        "plugin": "json",
+                        "status": "reviewed",
+                    },
+                    {
+                        "stable_id": first_id,
+                        "name": "orders",
+                        "plugin": "csv",
+                        "status": "reviewed",
+                    },
+                ],
+                "allowed_actions": ["add", "edit", "remove", "reorder", "finish"],
+            },
+        }
+        assert "/private" not in str(turn)
+        assert validate_payload(TurnType.REVIEW_COMPONENTS, turn["payload"]) is None
+
+    def test_single_output_review_omits_remove(self) -> None:
+        source_id = "11111111-1111-4111-8111-111111111111"
+        output_id = "33333333-3333-4333-8333-333333333333"
+        guided = GuidedSession(
+            step=GuidedStep.STEP_2_SINK,
+            source_order=(source_id,),
+            reviewed_sources={
+                source_id: SourceResolved(
+                    name="source",
+                    plugin="csv",
+                    options={"path": "/private/source.csv"},
+                    observed_columns=("id",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
+            output_order=(output_id,),
+            reviewed_outputs={
+                output_id: SinkOutputResolved(
+                    name="primary",
+                    plugin="json",
+                    options={"path": "/private/output.json"},
+                    required_fields=("id",),
+                    schema_mode="observed",
+                    on_write_failure="quarantine",
+                )
+            },
+        )
+
+        turn = build_component_review_turn(guided, "output")
+
+        assert turn["payload"]["allowed_actions"] == ["add", "edit", "reorder", "finish"]
+        assert turn["payload"]["items"] == [
+            {
+                "stable_id": output_id,
+                "name": "primary",
+                "plugin": "json",
+                "status": "reviewed",
+            }
+        ]
+        assert validate_payload(TurnType.REVIEW_COMPONENTS, turn["payload"]) is None
 
 
 class TestStep4WireEmitter:

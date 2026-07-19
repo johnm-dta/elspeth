@@ -31,7 +31,7 @@ from uuid import UUID, uuid4
 if TYPE_CHECKING:
     from elspeth.web.composer.guided.state_machine import TerminalState
     from elspeth.web.composer.redaction_telemetry import RedactionTelemetry
-    from elspeth.web.sessions.protocol import SessionServiceProtocol
+    from elspeth.web.sessions.protocol import GuidedOperationFence, SessionServiceProtocol
     from elspeth.web.sessions.telemetry import _SessionsTelemetry
 
 import structlog
@@ -39,6 +39,7 @@ from opentelemetry import metrics
 from sqlalchemy import Engine, update
 from sqlalchemy.exc import SQLAlchemyError
 
+from elspeth.contracts.blobs import BlobGuidedOperationWriteFence
 from elspeth.contracts.composer_audit import ComposerToolInvocation
 from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.composer_llm_audit import (
@@ -2120,6 +2121,7 @@ class ComposerServiceImpl:
         user_id: str | None,
         supersedes_draft_hash: str | None,
         recorder: BufferingRecorder,
+        operation_fence: GuidedOperationFence,
         progress: ComposerProgressSink | None = None,
     ) -> tuple[PipelinePlanResult, Mapping[str, frozenset[str]]]:
         """Run one shared planner call for the current guided checkpoint."""
@@ -2139,6 +2141,12 @@ class ComposerServiceImpl:
             raise TypeError("guided must be an exact GuidedSession")
         if type(recorder) is not BufferingRecorder:
             raise TypeError("recorder must be an exact BufferingRecorder")
+        from elspeth.web.sessions.protocol import GuidedOperationFence
+
+        if type(operation_fence) is not GuidedOperationFence:
+            raise TypeError("operation_fence must be an exact GuidedOperationFence")
+        if str(operation_fence.session_id) != originating_message.session_id:
+            raise AuditIntegrityError("guided planner operation fence targets a different session")
         if guided.active_proposal is not None:
             raise AuditIntegrityError("guided planning requires no active proposal")
         if guided.pending_source_intents or guided.pending_output_intents:
@@ -2203,6 +2211,12 @@ class ComposerServiceImpl:
                 max_storage_per_session=self._settings.max_blob_storage_per_session_bytes,
                 secret_service=self._secret_service,
                 runtime_preflight=None,
+                write_fence=BlobGuidedOperationWriteFence(
+                    session_id=operation_fence.session_id,
+                    operation_id=operation_fence.operation_id,
+                    lease_token=operation_fence.lease_token,
+                    attempt=operation_fence.attempt,
+                ),
             ),
             lifecycle=self._planner_request_lifecycle(progress),
             recorder=recorder,

@@ -1,4 +1,4 @@
-"""Retry/replay regressions for schema-8 guided mutation routes."""
+"""Retry/replay regressions for schema-9 guided mutation routes."""
 
 from __future__ import annotations
 
@@ -37,21 +37,21 @@ def _create_session(client: TestClient) -> str:
     return session_id
 
 
-def _seed_exited_wire_state(client: TestClient, session_id: str) -> str:
+def _seed_exited_guided_state(client: TestClient, session_id: str) -> str:
     service = client.app.state.session_service
     state = _initial_composition_state_with_guided_session()
     assert state.guided_session is not None
     guided = replace(
         state.guided_session,
-        step=GuidedStep.STEP_4_WIRE,
+        step=GuidedStep.STEP_1_SOURCE,
         history=(
             TurnRecord(
-                step=GuidedStep.STEP_4_WIRE,
-                turn_type=TurnType.CONFIRM_WIRING,
+                step=GuidedStep.STEP_1_SOURCE,
+                turn_type=TurnType.SINGLE_SELECT,
                 payload_hash="a" * 64,
                 response_hash="b" * 64,
                 emitter="server",
-                summary="Exited wire review",
+                summary="Exited source selection",
             ),
         ),
         terminal=TerminalState(
@@ -276,7 +276,7 @@ def _seed_exited_checkpoint(client: TestClient, session_id: str, checkpoint: Gui
 
 def test_reenter_replays_exact_located_response_without_a_second_state(composer_test_client: TestClient) -> None:
     session_id = _create_session(composer_test_client)
-    prior_turn_token = _seed_exited_wire_state(composer_test_client, session_id)
+    prior_turn_token = _seed_exited_guided_state(composer_test_client, session_id)
     operation_id = str(uuid4())
 
     first = composer_test_client.post(
@@ -320,7 +320,7 @@ def test_reenter_replays_exact_located_response_without_a_second_state(composer_
 
 def test_reenter_audit_insert_failure_rolls_back_new_occurrence(composer_test_client: TestClient) -> None:
     session_id = _create_session(composer_test_client)
-    _seed_exited_wire_state(composer_test_client, session_id)
+    _seed_exited_guided_state(composer_test_client, session_id)
     service = composer_test_client.app.state.session_service
 
     with (
@@ -343,7 +343,7 @@ def test_reenter_audit_insert_failure_rolls_back_new_occurrence(composer_test_cl
 
 def test_reenter_settlement_head_conflict_is_terminal_and_exactly_replayed(composer_test_client: TestClient) -> None:
     session_id = _create_session(composer_test_client)
-    _seed_exited_wire_state(composer_test_client, session_id)
+    _seed_exited_guided_state(composer_test_client, session_id)
     service = composer_test_client.app.state.session_service
     request_body = {"operation_id": str(uuid4())}
 
@@ -404,7 +404,7 @@ def test_reenter_schema8_earlier_checkpoint_replays_exact_hashed_response(
 
 def test_reenter_rejects_missing_operation_id_before_mutation(composer_test_client: TestClient) -> None:
     session_id = _create_session(composer_test_client)
-    _seed_exited_wire_state(composer_test_client, session_id)
+    _seed_exited_guided_state(composer_test_client, session_id)
 
     response = composer_test_client.post(f"/api/sessions/{session_id}/guided/reenter", json={})
 

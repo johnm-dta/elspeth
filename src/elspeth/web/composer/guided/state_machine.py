@@ -47,10 +47,9 @@ from elspeth.web.composer.guided.resolved import (
 from elspeth.web.composer.pipeline_proposal import AbsentBase, PresentBase, ProposalBase, reviewed_anchor_hash
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_from_dict, facts_to_dict
 
-# Schema 8 is a pre-release hard cut. There is no schema-7 decoder or
-# converter: session epoch 30 owns the current store recreation boundary
-# (epoch 29 introduced schema 8; epoch 30 closes the quota failure-code CHECK).
-GUIDED_SESSION_SCHEMA_VERSION = 8
+# Schema 9 is a pre-release hard cut. There is no older-schema decoder or
+# converter: session epoch 31 owns the current store recreation boundary.
+GUIDED_SESSION_SCHEMA_VERSION = 9
 GUIDED_MAX_DEFERRED_INTENTS = 256
 GUIDED_MAX_CONSTRAINTS_PER_INTENT = 64
 GUIDED_MAX_TOTAL_CONSTRAINTS = 4_096
@@ -1078,6 +1077,21 @@ class GuidedSession:
             )
             if self.active_proposal.reviewed_anchor_hash != expected_anchor:
                 raise InvariantError("GuidedSession active_proposal reviewed_anchor_hash mismatch")
+            unanswered = tuple(index for index, turn in enumerate(self.history) if turn.response_hash is None)
+            if unanswered != (len(self.history) - 1,):
+                raise InvariantError("GuidedSession active_proposal requires one sole unanswered trailing turn")
+            trailing = self.history[-1]
+            legal_pending_shape = (
+                self.step is GuidedStep.STEP_3_TRANSFORMS
+                and trailing.step is GuidedStep.STEP_3_TRANSFORMS
+                and trailing.turn_type is TurnType.PROPOSE_PIPELINE
+            ) or (
+                self.step is GuidedStep.STEP_4_WIRE
+                and trailing.step is GuidedStep.STEP_4_WIRE
+                and trailing.turn_type is TurnType.CONFIRM_WIRING
+            )
+            if not legal_pending_shape:
+                raise InvariantError("GuidedSession active_proposal is not bound to the current proposal/wire turn")
             positions = {intent_id: index for index, intent_id in enumerate(deferred_ids)}
             previous = -1
             for intent_id in self.active_proposal.covered_deferred_intent_ids:
@@ -1137,7 +1151,7 @@ class GuidedSession:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize the exact schema-8 keyset to a JSON-safe dictionary."""
+        """Serialize the exact schema-9 keyset to a JSON-safe dictionary."""
         return {
             "schema_version": GUIDED_SESSION_SCHEMA_VERSION,
             "step": self.step.value,
@@ -1174,7 +1188,7 @@ class GuidedSession:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> GuidedSession:
-        """Restore and revalidate one exact schema-8 checkpoint."""
+        """Restore and revalidate one exact schema-9 checkpoint."""
         try:
             if type(d) is not dict:
                 raise InvariantError("GuidedSession.from_dict: record must be an exact dict")

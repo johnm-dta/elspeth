@@ -98,6 +98,8 @@ const SCHEMA_FORM_PAYLOAD: SchemaFormPayload = {
 };
 
 const WIRE_STAGE_PAYLOAD: WireStageData = {
+  proposal_id: "00000000-0000-4000-8000-000000000001",
+  draft_hash: "d".repeat(64),
   topology: {
     sources: {
       source: {

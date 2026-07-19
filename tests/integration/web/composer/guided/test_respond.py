@@ -810,6 +810,159 @@ class TestStep2IntraStep:
         assert state_ids_after == state_ids_before
         assert proposals == []
 
+    def test_external_cancellation_before_proposal_staging_is_request_cancelled(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session_id = _create_session(composer_test_client)
+        self._drive_to_step_2_single_select(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, chosen=["json"])
+        _respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "plugin": "json",
+                "options": {
+                    "path": _outputs_path(composer_test_client, "request-cancelled-before-stage.jsonl"),
+                    "schema": {"mode": "observed"},
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+            },
+        )
+        _respond(composer_test_client, session_id, chosen=["text"], custom_inputs=[])
+        current = _get_guided(composer_test_client, session_id)
+        operation_id = str(uuid4())
+        planner_entered = asyncio.Event()
+
+        async def blocked_planner(**_kwargs: Any):
+            planner_entered.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(composer_test_client.app.state.composer_service, "plan_guided_pipeline", blocked_planner)
+        state_before = asyncio.run(composer_test_client.app.state.session_service.get_current_state(UUID(session_id)))
+
+        async def cancel_request() -> asyncio.CancelledError:
+            async with AsyncClient(transport=ASGITransport(app=composer_test_client.app), base_url="http://test") as client:
+                request_task = asyncio.create_task(
+                    client.post(
+                        f"/api/sessions/{session_id}/guided/respond",
+                        json={
+                            "operation_id": operation_id,
+                            "turn_token": current["next_turn"]["turn_token"],
+                            "component_action": {"action": "finish", "component_kind": "output"},
+                        },
+                    )
+                )
+                await asyncio.wait_for(planner_entered.wait(), timeout=5)
+                request_task.cancel("operator cancelled before proposal staging")
+                with pytest.raises(asyncio.CancelledError, match="operator cancelled before proposal staging") as caught:
+                    await asyncio.wait_for(request_task, timeout=5)
+                return caught.value
+
+        caught = asyncio.run(cancel_request())
+
+        assert caught.args == ("operator cancelled before proposal staging",)
+        state_after = asyncio.run(composer_test_client.app.state.session_service.get_current_state(UUID(session_id)))
+        assert state_before is not None and state_after is not None and state_after.id == state_before.id
+        with composer_test_client.app.state.session_engine.connect() as conn:
+            operation = conn.execute(
+                select(guided_operations_table.c.status, guided_operations_table.c.failure_code)
+                .where(guided_operations_table.c.session_id == session_id)
+                .where(guided_operations_table.c.operation_id == operation_id)
+            ).one()
+            failed_events = conn.execute(
+                select(guided_operation_events_table.c.event_kind)
+                .where(guided_operation_events_table.c.session_id == session_id)
+                .where(guided_operation_events_table.c.operation_id == operation_id)
+                .where(guided_operation_events_table.c.event_kind == "failed")
+            ).all()
+            proposals = conn.execute(
+                select(composition_proposals_table.c.id).where(composition_proposals_table.c.session_id == session_id)
+            ).all()
+        assert operation.status == "failed"
+        assert operation.failure_code == "request_cancelled"
+        assert len(failed_events) == 1
+        assert proposals == []
+
+    def test_cancellation_during_proposal_staging_drains_to_completed_replay(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session_id = _create_session(composer_test_client)
+        self._drive_to_step_2_single_select(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, chosen=["json"])
+        _respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "plugin": "json",
+                "options": {
+                    "path": _outputs_path(composer_test_client, "request-cancelled-during-stage.jsonl"),
+                    "schema": {"mode": "observed"},
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+            },
+        )
+        _respond(composer_test_client, session_id, chosen=["text"], custom_inputs=[])
+        current = _get_guided(composer_test_client, session_id)
+        operation_id = str(uuid4())
+        request_body = {
+            "operation_id": operation_id,
+            "turn_token": current["next_turn"]["turn_token"],
+            "component_action": {"action": "finish", "component_kind": "output"},
+        }
+        service = composer_test_client.app.state.session_service
+        original_insert = service._insert_prepared_guided_audit_rows_on_connection
+        audit_inserted = threading.Event()
+        release_worker = threading.Event()
+
+        def pause_after_audit_insert(*args: Any, **kwargs: Any) -> Any:
+            records = original_insert(*args, **kwargs)
+            audit_inserted.set()
+            if not release_worker.wait(timeout=5):
+                raise TimeoutError("test did not release guided proposal staging worker")
+            return records
+
+        monkeypatch.setattr(service, "_insert_prepared_guided_audit_rows_on_connection", pause_after_audit_insert)
+
+        async def cancel_and_replay():
+            async with AsyncClient(transport=ASGITransport(app=composer_test_client.app), base_url="http://test") as client:
+                request_task = asyncio.create_task(client.post(f"/api/sessions/{session_id}/guided/respond", json=request_body))
+                assert await asyncio.to_thread(audit_inserted.wait, 5), "guided proposal staging worker did not start"
+                request_task.cancel("operator cancelled atomic proposal staging")
+                await asyncio.sleep(0)
+                assert not request_task.done()
+                release_worker.set()
+                with pytest.raises(asyncio.CancelledError, match="operator cancelled atomic proposal staging") as caught:
+                    await asyncio.wait_for(request_task, timeout=5)
+                replay = await asyncio.wait_for(
+                    client.post(f"/api/sessions/{session_id}/guided/respond", json=request_body),
+                    timeout=5,
+                )
+                return caught.value, replay
+
+        caught, replay = asyncio.run(cancel_and_replay())
+
+        assert caught.args == ("operator cancelled atomic proposal staging",)
+        assert replay.status_code == 200, replay.json()
+        assert replay.json()["next_turn"]["type"] == "propose_pipeline"
+        with composer_test_client.app.state.session_engine.connect() as conn:
+            operation = conn.execute(
+                select(guided_operations_table.c.status, guided_operations_table.c.failure_code)
+                .where(guided_operations_table.c.session_id == session_id)
+                .where(guided_operations_table.c.operation_id == operation_id)
+            ).one()
+            proposals = conn.execute(
+                select(composition_proposals_table.c.id).where(composition_proposals_table.c.session_id == session_id)
+            ).all()
+        assert operation.status == "completed"
+        assert operation.failure_code is None
+        assert len(proposals) == 1
+
     def test_step_2_single_select_response_emits_schema_form(self, composer_test_client: TestClient) -> None:
         """Picking a sink plugin emits SCHEMA_FORM for the sink options."""
         session_id = _create_session(composer_test_client)

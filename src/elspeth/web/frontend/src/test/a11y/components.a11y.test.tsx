@@ -468,6 +468,8 @@ describe("UserMenu", () => {
 
 describe("WireStageTurn", () => {
   const wireBase: WireStageData = {
+    proposal_id: "00000000-0000-4000-8000-000000000001",
+    draft_hash: "d".repeat(64),
     topology: {
       sources: {
         source: {

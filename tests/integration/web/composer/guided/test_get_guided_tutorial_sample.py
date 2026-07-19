@@ -21,9 +21,12 @@ def _create_session(client: TestClient) -> str:
 
 
 def _start(client: TestClient, session_id: str, profile: str) -> None:
+    body = {"profile": profile, "operation_id": str(uuid4())}
+    if profile == "live":
+        body["intent"] = "Build the pipeline I describe."
     resp = client.post(
         f"/api/sessions/{session_id}/guided/start",
-        json={"profile": profile, "operation_id": str(uuid4())},
+        json=body,
     )
     assert resp.status_code == 200, resp.text
 

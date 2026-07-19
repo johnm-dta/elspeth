@@ -73,6 +73,7 @@ GuidedOperationKind = Literal[
     "guided_chat",
     "guided_convert",
     "guided_reenter",
+    "guided_plan",
     "state_revert",
     "session_fork",
 ]
@@ -85,6 +86,7 @@ GuidedOperationFailureCode = Literal[
     "custody_error",
     "quota_exceeded",
     "operation_failed",
+    "request_cancelled",
 ]
 # ``audit`` is an internal-only role for breadcrumb rows that have no real
 # OpenAI tool-response or assistant parent (LLM-call audit envelopes,
@@ -221,7 +223,16 @@ class GuidedSessionResult:
     session_id: UUID
 
 
-type GuidedOperationResult = GuidedCompositionStateResult | GuidedSessionResult
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedPipelineProposalResult:
+    """Replay locator for a guided-full pending proposal and its checkpoint."""
+
+    proposal_id: UUID
+    checkpoint_state_id: UUID
+
+
+type GuidedOperationResult = GuidedCompositionStateResult | GuidedPipelineProposalResult | GuidedSessionResult
 
 
 @final

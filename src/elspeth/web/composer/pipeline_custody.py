@@ -19,7 +19,12 @@ from uuid import UUID
 from pydantic import JsonValue
 from sqlalchemy import Engine
 
-from elspeth.contracts.blobs import AllowedMimeType, BlobRecord, InlineCustodyRequest
+from elspeth.contracts.blobs import (
+    AllowedMimeType,
+    BlobGuidedOperationWriteFence,
+    BlobRecord,
+    InlineCustodyRequest,
+)
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields
@@ -241,14 +246,19 @@ async def finalize_pipeline_custody(
     engine: Engine,
     data_dir: str | Path,
     max_storage_per_session: int,
+    write_fence: BlobGuidedOperationWriteFence | None = None,
 ) -> BlobRecord:
     """Materialize a prepared inline source through the shared blob service."""
+    if write_fence is not None and type(write_fence) is not BlobGuidedOperationWriteFence:
+        raise TypeError("pipeline custody write_fence must be an exact BlobGuidedOperationWriteFence")
+    if write_fence is not None and write_fence.session_id != preparation.request.session_id:
+        raise AuditIntegrityError("Pipeline custody write fence targets a different session")
     service = BlobServiceImpl(
         engine,
         Path(data_dir),
         max_storage_per_session=max_storage_per_session,
     )
-    record = await service.reserve_inline_custody(preparation.request)
+    record = await service.reserve_inline_custody(preparation.request, write_fence=write_fence)
     if record.id != preparation.blob_id:
         raise AuditIntegrityError("Inline custody returned a blob id different from the prepared proposal")
     return record

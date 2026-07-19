@@ -177,6 +177,8 @@ def _queue_state() -> CompositionState:
 class TestWireStageDataShape:
     def test_wire_stage_data_keys(self) -> None:
         payload: WireStageData = {
+            "proposal_id": "00000000-0000-4000-8000-000000000001",
+            "draft_hash": "d" * 64,
             "topology": {"sources": {}, "nodes": [], "outputs": []},
             "edge_contracts": [],
             "semantic_contracts": [],
@@ -185,6 +187,8 @@ class TestWireStageDataShape:
 
         assert set(payload) == {
             "topology",
+            "proposal_id",
+            "draft_hash",
             "edge_contracts",
             "semantic_contracts",
             "warnings",
@@ -203,6 +207,8 @@ class TestWireStageDataShape:
 class TestConfirmWiringValidation:
     def test_valid_wire_payload_passes(self) -> None:
         payload = {
+            "proposal_id": "00000000-0000-4000-8000-000000000001",
+            "draft_hash": "d" * 64,
             "topology": {"sources": {}, "nodes": [], "outputs": []},
             "edge_contracts": [],
             "semantic_contracts": [],
@@ -215,6 +221,8 @@ class TestConfirmWiringValidation:
         err = validate_payload(
             TurnType.CONFIRM_WIRING,
             {
+                "proposal_id": "00000000-0000-4000-8000-000000000001",
+                "draft_hash": "d" * 64,
                 "edge_contracts": [],
                 "semantic_contracts": [],
                 "warnings": [],
@@ -228,6 +236,8 @@ class TestConfirmWiringValidation:
         err = validate_payload(
             TurnType.CONFIRM_WIRING,
             {
+                "proposal_id": "00000000-0000-4000-8000-000000000001",
+                "draft_hash": "d" * 64,
                 "topology": {},
                 "edge_contracts": [],
                 "semantic_contracts": [],
@@ -245,6 +255,8 @@ class TestConfirmWiringValidation:
         err = validate_payload(
             TurnType.CONFIRM_WIRING,
             {
+                "proposal_id": "00000000-0000-4000-8000-000000000001",
+                "draft_hash": "d" * 64,
                 "topology": {"sources": {}, "nodes": [], "outputs": []},
                 "edge_contracts": [],
                 "semantic_contracts": [],
@@ -409,7 +421,7 @@ class TestBuildWireTopology:
 
 class TestBuildStep4WireTurn:
     def test_turn_type_and_step(self) -> None:
-        turn = build_step_4_wire_turn(_canonical_state())
+        turn = build_step_4_wire_turn(_canonical_state(), proposal_id="00000000-0000-4000-8000-000000000001", draft_hash="d" * 64)
 
         assert turn["type"] == TurnType.CONFIRM_WIRING.value
         assert turn["step_index"] == 3
@@ -418,7 +430,7 @@ class TestBuildStep4WireTurn:
         state = _contract_state()
         validation = state.validate()
 
-        turn = build_step_4_wire_turn(state)
+        turn = build_step_4_wire_turn(state, proposal_id="00000000-0000-4000-8000-000000000001", draft_hash="d" * 64)
         payload = turn["payload"]
 
         assert payload["topology"] == _build_wire_topology(state)
@@ -427,7 +439,9 @@ class TestBuildStep4WireTurn:
         assert payload["warnings"] == [warning.to_dict() for warning in validation.warnings]
 
     def test_edge_contracts_use_from_to_keys_not_from_id_to_id(self) -> None:
-        payload = build_step_4_wire_turn(_contract_state())["payload"]
+        payload = build_step_4_wire_turn(_contract_state(), proposal_id="00000000-0000-4000-8000-000000000001", draft_hash="d" * 64)[
+            "payload"
+        ]
 
         edge_contract = payload["edge_contracts"][0]
 
@@ -437,13 +451,15 @@ class TestBuildStep4WireTurn:
         assert "to_id" not in edge_contract
 
     def test_payload_validates(self) -> None:
-        turn = build_step_4_wire_turn(_contract_state())
+        turn = build_step_4_wire_turn(_contract_state(), proposal_id="00000000-0000-4000-8000-000000000001", draft_hash="d" * 64)
 
         assert validate_payload(TurnType.CONFIRM_WIRING, turn["payload"]) is None
 
     def test_revise_kwargs_fold_into_payload(self) -> None:
         turn = build_step_4_wire_turn(
             _canonical_state(),
+            proposal_id="00000000-0000-4000-8000-000000000001",
+            draft_hash="d" * 64,
             catalog=object(),
             advisor_findings="advisor says the wiring is coherent",
             signoff_outcome="approved",
@@ -453,7 +469,9 @@ class TestBuildStep4WireTurn:
         assert turn["payload"]["signoff_outcome"] == "approved"
 
     def test_initial_confirm_omits_revise_keys(self) -> None:
-        payload = build_step_4_wire_turn(_canonical_state())["payload"]
+        payload = build_step_4_wire_turn(_canonical_state(), proposal_id="00000000-0000-4000-8000-000000000001", draft_hash="d" * 64)[
+            "payload"
+        ]
 
         assert "advisor_findings" not in payload
         assert "signoff_outcome" not in payload
@@ -491,7 +509,7 @@ class TestQueueTransportPin:
         assert normalize["input"] == "inbound"
 
     def test_step_4_wire_turn_emits_and_validates_queue_topology(self) -> None:
-        turn = build_step_4_wire_turn(_queue_state())
+        turn = build_step_4_wire_turn(_queue_state(), proposal_id="00000000-0000-4000-8000-000000000001", draft_hash="d" * 64)
 
         assert turn["type"] == TurnType.CONFIRM_WIRING.value
         assert validate_payload(TurnType.CONFIRM_WIRING, turn["payload"]) is None
@@ -538,7 +556,7 @@ class TestHonestGapRendering:
             version=1,
         )
 
-        payload = build_step_4_wire_turn(state)["payload"]
+        payload = build_step_4_wire_turn(state, proposal_id="00000000-0000-4000-8000-000000000001", draft_hash="d" * 64)["payload"]
         node = payload["topology"]["nodes"][0]
 
         assert node["fork_to"] == ["branch_a", "branch_b"]

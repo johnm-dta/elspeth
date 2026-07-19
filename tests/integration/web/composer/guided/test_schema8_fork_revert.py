@@ -19,7 +19,7 @@ def test_early_guided_checkpoint_survives_public_fork_and_revert_without_proposa
 
     started = composer_test_client.post(
         f"/api/sessions/{parent_id}/guided/start",
-        json={"operation_id": str(uuid4()), "profile": "live"},
+        json={"operation_id": str(uuid4()), "profile": "live", "intent": "Build a live pipeline"},
     )
     assert started.status_code == 200, started.json()
     target_state_id = started.json()["composition_state"]["id"]

@@ -13,6 +13,7 @@ from elspeth.web.sessions.schemas import (
     ConvertGuidedRequest,
     ForkSessionRequest,
     GuidedChatRequest,
+    GuidedPlanRequest,
     GuidedRespondRequest,
     ReenterGuidedRequest,
     RevertStateRequest,
@@ -26,6 +27,7 @@ _OPERATION_ID = "00000000-0000-4000-8000-000000000001"
     ("model_type", "payload"),
     [
         (StartGuidedRequest, {"profile": "live"}),
+        (GuidedPlanRequest, {"intent": "Build a pipeline"}),
         (ConvertGuidedRequest, {}),
         (ReenterGuidedRequest, {}),
         (RevertStateRequest, {"state_id": str(uuid4())}),
@@ -39,7 +41,7 @@ def test_mutating_composer_requests_require_operation_id(model_type, payload) ->
 
 @pytest.mark.parametrize(
     "model_type",
-    [StartGuidedRequest, ConvertGuidedRequest, ReenterGuidedRequest, RevertStateRequest, ForkSessionRequest],
+    [StartGuidedRequest, GuidedPlanRequest, ConvertGuidedRequest, ReenterGuidedRequest, RevertStateRequest, ForkSessionRequest],
 )
 def test_mutating_composer_requests_are_strict_and_extra_forbid(model_type) -> None:
     assert model_type.model_config.get("strict") is True
@@ -337,3 +339,32 @@ def test_operation_hash_ignores_retry_id_but_binds_kind_and_session() -> None:
     assert reenter_hash == guided_operation_request_hash(session_id=session_id, kind="guided_reenter", request=request_b)
     assert reenter_hash != guided_operation_request_hash(session_id=session_id, kind="state_revert", request=request_a)
     assert reenter_hash != guided_operation_request_hash(session_id=uuid4(), kind="guided_reenter", request=request_a)
+
+
+def test_guided_plan_intent_is_visible_bounded_and_hash_authoritative() -> None:
+    session_id = uuid4()
+    request = GuidedPlanRequest.model_validate({"operation_id": _OPERATION_ID, "intent": "  Build the exact graph  "})
+
+    assert request.intent == "  Build the exact graph  "
+    request_hash = guided_operation_request_hash(session_id=session_id, kind="guided_plan", request=request)
+    changed_hash = guided_operation_request_hash(
+        session_id=session_id,
+        kind="guided_plan",
+        request=GuidedPlanRequest.model_validate({"operation_id": _OPERATION_ID, "intent": "Build the exact graph"}),
+    )
+    assert request_hash != changed_hash
+
+    for invalid in ("", " \n\t", "x" * 4097):
+        with pytest.raises(ValidationError, match="intent"):
+            GuidedPlanRequest.model_validate({"operation_id": _OPERATION_ID, "intent": invalid})
+
+
+def test_guided_start_carries_optional_exact_intent_for_server_profile_resolution() -> None:
+    live = StartGuidedRequest.model_validate({"operation_id": _OPERATION_ID, "profile": "live", "intent": "  Keep exact whitespace  "})
+    tutorial = StartGuidedRequest.model_validate({"operation_id": _OPERATION_ID, "profile": "tutorial"})
+
+    assert live.intent == "  Keep exact whitespace  "
+    assert tutorial.intent is None
+    for invalid in ("", " \n\t", "x" * 4097):
+        with pytest.raises(ValidationError, match="intent"):
+            StartGuidedRequest.model_validate({"operation_id": _OPERATION_ID, "profile": "live", "intent": invalid})

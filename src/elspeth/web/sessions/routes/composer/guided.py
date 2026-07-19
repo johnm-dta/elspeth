@@ -143,7 +143,12 @@ from .._helpers import (
     slog,
     sys,
 )
-from .pipeline_settlement import _await_with_deferred_cancellation
+from .pipeline_settlement import (
+    _GUIDED_ATOMIC_SETTLEMENT_COMPLETED,
+    _GUIDED_ATOMIC_SETTLEMENT_FAILURE,
+    _await_guided_atomic_settlement,
+    _await_with_deferred_cancellation,
+)
 
 if TYPE_CHECKING:
     from .guided_chat_atomic import GuidedChatProviderOutcome
@@ -274,6 +279,15 @@ def _load_durable_current_turn(
         validate_current_turn(record.step, turn)
     except ValueError as exc:
         raise AuditIntegrityError(f"Persisted current-schema turn is invalid: {exc}") from exc
+    if record.turn_type in {TurnType.PROPOSE_PIPELINE, TurnType.CONFIRM_WIRING}:
+        active_proposal = guided.active_proposal
+        if active_proposal is None:
+            raise AuditIntegrityError("Persisted guided proposal turn has no active proposal authority")
+        if (
+            turn["payload"]["proposal_id"] != str(active_proposal.proposal_id)
+            or turn["payload"]["draft_hash"] != active_proposal.draft_hash
+        ):
+            raise AuditIntegrityError("Persisted guided proposal turn does not match active proposal authority")
     return turn, prepared
 
 
@@ -422,10 +436,15 @@ def _build_get_guided_turn(
     if step is GuidedStep.STEP_3_TRANSFORMS:
         return None
     if step is GuidedStep.STEP_4_WIRE:
+        active = guided.active_proposal
+        if active is None:
+            raise InvariantError("STEP_4 wire review requires an active proposal binding")
         policy_validation = catalog.validate_composition_state(state)
         validation_state = state if policy_validation.validation.errors else policy_validation.executable_state
         return build_step_4_wire_turn(
             state,
+            proposal_id=str(active.proposal_id),
+            draft_hash=active.draft_hash,
             catalog=catalog,
             validation_state=validation_state,
             validation_summary=policy_validation.validation,
@@ -1299,6 +1318,11 @@ async def post_guided_start(
             detail=(f"Unknown profile discriminator. Valid values: {sorted(k.value for k in WorkflowProfileKind)}."),
         ) from exc
     profile = profile_for_kind(profile_kind)
+    if profile_kind is WorkflowProfileKind.LIVE:
+        if body.intent is None:
+            raise HTTPException(status_code=400, detail="Live guided start requires a visible intent.")
+    elif body.intent is not None:
+        raise HTTPException(status_code=400, detail="Tutorial guided start forbids a client intent.")
 
     from elspeth.contracts.errors import AuditIntegrityError
     from elspeth.web.sessions.protocol import (
@@ -1451,13 +1475,15 @@ async def post_guided_start(
                     # preflighted an empty head. Settle the exact current guided
                     # checkpoint as an idempotent no-op; the service CAS prevents
                     # it from blessing a stale head.
-                    settled_record = await service.complete_existing_state_guided_operation(
-                        renewed_fence,
-                        state_id=current_record.id,
-                        expected_current_state_id=current_record.id,
-                        expected_current_state_version=current_record.version,
-                        actor="composer_route",
-                        response_hash_factory=lambda record: guided_response_hash(_response_from_record(record)),
+                    settled_record = await _await_guided_atomic_settlement(
+                        service.complete_existing_state_guided_operation(
+                            renewed_fence,
+                            state_id=current_record.id,
+                            expected_current_state_id=current_record.id,
+                            expected_current_state_version=current_record.version,
+                            actor="composer_route",
+                            response_hash_factory=lambda record: guided_response_hash(_response_from_record(record)),
+                        )
                     )
                     return _response_from_record(settled_record)
 
@@ -1501,21 +1527,57 @@ async def post_guided_start(
                     validation_errors=persisted_errors,
                     composer_meta={"guided_session": seeded_guided.to_dict()},
                 )
-                seed_outcome = await service.seed_or_complete_guided_start_operation(
-                    renewed_fence,
-                    state=state_data,
-                    provenance="session_seed",
-                    actor="composer_route",
-                    response_hash_factory=lambda record: guided_response_hash(_response_from_record(record)),
-                    payloads=(prepared_seed_turn,),
-                    audit_evidence=seed_evidence,
-                    payload_store=request.app.state.payload_store,
+                seed_outcome = await _await_guided_atomic_settlement(
+                    service.seed_or_complete_guided_start_operation(
+                        renewed_fence,
+                        state=state_data,
+                        provenance="session_seed",
+                        actor="composer_route",
+                        response_hash_factory=lambda record: guided_response_hash(_response_from_record(record)),
+                        payloads=(prepared_seed_turn,),
+                        audit_evidence=seed_evidence,
+                        payload_store=request.app.state.payload_store,
+                    )
                 )
                 return _response_from_record(seed_outcome.state)
         except GuidedOperationFenceLostError:
             # Never poll while holding the compose lock. Rejoin outside it;
             # reserve either observes the winner or performs the sole takeover.
             continue
+        except asyncio.CancelledError as exc:
+            if exc.__dict__.get(_GUIDED_ATOMIC_SETTLEMENT_COMPLETED) is True:
+                raise
+            settlement_failure = exc.__dict__.get(_GUIDED_ATOMIC_SETTLEMENT_FAILURE)
+            if isinstance(settlement_failure, GuidedOperationFenceLostError):
+                raise
+            if settlement_failure is not None:
+                cancel_failure_code: GuidedOperationFailureCode = (
+                    "stale_conflict"
+                    if isinstance(settlement_failure, GuidedOperationSettlementConflictError)
+                    else "integrity_error"
+                    if isinstance(settlement_failure, AuditIntegrityError)
+                    else "operation_failed"
+                )
+            else:
+                caller_task = asyncio.current_task()
+                cancel_failure_code = (
+                    "request_cancelled" if caller_task is not None and caller_task.cancelling() > 0 else "operation_failed"
+                )
+            try:
+                await _await_with_deferred_cancellation(
+                    service.fail_guided_operation(
+                        reserved.fence,
+                        failure_code=cancel_failure_code,
+                        actor="composer_route",
+                    )
+                )
+            except GuidedOperationFenceLostError as fence_lost:
+                raise exc from fence_lost
+            except Exception as failure_exc:
+                raise exc from failure_exc
+            if settlement_failure is not None:
+                raise exc from settlement_failure
+            raise
         except Exception as exc:
             failure_code: GuidedOperationFailureCode = (
                 "stale_conflict"
@@ -2529,6 +2591,7 @@ async def post_guided_respond(
                                 user_id=user.user_id,
                                 supersedes_draft_hash=authority.proposal.draft_hash,
                                 recorder=planner_recorder,
+                                operation_fence=fence,
                             )
                             projection = build_guided_proposal_projection(
                                 proposal_id=successor_proposal_id,
@@ -2602,39 +2665,41 @@ async def post_guided_respond(
                                 ),
                                 assistant_turn_seq=None,
                             )
-                            stage_settlement = await service.stage_guided_pipeline_proposal(
-                                GuidedPipelineProposalStageCommand(
-                                    fence=fence,
-                                    expected_current_state_id=state_record.id,
-                                    expected_current_state_version=state_record.version,
-                                    expected_current_content_hash=predecessor_hash,
-                                    checkpoint_state_id=checkpoint_id,
-                                    proposal_id=successor_proposal_id,
-                                    state=stage_state,
-                                    plan=plan,
-                                    summary=PROPOSAL_SUMMARY_TEMPLATE,
-                                    rationale=PROPOSAL_RATIONALE_TEMPLATE,
-                                    affects=("pipeline",),
-                                    arguments_redacted_json=redact_tool_call_arguments(
-                                        "set_pipeline",
-                                        deep_thaw(plan.proposal.pipeline),
-                                        telemetry=NoopRedactionTelemetry(),
+                            stage_settlement = await _await_guided_atomic_settlement(
+                                service.stage_guided_pipeline_proposal(
+                                    GuidedPipelineProposalStageCommand(
+                                        fence=fence,
+                                        expected_current_state_id=state_record.id,
+                                        expected_current_state_version=state_record.version,
+                                        expected_current_content_hash=predecessor_hash,
+                                        checkpoint_state_id=checkpoint_id,
+                                        proposal_id=successor_proposal_id,
+                                        state=stage_state,
+                                        plan=plan,
+                                        summary=PROPOSAL_SUMMARY_TEMPLATE,
+                                        rationale=PROPOSAL_RATIONALE_TEMPLATE,
+                                        affects=("pipeline",),
+                                        arguments_redacted_json=redact_tool_call_arguments(
+                                            "set_pipeline",
+                                            deep_thaw(plan.proposal.pipeline),
+                                            telemetry=NoopRedactionTelemetry(),
+                                        ),
+                                        catalog_plugin_ids=catalog_ids,
+                                        actor="composer_route",
+                                        user_message_id=root_message.id if root_message is not None else None,
+                                        user_message_content_hash=(
+                                            _message_content_hash(root_message.content) if root_message is not None else None
+                                        ),
+                                        supersedes_proposal_id=authority.row.id,
+                                        response=stage_response,
+                                        payloads=(prepared_response, prepared_proposal),
+                                        audit_evidence=GuidedAuditEvidence(
+                                            invocations=(*planner_recorder.invocations, *recorder.invocations),
+                                            llm_calls=planner_recorder.llm_calls,
+                                        ),
                                     ),
-                                    catalog_plugin_ids=catalog_ids,
-                                    actor="composer_route",
-                                    user_message_id=root_message.id if root_message is not None else None,
-                                    user_message_content_hash=(
-                                        _message_content_hash(root_message.content) if root_message is not None else None
-                                    ),
-                                    supersedes_proposal_id=authority.row.id,
-                                    response=stage_response,
-                                    payloads=(prepared_response, prepared_proposal),
-                                    audit_evidence=GuidedAuditEvidence(
-                                        invocations=(*planner_recorder.invocations, *recorder.invocations),
-                                        llm_calls=planner_recorder.llm_calls,
-                                    ),
-                                ),
-                                payload_store=payload_store,
+                                    payload_store=payload_store,
+                                )
                             )
                             return _response_from_record(stage_settlement.result_state)
 
@@ -2692,24 +2757,41 @@ async def post_guided_respond(
                             response_hash=prepared_response.payload_id,
                             summary="Guided pipeline proposal accepted.",
                         )
+                        accepted_state = _replace(prepared.result.updated_state, guided_session=guided)
+                        policy_validation = catalog.validate_composition_state(accepted_state)
+                        validation_state = accepted_state if policy_validation.validation.errors else policy_validation.executable_state
+                        wire_turn = build_step_4_wire_turn(
+                            accepted_state,
+                            proposal_id=str(authority.row.id),
+                            draft_hash=authority.proposal.draft_hash,
+                            catalog=catalog,
+                            validation_state=validation_state,
+                            validation_summary=policy_validation.validation,
+                        )
+                        wire_turn = _finalize_guided_turn(wire_turn, shield_available=shield_available)
+                        try:
+                            wire_type = validate_current_turn(GuidedStep.STEP_4_WIRE, wire_turn)
+                        except ValueError as exc:
+                            raise AuditIntegrityError("guided accepted proposal produced an invalid wire review") from exc
+                        prepared_wire = prepare_guided_json_payload(
+                            payload_store,
+                            purpose="turn",
+                            payload=wire_turn["payload"],
+                        )
+                        wire_record = TurnRecord(
+                            step=GuidedStep.STEP_4_WIRE,
+                            turn_type=wire_type,
+                            payload_hash=prepared_wire.payload_id,
+                            response_hash=None,
+                            emitter="server",
+                        )
                         final_guided = _replace(
                             guided,
                             step=GuidedStep.STEP_4_WIRE,
-                            history=(*guided.history[:-1], answered),
+                            history=(*guided.history[:-1], answered, wire_record),
                             deferred_intents=remaining,
-                            active_proposal=None,
+                            active_proposal=guided.active_proposal,
                             active_edit_target=None,
-                        )
-                        accepted_state = _replace(prepared.result.updated_state, guided_session=final_guided)
-                        wire_turn = _build_get_guided_turn(accepted_state, final_guided, catalog=catalog)
-                        if wire_turn is None:
-                            raise AuditIntegrityError("guided accepted proposal did not produce wire review")
-                        wire_turn = _finalize_guided_turn(wire_turn, shield_available=shield_available)
-                        final_guided, _wire_record, _wire_type, prepared_wire = _prepare_server_turn_occurrence(
-                            final_guided,
-                            current_step=GuidedStep.STEP_4_WIRE,
-                            turn=wire_turn,
-                            payload_store=payload_store,
                         )
                         accepted_state = _replace(accepted_state, guided_session=final_guided)
                         emit_turn_answered(
@@ -2733,7 +2815,7 @@ async def post_guided_respond(
                         emit_turn_emitted(
                             recorder,
                             step=GuidedStep.STEP_4_WIRE,
-                            turn_type=TurnType(wire_turn["type"]),
+                            turn_type=wire_type,
                             payload_hash=prepared_wire.payload_id,
                             payload_payload_id=prepared_wire.payload_id,
                             emitter="server",
@@ -2937,6 +3019,7 @@ async def post_guided_respond(
                                 user_id=user.user_id,
                                 supersedes_draft_hash=None,
                                 recorder=planner_recorder,
+                                operation_fence=fence,
                             )
                             projection = build_guided_proposal_projection(
                                 proposal_id=proposal_id,
@@ -2999,39 +3082,41 @@ async def post_guided_respond(
                                 ),
                                 assistant_turn_seq=None,
                             )
-                            stage_settlement = await service.stage_guided_pipeline_proposal(
-                                GuidedPipelineProposalStageCommand(
-                                    fence=fence,
-                                    expected_current_state_id=state_record.id,
-                                    expected_current_state_version=state_record.version,
-                                    expected_current_content_hash=predecessor_hash,
-                                    checkpoint_state_id=checkpoint_id,
-                                    proposal_id=proposal_id,
-                                    state=stage_state,
-                                    plan=plan,
-                                    summary=PROPOSAL_SUMMARY_TEMPLATE,
-                                    rationale=PROPOSAL_RATIONALE_TEMPLATE,
-                                    affects=("pipeline",),
-                                    arguments_redacted_json=redact_tool_call_arguments(
-                                        "set_pipeline",
-                                        deep_thaw(plan.proposal.pipeline),
-                                        telemetry=NoopRedactionTelemetry(),
+                            stage_settlement = await _await_guided_atomic_settlement(
+                                service.stage_guided_pipeline_proposal(
+                                    GuidedPipelineProposalStageCommand(
+                                        fence=fence,
+                                        expected_current_state_id=state_record.id,
+                                        expected_current_state_version=state_record.version,
+                                        expected_current_content_hash=predecessor_hash,
+                                        checkpoint_state_id=checkpoint_id,
+                                        proposal_id=proposal_id,
+                                        state=stage_state,
+                                        plan=plan,
+                                        summary=PROPOSAL_SUMMARY_TEMPLATE,
+                                        rationale=PROPOSAL_RATIONALE_TEMPLATE,
+                                        affects=("pipeline",),
+                                        arguments_redacted_json=redact_tool_call_arguments(
+                                            "set_pipeline",
+                                            deep_thaw(plan.proposal.pipeline),
+                                            telemetry=NoopRedactionTelemetry(),
+                                        ),
+                                        catalog_plugin_ids=catalog_ids,
+                                        actor="composer_route",
+                                        user_message_id=root_message.id if root_message is not None else None,
+                                        user_message_content_hash=(
+                                            _message_content_hash(root_message.content) if root_message is not None else None
+                                        ),
+                                        supersedes_proposal_id=None,
+                                        response=stage_response,
+                                        payloads=tuple(prepared_payloads),
+                                        audit_evidence=GuidedAuditEvidence(
+                                            invocations=(*planner_recorder.invocations, *recorder.invocations),
+                                            llm_calls=planner_recorder.llm_calls,
+                                        ),
                                     ),
-                                    catalog_plugin_ids=catalog_ids,
-                                    actor="composer_route",
-                                    user_message_id=root_message.id if root_message is not None else None,
-                                    user_message_content_hash=(
-                                        _message_content_hash(root_message.content) if root_message is not None else None
-                                    ),
-                                    supersedes_proposal_id=None,
-                                    response=stage_response,
-                                    payloads=tuple(prepared_payloads),
-                                    audit_evidence=GuidedAuditEvidence(
-                                        invocations=(*planner_recorder.invocations, *recorder.invocations),
-                                        llm_calls=planner_recorder.llm_calls,
-                                    ),
-                                ),
-                                payload_store=payload_store,
+                                    payload_store=payload_store,
+                                )
                             )
                             return _response_from_record(stage_settlement.result_state)
 
@@ -3089,11 +3174,46 @@ async def post_guided_respond(
                 rejoin_after_lock = True
             except asyncio.CancelledError as exc:
                 exc_dict = exc.__dict__
-                # Only planner terminal exceptions carry this evidence marker.
-                # A route cancellation during an in-flight settlement must
-                # escape unchanged so the worker can commit and replay it.
-                if "llm_calls" not in exc_dict:
+                if exc_dict.get(_GUIDED_ATOMIC_SETTLEMENT_COMPLETED) is True:
                     raise
+                settlement_failure = exc_dict.get(_GUIDED_ATOMIC_SETTLEMENT_FAILURE)
+                if isinstance(settlement_failure, GuidedOperationFenceLostError):
+                    raise
+                caller_task = asyncio.current_task()
+                request_cancelled = caller_task is not None and caller_task.cancelling() > 0
+                if request_cancelled or "llm_calls" not in exc_dict:
+                    cancel_failure_code: GuidedOperationFailureCode = (
+                        "stale_conflict"
+                        if isinstance(settlement_failure, GuidedOperationSettlementConflictError)
+                        else "integrity_error"
+                        if isinstance(settlement_failure, (AuditIntegrityError, InvariantError))
+                        else "operation_failed"
+                        if settlement_failure is not None or not request_cancelled
+                        else "request_cancelled"
+                    )
+                    try:
+                        await _await_with_deferred_cancellation(
+                            service.fail_guided_operation_with_audit(
+                                GuidedOperationFailureCommand(
+                                    fence=reserved.fence,
+                                    failure_code=cancel_failure_code,
+                                    actor="composer_route",
+                                    audit_evidence=GuidedAuditEvidence(
+                                        invocations=planner_recorder.invocations,
+                                        llm_calls=planner_recorder.llm_calls,
+                                        chat_turns=planner_recorder.chat_turns,
+                                    ),
+                                ),
+                            )
+                        )
+                    except GuidedOperationFenceLostError as fence_lost:
+                        raise exc from fence_lost
+                    except Exception as failure_exc:
+                        raise exc from failure_exc
+                    if settlement_failure is not None:
+                        raise exc from settlement_failure
+                    raise
+                # Only planner terminal exceptions carry this evidence marker.
                 attached_calls = exc_dict["llm_calls"]
                 carrier_error: AuditIntegrityError | None = None
                 if type(attached_calls) is not tuple or attached_calls != planner_recorder.llm_calls:
@@ -3466,3 +3586,8 @@ async def post_guided_convert(
             actor="composer_route",
         )
         raise_guided_operation_failure(failed)
+
+
+from .guided_plan import router as guided_plan_router  # noqa: E402
+
+router.include_router(guided_plan_router)

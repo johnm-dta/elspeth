@@ -506,6 +506,8 @@ class TestPayloadValidation:
 
     def test_confirm_wiring_minimal_wire_payload_validates(self) -> None:
         payload = {
+            "proposal_id": "00000000-0000-4000-8000-000000000001",
+            "draft_hash": "d" * 64,
             "topology": {"sources": {}, "nodes": [], "outputs": []},
             "edge_contracts": [],
             "semantic_contracts": [],
@@ -518,6 +520,8 @@ class TestPayloadValidation:
         # closed composition vocabulary, so a queue node validates without any
         # queue-specific schema branch (elspeth-a5b86149d4 / elspeth-6421ffa028).
         payload = {
+            "proposal_id": "00000000-0000-4000-8000-000000000001",
+            "draft_hash": "d" * 64,
             "topology": {
                 "sources": {},
                 "nodes": [
@@ -548,6 +552,20 @@ class TestPayloadValidation:
         assert "edge_contracts" in err
         assert "semantic_contracts" in err
         assert "warnings" in err
+
+    @pytest.mark.parametrize("missing", ["proposal_id", "draft_hash"])
+    def test_confirm_wiring_requires_pending_proposal_binding(self, missing: str) -> None:
+        payload = {
+            "proposal_id": "00000000-0000-4000-8000-000000000001",
+            "draft_hash": "d" * 64,
+            "topology": {"sources": {}, "nodes": [], "outputs": []},
+            "edge_contracts": [],
+            "semantic_contracts": [],
+            "warnings": [],
+        }
+        del payload[missing]
+
+        assert validate_payload(TurnType.CONFIRM_WIRING, payload) is not None
 
     def test_schema_form_plugin_options_requires_plugin(self) -> None:
         from elspeth.web.composer.guided.protocol import validate_payload

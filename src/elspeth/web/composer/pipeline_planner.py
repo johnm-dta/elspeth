@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import Engine
 
+from elspeth.contracts.blobs import BlobGuidedOperationWriteFence
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallStatus
 from elspeth.contracts.composer_progress import ComposerProgressSink
 from elspeth.contracts.errors import AuditIntegrityError
@@ -207,12 +208,15 @@ class PlannerCustodyConfig:
     max_storage_per_session: int
     secret_service: WebSecretResolver | None
     runtime_preflight: RuntimePreflight | None
+    write_fence: BlobGuidedOperationWriteFence | None = None
 
     def __post_init__(self) -> None:
         if type(self.data_dir) is not str or not self.data_dir.strip():
             raise ValueError("data_dir must be a non-empty exact string")
         if type(self.max_storage_per_session) is not int or self.max_storage_per_session <= 0:
             raise ValueError("max_storage_per_session must be a positive exact integer")
+        if self.write_fence is not None and type(self.write_fence) is not BlobGuidedOperationWriteFence:
+            raise TypeError("PlannerCustodyConfig.write_fence must be an exact BlobGuidedOperationWriteFence")
 
 
 PlannerSettlement = Literal["complete", "failed", "cancelled"]
@@ -649,6 +653,7 @@ async def _build_valid_pipeline_plan(
                 engine=custody_config.session_engine,
                 data_dir=custody_config.data_dir,
                 max_storage_per_session=custody_config.max_storage_per_session,
+                write_fence=custody_config.write_fence,
             )
         )
         safe_pipeline = cast(dict[str, Any], deep_thaw(preparation.arguments))

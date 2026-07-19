@@ -297,7 +297,7 @@ class TestStep4WireEmitter:
         assert _step_index(GuidedStep.STEP_4_WIRE) == 3
 
     def test_builds_confirm_wiring_skeleton_payload(self) -> None:
-        turn = build_step_4_wire_turn(_empty_state())
+        turn = build_step_4_wire_turn(_empty_state(), proposal_id="00000000-0000-4000-8000-000000000001", draft_hash="d" * 64)
 
         assert turn["type"] == TurnType.CONFIRM_WIRING.value
         assert turn["step_index"] == 3
@@ -305,6 +305,8 @@ class TestStep4WireEmitter:
         payload = turn["payload"]
         assert set(payload.keys()) == {
             "topology",
+            "proposal_id",
+            "draft_hash",
             "edge_contracts",
             "semantic_contracts",
             "warnings",
@@ -319,7 +321,7 @@ class TestStep4WireEmitter:
         # the canonical queue row appears in the topology and the payload
         # validates, with no queue-specific emitter mutation
         # (elspeth-a5b86149d4 / elspeth-6421ffa028).
-        turn = build_step_4_wire_turn(_queue_state())
+        turn = build_step_4_wire_turn(_queue_state(), proposal_id="00000000-0000-4000-8000-000000000001", draft_hash="d" * 64)
 
         assert turn["type"] == TurnType.CONFIRM_WIRING.value
         assert validate_payload(TurnType.CONFIRM_WIRING, turn["payload"]) is None

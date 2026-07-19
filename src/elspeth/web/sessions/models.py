@@ -150,7 +150,10 @@ from elspeth.core.schema_identity import create_schema_identity_table
 #        ``quota_exceeded`` value so fork quota failures settle once and replay
 #        as a stable HTTP 413 instead of violating the epoch-29 CHECK.
 #        Pre-release policy remains delete-and-recreate; no migration exists.
-SESSION_SCHEMA_EPOCH = 30
+#   31 -> guided checkpoint schema 9 adds ``guided_plan``, the closed
+#        pipeline-proposal replay locator, and ``request_cancelled``. Schema 8
+#        and epoch 30 are rejected outright; no decoder or migration exists.
+SESSION_SCHEMA_EPOCH = 31
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 _POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"
@@ -691,7 +694,7 @@ guided_operations_table = Table(
         name="ck_guided_operations_result_session_id_bounded",
     ),
     CheckConstraint(
-        "kind IN ('guided_start', 'guided_respond', 'guided_chat', 'guided_convert', 'guided_reenter', 'state_revert', 'session_fork')",
+        "kind IN ('guided_start', 'guided_respond', 'guided_chat', 'guided_convert', 'guided_reenter', 'guided_plan', 'state_revert', 'session_fork')",
         name="ck_guided_operations_kind",
     ),
     CheckConstraint("status IN ('in_progress', 'completed', 'failed')", name="ck_guided_operations_status"),
@@ -709,12 +712,13 @@ guided_operations_table = Table(
         name="ck_guided_operations_lease_token_bounded",
     ),
     CheckConstraint(
-        "result_kind IS NULL OR result_kind IN ('composition_state', 'session')",
+        "result_kind IS NULL OR result_kind IN ('composition_state', 'pipeline_proposal', 'session')",
         name="ck_guided_operations_result_kind",
     ),
     CheckConstraint(
         "failure_code IS NULL OR failure_code IN ('provider_unavailable', 'provider_timeout', "
-        "'invalid_provider_response', 'stale_conflict', 'integrity_error', 'custody_error', 'quota_exceeded', 'operation_failed')",
+        "'invalid_provider_response', 'stale_conflict', 'integrity_error', 'custody_error', 'quota_exceeded', "
+        "'operation_failed', 'request_cancelled')",
         name="ck_guided_operations_failure_code",
     ),
     CheckConstraint(
@@ -736,7 +740,9 @@ guided_operations_table = Table(
         "(status = 'completed' AND ("
         "(kind = 'session_fork' AND result_kind = 'session' AND result_session_id IS NOT NULL "
         "AND result_state_id IS NULL AND proposal_id IS NULL) OR "
-        "(kind <> 'session_fork' AND result_kind = 'composition_state' "
+        "(kind = 'guided_plan' AND result_kind = 'pipeline_proposal' "
+        "AND result_state_id IS NOT NULL AND result_session_id IS NULL AND proposal_id IS NOT NULL) OR "
+        "(kind NOT IN ('session_fork', 'guided_plan') AND result_kind = 'composition_state' "
         "AND result_state_id IS NOT NULL AND result_session_id IS NULL "
         "AND (proposal_id IS NULL OR kind IN ('guided_respond', 'guided_chat'))))) OR "
         "(status = 'failed' AND result_kind IS NULL AND result_state_id IS NULL "

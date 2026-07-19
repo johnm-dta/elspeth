@@ -4,6 +4,7 @@ export type GuidedRetryKind =
   | "guided_chat"
   | "guided_convert"
   | "guided_reenter"
+  | "guided_plan"
   | "state_revert"
   | "session_fork";
 
@@ -26,8 +27,8 @@ export type GuidedRetryAcquisition =
   | { status: "acquired"; handle: GuidedRetryHandle }
   | { status: "conflict"; existing: GuidedRetryHandle };
 
-export const GUIDED_RETRY_STORAGE_KEY = "elspeth_guided_operation_retries_v1";
-const STORAGE_SCHEMA = "guided-operation-retries.v1";
+export const GUIDED_RETRY_STORAGE_KEY = "elspeth_guided_operation_retries_v2";
+const STORAGE_SCHEMA = "guided-operation-retries.v2";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SESSION_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -55,6 +56,7 @@ function isDescriptor(value: unknown): value is GuidedRetryDescriptor {
       record.kind === "guided_chat" ||
       record.kind === "guided_convert" ||
       record.kind === "guided_reenter" ||
+      record.kind === "guided_plan" ||
       record.kind === "state_revert" ||
       record.kind === "session_fork") &&
     typeof record.sessionId === "string" &&
@@ -235,7 +237,7 @@ export function acquireGuidedRetry(
     throw new Error("guided retry sessionId must be a canonical UUID");
   }
   const fingerprint = requestFingerprint(
-    JSON.stringify(canonicalIdentity({ schema: "guided-operation-request-fingerprint.v1", kind, requestIdentity })),
+    JSON.stringify(canonicalIdentity({ schema: "guided-operation-request-fingerprint.v2", kind, requestIdentity })),
   );
   const descriptors = readDescriptors();
   const scoped = descriptors.filter(

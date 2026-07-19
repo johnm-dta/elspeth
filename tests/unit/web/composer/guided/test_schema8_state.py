@@ -224,7 +224,15 @@ def _full_session() -> GuidedSession:
     deferred = _deferred()
     return GuidedSession(
         step=GuidedStep.STEP_3_TRANSFORMS,
-        history=(),
+        history=(
+            TurnRecord(
+                step=GuidedStep.STEP_3_TRANSFORMS,
+                turn_type=TurnType.PROPOSE_PIPELINE,
+                payload_hash=HASH_A,
+                response_hash=None,
+                emitter="llm",
+            ),
+        ),
         source_order=source_order,
         reviewed_sources=sources,
         pending_source_intents={},
@@ -249,7 +257,7 @@ def test_schema8_round_trip_retains_plural_order_and_stable_ids_after_restart() 
     encoded = session.to_dict()
     restored = GuidedSession.from_dict(encoded)
 
-    assert GUIDED_SESSION_SCHEMA_VERSION == 8
+    assert GUIDED_SESSION_SCHEMA_VERSION == 9
     assert restored == session
     assert restored.source_order == (SOURCE_B, SOURCE_A)
     assert restored.output_order == (OUTPUT_B, OUTPUT_A)
@@ -370,7 +378,7 @@ def test_constraint_union_round_trips_with_subject_target() -> None:
     assert DeferredStageIntent.from_dict(deferred.to_dict()) == deferred
 
 
-@pytest.mark.parametrize("bad_version", [7, 9, "8", 8.0, True])
+@pytest.mark.parametrize("bad_version", [7, 8, "9", 9.0, True])
 def test_wrong_or_coerced_schema_version_fails_closed(bad_version: object) -> None:
     encoded = GuidedSession.initial().to_dict()
     encoded["schema_version"] = bad_version
@@ -512,6 +520,44 @@ def test_active_proposal_requires_no_pending_intents_and_valid_covered_subsequen
     encoded["deferred_intents"][0]["constraints"] = []
     with pytest.raises(InvariantError, match="empty constraints"):
         GuidedSession.from_dict(encoded)
+
+
+def test_active_proposal_requires_one_trailing_unanswered_proposal_or_wire_turn() -> None:
+    valid_step_3 = _full_session()
+    assert GuidedSession.from_dict(valid_step_3.to_dict()) == valid_step_3
+
+    valid_step_4 = replace(
+        valid_step_3,
+        step=GuidedStep.STEP_4_WIRE,
+        history=(
+            replace(valid_step_3.history[-1], response_hash=HASH_B),
+            TurnRecord(
+                step=GuidedStep.STEP_4_WIRE,
+                turn_type=TurnType.CONFIRM_WIRING,
+                payload_hash=HASH_C,
+                response_hash=None,
+                emitter="server",
+            ),
+        ),
+    )
+    assert GuidedSession.from_dict(valid_step_4.to_dict()) == valid_step_4
+
+    invalid_records = []
+    missing = valid_step_3.to_dict()
+    missing["history"] = []
+    invalid_records.append(missing)
+    answered = valid_step_3.to_dict()
+    answered["history"][-1]["response_hash"] = HASH_B
+    invalid_records.append(answered)
+    cross_stage = valid_step_3.to_dict()
+    cross_stage["step"] = GuidedStep.STEP_4_WIRE.value
+    invalid_records.append(cross_stage)
+    ambiguous = valid_step_4.to_dict()
+    ambiguous["history"].append(dict(ambiguous["history"][-1]))
+    invalid_records.append(ambiguous)
+    for invalid in invalid_records:
+        with pytest.raises(InvariantError, match="active_proposal"):
+            GuidedSession.from_dict(invalid)
 
 
 def test_active_edit_target_must_resolve_or_have_active_proposal() -> None:

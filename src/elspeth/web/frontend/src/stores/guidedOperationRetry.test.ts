@@ -74,7 +74,7 @@ describe("guided operation retry custody", () => {
     window.sessionStorage.setItem(
       GUIDED_RETRY_STORAGE_KEY,
       JSON.stringify({
-        schema: "guided-operation-retries.v1",
+        schema: "guided-operation-retries.v2",
         descriptors: [{ kind: "guided_reenter", sessionId: SESSION_A, operationId: "not-a-uuid" }],
       }),
     );
@@ -99,6 +99,36 @@ describe("guided operation retry custody", () => {
 
     expect(retry.operationId).toBe(first.operationId);
     expect(window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY)).toContain('"kind":"guided_convert"');
+  });
+
+  it("retains guided plan custody under the v2-only envelope", () => {
+    const first = acquireHandle("guided_plan", SESSION_A, ["Build the exact graph"]);
+    const retry = acquireHandle("guided_plan", SESSION_A, ["Build the exact graph"]);
+
+    expect(retry.operationId).toBe(first.operationId);
+    expect(window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY)).toContain('"schema":"guided-operation-retries.v2"');
+    expect(window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY)).toContain('"kind":"guided_plan"');
+  });
+
+  it("does not read the retired v1 key or envelope", () => {
+    window.sessionStorage.setItem(
+      "elspeth_guided_operation_retries_v1",
+      JSON.stringify({
+        schema: "guided-operation-retries.v1",
+        descriptors: [{
+          kind: "guided_reenter",
+          sessionId: SESSION_A,
+          requestFingerprint: "a".repeat(64),
+          operationId: "00000000-0000-4000-8000-000000000399",
+          createdAt: Date.now(),
+        }],
+      }),
+    );
+
+    const acquired = acquireHandle("guided_reenter", SESSION_A, []);
+
+    expect(acquired.operationId).not.toBe("00000000-0000-4000-8000-000000000399");
+    expect(GUIDED_RETRY_STORAGE_KEY).toBe("elspeth_guided_operation_retries_v2");
   });
 
   it("reuses one session fork operation without storing edited content", () => {
@@ -183,7 +213,7 @@ describe("guided operation retry custody", () => {
     window.sessionStorage.setItem(
       GUIDED_RETRY_STORAGE_KEY,
       JSON.stringify({
-        schema: "guided-operation-retries.v1",
+        schema: "guided-operation-retries.v2",
         descriptors: [
           descriptor("guided_respond", SESSION_A, "301", "a"),
           descriptor("guided_respond", SESSION_A, "302", "b"),

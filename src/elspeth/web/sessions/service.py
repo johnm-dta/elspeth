@@ -160,6 +160,7 @@ from elspeth.web.sessions.protocol import (
     GuidedPipelineProposalAcceptCommand,
     GuidedPipelineProposalBackEditCommand,
     GuidedPipelineProposalRejectCommand,
+    GuidedPipelineProposalResult,
     GuidedPipelineProposalStageCommand,
     GuidedPipelineProposalStageSettlement,
     GuidedSessionResult,
@@ -1121,17 +1122,18 @@ def _strip_guided_profile_in_meta(
     source_to_child_message_id: Mapping[str, str],
     source_messages_by_id: Mapping[str, ChatMessageRecord],
 ) -> dict[str, Any] | None:
-    """Prepare one schema-8 guided checkpoint for a child session.
+    """Prepare one schema-9 guided checkpoint for a child session.
 
     A fork preserves reviewed facts and deferred intent, but proposal authority
     and parent-session chat identities cannot cross the session boundary. Parse
-    through the strict schema-8 decoder, rebuild the typed checkpoint, and fail
+    through the strict schema-9 decoder, rebuild the typed checkpoint, and fail
     before the fork transaction if any message reference is outside the copied
     slice.
     """
     from elspeth.core.canonical import stable_hash as _message_content_hash
+    from elspeth.web.composer.guided.errors import InvariantError
     from elspeth.web.composer.guided.profile import EMPTY_PROFILE
-    from elspeth.web.composer.guided.protocol import GuidedStep
+    from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
     from elspeth.web.composer.guided.state_machine import GuidedSession
 
     if composer_meta is None:
@@ -1141,8 +1143,37 @@ def _strip_guided_profile_in_meta(
     if guided_raw is None:
         return thawed
     if type(guided_raw) is not dict:
-        raise AuditIntegrityError("fork guided metadata is not an exact schema-8 object")
-    guided = GuidedSession.from_dict(guided_raw)
+        raise AuditIntegrityError("fork guided metadata is not an exact schema-9 object")
+    try:
+        guided = GuidedSession.from_dict(guided_raw)
+    except (InvariantError, KeyError, TypeError, ValueError) as exc:
+        raise AuditIntegrityError("fork guided schema-9 authority is malformed") from exc
+
+    unanswered_indices = [index for index, record in enumerate(guided.history) if record.response_hash is None]
+    trailing = guided.history[-1] if guided.history else None
+    has_exact_active_occurrence = bool(
+        unanswered_indices == [len(guided.history) - 1]
+        and trailing is not None
+        and (
+            (
+                guided.step is GuidedStep.STEP_3_TRANSFORMS
+                and trailing.step is GuidedStep.STEP_3_TRANSFORMS
+                and trailing.turn_type is TurnType.PROPOSE_PIPELINE
+            )
+            or (
+                guided.step is GuidedStep.STEP_4_WIRE
+                and trailing.step is GuidedStep.STEP_4_WIRE
+                and trailing.turn_type is TurnType.CONFIRM_WIRING
+            )
+        )
+    )
+    has_orphan_authority_occurrence = any(
+        guided.history[index].turn_type in {TurnType.PROPOSE_PIPELINE, TurnType.CONFIRM_WIRING} for index in unanswered_indices
+    )
+    if (guided.active_proposal is not None and not has_exact_active_occurrence) or (
+        guided.active_proposal is None and has_orphan_authority_occurrence
+    ):
+        raise AuditIntegrityError("fork guided proposal reference/history coupling is malformed")
 
     if set(source_to_child_message_id) != set(source_messages_by_id):
         raise AuditIntegrityError("fork guided message maps have different source keysets")
@@ -1179,7 +1210,6 @@ def _strip_guided_profile_in_meta(
     rewinds_to_topology = guided.active_proposal is not None or guided.step in {GuidedStep.STEP_3_TRANSFORMS, GuidedStep.STEP_4_WIRE}
     reconciled_history = guided.history
     if rewinds_to_topology:
-        unanswered_indices = [index for index, record in enumerate(guided.history) if record.response_hash is None]
         if len(unanswered_indices) > 1 or (unanswered_indices and unanswered_indices[0] != len(guided.history) - 1):
             raise AuditIntegrityError("fork guided topology rewind has malformed unanswered history")
         if unanswered_indices:
@@ -1666,6 +1696,93 @@ def _restore_authoritative_pipeline_proposal(
         authority,
         row=replace(row, pipeline_metadata=_pipeline_public_metadata(authority)),
     )
+
+
+def _require_pending_guided_checkpoint_proposal_authority(
+    conn: Connection,
+    *,
+    service: SessionServiceImpl,
+    session_id: str,
+    checkpoint: CompositionStateRecord,
+    guided: GuidedSession,
+    role: str,
+) -> AuthoritativePipelineProposal | None:
+    """Validate one checkpoint's complete pending guided proposal authority."""
+    from elspeth.web.composer.guided.planning import guided_private_reviewed_facts
+    from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
+
+    unanswered_indices = [index for index, turn in enumerate(guided.history) if turn.response_hash is None]
+    trailing = guided.history[-1] if guided.history else None
+    has_exact_active_occurrence = bool(
+        unanswered_indices == [len(guided.history) - 1]
+        and trailing is not None
+        and (
+            (
+                guided.step is GuidedStep.STEP_3_TRANSFORMS
+                and trailing.step is GuidedStep.STEP_3_TRANSFORMS
+                and trailing.turn_type is TurnType.PROPOSE_PIPELINE
+            )
+            or (
+                guided.step is GuidedStep.STEP_4_WIRE
+                and trailing.step is GuidedStep.STEP_4_WIRE
+                and trailing.turn_type is TurnType.CONFIRM_WIRING
+            )
+        )
+    )
+    has_orphan_authority_occurrence = any(
+        guided.history[index].turn_type in {TurnType.PROPOSE_PIPELINE, TurnType.CONFIRM_WIRING} for index in unanswered_indices
+    )
+    if (guided.active_proposal is not None and not has_exact_active_occurrence) or (
+        guided.active_proposal is None and has_orphan_authority_occurrence
+    ):
+        raise AuditIntegrityError(f"{role} guided proposal reference/history coupling is malformed")
+    reference = guided.active_proposal
+    if reference is None:
+        return None
+
+    proposal_row = conn.execute(
+        select(composition_proposals_table)
+        .where(composition_proposals_table.c.session_id == session_id)
+        .where(composition_proposals_table.c.id == str(reference.proposal_id))
+    ).one_or_none()
+    if proposal_row is None:
+        raise AuditIntegrityError(f"{role} guided proposal authority is missing or cross-session")
+    creation_rows = conn.execute(
+        select(proposal_events_table)
+        .where(proposal_events_table.c.session_id == session_id)
+        .where(proposal_events_table.c.proposal_id == str(reference.proposal_id))
+        .where(proposal_events_table.c.event_type == "proposal.created")
+    ).fetchall()
+    if len(creation_rows) != 1:
+        raise AuditIntegrityError(f"{role} guided proposal must have exactly one creation event")
+    authority = _restore_authoritative_pipeline_proposal(
+        conn=conn,
+        row=_proposal_record_from_row(proposal_row),
+        creation_event=_proposal_event_record_from_row(creation_rows[0]),
+        reviewed_facts=guided_private_reviewed_facts(guided),
+    )
+    _verify_pipeline_lifecycle_authority(conn, service=service, authority=authority)
+    proposal = authority.proposal
+    if (
+        reference.proposal_id != authority.row.id
+        or reference.draft_hash != proposal.draft_hash
+        or reference.base != proposal.base
+        or reference.reviewed_anchor_hash != proposal.reviewed_anchor_hash
+        or reference.covered_deferred_intent_ids != proposal.covered_deferred_intent_ids
+        or reference.creation_event_schema != _PIPELINE_CREATED_SCHEMA
+        or reference.supersedes_proposal_id != authority.supersedes_proposal_id
+        or reference.supersedes_draft_hash != proposal.supersedes_draft_hash
+    ):
+        raise AuditIntegrityError(f"{role} guided proposal reference differs from canonical authority")
+    if proposal.surface not in {PlannerSurface.GUIDED_STAGED, PlannerSurface.TUTORIAL_PROFILE}:
+        raise AuditIntegrityError(f"{role} guided proposal authority has an invalid surface")
+    if type(proposal.base) is not PresentBase or proposal.base.state_id != checkpoint.id:
+        raise AuditIntegrityError(f"{role} guided proposal checkpoint base is malformed")
+    if proposal.base.composition_content_hash != composition_content_hash(state_from_record(checkpoint)):
+        raise AuditIntegrityError(f"{role} guided proposal checkpoint content binding is malformed")
+    if authority.row.status != "pending":
+        raise AuditIntegrityError(f"{role} guided checkpoint references a terminal pipeline proposal")
+    return authority
 
 
 @dataclass(frozen=True, slots=True)
@@ -3241,7 +3358,7 @@ class SessionServiceImpl:
             SessionServiceImpl._validate_guided_hash(response_hash, label="guided operation response_hash")
             result_kind = row["result_kind"]
             if result_kind == "composition_state":
-                if row["kind"] == "session_fork":
+                if row["kind"] in {"session_fork", "guided_plan"}:
                     raise AuditIntegrityError("Tier 1: guided operation kind does not match its result locator")
                 if row["result_session_id"] is not None:
                     raise AuditIntegrityError("Tier 1: state result retained a session locator")
@@ -3250,6 +3367,16 @@ class SessionServiceImpl:
                 UUID(row["result_state_id"])
                 if row["proposal_id"] is not None:
                     UUID(row["proposal_id"])
+            elif result_kind == "pipeline_proposal":
+                if (
+                    row["kind"] != "guided_plan"
+                    or row["result_state_id"] is None
+                    or row["proposal_id"] is None
+                    or row["result_session_id"] is not None
+                ):
+                    raise AuditIntegrityError("Tier 1: guided plan operation has a malformed proposal locator")
+                UUID(row["result_state_id"])
+                UUID(row["proposal_id"])
             elif result_kind == "session":
                 if row["kind"] != "session_fork" or row["result_state_id"] is not None or row["proposal_id"] is not None:
                     raise AuditIntegrityError("Tier 1: guided operation kind does not match its result locator")
@@ -3270,6 +3397,11 @@ class SessionServiceImpl:
             result: GuidedOperationResult = GuidedCompositionStateResult(
                 state_id=UUID(row["result_state_id"]),
                 proposal_id=UUID(row["proposal_id"]) if row["proposal_id"] is not None else None,
+            )
+        elif result_kind == "pipeline_proposal":
+            result = GuidedPipelineProposalResult(
+                proposal_id=UUID(row["proposal_id"]),
+                checkpoint_state_id=UUID(row["result_state_id"]),
             )
         elif result_kind == "session":
             result = GuidedSessionResult(session_id=UUID(row["result_session_id"]))
@@ -3621,7 +3753,7 @@ class SessionServiceImpl:
     ) -> tuple[dict[str, str | None], GuidedOperationResult]:
         kind = row["kind"]
         if isinstance(result, GuidedCompositionStateResult):
-            if kind == "session_fork":
+            if kind in {"session_fork", "guided_plan"}:
                 raise ValueError("guided operation kind requires a different result locator")
             if result.proposal_id is not None and kind not in {"guided_respond", "guided_chat"}:
                 raise ValueError("only guided respond/chat state results may carry proposal_id")
@@ -3642,6 +3774,31 @@ class SessionServiceImpl:
                 {
                     "result_kind": "composition_state",
                     "result_state_id": state_id,
+                    "result_session_id": None,
+                    "proposal_id": proposal_id,
+                },
+                normalized,
+            )
+        if isinstance(result, GuidedPipelineProposalResult):
+            if kind != "guided_plan":
+                raise ValueError("only guided_plan may complete with a pipeline proposal locator")
+            proposal_id = SessionServiceImpl._merge_guided_binding(
+                current=row["proposal_id"], requested=result.proposal_id, label="proposal"
+            )
+            checkpoint_state_id = SessionServiceImpl._merge_guided_binding(
+                current=row["result_state_id"], requested=result.checkpoint_state_id, label="checkpoint state"
+            )
+            if row["result_session_id"] is not None:
+                raise AuditIntegrityError("Guided plan operation has a conflicting result-session binding")
+            assert proposal_id is not None and checkpoint_state_id is not None
+            normalized = GuidedPipelineProposalResult(
+                proposal_id=UUID(proposal_id),
+                checkpoint_state_id=UUID(checkpoint_state_id),
+            )
+            return (
+                {
+                    "result_kind": "pipeline_proposal",
+                    "result_state_id": checkpoint_state_id,
                     "result_session_id": None,
                     "proposal_id": proposal_id,
                 },
@@ -7754,7 +7911,6 @@ class SessionServiceImpl:
                     raise AuditIntegrityError("state revert session unexpectedly has no current checkpoint")
 
                 from elspeth.web.composer.guided.errors import InvariantError
-                from elspeth.web.composer.guided.planning import guided_private_reviewed_facts
                 from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
                 from elspeth.web.composer.guided.state_machine import GuidedSession
                 from elspeth.web.sessions.guided_replay import GUIDED_REPLAY_META_KEY
@@ -7771,41 +7927,29 @@ class SessionServiceImpl:
                     try:
                         guided = GuidedSession.from_dict(metadata["guided_session"])
                     except (InvariantError, KeyError, TypeError, ValueError) as exc:
-                        raise AuditIntegrityError(f"{role} checkpoint guided schema-8 authority is malformed") from exc
+                        raise AuditIntegrityError(f"{role} checkpoint guided schema-9 authority is malformed") from exc
                     return checkpoint, guided
 
                 target_record, target_guided = _guided_checkpoint(prior_row, role="target")
                 current_record, current_guided = _guided_checkpoint(current_row, role="current")
 
-                reference_contexts: dict[
-                    UUID,
-                    list[tuple[str, CompositionStateRecord, GuidedProposalRef, Mapping[str, Any]]],
-                ] = {}
+                referenced_authorities: dict[UUID, AuthoritativePipelineProposal] = {}
                 for role, checkpoint, guided in (
                     ("current", current_record, current_guided),
                     ("target", target_record, target_guided),
                 ):
                     if guided is None:
                         continue
-                    unanswered_indices = [index for index, turn in enumerate(guided.history) if turn.response_hash is None]
-                    has_exact_active_occurrence = bool(
-                        len(unanswered_indices) == 1
-                        and unanswered_indices[0] == len(guided.history) - 1
-                        and guided.history[-1].step is GuidedStep.STEP_3_TRANSFORMS
-                        and guided.history[-1].turn_type is TurnType.PROPOSE_PIPELINE
+                    authority = _require_pending_guided_checkpoint_proposal_authority(
+                        conn,
+                        service=self,
+                        session_id=sid,
+                        checkpoint=checkpoint,
+                        guided=guided,
+                        role=role,
                     )
-                    has_orphan_proposal_occurrence = any(
-                        guided.history[index].turn_type is TurnType.PROPOSE_PIPELINE for index in unanswered_indices
-                    )
-                    if (guided.active_proposal is not None and not has_exact_active_occurrence) or (
-                        guided.active_proposal is None and has_orphan_proposal_occurrence
-                    ):
-                        raise AuditIntegrityError(f"{role} guided proposal reference/history coupling is malformed")
-                    if guided.active_proposal is None:
-                        continue
-                    reference_contexts.setdefault(guided.active_proposal.proposal_id, []).append(
-                        (role, checkpoint, guided.active_proposal, guided_private_reviewed_facts(guided))
-                    )
+                    if authority is not None:
+                        referenced_authorities[authority.row.id] = authority
 
                 def _creation_event_for(proposal_id: UUID) -> ProposalEventRecord:
                     creation_rows = conn.execute(
@@ -7817,58 +7961,6 @@ class SessionServiceImpl:
                     if len(creation_rows) != 1:
                         raise AuditIntegrityError("state revert pipeline proposal must have exactly one creation event")
                     return _proposal_event_record_from_row(creation_rows[0])
-
-                def _require_exact_guided_reference(
-                    reference: GuidedProposalRef,
-                    authority: AuthoritativePipelineProposal,
-                ) -> None:
-                    proposal = authority.proposal
-                    if (
-                        reference.proposal_id != authority.row.id
-                        or reference.draft_hash != proposal.draft_hash
-                        or reference.base != proposal.base
-                        or reference.reviewed_anchor_hash != proposal.reviewed_anchor_hash
-                        or reference.covered_deferred_intent_ids != proposal.covered_deferred_intent_ids
-                        or reference.creation_event_schema != _PIPELINE_CREATED_SCHEMA
-                        or reference.supersedes_proposal_id != authority.supersedes_proposal_id
-                        or reference.supersedes_draft_hash != proposal.supersedes_draft_hash
-                    ):
-                        raise AuditIntegrityError("state revert guided proposal reference differs from canonical authority")
-
-                referenced_authorities: dict[UUID, AuthoritativePipelineProposal] = {}
-                for proposal_id, contexts in reference_contexts.items():
-                    proposal_row = conn.execute(
-                        select(composition_proposals_table)
-                        .where(composition_proposals_table.c.session_id == sid)
-                        .where(composition_proposals_table.c.id == str(proposal_id))
-                    ).one_or_none()
-                    if proposal_row is None:
-                        raise AuditIntegrityError("state revert guided proposal authority is missing or cross-session")
-                    creation_event = _creation_event_for(proposal_id)
-                    authority: AuthoritativePipelineProposal | None = None
-                    for role, checkpoint, reference, reviewed_facts in contexts:
-                        authority = _restore_authoritative_pipeline_proposal(
-                            conn=conn,
-                            row=_proposal_record_from_row(proposal_row),
-                            creation_event=creation_event,
-                            reviewed_facts=reviewed_facts,
-                        )
-                        _verify_pipeline_lifecycle_authority(conn, service=self, authority=authority)
-                        _require_exact_guided_reference(reference, authority)
-                        if authority.proposal.surface not in {
-                            PlannerSurface.GUIDED_STAGED,
-                            PlannerSurface.TUTORIAL_PROFILE,
-                        }:
-                            raise AuditIntegrityError(f"{role} guided proposal authority has an invalid surface")
-                        if type(authority.proposal.base) is not PresentBase or authority.proposal.base.state_id != checkpoint.id:
-                            raise AuditIntegrityError(f"{role} guided proposal checkpoint base is malformed")
-                        checkpoint_content_hash = composition_content_hash(state_from_record(checkpoint))
-                        if authority.proposal.base.composition_content_hash != checkpoint_content_hash:
-                            raise AuditIntegrityError(f"{role} guided proposal checkpoint content binding is malformed")
-                        if role == "current" and authority.row.status != "pending":
-                            raise AuditIntegrityError("current guided checkpoint references a terminal pipeline proposal")
-                    assert authority is not None
-                    referenced_authorities[proposal_id] = authority
 
                 pending_rows = conn.execute(
                     select(composition_proposals_table)
@@ -7949,8 +8041,11 @@ class SessionServiceImpl:
                             final_turn = history[-1]
                             if final_turn.step not in {GuidedStep.STEP_3_TRANSFORMS, GuidedStep.STEP_4_WIRE}:
                                 raise AuditIntegrityError("state revert guided topology rewind found a non-topology unanswered turn")
-                            if target_guided.active_proposal is not None and final_turn.turn_type is not TurnType.PROPOSE_PIPELINE:
-                                raise AuditIntegrityError("state revert guided proposal ref lacks its unanswered proposal turn")
+                            legal_turn_type = (
+                                TurnType.PROPOSE_PIPELINE if final_turn.step is GuidedStep.STEP_3_TRANSFORMS else TurnType.CONFIRM_WIRING
+                            )
+                            if target_guided.active_proposal is not None and final_turn.turn_type is not legal_turn_type:
+                                raise AuditIntegrityError("state revert guided proposal ref lacks its unanswered authority turn")
                             history = history[:-1]
                         restored_guided = replace(
                             target_guided,
@@ -10103,18 +10198,6 @@ class SessionServiceImpl:
         source_to_copied_message_id = {str(msg.id): str(uuid.uuid4()) for msg in messages_to_copy}
         source_assistant_ids = {str(msg.id) for msg in messages_to_copy if msg.role == "assistant"}
 
-        # Strict schema-8 preparation happens before the transaction so an
-        # out-of-slice reference cannot leave any child rows behind.
-        forked_composer_meta = (
-            _strip_guided_profile_in_meta(
-                source_state_record.composer_meta,
-                source_to_copied_message_id,
-                source_messages_by_id,
-            )
-            if source_state_record is not None
-            else None
-        )
-
         # Prepare all message rows upfront — preserve original created_at
         # so get_messages() ordering is deterministic.  Stamping all rows
         # with `now` would make them indistinguishable by timestamp and
@@ -10239,6 +10322,40 @@ class SessionServiceImpl:
                 ):
                     raise AuditIntegrityError("Guided fork message changed before staging")
 
+                locked_source_state: CompositionStateRecord | None = None
+                forked_composer_meta: dict[str, Any] | None = None
+                if source_state_record is not None:
+                    locked_source_row = conn.execute(
+                        select(composition_states_table)
+                        .where(composition_states_table.c.id == str(source_state_record.id))
+                        .where(composition_states_table.c.session_id == parent_session_id_str)
+                    ).one_or_none()
+                    if locked_source_row is None:
+                        raise AuditIntegrityError("Guided fork source checkpoint is missing or cross-session")
+                    locked_source_state = self._row_to_state_record(locked_source_row)
+                    forked_composer_meta = _strip_guided_profile_in_meta(
+                        locked_source_state.composer_meta,
+                        source_to_copied_message_id,
+                        source_messages_by_id,
+                    )
+                    source_meta = deep_thaw(locked_source_state.composer_meta)
+                    if type(source_meta) is dict and source_meta.get("guided_session") is not None:
+                        from elspeth.web.composer.guided.errors import InvariantError
+                        from elspeth.web.composer.guided.state_machine import GuidedSession
+
+                        try:
+                            source_guided = GuidedSession.from_dict(source_meta["guided_session"])
+                        except (InvariantError, KeyError, TypeError, ValueError) as exc:
+                            raise AuditIntegrityError("fork guided schema-9 authority is malformed") from exc
+                        _require_pending_guided_checkpoint_proposal_authority(
+                            conn,
+                            service=self,
+                            session_id=parent_session_id_str,
+                            checkpoint=locked_source_state,
+                            guided=source_guided,
+                            role="fork source",
+                        )
+
                 plan = tuple(
                     BlobForkPlanEntry(
                         source_blob_id=UUID(row.id),
@@ -10293,19 +10410,19 @@ class SessionServiceImpl:
                     )
                 )
                 with self._session_write_lock(conn, new_session_id_str):
-                    if source_state_record is not None and copied_state_id_str is not None:
+                    if locked_source_state is not None and copied_state_id_str is not None:
                         self._insert_composition_state(
                             conn,
                             session_id=new_session_id_str,
                             payload=StatePayload(
                                 data=CompositionStateData(
-                                    sources=source_state_record.sources,
-                                    nodes=source_state_record.nodes,
-                                    edges=source_state_record.edges,
-                                    outputs=source_state_record.outputs,
-                                    metadata_=source_state_record.metadata_,
-                                    is_valid=source_state_record.is_valid,
-                                    validation_errors=source_state_record.validation_errors,
+                                    sources=locked_source_state.sources,
+                                    nodes=locked_source_state.nodes,
+                                    edges=locked_source_state.edges,
+                                    outputs=locked_source_state.outputs,
+                                    metadata_=locked_source_state.metadata_,
+                                    is_valid=locked_source_state.is_valid,
+                                    validation_errors=locked_source_state.validation_errors,
                                     composer_meta=forked_composer_meta,
                                 ),
                                 derived_from_state_id=None,

@@ -656,9 +656,12 @@ function validateWirePayload(value: unknown, path: string): void {
   const payload = exactRecord(
     value,
     path,
-    ["topology", "edge_contracts", "semantic_contracts", "warnings"],
+    ["proposal_id", "draft_hash", "topology", "edge_contracts", "semantic_contracts", "warnings"],
     ["advisor_findings", "signoff_outcome", "passes_remaining"],
   );
+  canonicalUuid(payload.proposal_id, `${path}.proposal_id`);
+  const draftHash = stringValue(payload.draft_hash, `${path}.draft_hash`);
+  if (!SHA256.test(draftHash)) invalid(`${path}.draft_hash`, "expected lowercase SHA-256");
   const topology = exactRecord(payload.topology, `${path}.topology`, ["sources", "nodes", "outputs"]);
   for (const [name, item] of Object.entries(record(topology.sources, `${path}.topology.sources`))) {
     const source = exactRecord(item, `${path}.topology.sources.${name}`, [
@@ -1178,11 +1181,13 @@ function decodeProposalPayload(value: unknown, path: string): ProposePipelinePay
 
 function decodeWirePayload(value: unknown, path: string): WireStageData {
   validateWirePayload(value, path);
-  const payload = exactRecord(value, path, ["topology", "edge_contracts", "semantic_contracts", "warnings"], [
+  const payload = exactRecord(value, path, ["proposal_id", "draft_hash", "topology", "edge_contracts", "semantic_contracts", "warnings"], [
     "advisor_findings", "signoff_outcome", "passes_remaining",
   ]);
   const topology = exactRecord(payload.topology, `${path}.topology`, ["sources", "nodes", "outputs"]);
   return {
+    proposal_id: canonicalUuid(payload.proposal_id, `${path}.proposal_id`),
+    draft_hash: stringValue(payload.draft_hash, `${path}.draft_hash`),
     topology: {
       sources: Object.fromEntries(
         Object.entries(record(topology.sources, `${path}.topology.sources`)).map(([name, item]) => {

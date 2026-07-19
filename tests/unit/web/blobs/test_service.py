@@ -40,6 +40,8 @@ from elspeth.web.blobs.protocol import (
     BlobForkFenceLostError,
     BlobForkPlanEntry,
     BlobForkWriteFence,
+    BlobGuidedOperationFenceLostError,
+    BlobGuidedOperationWriteFence,
     BlobInProgressForkError,
     BlobIntegrityError,
     BlobNotFoundError,
@@ -1496,6 +1498,130 @@ def _custody_process(
 
 
 class TestInlineCustody:
+    @staticmethod
+    def _guided_operation_write_fence(
+        db_engine,
+        session_id: UUID,
+        *,
+        kind: str = "guided_plan",
+    ) -> BlobGuidedOperationWriteFence:
+        operation_id = str(uuid4())
+        lease_token = uuid4().hex
+        now = datetime.now(UTC)
+        with db_engine.begin() as conn:
+            conn.execute(
+                guided_operations_table.insert().values(
+                    session_id=str(session_id),
+                    operation_id=operation_id,
+                    kind=kind,
+                    status="in_progress",
+                    request_hash="a" * 64,
+                    lease_token=lease_token,
+                    lease_expires_at=now + timedelta(hours=1),
+                    attempt=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        return BlobGuidedOperationWriteFence(
+            session_id=session_id,
+            operation_id=operation_id,
+            lease_token=lease_token,
+            attempt=1,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["guided_plan", "guided_respond"])
+    async def test_guided_inline_custody_accepts_closed_planning_operation_kinds(
+        self,
+        db_engine,
+        session_id: UUID,
+        tmp_path: Path,
+        kind: str,
+    ) -> None:
+        service = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=100)
+        request = _custody_request(db_engine, session_id)
+        fence = self._guided_operation_write_fence(db_engine, session_id, kind=kind)
+
+        record = await service.reserve_inline_custody(request, write_fence=fence)
+
+        assert record.status == "ready"
+        assert Path(record.storage_path).read_bytes() == request.content
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalidity", ["wrong_kind", "wrong_token", "wrong_attempt"])
+    async def test_guided_inline_custody_requires_live_fence_at_reservation(
+        self,
+        db_engine,
+        session_id: UUID,
+        tmp_path: Path,
+        invalidity: str,
+    ) -> None:
+        service = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=100)
+        request = _custody_request(db_engine, session_id)
+        fence = self._guided_operation_write_fence(
+            db_engine,
+            session_id,
+            kind="guided_chat" if invalidity == "wrong_kind" else "guided_plan",
+        )
+        if invalidity == "wrong_token":
+            fence = replace(fence, lease_token="wrong-token")
+        elif invalidity == "wrong_attempt":
+            fence = replace(fence, attempt=2)
+
+        with pytest.raises(BlobGuidedOperationFenceLostError):
+            await service.reserve_inline_custody(request, write_fence=fence)
+
+        with db_engine.connect() as conn:
+            assert conn.execute(select(func.count()).select_from(blobs_table)).scalar_one() == 0
+        assert tuple(path for path in (tmp_path / "blobs").rglob("*") if path.is_file()) == ()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "takeover_values",
+        [
+            {"kind": "guided_chat"},
+            {"lease_token": "takeover-lease"},
+            {"attempt": 2},
+        ],
+        ids=["wrong-kind", "wrong-token", "wrong-attempt"],
+    )
+    async def test_guided_inline_custody_rechecks_fence_at_ready_write(
+        self,
+        db_engine,
+        session_id: UUID,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        takeover_values: dict[str, object],
+    ) -> None:
+        service = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=100)
+        request = _custody_request(db_engine, session_id)
+        fence = self._guided_operation_write_fence(db_engine, session_id)
+        original_write = blob_service_module._write_or_validate_reserved_blob
+
+        def _write_after_takeover(**kwargs):
+            wrote = original_write(**kwargs)
+            with db_engine.begin() as conn:
+                changed = conn.execute(
+                    guided_operations_table.update()
+                    .where(guided_operations_table.c.session_id == str(session_id))
+                    .where(guided_operations_table.c.operation_id == fence.operation_id)
+                    .where(guided_operations_table.c.lease_token == fence.lease_token)
+                    .where(guided_operations_table.c.attempt == fence.attempt)
+                    .values(**takeover_values, updated_at=datetime.now(UTC))
+                ).rowcount
+            assert changed == 1
+            return wrote
+
+        monkeypatch.setattr(blob_service_module, "_write_or_validate_reserved_blob", _write_after_takeover)
+
+        with pytest.raises(BlobGuidedOperationFenceLostError):
+            await service.reserve_inline_custody(request, write_fence=fence)
+
+        with db_engine.connect() as conn:
+            row = conn.execute(select(blobs_table.c.status).where(blobs_table.c.session_id == str(session_id))).one()
+        assert row.status == "pending"
+
     @pytest.mark.asyncio
     async def test_nonidempotent_duplicate_does_not_delete_existing_ready_file(
         self,

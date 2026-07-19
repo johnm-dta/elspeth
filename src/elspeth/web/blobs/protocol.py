@@ -24,6 +24,8 @@ from elspeth.contracts.blobs import BlobForkCleanupResult as BlobForkCleanupResu
 from elspeth.contracts.blobs import BlobForkFenceLostError as BlobForkFenceLostError
 from elspeth.contracts.blobs import BlobForkPlanEntry as BlobForkPlanEntry
 from elspeth.contracts.blobs import BlobForkWriteFence as BlobForkWriteFence
+from elspeth.contracts.blobs import BlobGuidedOperationFenceLostError as BlobGuidedOperationFenceLostError
+from elspeth.contracts.blobs import BlobGuidedOperationWriteFence as BlobGuidedOperationWriteFence
 from elspeth.contracts.blobs import BlobInProgressForkError as BlobInProgressForkError
 from elspeth.contracts.blobs import BlobIntegrityError as BlobIntegrityError
 from elspeth.contracts.blobs import BlobNotFoundError as BlobNotFoundError

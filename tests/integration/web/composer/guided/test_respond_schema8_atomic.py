@@ -1,4 +1,4 @@
-"""Schema-8 atomic RESPOND route contracts."""
+"""Schema-9 atomic RESPOND route contracts."""
 
 from __future__ import annotations
 
@@ -74,6 +74,24 @@ def _create_session(client: TestClient) -> str:
     response = client.post("/api/sessions", json={"title": "schema-8 respond"})
     assert response.status_code == 201, response.json()
     return response.json()["id"]
+
+
+def _with_active_step3(guided: GuidedSession, active: GuidedProposalRef) -> GuidedSession:
+    """Attach schema-9 proposal authority to its sole unanswered turn."""
+    return replace(
+        guided,
+        step=GuidedStep.STEP_3_TRANSFORMS,
+        history=(
+            TurnRecord(
+                step=GuidedStep.STEP_3_TRANSFORMS,
+                turn_type=TurnType.PROPOSE_PIPELINE,
+                payload_hash="d" * 64,
+                response_hash=None,
+                emitter="server",
+            ),
+        ),
+        active_proposal=active,
+    )
 
 
 def _start(client: TestClient, session_id: str) -> dict:
@@ -445,7 +463,7 @@ def test_step3_rejects_mismatched_proposal_binding_before_stage_dispatch_or_rese
         covered_deferred_intent_ids=(),
         creation_event_schema="pipeline_proposal_created.v1",
     )
-    guided = replace(initial, step=GuidedStep.STEP_3_TRANSFORMS, active_proposal=active)
+    guided = _with_active_step3(initial, active)
     _persist_guided(composer_test_client, session_id, guided)
     versions_before = asyncio.run(composer_test_client.app.state.session_service.get_state_versions(UUID(session_id)))
 
@@ -466,7 +484,7 @@ def test_step3_rejects_mismatched_proposal_binding_before_stage_dispatch_or_rese
     assert asyncio.run(composer_test_client.app.state.session_service.get_state_versions(UUID(session_id))) == versions_before
 
 
-def test_step3_matching_proposal_binding_reaches_only_the_durable_adapter_gate(
+def test_step3_matching_proposal_binding_requires_durable_payload_before_reservation(
     composer_test_client: TestClient,
 ) -> None:
     session_id = _create_session(composer_test_client)
@@ -487,22 +505,21 @@ def test_step3_matching_proposal_binding_reaches_only_the_durable_adapter_gate(
         covered_deferred_intent_ids=(),
         creation_event_schema="pipeline_proposal_created.v1",
     )
-    guided = replace(initial, step=GuidedStep.STEP_3_TRANSFORMS, active_proposal=active)
+    guided = _with_active_step3(initial, active)
     _persist_guided(composer_test_client, session_id, guided)
 
-    response = composer_test_client.post(
-        f"/api/sessions/{session_id}/guided/respond",
-        json={
-            "operation_id": str(uuid4()),
-            "turn_token": "a" * 64,
-            "chosen": ["accept"],
-            "proposal_id": str(proposal_id),
-            "draft_hash": draft_hash,
-        },
-    )
+    with pytest.raises(AuditIntegrityError, match="replay payload is unavailable or corrupt"):
+        composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "operation_id": str(uuid4()),
+                "turn_token": "a" * 64,
+                "chosen": ["accept"],
+                "proposal_id": str(proposal_id),
+                "draft_hash": draft_hash,
+            },
+        )
 
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "guided_respond_stage_unsupported"
     assert _respond_operation_count(composer_test_client, session_id) == 0
 
 
@@ -525,7 +542,7 @@ def test_step3_active_proposal_requires_binding_for_every_non_exit_action(
         covered_deferred_intent_ids=(),
         creation_event_schema="pipeline_proposal_created.v1",
     )
-    guided = replace(initial, step=GuidedStep.STEP_3_TRANSFORMS, active_proposal=active)
+    guided = _with_active_step3(initial, active)
     _persist_guided(composer_test_client, session_id, guided)
 
     response = composer_test_client.post(
@@ -558,7 +575,7 @@ def test_active_proposal_binding_gate_preserves_unbound_exit() -> None:
         covered_deferred_intent_ids=(),
         creation_event_schema="pipeline_proposal_created.v1",
     )
-    guided = replace(initial, step=GuidedStep.STEP_3_TRANSFORMS, active_proposal=active)
+    guided = _with_active_step3(initial, active)
     body = GuidedRespondRequest.model_validate(
         {
             "operation_id": str(uuid4()),
@@ -730,6 +747,8 @@ def test_preflight_invariant_is_sanitized_without_reservation_or_mutation(
                 "type": TurnType.CONFIRM_WIRING.value,
                 "step_index": 3,
                 "payload": {
+                    "proposal_id": "00000000-0000-4000-8000-000000000001",
+                    "draft_hash": "d" * 64,
                     "topology": {"sources": {}, "nodes": [], "outputs": []},
                     "edge_contracts": [],
                     "semantic_contracts": [],

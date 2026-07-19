@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -12,6 +13,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import structlog
 from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.pool import StaticPool
 
 from elspeth.core.payload_store import FilesystemPayloadStore
@@ -24,6 +27,7 @@ from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.models import composition_states_table, guided_operation_events_table, guided_operations_table
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
@@ -236,7 +240,7 @@ async def test_guided_start_live_profile_is_empty(tmp_path) -> None:
 
     resp = client.post(
         f"/api/sessions/{session.id}/guided/start",
-        json={"profile": "live", "operation_id": str(uuid.uuid4())},
+        json={"profile": "live", "intent": "Build a live pipeline", "operation_id": str(uuid.uuid4())},
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -246,6 +250,27 @@ async def test_guided_start_live_profile_is_empty(tmp_path) -> None:
     assert body["guided_session"]["chat_turn_seq"] == 0
     assert body["composition_state"]["sources"] == {}
     assert body["composition_state"]["nodes"] == []
+
+
+@pytest.mark.asyncio
+async def test_guided_start_profile_resolves_intent_shape_before_reservation(tmp_path) -> None:
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+
+    missing = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": "live", "operation_id": str(uuid.uuid4())},
+    )
+    forbidden = client.post(
+        f"/api/sessions/{session.id}/guided/start",
+        json={"profile": "tutorial", "intent": "client must not own tutorial seed", "operation_id": str(uuid.uuid4())},
+    )
+
+    assert missing.status_code == 400
+    assert forbidden.status_code == 400
+    with service._engine.connect() as conn:
+        assert conn.execute(select(guided_operations_table)).all() == []
 
 
 @pytest.mark.asyncio
@@ -261,12 +286,12 @@ async def test_fresh_get_and_start_share_the_same_prospective_turn_token(tmp_pat
     fresh = client.get(f"/api/sessions/{session.id}/guided")
     started = client.post(
         f"/api/sessions/{session.id}/guided/start",
-        json={"profile": "live", "operation_id": operation_id},
+        json={"profile": "live", "intent": "Build a live pipeline", "operation_id": operation_id},
     )
     persisted = client.get(f"/api/sessions/{session.id}/guided")
     replayed = client.post(
         f"/api/sessions/{session.id}/guided/start",
-        json={"profile": "live", "operation_id": operation_id},
+        json={"profile": "live", "intent": "Build a live pipeline", "operation_id": operation_id},
     )
 
     assert fresh.status_code == started.status_code == persisted.status_code == replayed.status_code == 200
@@ -501,7 +526,7 @@ async def test_guided_start_new_operation_returns_exact_existing_guided_head(tmp
     )
     current = client.post(
         f"/api/sessions/{session.id}/guided/start",
-        json={"profile": "live", "operation_id": str(uuid.uuid4())},
+        json={"profile": "live", "intent": "Build a live pipeline", "operation_id": str(uuid.uuid4())},
     )
 
     assert first.status_code == current.status_code == 200
@@ -1083,6 +1108,118 @@ async def test_guided_start_rejoins_after_fence_loss_without_polling_under_lock(
             {"session_id": str(session.id)},
         ).scalar_one()
     assert attempt == 2
+
+
+@pytest.mark.asyncio
+async def test_guided_start_repeated_request_cancellation_drains_terminal_failure(tmp_path) -> None:
+    app, service = _make_app(tmp_path, database_url=f"sqlite:///{tmp_path / 'start-cancel.db'}")
+    session = await service.create_session("alice", "T", "local")
+    operation_id = str(uuid.uuid4())
+    renew_entered = asyncio.Event()
+    failure_entered = asyncio.Event()
+    release_failure = asyncio.Event()
+    original_fail = service.fail_guided_operation
+
+    async def blocked_renew(*_args, **_kwargs):
+        renew_entered.set()
+        await asyncio.Event().wait()
+
+    async def blocked_failure(*args, **kwargs):
+        failure_entered.set()
+        await release_failure.wait()
+        return await original_fail(*args, **kwargs)
+
+    with (
+        patch.object(service, "renew_guided_operation", side_effect=blocked_renew),
+        patch.object(service, "fail_guided_operation", side_effect=blocked_failure),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            request_task = asyncio.create_task(
+                client.post(
+                    f"/api/sessions/{session.id}/guided/start",
+                    json={"profile": "tutorial", "operation_id": operation_id},
+                )
+            )
+            await asyncio.wait_for(renew_entered.wait(), timeout=5)
+            request_task.cancel("operator cancelled guided start")
+            await asyncio.wait_for(failure_entered.wait(), timeout=5)
+            request_task.cancel("shutdown repeated guided start cancellation")
+            await asyncio.sleep(0)
+            assert not request_task.done()
+            release_failure.set()
+            with pytest.raises(asyncio.CancelledError, match="operator cancelled guided start") as caught:
+                await asyncio.wait_for(request_task, timeout=5)
+
+    assert caught.value.args == ("operator cancelled guided start",)
+    assert await service.get_current_state(session.id) is None
+    with service._engine.connect() as conn:
+        operation = conn.execute(
+            select(guided_operations_table.c.status, guided_operations_table.c.failure_code)
+            .where(guided_operations_table.c.session_id == str(session.id))
+            .where(guided_operations_table.c.operation_id == operation_id)
+        ).one()
+        failure_events = conn.execute(
+            select(guided_operation_events_table.c.event_kind)
+            .where(guided_operation_events_table.c.session_id == str(session.id))
+            .where(guided_operation_events_table.c.operation_id == operation_id)
+            .where(guided_operation_events_table.c.event_kind == "failed")
+        ).all()
+    assert operation.status == "failed"
+    assert operation.failure_code == "request_cancelled"
+    assert len(failure_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_guided_start_cancellation_during_atomic_seed_drains_to_completed_replay(tmp_path) -> None:
+    app, service = _make_app(tmp_path, database_url=f"sqlite:///{tmp_path / 'start-seed-cancel.db'}")
+    session = await service.create_session("alice", "T", "local")
+    operation_id = str(uuid.uuid4())
+    payload = {"profile": "tutorial", "operation_id": operation_id}
+    audit_inserted = threading.Event()
+    release_worker = threading.Event()
+    original_insert = service._insert_prepared_guided_audit_rows_on_connection
+
+    def pause_after_audit_insert(*args, **kwargs):
+        records = original_insert(*args, **kwargs)
+        audit_inserted.set()
+        if not release_worker.wait(timeout=5):
+            raise TimeoutError("test did not release guided start settlement worker")
+        return records
+
+    with patch.object(service, "_insert_prepared_guided_audit_rows_on_connection", side_effect=pause_after_audit_insert):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            request_task = asyncio.create_task(client.post(f"/api/sessions/{session.id}/guided/start", json=payload))
+            assert await asyncio.to_thread(audit_inserted.wait, 5), "guided start settlement worker did not start"
+            request_task.cancel("operator cancelled atomic guided start")
+            await asyncio.sleep(0)
+            assert not request_task.done()
+            release_worker.set()
+            with pytest.raises(asyncio.CancelledError, match="operator cancelled atomic guided start") as caught:
+                await asyncio.wait_for(request_task, timeout=5)
+            replay = await asyncio.wait_for(
+                client.post(f"/api/sessions/{session.id}/guided/start", json=payload),
+                timeout=5,
+            )
+
+    assert caught.value.args == ("operator cancelled atomic guided start",)
+    assert replay.status_code == 200, replay.json()
+    with service._engine.connect() as conn:
+        operation = conn.execute(
+            select(
+                guided_operations_table.c.status,
+                guided_operations_table.c.failure_code,
+                guided_operations_table.c.result_state_id,
+            )
+            .where(guided_operations_table.c.session_id == str(session.id))
+            .where(guided_operations_table.c.operation_id == operation_id)
+        ).one()
+        state_count = conn.execute(
+            select(composition_states_table.c.id).where(composition_states_table.c.session_id == str(session.id))
+        ).all()
+    assert operation.status == "completed"
+    assert operation.failure_code is None
+    assert replay.json()["composition_state"]["id"] == operation.result_state_id
+    assert len(state_count) == 1
 
 
 @pytest.mark.asyncio

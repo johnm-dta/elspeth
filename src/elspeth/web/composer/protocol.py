@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from elspeth.web.composer.pipeline_planner import PipelinePlanResult, PlannerOriginatingMessage
     from elspeth.web.composer.pipeline_proposal import PresentBase
     from elspeth.web.composer.service import AdvisorCheckpointVerdict
+    from elspeth.web.sessions.protocol import GuidedOperationFence
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall
@@ -808,6 +809,7 @@ class ComposerService(Protocol):
         user_id: str | None,
         supersedes_draft_hash: str | None,
         recorder: BufferingRecorder,
+        operation_fence: GuidedOperationFence,
         progress: ComposerProgressSink | None = None,
     ) -> tuple[PipelinePlanResult, Mapping[str, frozenset[str]]]:
         """Run the shared planner once with split private/provider-safe facts."""

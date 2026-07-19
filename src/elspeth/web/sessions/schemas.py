@@ -370,6 +370,25 @@ class StartGuidedRequest(_GuidedOperationRequest):
     """
 
     profile: object = "live"
+    intent: str | None = pydantic.Field(default=None, min_length=1, max_length=4096)
+
+    @field_validator("intent")
+    @classmethod
+    def _validate_intent(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_visible_content(value, field_label="Guided intent")
+
+
+class GuidedPlanRequest(_GuidedOperationRequest):
+    """Request body for POST /api/sessions/{session_id}/guided/plan."""
+
+    intent: str = pydantic.Field(min_length=1, max_length=4096)
+
+    @field_validator("intent")
+    @classmethod
+    def _validate_intent(cls, value: str) -> str:
+        return _require_visible_content(value, field_label="Guided plan intent")
 
 
 class ConvertGuidedRequest(_GuidedOperationRequest):

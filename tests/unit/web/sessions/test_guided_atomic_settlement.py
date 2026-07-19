@@ -36,8 +36,14 @@ from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.intent_management import deferred_intent_management_option
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, GuidedStep, TurnType
 from elspeth.web.composer.guided.stage_subjects import ComponentCountConstraint
-from elspeth.web.composer.guided.state_machine import DeferredStageIntent, GuidedSession, TurnRecord
-from elspeth.web.composer.pipeline_proposal import composition_content_hash
+from elspeth.web.composer.guided.state_machine import (
+    DeferredStageIntent,
+    GuidedProposalRef,
+    GuidedSession,
+    TurnRecord,
+    guided_reviewed_anchor_hash,
+)
+from elspeth.web.composer.pipeline_proposal import AbsentBase, composition_content_hash
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.interpretation_state import PROMPT_SHIELD_AVAILABLE_DRAFT, PROMPT_SHIELD_WARNING_DRAFT
 from elspeth.web.plugin_policy.models import PluginId, PluginUnavailableReason
@@ -81,6 +87,26 @@ def _empty_composition_state() -> CompositionState:
         outputs=(),
         metadata=PipelineMetadata(),
         version=1,
+    )
+
+
+_GUIDED_PROPOSAL_ID = UUID("00000000-0000-4000-8000-000000000001")
+_GUIDED_PROPOSAL_DRAFT_HASH = "d" * 64
+
+
+def _guided_proposal_ref() -> GuidedProposalRef:
+    return GuidedProposalRef(
+        proposal_id=_GUIDED_PROPOSAL_ID,
+        draft_hash=_GUIDED_PROPOSAL_DRAFT_HASH,
+        base=AbsentBase(),
+        reviewed_anchor_hash=guided_reviewed_anchor_hash(
+            source_order=(),
+            reviewed_sources={},
+            output_order=(),
+            reviewed_outputs={},
+        ),
+        covered_deferred_intent_ids=(),
+        creation_event_schema="pipeline_proposal_created.v1",
     )
 
 
@@ -208,6 +234,8 @@ def test_confirm_wiring_cas_is_exact_finalized_wire_authority(
         "type": "confirm_wiring",
         "step_index": 3,
         "payload": {
+            "proposal_id": str(_GUIDED_PROPOSAL_ID),
+            "draft_hash": _GUIDED_PROPOSAL_DRAFT_HASH,
             "topology": {"sources": {}, "nodes": [], "outputs": []},
             "edge_contracts": [],
             "semantic_contracts": [],
@@ -228,6 +256,7 @@ def test_confirm_wiring_cas_is_exact_finalized_wire_authority(
         turn=finalized,
         payload_store=store,
     )
+    guided = replace(guided, active_proposal=_guided_proposal_ref())
 
     response = _turn_payload_response(finalized, guided=guided, shield_available=not shield_available)
     reloaded_turn, reloaded_payload = _load_durable_current_turn(guided, payload_store=store)
@@ -255,6 +284,8 @@ def test_confirm_wiring_cas_is_exact_finalized_wire_authority(
             "type": "confirm_wiring",
             "step_index": 0,
             "payload": {
+                "proposal_id": str(_GUIDED_PROPOSAL_ID),
+                "draft_hash": _GUIDED_PROPOSAL_DRAFT_HASH,
                 "topology": {"sources": {}, "nodes": [], "outputs": []},
                 "edge_contracts": [],
                 "semantic_contracts": [],
@@ -394,6 +425,8 @@ def test_durable_current_turn_rejects_wrong_step_type_matrix(tmp_path: Path) -> 
 
     store = FilesystemPayloadStore(tmp_path / "wrong-turn-matrix")
     payload = {
+        "proposal_id": str(_GUIDED_PROPOSAL_ID),
+        "draft_hash": _GUIDED_PROPOSAL_DRAFT_HASH,
         "topology": {"sources": {}, "nodes": [], "outputs": []},
         "edge_contracts": [],
         "semantic_contracts": [],
@@ -414,6 +447,53 @@ def test_durable_current_turn_rejects_wrong_step_type_matrix(tmp_path: Path) -> 
     )
 
     with pytest.raises(AuditIntegrityError, match="current-schema turn"):
+        _load_durable_current_turn(guided, payload_store=store)
+
+
+@pytest.mark.parametrize(
+    ("proposal_id", "draft_hash"),
+    [
+        ("00000000-0000-4000-8000-000000000002", _GUIDED_PROPOSAL_DRAFT_HASH),
+        (str(_GUIDED_PROPOSAL_ID), "e" * 64),
+    ],
+)
+def test_durable_confirm_wiring_requires_exact_active_proposal_binding(
+    tmp_path: Path,
+    proposal_id: str,
+    draft_hash: str,
+) -> None:
+    preparation = importlib.import_module("elspeth.web.sessions.guided_payloads")
+    from elspeth.web.sessions.routes.composer.guided import _load_durable_current_turn
+
+    store = FilesystemPayloadStore(tmp_path / f"wrong-proposal-binding-{proposal_id[-1]}-{draft_hash[0]}")
+    prepared = preparation.prepare_guided_json_payload(
+        store,
+        purpose="turn",
+        payload={
+            "proposal_id": proposal_id,
+            "draft_hash": draft_hash,
+            "topology": {"sources": {}, "nodes": [], "outputs": []},
+            "edge_contracts": [],
+            "semantic_contracts": [],
+            "warnings": [],
+        },
+    )
+    guided = replace(
+        GuidedSession.initial(),
+        step=GuidedStep.STEP_4_WIRE,
+        history=(
+            TurnRecord(
+                step=GuidedStep.STEP_4_WIRE,
+                turn_type=TurnType.CONFIRM_WIRING,
+                payload_hash=prepared.payload_id,
+                response_hash=None,
+                emitter="server",
+            ),
+        ),
+        active_proposal=_guided_proposal_ref(),
+    )
+
+    with pytest.raises(AuditIntegrityError, match="active proposal"):
         _load_durable_current_turn(guided, payload_store=store)
 
 

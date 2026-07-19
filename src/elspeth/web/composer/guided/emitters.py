@@ -453,6 +453,8 @@ def build_step_2_multi_select_turn(
 def build_step_4_wire_turn(
     state: CompositionState,
     *,
+    proposal_id: str,
+    draft_hash: str,
     catalog: CatalogServiceProtocol | None = None,
     validation_state: CompositionState | None = None,
     validation_summary: ValidationSummary | None = None,
@@ -473,6 +475,8 @@ def build_step_4_wire_turn(
     # use that copy for executable contract probes without exposing it here.
     validation = validation_summary or (validation_state or state).validate()
     payload: WireStageData = {
+        "proposal_id": proposal_id,
+        "draft_hash": draft_hash,
         "topology": _build_wire_topology(state),
         "edge_contracts": [ec.to_dict() for ec in validation.edge_contracts],
         "semantic_contracts": _semantic_contracts_payload(validation.semantic_contracts),

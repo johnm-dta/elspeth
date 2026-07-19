@@ -698,8 +698,8 @@ class TestGetGuidedFullStateRebuild:
         assert body["guided_session"]["step"] == "step_3_transforms"
         assert body["next_turn"] is None
 
-    def test_step_4_wire_returns_confirm_wiring_turn_idempotently(self, composer_test_client: TestClient) -> None:
-        """GET /guided at STEP_4_WIRE rebuilds the skeleton confirm_wiring turn."""
+    def test_step_4_wire_without_active_proposal_fails_closed(self, composer_test_client: TestClient) -> None:
+        """Schema 9 rejects a wire checkpoint without its bound proposal."""
         session_id = _create_session(composer_test_client)
 
         guided_dict = {
@@ -708,28 +708,10 @@ class TestGetGuidedFullStateRebuild:
         }
         _seed_guided_session(composer_test_client, session_id, guided_dict)
 
-        first = _get_guided(composer_test_client, session_id)
-        second = _get_guided(composer_test_client, session_id)
+        response = composer_test_client.get(f"/api/sessions/{session_id}/guided")
 
-        assert first["guided_session"]["step"] == "step_4_wire"
-        assert first["next_turn"] is not None
-        assert first["next_turn"]["type"] == "confirm_wiring"
-        assert first["next_turn"]["step_index"] == 3
-        assert set(first["next_turn"]["payload"]) == {
-            "topology",
-            "edge_contracts",
-            "semantic_contracts",
-            "warnings",
-        }
-        assert first["next_turn"]["payload"]["topology"] == {
-            "sources": {},
-            "nodes": [],
-            "outputs": [],
-        }
-        wire_records = [r for r in second["guided_session"]["history"] if r["step"] == "step_4_wire"]
-        assert len(wire_records) == 1
-        assert wire_records[0]["turn_type"] == "confirm_wiring"
-        assert second["next_turn"]["type"] == "confirm_wiring"
+        assert response.status_code == 500
+        assert response.json()["detail"] == "Server invariant violated. See application audit log for diagnostic detail."
 
     # ------------------------------------------------------------------
     # M4: Step 2 intra-step rebuild (Codex #10)

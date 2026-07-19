@@ -294,6 +294,8 @@ async def _assert_revert_integrity_failure_is_atomic(
     fence: GuidedOperationFence,
     proposal_id: UUID | None,
     match: str,
+    expected_proposal_status: str = "pending",
+    expected_rejection_count: int = 0,
 ) -> None:
     with engine.begin() as conn:
         state_count = conn.execute(
@@ -339,8 +341,8 @@ async def _assert_revert_integrity_failure_is_atomic(
                 .where(proposal_events_table.c.proposal_id == str(proposal_id))
                 .where(proposal_events_table.c.event_type == "proposal.rejected")
             ).scalar_one()
-            assert proposal.status == "pending"
-            assert terminal_count == 0
+            assert proposal.status == expected_proposal_status
+            assert terminal_count == expected_rejection_count
     assert operation.status == "in_progress"
     assert operation.result_state_id is None
 
@@ -578,6 +580,60 @@ async def test_revert_older_guided_proposal_checkpoint_rejects_pending_and_scrub
     assert restored.transition_consumed is False
     assert restored.active_proposal is None
     assert restored.active_edit_target is None
+
+
+@pytest.mark.asyncio
+async def test_revert_terminal_target_reference_rolls_back_every_surface(service, engine) -> None:
+    session = await service.create_session("alice", "Pipeline", "local")
+    guided = GuidedSession(step=GuidedStep.STEP_3_TRANSFORMS)
+    target = await service.save_composition_state(
+        session.id,
+        CompositionStateData(
+            composer_meta={"guided_session": guided.to_dict()},
+            metadata_={"name": "Guided target", "description": ""},
+            is_valid=True,
+        ),
+        provenance="session_seed",
+    )
+    proposal, target = await _attach_pending_guided_pipeline_proposal(
+        service,
+        session_id=session.id,
+        state=target,
+        guided=guided,
+    )
+    bound = state_from_record(target).guided_session
+    assert bound is not None and bound.active_proposal is not None
+    await service.reject_pipeline_composition_proposal(
+        session_id=session.id,
+        proposal_id=proposal.id,
+        draft_hash=bound.active_proposal.draft_hash,
+        reviewed_facts=guided_private_reviewed_facts(bound),
+        reason="superseded",
+        dispatch=None,
+        actor="test",
+    )
+    await service.save_composition_state(
+        session.id,
+        CompositionStateData(
+            composer_meta={"guided_session": None},
+            metadata_={"name": "Current freeform", "description": ""},
+            is_valid=True,
+        ),
+        provenance="session_seed",
+    )
+    fence = await _claim(service, session.id)
+
+    await _assert_revert_integrity_failure_is_atomic(
+        service,
+        engine,
+        session_id=session.id,
+        target_state_id=target.id,
+        fence=fence,
+        proposal_id=proposal.id,
+        match="terminal",
+        expected_proposal_status="rejected",
+        expected_rejection_count=1,
+    )
 
 
 @pytest.mark.asyncio
@@ -1091,7 +1147,7 @@ async def test_revert_guided_ref_without_trailing_proposal_turn_rolls_back_every
         target_state_id=target.id,
         fence=fence,
         proposal_id=proposal.id,
-        match="history coupling",
+        match="schema-9 authority is malformed",
     )
 
 
@@ -1105,7 +1161,7 @@ async def test_revert_guided_ref_with_multiple_unanswered_turns_rolls_back_every
                 step=GuidedStep.STEP_3_TRANSFORMS,
                 turn_type=TurnType.SINGLE_SELECT,
                 payload_hash="b" * 64,
-                response_hash=None,
+                response_hash="c" * 64,
                 emitter="server",
             ),
         ),
@@ -1125,6 +1181,14 @@ async def test_revert_guided_ref_with_multiple_unanswered_turns_rolls_back_every
         state=target,
         guided=guided,
     )
+    tampered_meta = deep_thaw(target.composer_meta)
+    tampered_meta["guided_session"]["history"][0]["response_hash"] = None
+    with engine.begin() as conn:
+        conn.execute(
+            update(composition_states_table)
+            .where(composition_states_table.c.id == str(target.id))
+            .values(composer_meta={"_version": 1, "data": tampered_meta})
+        )
     fence = await _claim(service, session.id)
 
     await _assert_revert_integrity_failure_is_atomic(
@@ -1134,7 +1198,7 @@ async def test_revert_guided_ref_with_multiple_unanswered_turns_rolls_back_every
         target_state_id=target.id,
         fence=fence,
         proposal_id=proposal.id,
-        match="history coupling",
+        match="schema-9 authority is malformed",
     )
 
 
@@ -1384,7 +1448,7 @@ async def test_stale_revert_fence_writes_nothing(service, engine) -> None:
 async def test_guided_state_save_system_message_and_settlement_are_atomic(service) -> None:
     session = await service.create_session("alice", "Pipeline", "local")
     fence = await _claim(service, session.id, kind="guided_convert")
-    state_data = CompositionStateData(composer_meta={"guided_session": {"schema_version": 8}}, is_valid=True)
+    state_data = CompositionStateData(composer_meta={"guided_session": {"schema_version": 9}}, is_valid=True)
 
     saved = await service.save_state_for_guided_operation(
         fence,
@@ -1436,7 +1500,7 @@ async def test_guided_start_atomic_seed_persists_and_settles_empty_session(servi
     session = await service.create_session("alice", "Pipeline", "local")
     fence = await _claim(service, session.id, kind="guided_start")
     state_data = CompositionStateData(
-        composer_meta={"guided_session": {"schema_version": 8}},
+        composer_meta={"guided_session": {"schema_version": 9}},
         is_valid=True,
     )
 
@@ -1468,7 +1532,7 @@ async def test_guided_start_atomic_seed_converges_exact_existing_guided_head(ser
     existing = await service.save_composition_state(
         session.id,
         CompositionStateData(
-            composer_meta={"guided_session": {"schema_version": 8}},
+            composer_meta={"guided_session": {"schema_version": 9}},
             is_valid=True,
         ),
         provenance="session_seed",
@@ -1509,7 +1573,7 @@ async def test_guided_start_atomic_seed_does_not_treat_generic_integrity_error_a
         await service.seed_or_complete_guided_start_operation(
             fence,
             state=CompositionStateData(
-                composer_meta={"guided_session": {"schema_version": 8}},
+                composer_meta={"guided_session": {"schema_version": 9}},
                 is_valid=True,
             ),
             provenance="session_seed",
@@ -1540,7 +1604,7 @@ async def test_guided_start_atomic_seed_serializes_two_sqlite_services(file_engi
         request_hash="c" * 64,
     )
     state_data = CompositionStateData(
-        composer_meta={"guided_session": {"schema_version": 8}},
+        composer_meta={"guided_session": {"schema_version": 9}},
         is_valid=True,
     )
 

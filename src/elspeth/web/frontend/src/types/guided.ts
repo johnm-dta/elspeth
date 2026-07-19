@@ -587,6 +587,8 @@ export interface ProposePipelinePayload {
  * advisory metadata emitted when the backend has something to report.
  */
 export interface WireStageData {
+  proposal_id: string;
+  draft_hash: string;
   topology: {
     sources: Record<
       string,

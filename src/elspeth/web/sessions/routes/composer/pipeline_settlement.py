@@ -39,6 +39,9 @@ from .._helpers import (
     asyncio,
 )
 
+_GUIDED_ATOMIC_SETTLEMENT_COMPLETED = "_elspeth_guided_atomic_settlement_completed"
+_GUIDED_ATOMIC_SETTLEMENT_FAILURE = "_elspeth_guided_atomic_settlement_failure"
+
 
 @dataclass(slots=True)
 class _DeferredCancellationState:
@@ -49,6 +52,43 @@ class _DeferredCancellationState:
 class PipelineRouteSettlement:
     settlement: PipelineProposalSettlementResult
     validation: ValidationSummary | None
+
+
+async def _await_guided_atomic_settlement[T](awaitable: Awaitable[T]) -> T:
+    """Drain a submitted guided settlement before preserving request cancellation."""
+
+    settlement_task = asyncio.ensure_future(awaitable)
+    caller_task = asyncio.current_task()
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            result = await asyncio.shield(settlement_task)
+        except asyncio.CancelledError as exc:
+            if settlement_task.done() and settlement_task.cancelled():
+                if cancellation is not None:
+                    cancellation.__dict__[_GUIDED_ATOMIC_SETTLEMENT_FAILURE] = exc
+                    raise cancellation from exc
+                raise
+            if caller_task is None or caller_task.cancelling() == 0:
+                raise
+            if cancellation is None:
+                cancellation = exc
+            if not settlement_task.done():
+                continue
+            try:
+                result = settlement_task.result()
+            except BaseException as failure:
+                cancellation.__dict__[_GUIDED_ATOMIC_SETTLEMENT_FAILURE] = failure
+                raise cancellation from failure
+        except Exception as failure:
+            if cancellation is None:
+                raise
+            cancellation.__dict__[_GUIDED_ATOMIC_SETTLEMENT_FAILURE] = failure
+            raise cancellation from failure
+        if cancellation is not None:
+            cancellation.__dict__[_GUIDED_ATOMIC_SETTLEMENT_COMPLETED] = True
+            raise cancellation
+        return result
 
 
 async def _await_with_deferred_cancellation[T](

@@ -327,6 +327,8 @@ class WireStageData(TypedDict):
     edge_contracts entries carry keys from/to, not from_id/to_id. warnings carries the live prompt-shield advisory. Renderers reconstruct edges from topology labels, never state.edges. Source rows carry id values matching validation producer ids (`source` or `source:<name>`); output rows carry id values matching validation sink ids (`output:<sink_name>`). sink_name remains the connection label; output.id is the edge target for overlay.
     """
 
+    proposal_id: str
+    draft_hash: str
     topology: WireTopology
     edge_contracts: Sequence[Mapping[str, Any]]
     semantic_contracts: Sequence[Mapping[str, Any]]
@@ -577,7 +579,7 @@ _REQUIRED_KEYS: Mapping[TurnType, frozenset[str]] = {
             "edit_targets",
         }
     ),
-    TurnType.CONFIRM_WIRING: frozenset({"topology", "edge_contracts", "semantic_contracts", "warnings"}),
+    TurnType.CONFIRM_WIRING: frozenset({"proposal_id", "draft_hash", "topology", "edge_contracts", "semantic_contracts", "warnings"}),
 }
 
 _ALLOWED_KEYS: Mapping[TurnType, frozenset[str]] = {
@@ -590,6 +592,8 @@ _ALLOWED_KEYS: Mapping[TurnType, frozenset[str]] = {
     TurnType.CONFIRM_WIRING: frozenset(
         {
             "topology",
+            "proposal_id",
+            "draft_hash",
             "edge_contracts",
             "semantic_contracts",
             "warnings",
@@ -1005,6 +1009,11 @@ def _validate_string_mapping(value: object, path: str) -> str | None:
 
 
 def _validate_wire_payload(payload: Mapping[str, Any]) -> str | None:
+    if (error := _canonical_uuid_error(payload["proposal_id"], "payload.proposal_id")) is not None:
+        return error
+    draft_hash = payload["draft_hash"]
+    if type(draft_hash) is not str or len(draft_hash) != 64 or any(char not in "0123456789abcdef" for char in draft_hash):
+        return "payload.draft_hash must be 64 lowercase hexadecimal characters"
     topology = payload["topology"]
     if (error := _exact_nested_keys(topology, frozenset({"sources", "nodes", "outputs"}), "payload.topology")) is not None:
         return error

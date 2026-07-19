@@ -117,6 +117,18 @@ describe("guided protocol types", () => {
     expect(mismatched.type).toBe("single_select");
   });
 
+  it("wire review remains bound to the pending proposal", () => {
+    const payload: WireStageData = {
+      proposal_id: "00000000-0000-4000-8000-000000000001",
+      draft_hash: "d".repeat(64),
+      topology: { sources: {}, nodes: [], outputs: [] },
+      edge_contracts: [],
+      semantic_contracts: [],
+      warnings: [],
+    };
+    expect(payload.proposal_id).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
   it("GuidedSession has exactly step, history, terminal, chat_history, chat_turn_seq, profile — exhaustive", () => {
     // Compile-time mutual-extends: adding/removing a key in GuidedSession
     // makes this assignment fail tsc.  Slice 5 added chat_history and
@@ -382,6 +394,8 @@ describe("WorkflowProfile wire type", () => {
 describe("WireStageData wire shape", () => {
   it("uses topology ids and edge_contracts from/to keys", () => {
     const data: WireStageData = {
+      proposal_id: "00000000-0000-4000-8000-000000000001",
+      draft_hash: "d".repeat(64),
       topology: {
         sources: {
           source: {

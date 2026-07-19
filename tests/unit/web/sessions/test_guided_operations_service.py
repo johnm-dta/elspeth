@@ -39,6 +39,7 @@ from elspeth.web.sessions.protocol import (
     GuidedOperationFenceLostError,
     GuidedOperationSettlementConflictError,
     GuidedOperationTakenOver,
+    GuidedPipelineProposalResult,
     GuidedSessionResult,
 )
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -465,7 +466,7 @@ async def test_guided_seed_rejects_cross_service_head_drift_before_writes(file_e
             claim.fence,
             expected_current_state_id=None,
             expected_current_state_version=None,
-            state=CompositionStateData(is_valid=True, composer_meta={"guided_session": {"schema_version": 8}}),
+            state=CompositionStateData(is_valid=True, composer_meta={"guided_session": {"schema_version": 9}}),
             provenance="session_seed",
             actor="worker-a",
             system_message="Wrong stale breadcrumb.",
@@ -650,6 +651,7 @@ async def test_file_backed_sqlite_concurrent_takeover_has_one_winner(file_engine
         ("guided_chat", "state_with_proposal"),
         ("guided_convert", "state"),
         ("guided_reenter", "state"),
+        ("guided_plan", "pipeline_proposal"),
         ("state_revert", "state"),
         ("session_fork", "session"),
     ],
@@ -667,6 +669,7 @@ async def test_terminal_replay_uses_closed_per_kind_locator(file_engine, kind: s
     result = {
         "state": GuidedCompositionStateResult(state_id=state_id),
         "state_with_proposal": GuidedCompositionStateResult(state_id=state_id, proposal_id=proposal_id),
+        "pipeline_proposal": GuidedPipelineProposalResult(proposal_id=proposal_id, checkpoint_state_id=state_id),
         "session": GuidedSessionResult(session_id=child_session_id),
     }[result_factory]
     operation_id = f"operation-{kind}"

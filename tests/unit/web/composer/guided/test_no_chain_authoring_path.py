@@ -132,12 +132,46 @@ def test_reachable_surfaces_share_one_lock_assuming_commit_boundary() -> None:
     assert _call_count(guided_route, "accept_guided_pipeline_proposal") == 1
 
 
-def test_guided_full_has_no_placeholder_controller_before_plan04() -> None:
-    """Keep Plan 03 honest: Plan 04 must add the real fourth controller."""
+def test_guided_full_router_seam_is_late_bound_without_a_placeholder_controller() -> None:
+    """Schema 9 reserves a separate router without exposing Task-5 behavior."""
 
     guided_source = (_ROOT / "src/elspeth/web/sessions/routes/composer/guided.py").read_text(encoding="utf-8")
+    guided_tree = _module_tree("src/elspeth/web/sessions/routes/composer/guided.py")
+    guided_plan_tree = _module_tree("src/elspeth/web/sessions/routes/composer/guided_plan.py")
     app = FastAPI()
     app.include_router(create_session_router())
 
     assert "PlannerSurface.GUIDED_FULL" not in guided_source
     assert "/api/sessions/{session_id}/guided/plan" not in app.openapi()["paths"]
+    assert (
+        next(node.name for node in reversed(guided_tree.body) if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef))
+        == "post_guided_convert"
+    )
+    late_import, late_include = guided_tree.body[-2:]
+    assert isinstance(late_import, ast.ImportFrom)
+    assert late_import.level == 1
+    assert late_import.module == "guided_plan"
+    assert [(alias.name, alias.asname) for alias in late_import.names] == [("router", "guided_plan_router")]
+    assert ast.unparse(late_include) == "router.include_router(guided_plan_router)"
+    assert not any(isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef) for node in guided_plan_tree.body)
+
+
+def test_guided_route_handler_module_positions_remain_at_the_signed_layout() -> None:
+    guided_tree = _module_tree("src/elspeth/web/sessions/routes/composer/guided.py")
+    expected_positions = {
+        "get_guided": 47,
+        "get_guided_tutorial_sample": 48,
+        "post_guided_reenter": 49,
+        "post_guided_start": 50,
+        "post_guided_respond": 64,
+        "post_guided_chat": 66,
+        "post_guided_convert": 67,
+    }
+
+    actual_positions = {
+        node.name: index
+        for index, node in enumerate(guided_tree.body)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name in expected_positions
+    }
+
+    assert actual_positions == expected_positions

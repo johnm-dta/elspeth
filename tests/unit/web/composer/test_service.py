@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.blobs import BlobGuidedOperationWriteFence
 from elspeth.contracts.composer_progress import ComposerProgressEvent
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import stable_hash
@@ -74,6 +75,7 @@ from elspeth.web.interpretation_state import INTERPRETATION_REVIEW_PENDING_CODE
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
+from elspeth.web.sessions.protocol import GuidedOperationFence
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
@@ -143,12 +145,19 @@ async def test_guided_service_routes_step3_through_the_planner_only_capability_p
 
     monkeypatch.setattr("elspeth.web.composer.service.plan_pipeline", capture_plan_pipeline)
     current_state = _empty_state()
+    session_id = uuid4()
+    custody_fence = GuidedOperationFence(
+        session_id=session_id,
+        operation_id=str(uuid4()),
+        lease_token=uuid4().hex,
+        attempt=1,
+    )
     result, _catalog_ids = await composer_service_with_real_sessions.plan_guided_pipeline(
         intent="Build the reviewed pipeline.",
         current_state=current_state,
         guided=guided,
         originating_message=PlannerOriginatingMessage(
-            session_id=str(uuid4()),
+            session_id=str(session_id),
             message_id=str(uuid4()),
             content="Build the reviewed pipeline.",
             user_id="test-user",
@@ -157,6 +166,7 @@ async def test_guided_service_routes_step3_through_the_planner_only_capability_p
         user_id="test-user",
         supersedes_draft_hash=None,
         recorder=BufferingRecorder(),
+        operation_fence=custody_fence,
     )
 
     assert result is sentinel_plan
@@ -164,6 +174,12 @@ async def test_guided_service_routes_step3_through_the_planner_only_capability_p
     assert captured[0]["surface"] is expected_surface
     assert captured[0]["profile"] == expected_profile
     assert captured[0]["rendered_skill"] == load_step_planner_skill(GuidedStep.STEP_3_TRANSFORMS)
+    assert captured[0]["custody_config"].write_fence == BlobGuidedOperationWriteFence(
+        session_id=custody_fence.session_id,
+        operation_id=custody_fence.operation_id,
+        lease_token=custody_fence.lease_token,
+        attempt=custody_fence.attempt,
+    )
 
 
 @pytest.mark.asyncio
@@ -243,6 +259,12 @@ async def test_actual_step3_staged_and_tutorial_adapters_render_identical_provid
                 user_id="test-user",
                 supersedes_draft_hash=None,
                 recorder=BufferingRecorder(),
+                operation_fence=GuidedOperationFence(
+                    session_id=session.id,
+                    operation_id=str(uuid4()),
+                    lease_token=uuid4().hex,
+                    attempt=1,
+                ),
             )
 
     assert len(manifests) == len(requests) == 2

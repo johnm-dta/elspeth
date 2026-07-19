@@ -148,6 +148,7 @@ def test_tables_and_composite_keys_are_current(engine) -> None:
         "guided_chat",
         "guided_convert",
         "guided_reenter",
+        "guided_plan",
         "state_revert",
         "session_fork",
     ],
@@ -166,12 +167,51 @@ def test_operation_kind_closed_vocabulary_accepts_supported_kinds(engine, kind: 
         ("request_hash", "a" * 63),
         ("attempt", 0),
         ("operation_id", ""),
-        ("kind", "guided_plan"),
     ],
 )
 def test_operation_constraints_reject_invalid_values(engine, column: str, value: object) -> None:
     with pytest.raises(IntegrityError), engine.begin() as connection:
         connection.execute(insert(guided_operations_table).values(**_operation(**{column: value})))
+
+
+def test_guided_plan_result_requires_exact_proposal_checkpoint_locator(engine) -> None:
+    completed = _operation(
+        kind="guided_plan",
+        status="completed",
+        lease_token=None,
+        lease_expires_at=None,
+        settled_at=NOW,
+        result_kind="pipeline_proposal",
+        proposal_id=PROPOSAL_ID,
+        result_state_id=STATE_ID,
+        response_hash=RESPONSE_HASH,
+    )
+    with engine.begin() as connection:
+        connection.execute(insert(guided_operations_table).values(**completed))
+
+    for missing in ("proposal_id", "result_state_id"):
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(
+                insert(guided_operations_table).values(
+                    **{**completed, "operation_id": f"{OPERATION_ID[:-1]}{1 if missing == 'proposal_id' else 2}", missing: None}
+                )
+            )
+
+
+def test_request_cancelled_is_closed_terminal_failure(engine) -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            insert(guided_operations_table).values(
+                **_operation(
+                    kind="guided_plan",
+                    status="failed",
+                    lease_token=None,
+                    lease_expires_at=None,
+                    settled_at=NOW,
+                    failure_code="request_cancelled",
+                )
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -342,7 +382,6 @@ def test_operation_id_is_scoped_by_session(engine) -> None:
         {"kind": "guided_start", "result_session_id": "00000000-0000-4000-8000-000000000009"},
         {"kind": "guided_start", "proposal_id": "00000000-0000-4000-8000-000000000008"},
         {"kind": "session_fork", "proposal_id": "00000000-0000-4000-8000-000000000008"},
-        {"kind": "guided_plan"},
         {"result_kind": "arbitrary_json"},
         {"result_kind": "composition_state", "result_state_id": "00000000-0000-4000-8000-000000000004"},
     ],

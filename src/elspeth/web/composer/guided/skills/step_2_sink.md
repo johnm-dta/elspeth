@@ -11,20 +11,11 @@ To build it:
 2. Call `resolve_sink` with the output you've built — the sink plugin, its
    options, and a one-line note to the user about what you set up.
 
-When the output is a **file** (json, jsonl, csv, text), set these options so the
-pipeline can actually write it — the plugin schema lists them as optional, but a
-file sink will not commit without them:
-
-- `path` — a relative path under `outputs/`, e.g. `outputs/results.json`. The
-  server keeps outputs in its own data area, so you only give the
-  `outputs/<filename>` part, never an absolute path.
-- `mode` — `write` to create or replace the file, or `append` to add rows to an
-  existing one. Use `write` unless the user asked to append.
-- `collision_policy` — what to do if the target file already exists:
-  `auto_increment` (write to a free sibling path), `fail_if_exists`, or
-  `append_or_create` (only with `mode: append`). Use `auto_increment` unless the
-  user wants otherwise.
-- `schema` — `{ "mode": "observed" }` unless the user pinned exact output fields.
+Configure the selected sink only from its policy-visible live schema and
+assistance. Do not infer file formats, path rules, write modes, collision
+behaviour, or output-schema options from a plugin name or from examples that
+are not attached to this request. Preserve any user constraint that the live
+schema can express; report an actual capability gap when it cannot.
 
 Pick the sink that matches what the user asked for and configure it yourself from
 what they told you. Don't make them choose from a list, and don't ask them to

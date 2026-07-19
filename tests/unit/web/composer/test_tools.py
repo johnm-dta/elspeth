@@ -3024,6 +3024,7 @@ class TestDiscoveryTools:
         assert result.success is False
         assert result.data["error_code"] == "credential_unavailable"
         assert "azure_prompt_shield" not in result.data["error"]
+        assert "composer_hints" not in result.data
 
     def test_get_plugin_assistance_rejects_snapshot_unavailable_plugin(self) -> None:
         catalog = _mock_catalog()
@@ -3044,6 +3045,7 @@ class TestDiscoveryTools:
         assert result.success is False
         assert result.data["error_code"] == "credential_unavailable"
         assert "azure_prompt_shield" not in result.data["error"]
+        assert "composer_hints" not in result.data
 
     def test_get_expression_grammar_is_static(self) -> None:
         grammar = get_expression_grammar()

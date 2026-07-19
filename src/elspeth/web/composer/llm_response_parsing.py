@@ -450,12 +450,19 @@ def build_llm_call_record(
     )
 
 
-def attach_llm_calls(exc: BaseException, recorder: BufferingRecorder | None) -> None:
-    """Attach buffered LLM calls to exception objects that otherwise lack carriers."""
+def attach_llm_calls(
+    exc: BaseException,
+    recorder: BufferingRecorder | None,
+    *,
+    start_index: int = 0,
+) -> None:
+    """Attach only this operation's buffered LLM calls to an exception."""
     if recorder is None:
         return
+    if type(start_index) is not int or start_index < 0:
+        raise ValueError("start_index must be a non-negative exact integer")
     exc_with_calls = cast(Any, exc)
-    exc_with_calls.llm_calls = recorder.llm_calls
+    exc_with_calls.llm_calls = recorder.llm_calls[start_index:]
 
 
 # ---------------------------------------------------------------------------

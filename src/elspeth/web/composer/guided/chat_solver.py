@@ -397,7 +397,7 @@ _STEP_1_SOURCE_TOOL: dict[str, Any] = {
                         "authored into every row of inline `content` — declare them as a contract: set "
                         '`schema` to `{"mode": "observed", "guaranteed_fields": [<those exact column '
                         "names>]}`. This records the columns the rows are guaranteed to contain so a "
-                        "downstream transform that reads one of them (e.g. web_scrape reading `url`) "
+                        "downstream transform that reads one of them "
                         "wires cleanly at the wiring step; an observed source with no `guaranteed_fields` "
                         "promises nothing and fails that contract. Keep `mode` `observed` so any other "
                         "columns still pass through."
@@ -657,7 +657,8 @@ def _record_llm_call(
 def _build_step_1_source_dynamic_block(
     *,
     plugin_hint: str | None,
-    current_source: SourceResolved | None = None,
+    current_source: SourceResolved | None,
+    available_source_plugins: tuple[str, ...],
 ) -> str:
     """Compose the DYNAMIC Step-1 source block (hint + revise context + tool instructions).
 
@@ -667,10 +668,14 @@ def _build_step_1_source_dynamic_block(
     intentionally part of THIS block (after the dynamic hint/revise content),
     not the marked head — only the ~1199-token skill is in the cached prefix.
     """
+    if type(available_source_plugins) is not tuple or any(type(plugin) is not str or not plugin for plugin in available_source_plugins):
+        raise TypeError("available_source_plugins must be an exact tuple of non-empty strings")
+    if len(set(available_source_plugins)) != len(available_source_plugins):
+        raise ValueError("available_source_plugins must not contain duplicates")
     hint = (
         f"The current source plugin selected in the wizard is {plugin_hint!r}."
         if plugin_hint is not None
-        else "The current source plugin is not persisted in server state; infer only when the chat message or tool context makes it explicit."
+        else "No source plugin is currently selected in server state."
     )
     revise_block = ""
     if current_source is not None:
@@ -684,6 +689,8 @@ def _build_step_1_source_dynamic_block(
     return (
         "## Step 1 Source/Data Schema Tool\n\n"
         f"{hint}\n"
+        f"Policy-visible source plugins: {json.dumps(available_source_plugins)}. "
+        "Choose only from this server-supplied list; an absent plugin is not available for this request.\n"
         f"{revise_block}"
         "If the user's message provides enough information to create inline source data, "
         "call `resolve_source` with the complete file content, the source plugin, "
@@ -694,25 +701,9 @@ def _build_step_1_source_dynamic_block(
         "you are RECORDING the columns the operator told you the rows contain, so a "
         "later transform that reads one of them wires cleanly at the wiring step. "
         "Keep `mode` `observed` so any other columns still pass through. "
-        "For CSV data, include a header row in `content` and set "
-        "`mime_type` to `text/csv`. When the user wants to FETCH one or more remote "
-        "document files from URL(s), make the source an INLINE `json` or `csv` manifest "
-        "whose rows carry each URL, then add downstream transform nodes: `blob_fetch` "
-        "to create blob refs and a parser transform such as `blob_csv_expand` to expand "
-        "the blob into rows. Do not choose a fetcher as the source plugin. When the user "
-        "wants to SCRAPE one or more webpages into row content, the source is an INLINE "
-        "`json` (or `csv`) dataset whose rows carry each "
-        "URL in a `url` column — e.g. json `content` of "
-        '`[{"url": "https://example/a"}, {"url": "https://example/b"}]`. Declare that '
-        "`url` column as guaranteed on the source `schema` "
-        '(`{"mode": "observed", "guaranteed_fields": ["url"]}`) so the downstream '
-        "web_scrape transform's required `url` input is satisfied at the wiring step "
-        "(an observed-mode source that guarantees nothing fails that contract). You "
-        "must NOT choose a `web_scraper`/`web_scrape` source: scraping pages is a "
-        "downstream TRANSFORM applied later, never a source plugin. The valid "
-        "source plugins are `aws_s3`, `azure_blob`, `csv`, `dataverse`, `json`, `null`, and `text`. "
-        "For `aws_s3`, `endpoint_url` is CLI/batch-only; web authors must never set it "
-        "because every non-null web-authored value is rejected. "
+        "When the user asks for later-stage fetching, parsing, enrichment, or other "
+        "processing, retain that instruction for its responsible stage instead of "
+        "inventing a source or transform plugin here. "
         "Preserve user-supplied values exactly in the file "
         "content; do not invent hidden pipeline transforms. Also set `on_validation_failure` "
         "when you resolve a source: use `discard` for a demo source that is valid by "
@@ -1108,7 +1099,8 @@ async def maybe_resolve_step_1_source_chat(
     model: str,
     user_message: str,
     plugin_hint: str | None,
-    current_source: SourceResolved | None = None,
+    current_source: SourceResolved | None,
+    available_source_plugins: tuple[str, ...],
     temperature: float | None,
     seed: int | None,
     recorder: BufferingRecorder | None = None,
@@ -1155,6 +1147,7 @@ async def maybe_resolve_step_1_source_chat(
                 "content": _build_step_1_source_dynamic_block(
                     plugin_hint=plugin_hint,
                     current_source=current_source,
+                    available_source_plugins=available_source_plugins,
                 ),
             },
         ]

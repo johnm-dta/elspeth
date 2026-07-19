@@ -15,6 +15,7 @@ Layer: L3 (application).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import sys
@@ -135,7 +136,7 @@ from elspeth.web.composer.recipes import (
 )
 from elspeth.web.composer.redaction import redact_tool_call_arguments
 from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
-from elspeth.web.composer.skills import assert_skill_hash_unchanged_on_disk, load_skill_with_hash
+from elspeth.web.composer.skills import assert_skill_hash_unchanged_on_disk
 from elspeth.web.composer.state import CompositionState, NodeSpec, ValidationSummary
 from elspeth.web.composer.tools import (
     _SESSION_AWARE_TOOL_HANDLERS,
@@ -924,26 +925,25 @@ class ComposerServiceImpl:
         self._phase3_last_redacted_tool_rows: tuple[RedactedToolRow, ...] = ()
         self._phase3_last_audit_outcome: AuditOutcome | None = None
 
-        # F-5a. Re-read the composer skill markdown from disk and assert
-        # its SHA-256 still matches the
-        # ``PIPELINE_COMPOSER_SKILL_HASH`` captured atomically at module
-        # import. A mismatch means the on-disk file was edited after the
-        # LRU cache populated — the LLM would be prompted with the cached
-        # (older) text while any audit row written this process would
-        # record that older hash. The audit trail and the actual file
-        # would then disagree, which is an operator-actionable Tier-1
-        # anomaly. The assertion raises ``RuntimeError`` with restart
-        # guidance. Performed once per service instantiation; subsequent
-        # in-process drift is bounded by the LRU cache lifetime (process
-        # death restarts the cache).
+        # F-5a. Re-read both static prompt source files and compare them with
+        # the individually cached hashes. The audit hash covers the exact
+        # composed prompt, while these checks make drift in either source an
+        # operator-actionable Tier-1 anomaly requiring restart.
         from elspeth.web.composer.prompts import (
+            PIPELINE_CAPABILITIES_SKILL_HASH,
+            PIPELINE_CAPABILITIES_SKILL_NAME,
+            PIPELINE_COMPOSER_INTERACTION_SKILL_HASH,
             PIPELINE_COMPOSER_SKILL_HASH,
             PIPELINE_COMPOSER_SKILL_NAME,
         )
 
         assert_skill_hash_unchanged_on_disk(
             PIPELINE_COMPOSER_SKILL_NAME,
-            PIPELINE_COMPOSER_SKILL_HASH,
+            PIPELINE_COMPOSER_INTERACTION_SKILL_HASH,
+        )
+        assert_skill_hash_unchanged_on_disk(
+            PIPELINE_CAPABILITIES_SKILL_NAME,
+            PIPELINE_CAPABILITIES_SKILL_HASH,
         )
         self._composer_skill_hash: str = PIPELINE_COMPOSER_SKILL_HASH
         self._composer_skill_name: str = PIPELINE_COMPOSER_SKILL_NAME
@@ -1174,20 +1174,19 @@ class ComposerServiceImpl:
             return
         if self._sessions_service is None:
             return
-        # Re-read the in-memory cached text (the same atomic pair fed to
-        # the LLM). ``load_skill_with_hash`` is @lru_cache'd so this is a
-        # cheap dict hit; the assert in __init__ already verified the
-        # on-disk file still matches.
-        text, sha256_hex = load_skill_with_hash(self._composer_skill_name)
-        # Defensive Tier-1 consistency check: the cached hash on the
-        # service instance and the hash returned by the cache MUST agree.
-        # A mismatch would mean a race between this method and a manual
-        # cache invalidation; the audit trail's join semantics would
-        # break.
+        # Archive the exact composed static prompt, not either source markdown
+        # in isolation. Startup independently verified both cached source files
+        # against disk before this exact in-memory composition was accepted.
+        from elspeth.web.composer.prompts import SYSTEM_PROMPT
+
+        text = SYSTEM_PROMPT
+        sha256_hex = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        # Defensive Tier-1 consistency check: the service's composed prompt
+        # hash and the exact archived content MUST agree.
         if sha256_hex != self._composer_skill_hash:
             raise RuntimeError(
                 f"Composer skill hash drift detected: service instance cached "
-                f"{self._composer_skill_hash!r} but load_skill_with_hash now returns "
+                f"{self._composer_skill_hash!r} but exact prompt composition now returns "
                 f"{sha256_hex!r}. The LRU cache was invalidated mid-process; restart "
                 f"elspeth-web.service so the in-memory skill prompt and the audit "
                 f"row's composer_skill_hash agree."
@@ -2133,6 +2132,7 @@ class ComposerServiceImpl:
             guided_redacted_planner_context,
         )
         from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE
+        from elspeth.web.composer.guided.prompts import load_step_planner_skill
         from elspeth.web.composer.guided.state_machine import GuidedSession
 
         if type(guided) is not GuidedSession:
@@ -2159,6 +2159,8 @@ class ComposerServiceImpl:
                 claimed_intent_ids=claimed_intent_ids,
             )
 
+        planner_surface = PlannerSurface.TUTORIAL_PROFILE if guided.profile == TUTORIAL_PROFILE else PlannerSurface.GUIDED_STAGED
+        planner_profile = "tutorial" if planner_surface is PlannerSurface.TUTORIAL_PROFILE else "ordinary"
         plan = await plan_pipeline(
             intent=intent,
             current_state=current_state,
@@ -2168,7 +2170,8 @@ class ComposerServiceImpl:
             eligible_deferred_intent_ids=tuple(item.intent_id for item in guided.deferred_intents),
             claim_evaluator=evaluate_claims,
             supersedes_draft_hash=supersedes_draft_hash,
-            surface=(PlannerSurface.TUTORIAL_PROFILE if guided.profile == TUTORIAL_PROFILE else PlannerSurface.GUIDED_STAGED),
+            surface=planner_surface,
+            profile=planner_profile,
             policy_catalog=policy_catalog,
             plugin_snapshot=plugin_snapshot,
             originating_message=originating_message,
@@ -2186,7 +2189,7 @@ class ComposerServiceImpl:
                 max_api_attempts=_LLM_API_MAX_ATTEMPTS,
                 api_retry_base_seconds=_LLM_API_RETRY_BASE_DELAY_SECONDS,
             ),
-            rendered_skill=build_system_prompt(self._data_dir),
+            rendered_skill=load_step_planner_skill(guided.step),
             repair_budget=self._settings.composer_planner_repair_budget,
             budget_policy=PlannerBudgetPolicy(
                 max_total_provider_calls=self._settings.composer_planner_max_provider_calls,
@@ -2217,13 +2220,14 @@ class ComposerServiceImpl:
         *,
         session_id: UUID,
         current_state_id: UUID | None,
-        recorder: BufferingRecorder,
+        llm_calls: tuple[ComposerLLMCall, ...],
+        invocations: tuple[ComposerToolInvocation, ...],
     ) -> None:
         """Make planner LLM/discovery evidence durable before proposal authority."""
 
         sessions = self._require_sessions_service()
         try:
-            for call in recorder.llm_calls:
+            for call in llm_calls:
                 content = json.dumps(
                     {
                         "_kind": "llm_call_audit",
@@ -2243,7 +2247,7 @@ class ComposerServiceImpl:
                     composition_state_id=current_state_id,
                     writer_principal="compose_loop",
                 )
-            for invocation in recorder.invocations:
+            for invocation in invocations:
                 content, envelope = redacted_tool_invocation_content_and_envelope(invocation)
                 await sessions.add_message(
                     session_id,
@@ -2273,7 +2277,8 @@ class ComposerServiceImpl:
         await self._persist_pipeline_planner_audit(
             session_id=session_id,
             current_state_id=current_state_id,
-            recorder=recorder,
+            llm_calls=recorder.llm_calls,
+            invocations=recorder.invocations,
         )
         arguments = cast(dict[str, Any], deep_thaw(plan.proposal.pipeline))
         redacted_arguments = redact_tool_call_arguments(
@@ -2369,6 +2374,8 @@ class ComposerServiceImpl:
             runtime_preflight=None,
         )
         plan: PipelinePlanResult | None = None
+        planner_llm_start = len(recorder.llm_calls)
+        planner_invocation_start = len(recorder.invocations)
         recipe_match = match_freeform_recipe_intent(message)
         if recipe_match is not None and recipe_match.inline_blob is not None:
             recipe = get_recipe(recipe_match.recipe_name)
@@ -2437,46 +2444,70 @@ class ComposerServiceImpl:
                 except RecipeValidationError:
                     plan = None
         if plan is None:
-            plan = await plan_pipeline(
-                intent=message,
-                current_state=state,
-                provider_current_state=state.to_dict(),
-                reviewed_facts={},
-                reviewed_planner_context={},
-                eligible_deferred_intent_ids=(),
-                claim_evaluator=None,
-                supersedes_draft_hash=None,
-                surface=PlannerSurface.FREEFORM,
-                policy_catalog=policy_catalog,
-                plugin_snapshot=plugin_snapshot,
-                originating_message=origin,
-                base=base,
-                model_config=PlannerModelConfig(
-                    completion=_litellm_acompletion,
-                    model_identifier=self._model,
-                    provider=self._availability.provider or "unknown",
-                    temperature=self._settings.composer_temperature,
-                    seed=self._settings.composer_seed,
-                    timeout_seconds=self._timeout_seconds,
-                    max_composition_turns=self._max_composition_turns,
-                    max_discovery_turns=self._max_discovery_turns,
-                    max_tool_calls_per_turn=self._max_tool_calls_per_turn,
-                    max_api_attempts=_LLM_API_MAX_ATTEMPTS,
-                    api_retry_base_seconds=_LLM_API_RETRY_BASE_DELAY_SECONDS,
-                ),
-                rendered_skill=rendered_skill,
-                repair_budget=self._settings.composer_planner_repair_budget,
-                budget_policy=PlannerBudgetPolicy(
-                    max_total_provider_calls=self._settings.composer_planner_max_provider_calls,
-                    max_request_bytes=self._settings.composer_planner_max_request_bytes,
-                    max_completion_tokens=self._settings.composer_planner_max_completion_tokens,
-                    max_cumulative_provider_cost=self._settings.composer_planner_max_cumulative_provider_cost,
-                ),
-                custody_config=custody_config,
-                lifecycle=self._planner_request_lifecycle(progress),
-                recorder=recorder,
-                candidate_finalizer=lambda candidate: candidate,
-            )
+            try:
+                plan = await plan_pipeline(
+                    intent=message,
+                    current_state=state,
+                    provider_current_state=state.to_dict(),
+                    reviewed_facts={},
+                    reviewed_planner_context={},
+                    eligible_deferred_intent_ids=(),
+                    claim_evaluator=None,
+                    supersedes_draft_hash=None,
+                    surface=PlannerSurface.FREEFORM,
+                    profile="ordinary",
+                    policy_catalog=policy_catalog,
+                    plugin_snapshot=plugin_snapshot,
+                    originating_message=origin,
+                    base=base,
+                    model_config=PlannerModelConfig(
+                        completion=_litellm_acompletion,
+                        model_identifier=self._model,
+                        provider=self._availability.provider or "unknown",
+                        temperature=self._settings.composer_temperature,
+                        seed=self._settings.composer_seed,
+                        timeout_seconds=self._timeout_seconds,
+                        max_composition_turns=self._max_composition_turns,
+                        max_discovery_turns=self._max_discovery_turns,
+                        max_tool_calls_per_turn=self._max_tool_calls_per_turn,
+                        max_api_attempts=_LLM_API_MAX_ATTEMPTS,
+                        api_retry_base_seconds=_LLM_API_RETRY_BASE_DELAY_SECONDS,
+                    ),
+                    rendered_skill=rendered_skill,
+                    repair_budget=self._settings.composer_planner_repair_budget,
+                    budget_policy=PlannerBudgetPolicy(
+                        max_total_provider_calls=self._settings.composer_planner_max_provider_calls,
+                        max_request_bytes=self._settings.composer_planner_max_request_bytes,
+                        max_completion_tokens=self._settings.composer_planner_max_completion_tokens,
+                        max_cumulative_provider_cost=self._settings.composer_planner_max_cumulative_provider_cost,
+                    ),
+                    custody_config=custody_config,
+                    lifecycle=self._planner_request_lifecycle(progress),
+                    recorder=recorder,
+                    candidate_finalizer=lambda candidate: candidate,
+                )
+            except BaseException as exc:
+                exc_dict = exc.__dict__
+                attached_calls = exc_dict["llm_calls"] if "llm_calls" in exc_dict else ()
+                if type(attached_calls) is not tuple or any(type(call) is not ComposerLLMCall for call in attached_calls):
+                    raise AuditIntegrityError("pipeline planner exception carried malformed LLM audit evidence") from exc
+                if attached_calls != recorder.llm_calls[planner_llm_start:]:
+                    raise AuditIntegrityError("pipeline planner exception carried unrelated LLM audit evidence") from exc
+                _persisted, deferred = await _await_pipeline_staging_write_with_deferred_cancellation(
+                    self._persist_pipeline_planner_audit(
+                        session_id=session_uuid,
+                        current_state_id=state_uuid,
+                        llm_calls=attached_calls,
+                        invocations=recorder.invocations[planner_invocation_start:],
+                    ),
+                    deferred=exc if type(exc) is asyncio.CancelledError else None,
+                )
+                exc_dict["llm_calls_durable"] = True
+                if deferred is not None:
+                    if deferred is exc:
+                        raise
+                    raise deferred from exc
+                raise
         return await self._stage_pipeline_plan(
             plan=plan,
             state=state,

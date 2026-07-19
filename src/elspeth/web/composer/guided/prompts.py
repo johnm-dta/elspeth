@@ -9,7 +9,9 @@ Skills are split per step:
   skills/step_4_wire.md           Step-4 wiring constraints.
 
 ``load_step_chat_skill(step)`` composes base + one step, scoped to the user's
-current wizard position. Consumed by the per-step chat solver.
+current wizard position. Consumed by the per-step chat solver.  The separate
+``load_step_planner_skill(step)`` prepends the canonical capability core and is
+used only by the shared planner, whose palette includes the terminal tool.
 
 All loaders are module-cached via ``@lru_cache``; per project memory, restart
 elspeth-web.service after editing any skill markdown for live changes to take
@@ -23,6 +25,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from elspeth.web.composer.capability_skill import render_with_pipeline_capabilities
 from elspeth.web.composer.guided.protocol import GuidedStep
 
 _SKILLS_DIR = Path(__file__).parent / "skills"
@@ -68,6 +71,12 @@ def load_step_chat_skill(step: GuidedStep) -> str:
     elspeth-web.service after editing skill markdown.
     """
     return f"{_load_base().rstrip()}\n\n{_load_step(step).rstrip()}\n"
+
+
+@lru_cache(maxsize=len(GuidedStep))
+def load_step_planner_skill(step: GuidedStep) -> str:
+    """Compose canonical capabilities + the current guided interaction rules."""
+    return render_with_pipeline_capabilities(load_step_chat_skill(step))
 
 
 def build_mode_transition_system_prompt(*, terminal_reason: str, freeform_skill: str) -> str:

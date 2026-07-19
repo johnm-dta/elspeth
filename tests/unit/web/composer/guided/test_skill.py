@@ -52,12 +52,17 @@ def test_sample_row_projection_redacts_values() -> None:
     }
 
 
-def test_step_3_skill_keeps_fail_closed_field_mapper_rules() -> None:
+def test_step_3_skill_keeps_fail_closed_mapping_direction_rules() -> None:
     text = load_step_chat_skill(GuidedStep.STEP_3_TRANSFORMS)
 
-    assert "mapping **keys**" in text
-    assert "immediate upstream contract guarantees" in text
-    assert "mapped output **targets**" in text
+    assert "source side" in text
+    assert "mapping keys" in text
+    assert "immediate-upstream fields" in text
+    assert "target side" in text
+    assert "mapping values" in text
+    assert "emitted downstream fields" in text
+    assert "never reverse" in text
+    assert "Required downstream fields belong in output targets" in text
     assert "unproven source" in text
 
 

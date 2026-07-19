@@ -21,10 +21,19 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.composer_progress import ComposerProgressEvent
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import stable_hash
 from elspeth.core.canonical import canonical_json
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.composer.audit import BufferingRecorder
+from elspeth.web.composer.guided.profile import EMPTY_PROFILE, TUTORIAL_PROFILE
+from elspeth.web.composer.guided.prompts import load_step_planner_skill
+from elspeth.web.composer.guided.protocol import GuidedStep
+from elspeth.web.composer.guided.resolved import SinkOutputResolved, SourceResolved
+from elspeth.web.composer.guided.state_machine import GuidedSession
+from elspeth.web.composer.pipeline_planner import PlannerOriginatingMessage
+from elspeth.web.composer.pipeline_proposal import PlannerSurface, PresentBase
 from elspeth.web.composer.protocol import (
     ComposerConvergenceError,
     ComposerPluginCrashError,
@@ -80,6 +89,169 @@ from tests.unit.web.composer._helpers import (
     _mock_catalog,
     _stub_advisor_end_gate_clean,  # noqa: F401  (autouse end-gate CLEAN stub)
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("profile", "expected_surface", "expected_profile"),
+    (
+        (EMPTY_PROFILE, PlannerSurface.GUIDED_STAGED, "ordinary"),
+        (TUTORIAL_PROFILE, PlannerSurface.TUTORIAL_PROFILE, "tutorial"),
+    ),
+)
+async def test_guided_service_routes_step3_through_the_planner_only_capability_prompt(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    monkeypatch: pytest.MonkeyPatch,
+    profile: Any,
+    expected_surface: PlannerSurface,
+    expected_profile: str,
+) -> None:
+    source_id = "11111111-1111-4111-8111-111111111111"
+    output_id = "22222222-2222-4222-8222-222222222222"
+    guided = GuidedSession(
+        step=GuidedStep.STEP_3_TRANSFORMS,
+        profile=profile,
+        source_order=(source_id,),
+        reviewed_sources={
+            source_id: SourceResolved(
+                name="input",
+                plugin="csv",
+                options={"path": "/data/input.csv"},
+                observed_columns=("id",),
+                sample_rows=(),
+                on_validation_failure="discard",
+            )
+        },
+        output_order=(output_id,),
+        reviewed_outputs={
+            output_id: SinkOutputResolved(
+                name="results",
+                plugin="json",
+                options={"path": "/data/results.jsonl"},
+                required_fields=("id",),
+                schema_mode="observed",
+                on_write_failure="discard",
+            )
+        },
+    )
+    captured: list[dict[str, Any]] = []
+    sentinel_plan = object()
+
+    async def capture_plan_pipeline(**kwargs: Any) -> Any:
+        captured.append(kwargs)
+        return sentinel_plan
+
+    monkeypatch.setattr("elspeth.web.composer.service.plan_pipeline", capture_plan_pipeline)
+    current_state = _empty_state()
+    result, _catalog_ids = await composer_service_with_real_sessions.plan_guided_pipeline(
+        intent="Build the reviewed pipeline.",
+        current_state=current_state,
+        guided=guided,
+        originating_message=PlannerOriginatingMessage(
+            session_id=str(uuid4()),
+            message_id=str(uuid4()),
+            content="Build the reviewed pipeline.",
+            user_id="test-user",
+        ),
+        base=PresentBase(state_id=uuid4(), composition_content_hash="0" * 64),
+        user_id="test-user",
+        supersedes_draft_hash=None,
+        recorder=BufferingRecorder(),
+    )
+
+    assert result is sentinel_plan
+    assert len(captured) == 1
+    assert captured[0]["surface"] is expected_surface
+    assert captured[0]["profile"] == expected_profile
+    assert captured[0]["rendered_skill"] == load_step_planner_skill(GuidedStep.STEP_3_TRANSFORMS)
+
+
+@pytest.mark.asyncio
+async def test_actual_step3_staged_and_tutorial_adapters_render_identical_provider_requests(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import elspeth.web.composer.pipeline_planner as planner_module
+
+    sessions = cast(SessionServiceImpl | None, composer_service_with_real_sessions._sessions_service)
+    assert sessions is not None
+    actual_service = ComposerServiceImpl.for_trained_operator(
+        composer_service_with_real_sessions._catalog,
+        composer_service_with_real_sessions._settings,
+        sessions_service=sessions,
+        session_engine=sessions._engine,
+    )
+    session = await sessions.create_session("test-user", "Planner parity", "local")
+    source_id = "11111111-1111-4111-8111-111111111111"
+    output_id = "22222222-2222-4222-8222-222222222222"
+    ordinary = GuidedSession(
+        step=GuidedStep.STEP_3_TRANSFORMS,
+        profile=EMPTY_PROFILE,
+        source_order=(source_id,),
+        reviewed_sources={
+            source_id: SourceResolved(
+                name="input",
+                plugin="csv",
+                options={"path": "/data/input.csv"},
+                observed_columns=("id",),
+                sample_rows=(),
+                on_validation_failure="discard",
+            )
+        },
+        output_order=(output_id,),
+        reviewed_outputs={
+            output_id: SinkOutputResolved(
+                name="results",
+                plugin="json",
+                options={"path": "/data/results.jsonl"},
+                required_fields=("id",),
+                schema_mode="observed",
+                on_write_failure="discard",
+            )
+        },
+    )
+    manifests: list[Any] = []
+    requests: list[dict[str, Any]] = []
+    real_builder = planner_module.build_planner_capability_manifest  # type: ignore[attr-defined]
+
+    def capture_manifest(**kwargs: Any) -> Any:
+        manifest = real_builder(**kwargs)
+        manifests.append(manifest)
+        return manifest
+
+    async def mutating_completion(**kwargs: Any) -> Any:
+        kwargs["messages"][0]["content"] += "\nprovider-side mutation"
+        requests.append(kwargs)
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(planner_module, "build_planner_capability_manifest", capture_manifest)  # type: ignore[attr-defined]
+    monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", mutating_completion)
+
+    for guided in (ordinary, replace(ordinary, profile=TUTORIAL_PROFILE)):
+        with pytest.raises(AuditIntegrityError, match="planner call inputs changed"):
+            await actual_service.plan_guided_pipeline(
+                intent="Build the reviewed pipeline.",
+                current_state=_empty_state(),
+                guided=guided,
+                originating_message=PlannerOriginatingMessage(
+                    session_id=str(session.id),
+                    message_id=None,
+                    content="Build the reviewed pipeline.",
+                    user_id="test-user",
+                ),
+                base=PresentBase(state_id=UUID("55555555-5555-4555-8555-555555555555"), composition_content_hash="0" * 64),
+                user_id="test-user",
+                supersedes_draft_hash=None,
+                recorder=BufferingRecorder(),
+            )
+
+    assert len(manifests) == len(requests) == 2
+    assert [manifest.surface for manifest in manifests] == [PlannerSurface.GUIDED_STAGED, PlannerSurface.TUTORIAL_PROFILE]
+    assert [manifest.profile for manifest in manifests] == ["ordinary", "tutorial"]
+    assert manifests[0].rendered_prompt_hash == manifests[1].rendered_prompt_hash
+    assert manifests[0].effective_tool_hash == manifests[1].effective_tool_hash
+    assert requests[0]["messages"] == requests[1]["messages"]
+    assert requests[0]["tools"] == requests[1]["tools"]
 
 
 def _execute_tool(

@@ -15,17 +15,15 @@ left without it is incomplete.
 
 A source in the default **observed** mode promises *no* fields — it passes
 through whatever columns are present. That is the honest default. But some
-downstream transforms consume a column **by name**: `web_scrape` reads a `url`
-column; a join reads a key. When the pipeline will require such a column, the
-source must *guarantee* it, or the field contract fails at the wiring step — at
-the very end, after all the work is done.
+downstream transforms consume a column **by name**. When the pipeline will
+require such a column, the source must *guarantee* it, or the field contract
+fails at the wiring step — at the very end, after all the work is done.
 
 You are **not** obliged to *prove* the column exists, and you must never invent
 a guarantee to silence the contract. Knowing the data's shape is the
-**operator's** responsibility, not yours — most sources are fetched, not
-uploaded (`dataverse`, an API, a remote file), so you often cannot see the rows
-at all. Your obligation is to **surface an unmet requirement and record a proven
-one**:
+**operator's** responsibility, not yours — many policy-visible sources are
+remote or otherwise not inspectable, so you often cannot see the rows at all.
+Your obligation is to **surface an unmet requirement and record a proven one**:
 
 - **Proven → record it.** A requirement is proven when the operator *told you*
   the data carries the column ("these are all URLs"; "the `website` column holds

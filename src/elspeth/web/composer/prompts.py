@@ -9,6 +9,7 @@ Layer: L3 (application).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Mapping
@@ -16,6 +17,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Final
 
 from elspeth.web.catalog.policy_view import PolicyCatalogView
+from elspeth.web.composer.capability_skill import render_with_pipeline_capabilities
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.prompts import build_mode_transition_system_prompt
 from elspeth.web.composer.guided.state_machine import TerminalKind
@@ -27,22 +29,20 @@ from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 if TYPE_CHECKING:
     from elspeth.web.composer.guided.state_machine import TerminalState
 
-# Load the pipeline composer skill once at module level (static content) AND
-# capture its SHA-256 atomically from the same read — Phase 5b F-5a. The
-# audit-row ``composer_skill_hash`` on every ``interpretation_events`` row
-# (and any future audit row that carries the skill version) MUST match the
-# hash of exactly the text the LLM was prompted with. By taking both values
-# from a single in-memory read, the hash and the text cannot disagree, and
-# the LRU cache that backs ``load_skill_with_hash`` guarantees subsequent
-# callers receive the same atomic pair without re-reading disk.
-_PIPELINE_SKILL, PIPELINE_COMPOSER_SKILL_HASH = load_skill_with_hash("pipeline_composer")
+# Load both static prompt sources and their individual hashes atomically. The
+# exported ``PIPELINE_COMPOSER_SKILL_HASH`` below covers their exact rendered
+# composition, while these source hashes let service startup detect on-disk
+# drift in either file.
+_PIPELINE_SKILL, PIPELINE_COMPOSER_INTERACTION_SKILL_HASH = load_skill_with_hash("pipeline_composer")
 PIPELINE_COMPOSER_SKILL_NAME: str = "pipeline_composer"
 PIPELINE_COMPOSER_SKILL_FILENAME: str = f"{PIPELINE_COMPOSER_SKILL_NAME}.md"
+PIPELINE_CAPABILITIES_SKILL_NAME: str = "pipeline_capabilities"
+_PIPELINE_CAPABILITIES_SKILL, PIPELINE_CAPABILITIES_SKILL_HASH = load_skill_with_hash(PIPELINE_CAPABILITIES_SKILL_NAME)
 
 # SYSTEM_PROMPT is bound below, once the strip helper is defined — it is the
-# advisor-enabled, no-deployment-layer projection of the loaded skill (i.e.,
+# advisor-enabled, no-deployment-layer projection of both loaded skills (i.e.,
 # what ``build_system_prompt(None)`` returns). Exported for tests that need
-# to assert identity with the core skill; build_messages no longer uses it
+# to assert identity with the static system prompt; build_messages no longer uses it
 # as a fast path (the F1 fix routes every call through ``build_system_prompt``
 # so the advisor-disabled-fallback strip applies consistently).
 
@@ -56,7 +56,8 @@ def _strip_advisor_disabled_fallback(text: str) -> str:
     return re.sub(r"<!-- ADVISOR-DISABLED -->.*?<!-- /ADVISOR-DISABLED -->", "", text, flags=re.DOTALL)
 
 
-SYSTEM_PROMPT = _strip_advisor_disabled_fallback(_PIPELINE_SKILL)
+SYSTEM_PROMPT = render_with_pipeline_capabilities(_strip_advisor_disabled_fallback(_PIPELINE_SKILL))
+PIPELINE_COMPOSER_SKILL_HASH = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()
 
 
 @lru_cache(maxsize=8)
@@ -81,7 +82,7 @@ def build_system_prompt(data_dir: str | None = None) -> str:
     Returns:
         Combined system prompt string.
     """
-    core = _strip_advisor_disabled_fallback(_PIPELINE_SKILL)
+    core = render_with_pipeline_capabilities(_strip_advisor_disabled_fallback(_PIPELINE_SKILL))
     deployment = load_deployment_skill("pipeline_composer", data_dir)
     if deployment:
         return core + "\n\n---\n\n" + deployment

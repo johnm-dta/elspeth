@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.web.composer.pipeline_planner import PipelinePlannerError
@@ -647,6 +648,182 @@ async def _recipe_composer_context(
         session_engine=engine,
     )
     return engine, sessions, session, user_message, composer
+
+
+@pytest.mark.asyncio
+async def test_freeform_matching_provider_cancellation_persists_once_without_self_cause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider cancellation remains the original exception after its audit commits."""
+    message = "Build a CSV to JSONL pipeline."
+    engine, sessions, session, user_message, composer = await _recipe_composer_context(
+        tmp_path,
+        monkeypatch,
+        message=message,
+    )
+
+    async def cancelling_completion(**_kwargs: Any) -> _Response:
+        raise asyncio.CancelledError("provider cancelled matching freeform planner request")
+
+    monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", cancelling_completion)
+
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await composer.compose(
+            message,
+            [],
+            _empty_state(),
+            session_id=str(session.id),
+            user_id="planner-user",
+            user_message_id=str(user_message.id),
+        )
+
+    assert type(caught.value) is asyncio.CancelledError
+    assert caught.value.args == ("provider cancelled matching freeform planner request",)
+    assert caught.value.__cause__ is None
+    persisted = await sessions.get_messages(session.id, limit=None)
+    audit_calls = [
+        envelope["call"] for row in persisted for envelope in (row.tool_calls or ()) if envelope.get("_kind") == "llm_call_audit"
+    ]
+    assert len(audit_calls) == 1
+    assert audit_calls[0]["status"] == ComposerLLMCallStatus.CANCELLED.value
+    assert await sessions.list_composition_proposals(session.id) == []
+    _assert_no_pipeline_side_effects(engine)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_outcome", "expected_status"),
+    (
+        ("success", ComposerLLMCallStatus.SUCCESS),
+        ("error", ComposerLLMCallStatus.API_ERROR),
+        ("cancel", ComposerLLMCallStatus.CANCELLED),
+    ),
+)
+async def test_freeform_planner_manifest_mismatch_is_durable_before_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_outcome: str,
+    expected_status: ComposerLLMCallStatus,
+) -> None:
+    import elspeth.web.composer.pipeline_planner as planner_module
+
+    message = "Build a CSV to JSONL pipeline."
+    engine, sessions, session, user_message, composer = await _recipe_composer_context(
+        tmp_path,
+        monkeypatch,
+        message=message,
+    )
+    requests: list[dict[str, Any]] = []
+    manifests: list[Any] = []
+    real_builder = planner_module.build_planner_capability_manifest  # type: ignore[attr-defined]
+
+    def capture_manifest(**kwargs: Any) -> Any:
+        manifest = real_builder(**kwargs)
+        manifests.append(manifest)
+        return manifest
+
+    async def mutating_completion(**kwargs: Any) -> _Response:
+        kwargs["messages"][0]["content"] += "\nprovider-side mutation"
+        requests.append(kwargs)
+        if provider_outcome == "error":
+            raise RuntimeError("provider unavailable")
+        if provider_outcome == "cancel":
+            raise asyncio.CancelledError()
+        return _terminal_response(tmp_path)
+
+    monkeypatch.setattr(planner_module, "build_planner_capability_manifest", capture_manifest)
+    monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", mutating_completion)
+
+    with pytest.raises(AuditIntegrityError, match="planner call inputs changed"):
+        await composer.compose(
+            message,
+            [],
+            _empty_state(),
+            session_id=str(session.id),
+            user_id="planner-user",
+            user_message_id=str(user_message.id),
+        )
+
+    persisted = await sessions.get_messages(session.id, limit=None)
+    audit_calls = [
+        envelope["call"] for row in persisted for envelope in (row.tool_calls or ()) if envelope.get("_kind") == "llm_call_audit"
+    ]
+    assert len(requests) == len(manifests) == len(audit_calls) == 1
+    assert audit_calls[0]["status"] == expected_status.value
+    assert audit_calls[0]["messages_hash"] != manifests[0].rendered_prompt_hash
+    assert audit_calls[0]["tools_spec_hash"] == manifests[0].effective_tool_hash
+    assert await sessions.list_composition_proposals(session.id) == []
+    _assert_no_pipeline_side_effects(engine)
+
+
+@pytest.mark.asyncio
+async def test_freeform_manifest_mismatch_audit_write_defers_request_cancellation_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request cancel racing mismatch-audit persistence wins after the row commits."""
+    message = "Build a CSV to JSONL pipeline."
+    engine, sessions, session, user_message, composer = await _recipe_composer_context(
+        tmp_path,
+        monkeypatch,
+        message=message,
+    )
+
+    async def mutating_completion(**kwargs: Any) -> _Response:
+        kwargs["messages"][0]["content"] += "\nprovider-side mutation"
+        return _terminal_response(tmp_path)
+
+    monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", mutating_completion)
+
+    audit_worker_started = threading.Event()
+    release_audit_worker = threading.Event()
+    audit_worker_finished = threading.Event()
+    original_insert = sessions._insert_chat_message  # type: ignore[attr-defined]
+
+    def pause_mismatch_audit_insert(*args: Any, **kwargs: Any) -> Any:
+        row_id = original_insert(*args, **kwargs)
+        tool_calls = kwargs["tool_calls"]
+        if kwargs["role"] == "audit" and tool_calls and tool_calls[0]["_kind"] == "llm_call_audit":
+            audit_worker_started.set()
+            if not release_audit_worker.wait(timeout=5.0):
+                raise TimeoutError("test did not release mismatch audit worker")
+            audit_worker_finished.set()
+        return row_id
+
+    monkeypatch.setattr(sessions, "_insert_chat_message", pause_mismatch_audit_insert)
+    compose_task = asyncio.create_task(
+        composer.compose(
+            message,
+            [],
+            _empty_state(),
+            session_id=str(session.id),
+            user_id="planner-user",
+            user_message_id=str(user_message.id),
+        )
+    )
+    assert await asyncio.to_thread(audit_worker_started.wait, 5.0), "mismatch audit worker did not start"
+    compose_task.cancel("request cancelled during mismatch audit persistence")
+    await asyncio.sleep(0)
+    cancellation_escaped_before_worker = compose_task.done()
+    release_audit_worker.set()
+    assert await asyncio.to_thread(audit_worker_finished.wait, 5.0), "mismatch audit worker did not finish"
+
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await asyncio.wait_for(compose_task, timeout=5.0)
+
+    assert not cancellation_escaped_before_worker
+    assert caught.value.args == ("request cancelled during mismatch audit persistence",)
+    assert type(caught.value.__cause__) is AuditIntegrityError
+    assert "planner call inputs changed" in str(caught.value.__cause__)
+    persisted = await sessions.get_messages(session.id, limit=None)
+    audit_calls = [
+        envelope["call"] for row in persisted for envelope in (row.tool_calls or ()) if envelope.get("_kind") == "llm_call_audit"
+    ]
+    assert len(audit_calls) == 1
+    assert audit_calls[0]["status"] == ComposerLLMCallStatus.SUCCESS.value
+    assert await sessions.list_composition_proposals(session.id) == []
+    _assert_no_pipeline_side_effects(engine)
 
 
 def _assert_no_pipeline_side_effects(engine: Any) -> None:

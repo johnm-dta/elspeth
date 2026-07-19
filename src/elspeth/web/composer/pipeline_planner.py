@@ -36,10 +36,17 @@ from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder, begin_dispatch, dispatch_with_audit
+from elspeth.web.composer.capability_skill import (
+    PLANNER_DISCOVERY_TOOL_NAMES,
+    PLANNER_TERMINAL_TOOL_NAME,
+    PlannerCapabilityManifest,
+    build_planner_capability_manifest,
+)
 from elspeth.web.composer.discovery_cache import serialize_tool_result
 from elspeth.web.composer.guided.deferred_intents import DeferredIntentClaimError
 from elspeth.web.composer.llm_response_parsing import (
     apply_anthropic_cache_markers,
+    attach_llm_calls,
     build_llm_call_record,
     supports_anthropic_prompt_cache_markers,
 )
@@ -65,33 +72,8 @@ from elspeth.web.composer.tools.schema_contract import canonical_set_pipeline_sc
 from elspeth.web.composer.tools.sessions import build_set_pipeline_candidate
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
-PLANNER_DISCOVERY_TOOL_NAMES: Final[tuple[str, ...]] = (
-    # Core discovery.
-    "diff_pipeline",
-    "explain_validation_error",
-    "get_audit_info",
-    "get_expression_grammar",
-    "get_pipeline_state",
-    "get_plugin_assistance",
-    "get_plugin_schema",
-    "list_models",
-    "list_recipes",
-    "list_sinks",
-    "list_sources",
-    "list_transforms",
-    "preview_pipeline",
-    # Blob discovery.
-    "get_blob_content",
-    "get_blob_metadata",
-    "inspect_source",
-    "list_blobs",
-    "list_composer_blobs",
-    # Secret discovery.  Values remain outside this surface.
-    "list_secret_refs",
-    "validate_secret_ref",
-)
 _PLANNER_DISCOVERY_TOOL_NAME_SET: Final[frozenset[str]] = frozenset(PLANNER_DISCOVERY_TOOL_NAMES)
-_TERMINAL_TOOL_NAME: Final[str] = "emit_pipeline_proposal"
+_TERMINAL_TOOL_NAME: Final[str] = PLANNER_TERMINAL_TOOL_NAME
 
 
 class _Completion(Protocol):
@@ -379,6 +361,22 @@ def planner_tool_definitions() -> list[dict[str, Any]]:
         for name in PLANNER_DISCOVERY_TOOL_NAMES
     ]
     return [*discovery, planner_terminal_tool_definition()]
+
+
+def _assert_planner_call_matches_manifest(
+    call: ComposerLLMCall,
+    manifest: PlannerCapabilityManifest,
+    recorder: BufferingRecorder,
+) -> None:
+    """Audit the terminal provider outcome before rejecting input mutation.
+
+    Matching calls continue to their normal single recording point.  A
+    mismatch is itself a terminal integrity outcome, so the exact outbound
+    hashes and provider status must be retained before the fail-closed error.
+    """
+    if call.messages_hash != manifest.rendered_prompt_hash or call.tools_spec_hash != manifest.effective_tool_hash:
+        recorder.record_llm_call(call)
+        raise AuditIntegrityError("planner call inputs changed after capability manifest construction")
 
 
 def _provider_fields(value: Any) -> Mapping[str, Any] | None:
@@ -800,6 +798,7 @@ async def plan_pipeline(
     claim_evaluator: PipelineClaimEvaluator | None,
     supersedes_draft_hash: str | None,
     surface: PlannerSurface,
+    profile: str,
     policy_catalog: PolicyCatalogView,
     plugin_snapshot: PluginAvailabilitySnapshot,
     originating_message: PlannerOriginatingMessage,
@@ -820,6 +819,8 @@ async def plan_pipeline(
         raise ValueError("rendered_skill must be a non-empty exact string")
     if type(repair_budget) is not int or repair_budget < 0:
         raise ValueError("repair_budget must be a non-negative exact integer")
+    if profile not in {"ordinary", "tutorial"}:
+        raise ValueError("profile must be 'ordinary' or 'tutorial'")
     if policy_catalog.snapshot is not plugin_snapshot:
         raise ValueError("plugin_snapshot_catalog_mismatch")
     canonical_json(provider_current_state)
@@ -838,6 +839,7 @@ async def plan_pipeline(
     if surface in {PlannerSurface.FREEFORM, PlannerSurface.GUIDED_FULL} and claim_evaluator is not None:
         raise ValueError("freeform and guided-full surfaces cannot provide claim_evaluator")
 
+    llm_call_start = len(recorder.llm_calls)
     outcome: PlannerSettlement = "failed"
     primary_error: BaseException | None = None
     try:
@@ -853,6 +855,7 @@ async def plan_pipeline(
                 claim_evaluator=claim_evaluator,
                 supersedes_draft_hash=supersedes_draft_hash,
                 surface=surface,
+                profile=profile,
                 policy_catalog=policy_catalog,
                 plugin_snapshot=plugin_snapshot,
                 originating_message=originating_message,
@@ -870,6 +873,7 @@ async def plan_pipeline(
         return proposal
     except BaseException as exc:
         primary_error = exc
+        attach_llm_calls(exc, recorder, start_index=llm_call_start)
         if isinstance(exc, asyncio.CancelledError):
             outcome = "cancelled"
         raise
@@ -893,6 +897,7 @@ async def _plan_pipeline_inner(
     claim_evaluator: PipelineClaimEvaluator | None,
     supersedes_draft_hash: str | None,
     surface: PlannerSurface,
+    profile: str,
     policy_catalog: PolicyCatalogView,
     plugin_snapshot: PluginAvailabilitySnapshot,
     originating_message: PlannerOriginatingMessage,
@@ -957,7 +962,6 @@ async def _plan_pipeline_inner(
                     "intent": intent,
                     "current_state": provider_current_state,
                     "reviewed_facts": reviewed_planner_context,
-                    "surface": surface.value,
                     "instruction": (
                         "Use read-only discovery as needed, then call emit_pipeline_proposal exactly once "
                         "with one complete canonical set_pipeline argument object."
@@ -975,12 +979,31 @@ async def _plan_pipeline_inner(
 
     async def call_model() -> tuple[Any, tuple[_ParsedToolCall, ...], ComposerLLMCall]:
         nonlocal total_calls, total_cost
-        marked_messages, marked_tools = (
+        cache_marked_messages, cache_marked_tools = (
             apply_anthropic_cache_markers(messages, tools)
             if supports_anthropic_prompt_cache_markers(model_config.model_identifier)
             else (list(messages), list(tools))
         )
-        assert marked_tools is not None
+        assert cache_marked_tools is not None
+        call_input_snapshot = json.loads(
+            canonical_json(
+                {
+                    "messages": cache_marked_messages,
+                    "tools": cache_marked_tools,
+                }
+            )
+        )
+        if type(call_input_snapshot) is not dict:
+            raise AuditIntegrityError("planner call input snapshot must be an exact object")
+        marked_messages = cast(list[dict[str, Any]], call_input_snapshot["messages"])
+        marked_tools = cast(list[dict[str, Any]], call_input_snapshot["tools"])
+        manifest = build_planner_capability_manifest(
+            surface=surface,
+            profile=profile,
+            messages=marked_messages,
+            tools=marked_tools,
+            canonical_schema=canonical_set_pipeline_schema(),
+        )
         request_size = len(canonical_json({"messages": marked_messages, "tools": marked_tools}).encode("utf-8"))
         if request_size > budget_policy.max_request_bytes:
             raise PipelinePlannerError("planner request byte budget exhausted", code="REQUEST_BYTES_EXHAUSTED")
@@ -1016,42 +1039,42 @@ async def _plan_pipeline_inner(
             try:
                 response = await asyncio.wait_for(model_config.completion(**kwargs), timeout=remaining)
             except asyncio.CancelledError as exc:
-                recorder.record_llm_call(
-                    build_llm_call_record(
-                        model_requested=model_config.model_identifier,
-                        messages=marked_messages,
-                        tools=marked_tools,
-                        status=ComposerLLMCallStatus.CANCELLED,
-                        started_at=started_at,
-                        started_ns=started_ns,
-                        temperature=model_config.temperature,
-                        seed=model_config.seed,
-                        error_class=type(exc).__name__,
-                        error_message=type(exc).__name__,
-                        max_completion_tokens_requested=budget_policy.max_completion_tokens,
-                        planner_policy_hash=budget_policy.audit_hash,
-                        planner_call_ordinal=ordinal,
-                    )
+                cancelled_call = build_llm_call_record(
+                    model_requested=model_config.model_identifier,
+                    messages=marked_messages,
+                    tools=marked_tools,
+                    status=ComposerLLMCallStatus.CANCELLED,
+                    started_at=started_at,
+                    started_ns=started_ns,
+                    temperature=model_config.temperature,
+                    seed=model_config.seed,
+                    error_class=type(exc).__name__,
+                    error_message=type(exc).__name__,
+                    max_completion_tokens_requested=budget_policy.max_completion_tokens,
+                    planner_policy_hash=budget_policy.audit_hash,
+                    planner_call_ordinal=ordinal,
                 )
+                _assert_planner_call_matches_manifest(cancelled_call, manifest, recorder)
+                recorder.record_llm_call(cancelled_call)
                 raise
             except TimeoutError as exc:
-                recorder.record_llm_call(
-                    build_llm_call_record(
-                        model_requested=model_config.model_identifier,
-                        messages=marked_messages,
-                        tools=marked_tools,
-                        status=ComposerLLMCallStatus.TIMEOUT,
-                        started_at=started_at,
-                        started_ns=started_ns,
-                        temperature=model_config.temperature,
-                        seed=model_config.seed,
-                        error_class=type(exc).__name__,
-                        error_message=type(exc).__name__,
-                        max_completion_tokens_requested=budget_policy.max_completion_tokens,
-                        planner_policy_hash=budget_policy.audit_hash,
-                        planner_call_ordinal=ordinal,
-                    )
+                timed_out_call = build_llm_call_record(
+                    model_requested=model_config.model_identifier,
+                    messages=marked_messages,
+                    tools=marked_tools,
+                    status=ComposerLLMCallStatus.TIMEOUT,
+                    started_at=started_at,
+                    started_ns=started_ns,
+                    temperature=model_config.temperature,
+                    seed=model_config.seed,
+                    error_class=type(exc).__name__,
+                    error_message=type(exc).__name__,
+                    max_completion_tokens_requested=budget_policy.max_completion_tokens,
+                    planner_policy_hash=budget_policy.audit_hash,
+                    planner_call_ordinal=ordinal,
                 )
+                _assert_planner_call_matches_manifest(timed_out_call, manifest, recorder)
+                recorder.record_llm_call(timed_out_call)
                 raise PipelinePlannerError("planner wall-clock budget exhausted", code="TIMEOUT") from exc
             except Exception as exc:
                 from litellm.exceptions import APIError as LiteLLMAPIError
@@ -1063,23 +1086,23 @@ async def _plan_pipeline_inner(
                     status = ComposerLLMCallStatus.AUTH_ERROR
                 elif isinstance(exc, LiteLLMBadRequestError):
                     status = ComposerLLMCallStatus.BAD_REQUEST_ERROR
-                recorder.record_llm_call(
-                    build_llm_call_record(
-                        model_requested=model_config.model_identifier,
-                        messages=marked_messages,
-                        tools=marked_tools,
-                        status=status,
-                        started_at=started_at,
-                        started_ns=started_ns,
-                        temperature=model_config.temperature,
-                        seed=model_config.seed,
-                        error_class=type(exc).__name__,
-                        error_message=type(exc).__name__,
-                        max_completion_tokens_requested=budget_policy.max_completion_tokens,
-                        planner_policy_hash=budget_policy.audit_hash,
-                        planner_call_ordinal=ordinal,
-                    )
+                failed_call = build_llm_call_record(
+                    model_requested=model_config.model_identifier,
+                    messages=marked_messages,
+                    tools=marked_tools,
+                    status=status,
+                    started_at=started_at,
+                    started_ns=started_ns,
+                    temperature=model_config.temperature,
+                    seed=model_config.seed,
+                    error_class=type(exc).__name__,
+                    error_message=type(exc).__name__,
+                    max_completion_tokens_requested=budget_policy.max_completion_tokens,
+                    planner_policy_hash=budget_policy.audit_hash,
+                    planner_call_ordinal=ordinal,
                 )
+                _assert_planner_call_matches_manifest(failed_call, manifest, recorder)
+                recorder.record_llm_call(failed_call)
                 if (
                     isinstance(exc, LiteLLMAPIError)
                     and status is ComposerLLMCallStatus.API_ERROR
@@ -1108,6 +1131,7 @@ async def _plan_pipeline_inner(
                 planner_policy_hash=budget_policy.audit_hash,
                 planner_call_ordinal=ordinal,
             )
+            _assert_planner_call_matches_manifest(call, manifest, recorder)
             # Cost enforcement is intentionally post-call and pre-parse.  Do
             # not inspect provider content or dispatch tools before it passes.
             if call.provider_cost is None:

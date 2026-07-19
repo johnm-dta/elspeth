@@ -1377,6 +1377,8 @@ async def _persist_tool_invocations(
 
 def _llm_calls_from_exception(exc: BaseException) -> tuple[ComposerLLMCall, ...]:
     exc_dict = exc.__dict__
+    if "llm_calls_durable" in exc_dict and exc_dict["llm_calls_durable"] is True:
+        return ()
     if "llm_calls" not in exc_dict:
         return ()
     calls = exc_dict["llm_calls"]

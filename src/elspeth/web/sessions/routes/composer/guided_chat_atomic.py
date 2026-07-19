@@ -195,6 +195,7 @@ async def run_guided_chat_provider_attempt(
             user_message=message,
             plugin_hint=plugin_hint,
             current_source=source,
+            available_source_plugins=tuple(plugin.name for plugin in catalog.list_sources()),
             temperature=settings.composer_temperature,
             seed=settings.composer_seed,
             recorder=recorder,

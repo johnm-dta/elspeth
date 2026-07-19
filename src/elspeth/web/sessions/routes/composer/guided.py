@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio  # noqa: F401  # Preserve signed module statement positions.
+import asyncio
 import json  # noqa: F401  # Preserve signed module statement positions.
 from typing import TYPE_CHECKING, Literal, cast
 from uuid import uuid4
@@ -143,6 +143,7 @@ from .._helpers import (
     slog,
     sys,
 )
+from .pipeline_settlement import _await_with_deferred_cancellation
 
 if TYPE_CHECKING:
     from .guided_chat_atomic import GuidedChatProviderOutcome
@@ -3086,6 +3087,40 @@ async def post_guided_respond(
                     return _response_from_record(settlement.result_state)
             except GuidedOperationFenceLostError:
                 rejoin_after_lock = True
+            except asyncio.CancelledError as exc:
+                exc_dict = exc.__dict__
+                # Only planner terminal exceptions carry this evidence marker.
+                # A route cancellation during an in-flight settlement must
+                # escape unchanged so the worker can commit and replay it.
+                if "llm_calls" not in exc_dict:
+                    raise
+                attached_calls = exc_dict["llm_calls"]
+                carrier_error: AuditIntegrityError | None = None
+                if type(attached_calls) is not tuple or attached_calls != planner_recorder.llm_calls:
+                    carrier_error = AuditIntegrityError("guided planner cancellation carried malformed or unrelated LLM audit evidence")
+                    attached_calls = planner_recorder.llm_calls
+                try:
+                    await _await_with_deferred_cancellation(
+                        service.fail_guided_operation_with_audit(
+                            GuidedOperationFailureCommand(
+                                fence=reserved.fence,
+                                failure_code="operation_failed",
+                                actor="composer_route",
+                                audit_evidence=GuidedAuditEvidence(
+                                    invocations=planner_recorder.invocations,
+                                    llm_calls=attached_calls,
+                                    chat_turns=planner_recorder.chat_turns,
+                                ),
+                            ),
+                        )
+                    )
+                except GuidedOperationFenceLostError as fence_lost:
+                    raise exc from fence_lost
+                except Exception as failure_exc:
+                    raise exc from failure_exc
+                if carrier_error is not None:
+                    raise exc from carrier_error
+                raise
             except Exception as exc:
                 failure_code: GuidedOperationFailureCode = (
                     "stale_conflict"

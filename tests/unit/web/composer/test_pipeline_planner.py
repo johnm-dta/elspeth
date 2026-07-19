@@ -24,12 +24,16 @@ from litellm.exceptions import APIError as LiteLLMAPIError
 from sqlalchemy import func, insert, select
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder
+from elspeth.web.composer.capability_skill import load_pipeline_capability_core
 from elspeth.web.composer.guided.deferred_intents import DeferredIntentClaimError
+from elspeth.web.composer.guided.prompts import load_step_planner_skill
+from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.pipeline_planner import (
     PLANNER_DISCOVERY_TOOL_NAMES,
     PipelinePlannerError,
@@ -42,6 +46,7 @@ from elspeth.web.composer.pipeline_planner import (
     planner_tool_definitions,
 )
 from elspeth.web.composer.pipeline_proposal import AbsentBase, PipelineProposal, PlannerSurface
+from elspeth.web.composer.prompts import build_system_prompt
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools._common import ToolContext
 from elspeth.web.composer.tools.schema_contract import canonical_set_pipeline_schema
@@ -264,8 +269,10 @@ async def _plan(
     current_state: CompositionState | None = None,
     intent: str = "Build the requested pipeline.",
     surface: PlannerSurface = PlannerSurface.FREEFORM,
+    profile: str | None = None,
     eligible_deferred_intent_ids: tuple[str, ...] = (),
     claim_evaluator: Any = None,
+    rendered_skill: str | None = None,
 ) -> Any:
     # Candidate validation needs the real plugin contracts.  ``tool_context``
     # remains in the test signature so the standard composer fixture proves
@@ -285,12 +292,13 @@ async def _plan(
         claim_evaluator=claim_evaluator,
         supersedes_draft_hash=None,
         surface=surface,
+        profile=profile or ("tutorial" if surface is PlannerSurface.TUTORIAL_PROFILE else "ordinary"),
         policy_catalog=policy_catalog,
         plugin_snapshot=plugin_snapshot,
         originating_message=originating_message or _origin(),
         base=AbsentBase(),
         model_config=_model(completion, **dict(model_overrides or {})),
-        rendered_skill="You are the bounded ELSPETH pipeline planner.",
+        rendered_skill=rendered_skill or f"{load_pipeline_capability_core()}\n\nYou are the bounded ELSPETH pipeline planner.",
         repair_budget=repair_budget,
         budget_policy=budget or _budget(),
         custody_config=custody_config or _custody(tmp_path),
@@ -469,6 +477,168 @@ async def test_happy_path_returns_proposal_and_audits_exact_marked_wire_payload(
     assert audit.max_completion_tokens_requested == policy.max_completion_tokens
     assert audit.planner_policy_hash == policy.audit_hash
     assert audit.planner_call_ordinal == 1
+
+
+@pytest.mark.asyncio
+async def test_real_planner_call_builds_manifest_from_exact_audited_inputs(
+    tmp_path: Path,
+    tool_context: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import elspeth.web.composer.pipeline_planner as planner_module
+
+    captured: list[Any] = []
+    real_builder = planner_module.build_planner_capability_manifest
+
+    def capture_manifest(**kwargs: Any) -> Any:
+        manifest = real_builder(**kwargs)
+        captured.append(manifest)
+        return manifest
+
+    monkeypatch.setattr(planner_module, "build_planner_capability_manifest", capture_manifest)
+    completion = _ScriptedCompletion(_response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})))
+    recorder = BufferingRecorder()
+
+    await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion, recorder=recorder)
+
+    assert len(captured) == 1
+    assert captured[0].rendered_prompt_hash == recorder.llm_calls[0].messages_hash
+    assert captured[0].effective_tool_hash == recorder.llm_calls[0].tools_spec_hash
+
+
+@pytest.mark.asyncio
+async def test_real_planner_surface_paths_share_exact_capabilities_tools_and_audit(
+    tmp_path: Path,
+    tool_context: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import elspeth.web.composer.pipeline_planner as planner_module
+
+    captured: list[Any] = []
+    real_builder = planner_module.build_planner_capability_manifest
+
+    def capture_manifest(**kwargs: Any) -> Any:
+        manifest = real_builder(**kwargs)
+        captured.append(manifest)
+        return manifest
+
+    monkeypatch.setattr(planner_module, "build_planner_capability_manifest", capture_manifest)
+    step_3_planner = load_step_planner_skill(GuidedStep.STEP_3_TRANSFORMS)
+    scenarios = (
+        (PlannerSurface.FREEFORM, "ordinary", build_system_prompt(None)),
+        (PlannerSurface.GUIDED_STAGED, "ordinary", step_3_planner),
+        (PlannerSurface.TUTORIAL_PROFILE, "tutorial", step_3_planner),
+    )
+    requests: list[dict[str, Any]] = []
+    audits: list[Any] = []
+
+    for surface, profile, rendered_skill in scenarios:
+        completion = _ScriptedCompletion(_response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})))
+        recorder = BufferingRecorder()
+        await _plan(
+            tmp_path=tmp_path,
+            tool_context=tool_context,
+            completion=completion,
+            recorder=recorder,
+            surface=surface,
+            profile=profile,
+            rendered_skill=rendered_skill,
+        )
+        requests.append(completion.requests[0])
+        audits.append(recorder.llm_calls[0])
+
+    assert [(manifest.surface, manifest.profile) for manifest in captured] == [
+        (surface, profile) for surface, profile, _rendered_skill in scenarios
+    ]
+    assert len({manifest.planner_implementation_id for manifest in captured}) == 1
+    assert len({manifest.capability_core_hash for manifest in captured}) == 1
+    assert len({manifest.canonical_schema_hash for manifest in captured}) == 1
+    assert len({manifest.effective_tool_hash for manifest in captured}) == 1
+    assert requests[0]["messages"][0]["content"] == build_system_prompt(None)
+    assert requests[1]["messages"][0]["content"] == step_3_planner
+    assert requests[2]["messages"][0]["content"] == step_3_planner
+    assert requests[1]["tools"] == requests[2]["tools"] == requests[0]["tools"]
+    for manifest, request, audit_call in zip(captured, requests, audits, strict=True):
+        assert manifest.rendered_prompt_hash == stable_hash(request["messages"])
+        assert manifest.effective_tool_hash == stable_hash(request["tools"])
+        assert audit_call.messages_hash == manifest.rendered_prompt_hash
+        assert audit_call.tools_spec_hash == manifest.effective_tool_hash
+
+
+@pytest.mark.asyncio
+async def test_provider_side_call_input_mutation_is_detected_as_audit_integrity_failure(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    class _MutatingCompletion(_ScriptedCompletion):
+        async def __call__(self, **kwargs: Any) -> _Response:
+            kwargs["tools"][-1]["function"]["parameters"]["properties"]["pipeline"]["properties"].pop("edges")
+            return await super().__call__(**kwargs)
+
+    completion = _MutatingCompletion(_response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})))
+
+    with pytest.raises(AuditIntegrityError, match="planner call inputs changed"):
+        await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_outcome", "expected_status"),
+    (
+        (_response(("emit_pipeline_proposal", {"pipeline": {}})), ComposerLLMCallStatus.SUCCESS),
+        (RuntimeError("provider unavailable"), ComposerLLMCallStatus.API_ERROR),
+        (asyncio.CancelledError(), ComposerLLMCallStatus.CANCELLED),
+    ),
+)
+async def test_provider_input_mutation_is_audited_once_before_integrity_failure(
+    tmp_path: Path,
+    tool_context: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_outcome: _Response | BaseException,
+    expected_status: ComposerLLMCallStatus,
+) -> None:
+    import elspeth.web.composer.pipeline_planner as planner_module
+
+    class _MutatingCompletion(_ScriptedCompletion):
+        async def __call__(self, **kwargs: Any) -> _Response:
+            kwargs["messages"][0]["content"] += "\nprovider-side mutation"
+            return await super().__call__(**kwargs)
+
+    recorder = BufferingRecorder()
+    await _plan(
+        tmp_path=tmp_path,
+        tool_context=tool_context,
+        completion=_ScriptedCompletion(_response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)}))),
+        recorder=recorder,
+    )
+    (unrelated_prior_call,) = recorder.llm_calls
+    captured_manifests: list[Any] = []
+    real_builder = planner_module.build_planner_capability_manifest
+
+    def capture_manifest(**kwargs: Any) -> Any:
+        manifest = real_builder(**kwargs)
+        captured_manifests.append(manifest)
+        return manifest
+
+    monkeypatch.setattr(planner_module, "build_planner_capability_manifest", capture_manifest)
+
+    with pytest.raises(AuditIntegrityError, match="planner call inputs changed") as caught:
+        await _plan(
+            tmp_path=tmp_path,
+            tool_context=tool_context,
+            completion=_MutatingCompletion(provider_outcome),
+            recorder=recorder,
+        )
+
+    assert len(captured_manifests) == 1
+    assert len(recorder.llm_calls) == 2
+    (manifest,) = captured_manifests
+    audit_call = recorder.llm_calls[-1]
+    assert caught.value.llm_calls == (audit_call,)  # type: ignore[attr-defined]
+    assert unrelated_prior_call not in caught.value.llm_calls  # type: ignore[attr-defined]
+    assert audit_call.status is expected_status
+    assert audit_call.messages_hash != manifest.rendered_prompt_hash
+    assert audit_call.tools_spec_hash == manifest.effective_tool_hash
 
 
 @pytest.mark.asyncio

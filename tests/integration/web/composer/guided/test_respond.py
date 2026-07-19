@@ -11,10 +11,12 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -30,8 +32,10 @@ from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.service import BlobServiceImpl
 from elspeth.web.composer.audit import BufferingRecorder
+from elspeth.web.composer.capability_skill import PlannerCapabilityManifest
 from elspeth.web.composer.pipeline_proposal import composition_content_hash
 from elspeth.web.composer.progress import ComposerProgressRegistry
+from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.models import (
@@ -53,6 +57,59 @@ from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class _PlannerFunction:
+    name: str
+    arguments: str
+
+
+@dataclass
+class _PlannerToolCall:
+    id: str
+    function: _PlannerFunction
+
+
+@dataclass
+class _PlannerMessage:
+    content: str | None
+    tool_calls: list[_PlannerToolCall]
+
+
+@dataclass
+class _PlannerChoice:
+    message: _PlannerMessage
+
+
+@dataclass
+class _PlannerResponse:
+    choices: list[_PlannerChoice]
+    usage: Mapping[str, object]
+    model: str = "provider/guided-planner-v1"
+    id: str = "guided-planner-request-1"
+
+
+def _planner_terminal_response() -> _PlannerResponse:
+    return _PlannerResponse(
+        choices=[
+            _PlannerChoice(
+                message=_PlannerMessage(
+                    content=None,
+                    tool_calls=[
+                        _PlannerToolCall(
+                            id="guided-terminal",
+                            function=_PlannerFunction(
+                                name="emit_pipeline_proposal",
+                                arguments=json.dumps({"pipeline": {}}),
+                            ),
+                        )
+                    ],
+                )
+            )
+        ],
+        usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": 0.01},
+    )
 
 
 def _create_session(client: TestClient) -> str:
@@ -485,6 +542,273 @@ class TestStep2IntraStep:
         )
         _respond(client, session_id, chosen=["text"], custom_inputs=[])
         return _finish_review(client, session_id, "output")
+
+    @pytest.mark.parametrize(
+        ("profile", "expected_surface"),
+        (("live", "guided_staged"), ("tutorial", "tutorial_profile")),
+    )
+    @pytest.mark.parametrize(
+        ("provider_outcome", "expected_status"),
+        (
+            ("success", ComposerLLMCallStatus.SUCCESS),
+            ("error", ComposerLLMCallStatus.API_ERROR),
+            ("cancel", ComposerLLMCallStatus.CANCELLED),
+        ),
+    )
+    def test_actual_guided_planner_manifest_mismatch_is_durable_before_failure(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        profile: str,
+        expected_surface: str,
+        provider_outcome: str,
+        expected_status: ComposerLLMCallStatus,
+    ) -> None:
+        import elspeth.web.composer.pipeline_planner as planner_module
+
+        session_id = _create_session(composer_test_client)
+        if profile == "tutorial":
+            started = composer_test_client.post(
+                f"/api/sessions/{session_id}/guided/start",
+                json={"profile": "tutorial", "operation_id": str(uuid4())},
+            )
+            assert started.status_code == 200, started.json()
+        self._drive_to_step_2_single_select(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, chosen=["json"])
+        _respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "plugin": "json",
+                "options": {
+                    "path": _outputs_path(composer_test_client, f"{profile}-{provider_outcome}.jsonl"),
+                    "schema": {"mode": "observed"},
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+            },
+        )
+        _respond(composer_test_client, session_id, chosen=["text"], custom_inputs=[])
+
+        app = composer_test_client.app
+        monkeypatch.setattr(
+            ComposerServiceImpl,
+            "_compute_availability",
+            lambda _self: ComposerAvailability(
+                available=True,
+                provider="test",
+                model="test/guided-planner",
+                reason=None,
+            ),
+        )
+        app.state.composer_service = ComposerServiceImpl(
+            app.state.catalog_service,
+            app.state.settings.model_copy(update={"composer_model": "test/guided-planner"}),
+            sessions_service=app.state.session_service,
+            session_engine=app.state.session_engine,
+            secret_service=app.state.scoped_secret_resolver,
+            plugin_snapshot_factory=lambda user_id: app.state.plugin_snapshot_factory(UserIdentity(user_id=user_id, username=user_id)),
+            operator_profile_registry=app.state.operator_profile_registry,
+        )
+        requests: list[dict[str, object]] = []
+        manifests: list[PlannerCapabilityManifest] = []
+        real_builder = planner_module.build_planner_capability_manifest  # type: ignore[attr-defined]
+
+        def capture_manifest(**kwargs: Any) -> PlannerCapabilityManifest:
+            manifest = real_builder(**kwargs)
+            manifests.append(manifest)
+            return manifest
+
+        async def mutating_completion(**kwargs: Any) -> _PlannerResponse:
+            kwargs["messages"][0]["content"] += "\nprovider-side mutation"
+            requests.append(kwargs)
+            if provider_outcome == "error":
+                raise RuntimeError("provider unavailable")
+            if provider_outcome == "cancel":
+                raise asyncio.CancelledError()
+            return _planner_terminal_response()
+
+        monkeypatch.setattr(planner_module, "build_planner_capability_manifest", capture_manifest)  # type: ignore[attr-defined]
+        monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", mutating_completion)
+
+        failed = _post_current_response(
+            composer_test_client,
+            session_id,
+            component_action={"action": "finish", "component_kind": "output"},
+        )
+        assert failed.status_code == 500, failed.json()
+
+        audit_messages = asyncio.run(app.state.session_service.get_messages(UUID(session_id), limit=None))
+        planner_calls = [
+            envelope["call"]
+            for message in audit_messages
+            for envelope in (message.tool_calls or ())
+            if envelope.get("_kind") == "llm_call_audit" and envelope.get("call", {}).get("planner_call_ordinal") == 1
+        ]
+        with app.state.session_engine.connect() as conn:
+            failed_operations = (
+                conn.execute(
+                    select(guided_operations_table.c.failure_code)
+                    .where(guided_operations_table.c.session_id == session_id)
+                    .where(guided_operations_table.c.status == "failed")
+                )
+                .scalars()
+                .all()
+            )
+            proposals = conn.execute(
+                select(composition_proposals_table.c.id).where(composition_proposals_table.c.session_id == session_id)
+            ).all()
+
+        assert len(requests) == len(manifests) == len(planner_calls) == 1
+        manifest = manifests[0]
+        assert manifest.surface.value == expected_surface
+        assert manifest.profile == ("tutorial" if profile == "tutorial" else "ordinary")
+        assert planner_calls[0]["status"] == expected_status.value
+        assert planner_calls[0]["messages_hash"] != manifest.rendered_prompt_hash
+        assert planner_calls[0]["tools_spec_hash"] == manifest.effective_tool_hash
+        assert failed_operations == ["integrity_error"]
+        assert proposals == []
+
+    def test_actual_guided_planner_repeated_cancellation_waits_for_failure_settlement(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session_id = _create_session(composer_test_client)
+        self._drive_to_step_2_single_select(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, chosen=["json"])
+        _respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "plugin": "json",
+                "options": {
+                    "path": _outputs_path(composer_test_client, "matching-cancel.jsonl"),
+                    "schema": {"mode": "observed"},
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+            },
+        )
+        _respond(composer_test_client, session_id, chosen=["text"], custom_inputs=[])
+        current = _get_guided(composer_test_client, session_id)
+        operation_id = str(uuid4())
+
+        app = composer_test_client.app
+        monkeypatch.setattr(
+            ComposerServiceImpl,
+            "_compute_availability",
+            lambda _self: ComposerAvailability(
+                available=True,
+                provider="test",
+                model="test/guided-planner",
+                reason=None,
+            ),
+        )
+        app.state.composer_service = ComposerServiceImpl(
+            app.state.catalog_service,
+            app.state.settings.model_copy(update={"composer_model": "test/guided-planner"}),
+            sessions_service=app.state.session_service,
+            session_engine=app.state.session_engine,
+            secret_service=app.state.scoped_secret_resolver,
+            plugin_snapshot_factory=lambda user_id: app.state.plugin_snapshot_factory(UserIdentity(user_id=user_id, username=user_id)),
+            operator_profile_registry=app.state.operator_profile_registry,
+        )
+
+        async def cancelling_completion(**_kwargs: Any) -> _PlannerResponse:
+            raise asyncio.CancelledError("provider cancelled matching planner request")
+
+        monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", cancelling_completion)
+        with app.state.session_engine.connect() as conn:
+            state_ids_before = conn.execute(
+                select(composition_states_table.c.id).where(composition_states_table.c.session_id == session_id)
+            ).all()
+
+        audit_inserted = threading.Event()
+        release_audit_worker = threading.Event()
+        original_insert = app.state.session_service._insert_prepared_guided_audit_rows_on_connection
+
+        def pause_after_audit_insert(*args: Any, **kwargs: Any) -> Any:
+            records = original_insert(*args, **kwargs)
+            audit_inserted.set()
+            if not release_audit_worker.wait(timeout=5.0):
+                raise TimeoutError("test did not release guided cancellation audit worker")
+            return records
+
+        monkeypatch.setattr(
+            app.state.session_service,
+            "_insert_prepared_guided_audit_rows_on_connection",
+            pause_after_audit_insert,
+        )
+
+        async def invoke_cancelled_route() -> None:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                request_task = asyncio.create_task(
+                    client.post(
+                        f"/api/sessions/{session_id}/guided/respond",
+                        json={
+                            "operation_id": operation_id,
+                            "turn_token": current["next_turn"]["turn_token"],
+                            "component_action": {"action": "finish", "component_kind": "output"},
+                        },
+                    )
+                )
+                assert await asyncio.to_thread(audit_inserted.wait, 5.0), "guided cancellation audit worker did not start"
+                request_task.cancel("shutdown cancelled guided failure settlement")
+                await asyncio.sleep(0)
+                cancellation_escaped_before_settlement = request_task.done()
+                release_audit_worker.set()
+                with pytest.raises(
+                    asyncio.CancelledError,
+                    match="provider cancelled matching planner request",
+                ) as caught:
+                    await asyncio.wait_for(request_task, timeout=5.0)
+                assert not cancellation_escaped_before_settlement
+                assert caught.value.args == ("provider cancelled matching planner request",)
+                assert caught.value.__cause__ is None
+
+        asyncio.run(invoke_cancelled_route())
+
+        audit_messages = asyncio.run(app.state.session_service.get_messages(UUID(session_id), limit=None))
+        planner_calls = [
+            envelope["call"]
+            for message in audit_messages
+            for envelope in (message.tool_calls or ())
+            if envelope.get("_kind") == "llm_call_audit" and envelope.get("call", {}).get("planner_call_ordinal") == 1
+        ]
+        with app.state.session_engine.connect() as conn:
+            operation = conn.execute(
+                select(
+                    guided_operations_table.c.status,
+                    guided_operations_table.c.failure_code,
+                    guided_operations_table.c.proposal_id,
+                    guided_operations_table.c.result_state_id,
+                )
+                .where(guided_operations_table.c.session_id == session_id)
+                .where(guided_operations_table.c.operation_id == operation_id)
+            ).one()
+            failed_events = conn.execute(
+                select(guided_operation_events_table.c.event_kind)
+                .where(guided_operation_events_table.c.session_id == session_id)
+                .where(guided_operation_events_table.c.operation_id == operation_id)
+                .where(guided_operation_events_table.c.event_kind == "failed")
+            ).all()
+            state_ids_after = conn.execute(
+                select(composition_states_table.c.id).where(composition_states_table.c.session_id == session_id)
+            ).all()
+            proposals = conn.execute(
+                select(composition_proposals_table.c.id).where(composition_proposals_table.c.session_id == session_id)
+            ).all()
+
+        assert len(planner_calls) == 1
+        assert planner_calls[0]["status"] == ComposerLLMCallStatus.CANCELLED.value
+        assert operation.status == "failed"
+        assert operation.failure_code == "operation_failed"
+        assert operation.proposal_id is None
+        assert operation.result_state_id is None
+        assert len(failed_events) == 1
+        assert state_ids_after == state_ids_before
+        assert proposals == []
 
     def test_step_2_single_select_response_emits_schema_form(self, composer_test_client: TestClient) -> None:
         """Picking a sink plugin emits SCHEMA_FORM for the sink options."""

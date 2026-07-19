@@ -324,6 +324,8 @@ async def test_step_1_solver_returns_only_the_closed_deferred_intent_action(monk
         model="test/model",
         user_message="Later, use the llm transform.",
         plugin_hint=None,
+        current_source=None,
+        available_source_plugins=("csv", "json"),
         temperature=None,
         seed=None,
         timeout_seconds=30.0,
@@ -387,6 +389,8 @@ async def test_malformed_deferred_action_returns_repair_copy_without_an_action(m
         model="test/model",
         user_message="Later use a transform.",
         plugin_hint=None,
+        current_source=None,
+        available_source_plugins=("csv", "json"),
         temperature=None,
         seed=None,
         timeout_seconds=30.0,
@@ -483,6 +487,8 @@ async def test_every_malformed_deferred_terminal_payload_gets_the_bounded_deferr
             model="test/model",
             user_message="Later use a transform.",
             plugin_hint=None,
+            current_source=None,
+            available_source_plugins=("csv", "json"),
             temperature=None,
             seed=None,
             timeout_seconds=30.0,
@@ -532,6 +538,8 @@ async def test_mixed_deferred_and_other_terminal_calls_get_the_bounded_deferred_
             model="test/model",
             user_message="Later use a transform.",
             plugin_hint=None,
+            current_source=None,
+            available_source_plugins=("csv", "json"),
             temperature=None,
             seed=None,
             timeout_seconds=30.0,
@@ -630,6 +638,8 @@ async def test_source_and_sink_solvers_return_only_the_closed_stable_intent_mana
             model="test/model",
             user_message="Cancel the saved topology requirement.",
             plugin_hint=None,
+            current_source=None,
+            available_source_plugins=("csv", "json"),
             temperature=None,
             seed=None,
             timeout_seconds=30.0,
@@ -1138,11 +1148,17 @@ def test_parse_rejects_tool_scaffolding_case_insensitively() -> None:
         _parse_step_1_source_tool_arguments(_source_tool_args(assistant_message="<TOOL_CALL>{}</TOOL_CALL>"), plugin_hint="json")
 
 
-def test_step_1_source_dynamic_block_guides_aws_s3_endpoint_url_policy() -> None:
-    prompt = _build_step_1_source_dynamic_block(plugin_hint="csv")
+def test_step_1_source_dynamic_block_uses_only_policy_visible_inventory() -> None:
+    prompt = _build_step_1_source_dynamic_block(
+        plugin_hint="renamed_source",
+        current_source=None,
+        available_source_plugins=("renamed_source",),
+    )
 
-    expected_guidance = ("`aws_s3`", "`endpoint_url`", "CLI/batch-only", "web authors must never set it")
-    assert [text for text in expected_guidance if text not in prompt] == []
+    assert 'Policy-visible source plugins: ["renamed_source"]' in prompt
+    assert "aws_s3" not in prompt
+    assert "web_scrape" not in prompt
+    assert "field_mapper" not in prompt
 
 
 def test_step_1_revision_prompt_uses_llm_safe_source_context() -> None:
@@ -1165,7 +1181,11 @@ def test_step_1_revision_prompt_uses_llm_safe_source_context() -> None:
         on_validation_failure="quarantine",
     )
 
-    prompt = _build_step_1_source_dynamic_block(plugin_hint="csv", current_source=current_source)
+    prompt = _build_step_1_source_dynamic_block(
+        plugin_hint="csv",
+        current_source=current_source,
+        available_source_plugins=("csv",),
+    )
 
     assert "person@example.test" not in prompt
     assert "https://example.test/private" not in prompt

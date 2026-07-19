@@ -3,7 +3,7 @@
 Audit-tier (Tier 1) per CLAUDE.md. Coercion forbidden — every field is
 either present or the function raises.
 
-Per Errata C4: the four event types are recorded as ComposerToolInvocation
+Per Errata C4: the guided event types are recorded as ComposerToolInvocation
 records with a tool_name discriminator, NOT via GuidedAuditEvent.
 """
 
@@ -18,12 +18,27 @@ import pytest
 from elspeth.contracts.composer_audit import ComposerToolInvocation
 from elspeth.web.composer.guided.audit import (
     emit_dropped_to_freeform,
+    emit_intent_cancelled,
     emit_step_advanced,
     emit_turn_answered,
     emit_turn_emitted,
 )
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
-from elspeth.web.composer.guided.state_machine import TerminalReason
+from elspeth.web.composer.guided.state_machine import DeferredStageIntent, TerminalReason
+
+
+def _cancelled_intent() -> DeferredStageIntent:
+    return DeferredStageIntent.create(
+        intent_id="00000000-0000-4000-8000-000000000801",
+        receiving_stage="source",
+        target_stage="topology",
+        catalog_kind=None,
+        catalog_name=None,
+        redacted_summary="Future topology instruction.",
+        originating_message_id="00000000-0000-4000-8000-000000000802",
+        message_content_hash="a" * 64,
+        constraints=(),
+    )
 
 
 class _FakeRecorder:
@@ -162,6 +177,41 @@ class TestEmitDroppedToFreeform:
             "drop_reason": "user_pressed_exit",
             "prev_step": "step_2_sink",
         }
+
+
+class TestEmitIntentCancelled:
+    def test_records_only_stable_structural_identity(self) -> None:
+        rec = _FakeRecorder()
+
+        emit_intent_cancelled(
+            rec,
+            intent=_cancelled_intent(),
+            composition_version=4,
+            actor="test-actor",
+        )
+
+        inv = rec.invocations[0]
+        assert inv.tool_name == "guided_intent_cancelled"
+        assert json.loads(inv.arguments_canonical) == {
+            "intent_id": "00000000-0000-4000-8000-000000000801",
+            "receiving_stage": "source",
+            "target_stage": "topology",
+        }
+        assert "summary" not in inv.arguments_canonical
+        assert "message" not in inv.arguments_canonical
+
+    def test_rejects_untyped_identity_before_recording(self) -> None:
+        rec = _FakeRecorder()
+
+        with pytest.raises(TypeError, match="exact DeferredStageIntent"):
+            emit_intent_cancelled(
+                rec,
+                intent=object(),  # type: ignore[arg-type]
+                composition_version=4,
+                actor="test-actor",
+            )
+
+        assert rec.invocations == []
 
 
 class TestArgumentsHashInvariant:

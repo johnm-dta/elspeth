@@ -77,8 +77,8 @@ async def test_step_1_source_resolution_sends_configured_sampling(monkeypatch: p
         timeout_seconds=30.0,
     )
 
-    assert result.resolution is None
-    assert result.prose_reply == "advice"
+    assert type(result) is chat_solver.GuidedChatProseOutcome
+    assert result.assistant_message == "advice"
     assert captured["temperature"] == 0.0
     assert captured["seed"] == 42
 

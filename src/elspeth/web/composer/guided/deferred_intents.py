@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, cast
+from uuid import UUID
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -73,6 +74,10 @@ class DeferredIntentActionShapeError(GuidedSolverResponseShapeError):
     """The model emitted a malformed future-stage action."""
 
 
+class DeferredIntentManagementActionShapeError(GuidedSolverResponseShapeError):
+    """The model emitted a malformed stable-intent management action."""
+
+
 class DeferredIntentClaimError(ValueError):
     """A planner terminal claimed deferred coverage it did not prove."""
 
@@ -113,6 +118,48 @@ class DeferredIntentAction:
             raise InvariantError(f"DeferredIntentAction.constraints exceeds the {GUIDED_MAX_CONSTRAINTS_PER_INTENT}-constraint limit")
         if any(type(constraint) not in _ALLOWED_CONSTRAINT_TYPES for constraint in self.constraints):
             raise InvariantError("DeferredIntentAction.constraints contains an unsupported constraint")
+
+
+def _canonical_uuid_text(value: object, field_name: str) -> str:
+    if type(value) is not str:
+        raise InvariantError(f"{field_name} must be a canonical UUID string")
+    try:
+        parsed = UUID(value)
+    except ValueError as exc:
+        raise InvariantError(f"{field_name} must be a canonical UUID string") from exc
+    if str(parsed) != value:
+        raise InvariantError(f"{field_name} must be a canonical UUID string")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class DeferredIntentCancelAction:
+    """Explicitly cancel one pending intent by stable identity."""
+
+    intent_id: str
+    selection_token: str
+
+    def __post_init__(self) -> None:
+        _canonical_uuid_text(self.intent_id, "DeferredIntentCancelAction.intent_id")
+        _require_nonempty_exact_str(self.selection_token, "DeferredIntentCancelAction.selection_token")
+
+
+@dataclass(frozen=True, slots=True)
+class DeferredIntentEditAction:
+    """Replace one pending intent while retaining its stable identity."""
+
+    intent_id: str
+    selection_token: str
+    replacement: DeferredIntentAction
+
+    def __post_init__(self) -> None:
+        _canonical_uuid_text(self.intent_id, "DeferredIntentEditAction.intent_id")
+        _require_nonempty_exact_str(self.selection_token, "DeferredIntentEditAction.selection_token")
+        if type(self.replacement) is not DeferredIntentAction:
+            raise InvariantError("DeferredIntentEditAction.replacement must be exact")
+
+
+type DeferredIntentManagementAction = DeferredIntentCancelAction | DeferredIntentEditAction
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +256,33 @@ def deferred_intent_action_from_dict(value: object) -> DeferredIntentAction:
         )
     except (InvariantError, KeyError, TypeError, ValueError) as exc:
         raise DeferredIntentActionShapeError(str(exc)) from exc
+
+
+def deferred_intent_management_action_from_dict(value: object) -> DeferredIntentManagementAction:
+    """Decode one exact cancel/edit action with no open-ended payload bag."""
+
+    try:
+        if type(value) is not dict:
+            raise InvariantError("deferred intent management action must be an exact dict")
+        action = value.get("action")
+        if action == "cancel":
+            if set(value) != {"action", "intent_id", "selection_token"}:
+                raise InvariantError("deferred intent cancel action has an invalid exact keyset")
+            return DeferredIntentCancelAction(
+                intent_id=_canonical_uuid_text(value["intent_id"], "deferred intent cancel intent_id"),
+                selection_token=_require_nonempty_exact_str(value["selection_token"], "deferred intent cancel selection_token"),
+            )
+        if action == "edit":
+            if set(value) != {"action", "intent_id", "selection_token", "replacement"}:
+                raise InvariantError("deferred intent edit action has an invalid exact keyset")
+            return DeferredIntentEditAction(
+                intent_id=_canonical_uuid_text(value["intent_id"], "deferred intent edit intent_id"),
+                selection_token=_require_nonempty_exact_str(value["selection_token"], "deferred intent edit selection_token"),
+                replacement=deferred_intent_action_from_dict(value["replacement"]),
+            )
+        raise InvariantError("deferred intent management action has an unsupported discriminator")
+    except (DeferredIntentActionShapeError, InvariantError, KeyError, TypeError, ValueError) as exc:
+        raise DeferredIntentManagementActionShapeError(str(exc)) from exc
 
 
 def _subject_stage(subject: StableSubject | PluginSubject) -> StageName:

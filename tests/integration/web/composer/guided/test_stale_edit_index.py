@@ -20,7 +20,7 @@ def test_step_3_chat_is_rejected_before_provider_reservation_or_blob_work(
     composer_test_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Schema-8 Chat is closed to Step 3 regardless of edit/proposal state."""
+    """Schema-8 Step-3 Chat has no turn when there is no pending intent to manage."""
     client = composer_test_client
     session_id = _create_session(client)
     _persist_guided(client, session_id, GuidedSession(step=GuidedStep.STEP_3_TRANSFORMS))

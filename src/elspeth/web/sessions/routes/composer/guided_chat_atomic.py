@@ -7,7 +7,6 @@ import contextlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from time import perf_counter
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
@@ -16,23 +15,21 @@ from fastapi import HTTPException, Request
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import stable_hash
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
-from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution
-from elspeth.web.composer.guided.deferred_intents import (
-    DeferredIntentAccepted,
-    DeferredIntentAction,
-    DeferredIntentClarification,
-    DeferredIntentRejected,
-    DeferredIntentUnsupported,
-    create_deferred_stage_intent,
-    validate_deferred_intent_action,
-)
+from elspeth.web.composer.guided.audit import emit_intent_cancelled
+from elspeth.web.composer.guided.chat_solver import DeferredIntentManagementChatRequest
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import ControlSignal, GuidedStep, Turn, TurnType
 from elspeth.web.composer.guided.resolved import SinkResolved
-from elspeth.web.composer.guided.stage_subjects import StageName
 from elspeth.web.composer.pipeline_proposal import composition_content_hash
 from elspeth.web.sessions._guided_step_chat import (
+    GuidedStepChatEmptyResult,
+    GuidedStepChatOnlyResult,
+    GuidedStepDeferredIntentResult,
+    GuidedStepDeferredManagementResult,
+    Step1SourceResolvedResult,
+    Step2SinkResolvedResult,
     StepChatResult,
+    resolve_deferred_intent_management_chat_with_auto_drop,
     resolve_step_1_source_chat_with_auto_drop,
     resolve_step_2_sink_chat_with_auto_drop,
     solve_step_chat_with_auto_drop,
@@ -51,6 +48,7 @@ from elspeth.web.sessions.protocol import (
     GuidedOperationFenceLostError,
     GuidedOperationSettlementConflictError,
     GuidedOriginatingUserMessageDraft,
+    GuidedPendingProposalInvalidation,
     GuidedReplayTurn,
     GuidedResponseDescriptor,
     GuidedStateOperationCommand,
@@ -95,29 +93,23 @@ from ..guided_operations import (
     raise_guided_operation_failure,
     reserve_or_replay_guided_operation,
 )
+from .guided_chat_intent_management import (
+    DeferredRequestAuthority,
+    DeferredRequestCancelled,
+    ManagementRewindAuthority,
+    apply_deferred_request,
+    deferred_request_management,
+    deferred_request_retained_intent_id,
+    maybe_prepare_schema8_management_rewind,
+)
 
-
-@dataclass(frozen=True, slots=True)
-class GuidedChatProviderOutcome:
-    """Closed result of the provider-only phase."""
-
-    chat: StepChatResult
-    source_resolution: Step1SourceChatResolution | None
-    sink_resolution: SinkResolved | None
-    deferred_action: DeferredIntentAction | None
-
-    def __post_init__(self) -> None:
-        if type(self.chat) is not StepChatResult:
-            raise TypeError("GuidedChatProviderOutcome.chat must be an exact StepChatResult")
-        if self.source_resolution is not None and type(self.source_resolution) is not Step1SourceChatResolution:
-            raise TypeError("GuidedChatProviderOutcome.source_resolution must be exact or None")
-        if self.sink_resolution is not None and type(self.sink_resolution) is not SinkResolved:
-            raise TypeError("GuidedChatProviderOutcome.sink_resolution must be exact or None")
-        if self.deferred_action is not None and type(self.deferred_action) is not DeferredIntentAction:
-            raise TypeError("GuidedChatProviderOutcome.deferred_action must be exact or None")
-        terminal_results = sum(result is not None for result in (self.source_resolution, self.sink_resolution, self.deferred_action))
-        if terminal_results > 1:
-            raise InvariantError("GuidedChatProviderOutcome must carry at most one terminal result")
+type GuidedChatProviderOutcome = (
+    GuidedStepChatOnlyResult
+    | GuidedStepDeferredIntentResult
+    | GuidedStepDeferredManagementResult
+    | Step1SourceResolvedResult
+    | Step2SinkResolvedResult
+)
 
 
 ProviderRunner = Callable[..., Awaitable[GuidedChatProviderOutcome]]
@@ -132,45 +124,6 @@ class _ChatPreflight:
     guided: Any
     current_turn: Turn
     current_payload: PreparedGuidedJsonPayload
-
-
-def _guided_stage_name(step: GuidedStep) -> StageName:
-    if step is GuidedStep.STEP_1_SOURCE:
-        return "source"
-    if step is GuidedStep.STEP_2_SINK:
-        return "output"
-    if step is GuidedStep.STEP_3_TRANSFORMS:
-        return "topology"
-    if step is GuidedStep.STEP_4_WIRE:
-        return "wire_review"
-    raise AuditIntegrityError("Guided Chat step is outside the closed stage vocabulary")
-
-
-def _deferred_disposition_chat(
-    disposition: DeferredIntentAccepted | DeferredIntentClarification | DeferredIntentUnsupported | DeferredIntentRejected,
-    *,
-    latency_ms: int,
-) -> StepChatResult:
-    if type(disposition) is DeferredIntentAccepted:
-        message = f"I saved that instruction for the {disposition.action.target_stage.replace('_', ' ')} stage."
-    elif type(disposition) is DeferredIntentClarification:
-        kinds = ", ".join(disposition.plugin_kinds)
-        message = f"I found {disposition.plugin_name!r} in more than one plugin category ({kinds}). Which category did you mean?"
-    elif type(disposition) is DeferredIntentUnsupported:
-        if disposition.reason.value == "plugin_not_enabled":
-            message = f"The {disposition.plugin_kind} plugin {disposition.plugin_name!r} is not enabled by the current policy."
-        elif disposition.reason.value == "plugin_not_installed":
-            message = f"The {disposition.plugin_kind} plugin {disposition.plugin_name!r} is not installed."
-        else:
-            message = f"The {disposition.plugin_kind} plugin {disposition.plugin_name!r} is currently unavailable."
-    else:
-        message = "I couldn't safely retain that as a future-stage instruction. Please clarify the target stage and structural requirement."
-    return StepChatResult(
-        assistant_message=message,
-        status=ComposerChatTurnStatus.SUCCESS,
-        latency_ms=latency_ms,
-        error_class=None,
-    )
 
 
 def _unsupported_stage(step: GuidedStep) -> HTTPException:
@@ -216,9 +169,13 @@ async def run_guided_chat_provider_attempt(
 
     source = _current_source(guided)
     sink = _current_sink(guided)
-    context_block = build_step_chat_context_block(step=step, current_source=source, current_sink=sink, state=state)
-    started = perf_counter()
-
+    context_block = build_step_chat_context_block(
+        step=step,
+        current_source=source,
+        current_sink=sink,
+        state=state,
+        deferred_intents=guided.deferred_intents,
+    )
     if step is GuidedStep.STEP_1_SOURCE:
         plugin_hint = None
         target = guided.active_edit_target
@@ -244,33 +201,8 @@ async def run_guided_chat_provider_attempt(
             timeout_seconds=settings.composer_timeout_seconds,
             context_block=context_block,
         )
-        if source_outcome.source_resolution is not None:
-            return GuidedChatProviderOutcome(
-                chat=StepChatResult(
-                    assistant_message=source_outcome.source_resolution.assistant_message,
-                    status=ComposerChatTurnStatus.SUCCESS,
-                    latency_ms=int((perf_counter() - started) * 1000),
-                    error_class=None,
-                ),
-                source_resolution=source_outcome.source_resolution,
-                sink_resolution=None,
-                deferred_action=None,
-            )
-        if source_outcome.deferred_action is not None:
-            return GuidedChatProviderOutcome(
-                chat=StepChatResult(
-                    assistant_message="I found a future-stage instruction and will validate it before retaining it.",
-                    status=ComposerChatTurnStatus.SUCCESS,
-                    latency_ms=int((perf_counter() - started) * 1000),
-                    error_class=None,
-                ),
-                source_resolution=None,
-                sink_resolution=None,
-                deferred_action=source_outcome.deferred_action,
-            )
-        direct = source_outcome.fallback_chat or source_outcome.prose_chat
-        if direct is not None:
-            return GuidedChatProviderOutcome(chat=direct, source_resolution=None, sink_resolution=None, deferred_action=None)
+        if not isinstance(source_outcome, GuidedStepChatEmptyResult):
+            return source_outcome
 
     elif step is GuidedStep.STEP_2_SINK:
         sink_outcome = await resolve_step_2_sink_chat_with_auto_drop(
@@ -292,35 +224,27 @@ async def run_guided_chat_provider_attempt(
             context_block=context_block,
             progress=progress,
         )
-        if sink_outcome.sink_resolution is not None:
-            return GuidedChatProviderOutcome(
-                chat=StepChatResult(
-                    assistant_message=sink_outcome.assistant_message or "Output configuration prepared.",
-                    status=ComposerChatTurnStatus.SUCCESS,
-                    latency_ms=int((perf_counter() - started) * 1000),
-                    error_class=None,
-                ),
-                source_resolution=None,
-                sink_resolution=sink_outcome.sink_resolution,
-                deferred_action=None,
-            )
-        if sink_outcome.deferred_action is not None:
-            return GuidedChatProviderOutcome(
-                chat=StepChatResult(
-                    assistant_message="I found a future-stage instruction and will validate it before retaining it.",
-                    status=ComposerChatTurnStatus.SUCCESS,
-                    latency_ms=int((perf_counter() - started) * 1000),
-                    error_class=None,
-                ),
-                source_resolution=None,
-                sink_resolution=None,
-                deferred_action=sink_outcome.deferred_action,
-            )
-        direct = sink_outcome.fallback_chat or sink_outcome.prose_chat
-        if direct is not None:
-            return GuidedChatProviderOutcome(chat=direct, source_resolution=None, sink_resolution=None, deferred_action=None)
-    else:  # pragma: no cover - preflight owns the closed stage gate
-        raise AuditIntegrityError("Guided Chat provider received an unsupported schema-8 stage")
+        if not isinstance(sink_outcome, GuidedStepChatEmptyResult):
+            return sink_outcome
+    elif step in {GuidedStep.STEP_3_TRANSFORMS, GuidedStep.STEP_4_WIRE}:
+        management = await resolve_deferred_intent_management_chat_with_auto_drop(
+            site="post_guided_chat",
+            session_id=str(session_id),
+            user_id=user.user_id,
+            request=DeferredIntentManagementChatRequest(
+                model=settings.composer_model,
+                step=step,
+                user_message=message,
+                temperature=settings.composer_temperature,
+                seed=settings.composer_seed,
+                timeout_seconds=settings.composer_timeout_seconds,
+                context_block=context_block,
+            ),
+            recorder=recorder,
+        )
+        return management
+    else:  # pragma: no cover - the closed GuidedStep enum owns this exhaustiveness
+        raise AuditIntegrityError("Guided Chat provider received an unknown schema-8 stage")
 
     advisory = await solve_step_chat_with_auto_drop(
         site="post_guided_chat",
@@ -335,7 +259,7 @@ async def run_guided_chat_provider_attempt(
         timeout_seconds=settings.composer_timeout_seconds,
         context_block=context_block,
     )
-    return GuidedChatProviderOutcome(chat=advisory, source_resolution=None, sink_resolution=None, deferred_action=None)
+    return GuidedStepChatOnlyResult(chat=advisory)
 
 
 def _transition_request(
@@ -447,7 +371,14 @@ async def post_guided_chat_schema8(
             raise HTTPException(status_code=400, detail="Session is not in guided mode. Use /api/sessions/{id}/messages.")
         if guided.terminal is not None:
             raise HTTPException(status_code=409, detail="Guided session is already terminal.")
-        if guided.step not in {GuidedStep.STEP_1_SOURCE, GuidedStep.STEP_2_SINK}:
+        if guided.step not in {
+            GuidedStep.STEP_1_SOURCE,
+            GuidedStep.STEP_2_SINK,
+            GuidedStep.STEP_3_TRANSFORMS,
+            GuidedStep.STEP_4_WIRE,
+        }:
+            raise _unsupported_stage(guided.step)
+        if guided.step in {GuidedStep.STEP_3_TRANSFORMS, GuidedStep.STEP_4_WIRE} and not guided.deferred_intents:
             raise _unsupported_stage(guided.step)
         prospective, current_turn, current_payload = guided_route._schema8_prospective_occurrence(
             state,
@@ -525,6 +456,10 @@ async def post_guided_chat_schema8(
 
             recorder = BufferingRecorder()
             attempt_message_id = uuid4()
+            originating_message = GuidedOriginatingUserMessageDraft(
+                message_id=attempt_message_id,
+                content=body.message,
+            )
             progress_started = False
             progress_registry = _get_composer_progress_registry(request)
             try:
@@ -565,9 +500,12 @@ async def post_guided_chat_schema8(
                         progress=progress_sink,
                     )
                     chat_result = provider_outcome.chat
-                    source_resolution = provider_outcome.source_resolution
-                    sink_resolution = provider_outcome.sink_resolution
-                    deferred_action = provider_outcome.deferred_action
+                    source_resolution = provider_outcome.resolution if type(provider_outcome) is Step1SourceResolvedResult else None
+                    sink_resolution = provider_outcome.sink if type(provider_outcome) is Step2SinkResolvedResult else None
+                    deferred_action = provider_outcome.action if type(provider_outcome) is GuidedStepDeferredIntentResult else None
+                    deferred_management_action = (
+                        provider_outcome.action if type(provider_outcome) is GuidedStepDeferredManagementResult else None
+                    )
                     if source_resolution is not None and TurnType(frozen.current_turn["type"]) is TurnType.SCHEMA_FORM:
                         source_resolution = None
                         chat_result = StepChatResult(
@@ -612,28 +550,23 @@ async def post_guided_chat_schema8(
                         raise AuditIntegrityError("Guided Chat turn custody changed after provider work")
 
                     occurrence_was_prospective = not (current_guided.history and current_guided.history[-1].response_hash is None)
-                    retained_intent_id: UUID | None = None
-                    if deferred_action is not None:
-                        disposition = validate_deferred_intent_action(
-                            deferred_action,
-                            receiving_stage=_guided_stage_name(prospective.step),
-                            catalog=catalog,
+                    deferred = apply_deferred_request(
+                        deferred_action,
+                        deferred_management_action,
+                        authority=DeferredRequestAuthority(
                             guided=prospective,
-                        )
-                        chat_result = _deferred_disposition_chat(disposition, latency_ms=chat_result.latency_ms)
-                        if type(disposition) is DeferredIntentAccepted:
-                            retained_intent_id = uuid4()
-                            retained = create_deferred_stage_intent(
-                                disposition.action,
-                                receiving_stage=_guided_stage_name(prospective.step),
-                                intent_id=str(retained_intent_id),
-                                originating_message_id=str(attempt_message_id),
-                                originating_message_content=body.message,
-                            )
-                            prospective = _replace(
-                                prospective,
-                                deferred_intents=(*prospective.deferred_intents, retained),
-                            )
+                            catalog=catalog,
+                            originating_message=originating_message,
+                            new_intent_id=uuid4(),
+                        ),
+                        chat=chat_result,
+                    )
+                    prospective = deferred.guided
+                    chat_result = deferred.chat
+                    retained_intent_id = deferred_request_retained_intent_id(deferred)
+                    management = deferred_request_management(deferred)
+                    settled_management_action = management.action if management is not None else None
+                    cancelled_intent = management.effective_intent if type(management) is DeferredRequestCancelled else None
                     transition_body = _transition_request(
                         body=body,
                         guided=prospective,
@@ -646,7 +579,29 @@ async def post_guided_chat_schema8(
                     next_turn: Turn | None = current_turn
                     prepared_next: PreparedGuidedJsonPayload | None = planned_current
                     transition_succeeded = False
-                    if transition_body is not None:
+                    rewound = False
+                    invalidated_pending_proposal: GuidedPendingProposalInvalidation | None = None
+                    rewind = maybe_prepare_schema8_management_rewind(
+                        authority=ManagementRewindAuthority(
+                            guided_route=guided_route,
+                            current_state=current_state,
+                            current_guided=current_guided,
+                            prospective=prospective,
+                            catalog=catalog,
+                            shield_available=shield_available,
+                            payload_store=payload_store,
+                        ),
+                        management=management,
+                    )
+                    if rewind is not None:
+                        resulting_state = rewind.state
+                        planned_response = rewind.response_payload
+                        next_turn = rewind.next_turn
+                        prepared_next = rewind.next_payload
+                        invalidated_pending_proposal = rewind.invalidated_proposal
+                        transition_succeeded = True
+                        rewound = True
+                    elif transition_body is not None:
                         try:
                             resulting_state, planned_response, next_turn, prepared_next = guided_route._schema8_answer_and_project_next(
                                 current_state,
@@ -676,7 +631,9 @@ async def post_guided_chat_schema8(
                         raise AuditIntegrityError("Guided Chat transition removed its checkpoint")
                     finished_at = datetime.now(UTC)
                     is_private_future_instruction = (
-                        deferred_action is not None or chat_result.error_class == "DeferredIntentActionShapeError"
+                        deferred_action is not None
+                        or deferred_management_action is not None
+                        or chat_result.error_class in {"DeferredIntentActionShapeError", "DeferredIntentManagementActionShapeError"}
                     )
                     user_turn = ChatTurn(
                         role=ChatRole.USER,
@@ -700,7 +657,15 @@ async def post_guided_chat_schema8(
                             if assistant_kind == "assistant"
                             else "not_applied"
                             if chat_result.error_class
-                            in {"StepTransitionRejected", "InlineSourceNotApplied", "DeferredIntentActionShapeError"}
+                            in {
+                                "StepTransitionRejected",
+                                "InlineSourceNotApplied",
+                                "DeferredIntentActionShapeError",
+                                "DeferredIntentManagementActionShapeError",
+                                "DeferredIntentUnknown",
+                                "DeferredIntentBindingMismatch",
+                                "DeferredIntentAmbiguous",
+                            }
                             else "quality_guard"
                             if chat_result.error_class == "AssistantScaffoldLeakError"
                             else "unavailable"
@@ -729,6 +694,13 @@ async def post_guided_chat_schema8(
                     )
 
                     audit = BufferingRecorder()
+                    if cancelled_intent is not None:
+                        emit_intent_cancelled(
+                            audit,
+                            intent=cancelled_intent,
+                            composition_version=current_state.version,
+                            actor=user.user_id,
+                        )
                     if occurrence_was_prospective:
                         emit_turn_emitted(
                             audit,
@@ -751,7 +723,7 @@ async def post_guided_chat_schema8(
                             composition_version=current_state.version,
                             actor=user.user_id,
                         )
-                        if resulting_guided.step is not prospective.step:
+                        if resulting_guided.step is not prospective.step and not rewound:
                             emit_step_advanced(
                                 audit,
                                 prev=prospective.step,
@@ -846,11 +818,10 @@ async def post_guided_chat_schema8(
                             ),
                             payloads=tuple(prepared_payloads),
                             audit_evidence=evidence,
-                            originating_message=GuidedOriginatingUserMessageDraft(
-                                message_id=attempt_message_id,
-                                content=body.message,
-                            ),
+                            originating_message=originating_message,
                             retained_deferred_intent_id=retained_intent_id,
+                            deferred_intent_action=settled_management_action,
+                            invalidated_pending_proposal=invalidated_pending_proposal,
                         ),
                         payload_store=payload_store,
                     )

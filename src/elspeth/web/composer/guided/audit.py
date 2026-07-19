@@ -1,6 +1,6 @@
 """Guided-mode audit event emission.
 
-Per Errata C4: the four event types (turn_emitted, turn_answered,
+Per Errata C4: the guided event types (turn_emitted, turn_answered,
 step_advanced, dropped_to_freeform) are recorded as
 :class:`~elspeth.contracts.composer_audit.ComposerToolInvocation` records
 with a ``tool_name`` discriminator. No new audit primitive, no schema
@@ -26,12 +26,13 @@ from elspeth.contracts.composer_audit import (
 )
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
-from elspeth.web.composer.guided.state_machine import TerminalReason
+from elspeth.web.composer.guided.state_machine import DeferredStageIntent, TerminalReason
 
 # Closed allowlists for discriminator fields. Checked before construction so
 # the audit trail never records a record with an invalid discriminator value.
 _VALID_EMITTERS: frozenset[str] = frozenset({"server", "llm"})
 _VALID_ADVANCE_REASONS: frozenset[str] = frozenset({"user_advanced", "auto_advanced"})
+_VALID_STAGE_NAMES: frozenset[str] = frozenset({"source", "output", "topology", "wire_review"})
 
 
 def _build_invocation(
@@ -246,6 +247,41 @@ def emit_dropped_to_freeform(
         composition_version=composition_version,
         actor=actor,
         now=now,
+    )
+    recorder.record(invocation)
+
+
+def emit_intent_cancelled(
+    recorder: ComposerToolRecorder,
+    *,
+    intent: DeferredStageIntent,
+    composition_version: int,
+    actor: str,
+) -> None:
+    """Record one explicit cancellation without copying intent prose."""
+
+    if type(intent) is not DeferredStageIntent:
+        raise TypeError("intent must be an exact DeferredStageIntent")
+    try:
+        parsed_intent_id = uuid.UUID(intent.intent_id)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("intent_id must be a canonical UUID string") from exc
+    if str(parsed_intent_id) != intent.intent_id:
+        raise ValueError("intent_id must be a canonical UUID string")
+    if intent.receiving_stage not in _VALID_STAGE_NAMES:
+        raise ValueError("receiving_stage is outside the closed stage vocabulary")
+    if intent.target_stage not in _VALID_STAGE_NAMES:
+        raise ValueError("target_stage is outside the closed stage vocabulary")
+    invocation = _build_invocation(
+        tool_name="guided_intent_cancelled",
+        payload={
+            "intent_id": intent.intent_id,
+            "receiving_stage": intent.receiving_stage,
+            "target_stage": intent.target_stage,
+        },
+        composition_version=composition_version,
+        actor=actor,
+        now=datetime.now(UTC),
     )
     recorder.record(invocation)
 

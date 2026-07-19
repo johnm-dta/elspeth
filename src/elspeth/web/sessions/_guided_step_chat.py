@@ -22,12 +22,27 @@ from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided.chat_solver import (
     AssistantScaffoldLeakError,
+    DeferredIntentManagementChatRequest,
+    GuidedChatDeferredIntentOutcome,
+    GuidedChatDeferredManagementOutcome,
+    GuidedChatEmptyOutcome,
+    GuidedChatProseOutcome,
     Step1SourceChatResolution,
+    Step1SourceResolvedOutcome,
+    Step2SinkResolvedOutcome,
+    maybe_manage_deferred_intent_chat,
     maybe_resolve_step_1_source_chat,
     maybe_resolve_step_2_sink_chat,
     solve_step_chat,
 )
-from elspeth.web.composer.guided.deferred_intents import DeferredIntentAction, DeferredIntentActionShapeError
+from elspeth.web.composer.guided.deferred_intents import (
+    DeferredIntentAction,
+    DeferredIntentActionShapeError,
+    DeferredIntentCancelAction,
+    DeferredIntentEditAction,
+    DeferredIntentManagementAction,
+    DeferredIntentManagementActionShapeError,
+)
 from elspeth.web.composer.guided.errors import GuidedSolverResponseShapeError
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import SinkResolved, SourceResolved
@@ -35,6 +50,40 @@ from elspeth.web.composer.state import CompositionState
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 slog = structlog.get_logger()
+
+
+def _provider_transient_exception_types() -> tuple[type[BaseException], ...]:
+    """Canonical provider/transport failures shared by every chat palette."""
+
+    from litellm.exceptions import APIError as LiteLLMAPIError
+    from litellm.exceptions import AuthenticationError as LiteLLMAuthError
+    from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+    from litellm.exceptions import (
+        BlockedPiiEntityError,
+        BudgetExceededError,
+        GuardrailInterventionNormalStringError,
+        GuardrailRaisedException,
+    )
+
+    return (
+        LiteLLMAPIError,
+        LiteLLMAuthError,
+        LiteLLMBadRequestError,
+        BudgetExceededError,
+        BlockedPiiEntityError,
+        GuardrailRaisedException,
+        GuardrailInterventionNormalStringError,
+        TimeoutError,
+        IndexError,
+        AttributeError,
+        json.JSONDecodeError,
+    )
+
+
+def _guided_tool_transient_exception_types() -> tuple[type[BaseException], ...]:
+    """Provider failures plus malformed terminal/discovery response shapes."""
+
+    return (*_provider_transient_exception_types(), ValueError, GuidedSolverResponseShapeError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,33 +103,83 @@ class StepChatResult:
     error_class: str | None
 
 
-@dataclass(frozen=True, slots=True)
-class Step1SourceChatResult:
-    """Guarded result of the Step-1 source resolver branch.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GuidedStepChatEmptyResult:
+    """The specialised provider produced no usable terminal channel."""
 
-    ``source_resolution`` carries a valid ``resolve_source`` tool result. A
-    ``None`` value means the model replied in ordinary prose (``prose_chat``)
-    or the resolver failed (``fallback_chat``); either way the route must not
-    call the model again or commit source state from invalid tool arguments.
 
-    ``fallback_chat`` carries the fallback chat result when the resolver
-    itself failed — a transient or malformed model response (unavailable
-    copy) or a scaffold leak in the tool's own ``assistant_message`` argument
-    (honest quality-check copy, distinguished via ``error_class``).
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GuidedStepChatOnlyResult:
+    chat: StepChatResult
 
-    ``prose_chat`` carries the model's own SUCCESS reply when it declined the
-    tool call and answered in prose instead — captured directly from the
-    resolve-equipped call so the route never needs a second, tool-less call
-    to obtain an answer to show the user. Defaults to ``None`` for
-    construction-site compatibility with callers outside this module that do
-    not know about the salvage path; every call site inside this module sets
-    it explicitly.
-    """
+    def __post_init__(self) -> None:
+        if type(self.chat) is not StepChatResult:
+            raise TypeError("GuidedStepChatOnlyResult.chat must be exact")
 
-    source_resolution: Step1SourceChatResolution | None
-    fallback_chat: StepChatResult | None
-    prose_chat: StepChatResult | None = None
-    deferred_action: DeferredIntentAction | None = None
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GuidedStepDeferredIntentResult:
+    chat: StepChatResult
+    action: DeferredIntentAction
+
+    def __post_init__(self) -> None:
+        if type(self.chat) is not StepChatResult:
+            raise TypeError("GuidedStepDeferredIntentResult.chat must be exact")
+        if type(self.action) is not DeferredIntentAction:
+            raise TypeError("GuidedStepDeferredIntentResult.action must be exact")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GuidedStepDeferredManagementResult:
+    chat: StepChatResult
+    action: DeferredIntentManagementAction
+
+    def __post_init__(self) -> None:
+        if type(self.chat) is not StepChatResult:
+            raise TypeError("GuidedStepDeferredManagementResult.chat must be exact")
+        if type(self.action) not in {DeferredIntentCancelAction, DeferredIntentEditAction}:
+            raise TypeError("GuidedStepDeferredManagementResult.action must be exact")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Step1SourceResolvedResult:
+    chat: StepChatResult
+    resolution: Step1SourceChatResolution
+
+    def __post_init__(self) -> None:
+        if type(self.chat) is not StepChatResult:
+            raise TypeError("Step1SourceResolvedResult.chat must be exact")
+        if type(self.resolution) is not Step1SourceChatResolution:
+            raise TypeError("Step1SourceResolvedResult.resolution must be exact")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Step2SinkResolvedResult:
+    chat: StepChatResult
+    sink: SinkResolved
+
+    def __post_init__(self) -> None:
+        if type(self.chat) is not StepChatResult:
+            raise TypeError("Step2SinkResolvedResult.chat must be exact")
+        if type(self.sink) is not SinkResolved:
+            raise TypeError("Step2SinkResolvedResult.sink must be exact")
+
+
+type Step1SourceChatResult = (
+    GuidedStepChatEmptyResult
+    | GuidedStepChatOnlyResult
+    | GuidedStepDeferredIntentResult
+    | GuidedStepDeferredManagementResult
+    | Step1SourceResolvedResult
+)
+
+type Step2SinkChatResult = (
+    GuidedStepChatEmptyResult
+    | GuidedStepChatOnlyResult
+    | GuidedStepDeferredIntentResult
+    | GuidedStepDeferredManagementResult
+    | Step2SinkResolvedResult
+)
 
 
 # Synthetic message returned to the user when the LLM is transiently
@@ -118,6 +217,11 @@ _DEFERRED_ACTION_REPAIR_MESSAGE = (
     "Please restate the target stage and the structural requirement."
 )
 
+_DEFERRED_MANAGEMENT_REPAIR_MESSAGE = (
+    "I couldn't verify which saved instruction to change, so I didn't change anything. "
+    "Please identify one pending instruction and say whether to cancel or revise it."
+)
+
 
 def _safe_frame_strings(
     exc: BaseException,
@@ -149,6 +253,107 @@ def _safe_frame_strings(
     return tuple(frames)
 
 
+type DeferredIntentManagementChatResult = GuidedStepChatOnlyResult | GuidedStepDeferredManagementResult
+
+
+async def resolve_deferred_intent_management_chat_with_auto_drop(
+    *,
+    site: str,
+    session_id: str,
+    user_id: str,
+    request: DeferredIntentManagementChatRequest,
+    recorder: BufferingRecorder | None,
+) -> DeferredIntentManagementChatResult:
+    """Map malformed/transient management calls to an unchanged guided turn."""
+
+    started = time.perf_counter()
+    try:
+        outcome = await maybe_manage_deferred_intent_chat(
+            request=request,
+            recorder=recorder,
+        )
+        if type(outcome) is GuidedChatDeferredManagementOutcome:
+            return GuidedStepDeferredManagementResult(
+                action=outcome.action,
+                chat=StepChatResult(
+                    assistant_message="I found a request to change one saved instruction and will verify its stable identity.",
+                    status=ComposerChatTurnStatus.SUCCESS,
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    error_class=None,
+                ),
+            )
+        if type(outcome) is GuidedChatProseOutcome:
+            return GuidedStepChatOnlyResult(
+                chat=StepChatResult(
+                    assistant_message=outcome.assistant_message,
+                    status=ComposerChatTurnStatus.SUCCESS,
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    error_class=None,
+                ),
+            )
+        raise GuidedSolverResponseShapeError(f"unexpected management chat outcome: {type(outcome).__name__}")
+    except DeferredIntentManagementActionShapeError as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        slog.error(
+            "guided.deferred_intent_management_shape_rejected",
+            session_id=session_id,
+            user_id=user_id,
+            site=site,
+            step=request.step.value,
+            exc_class=type(exc).__name__,
+            latency_ms=latency_ms,
+            frames=_safe_frame_strings(exc),
+        )
+        return GuidedStepChatOnlyResult(
+            chat=StepChatResult(
+                assistant_message=_DEFERRED_MANAGEMENT_REPAIR_MESSAGE,
+                status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
+                latency_ms=latency_ms,
+                error_class=type(exc).__name__,
+            ),
+        )
+    except AssistantScaffoldLeakError as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        slog.error(
+            "guided.deferred_intent_management_scaffold_leak",
+            session_id=session_id,
+            user_id=user_id,
+            site=site,
+            step=request.step.value,
+            exc_class=type(exc).__name__,
+            latency_ms=latency_ms,
+            frames=_safe_frame_strings(exc),
+        )
+        return GuidedStepChatOnlyResult(
+            chat=StepChatResult(
+                assistant_message=_SCAFFOLD_LEAK_MESSAGE,
+                status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
+                latency_ms=latency_ms,
+                error_class=type(exc).__name__,
+            ),
+        )
+    except _guided_tool_transient_exception_types() as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        slog.error(
+            "guided.deferred_intent_management_transient_failure",
+            session_id=session_id,
+            user_id=user_id,
+            site=site,
+            step=request.step.value,
+            exc_class=type(exc).__name__,
+            latency_ms=latency_ms,
+            frames=_safe_frame_strings(exc),
+        )
+        return GuidedStepChatOnlyResult(
+            chat=StepChatResult(
+                assistant_message=_SYNTHETIC_UNAVAILABLE_MESSAGE,
+                status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
+                latency_ms=latency_ms,
+                error_class=type(exc).__name__,
+            ),
+        )
+
+
 async def resolve_step_1_source_chat_with_auto_drop(
     *,
     site: str,
@@ -168,19 +373,10 @@ async def resolve_step_1_source_chat_with_auto_drop(
 
     ``context_block`` threads straight through to
     :func:`maybe_resolve_step_1_source_chat` so a declined-to-prose reply
-    (``prose_chat`` below) is grounded in the same "current build" context a
-    second, tool-less call would otherwise have supplied.
+    (returned as ``GuidedStepChatOnlyResult``) is grounded in the same
+    "current build" context a second, tool-less call would otherwise have
+    supplied.
     """
-    from litellm.exceptions import APIError as LiteLLMAPIError
-    from litellm.exceptions import AuthenticationError as LiteLLMAuthError
-    from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
-    from litellm.exceptions import (
-        BlockedPiiEntityError,
-        BudgetExceededError,
-        GuardrailInterventionNormalStringError,
-        GuardrailRaisedException,
-    )
-
     started = time.perf_counter()
     try:
         outcome = await maybe_resolve_step_1_source_chat(
@@ -194,25 +390,50 @@ async def resolve_step_1_source_chat_with_auto_drop(
             timeout_seconds=timeout_seconds,
             context_block=context_block,
         )
-        prose_chat: StepChatResult | None = None
-        if outcome.prose_reply is not None:
-            # The resolve-equipped call declined the tool and answered in
-            # prose instead — a genuine SUCCESS, not a fallback. Building the
-            # StepChatResult here (not in the route) keeps latency/status
-            # computation colocated with the other outcomes of this call.
-            prose_chat = StepChatResult(
-                assistant_message=outcome.prose_reply,
-                status=ComposerChatTurnStatus.SUCCESS,
-                latency_ms=int((time.perf_counter() - started) * 1000),
-                error_class=None,
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        if type(outcome) is Step1SourceResolvedOutcome:
+            return Step1SourceResolvedResult(
+                chat=StepChatResult(
+                    assistant_message=outcome.resolution.assistant_message,
+                    status=ComposerChatTurnStatus.SUCCESS,
+                    latency_ms=latency_ms,
+                    error_class=None,
+                ),
+                resolution=outcome.resolution,
             )
-        return Step1SourceChatResult(
-            source_resolution=outcome.resolution,
-            fallback_chat=None,
-            prose_chat=prose_chat,
-            deferred_action=outcome.deferred_action,
-        )
-    except DeferredIntentActionShapeError as exc:
+        if type(outcome) is GuidedChatDeferredIntentOutcome:
+            return GuidedStepDeferredIntentResult(
+                chat=StepChatResult(
+                    assistant_message="I found a future-stage instruction and will validate it before retaining it.",
+                    status=ComposerChatTurnStatus.SUCCESS,
+                    latency_ms=latency_ms,
+                    error_class=None,
+                ),
+                action=outcome.action,
+            )
+        if type(outcome) is GuidedChatDeferredManagementOutcome:
+            return GuidedStepDeferredManagementResult(
+                chat=StepChatResult(
+                    assistant_message="I found a request to change one saved instruction and will verify its stable identity.",
+                    status=ComposerChatTurnStatus.SUCCESS,
+                    latency_ms=latency_ms,
+                    error_class=None,
+                ),
+                action=outcome.action,
+            )
+        if type(outcome) is GuidedChatProseOutcome:
+            return GuidedStepChatOnlyResult(
+                chat=StepChatResult(
+                    assistant_message=outcome.assistant_message,
+                    status=ComposerChatTurnStatus.SUCCESS,
+                    latency_ms=latency_ms,
+                    error_class=None,
+                ),
+            )
+        if type(outcome) is GuidedChatEmptyOutcome:
+            return GuidedStepChatEmptyResult()
+        raise GuidedSolverResponseShapeError(f"unexpected Step-1 chat outcome: {type(outcome).__name__}")
+    except (DeferredIntentActionShapeError, DeferredIntentManagementActionShapeError) as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
         slog.error(
             "guided.step_1_deferred_intent_shape_rejected",
@@ -224,9 +445,8 @@ async def resolve_step_1_source_chat_with_auto_drop(
             latency_ms=latency_ms,
             frames=_safe_frame_strings(exc),
         )
-        return Step1SourceChatResult(
-            source_resolution=None,
-            fallback_chat=StepChatResult(
+        return GuidedStepChatOnlyResult(
+            chat=StepChatResult(
                 assistant_message=_DEFERRED_ACTION_REPAIR_MESSAGE,
                 status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
                 latency_ms=latency_ms,
@@ -253,30 +473,15 @@ async def resolve_step_1_source_chat_with_auto_drop(
             latency_ms=latency_ms,
             frames=_safe_frame_strings(exc),
         )
-        return Step1SourceChatResult(
-            source_resolution=None,
-            fallback_chat=StepChatResult(
+        return GuidedStepChatOnlyResult(
+            chat=StepChatResult(
                 assistant_message=_SCAFFOLD_LEAK_MESSAGE,
                 status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
                 latency_ms=latency_ms,
                 error_class=type(exc).__name__,
             ),
         )
-    except (
-        LiteLLMAPIError,
-        LiteLLMAuthError,
-        LiteLLMBadRequestError,
-        BudgetExceededError,
-        BlockedPiiEntityError,
-        GuardrailRaisedException,
-        GuardrailInterventionNormalStringError,
-        TimeoutError,
-        IndexError,
-        AttributeError,
-        json.JSONDecodeError,
-        ValueError,
-        GuidedSolverResponseShapeError,
-    ) as exc:
+    except _guided_tool_transient_exception_types() as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
         slog.error(
             "guided.step_1_source_chat_transient_failure",
@@ -288,45 +493,14 @@ async def resolve_step_1_source_chat_with_auto_drop(
             latency_ms=latency_ms,
             frames=_safe_frame_strings(exc),
         )
-        return Step1SourceChatResult(
-            source_resolution=None,
-            fallback_chat=StepChatResult(
+        return GuidedStepChatOnlyResult(
+            chat=StepChatResult(
                 assistant_message=_SYNTHETIC_UNAVAILABLE_MESSAGE,
                 status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
                 latency_ms=latency_ms,
                 error_class=type(exc).__name__,
             ),
         )
-
-
-@dataclass(frozen=True, slots=True)
-class Step2SinkChatResult:
-    """Outcome of a Step-2 sink chat attempt with auto-drop fall-back.
-
-    ``sink_resolution`` carries a valid ``resolve_sink`` tool result, or
-    ``None`` when the model replied in prose (``prose_chat``) or the resolver
-    failed (``fallback_chat``). ``assistant_message`` carries the LLM's reply
-    that accompanied the tool call (``None`` unless ``sink_resolution`` is set).
-
-    ``fallback_chat`` carries the unavailable-copy message on transient LLM
-    failure, or the honest quality-check copy on a scaffold leak in the
-    tool's own ``assistant_message`` argument (distinguished via
-    ``error_class``).
-
-    ``prose_chat`` carries the model's own SUCCESS reply when it declined the
-    tool call and answered in prose instead — captured directly from the
-    resolve-equipped call so the route never needs a second, tool-less call
-    to obtain an answer to show the user. Defaults to ``None`` for
-    construction-site compatibility with callers outside this module that do
-    not know about the salvage path; every call site inside this module sets
-    it explicitly.
-    """
-
-    sink_resolution: SinkResolved | None
-    assistant_message: str | None
-    fallback_chat: StepChatResult | None
-    prose_chat: StepChatResult | None = None
-    deferred_action: DeferredIntentAction | None = None
 
 
 async def resolve_step_2_sink_chat_with_auto_drop(
@@ -357,20 +531,10 @@ async def resolve_step_2_sink_chat_with_auto_drop(
     ``get_plugin_schema`` before resolving. ``max_discovery_iters`` bounds the
     loop (the route passes ``settings.composer_max_discovery_turns``); ``None``
     defers to the solver's own default. ``context_block`` threads straight
-    through so a declined-to-prose reply (``prose_chat`` below) is grounded in
-    the same "current build" context a second, tool-less call would
-    otherwise have supplied.
+    through so a declined-to-prose reply (returned as
+    ``GuidedStepChatOnlyResult``) is grounded in the same "current build"
+    context a second, tool-less call would otherwise have supplied.
     """
-    from litellm.exceptions import APIError as LiteLLMAPIError
-    from litellm.exceptions import AuthenticationError as LiteLLMAuthError
-    from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
-    from litellm.exceptions import (
-        BlockedPiiEntityError,
-        BudgetExceededError,
-        GuardrailInterventionNormalStringError,
-        GuardrailRaisedException,
-    )
-
     started = time.perf_counter()
     try:
         outcome = await maybe_resolve_step_2_sink_chat(
@@ -390,33 +554,50 @@ async def resolve_step_2_sink_chat_with_auto_drop(
             context_block=context_block,
             progress=progress,
         )
-        if outcome.sink is not None:
-            return Step2SinkChatResult(
-                sink_resolution=outcome.sink,
-                assistant_message=outcome.assistant_message,
-                fallback_chat=None,
-                deferred_action=outcome.deferred_action,
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        if type(outcome) is Step2SinkResolvedOutcome:
+            return Step2SinkResolvedResult(
+                chat=StepChatResult(
+                    assistant_message=outcome.assistant_message,
+                    status=ComposerChatTurnStatus.SUCCESS,
+                    latency_ms=latency_ms,
+                    error_class=None,
+                ),
+                sink=outcome.sink,
             )
-        prose_chat: StepChatResult | None = None
-        if outcome.assistant_message is not None:
-            # The resolve-equipped call declined the tool and answered in
-            # prose instead — a genuine SUCCESS, not a fallback. Building the
-            # StepChatResult here (not in the route) keeps latency/status
-            # computation colocated with the other outcomes of this call.
-            prose_chat = StepChatResult(
-                assistant_message=outcome.assistant_message,
-                status=ComposerChatTurnStatus.SUCCESS,
-                latency_ms=int((time.perf_counter() - started) * 1000),
-                error_class=None,
+        if type(outcome) is GuidedChatDeferredIntentOutcome:
+            return GuidedStepDeferredIntentResult(
+                chat=StepChatResult(
+                    assistant_message="I found a future-stage instruction and will validate it before retaining it.",
+                    status=ComposerChatTurnStatus.SUCCESS,
+                    latency_ms=latency_ms,
+                    error_class=None,
+                ),
+                action=outcome.action,
             )
-        return Step2SinkChatResult(
-            sink_resolution=None,
-            assistant_message=None,
-            fallback_chat=None,
-            prose_chat=prose_chat,
-            deferred_action=outcome.deferred_action,
-        )
-    except DeferredIntentActionShapeError as exc:
+        if type(outcome) is GuidedChatDeferredManagementOutcome:
+            return GuidedStepDeferredManagementResult(
+                chat=StepChatResult(
+                    assistant_message="I found a request to change one saved instruction and will verify its stable identity.",
+                    status=ComposerChatTurnStatus.SUCCESS,
+                    latency_ms=latency_ms,
+                    error_class=None,
+                ),
+                action=outcome.action,
+            )
+        if type(outcome) is GuidedChatProseOutcome:
+            return GuidedStepChatOnlyResult(
+                chat=StepChatResult(
+                    assistant_message=outcome.assistant_message,
+                    status=ComposerChatTurnStatus.SUCCESS,
+                    latency_ms=latency_ms,
+                    error_class=None,
+                ),
+            )
+        if type(outcome) is GuidedChatEmptyOutcome:
+            return GuidedStepChatEmptyResult()
+        raise GuidedSolverResponseShapeError(f"unexpected Step-2 chat outcome: {type(outcome).__name__}")
+    except (DeferredIntentActionShapeError, DeferredIntentManagementActionShapeError) as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
         slog.error(
             "guided.step_2_deferred_intent_shape_rejected",
@@ -428,10 +609,8 @@ async def resolve_step_2_sink_chat_with_auto_drop(
             latency_ms=latency_ms,
             frames=_safe_frame_strings(exc),
         )
-        return Step2SinkChatResult(
-            sink_resolution=None,
-            assistant_message=None,
-            fallback_chat=StepChatResult(
+        return GuidedStepChatOnlyResult(
+            chat=StepChatResult(
                 assistant_message=_DEFERRED_ACTION_REPAIR_MESSAGE,
                 status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
                 latency_ms=latency_ms,
@@ -457,34 +636,17 @@ async def resolve_step_2_sink_chat_with_auto_drop(
             latency_ms=latency_ms,
             frames=_safe_frame_strings(exc),
         )
-        return Step2SinkChatResult(
-            sink_resolution=None,
-            assistant_message=None,
-            fallback_chat=StepChatResult(
+        return GuidedStepChatOnlyResult(
+            chat=StepChatResult(
                 assistant_message=_SCAFFOLD_LEAK_MESSAGE,
                 status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
                 latency_ms=latency_ms,
                 error_class=type(exc).__name__,
             ),
         )
-    except (
-        LiteLLMAPIError,
-        LiteLLMAuthError,
-        LiteLLMBadRequestError,
-        BudgetExceededError,
-        BlockedPiiEntityError,
-        GuardrailRaisedException,
-        GuardrailInterventionNormalStringError,
-        TimeoutError,
-        IndexError,
-        AttributeError,
-        json.JSONDecodeError,
-        ValueError,
-        # A malformed discovery-tool dispatch deep in the sink loop raises this
-        # (via ``_execute_discovery_call``); absorb it into the advisory fallback
-        # instead of letting malformed model output escape as a 500.
-        GuidedSolverResponseShapeError,
-    ) as exc:
+    # A malformed discovery-tool dispatch deep in the sink loop raises a
+    # GuidedSolverResponseShapeError; the shared tool classification absorbs it.
+    except _guided_tool_transient_exception_types() as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
         slog.error(
             "guided.step_2_sink_chat_transient_failure",
@@ -496,10 +658,8 @@ async def resolve_step_2_sink_chat_with_auto_drop(
             latency_ms=latency_ms,
             frames=_safe_frame_strings(exc),
         )
-        return Step2SinkChatResult(
-            sink_resolution=None,
-            assistant_message=None,
-            fallback_chat=StepChatResult(
+        return GuidedStepChatOnlyResult(
+            chat=StepChatResult(
                 assistant_message=_SYNTHETIC_UNAVAILABLE_MESSAGE,
                 status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
                 latency_ms=latency_ms,
@@ -587,16 +747,6 @@ async def solve_step_chat_with_auto_drop(
         the two fallback causes (``AssistantScaffoldLeakError`` vs a
         transient exception class) since ``status`` alone does not.
     """
-    from litellm.exceptions import APIError as LiteLLMAPIError
-    from litellm.exceptions import AuthenticationError as LiteLLMAuthError
-    from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
-    from litellm.exceptions import (
-        BlockedPiiEntityError,
-        BudgetExceededError,
-        GuardrailInterventionNormalStringError,
-        GuardrailRaisedException,
-    )
-
     started = time.perf_counter()
     try:
         message = await solve_step_chat(
@@ -639,19 +789,7 @@ async def solve_step_chat_with_auto_drop(
             latency_ms=latency_ms,
             error_class=type(exc).__name__,
         )
-    except (
-        LiteLLMAPIError,
-        LiteLLMAuthError,
-        LiteLLMBadRequestError,
-        BudgetExceededError,
-        BlockedPiiEntityError,
-        GuardrailRaisedException,
-        GuardrailInterventionNormalStringError,
-        TimeoutError,
-        IndexError,
-        AttributeError,
-        json.JSONDecodeError,
-    ) as exc:
+    except _provider_transient_exception_types() as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
         slog.error(
             "guided.step_chat_transient_failure",

@@ -19,7 +19,7 @@ import json
 import math
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, cast
@@ -36,9 +36,15 @@ from elspeth.web.composer.guided._discovery import _assistant_tool_calls_message
 from elspeth.web.composer.guided.deferred_intents import (
     DeferredIntentAction,
     DeferredIntentActionShapeError,
+    DeferredIntentCancelAction,
+    DeferredIntentEditAction,
+    DeferredIntentManagementAction,
+    DeferredIntentManagementActionShapeError,
     deferred_intent_action_from_dict,
+    deferred_intent_management_action_from_dict,
 )
 from elspeth.web.composer.guided.errors import GuidedSolverResponseShapeError, InvariantError
+from elspeth.web.composer.guided.intent_management import deferred_intent_management_option
 from elspeth.web.composer.guided.prompts import _summarize_sample_row, load_step_chat_skill
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import (
@@ -51,6 +57,7 @@ from elspeth.web.composer.guided.resolved import (
     freeze_guided_json_mapping,
     freeze_guided_str_sequence,
 )
+from elspeth.web.composer.guided.state_machine import DeferredStageIntent
 from elspeth.web.composer.llm_response_parsing import (
     apply_anthropic_cache_markers,
     attach_llm_calls,
@@ -303,30 +310,55 @@ class Step1SourceChatResolution:
         freeze_fields(self, "options", "sample_rows", "observed_columns")
 
 
-@dataclass(frozen=True, slots=True)
-class Step1SourceChatOutcome:
-    """Outcome of one ``resolve_source``-equipped LLM call.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GuidedChatEmptyOutcome:
+    """The provider emitted neither a terminal call nor usable prose."""
 
-    At most one of the two fields is populated. ``resolution`` is a valid
-    ``resolve_source`` tool call. ``prose_reply`` is the model's own
-    register-guarded plain-language answer when it declined the tool — not
-    enough detail to act, or a plain question — captured directly from THIS
-    call so the caller never needs a second, tool-less call to obtain an
-    answer to show the user (that second call previously reused a
-    tool-capable system prompt with no tools attached, which is what caused
-    the model to hallucinate ``<tool_call>`` scaffolding — see
-    ``_ADVISORY_NO_TOOLS_ADDENDUM``).
 
-    Both fields are ``None`` only when the model's reply had neither a tool
-    call nor any content — a genuinely defective/empty response. That rare
-    case is deliberately NOT raised here: the caller falls back to the
-    tool-less advisory call exactly as before, which already raises
-    ``InvariantError`` on empty content.
-    """
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GuidedChatProseOutcome:
+    assistant_message: str
 
-    resolution: Step1SourceChatResolution | None
-    prose_reply: str | None
-    deferred_action: DeferredIntentAction | None = None
+    def __post_init__(self) -> None:
+        if type(self.assistant_message) is not str or not self.assistant_message:
+            raise TypeError("GuidedChatProseOutcome.assistant_message must be a non-empty exact string")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GuidedChatDeferredIntentOutcome:
+    action: DeferredIntentAction
+
+    def __post_init__(self) -> None:
+        if type(self.action) is not DeferredIntentAction:
+            raise TypeError("GuidedChatDeferredIntentOutcome.action must be exact")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GuidedChatDeferredManagementOutcome:
+    action: DeferredIntentManagementAction
+
+    def __post_init__(self) -> None:
+        if type(self.action) not in {DeferredIntentCancelAction, DeferredIntentEditAction}:
+            raise TypeError("GuidedChatDeferredManagementOutcome.action must be exact")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Step1SourceResolvedOutcome:
+    resolution: Step1SourceChatResolution
+
+    def __post_init__(self) -> None:
+        if type(self.resolution) is not Step1SourceChatResolution:
+            raise TypeError("Step1SourceResolvedOutcome.resolution must be exact")
+
+
+type Step1SourceChatOutcome = (
+    GuidedChatEmptyOutcome
+    | GuidedChatProseOutcome
+    | GuidedChatDeferredIntentOutcome
+    | GuidedChatDeferredManagementOutcome
+    | Step1SourceResolvedOutcome
+)
+type DeferredIntentManagementChatOutcome = GuidedChatProseOutcome | GuidedChatDeferredManagementOutcome
 
 
 _STEP_1_SOURCE_TOOL: dict[str, Any] = {
@@ -504,6 +536,42 @@ _DEFERRED_INTENT_TOOL: dict[str, Any] = {
     },
 }
 
+_DEFERRED_INTENT_MANAGEMENT_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "manage_deferred_intent",
+        "description": (
+            "Use only when the user explicitly asks to cancel or revise one listed pending deferred intent. "
+            "Copy the exact server-listed intent_id and paired selection_token; never invent, approximate, or mix them."
+        ),
+        "parameters": {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["action", "intent_id", "selection_token"],
+                    "properties": {
+                        "action": {"type": "string", "enum": ["cancel"]},
+                        "intent_id": {"type": "string", "format": "uuid"},
+                        "selection_token": {"type": "string", "minLength": 1},
+                    },
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["action", "intent_id", "selection_token", "replacement"],
+                    "properties": {
+                        "action": {"type": "string", "enum": ["edit"]},
+                        "intent_id": {"type": "string", "format": "uuid"},
+                        "selection_token": {"type": "string", "minLength": 1},
+                        "replacement": _DEFERRED_INTENT_TOOL["function"]["parameters"],
+                    },
+                },
+            ]
+        },
+    },
+}
+
 
 def _parse_deferred_intent_tool_arguments(arguments: object) -> DeferredIntentAction:
     if type(arguments) is not str:
@@ -525,6 +593,28 @@ def _parse_deferred_intent_tool_arguments(arguments: object) -> DeferredIntentAc
             "retain_deferred_intent function.arguments could not be parsed within bounded JSON limits"
         ) from exc
     return deferred_intent_action_from_dict(value)
+
+
+def _parse_deferred_intent_management_tool_arguments(arguments: object) -> DeferredIntentManagementAction:
+    if type(arguments) is not str:
+        raise DeferredIntentManagementActionShapeError(
+            f"manage_deferred_intent function.arguments must be an exact JSON string; got {type(arguments).__name__}"
+        )
+    try:
+        argument_bytes = len(arguments.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise DeferredIntentManagementActionShapeError("manage_deferred_intent function.arguments must be valid UTF-8 text") from exc
+    if argument_bytes > GUIDED_JSON_MAX_TOTAL_UTF8_BYTES:
+        raise DeferredIntentManagementActionShapeError(
+            f"manage_deferred_intent function.arguments exceeds the {GUIDED_JSON_MAX_TOTAL_UTF8_BYTES}-byte guided JSON limit"
+        )
+    try:
+        value = json.loads(arguments)
+    except (RecursionError, ValueError) as exc:
+        raise DeferredIntentManagementActionShapeError(
+            "manage_deferred_intent function.arguments could not be parsed within bounded JSON limits"
+        ) from exc
+    return deferred_intent_management_action_from_dict(value)
 
 
 def _record_llm_call(
@@ -712,6 +802,7 @@ def build_step_chat_context_block(
     current_source: SourceResolved | None,
     current_sink: SinkResolved | None,
     state: CompositionState | None,
+    deferred_intents: Sequence[DeferredStageIntent],
 ) -> str:
     """Compose the LLM-safe "current build" block for the advisory chat path.
 
@@ -755,7 +846,132 @@ def build_step_chat_context_block(
             f"outputs={json.dumps(output_plugins)}, "
             f"edge_count={len(state.edges)}."
         )
+    lines.extend(("", "Pending saved instructions (stable identities):"))
+    if deferred_intents:
+        for intent in deferred_intents:
+            lines.append(json.dumps(deferred_intent_management_option(intent).to_provider_dict(), sort_keys=True))
+    else:
+        lines.append("none")
     return "\n".join(lines) + "\n"
+
+
+@dataclass(frozen=True, slots=True)
+class DeferredIntentManagementChatRequest:
+    """Bounded provider request for stable-id intent management."""
+
+    model: str
+    step: GuidedStep
+    user_message: str
+    temperature: float | None
+    seed: int | None
+    timeout_seconds: float
+    context_block: str
+
+
+def _deferred_management_outcome_from_message(message: Any) -> DeferredIntentManagementChatOutcome:
+    tool_calls = message.tool_calls or ()
+    if tool_calls:
+        if len(tool_calls) != 1 or tool_calls[0].function is None or tool_calls[0].function.name != "manage_deferred_intent":
+            raise DeferredIntentManagementActionShapeError("passed-stage chat must return exactly one manage_deferred_intent call")
+        management = _parse_deferred_intent_management_tool_arguments(tool_calls[0].function.arguments)
+        return GuidedChatDeferredManagementOutcome(action=management)
+    prose = _require_prose_assistant_message(message.content, tool="maybe_manage_deferred_intent_chat")
+    return GuidedChatProseOutcome(assistant_message=prose)
+
+
+async def maybe_manage_deferred_intent_chat(
+    *,
+    request: DeferredIntentManagementChatRequest,
+    recorder: BufferingRecorder | None,
+) -> DeferredIntentManagementChatOutcome:
+    """Offer only stable-id deferred-intent management on Steps 3 and 4."""
+
+    if request.step not in {GuidedStep.STEP_3_TRANSFORMS, GuidedStep.STEP_4_WIRE}:
+        raise InvariantError("management-only guided chat is restricted to Steps 3 and 4")
+    from litellm.exceptions import APIError as LiteLLMAPIError
+    from litellm.exceptions import AuthenticationError as LiteLLMAuthError
+    from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": load_step_chat_skill(request.step).rstrip()},
+        {
+            "role": "system",
+            "content": (
+                "You may call `manage_deferred_intent` only to cancel or revise one "
+                "pending saved instruction listed by exact stable intent_id and its paired selection_token. Do not "
+                "claim a change was applied in prose."
+            ),
+        },
+        {"role": "system", "content": request.context_block},
+        {"role": "user", "content": request.user_message},
+    ]
+    tools = [_DEFERRED_INTENT_MANAGEMENT_TOOL]
+    kwargs: dict[str, Any] = {"model": request.model, "messages": messages, "tools": tools}
+    if request.temperature is not None:
+        kwargs["temperature"] = request.temperature
+    if request.seed is not None:
+        kwargs["seed"] = request.seed
+    started_at = datetime.now(UTC)
+    started_ns = time.monotonic_ns()
+    status: ComposerLLMCallStatus | None = None
+    response: Any = None
+    error_class: str | None = None
+    error_message: str | None = None
+    try:
+        response = await _bounded_acompletion(kwargs, request.timeout_seconds)
+        outcome = _deferred_management_outcome_from_message(response.choices[0].message)
+        status = ComposerLLMCallStatus.SUCCESS
+        return outcome
+    except TimeoutError:
+        status = ComposerLLMCallStatus.TIMEOUT
+        error_class = "TimeoutError"
+        error_message = "TimeoutError"
+        raise
+    except asyncio.CancelledError as exc:
+        status = ComposerLLMCallStatus.CANCELLED
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    except LiteLLMAuthError as exc:
+        status = ComposerLLMCallStatus.AUTH_ERROR
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    except LiteLLMBadRequestError as exc:
+        status = ComposerLLMCallStatus.BAD_REQUEST_ERROR
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    except LiteLLMAPIError as exc:
+        status = ComposerLLMCallStatus.API_ERROR
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    except (IndexError, AttributeError, json.JSONDecodeError, ValueError, GuidedSolverResponseShapeError) as exc:
+        status = ComposerLLMCallStatus.MALFORMED_RESPONSE
+        error_class = type(exc).__name__
+        error_message = "malformed_response"
+        raise
+    except Exception as exc:
+        status = ComposerLLMCallStatus.API_ERROR
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    finally:
+        _record_llm_call(
+            recorder=recorder,
+            model=request.model,
+            messages=messages,
+            tools=tools,
+            status=status,
+            started_at=started_at,
+            started_ns=started_ns,
+            temperature=request.temperature,
+            seed=request.seed,
+            response=response,
+            error_class=error_class,
+            error_message=error_message,
+        )
 
 
 @trust_boundary(
@@ -947,7 +1163,7 @@ async def maybe_resolve_step_1_source_chat(
         if retry_addendum is not None:
             messages.append({"role": "system", "content": retry_addendum})
         messages.append({"role": "user", "content": user_message})
-        tools = [_STEP_1_SOURCE_TOOL, _DEFERRED_INTENT_TOOL]
+        tools = [_STEP_1_SOURCE_TOOL, _DEFERRED_INTENT_TOOL, _DEFERRED_INTENT_MANAGEMENT_TOOL]
         # Mark BEFORE kwargs so the SAME marked objects feed both the wire call and
         # the audit record (messages / tools below, read in the finally block).
         # Gated on THIS call's model.
@@ -978,13 +1194,17 @@ async def maybe_resolve_step_1_source_chat(
             terminal_calls = [
                 tool_call
                 for tool_call in tool_calls
-                if tool_call.function is not None and tool_call.function.name in {"resolve_source", "retain_deferred_intent"}
+                if tool_call.function is not None
+                and tool_call.function.name in {"resolve_source", "retain_deferred_intent", "manage_deferred_intent"}
             ]
             if terminal_calls:
                 if len(terminal_calls) != 1 or len(tool_calls) != 1:
                     error_type = (
                         DeferredIntentActionShapeError
-                        if any(call.function is not None and call.function.name == "retain_deferred_intent" for call in terminal_calls)
+                        if any(
+                            call.function is not None and call.function.name in {"retain_deferred_intent", "manage_deferred_intent"}
+                            for call in terminal_calls
+                        )
                         else GuidedSolverResponseShapeError
                     )
                     raise error_type("step-1 chat must return exactly one terminal guided action")
@@ -995,14 +1215,18 @@ async def maybe_resolve_step_1_source_chat(
                 if function.name == "retain_deferred_intent":
                     deferred = _parse_deferred_intent_tool_arguments(arguments)
                     status = ComposerLLMCallStatus.SUCCESS
-                    return Step1SourceChatOutcome(resolution=None, prose_reply=None, deferred_action=deferred)
+                    return GuidedChatDeferredIntentOutcome(action=deferred)
+                if function.name == "manage_deferred_intent":
+                    management = _parse_deferred_intent_management_tool_arguments(arguments)
+                    status = ComposerLLMCallStatus.SUCCESS
+                    return GuidedChatDeferredManagementOutcome(action=management)
                 if not isinstance(arguments, str):
                     raise GuidedSolverResponseShapeError(
                         f"{function.name} function.arguments must be a JSON string; got {type(arguments).__name__}"
                     )
                 result = _parse_step_1_source_tool_arguments(arguments, plugin_hint=plugin_hint)
                 status = ComposerLLMCallStatus.SUCCESS
-                return Step1SourceChatOutcome(resolution=result, prose_reply=None)
+                return Step1SourceResolvedOutcome(resolution=result)
             # No resolve_source call: the model judged the message doesn't carry
             # enough detail to act (or it's a plain question) and answered in
             # prose instead. Validate + return that prose directly — the SAME
@@ -1020,7 +1244,7 @@ async def maybe_resolve_step_1_source_chat(
                     # content): both fields None — the caller falls back to the
                     # advisory chat path exactly as before.
                     status = ComposerLLMCallStatus.SUCCESS
-                    return Step1SourceChatOutcome(resolution=None, prose_reply=None)
+                    return GuidedChatEmptyOutcome()
                 prose = _require_prose_assistant_message(str(content), tool="maybe_resolve_step_1_source_chat")
                 if attempt_index == 0 and _should_retry_step_1_source_false_tool_decline(
                     user_message=user_message,
@@ -1039,13 +1263,13 @@ async def maybe_resolve_step_1_source_chat(
                     retry_addendum = _STEP_1_SOURCE_INLINE_CONTROL_RETRY_ADDENDUM
                     continue
                 status = ComposerLLMCallStatus.SUCCESS
-                return Step1SourceChatOutcome(resolution=None, prose_reply=prose)
+                return GuidedChatProseOutcome(assistant_message=prose)
 
             # Non-empty tool_calls with no resolve_source (hallucinated tool name
             # or function=None): return the empty outcome so the route falls back
             # to the tool-less advisory call, matching the step-2 contract.
             status = ComposerLLMCallStatus.SUCCESS
-            return Step1SourceChatOutcome(resolution=None, prose_reply=None)
+            return GuidedChatEmptyOutcome()
         except TimeoutError:
             status = ComposerLLMCallStatus.TIMEOUT
             error_class = "TimeoutError"
@@ -1251,24 +1475,25 @@ keeps direct callers (and tests) bounded. Reaching the cap returns ``None``
 """
 
 
-@dataclass(frozen=True, slots=True)
-class Step2SinkChatOutcome:
-    """Outcome of one ``resolve_sink``-equipped discovery-loop round.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Step2SinkResolvedOutcome:
+    sink: SinkResolved
+    assistant_message: str
 
-    At most one of the two fields is populated. ``sink`` is set on a valid
-    ``resolve_sink`` tool call, paired with its ``assistant_message``.
-    Otherwise ``assistant_message`` alone carries the model's own
-    register-guarded plain-prose reply — captured ONLY on a clean, tool-call-
-    free response (see :func:`maybe_resolve_step_2_sink_chat`) — so the
-    caller can show it directly without a second, tool-less call. Both
-    fields ``None`` covers every other non-terminal case unchanged from
-    before this salvage was added: a hallucinated non-discovery tool call, a
-    genuinely empty/defective response, or the discovery-iteration cap.
-    """
+    def __post_init__(self) -> None:
+        if type(self.sink) is not SinkResolved:
+            raise TypeError("Step2SinkResolvedOutcome.sink must be exact")
+        if type(self.assistant_message) is not str or not self.assistant_message:
+            raise TypeError("Step2SinkResolvedOutcome.assistant_message must be a non-empty exact string")
 
-    sink: SinkResolved | None
-    assistant_message: str | None
-    deferred_action: DeferredIntentAction | None = None
+
+type Step2SinkChatOutcome = (
+    GuidedChatEmptyOutcome
+    | GuidedChatProseOutcome
+    | GuidedChatDeferredIntentOutcome
+    | GuidedChatDeferredManagementOutcome
+    | Step2SinkResolvedOutcome
+)
 
 
 async def maybe_resolve_step_2_sink_chat(
@@ -1337,7 +1562,7 @@ async def maybe_resolve_step_2_sink_chat(
     discovery_enabled = catalog is not None and plugin_snapshot is not None and state is not None
     discovery_defs = get_discovery_tool_definitions(_STEP_2_SINK_DISCOVERY_TOOL_NAMES) if discovery_enabled else []
     allowed_discovery = _STEP_2_SINK_DISCOVERY_TOOL_NAMES if discovery_enabled else frozenset()
-    tools = [_STEP_2_SINK_TOOL, _DEFERRED_INTENT_TOOL, *discovery_defs]
+    tools = [_STEP_2_SINK_TOOL, _DEFERRED_INTENT_TOOL, _DEFERRED_INTENT_MANAGEMENT_TOOL, *discovery_defs]
     actor = user_id or "guided-composer"
     iteration_cap = max_discovery_iters if max_discovery_iters is not None else _DEFAULT_MAX_DISCOVERY_ITERS
 
@@ -1378,13 +1603,17 @@ async def maybe_resolve_step_2_sink_chat(
             terminal_calls = [
                 tool_call
                 for tool_call in tool_calls
-                if tool_call.function is not None and tool_call.function.name in {"resolve_sink", "retain_deferred_intent"}
+                if tool_call.function is not None
+                and tool_call.function.name in {"resolve_sink", "retain_deferred_intent", "manage_deferred_intent"}
             ]
             if terminal_calls:
                 if len(terminal_calls) != 1 or len(tool_calls) != 1:
                     error_type = (
                         DeferredIntentActionShapeError
-                        if any(call.function is not None and call.function.name == "retain_deferred_intent" for call in terminal_calls)
+                        if any(
+                            call.function is not None and call.function.name in {"retain_deferred_intent", "manage_deferred_intent"}
+                            for call in terminal_calls
+                        )
                         else GuidedSolverResponseShapeError
                     )
                     raise error_type("step-2 chat must return exactly one terminal guided action")
@@ -1395,14 +1624,18 @@ async def maybe_resolve_step_2_sink_chat(
                 if function.name == "retain_deferred_intent":
                     deferred = _parse_deferred_intent_tool_arguments(arguments)
                     status = ComposerLLMCallStatus.SUCCESS
-                    return Step2SinkChatOutcome(sink=None, assistant_message=None, deferred_action=deferred)
+                    return GuidedChatDeferredIntentOutcome(action=deferred)
+                if function.name == "manage_deferred_intent":
+                    management = _parse_deferred_intent_management_tool_arguments(arguments)
+                    status = ComposerLLMCallStatus.SUCCESS
+                    return GuidedChatDeferredManagementOutcome(action=management)
                 if not isinstance(arguments, str):
                     raise GuidedSolverResponseShapeError(
                         f"{function.name} function.arguments must be a JSON string; got {type(arguments).__name__}"
                     )
                 sink, assistant = _parse_step_2_sink_tool_arguments(arguments)
                 status = ComposerLLMCallStatus.SUCCESS
-                return Step2SinkChatOutcome(sink=sink, assistant_message=assistant)
+                return Step2SinkResolvedOutcome(sink=sink, assistant_message=assistant)
 
             # A clean, tool-call-free reply: the model judged the message
             # doesn't carry enough detail to act (or it's a plain question)
@@ -1417,10 +1650,10 @@ async def maybe_resolve_step_2_sink_chat(
                 content = message.content
                 if content is None or not str(content).strip():
                     status = ComposerLLMCallStatus.SUCCESS
-                    return Step2SinkChatOutcome(sink=None, assistant_message=None)
+                    return GuidedChatEmptyOutcome()
                 prose = _require_prose_assistant_message(str(content), tool="maybe_resolve_step_2_sink_chat")
                 status = ComposerLLMCallStatus.SUCCESS
-                return Step2SinkChatOutcome(sink=None, assistant_message=prose)
+                return GuidedChatProseOutcome(assistant_message=prose)
 
             # Execution-side safety gate: the only non-terminal calls we
             # dispatch are allowed read-only discovery tools. ANY other tool
@@ -1429,7 +1662,7 @@ async def maybe_resolve_step_2_sink_chat(
             discovery_calls = [tc for tc in tool_calls if tc.function is not None and tc.function.name in allowed_discovery]
             if not discovery_calls or len(discovery_calls) != len(tool_calls):
                 status = ComposerLLMCallStatus.SUCCESS
-                return Step2SinkChatOutcome(sink=None, assistant_message=None)
+                return GuidedChatEmptyOutcome()
 
             # Thread the assistant tool-call request once, then answer every
             # call id with its result, or the next round 400s.
@@ -1512,7 +1745,7 @@ async def maybe_resolve_step_2_sink_chat(
             )
 
     # Discovery iteration cap reached without a resolve_sink — advisory fallback.
-    return Step2SinkChatOutcome(sink=None, assistant_message=None)
+    return GuidedChatEmptyOutcome()
 
 
 async def solve_step_chat(

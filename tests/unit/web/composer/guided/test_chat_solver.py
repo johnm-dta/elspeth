@@ -10,35 +10,266 @@ validation; tests for that surface live in test_step_tool_scope.py.
 
 from __future__ import annotations
 
+import inspect
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
+from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus, ComposerLLMCallStatus
+from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided import chat_solver
 from elspeth.web.composer.guided.chat_solver import (
     AssistantScaffoldLeakError,
+    DeferredIntentManagementChatRequest,
     Step1SourceChatResolution,
     _build_step_1_source_dynamic_block,
     _build_step_2_sink_tool_prompt,
     _parse_step_1_source_tool_arguments,
     _parse_step_2_sink_tool_arguments,
     build_step_chat_context_block,
+    maybe_manage_deferred_intent_chat,
     maybe_resolve_step_1_source_chat,
     maybe_resolve_step_2_sink_chat,
     solve_step_chat,
 )
-from elspeth.web.composer.guided.deferred_intents import DeferredIntentAction
+from elspeth.web.composer.guided.deferred_intents import (
+    DeferredIntentAction,
+    DeferredIntentCancelAction,
+    create_deferred_stage_intent,
+)
 from elspeth.web.composer.guided.errors import InvariantError
+from elspeth.web.composer.guided.intent_management import deferred_intent_management_option
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved, SourceResolved
 from elspeth.web.composer.guided.stage_subjects import ComponentCountConstraint
+from elspeth.web.sessions import _guided_step_chat as guided_step_chat_module
 from elspeth.web.sessions._guided_step_chat import (
+    resolve_deferred_intent_management_chat_with_auto_drop,
     resolve_step_1_source_chat_with_auto_drop,
     resolve_step_2_sink_chat_with_auto_drop,
 )
+from elspeth.web.sessions.routes.composer import guided_chat_atomic as guided_chat_atomic_module
+from elspeth.web.sessions.routes.composer.guided_chat_intent_management import (
+    DeferredRequestCancelled,
+    DeferredRequestEdited,
+    DeferredRequestRetained,
+    DeferredRequestUnchanged,
+)
+
+
+def test_solver_wrapper_and_atomic_provider_channels_are_closed_discriminated_unions() -> None:
+    assert len(get_args(chat_solver.Step1SourceChatOutcome.__value__)) == 5
+    assert len(get_args(chat_solver.Step2SinkChatOutcome.__value__)) == 5
+    assert len(get_args(guided_step_chat_module.Step1SourceChatResult.__value__)) == 5
+    assert len(get_args(guided_step_chat_module.Step2SinkChatResult.__value__)) == 5
+    assert len(get_args(guided_chat_atomic_module.GuidedChatProviderOutcome.__value__)) == 5
+
+
+@pytest.mark.parametrize(
+    ("module", "variant_name", "required_fields"),
+    [
+        (chat_solver, "GuidedChatProseOutcome", {"assistant_message"}),
+        (chat_solver, "GuidedChatDeferredIntentOutcome", {"action"}),
+        (chat_solver, "GuidedChatDeferredManagementOutcome", {"action"}),
+        (chat_solver, "Step1SourceResolvedOutcome", {"resolution"}),
+        (chat_solver, "Step2SinkResolvedOutcome", {"sink", "assistant_message"}),
+        (guided_step_chat_module, "GuidedStepChatOnlyResult", {"chat"}),
+        (guided_step_chat_module, "GuidedStepDeferredIntentResult", {"chat", "action"}),
+        (guided_step_chat_module, "GuidedStepDeferredManagementResult", {"chat", "action"}),
+        (guided_step_chat_module, "Step1SourceResolvedResult", {"chat", "resolution"}),
+        (guided_step_chat_module, "Step2SinkResolvedResult", {"chat", "sink"}),
+    ],
+)
+def test_closed_chat_variants_have_only_required_keyword_fields(
+    module: object,
+    variant_name: str,
+    required_fields: set[str],
+) -> None:
+    variant = getattr(module, variant_name)
+    signature = inspect.signature(variant)
+
+    assert set(signature.parameters) == required_fields
+    assert all(parameter.kind is inspect.Parameter.KEYWORD_ONLY for parameter in signature.parameters.values())
+    assert all(parameter.default is inspect.Parameter.empty for parameter in signature.parameters.values())
+
+
+def test_closed_chat_variant_rejects_cross_channel_construction() -> None:
+    variant = chat_solver.GuidedChatDeferredIntentOutcome
+
+    with pytest.raises(TypeError):
+        variant(action=None, assistant_message="impossible")
+
+
+@pytest.mark.parametrize(
+    ("outcome_type", "expected_fields"),
+    [
+        (DeferredRequestUnchanged, {"guided", "chat"}),
+        (DeferredRequestRetained, {"guided", "chat", "retained_intent_id"}),
+        (
+            DeferredRequestCancelled,
+            {"guided", "chat", "action", "effective_intent", "deferred_intents", "invalidated_active_proposal"},
+        ),
+        (
+            DeferredRequestEdited,
+            {"guided", "chat", "action", "effective_intent", "deferred_intents", "invalidated_active_proposal"},
+        ),
+    ],
+)
+def test_deferred_request_application_variants_are_closed_keyword_only_shapes(
+    outcome_type: type[object],
+    expected_fields: set[str],
+) -> None:
+    assert {field.name for field in fields(outcome_type)} == expected_fields
+    assert all(parameter.kind is inspect.Parameter.KEYWORD_ONLY for parameter in inspect.signature(outcome_type).parameters.values())
+
+
+@pytest.mark.asyncio
+async def test_management_auto_drop_uses_canonical_provider_api_error_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from litellm.exceptions import APIError as LiteLLMAPIError
+
+    async def provider_failure(**_kwargs: object) -> object:
+        raise LiteLLMAPIError(
+            status_code=500,
+            message="private upstream detail",
+            llm_provider="test",
+            model="test/model",
+        )
+
+    monkeypatch.setattr("elspeth.web.sessions._guided_step_chat.maybe_manage_deferred_intent_chat", provider_failure)
+    result = await resolve_deferred_intent_management_chat_with_auto_drop(
+        site="test",
+        session_id="session",
+        user_id="user",
+        request=DeferredIntentManagementChatRequest(
+            model="test/model",
+            step=GuidedStep.STEP_3_TRANSFORMS,
+            user_message="cancel one saved instruction",
+            temperature=None,
+            seed=None,
+            timeout_seconds=5,
+            context_block="safe context",
+        ),
+        recorder=None,
+    )
+
+    assert type(result) is guided_step_chat_module.GuidedStepChatOnlyResult
+    assert result.chat.status is ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE
+    assert result.chat.error_class == "APIError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_kind", "expected_status", "expected_class"),
+    [
+        ("authentication", ComposerLLMCallStatus.AUTH_ERROR, "AuthenticationError"),
+        ("bad_request", ComposerLLMCallStatus.BAD_REQUEST_ERROR, "BadRequestError"),
+    ],
+)
+async def test_management_llm_audit_matches_source_and_sink_error_classification(
+    monkeypatch: pytest.MonkeyPatch,
+    error_kind: str,
+    expected_status: ComposerLLMCallStatus,
+    expected_class: str,
+) -> None:
+    from litellm.exceptions import AuthenticationError as LiteLLMAuthError
+    from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+
+    error = (
+        LiteLLMAuthError(message="private auth detail", llm_provider="test", model="test/model")
+        if error_kind == "authentication"
+        else LiteLLMBadRequestError(message="private request detail", llm_provider="test", model="test/model")
+    )
+
+    async def provider_failure(**_kwargs: object) -> object:
+        raise error
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", provider_failure)
+    recorder = BufferingRecorder()
+    with pytest.raises(type(error)):
+        await maybe_manage_deferred_intent_chat(
+            request=DeferredIntentManagementChatRequest(
+                model="test/model",
+                step=GuidedStep.STEP_3_TRANSFORMS,
+                user_message="cancel one saved instruction",
+                temperature=None,
+                seed=None,
+                timeout_seconds=5,
+                context_block="safe context",
+            ),
+            recorder=recorder,
+        )
+
+    assert recorder.llm_calls[-1].status is expected_status
+    assert recorder.llm_calls[-1].error_class == expected_class
+
+
+@pytest.mark.asyncio
+async def test_management_scaffold_leak_uses_quality_check_copy_not_provider_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scaffold_reply(**_kwargs: object) -> _FakeLLMResponse:
+        return _ok_response("<tool_call>manage_deferred_intent</tool_call>")
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", scaffold_reply)
+    result = await resolve_deferred_intent_management_chat_with_auto_drop(
+        site="test",
+        session_id="session",
+        user_id="user",
+        request=DeferredIntentManagementChatRequest(
+            model="test/model",
+            step=GuidedStep.STEP_3_TRANSFORMS,
+            user_message="cancel one saved instruction",
+            temperature=None,
+            seed=None,
+            timeout_seconds=5,
+            context_block="safe context",
+        ),
+        recorder=None,
+    )
+
+    assert type(result) is guided_step_chat_module.GuidedStepChatOnlyResult
+    assert "didn't pass a quality check" in result.chat.assistant_message
+    assert "unavailable" not in result.chat.assistant_message
+    assert result.chat.error_class == "AssistantScaffoldLeakError"
+
+
+@pytest.mark.asyncio
+async def test_management_solver_rejects_non_string_prose_without_private_repr_egress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_canary = "PRIVATE-NESTED-MANAGEMENT-CONTENT-CANARY"
+    malformed_content = {"summary": ["ordinary", {"private": private_canary}]}
+
+    async def malformed_reply(**_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=malformed_content, tool_calls=None))],
+        )
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", malformed_reply)
+    recorder = BufferingRecorder()
+    with pytest.raises(ValueError, match="assistant_message must be a non-empty string") as raised:
+        await maybe_manage_deferred_intent_chat(
+            request=DeferredIntentManagementChatRequest(
+                model="test/model",
+                step=GuidedStep.STEP_3_TRANSFORMS,
+                user_message="cancel one saved instruction",
+                temperature=None,
+                seed=None,
+                timeout_seconds=5,
+                context_block="safe context",
+            ),
+            recorder=recorder,
+        )
+
+    assert private_canary not in str(raised.value)
+    assert recorder.llm_calls[-1].status is ComposerLLMCallStatus.MALFORMED_RESPONSE
+    assert recorder.llm_calls[-1].error_class == "ValueError"
+    assert private_canary not in repr(recorder.llm_calls)
 
 
 @dataclass
@@ -98,9 +329,8 @@ async def test_step_1_solver_returns_only_the_closed_deferred_intent_action(monk
         timeout_seconds=30.0,
     )
 
-    assert outcome.resolution is None
-    assert outcome.prose_reply is None
-    assert outcome.deferred_action == DeferredIntentAction(
+    assert type(outcome) is chat_solver.GuidedChatDeferredIntentOutcome
+    assert outcome.action == DeferredIntentAction(
         target_stage="topology",
         catalog_kind="transform",
         catalog_name="llm",
@@ -117,7 +347,7 @@ async def test_step_1_solver_returns_only_the_closed_deferred_intent_action(monk
         ),
     )
     tool_names = [tool["function"]["name"] for tool in captured["tools"]]
-    assert tool_names == ["resolve_source", "retain_deferred_intent"]
+    assert tool_names == ["resolve_source", "retain_deferred_intent", "manage_deferred_intent"]
     deferred_schema = captured["tools"][1]["function"]["parameters"]
     assert deferred_schema["additionalProperties"] is False
     assert set(deferred_schema["required"]) == {
@@ -162,12 +392,9 @@ async def test_malformed_deferred_action_returns_repair_copy_without_an_action(m
         timeout_seconds=30.0,
     )
 
-    assert result.source_resolution is None
-    assert result.deferred_action is None
-    assert result.prose_chat is None
-    assert result.fallback_chat is not None
-    assert "couldn't verify that future-stage instruction" in result.fallback_chat.assistant_message
-    assert result.fallback_chat.error_class == "DeferredIntentActionShapeError"
+    assert type(result) is guided_step_chat_module.GuidedStepChatOnlyResult
+    assert "couldn't verify that future-stage instruction" in result.chat.assistant_message
+    assert result.chat.error_class == "DeferredIntentActionShapeError"
 
 
 _MALFORMED_DEFERRED_ARGUMENTS: tuple[object, ...] = (
@@ -273,13 +500,12 @@ async def test_every_malformed_deferred_terminal_payload_gets_the_bounded_deferr
             timeout_seconds=30.0,
         )
 
-    assert result.deferred_action is None
-    assert result.fallback_chat is not None
-    assert result.fallback_chat.assistant_message == (
+    assert type(result) is guided_step_chat_module.GuidedStepChatOnlyResult
+    assert result.chat.assistant_message == (
         "I couldn't verify that future-stage instruction, so I didn't retain it. "
         "Please restate the target stage and the structural requirement."
     )
-    assert result.fallback_chat.error_class == "DeferredIntentActionShapeError"
+    assert result.chat.error_class == "DeferredIntentActionShapeError"
 
 
 @pytest.mark.asyncio
@@ -323,9 +549,8 @@ async def test_mixed_deferred_and_other_terminal_calls_get_the_bounded_deferred_
             timeout_seconds=30.0,
         )
 
-    assert result.deferred_action is None
-    assert result.fallback_chat is not None
-    assert result.fallback_chat.error_class == "DeferredIntentActionShapeError"
+    assert type(result) is guided_step_chat_module.GuidedStepChatOnlyResult
+    assert result.chat.error_class == "DeferredIntentActionShapeError"
 
 
 @pytest.mark.asyncio
@@ -369,11 +594,61 @@ async def test_step_2_solver_returns_the_same_closed_deferred_action(monkeypatch
         timeout_seconds=30.0,
     )
 
-    assert result.sink is None
-    assert result.assistant_message is None
-    assert result.deferred_action is not None
-    assert result.deferred_action.target_stage == "topology"
-    assert [tool["function"]["name"] for tool in captured["tools"]] == ["resolve_sink", "retain_deferred_intent"]
+    assert type(result) is chat_solver.GuidedChatDeferredIntentOutcome
+    assert result.action.target_stage == "topology"
+    assert [tool["function"]["name"] for tool in captured["tools"]] == [
+        "resolve_sink",
+        "retain_deferred_intent",
+        "manage_deferred_intent",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["source", "sink"])
+async def test_source_and_sink_solvers_return_only_the_closed_stable_intent_management_action(
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    async def fake_acompletion(**_kwargs: Any) -> _FakeLLMResponse:
+        call = SimpleNamespace(
+            function=SimpleNamespace(
+                name="manage_deferred_intent",
+                arguments=json.dumps(
+                    {
+                        "action": "cancel",
+                        "intent_id": "00000000-0000-4000-8000-000000000801",
+                        "selection_token": "server-selection-token",
+                    }
+                ),
+            )
+        )
+        return _FakeLLMResponse(choices=[_FakeChoice(message=_FakeMessage(content=None, tool_calls=[call]))])
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+    if stage == "source":
+        outcome = await maybe_resolve_step_1_source_chat(
+            model="test/model",
+            user_message="Cancel the saved topology requirement.",
+            plugin_hint=None,
+            temperature=None,
+            seed=None,
+            timeout_seconds=30.0,
+        )
+    else:
+        outcome = await maybe_resolve_step_2_sink_chat(
+            model="test/model",
+            user_message="Cancel the saved topology requirement.",
+            current_sink=None,
+            temperature=None,
+            seed=None,
+            timeout_seconds=30.0,
+        )
+
+    assert type(outcome) is chat_solver.GuidedChatDeferredManagementOutcome
+    assert outcome.action == DeferredIntentCancelAction(
+        intent_id="00000000-0000-4000-8000-000000000801",
+        selection_token="server-selection-token",
+    )
 
 
 def test_step_1_source_chat_resolution_deep_freezes_container_fields() -> None:
@@ -527,6 +802,7 @@ def test_build_step_chat_context_block_names_artifacts_llm_safely() -> None:
         current_source=current_source,
         current_sink=current_sink,
         state=None,
+        deferred_intents=(),
     )
 
     assert "step_2_sink" in block
@@ -546,9 +822,83 @@ def test_build_step_chat_context_block_is_honest_when_nothing_is_built() -> None
         current_source=None,
         current_sink=None,
         state=None,
+        deferred_intents=(),
     )
     assert "Applied source: none yet." in block
     assert "Applied output: none yet." in block
+    assert "Pending saved instructions (stable identities):\nnone" in block
+
+
+@pytest.mark.asyncio
+async def test_management_only_chat_lists_stable_intent_and_offers_no_other_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    action = DeferredIntentAction(
+        target_stage="topology",
+        catalog_kind="transform",
+        catalog_name="passthrough",
+        redacted_summary="topology constraint",
+        constraints=(
+            ComponentCountConstraint(
+                kind="component_count",
+                component_kind="node",
+                plugin_kind="transform",
+                plugin_name="passthrough",
+                operator="at_least",
+                count=1,
+            ),
+        ),
+    )
+    intent = create_deferred_stage_intent(
+        action,
+        receiving_stage="source",
+        intent_id="11111111-1111-4111-8111-111111111111",
+        originating_message_id="22222222-2222-4222-8222-222222222222",
+        originating_message_content="private instruction",
+    )
+    context = build_step_chat_context_block(
+        step=GuidedStep.STEP_4_WIRE,
+        current_source=None,
+        current_sink=None,
+        state=None,
+        deferred_intents=(intent,),
+    )
+    selection_token = deferred_intent_management_option(intent).selection_token
+    captured: dict[str, Any] = {}
+
+    async def completion(**kwargs: Any) -> SimpleNamespace:
+        captured.update(kwargs)
+        tool_call = SimpleNamespace(
+            function=SimpleNamespace(
+                name="manage_deferred_intent",
+                arguments=json.dumps({"action": "cancel", "intent_id": intent.intent_id, "selection_token": selection_token}),
+            )
+        )
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None, tool_calls=[tool_call]))])
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", completion)
+    outcome = await maybe_manage_deferred_intent_chat(
+        request=DeferredIntentManagementChatRequest(
+            model="test-model",
+            step=GuidedStep.STEP_4_WIRE,
+            user_message="cancel the saved instruction",
+            temperature=None,
+            seed=None,
+            timeout_seconds=5,
+            context_block=context,
+        ),
+        recorder=None,
+    )
+
+    assert type(outcome) is chat_solver.GuidedChatDeferredManagementOutcome
+    assert outcome.action == DeferredIntentCancelAction(
+        intent_id=intent.intent_id,
+        selection_token=selection_token,
+    )
+    assert [tool["function"]["name"] for tool in captured["tools"]] == ["manage_deferred_intent"]
+    assert intent.intent_id in context
+    assert selection_token in context
+    assert "private instruction" not in context
 
 
 @pytest.mark.asyncio

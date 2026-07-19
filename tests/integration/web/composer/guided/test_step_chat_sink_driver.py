@@ -15,12 +15,18 @@ from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import PluginKind
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.audit import BufferingRecorder
-from elspeth.web.composer.guided.chat_solver import Step2SinkChatOutcome, maybe_resolve_step_2_sink_chat
+from elspeth.web.composer.guided.chat_solver import (
+    GuidedChatEmptyOutcome,
+    GuidedChatProseOutcome,
+    Step2SinkChatOutcome,
+    Step2SinkResolvedOutcome,
+    maybe_resolve_step_2_sink_chat,
+)
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions._guided_step_chat import (
-    Step2SinkChatResult,
+    GuidedStepChatOnlyResult,
     resolve_step_2_sink_chat_with_auto_drop,
 )
 
@@ -103,8 +109,8 @@ async def test_sink_driver_resolves_json_output() -> None:
             seed=None,
             timeout_seconds=30.0,
         )
+    assert type(outcome) is Step2SinkResolvedOutcome
     sink = outcome.sink
-    assert sink is not None
     assert isinstance(sink, SinkResolved)
     assert len(sink.outputs) == 1
     assert sink.outputs[0].plugin == "json"
@@ -136,7 +142,7 @@ async def test_sink_driver_captures_prose_reply_on_decline() -> None:
             seed=None,
             timeout_seconds=30.0,
         )
-    assert outcome.sink is None
+    assert type(outcome) is GuidedChatProseOutcome
     assert outcome.assistant_message == "A sink writes rows out."
 
 
@@ -171,8 +177,7 @@ async def test_sink_driver_returns_both_none_on_hallucinated_tool_call() -> None
             seed=None,
             timeout_seconds=30.0,
         )
-    assert outcome.sink is None
-    assert outcome.assistant_message is None
+    assert type(outcome) is GuidedChatEmptyOutcome
 
 
 @pytest.mark.asyncio
@@ -264,11 +269,10 @@ async def test_sink_wrapper_carries_declined_prose_as_prose_chat() -> None:
     ``fallback_chat or prose_chat`` so this is what makes the step-2 answer a
     single call instead of a second, tool-less one — mirrors the step-1
     single-call guarantee. Without this coverage a refactor that stopped
-    populating ``prose_chat`` (it defaults to None for construction-site
-    compatibility) would silently revert step 2 to double-call, all tests
-    green. Regression for the fp-review step-2-salvage-untested finding.
+    populating ``prose_chat`` would silently revert step 2 to double-call, all
+    tests green. Regression for the fp-review step-2-salvage-untested finding.
     """
-    declined = Step2SinkChatOutcome(sink=None, assistant_message="A sink writes your rows out to a file or table.")
+    declined = GuidedChatProseOutcome(assistant_message="A sink writes your rows out to a file or table.")
 
     async def _decline_sink_chat(**_kwargs: object) -> Step2SinkChatOutcome:
         return declined
@@ -288,12 +292,9 @@ async def test_sink_wrapper_carries_declined_prose_as_prose_chat() -> None:
             seed=None,
             timeout_seconds=30.0,
         )
-    assert isinstance(result, Step2SinkChatResult)
-    assert result.sink_resolution is None
-    assert result.fallback_chat is None
-    assert result.prose_chat is not None
-    assert result.prose_chat.assistant_message == "A sink writes your rows out to a file or table."
-    assert result.prose_chat.status == ComposerChatTurnStatus.SUCCESS
+    assert type(result) is GuidedStepChatOnlyResult
+    assert result.chat.assistant_message == "A sink writes your rows out to a file or table."
+    assert result.chat.status == ComposerChatTurnStatus.SUCCESS
 
 
 @pytest.mark.asyncio
@@ -308,7 +309,7 @@ async def test_sink_wrapper_threads_progress_sink_to_driver() -> None:
 
     async def _capture_and_resolve(**kwargs: object) -> Step2SinkChatOutcome:
         captured_kwargs.update(kwargs)
-        return Step2SinkChatOutcome(sink=None, assistant_message="ok")
+        return GuidedChatProseOutcome(assistant_message="ok")
 
     async def _progress_sink(_event: object) -> None:
         return None
@@ -352,11 +353,9 @@ async def test_sink_wrapper_absorbs_transient_into_synthetic_unavailable() -> No
             seed=None,
             timeout_seconds=30.0,
         )
-    assert isinstance(result, Step2SinkChatResult)
-    assert result.sink_resolution is None
-    assert result.fallback_chat is not None
-    assert result.fallback_chat.error_class == "TimeoutError"
-    assert result.fallback_chat.status == ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE
+    assert type(result) is GuidedStepChatOnlyResult
+    assert result.chat.error_class == "TimeoutError"
+    assert result.chat.status == ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -390,10 +389,9 @@ async def test_sink_wrapper_classifies_strict_snapshot_failure_as_malformed_and_
             recorder=recorder,
         )
 
-    assert result.sink_resolution is None
-    assert result.fallback_chat is not None
-    assert result.fallback_chat.error_class == "ValueError"
-    assert result.fallback_chat.status == ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE
+    assert type(result) is GuidedStepChatOnlyResult
+    assert result.chat.error_class == "ValueError"
+    assert result.chat.status == ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE
     assert recorder.llm_calls[-1].status is ComposerLLMCallStatus.MALFORMED_RESPONSE
 
 
@@ -454,8 +452,6 @@ async def test_sink_wrapper_absorbs_malformed_discovery_args_into_synthetic_unav
             catalog=catalog,
             plugin_snapshot=plugin_snapshot,
         )
-    assert isinstance(result, Step2SinkChatResult)
-    assert result.sink_resolution is None
-    assert result.fallback_chat is not None
-    assert result.fallback_chat.error_class == "GuidedSolverResponseShapeError"
-    assert result.fallback_chat.status == ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE
+    assert type(result) is GuidedStepChatOnlyResult
+    assert result.chat.error_class == "GuidedSolverResponseShapeError"
+    assert result.chat.status == ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE

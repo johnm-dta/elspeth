@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from typing import Any
+from uuid import UUID
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
 from elspeth.contracts.composer_llm_audit import ComposerChatTurn, ComposerLLMCall, ComposerLLMCallStatus
@@ -24,6 +25,7 @@ _GUIDED_SYNTHETIC_TOOLS = frozenset(
         "guided_turn_answered",
         "guided_step_advanced",
         "guided_dropped_to_freeform",
+        "guided_intent_cancelled",
     }
 )
 _ADVANCE_REASONS = frozenset({"user_advanced", "auto_advanced"})
@@ -31,6 +33,13 @@ _ADVANCE_REASONS = frozenset({"user_advanced", "auto_advanced"})
 
 def _is_sha256(value: object) -> bool:
     return type(value) is str and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+
+def _is_canonical_uuid(value: str) -> bool:
+    try:
+        return str(UUID(value)) == value
+    except ValueError:
+        return False
 
 
 def _valid_guided_synthetic_payload(tool_name: str, payload: object) -> bool:
@@ -73,7 +82,14 @@ def _valid_guided_synthetic_payload(tool_name: str, payload: object) -> bool:
             and value["prev_step"] in steps
             and value["drop_reason"] == TerminalReason.USER_PRESSED_EXIT.value
         )
-    return False
+    return (
+        tool_name == "guided_intent_cancelled"
+        and set(value) == {"intent_id", "receiving_stage", "target_stage"}
+        and type(value["intent_id"]) is str
+        and _is_canonical_uuid(value["intent_id"])
+        and value["receiving_stage"] in {"source", "output", "topology", "wire_review"}
+        and value["target_stage"] in {"source", "output", "topology", "wire_review"}
+    )
 
 
 def _omitted_success_invocation(invocation: ComposerToolInvocation) -> tuple[str, dict[str, Any]]:
@@ -87,6 +103,27 @@ def _omitted_success_invocation(invocation: ComposerToolInvocation) -> tuple[str
     return (
         json.dumps({"_kind": "guided_tool_audit", "status": invocation.status.value, "tool_name": invocation.tool_name}),
         {"_kind": "audit", "invocation": projection},
+    )
+
+
+def is_authentic_guided_synthetic_invocation(invocation: ComposerToolInvocation) -> bool:
+    """Return whether an invocation is an exact server synthetic event."""
+
+    if type(invocation) is not ComposerToolInvocation or invocation.status is not ComposerToolStatus.SUCCESS:
+        return False
+    try:
+        arguments = json.loads(invocation.arguments_canonical)
+    except (TypeError, ValueError):
+        return False
+    return (
+        invocation.tool_name in _GUIDED_SYNTHETIC_TOOLS
+        and stable_hash(arguments) == invocation.arguments_hash
+        and invocation.result_canonical is None
+        and invocation.result_hash is None
+        and invocation.error_class is None
+        and invocation.error_message is None
+        and invocation.version_after == invocation.version_before
+        and _valid_guided_synthetic_payload(invocation.tool_name, arguments)
     )
 
 
@@ -125,22 +162,7 @@ def prepare_guided_audit_rows(
                 }
             )
         elif invocation.tool_name not in MANIFEST:
-            try:
-                arguments = json.loads(invocation.arguments_canonical)
-            except (TypeError, ValueError):
-                arguments = None
-            authentic = stable_hash(arguments) == invocation.arguments_hash if arguments is not None else False
-            synthetic = (
-                invocation.tool_name in _GUIDED_SYNTHETIC_TOOLS
-                and authentic
-                and invocation.result_canonical is None
-                and invocation.result_hash is None
-                and invocation.error_class is None
-                and invocation.error_message is None
-                and invocation.version_after == invocation.version_before
-                and _valid_guided_synthetic_payload(invocation.tool_name, arguments)
-            )
-            if not synthetic:
+            if not is_authentic_guided_synthetic_invocation(invocation):
                 content, envelope = _omitted_success_invocation(invocation)
         rows.append(PreparedGuidedAuditRow(kind="tool", content=content, envelope=envelope))
     for call in llm_calls:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -13,7 +14,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
 from elspeth.contracts.composer_interpretation import InterpretationKind
@@ -26,9 +27,13 @@ from elspeth.contracts.composer_llm_audit import (
 )
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
-from elspeth.contracts.hashing import stable_hash
+from elspeth.contracts.hashing import canonical_json, stable_hash
 from elspeth.core.payload_store import FilesystemPayloadStore
+from elspeth.web.composer.audit import BufferingRecorder
+from elspeth.web.composer.guided.audit import emit_intent_cancelled
+from elspeth.web.composer.guided.deferred_intents import DeferredIntentAction, DeferredIntentCancelAction, DeferredIntentEditAction
 from elspeth.web.composer.guided.errors import InvariantError
+from elspeth.web.composer.guided.intent_management import deferred_intent_management_option
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, GuidedStep, TurnType
 from elspeth.web.composer.guided.stage_subjects import ComponentCountConstraint
 from elspeth.web.composer.guided.state_machine import DeferredStageIntent, GuidedSession, TurnRecord
@@ -788,6 +793,42 @@ def test_audit_preparation_uses_real_typed_evidence_and_omits_hidden_provider_da
     assert "RAW-VALIDATION-CANARY" not in persisted
     assert "UNKNOWN-SUCCESS-CREDENTIAL" not in persisted
     assert "UNKNOWN-SUCCESS-DIAGNOSTIC" not in persisted
+
+
+def test_intent_cancellation_is_allowlisted_only_for_the_exact_structural_schema() -> None:
+    preparation = importlib.import_module("elspeth.web.sessions.guided_audit")
+    invocation, _llm_call, _chat_turn = _audit_evidence()
+    payload = {
+        "intent_id": "00000000-0000-4000-8000-000000000801",
+        "receiving_stage": "source",
+        "target_stage": "topology",
+    }
+    authentic = replace(
+        invocation,
+        tool_call_id="intent-cancel-authentic",
+        tool_name="guided_intent_cancelled",
+        arguments_canonical=canonical_json(payload),
+        arguments_hash=stable_hash(payload),
+    )
+    malformed_payload = {**payload, "summary": "PRIVATE-CANCELLATION-CANARY"}
+    malformed = replace(
+        authentic,
+        tool_call_id="intent-cancel-malformed",
+        arguments_canonical=canonical_json(malformed_payload),
+        arguments_hash=stable_hash(malformed_payload),
+    )
+
+    authentic_row, malformed_row = preparation.prepare_guided_audit_rows(
+        invocations=(authentic, malformed),
+        llm_calls=(),
+        chat_turns=(),
+    )
+
+    authentic_envelope = deep_thaw(authentic_row.envelope["invocation"])
+    assert json.loads(authentic_envelope["arguments_canonical"]) == payload
+    malformed_persisted = repr(deep_thaw({"content": malformed_row.content, "envelope": malformed_row.envelope}))
+    assert "PRIVATE-CANCELLATION-CANARY" not in malformed_persisted
+    assert "unmanifested_success_payload_omitted" in malformed_persisted
 
 
 def test_synthetic_audit_payload_reference_must_exist_in_verified_payload_set() -> None:
@@ -1621,6 +1662,356 @@ async def test_deferred_intent_delta_allows_one_typed_terminal_append(service_an
     result_guided = state_from_record(settlement.result_state).guided_session
     assert result_guided is not None
     assert result_guided.deferred_intents == candidate
+
+
+@pytest.mark.asyncio
+async def test_deferred_intent_delta_allows_one_typed_exact_cancellation_with_custody_and_audit(
+    service_and_engine,
+) -> None:
+    service, engine = service_and_engine
+    session_id = (await service.create_session("alice", "guided deferred cancel", "local")).id
+    origin = await service.add_message(
+        session_id,
+        "user",
+        "private deferred instruction",
+        writer_principal="route_user_message",
+    )
+    cancelled = _deferred_intent(originating_message_id=origin.id)
+    preserved_origin = await service.add_message(
+        session_id,
+        "user",
+        "another private instruction",
+        writer_principal="route_user_message",
+    )
+    preserved = _deferred_intent(
+        originating_message_id=preserved_origin.id,
+        message_content="another private instruction",
+    )
+    predecessor = await _seed_guided_predecessor_with_intents(service, session_id, (cancelled, preserved))
+    claimed = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id="respond-deferred-cancel",
+        kind="guided_respond",
+        request_hash="a" * 64,
+        actor="worker",
+        lease_seconds=60,
+    )
+    assert isinstance(claimed, GuidedOperationClaimed)
+    command = _present_respond_command(claimed.fence, predecessor)
+    recorder = BufferingRecorder()
+    emit_intent_cancelled(
+        recorder,
+        intent=cancelled,
+        composition_version=1,
+        actor="alice",
+    )
+    command = replace(
+        command,
+        state=replace(
+            command.state,
+            composer_meta={"guided_session": replace(GuidedSession.initial(), deferred_intents=(preserved,)).to_dict()},
+        ),
+        audit_evidence=GuidedAuditEvidence(invocations=recorder.invocations),
+        originating_message=GuidedOriginatingUserMessageDraft(
+            message_id=uuid4(),
+            content=f"cancel exact intent {cancelled.intent_id}",
+        ),
+        deferred_intent_action=DeferredIntentCancelAction(
+            intent_id=cancelled.intent_id,
+            selection_token=deferred_intent_management_option(cancelled).selection_token,
+        ),
+    )
+
+    settlement = await service.settle_guided_state_operation(command)
+
+    result_guided = state_from_record(settlement.result_state).guided_session
+    assert result_guided is not None
+    assert result_guided.deferred_intents == (preserved,)
+    with engine.connect() as connection:
+        audit_rows = connection.execute(
+            select(chat_messages_table)
+            .where(chat_messages_table.c.session_id == str(session_id))
+            .where(chat_messages_table.c.role == "audit")
+        ).all()
+    assert sum("guided_intent_cancelled" in repr(row.tool_calls) for row in audit_rows) == 1
+
+
+@pytest.mark.parametrize(
+    "private_request",
+    [
+        "cancel the first saved instruction",
+        "cancel exact intent {preserved_id}",
+        "compare {cancelled_id} with {preserved_id}, then cancel one",
+    ],
+    ids=["zero-current-uuids", "wrong-current-uuid", "multiple-current-uuids"],
+)
+@pytest.mark.asyncio
+async def test_settlement_rechecks_plural_intent_user_authority_and_rolls_back(
+    service_and_engine,
+    private_request: str,
+) -> None:
+    service, engine = service_and_engine
+    session_id = (await service.create_session("alice", "guided plural cancellation authority", "local")).id
+    cancelled_origin = await service.add_message(
+        session_id,
+        "user",
+        "private deferred instruction",
+        writer_principal="route_user_message",
+    )
+    preserved_origin = await service.add_message(
+        session_id,
+        "user",
+        "another private instruction",
+        writer_principal="route_user_message",
+    )
+    cancelled = _deferred_intent(originating_message_id=cancelled_origin.id)
+    preserved = _deferred_intent(
+        originating_message_id=preserved_origin.id,
+        message_content="another private instruction",
+    )
+    predecessor = await _seed_guided_predecessor_with_intents(service, session_id, (cancelled, preserved))
+    operation_id = f"respond-plural-authority-{uuid4()}"
+    claimed = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id=operation_id,
+        kind="guided_respond",
+        request_hash="b" * 64,
+        actor="worker",
+        lease_seconds=60,
+    )
+    assert isinstance(claimed, GuidedOperationClaimed)
+    recorder = BufferingRecorder()
+    emit_intent_cancelled(recorder, intent=cancelled, composition_version=1, actor="alice")
+    command = _present_respond_command(claimed.fence, predecessor)
+    command = replace(
+        command,
+        state=replace(
+            command.state,
+            composer_meta={"guided_session": replace(GuidedSession.initial(), deferred_intents=(preserved,)).to_dict()},
+        ),
+        audit_evidence=GuidedAuditEvidence(invocations=recorder.invocations),
+        originating_message=GuidedOriginatingUserMessageDraft(
+            message_id=uuid4(),
+            content=private_request.format(cancelled_id=cancelled.intent_id, preserved_id=preserved.intent_id),
+        ),
+        deferred_intent_action=DeferredIntentCancelAction(
+            intent_id=cancelled.intent_id,
+            selection_token=deferred_intent_management_option(cancelled).selection_token,
+        ),
+    )
+
+    with pytest.raises(AuditIntegrityError, match="one matching UUID"):
+        await service.settle_guided_state_operation(command)
+
+    with engine.connect() as connection:
+        operation = (
+            connection.execute(select(guided_operations_table).where(guided_operations_table.c.operation_id == operation_id))
+            .mappings()
+            .one()
+        )
+    assert operation["status"] == "in_progress"
+    assert operation["result_state_id"] is None
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["arg_error", "malformed", "redacted", "hash", "result", "version", "selection_token"],
+)
+@pytest.mark.asyncio
+async def test_deferred_intent_cancellation_rejects_inauthentic_audit_or_binding_and_rolls_back(
+    service_and_engine,
+    corruption: str,
+) -> None:
+    service, engine = service_and_engine
+    session_id = (await service.create_session("alice", "guided cancellation audit integrity", "local")).id
+    origin = await service.add_message(
+        session_id,
+        "user",
+        "private deferred instruction",
+        writer_principal="route_user_message",
+    )
+    cancelled = _deferred_intent(originating_message_id=origin.id)
+    predecessor = await _seed_guided_predecessor_with_intents(service, session_id, (cancelled,))
+    operation_id = f"respond-cancel-corrupt-{corruption}"
+    claimed = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id=operation_id,
+        kind="guided_respond",
+        request_hash="c" * 64,
+        actor="worker",
+        lease_seconds=60,
+    )
+    assert isinstance(claimed, GuidedOperationClaimed)
+    recorder = BufferingRecorder()
+    emit_intent_cancelled(recorder, intent=cancelled, composition_version=1, actor="alice")
+    (authentic,) = recorder.invocations
+    if corruption == "arg_error":
+        corrupted = replace(authentic, status=ComposerToolStatus.ARG_ERROR, error_class="ToolArgumentError", version_after=None)
+    elif corruption == "malformed":
+        corrupted = replace(authentic, arguments_canonical="{")
+    elif corruption == "redacted":
+        redacted = {"_redaction_status": "guided_failure_payload_omitted"}
+        corrupted = replace(authentic, arguments_canonical=canonical_json(redacted), arguments_hash=stable_hash(redacted))
+    elif corruption == "hash":
+        corrupted = replace(authentic, arguments_hash="0" * 64)
+    elif corruption == "result":
+        corrupted = replace(authentic, result_canonical="{}", result_hash=stable_hash({}))
+    elif corruption == "version":
+        corrupted = replace(authentic, version_after=2)
+    else:
+        corrupted = authentic
+    command = _present_respond_command(claimed.fence, predecessor)
+    command = replace(
+        command,
+        state=replace(command.state, composer_meta={"guided_session": GuidedSession.initial().to_dict()}),
+        audit_evidence=GuidedAuditEvidence(invocations=(corrupted,)),
+        deferred_intent_action=DeferredIntentCancelAction(
+            intent_id=cancelled.intent_id,
+            selection_token=(
+                "wrong-server-selection-token"
+                if corruption == "selection_token"
+                else deferred_intent_management_option(cancelled).selection_token
+            ),
+        ),
+    )
+    with engine.connect() as connection:
+        before_states = connection.execute(
+            select(func.count()).select_from(composition_states_table).where(composition_states_table.c.session_id == str(session_id))
+        ).scalar_one()
+        before_messages = connection.execute(
+            select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.session_id == str(session_id))
+        ).scalar_one()
+
+    with pytest.raises(AuditIntegrityError):
+        await service.settle_guided_state_operation(command)
+
+    with engine.connect() as connection:
+        after_states = connection.execute(
+            select(func.count()).select_from(composition_states_table).where(composition_states_table.c.session_id == str(session_id))
+        ).scalar_one()
+        after_messages = connection.execute(
+            select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.session_id == str(session_id))
+        ).scalar_one()
+        operation = (
+            connection.execute(select(guided_operations_table).where(guided_operations_table.c.operation_id == operation_id))
+            .mappings()
+            .one()
+        )
+    assert (after_states, after_messages) == (before_states, before_messages)
+    assert operation["status"] == "in_progress"
+    assert operation["result_state_id"] is None
+
+
+@pytest.mark.parametrize("non_cancel_sideband", ["unchanged", "append", "edit"])
+def test_cancellation_audit_is_forbidden_without_exact_cancel_sideband(non_cancel_sideband: str) -> None:
+    from elspeth.web.sessions.service import _verify_guided_deferred_intent_mutation
+
+    intent = _deferred_intent()
+    recorder = BufferingRecorder()
+    emit_intent_cancelled(recorder, intent=intent, composition_version=1, actor="alice")
+    command = _empty_respond_command(
+        GuidedOperationFence(
+            session_id=uuid4(),
+            operation_id="non-cancel-sideband",
+            lease_token="lease",
+            attempt=1,
+        )
+    )
+    command = replace(
+        command,
+        originating_message=GuidedOriginatingUserMessageDraft(message_id=uuid4(), content="private non-cancel request"),
+    )
+    if non_cancel_sideband == "append":
+        command = replace(command, retained_deferred_intent_id=uuid4())
+    elif non_cancel_sideband == "edit":
+        command = replace(
+            command,
+            deferred_intent_action=DeferredIntentEditAction(
+                intent_id=intent.intent_id,
+                selection_token=deferred_intent_management_option(intent).selection_token,
+                replacement=DeferredIntentAction(
+                    target_stage=intent.target_stage,
+                    catalog_kind=intent.catalog_kind,
+                    catalog_name=intent.catalog_name,
+                    redacted_summary=intent.redacted_summary,
+                    constraints=intent.constraints,
+                ),
+            ),
+        )
+    command = replace(command, audit_evidence=GuidedAuditEvidence(invocations=recorder.invocations))
+
+    with pytest.raises(AuditIntegrityError, match="if and only if"):
+        _verify_guided_deferred_intent_mutation(
+            cast(Any, None),
+            session_id=str(command.fence.session_id),
+            command=command,
+            prior_guided=GuidedSession.initial(),
+            candidate_guided=GuidedSession.initial(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_deferred_intent_delta_allows_stable_id_edit_with_new_private_message_custody(
+    service_and_engine,
+) -> None:
+    service, _engine = service_and_engine
+    session_id = (await service.create_session("alice", "guided deferred edit", "local")).id
+    origin = await service.add_message(
+        session_id,
+        "user",
+        "private deferred instruction",
+        writer_principal="route_user_message",
+    )
+    existing = _deferred_intent(originating_message_id=origin.id)
+    predecessor = await _seed_guided_predecessor_with_intents(service, session_id, (existing,))
+    claimed = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id="respond-deferred-edit",
+        kind="guided_respond",
+        request_hash="b" * 64,
+        actor="worker",
+        lease_seconds=60,
+    )
+    assert isinstance(claimed, GuidedOperationClaimed)
+    command = _present_respond_command(claimed.fence, predecessor)
+    replacement_action = DeferredIntentAction(
+        target_stage="topology",
+        catalog_kind="transform",
+        catalog_name="passthrough",
+        redacted_summary="model text is not durable authority",
+        constraints=existing.constraints,
+    )
+    private_revision = GuidedOriginatingUserMessageDraft(message_id=uuid4(), content="private revised instruction")
+    from elspeth.web.composer.guided.deferred_intents import create_deferred_stage_intent
+
+    replacement = create_deferred_stage_intent(
+        replacement_action,
+        receiving_stage=existing.receiving_stage,
+        intent_id=existing.intent_id,
+        originating_message_id=str(private_revision.message_id),
+        originating_message_content=private_revision.content,
+    )
+    command = replace(
+        command,
+        state=replace(
+            command.state,
+            composer_meta={"guided_session": replace(GuidedSession.initial(), deferred_intents=(replacement,)).to_dict()},
+        ),
+        originating_message=private_revision,
+        deferred_intent_action=DeferredIntentEditAction(
+            intent_id=existing.intent_id,
+            selection_token=deferred_intent_management_option(existing).selection_token,
+            replacement=replacement_action,
+        ),
+    )
+
+    settlement = await service.settle_guided_state_operation(command)
+
+    result_guided = state_from_record(settlement.result_state).guided_session
+    assert result_guided is not None
+    assert result_guided.deferred_intents == (replacement,)
+    assert settlement.originating_message is not None
+    assert settlement.originating_message.content == private_revision.content
 
 
 @pytest.mark.asyncio

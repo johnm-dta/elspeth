@@ -8,7 +8,12 @@ from unittest.mock import patch
 
 import pytest
 
-from elspeth.web.composer.guided.chat_solver import maybe_resolve_step_1_source_chat
+from elspeth.web.composer.guided.chat_solver import (
+    GuidedChatEmptyOutcome,
+    GuidedChatProseOutcome,
+    Step1SourceResolvedOutcome,
+    maybe_resolve_step_1_source_chat,
+)
 from elspeth.web.composer.guided.resolved import SourceResolved
 
 
@@ -83,8 +88,7 @@ async def test_source_driver_retries_inline_json_control_advice_into_tool_call()
         )
 
     assert len(calls) == 2
-    assert outcome.prose_reply is None
-    assert outcome.resolution is not None
+    assert type(outcome) is Step1SourceResolvedOutcome
     assert outcome.resolution.plugin == "json"
     assert outcome.resolution.observed_columns == ("line",)
 
@@ -131,8 +135,8 @@ async def test_source_driver_includes_current_source_in_prompt() -> None:
             timeout_seconds=30.0,
         )
 
+    assert type(outcome) is Step1SourceResolvedOutcome
     result = outcome.resolution
-    assert result is not None
     assert result.plugin == "json"
     # The system prompt is SPLIT: messages[0] is the stable skill head (the
     # markable cache prefix), and the dynamic block — including the current-source
@@ -214,8 +218,8 @@ async def test_source_driver_strips_echoed_server_owned_keys() -> None:
             timeout_seconds=30.0,
         )
 
+    assert type(outcome) is Step1SourceResolvedOutcome
     result = outcome.resolution
-    assert result is not None
     # Drop-direction: both keys are server-owned; neither may survive an LLM source
     # resolution (set_source rejects caller-supplied blob_ref / source_authoring,
     # which turned the next Send into a 400 "Step 1 source commit failed").
@@ -268,8 +272,8 @@ async def test_source_driver_captures_prose_reply_on_decline() -> None:
             seed=None,
             timeout_seconds=30.0,
         )
-    assert outcome.resolution is None
-    assert outcome.prose_reply == "Here is some advice."
+    assert type(outcome) is GuidedChatProseOutcome
+    assert outcome.assistant_message == "Here is some advice."
 
 
 @pytest.mark.asyncio
@@ -354,8 +358,7 @@ async def test_source_driver_declines_prose_beside_hallucinated_tool_call() -> N
             seed=None,
             timeout_seconds=30.0,
         )
-    assert outcome.resolution is None
-    assert outcome.prose_reply is None
+    assert type(outcome) is GuidedChatEmptyOutcome
 
 
 @pytest.mark.asyncio
@@ -381,5 +384,4 @@ async def test_source_driver_returns_both_none_on_empty_response() -> None:
             seed=None,
             timeout_seconds=30.0,
         )
-    assert outcome.resolution is None
-    assert outcome.prose_reply is None
+    assert type(outcome) is GuidedChatEmptyOutcome

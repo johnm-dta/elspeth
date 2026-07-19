@@ -26,7 +26,7 @@ from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.audit import BufferingRecorder
-from elspeth.web.composer.guided.chat_solver import maybe_resolve_step_2_sink_chat
+from elspeth.web.composer.guided.chat_solver import GuidedChatEmptyOutcome, maybe_resolve_step_2_sink_chat
 from elspeth.web.composer.guided.resolved import SinkResolved
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
@@ -182,8 +182,7 @@ async def test_sink_loop_refuses_to_dispatch_mutation_tool() -> None:
             user_id="u1",
         )
 
-    assert result.sink is None
-    assert result.assistant_message is None
+    assert type(result) is GuidedChatEmptyOutcome
     execute_tool_spy.assert_not_called()
 
 
@@ -264,8 +263,7 @@ async def test_sink_loop_returns_none_at_iteration_cap() -> None:
             max_discovery_iters=3,
         )
 
-    assert result.sink is None
-    assert result.assistant_message is None
+    assert type(result) is GuidedChatEmptyOutcome
     assert len(recorder.llm_calls) == 3
 
 
@@ -411,4 +409,4 @@ async def test_sink_loop_single_shot_when_no_catalog() -> None:
     assert result.sink is not None
     # Terminal guided actions remain available, but no discovery tools are offered.
     offered_names = {t["function"]["name"] for t in captured[0]}
-    assert offered_names == {"resolve_sink", "retain_deferred_intent"}
+    assert offered_names == {"resolve_sink", "retain_deferred_intent", "manage_deferred_intent"}

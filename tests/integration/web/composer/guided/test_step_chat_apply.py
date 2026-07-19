@@ -10,7 +10,7 @@ import pytest
 from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus
 from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved
-from elspeth.web.sessions._guided_step_chat import StepChatResult
+from elspeth.web.sessions._guided_step_chat import Step1SourceResolvedResult, Step2SinkResolvedResult, StepChatResult
 from elspeth.web.sessions.routes.composer import guided as guided_route
 from elspeth.web.sessions.routes.composer.guided_chat_atomic import GuidedChatProviderOutcome
 from tests.integration.web.composer.guided.test_step_chat import TestStepChatCrossStep, _create_session, _outputs_path
@@ -41,16 +41,14 @@ def _source_resolution() -> Step1SourceChatResolution:
 
 async def _resolved_source_provider(**_kwargs: object) -> GuidedChatProviderOutcome:
     resolution = _source_resolution()
-    return GuidedChatProviderOutcome(
+    return Step1SourceResolvedResult(
         chat=StepChatResult(
             assistant_message=resolution.assistant_message,
             status=ComposerChatTurnStatus.SUCCESS,
             latency_ms=1,
             error_class=None,
         ),
-        source_resolution=resolution,
-        sink_resolution=None,
-        deferred_action=None,
+        resolution=resolution,
     )
 
 
@@ -150,16 +148,14 @@ def test_step_2_chat_projects_sink_selection_without_committing_an_output(
     )
 
     async def sink_provider(**_kwargs: object) -> GuidedChatProviderOutcome:
-        return GuidedChatProviderOutcome(
+        return Step2SinkResolvedResult(
             chat=StepChatResult(
                 assistant_message="I prepared the JSON output form.",
                 status=ComposerChatTurnStatus.SUCCESS,
                 latency_ms=1,
                 error_class=None,
             ),
-            source_resolution=None,
-            sink_resolution=sink,
-            deferred_action=None,
+            sink=sink,
         )
 
     monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", sink_provider)

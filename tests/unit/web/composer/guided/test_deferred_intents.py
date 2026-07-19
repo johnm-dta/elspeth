@@ -2,23 +2,36 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.canonical import stable_hash
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.schemas import PluginKind, PluginSchemaInfo, PluginSummary
+from elspeth.web.composer.guided import intent_management as intent_management_module
 from elspeth.web.composer.guided.deferred_intents import (
     DeferredIntentAccepted,
     DeferredIntentAction,
+    DeferredIntentCancelAction,
+    DeferredIntentEditAction,
+    DeferredIntentManagementActionShapeError,
     DeferredIntentRejected,
     DeferredIntentUnsupported,
     create_deferred_stage_intent,
     deferred_intent_action_from_dict,
+    deferred_intent_management_action_from_dict,
     validate_deferred_intent_action,
 )
 from elspeth.web.composer.guided.errors import GuidedSolverResponseShapeError, InvariantError
+from elspeth.web.composer.guided.intent_management import (
+    DeferredIntentManagementApplied,
+    resolve_deferred_intent_management,
+    schema8_deferred_management_rewind_step,
+)
+from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import SinkOutputResolved
 from elspeth.web.composer.guided.stage_subjects import (
     ComponentCountConstraint,
@@ -26,12 +39,18 @@ from elspeth.web.composer.guided.stage_subjects import (
     PluginSubject,
     StableSubject,
 )
-from elspeth.web.composer.guided.state_machine import GuidedSession
+from elspeth.web.composer.guided.state_machine import DeferredStageIntent, GuidedSession
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.plugin_policy.models import PluginAvailability, PluginAvailabilitySnapshot, PluginId, PluginUnavailableReason
 
 INTENT_ID = "11111111-1111-4111-8111-111111111111"
 MESSAGE_ID = "22222222-2222-4222-8222-222222222222"
+SELECTION_TOKEN = "server-selection-token"
+
+
+@pytest.mark.parametrize("action_type", [DeferredIntentCancelAction, DeferredIntentEditAction])
+def test_management_selection_token_is_a_required_constructor_field(action_type: type[object]) -> None:
+    assert inspect.signature(action_type).parameters["selection_token"].default is inspect.Parameter.empty
 
 
 class _Catalog:
@@ -1185,3 +1204,420 @@ def test_model_summary_cannot_echo_private_message_into_durable_metadata() -> No
 
     assert private_message not in repr(intent.to_dict())
     assert intent.redacted_summary == "Future topology instruction for transform plugin 'llm'; 1 structural constraint(s)."
+
+
+def test_deferred_intent_management_decoder_returns_closed_cancel_and_edit_actions() -> None:
+    replacement = _action()
+    replacement_dict = {
+        "target_stage": replacement.target_stage,
+        "catalog_kind": replacement.catalog_kind,
+        "catalog_name": replacement.catalog_name,
+        "redacted_summary": replacement.redacted_summary,
+        "constraints": [constraint.to_dict() for constraint in replacement.constraints],
+    }
+    cancel = deferred_intent_management_action_from_dict({"action": "cancel", "intent_id": INTENT_ID, "selection_token": SELECTION_TOKEN})
+    edit = deferred_intent_management_action_from_dict(
+        {
+            "action": "edit",
+            "intent_id": INTENT_ID,
+            "selection_token": SELECTION_TOKEN,
+            "replacement": replacement_dict,
+        }
+    )
+
+    assert cancel == DeferredIntentCancelAction(intent_id=INTENT_ID, selection_token=SELECTION_TOKEN)
+    assert edit == DeferredIntentEditAction(intent_id=INTENT_ID, selection_token=SELECTION_TOKEN, replacement=replacement)
+
+
+def test_management_resolution_cancels_one_exact_stable_id_and_edits_in_place() -> None:
+    first = create_deferred_stage_intent(
+        _action(),
+        receiving_stage="source",
+        intent_id=INTENT_ID,
+        originating_message_id=MESSAGE_ID,
+        originating_message_content="first private instruction",
+    )
+    second = create_deferred_stage_intent(
+        _action(),
+        receiving_stage="source",
+        intent_id="33333333-3333-4333-8333-333333333333",
+        originating_message_id="44444444-4444-4444-8444-444444444444",
+        originating_message_content="second private instruction",
+    )
+    guided = replace(GuidedSession.initial(), deferred_intents=(first, second))
+    catalog = _view((("transform", "llm"),))
+    selection_token = intent_management_module.deferred_intent_management_option(first).selection_token
+
+    cancelled = resolve_deferred_intent_management(
+        DeferredIntentCancelAction(intent_id=INTENT_ID, selection_token=selection_token),
+        guided=guided,
+        catalog=catalog,
+        originating_message_id="55555555-5555-4555-8555-555555555555",
+        originating_message_content=f"cancel exact intent {INTENT_ID}",
+    )
+    edited = resolve_deferred_intent_management(
+        DeferredIntentEditAction(intent_id=INTENT_ID, selection_token=selection_token, replacement=_action()),
+        guided=guided,
+        catalog=catalog,
+        originating_message_id="55555555-5555-4555-8555-555555555555",
+        originating_message_content=f"edit exact intent {INTENT_ID}",
+    )
+
+    assert type(cancelled) is DeferredIntentManagementApplied
+    assert cancelled.deferred_intents == (second,)
+    assert type(edited) is DeferredIntentManagementApplied
+    assert [intent.intent_id for intent in edited.deferred_intents] == [first.intent_id, second.intent_id]
+    assert edited.deferred_intents[0].originating_message_id == "55555555-5555-4555-8555-555555555555"
+
+
+@pytest.mark.parametrize(
+    ("prior_action", "replacement", "expected_target"),
+    [
+        pytest.param(
+            _action(),
+            DeferredIntentAction(
+                target_stage="output",
+                catalog_kind="sink",
+                catalog_name="json",
+                redacted_summary="Keep the JSON output.",
+                constraints=(
+                    ComponentCountConstraint(
+                        kind="component_count",
+                        component_kind="output",
+                        plugin_kind="sink",
+                        plugin_name="json",
+                        operator="at_least",
+                        count=1,
+                    ),
+                ),
+            ),
+            "output",
+            id="edit-moves-authority-earlier",
+        ),
+        pytest.param(
+            DeferredIntentAction(
+                target_stage="output",
+                catalog_kind="sink",
+                catalog_name="json",
+                redacted_summary="Keep the JSON output.",
+                constraints=(
+                    ComponentCountConstraint(
+                        kind="component_count",
+                        component_kind="output",
+                        plugin_kind="sink",
+                        plugin_name="json",
+                        operator="at_least",
+                        count=1,
+                    ),
+                ),
+            ),
+            _action(),
+            "topology",
+            id="edit-moves-authority-later",
+        ),
+    ],
+)
+def test_management_edit_exposes_replacement_as_effective_rewind_authority(
+    prior_action: DeferredIntentAction,
+    replacement: DeferredIntentAction,
+    expected_target: str,
+) -> None:
+    prior = create_deferred_stage_intent(
+        prior_action,
+        receiving_stage="source",
+        intent_id=INTENT_ID,
+        originating_message_id=MESSAGE_ID,
+        originating_message_content="private prior instruction",
+    )
+    preserved = create_deferred_stage_intent(
+        _action(),
+        receiving_stage="source",
+        intent_id="33333333-3333-4333-8333-333333333333",
+        originating_message_id="44444444-4444-4444-8444-444444444444",
+        originating_message_content="private preserved instruction",
+    )
+    result = resolve_deferred_intent_management(
+        DeferredIntentEditAction(
+            intent_id=prior.intent_id,
+            selection_token=intent_management_module.deferred_intent_management_option(prior).selection_token,
+            replacement=replacement,
+        ),
+        guided=replace(GuidedSession.initial(), deferred_intents=(prior, preserved)),
+        catalog=_view((("transform", "llm"), ("sink", "json"))),
+        originating_message_id="55555555-5555-4555-8555-555555555555",
+        originating_message_content=f"private edit instruction {prior.intent_id}",
+    )
+
+    assert type(result) is DeferredIntentManagementApplied
+    assert result.effective_intent.target_stage == expected_target
+    assert result.effective_intent.intent_id == prior.intent_id
+    assert [intent.intent_id for intent in result.deferred_intents] == [prior.intent_id, preserved.intent_id]
+
+
+def test_management_cancel_keeps_prior_intent_as_effective_rewind_authority() -> None:
+    prior = create_deferred_stage_intent(
+        _action(),
+        receiving_stage="source",
+        intent_id=INTENT_ID,
+        originating_message_id=MESSAGE_ID,
+        originating_message_content="private prior instruction",
+    )
+    result = resolve_deferred_intent_management(
+        DeferredIntentCancelAction(
+            intent_id=prior.intent_id,
+            selection_token=intent_management_module.deferred_intent_management_option(prior).selection_token,
+        ),
+        guided=replace(GuidedSession.initial(), deferred_intents=(prior,)),
+        catalog=_view((("transform", "llm"),)),
+        originating_message_id="55555555-5555-4555-8555-555555555555",
+        originating_message_content="private cancellation",
+    )
+
+    assert type(result) is DeferredIntentManagementApplied
+    assert result.effective_intent is prior
+
+
+def _count_intent(*, intent_id: str, message_id: str, count: int, message: str) -> DeferredStageIntent:
+    return create_deferred_stage_intent(
+        DeferredIntentAction(
+            target_stage="topology",
+            catalog_kind="transform",
+            catalog_name="llm",
+            redacted_summary="Use the named transform.",
+            constraints=(
+                ComponentCountConstraint(
+                    kind="component_count",
+                    component_kind="node",
+                    plugin_kind="transform",
+                    plugin_name="llm",
+                    operator="at_least",
+                    count=count,
+                ),
+            ),
+        ),
+        receiving_stage="source",
+        intent_id=intent_id,
+        originating_message_id=message_id,
+        originating_message_content=message,
+    )
+
+
+def test_management_options_distinguish_exact_structural_constraints_without_private_prose() -> None:
+    first = _count_intent(intent_id=INTENT_ID, message_id=MESSAGE_ID, count=1, message="PRIVATE-FIRST-CANARY")
+    second = _count_intent(
+        intent_id="33333333-3333-4333-8333-333333333333",
+        message_id="44444444-4444-4444-8444-444444444444",
+        count=2,
+        message="PRIVATE-SECOND-CANARY",
+    )
+
+    first_option = intent_management_module.deferred_intent_management_option(first)
+    second_option = intent_management_module.deferred_intent_management_option(second)
+
+    assert first_option.structural_constraints[0]["count"] == 1
+    assert second_option.structural_constraints[0]["count"] == 2
+    assert first_option.selection_token != second_option.selection_token
+    assert "PRIVATE-FIRST-CANARY" not in repr(first_option)
+    assert "PRIVATE-SECOND-CANARY" not in repr(second_option)
+
+
+def test_management_option_hashes_option_values_instead_of_egressing_raw_value() -> None:
+    private_value = "PRIVATE-OPTION-VALUE-CANARY"
+    intent = create_deferred_stage_intent(
+        _option_action(
+            subject=PluginSubject(
+                kind="plugin",
+                subject_id="33333333-3333-4333-8333-333333333333",
+                plugin_kind="transform",
+                plugin_name="llm",
+            ),
+            option_path=("mode",),
+            value=private_value,
+        ),
+        receiving_stage="source",
+        intent_id=INTENT_ID,
+        originating_message_id=MESSAGE_ID,
+        originating_message_content="private instruction",
+    )
+
+    option = intent_management_module.deferred_intent_management_option(intent)
+    constraint = option.structural_constraints[0]
+
+    assert "value" not in constraint
+    assert constraint["value_hash"] == stable_hash({"schema": "guided.deferred-option-value.v1", "value": private_value})
+    assert private_value not in repr(option)
+
+
+def test_management_rejects_model_intent_id_and_selection_token_mixup_without_mutation() -> None:
+    first = _count_intent(intent_id=INTENT_ID, message_id=MESSAGE_ID, count=1, message="first private")
+    second = _count_intent(
+        intent_id="33333333-3333-4333-8333-333333333333",
+        message_id="44444444-4444-4444-8444-444444444444",
+        count=2,
+        message="second private",
+    )
+    guided = replace(GuidedSession.initial(), deferred_intents=(first, second))
+
+    result = resolve_deferred_intent_management(
+        DeferredIntentCancelAction(
+            intent_id=first.intent_id,
+            selection_token=intent_management_module.deferred_intent_management_option(second).selection_token,
+        ),
+        guided=guided,
+        catalog=_view((("transform", "llm"),)),
+        originating_message_id="55555555-5555-4555-8555-555555555555",
+        originating_message_content="Cancel the count-one instruction.",
+    )
+
+    assert type(result) is intent_management_module.DeferredIntentManagementBindingMismatch
+    assert guided.deferred_intents == (first, second)
+
+
+@pytest.mark.parametrize(
+    ("message_template", "applied"),
+    [
+        ("Cancel the count-one instruction.", False),
+        ("Cancel exact intent {second_id}.", False),
+        ("Compare {first_id} with {second_id}, then cancel one.", False),
+        ("Cancel exact intent {first_id}.", True),
+    ],
+    ids=["zero-current-uuids", "coherent-wrong-pair", "multiple-current-uuids", "one-matching-current-uuid"],
+)
+def test_multiple_distinct_pending_intents_require_one_matching_private_uuid(
+    message_template: str,
+    applied: bool,
+) -> None:
+    first = _count_intent(intent_id=INTENT_ID, message_id=MESSAGE_ID, count=1, message="first private")
+    second = _count_intent(
+        intent_id="33333333-3333-4333-8333-333333333333",
+        message_id="44444444-4444-4444-8444-444444444444",
+        count=2,
+        message="second private",
+    )
+    guided = replace(GuidedSession.initial(), deferred_intents=(first, second))
+    action = DeferredIntentCancelAction(
+        intent_id=first.intent_id,
+        selection_token=intent_management_module.deferred_intent_management_option(first).selection_token,
+    )
+
+    result = resolve_deferred_intent_management(
+        action,
+        guided=guided,
+        catalog=_view((("transform", "llm"),)),
+        originating_message_id="55555555-5555-4555-8555-555555555555",
+        originating_message_content=message_template.format(first_id=first.intent_id, second_id=second.intent_id),
+    )
+
+    if applied:
+        assert type(result) is DeferredIntentManagementApplied
+        assert result.deferred_intents == (second,)
+    else:
+        assert type(result) is intent_management_module.DeferredIntentManagementAmbiguous
+        assert guided.deferred_intents == (first, second)
+
+
+def test_single_pending_intent_still_accepts_natural_language_selection() -> None:
+    intent = _count_intent(intent_id=INTENT_ID, message_id=MESSAGE_ID, count=1, message="private")
+
+    result = resolve_deferred_intent_management(
+        DeferredIntentCancelAction(
+            intent_id=intent.intent_id,
+            selection_token=intent_management_module.deferred_intent_management_option(intent).selection_token,
+        ),
+        guided=replace(GuidedSession.initial(), deferred_intents=(intent,)),
+        catalog=_view((("transform", "llm"),)),
+        originating_message_id="55555555-5555-4555-8555-555555555555",
+        originating_message_content="Cancel the saved count-one instruction.",
+    )
+
+    assert type(result) is DeferredIntentManagementApplied
+
+
+def test_identical_management_options_require_private_message_to_name_exact_uuid() -> None:
+    first = _count_intent(intent_id=INTENT_ID, message_id=MESSAGE_ID, count=1, message="first private")
+    second = _count_intent(
+        intent_id="33333333-3333-4333-8333-333333333333",
+        message_id="44444444-4444-4444-8444-444444444444",
+        count=1,
+        message="second private",
+    )
+    guided = replace(GuidedSession.initial(), deferred_intents=(first, second))
+    action = DeferredIntentCancelAction(
+        intent_id=first.intent_id,
+        selection_token=intent_management_module.deferred_intent_management_option(first).selection_token,
+    )
+
+    ambiguous = resolve_deferred_intent_management(
+        action,
+        guided=guided,
+        catalog=_view((("transform", "llm"),)),
+        originating_message_id="55555555-5555-4555-8555-555555555555",
+        originating_message_content="Cancel the saved count-one instruction.",
+    )
+    explicit = resolve_deferred_intent_management(
+        action,
+        guided=guided,
+        catalog=_view((("transform", "llm"),)),
+        originating_message_id="55555555-5555-4555-8555-555555555555",
+        originating_message_content=f"Cancel exact intent {first.intent_id}.",
+    )
+
+    assert type(ambiguous) is intent_management_module.DeferredIntentManagementAmbiguous
+    assert type(explicit) is DeferredIntentManagementApplied
+    assert explicit.deferred_intents == (second,)
+
+
+def test_schema8_rewind_boundary_is_explicit_for_passed_output_and_topology_only() -> None:
+    assert (
+        schema8_deferred_management_rewind_step(
+            current_step=GuidedStep.STEP_4_WIRE,
+            target_stage="output",
+        )
+        is GuidedStep.STEP_2_SINK
+    )
+    assert (
+        schema8_deferred_management_rewind_step(
+            current_step=GuidedStep.STEP_4_WIRE,
+            target_stage="topology",
+        )
+        is GuidedStep.STEP_2_SINK
+    )
+    assert (
+        schema8_deferred_management_rewind_step(
+            current_step=GuidedStep.STEP_4_WIRE,
+            target_stage="wire_review",
+        )
+        is None
+    )
+    with pytest.raises(AuditIntegrityError, match="already-passed source"):
+        schema8_deferred_management_rewind_step(
+            current_step=GuidedStep.STEP_4_WIRE,
+            target_stage="source",
+        )
+
+
+def _encoded_action() -> dict[str, object]:
+    action = _action()
+    return {
+        "target_stage": action.target_stage,
+        "catalog_kind": action.catalog_kind,
+        "catalog_name": action.catalog_name,
+        "redacted_summary": action.redacted_summary,
+        "constraints": [constraint.to_dict() for constraint in action.constraints],
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"action": "delete", "intent_id": INTENT_ID},
+        {"action": "cancel", "intent_id": "not-a-uuid"},
+        {"action": "cancel", "intent_id": INTENT_ID, "replacement": _encoded_action()},
+        {"action": "edit", "intent_id": INTENT_ID},
+        {"action": "edit", "intent_id": INTENT_ID, "replacement": _encoded_action(), "raw_prose": "secret"},
+    ],
+)
+def test_deferred_intent_management_decoder_rejects_every_malformed_shape(payload: object) -> None:
+    with pytest.raises(DeferredIntentManagementActionShapeError):
+        deferred_intent_management_action_from_dict(payload)

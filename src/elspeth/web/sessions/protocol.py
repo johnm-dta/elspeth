@@ -32,6 +32,11 @@ from elspeth.contracts.composer_llm_audit import ComposerChatTurn, ComposerLLMCa
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields, require_int
 from elspeth.contracts.hashing import stable_hash
+from elspeth.web.composer.guided.deferred_intents import (
+    DeferredIntentCancelAction,
+    DeferredIntentEditAction,
+    DeferredIntentManagementAction,
+)
 from elspeth.web.composer.guided.protocol import TurnType
 from elspeth.web.composer.guided.state_machine import ComponentTarget
 from elspeth.web.plugin_policy.models import PluginId, PluginUnavailableReason
@@ -1091,6 +1096,24 @@ class PreparedGuidedInterpretationDraft:
 
 @final
 @dataclass(frozen=True, slots=True)
+class GuidedPendingProposalInvalidation:
+    """Exact pending proposal authority invalidated by a guided state mutation."""
+
+    proposal_id: UUID
+    draft_hash: str
+    reviewed_facts: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if type(self.proposal_id) is not UUID:
+            raise AuditIntegrityError("Guided pending proposal invalidation id must be a UUID")
+        _require_guided_sha256(self.draft_hash, "Guided pending proposal invalidation draft_hash")
+        if type(self.reviewed_facts) not in {dict, MappingProxyType}:
+            raise AuditIntegrityError("Guided pending proposal invalidation reviewed_facts must be a mapping")
+        freeze_fields(self, "reviewed_facts")
+
+
+@final
+@dataclass(frozen=True, slots=True)
 class GuidedStateOperationCommand:
     """Complete immutable input for one fenced guided state settlement."""
 
@@ -1107,7 +1130,31 @@ class GuidedStateOperationCommand:
     audit_evidence: GuidedAuditEvidence = GuidedAuditEvidence()
     originating_message: GuidedOriginatingUserMessageDraft | None = None
     retained_deferred_intent_id: UUID | None = None
+    deferred_intent_action: DeferredIntentManagementAction | None = None
+    invalidated_pending_proposal: GuidedPendingProposalInvalidation | None = None
     interpretations: tuple[PreparedGuidedInterpretationDraft, ...] = ()
+
+    def _validate_deferred_intent_sidebands(self) -> None:
+        if self.retained_deferred_intent_id is not None and type(self.retained_deferred_intent_id) is not UUID:
+            raise AuditIntegrityError("GuidedStateOperationCommand.retained_deferred_intent_id must be a UUID or None")
+        if self.retained_deferred_intent_id is not None and self.originating_message is None:
+            raise AuditIntegrityError("A retained deferred intent requires an originating user-message draft")
+        if self.deferred_intent_action is not None and type(self.deferred_intent_action) not in {
+            DeferredIntentCancelAction,
+            DeferredIntentEditAction,
+        }:
+            raise AuditIntegrityError("GuidedStateOperationCommand.deferred_intent_action must be exact or None")
+        if self.deferred_intent_action is not None and self.originating_message is None:
+            raise AuditIntegrityError("A deferred intent action requires an originating user-message draft")
+        if self.deferred_intent_action is not None and self.retained_deferred_intent_id is not None:
+            raise AuditIntegrityError("A guided settlement cannot retain and manage deferred intent together")
+        if (
+            self.invalidated_pending_proposal is not None
+            and type(self.invalidated_pending_proposal) is not GuidedPendingProposalInvalidation
+        ):
+            raise AuditIntegrityError("GuidedStateOperationCommand.invalidated_pending_proposal must be exact or None")
+        if self.invalidated_pending_proposal is not None and self.deferred_intent_action is None:
+            raise AuditIntegrityError("Pending proposal invalidation requires an exact deferred intent action")
 
     def __post_init__(self) -> None:
         if type(self.fence) is not GuidedOperationFence:
@@ -1147,10 +1194,7 @@ class GuidedStateOperationCommand:
             raise AuditIntegrityError("GuidedStateOperationCommand.audit_evidence must be exact typed evidence")
         if self.originating_message is not None and type(self.originating_message) is not GuidedOriginatingUserMessageDraft:
             raise AuditIntegrityError("GuidedStateOperationCommand.originating_message must be an exact draft or None")
-        if self.retained_deferred_intent_id is not None and type(self.retained_deferred_intent_id) is not UUID:
-            raise AuditIntegrityError("GuidedStateOperationCommand.retained_deferred_intent_id must be a UUID or None")
-        if self.retained_deferred_intent_id is not None and self.originating_message is None:
-            raise AuditIntegrityError("A retained deferred intent requires an originating user-message draft")
+        self._validate_deferred_intent_sidebands()
         if type(self.interpretations) is not tuple or any(
             type(draft) is not PreparedGuidedInterpretationDraft for draft in self.interpretations
         ):

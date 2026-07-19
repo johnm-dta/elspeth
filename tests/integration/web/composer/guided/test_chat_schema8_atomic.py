@@ -24,7 +24,7 @@ from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved
 from elspeth.web.composer.guided.state_machine import GuidedSession
-from elspeth.web.sessions._guided_step_chat import StepChatResult
+from elspeth.web.sessions._guided_step_chat import GuidedStepChatOnlyResult, Step1SourceResolvedResult, StepChatResult
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import guided_operations_table
 from elspeth.web.sessions.protocol import CompositionStateData
@@ -148,16 +148,14 @@ def _source_resolution() -> Step1SourceChatResolution:
 
 async def _resolved_source_provider(**_kwargs: object) -> GuidedChatProviderOutcome:
     resolution = _source_resolution()
-    return GuidedChatProviderOutcome(
+    return Step1SourceResolvedResult(
         chat=StepChatResult(
             assistant_message=resolution.assistant_message,
             status=ComposerChatTurnStatus.SUCCESS,
             latency_ms=1,
             error_class=None,
         ),
-        source_resolution=resolution,
-        sink_resolution=None,
-        deferred_action=None,
+        resolution=resolution,
     )
 
 
@@ -182,16 +180,13 @@ def _persist_guided(client: TestClient, session_id: str, guided: GuidedSession) 
 
 
 async def _advisory_provider(**_kwargs: object) -> GuidedChatProviderOutcome:
-    return GuidedChatProviderOutcome(
+    return GuidedStepChatOnlyResult(
         chat=StepChatResult(
             assistant_message="Review the current source choices.",
             status=ComposerChatTurnStatus.SUCCESS,
             latency_ms=1,
             error_class=None,
         ),
-        source_resolution=None,
-        sink_resolution=None,
-        deferred_action=None,
     )
 
 
@@ -261,7 +256,7 @@ def test_reused_operation_id_with_different_message_conflicts_without_provider(
     assert _chat_operation_count(composer_test_client, session_id) == 1
 
 
-def test_schema8_chat_rejects_no_turn_stage_before_provider_or_reservation(
+def test_schema8_chat_rejects_step3_without_current_turn_before_provider_or_reservation(
     composer_test_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

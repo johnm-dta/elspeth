@@ -13,7 +13,7 @@ import threading
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
@@ -78,7 +78,11 @@ from elspeth.web.interpretation_state import (
 )
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
 from elspeth.web.sessions.converters import state_from_record
-from elspeth.web.sessions.guided_audit import prepare_guided_audit_rows, validate_guided_audit_payload_references
+from elspeth.web.sessions.guided_audit import (
+    is_authentic_guided_synthetic_invocation,
+    prepare_guided_audit_rows,
+    validate_guided_audit_payload_references,
+)
 from elspeth.web.sessions.guided_payloads import verify_guided_json_payloads
 from elspeth.web.sessions.guided_replay import (
     guided_response_projection_hash,
@@ -152,6 +156,7 @@ from elspeth.web.sessions.protocol import (
     GuidedOperationResult,
     GuidedOperationSettlementConflictError,
     GuidedOperationTakenOver,
+    GuidedPendingProposalInvalidation,
     GuidedPipelineProposalAcceptCommand,
     GuidedPipelineProposalBackEditCommand,
     GuidedPipelineProposalRejectCommand,
@@ -190,6 +195,7 @@ from elspeth.web.validation import INTERPRETATION_PLACEHOLDER_RE, _validate_acce
 if TYPE_CHECKING:
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.web.catalog.protocol import CatalogService
+    from elspeth.web.composer.guided.state_machine import DeferredStageIntent, GuidedProposalRef, GuidedSession
     from elspeth.web.composer.state import CompositionState, ValidationSummary
     from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
     from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
@@ -778,6 +784,147 @@ def _verify_guided_deferred_message_authority(
             raise AuditIntegrityError("guided deferred intent must originate from a user message")
         if stable_hash(row.content) != intent.message_content_hash:
             raise AuditIntegrityError("guided deferred intent message content hash mismatch")
+
+
+def _require_exact_guided_intent_cancellation_audit(
+    command: GuidedStateOperationCommand,
+    existing_intent: DeferredStageIntent,
+) -> None:
+    cancellation_events: list[object] = []
+    for invocation in command.audit_evidence.invocations:
+        if invocation.tool_name != "guided_intent_cancelled":
+            continue
+        if not is_authentic_guided_synthetic_invocation(invocation):
+            raise AuditIntegrityError("guided intent cancellation audit event is not an authentic server synthetic invocation")
+        try:
+            arguments = json.loads(invocation.arguments_canonical)
+        except (TypeError, ValueError) as exc:
+            raise AuditIntegrityError("guided intent cancellation audit payload is malformed") from exc
+        if stable_hash(arguments) != invocation.arguments_hash:
+            raise AuditIntegrityError("guided intent cancellation audit payload hash mismatch")
+        cancellation_events.append(arguments)
+    expected = {
+        "intent_id": existing_intent.intent_id,
+        "receiving_stage": existing_intent.receiving_stage,
+        "target_stage": existing_intent.target_stage,
+    }
+    if cancellation_events != [expected]:
+        raise AuditIntegrityError("guided intent cancellation requires one exact structural audit event")
+
+
+def _verify_guided_deferred_intent_append(
+    command: GuidedStateOperationCommand,
+    *,
+    prior_guided: GuidedSession,
+    candidate_guided: GuidedSession,
+) -> DeferredStageIntent:
+    if (
+        len(candidate_guided.deferred_intents) != len(prior_guided.deferred_intents) + 1
+        or candidate_guided.deferred_intents[:-1] != prior_guided.deferred_intents
+        or candidate_guided.deferred_intents[-1].intent_id != str(command.retained_deferred_intent_id)
+    ):
+        raise AuditIntegrityError("retained deferred intent must be one exact terminal append")
+    retained = candidate_guided.deferred_intents[-1]
+    originating = command.originating_message
+    if originating is None:  # pragma: no cover - command type owns this guard
+        raise AuditIntegrityError("retained deferred intent lost its originating message")
+    if retained.originating_message_id != str(originating.message_id):
+        raise AuditIntegrityError("retained deferred intent names the wrong originating message")
+    if retained.message_content_hash != stable_hash(originating.content):
+        raise AuditIntegrityError("retained deferred intent message content hash mismatch")
+    return retained
+
+
+def _expected_guided_deferred_intents_after_management(
+    conn: Connection,
+    *,
+    session_id: str,
+    command: GuidedStateOperationCommand,
+    prior_guided: GuidedSession,
+) -> tuple[DeferredStageIntent, ...]:
+    from elspeth.web.composer.guided.deferred_intents import (
+        DeferredIntentCancelAction,
+        DeferredIntentEditAction,
+        create_deferred_stage_intent,
+    )
+
+    action = command.deferred_intent_action
+    if action is None:  # pragma: no cover - command shape owns this branch
+        raise AuditIntegrityError("deferred intent action sideband is missing")
+    matching = [(index, intent) for index, intent in enumerate(prior_guided.deferred_intents) if intent.intent_id == action.intent_id]
+    if len(matching) != 1:
+        raise AuditIntegrityError("deferred intent action does not name one exact pending intent")
+    intent_index, existing = matching[0]
+    from elspeth.web.composer.guided.intent_management import (
+        deferred_intent_management_option,
+        deferred_intent_management_user_authority_matches,
+    )
+
+    if action.selection_token != deferred_intent_management_option(existing).selection_token:
+        raise AuditIntegrityError("deferred intent action selection token does not bind its exact pending intent")
+    originating = command.originating_message
+    if originating is None or not deferred_intent_management_user_authority_matches(
+        action,
+        deferred_intents=prior_guided.deferred_intents,
+        originating_message_content=originating.content,
+    ):
+        raise AuditIntegrityError("multiple deferred intents require one matching UUID in the private request")
+    _verify_guided_deferred_message_authority(conn, session_id=session_id, guided=prior_guided)
+    if type(action) is DeferredIntentCancelAction:
+        _require_exact_guided_intent_cancellation_audit(command, existing)
+        replacement: tuple[DeferredStageIntent, ...] = ()
+    elif type(action) is DeferredIntentEditAction:
+        originating = command.originating_message
+        if originating is None:  # pragma: no cover - command guards this
+            raise AuditIntegrityError("deferred intent edit lost its originating message")
+        replacement = (
+            create_deferred_stage_intent(
+                action.replacement,
+                receiving_stage=existing.receiving_stage,
+                intent_id=existing.intent_id,
+                originating_message_id=str(originating.message_id),
+                originating_message_content=originating.content,
+            ),
+        )
+    else:  # pragma: no cover - command owns the exact union
+        raise AuditIntegrityError("deferred intent action type is unsupported")
+    return (*prior_guided.deferred_intents[:intent_index], *replacement, *prior_guided.deferred_intents[intent_index + 1 :])
+
+
+def _verify_guided_deferred_intent_mutation(
+    conn: Connection,
+    *,
+    session_id: str,
+    command: GuidedStateOperationCommand,
+    prior_guided: GuidedSession,
+    candidate_guided: GuidedSession,
+) -> DeferredStageIntent | None:
+    """Verify the exact append/cancel/edit sideband against both checkpoints."""
+
+    from elspeth.web.composer.guided.deferred_intents import DeferredIntentCancelAction
+
+    cancellation_invocations = tuple(
+        invocation for invocation in command.audit_evidence.invocations if invocation.tool_name == "guided_intent_cancelled"
+    )
+    is_cancel = type(command.deferred_intent_action) is DeferredIntentCancelAction
+    if is_cancel != bool(cancellation_invocations):
+        raise AuditIntegrityError("guided intent cancellation audit must exist if and only if the typed action is cancel")
+
+    if command.retained_deferred_intent_id is None and command.deferred_intent_action is None:
+        if candidate_guided.deferred_intents != prior_guided.deferred_intents:
+            raise AuditIntegrityError("deferred intent mutation requires an explicit typed sideband")
+        return None
+    if command.retained_deferred_intent_id is not None:
+        return _verify_guided_deferred_intent_append(command, prior_guided=prior_guided, candidate_guided=candidate_guided)
+    expected = _expected_guided_deferred_intents_after_management(
+        conn,
+        session_id=session_id,
+        command=command,
+        prior_guided=prior_guided,
+    )
+    if candidate_guided.deferred_intents != expected:
+        raise AuditIntegrityError("deferred intent action candidate differs from its exact typed mutation")
+    return None
 
 
 def _normalize_optional_provenance_text(value: str | None) -> str | None:
@@ -1519,6 +1666,133 @@ def _restore_authoritative_pipeline_proposal(
         authority,
         row=replace(row, pipeline_metadata=_pipeline_public_metadata(authority)),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _GuidedPendingProposalInvalidationContext:
+    """Frozen checkpoint and database authority for one proposal invalidation."""
+
+    service: SessionServiceImpl
+    session_id: str
+    current_record: CompositionStateRecord | None
+    prior_guided: GuidedSession
+    candidate_guided: GuidedSession
+    expected_current_content_hash: str | None
+
+
+def _require_guided_pending_proposal_transition(
+    context: _GuidedPendingProposalInvalidationContext,
+    invalidation: GuidedPendingProposalInvalidation | None,
+) -> GuidedProposalRef | None:
+    """Verify that the candidate clears exactly the checkpoint's active ref."""
+
+    if context.prior_guided.active_proposal == context.candidate_guided.active_proposal:
+        if invalidation is not None:
+            raise AuditIntegrityError("guided proposal invalidation sideband did not clear an active proposal")
+        return None
+    if invalidation is None:
+        raise AuditIntegrityError("clearing guided active proposal requires an exact invalidation sideband")
+    active = context.prior_guided.active_proposal
+    if active is None or context.candidate_guided.active_proposal is not None:
+        raise AuditIntegrityError("guided proposal invalidation must clear one exact active proposal")
+    if active.proposal_id != invalidation.proposal_id or active.draft_hash != invalidation.draft_hash:
+        raise AuditIntegrityError("guided proposal invalidation sideband differs from checkpoint authority")
+    if context.current_record is None:
+        raise AuditIntegrityError("guided proposal invalidation requires a current checkpoint")
+    return active
+
+
+def _verify_guided_pending_proposal_invalidation(
+    conn: Connection,
+    *,
+    context: _GuidedPendingProposalInvalidationContext,
+    invalidation: GuidedPendingProposalInvalidation | None,
+) -> AuthoritativePipelineProposal | None:
+    """Verify one exact active-reference clear and restore pending row authority."""
+
+    active = _require_guided_pending_proposal_transition(context, invalidation)
+    if active is None:
+        return None
+    if invalidation is None or context.current_record is None:  # pragma: no cover - transition verifier owns this
+        raise AuditIntegrityError("guided proposal invalidation lost its verified authority")
+    proposal_row = conn.execute(
+        select(composition_proposals_table)
+        .where(composition_proposals_table.c.session_id == context.session_id)
+        .where(composition_proposals_table.c.id == str(invalidation.proposal_id))
+    ).one_or_none()
+    if proposal_row is None:
+        raise AuditIntegrityError("guided proposal invalidation authority is missing or cross-session")
+    creation_rows = conn.execute(
+        select(proposal_events_table)
+        .where(proposal_events_table.c.session_id == context.session_id)
+        .where(proposal_events_table.c.proposal_id == str(invalidation.proposal_id))
+        .where(proposal_events_table.c.event_type == "proposal.created")
+    ).fetchall()
+    if len(creation_rows) != 1:
+        raise AuditIntegrityError("guided proposal invalidation requires one creation event")
+    authority = _restore_authoritative_pipeline_proposal(
+        conn=conn,
+        row=_proposal_record_from_row(proposal_row),
+        creation_event=_proposal_event_record_from_row(creation_rows[0]),
+        reviewed_facts=deep_thaw(invalidation.reviewed_facts),
+    )
+    _verify_pipeline_lifecycle_authority(conn, service=context.service, authority=authority)
+    if authority.row.status != "pending":
+        raise AuditIntegrityError("guided proposal invalidation requires a pending proposal")
+    proposal = authority.proposal
+    if (
+        proposal.draft_hash != active.draft_hash
+        or proposal.base != active.base
+        or proposal.reviewed_anchor_hash != active.reviewed_anchor_hash
+        or proposal.covered_deferred_intent_ids != active.covered_deferred_intent_ids
+        or authority.supersedes_proposal_id != active.supersedes_proposal_id
+        or proposal.supersedes_draft_hash != active.supersedes_draft_hash
+    ):
+        raise AuditIntegrityError("guided proposal invalidation restored authority differs from checkpoint")
+    if type(proposal.base) is not PresentBase or proposal.base.state_id != context.current_record.id:
+        raise AuditIntegrityError("guided proposal invalidation base differs from current checkpoint")
+    if proposal.base.composition_content_hash != context.expected_current_content_hash:
+        raise AuditIntegrityError("guided proposal invalidation base content hash changed")
+    return authority
+
+
+def _reject_guided_pending_proposal(
+    conn: Connection,
+    *,
+    authority: AuthoritativePipelineProposal,
+    actor: str,
+    created_at: datetime,
+) -> None:
+    """Append one immutable supersession event and terminalize the pending row."""
+
+    session_id = str(authority.row.session_id)
+    proposal_id = str(authority.row.id)
+    event_id = str(uuid.uuid4())
+    conn.execute(
+        insert(proposal_events_table).values(
+            id=event_id,
+            session_id=session_id,
+            proposal_id=proposal_id,
+            event_type="proposal.rejected",
+            actor=actor,
+            payload=_pipeline_rejected_payload(authority=authority, reason="superseded", dispatch=None),
+            created_at=created_at,
+        )
+    )
+    updated = conn.execute(
+        update(composition_proposals_table)
+        .where(composition_proposals_table.c.session_id == session_id)
+        .where(composition_proposals_table.c.id == proposal_id)
+        .where(composition_proposals_table.c.status == "pending")
+        .values(
+            status="rejected",
+            committed_state_id=None,
+            audit_event_id=event_id,
+            updated_at=created_at,
+        )
+    )
+    if updated.rowcount != 1:
+        raise AuditIntegrityError("guided proposal invalidation lost the pending proposal CAS")
 
 
 def _classify_authoritative_composition_proposal(
@@ -7482,7 +7756,7 @@ class SessionServiceImpl:
                 from elspeth.web.composer.guided.errors import InvariantError
                 from elspeth.web.composer.guided.planning import guided_private_reviewed_facts
                 from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
-                from elspeth.web.composer.guided.state_machine import GuidedProposalRef, GuidedSession
+                from elspeth.web.composer.guided.state_machine import GuidedSession
                 from elspeth.web.sessions.guided_replay import GUIDED_REPLAY_META_KEY
 
                 def _guided_checkpoint(row: Any, *, role: str) -> tuple[CompositionStateRecord, GuidedSession | None]:
@@ -8076,10 +8350,14 @@ class SessionServiceImpl:
                     .order_by(desc(composition_states_table.c.version))
                     .limit(1)
                 ).one_or_none()
+                current_record: CompositionStateRecord | None = None
+                if current_row is not None:
+                    current_record = self._row_to_state_record(current_row)
                 if command.expected_current_content_hash is not None:
                     if current_row is None:  # pragma: no cover - expected-current guard owns absence
                         raise AuditIntegrityError("Guided operation expected content hash without a current state")
-                    current_record = self._row_to_state_record(current_row)
+                    if current_record is None:  # pragma: no cover - paired with current_row
+                        raise AuditIntegrityError("Guided operation current state conversion failed")
                     if composition_content_hash(state_from_record(current_record)) != command.expected_current_content_hash:
                         raise AuditIntegrityError("Guided operation current state content changed before settlement")
 
@@ -8101,27 +8379,26 @@ class SessionServiceImpl:
                     if current_row is None
                     else _guided_checkpoint(self._row_to_state_record(current_row).composer_meta, role="prior")
                 )
-                prior_intents = tuple(canonical_json(intent.to_dict()) for intent in prior_guided.deferred_intents)
-                candidate_intents = tuple(canonical_json(intent.to_dict()) for intent in candidate_guided.deferred_intents)
-                retained_deferred_intent = None
-                if command.retained_deferred_intent_id is None:
-                    if candidate_intents != prior_intents:
-                        raise AuditIntegrityError("deferred intent mutation requires an explicit typed append sideband")
-                else:
-                    if (
-                        len(candidate_intents) != len(prior_intents) + 1
-                        or candidate_intents[:-1] != prior_intents
-                        or candidate_guided.deferred_intents[-1].intent_id != str(command.retained_deferred_intent_id)
-                    ):
-                        raise AuditIntegrityError("retained deferred intent must be one exact terminal append")
-                    retained_deferred_intent = candidate_guided.deferred_intents[-1]
-                    originating = command.originating_message
-                    if originating is None:  # pragma: no cover - command type owns this guard
-                        raise AuditIntegrityError("retained deferred intent lost its originating message")
-                    if retained_deferred_intent.originating_message_id != str(originating.message_id):
-                        raise AuditIntegrityError("retained deferred intent names the wrong originating message")
-                    if retained_deferred_intent.message_content_hash != stable_hash(originating.content):
-                        raise AuditIntegrityError("retained deferred intent message content hash mismatch")
+                retained_deferred_intent = _verify_guided_deferred_intent_mutation(
+                    conn,
+                    session_id=sid,
+                    command=command,
+                    prior_guided=prior_guided,
+                    candidate_guided=candidate_guided,
+                )
+
+                invalidated_authority = _verify_guided_pending_proposal_invalidation(
+                    conn,
+                    context=_GuidedPendingProposalInvalidationContext(
+                        service=self,
+                        session_id=sid,
+                        current_record=current_record,
+                        prior_guided=prior_guided,
+                        candidate_guided=candidate_guided,
+                        expected_current_content_hash=command.expected_current_content_hash,
+                    ),
+                    invalidation=command.invalidated_pending_proposal,
+                )
 
                 inserted_state_id = self._insert_composition_state(
                     conn,
@@ -8138,6 +8415,14 @@ class SessionServiceImpl:
                 )
                 primary_row = conn.execute(select(composition_states_table).where(composition_states_table.c.id == inserted_state_id)).one()
                 primary_state = self._row_to_state_record(primary_row)
+
+                if invalidated_authority is not None:
+                    _reject_guided_pending_proposal(
+                        conn,
+                        authority=invalidated_authority,
+                        actor=command.actor,
+                        created_at=now,
+                    )
 
                 row_count = len(audit_rows) + (1 if command.originating_message is not None else 0)
                 sequence_no = self._reserve_sequence_range(conn, sid, count=row_count) if row_count else None

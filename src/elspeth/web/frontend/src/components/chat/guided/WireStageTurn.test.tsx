@@ -16,7 +16,7 @@ function canonicalData(): WireStageData {
         source: {
           id: "source",
           plugin: "inline_blob",
-          on_success: "chain_in",
+          on_success: "source_records",
           on_validation_failure: "quarantine",
         },
       },
@@ -25,7 +25,7 @@ function canonicalData(): WireStageData {
           id: "scrape",
           node_type: "transform",
           plugin: "web_scrape",
-          input: "chain_in",
+          input: "source_records",
           on_success: "scraped",
           on_error: "scrape_error",
           routes: null,
@@ -237,7 +237,7 @@ describe("reconstructWireEdges", () => {
       refunds: {
         id: "source:refunds",
         plugin: "inline_blob",
-        on_success: "chain_in",
+        on_success: "source_records",
         on_validation_failure: "discard",
       },
     };
@@ -495,7 +495,7 @@ describe("WireStageTurn", () => {
     // expander for operators.
     expect(screen.getByText("Technical details")).toBeTruthy();
     const raw = document.querySelector(".wire-stage__raw-text");
-    expect(raw?.textContent).toContain("source -> scrape via chain_in (contract unchecked)");
+    expect(raw?.textContent).toContain("source -> scrape via source_records (contract unchecked)");
     expect(raw?.textContent).toContain("scrape -> mapper via scraped (connected)");
 
     // Internal ids appear ONLY inside the raw expander — never in the list.
@@ -503,7 +503,7 @@ describe("WireStageTurn", () => {
     expect(list?.textContent).not.toContain("scrape");
     expect(list?.textContent).not.toContain("mapper");
     expect(list?.textContent).not.toContain("output:jsonl_out");
-    expect(list?.textContent).not.toContain("chain_in");
+    expect(list?.textContent).not.toContain("source_records");
   });
 
   it("buildEntityNames: single source is 'Source', named sources keep their name, plugin-less nodes fall back to node_type", () => {
@@ -519,13 +519,13 @@ describe("WireStageTurn", () => {
       refunds: {
         id: "source:refunds",
         plugin: "inline_blob",
-        on_success: "chain_in",
+        on_success: "source_records",
         on_validation_failure: "discard",
       },
       orders: {
         id: "source:orders",
         plugin: "inline_blob",
-        on_success: "chain_in",
+        on_success: "source_records",
         on_validation_failure: "discard",
       },
     };

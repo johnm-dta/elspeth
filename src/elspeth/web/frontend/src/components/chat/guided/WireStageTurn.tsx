@@ -175,7 +175,7 @@ export interface WireStageTurnProps {
 
 /**
  * Human names for every topology entity, keyed by its internal id
- * (elspeth-016f463ff0: `guided_xform_0` / `output:main` must not reach
+ * (elspeth-016f463ff0: internal node and output identifiers must not reach
  * first-run copy). Transforms reuse the acknowledgement cards' step-label
  * mapping (stepLabelForPlugin, e.g. llm → "Summarise") so the wiring list and
  * the cards name a step identically; a plugin-less structural node falls back

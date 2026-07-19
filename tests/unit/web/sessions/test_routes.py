@@ -5774,6 +5774,56 @@ class TestRevertEndpoint:
     """Tests for POST /api/sessions/{id}/state/revert (R1)."""
 
     @pytest.mark.asyncio
+    async def test_revert_resolves_target_and_mutates_under_compose_lock_but_reserves_outside(self, tmp_path) -> None:
+        from elspeth.web.sessions.routes._helpers import _SessionComposeLockRegistry
+
+        app, service = _make_app(tmp_path)
+        registry = _SessionComposeLockRegistry()
+        app.state.session_compose_lock_registry = registry
+        session = await service.create_session("alice", "Pipeline", "local")
+        target = await service.save_composition_state(
+            session.id,
+            CompositionStateData(is_valid=True),
+            provenance="session_seed",
+        )
+        await service.save_composition_state(
+            session.id,
+            CompositionStateData(is_valid=True),
+            provenance="session_seed",
+        )
+        compose_lock = await registry.get_lock(str(session.id))
+        lock_observations: list[tuple[str, bool]] = []
+        original_get_state = service.get_state
+        original_reserve = service.reserve_guided_operation
+        original_revert = service.revert_state_for_guided_operation
+
+        async def observed_get_state(state_id):
+            lock_observations.append(("target", compose_lock.locked()))
+            return await original_get_state(state_id)
+
+        async def observed_reserve(*args, **kwargs):
+            lock_observations.append(("reserve", compose_lock.locked()))
+            return await original_reserve(*args, **kwargs)
+
+        async def observed_revert(*args, **kwargs):
+            lock_observations.append(("mutation", compose_lock.locked()))
+            return await original_revert(*args, **kwargs)
+
+        with (
+            patch.object(service, "get_state", side_effect=observed_get_state),
+            patch.object(service, "reserve_guided_operation", side_effect=observed_reserve),
+            patch.object(service, "revert_state_for_guided_operation", side_effect=observed_revert),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post(
+                    f"/api/sessions/{session.id}/state/revert",
+                    json={"operation_id": str(uuid.uuid4()), "state_id": str(target.id)},
+                )
+
+        assert response.status_code == 200
+        assert lock_observations == [("target", True), ("reserve", False), ("mutation", True)]
+
+    @pytest.mark.asyncio
     async def test_revert_creates_new_version(self, tmp_path) -> None:
         app, service = _make_app(tmp_path)
         client = TestClient(app)

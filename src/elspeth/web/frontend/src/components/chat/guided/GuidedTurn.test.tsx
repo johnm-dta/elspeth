@@ -88,7 +88,7 @@ const WIRE_STAGE_PAYLOAD: WireStageData = {
       source: {
         id: "source",
         plugin: "inline_blob",
-        on_success: "chain_in",
+        on_success: "source_records",
         on_validation_failure: "discard",
       },
     },
@@ -97,7 +97,7 @@ const WIRE_STAGE_PAYLOAD: WireStageData = {
         id: "scrape",
         node_type: "transform",
         plugin: "web_scrape",
-        input: "chain_in",
+        input: "source_records",
         on_success: "scraped",
         on_error: "scrape_error",
         routes: null,

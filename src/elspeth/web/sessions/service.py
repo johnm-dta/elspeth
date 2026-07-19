@@ -153,6 +153,7 @@ from elspeth.web.sessions.protocol import (
     GuidedOperationSettlementConflictError,
     GuidedOperationTakenOver,
     GuidedPipelineProposalAcceptCommand,
+    GuidedPipelineProposalBackEditCommand,
     GuidedPipelineProposalRejectCommand,
     GuidedPipelineProposalStageCommand,
     GuidedPipelineProposalStageSettlement,
@@ -8617,6 +8618,276 @@ class SessionServiceImpl:
                 return self._row_to_state_record(row)
 
         return cast("CompositionStateRecord", await self._run_sync(_sync))
+
+    async def back_edit_guided_pipeline_proposal(
+        self,
+        command: GuidedPipelineProposalBackEditCommand,
+        *,
+        payload_store: PayloadStore | None = None,
+    ) -> GuidedPipelineProposalStageSettlement:
+        """Atomically supersede one proposal and rewind to a component edit."""
+
+        if type(command) is not GuidedPipelineProposalBackEditCommand:
+            raise TypeError("command must be an exact GuidedPipelineProposalBackEditCommand")
+
+        from elspeth.web.composer.guided.protocol import BLOB_REF_PATH_PREFIX, GuidedStep, Turn, TurnType, validate_current_turn
+        from elspeth.web.composer.guided.state_machine import GuidedSession, TurnRecord
+
+        payloads_by_purpose = {payload.purpose: payload for payload in command.payloads}
+        response_payload = payloads_by_purpose["turn_response"]
+        turn_payload = payloads_by_purpose["turn"]
+        expected_response_payload = {
+            "action": "revise",
+            "proposal_id": str(command.proposal_id),
+            "draft_hash": command.draft_hash,
+            "edit_target": command.edit_target.to_dict(),
+        }
+        if deep_thaw(response_payload.payload) != expected_response_payload:
+            raise AuditIntegrityError("guided back-edit response payload differs from its exact authority")
+        next_turn = command.response.next_turn
+        if next_turn is None:  # pragma: no cover - command guards this
+            raise AuditIntegrityError("guided back-edit response lost its edit form")
+        if next_turn.payload_id != turn_payload.payload_id:
+            raise AuditIntegrityError("guided back-edit response does not bind its edit form payload")
+        target_step = GuidedStep.STEP_1_SOURCE if command.edit_target.kind == "source" else GuidedStep.STEP_2_SINK
+        try:
+            validate_current_turn(
+                target_step,
+                Turn(
+                    type=TurnType.SCHEMA_FORM.value,
+                    step_index=next_turn.step_index,
+                    payload=cast("Any", deep_thaw(turn_payload.payload)),
+                ),
+            )
+        except ValueError as exc:
+            raise AuditIntegrityError("guided back-edit form payload is malformed") from exc
+
+        audit_rows = self._prepare_guided_audit_cohort(
+            audit_evidence=command.audit_evidence,
+            payloads=command.payloads,
+            payload_store=payload_store,
+        )
+        prepared_state = with_guided_response_descriptor(command.state, command.response)
+        sid = str(command.fence.session_id)
+        pid = str(command.proposal_id)
+        now = self._now()
+
+        def _sync() -> GuidedPipelineProposalStageSettlement:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                operation_row, _ = self.require_guided_operation_fence_on_connection(conn, command.fence)
+                if operation_row["kind"] != "guided_respond":
+                    raise AuditIntegrityError("guided proposal back-edit requires guided_respond")
+                self._require_guided_expected_current_state_on_connection(
+                    conn,
+                    session_id=sid,
+                    expected_state_id=command.expected_current_state_id,
+                    expected_state_version=command.expected_current_state_version,
+                )
+                current_row = conn.execute(
+                    select(composition_states_table).where(
+                        composition_states_table.c.session_id == sid,
+                        composition_states_table.c.id == str(command.expected_current_state_id),
+                    )
+                ).one()
+                current_record = self._row_to_state_record(current_row)
+                current_state = state_from_record(current_record)
+                current_content_hash = composition_content_hash(current_state)
+                if current_content_hash != command.expected_current_content_hash:
+                    raise AuditIntegrityError("guided back-edit current composition content changed")
+
+                proposal_row = conn.execute(
+                    select(composition_proposals_table)
+                    .where(composition_proposals_table.c.session_id == sid)
+                    .where(composition_proposals_table.c.id == pid)
+                ).one_or_none()
+                if proposal_row is None:
+                    raise AuditIntegrityError("guided back-edit proposal authority is missing or cross-session")
+                creation_rows = conn.execute(
+                    select(proposal_events_table)
+                    .where(proposal_events_table.c.session_id == sid)
+                    .where(proposal_events_table.c.proposal_id == pid)
+                    .where(proposal_events_table.c.event_type == "proposal.created")
+                ).fetchall()
+                if len(creation_rows) != 1:
+                    raise AuditIntegrityError("guided back-edit proposal must have one creation event")
+                authority = _restore_authoritative_pipeline_proposal(
+                    conn=conn,
+                    row=_proposal_record_from_row(proposal_row),
+                    creation_event=_proposal_event_record_from_row(creation_rows[0]),
+                    reviewed_facts=deep_thaw(command.reviewed_facts),
+                )
+                _verify_pipeline_lifecycle_authority(conn, service=self, authority=authority)
+                if authority.row.status != "pending" or authority.proposal.draft_hash != command.draft_hash:
+                    raise AuditIntegrityError("guided back-edit does not name the active pending draft")
+                if type(authority.proposal.base) is not PresentBase or authority.proposal.base.state_id != current_record.id:
+                    raise AuditIntegrityError("guided back-edit proposal base differs from current checkpoint")
+                if authority.proposal.base.composition_content_hash != current_content_hash:
+                    raise AuditIntegrityError("guided back-edit proposal base content hash changed")
+
+                guided = current_state.guided_session
+                if guided is None or guided.active_proposal is None:
+                    raise AuditIntegrityError("guided back-edit current checkpoint has no active proposal")
+                active = guided.active_proposal
+                if (
+                    active.proposal_id != command.proposal_id
+                    or active.draft_hash != authority.proposal.draft_hash
+                    or active.base != authority.proposal.base
+                    or active.reviewed_anchor_hash != authority.proposal.reviewed_anchor_hash
+                    or active.covered_deferred_intent_ids != authority.proposal.covered_deferred_intent_ids
+                    or active.creation_event_schema != "pipeline_proposal_created.v1"
+                    or active.supersedes_proposal_id != authority.supersedes_proposal_id
+                    or active.supersedes_draft_hash != authority.proposal.supersedes_draft_hash
+                ):
+                    raise AuditIntegrityError("guided back-edit active proposal reference differs from authority")
+                turn_payload_json = deep_thaw(turn_payload.payload)
+                if command.edit_target.kind == "source":
+                    source_target = guided.reviewed_sources.get(command.edit_target.stable_id)
+                    if source_target is None:
+                        raise AuditIntegrityError("guided back-edit target is not an exact reviewed component")
+                    expected_plugin = source_target.plugin
+                    expected_prefill = {"schema": {"mode": "observed"}, **dict(deep_thaw(source_target.options))}
+                    blob_ref = source_target.options.get("blob_ref")
+                    if blob_ref is not None and type(expected_prefill.get("path")) is str:
+                        expected_prefill["path"] = f"{BLOB_REF_PATH_PREFIX}{blob_ref}"
+                    expected_prefill["on_validation_failure"] = source_target.on_validation_failure
+                else:
+                    output_target = guided.reviewed_outputs.get(command.edit_target.stable_id)
+                    if output_target is None:
+                        raise AuditIntegrityError("guided back-edit target is not an exact reviewed component")
+                    expected_plugin = output_target.plugin
+                    expected_prefill = {"schema": {"mode": "observed"}, **dict(deep_thaw(output_target.options))}
+                    expected_prefill["on_write_failure"] = output_target.on_write_failure
+                if turn_payload_json["plugin"] != expected_plugin or deep_thaw(turn_payload_json["prefilled"]) != expected_prefill:
+                    raise AuditIntegrityError("guided back-edit form differs from server-held reviewed custody")
+                if (
+                    guided.step is not GuidedStep.STEP_3_TRANSFORMS
+                    or not guided.history
+                    or guided.history[-1].step is not GuidedStep.STEP_3_TRANSFORMS
+                    or guided.history[-1].turn_type is not TurnType.PROPOSE_PIPELINE
+                    or guided.history[-1].response_hash is not None
+                    or any(record.response_hash is None for record in guided.history[:-1])
+                ):
+                    raise AuditIntegrityError("guided back-edit has no exact active proposal occurrence")
+
+                metadata = deep_thaw(command.state.composer_meta)
+                if type(metadata) is not dict or set(metadata) != {"guided_session"}:
+                    raise AuditIntegrityError("guided back-edit candidate metadata is malformed")
+                try:
+                    candidate_guided = GuidedSession.from_dict(metadata["guided_session"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise AuditIntegrityError("guided back-edit candidate checkpoint is malformed") from exc
+                answered = replace(
+                    guided.history[-1],
+                    response_hash=response_payload.payload_id,
+                    summary="Guided pipeline proposal revision requested.",
+                )
+                emitted = TurnRecord(
+                    step=target_step,
+                    turn_type=TurnType.SCHEMA_FORM,
+                    payload_hash=turn_payload.payload_id,
+                    response_hash=None,
+                    emitter="server",
+                )
+                expected_guided = replace(
+                    guided,
+                    step=target_step,
+                    history=(*guided.history[:-1], answered, emitted),
+                    active_proposal=None,
+                    active_edit_target=command.edit_target,
+                )
+                if candidate_guided != expected_guided:
+                    raise AuditIntegrityError("guided back-edit candidate differs from the exact rewind transition")
+                if (
+                    _composition_state_data_content_hash(command.state) != command.expected_current_content_hash
+                    or command.state.is_valid is not current_record.is_valid
+                    or deep_thaw(command.state.validation_errors) != deep_thaw(current_record.validation_errors)
+                ):
+                    raise AuditIntegrityError("guided back-edit candidate changed authored composition or validation authority")
+
+                state_id = self._insert_composition_state(
+                    conn,
+                    session_id=sid,
+                    payload=StatePayload(data=prepared_state, derived_from_state_id=str(current_record.id)),
+                    provenance="convergence_persist",
+                    created_at=now,
+                )
+                event_id = str(uuid.uuid4())
+                conn.execute(
+                    insert(proposal_events_table).values(
+                        id=event_id,
+                        session_id=sid,
+                        proposal_id=pid,
+                        event_type="proposal.rejected",
+                        actor=command.actor,
+                        payload=_pipeline_rejected_payload(
+                            authority=authority,
+                            reason="superseded",
+                            dispatch=None,
+                        ),
+                        created_at=now,
+                    )
+                )
+                updated = conn.execute(
+                    update(composition_proposals_table)
+                    .where(composition_proposals_table.c.session_id == sid)
+                    .where(composition_proposals_table.c.id == pid)
+                    .where(composition_proposals_table.c.status == "pending")
+                    .values(
+                        status="rejected",
+                        committed_state_id=None,
+                        audit_event_id=event_id,
+                        updated_at=now,
+                    )
+                )
+                if updated.rowcount != 1:
+                    raise AuditIntegrityError("guided back-edit proposal changed during settlement")
+
+                result_row = conn.execute(select(composition_states_table).where(composition_states_table.c.id == state_id)).one()
+                result_state = self._row_to_state_record(result_row)
+                sequence_no = self._reserve_sequence_range(conn, sid, count=len(audit_rows)) if audit_rows else None
+                audit_messages = self._insert_prepared_guided_audit_rows_on_connection(
+                    conn,
+                    session_id=sid,
+                    composition_state_id=result_state.id,
+                    audit_rows=audit_rows,
+                    sequence_no=sequence_no,
+                    created_at=now,
+                )
+                if audit_rows:
+                    conn.execute(update(sessions_table).where(sessions_table.c.id == sid).values(updated_at=now))
+
+                response = project_guided_response(result_state, payloads=command.payloads)
+                projected_json = response_json(response)
+                response_hash = guided_response_projection_hash(response)
+                self.bind_guided_operation_on_connection(
+                    conn,
+                    command.fence,
+                    proposal_id=command.proposal_id,
+                    result_state_id=result_state.id,
+                )
+                self.complete_guided_operation_on_connection(
+                    conn,
+                    command.fence,
+                    result=GuidedCompositionStateResult(state_id=result_state.id, proposal_id=command.proposal_id),
+                    response_hash=response_hash,
+                    actor=command.actor,
+                )
+                updated_row = conn.execute(select(composition_proposals_table).where(composition_proposals_table.c.id == pid)).one()
+                proposal_record = replace(
+                    _proposal_record_from_row(updated_row),
+                    pipeline_metadata=_pipeline_public_metadata(authority),
+                )
+                return GuidedPipelineProposalStageSettlement(
+                    result_state=result_state,
+                    proposal=proposal_record,
+                    audit_messages=audit_messages,
+                    response_json=projected_json,
+                    response_hash=response_hash,
+                )
+
+        settlement = cast("GuidedPipelineProposalStageSettlement", await self._run_sync(_sync))
+        _PIPELINE_SETTLEMENT_COUNTER.add(1, {"surface": "guided_staged", "result": "superseded_for_component_edit"})
+        return settlement
 
     async def reject_guided_pipeline_proposal(
         self,

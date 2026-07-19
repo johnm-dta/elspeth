@@ -33,6 +33,7 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields, require_int
 from elspeth.contracts.hashing import stable_hash
 from elspeth.web.composer.guided.protocol import TurnType
+from elspeth.web.composer.guided.state_machine import ComponentTarget
 from elspeth.web.plugin_policy.models import PluginId, PluginUnavailableReason
 
 if TYPE_CHECKING:
@@ -1328,6 +1329,60 @@ class GuidedPipelineProposalAcceptCommand:
 
 @final
 @dataclass(frozen=True, slots=True)
+class GuidedPipelineProposalBackEditCommand:
+    """Complete atomic source/output proposal-rewind cohort."""
+
+    fence: GuidedOperationFence
+    expected_current_state_id: UUID
+    expected_current_state_version: int
+    expected_current_content_hash: str
+    proposal_id: UUID
+    draft_hash: str
+    reviewed_facts: Mapping[str, Any]
+    edit_target: ComponentTarget
+    state: CompositionStateData
+    actor: str
+    response: GuidedResponseDescriptor
+    payloads: tuple[PreparedGuidedJsonPayload, ...]
+    audit_evidence: GuidedAuditEvidence = GuidedAuditEvidence()
+
+    def __post_init__(self) -> None:
+        if type(self.fence) is not GuidedOperationFence:
+            raise AuditIntegrityError("guided back-edit fence must be exact")
+        for name in ("expected_current_state_id", "proposal_id"):
+            if type(getattr(self, name)) is not UUID:
+                raise AuditIntegrityError(f"guided back-edit {name} must be a UUID")
+        if type(self.expected_current_state_version) is not int or self.expected_current_state_version < 1:
+            raise AuditIntegrityError("guided back-edit expected version must be positive")
+        _require_guided_sha256(self.expected_current_content_hash, "guided back-edit expected content hash")
+        _require_guided_sha256(self.draft_hash, "guided back-edit draft_hash")
+        if type(self.reviewed_facts) not in {dict, MappingProxyType}:
+            raise AuditIntegrityError("guided back-edit reviewed_facts must be a mapping")
+        if type(self.edit_target) is not ComponentTarget or self.edit_target.kind not in {"source", "output"}:
+            raise AuditIntegrityError("guided back-edit target must be an exact source/output ComponentTarget")
+        if type(self.state) is not CompositionStateData:
+            raise AuditIntegrityError("guided back-edit state must be exact")
+        if type(self.actor) is not str or not self.actor:
+            raise AuditIntegrityError("guided back-edit actor must be non-empty")
+        if type(self.response) is not GuidedResponseDescriptor or self.response.kind != "guided_respond":
+            raise AuditIntegrityError("guided back-edit response must be guided_respond")
+        next_turn = self.response.next_turn
+        if next_turn is None or next_turn.turn_type is not TurnType.SCHEMA_FORM:
+            raise AuditIntegrityError("guided back-edit response must carry a schema form")
+        expected_step_index = 0 if self.edit_target.kind == "source" else 1
+        if next_turn.step_index != expected_step_index:
+            raise AuditIntegrityError("guided back-edit response step differs from its target")
+        if type(self.payloads) is not tuple or len(self.payloads) != 2:
+            raise AuditIntegrityError("guided back-edit requires exact response and turn payloads")
+        if {payload.purpose for payload in self.payloads} != {"turn", "turn_response"}:
+            raise AuditIntegrityError("guided back-edit payload purposes are malformed")
+        if type(self.audit_evidence) is not GuidedAuditEvidence:
+            raise AuditIntegrityError("guided back-edit audit evidence must be exact")
+        freeze_fields(self, "reviewed_facts", "payloads")
+
+
+@final
+@dataclass(frozen=True, slots=True)
 class GuidedPipelineProposalRejectCommand:
     """Complete atomic guided operator rejection cohort."""
 
@@ -1719,6 +1774,13 @@ class SessionServiceProtocol(Protocol):
     async def accept_guided_pipeline_proposal(
         self,
         command: GuidedPipelineProposalAcceptCommand,
+        *,
+        payload_store: PayloadStore | None = None,
+    ) -> GuidedPipelineProposalStageSettlement: ...
+
+    async def back_edit_guided_pipeline_proposal(
+        self,
+        command: GuidedPipelineProposalBackEditCommand,
         *,
         payload_store: PayloadStore | None = None,
     ) -> GuidedPipelineProposalStageSettlement: ...

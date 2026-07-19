@@ -12,6 +12,7 @@ import asyncio
 import json
 import threading
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -20,7 +21,7 @@ import pytest
 import structlog
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import event, func, select
 
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallStatus
 from elspeth.contracts.errors import AuditIntegrityError
@@ -29,14 +30,20 @@ from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.service import BlobServiceImpl
 from elspeth.web.composer.audit import BufferingRecorder
+from elspeth.web.composer.pipeline_proposal import composition_content_hash
 from elspeth.web.composer.progress import ComposerProgressRegistry
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
+from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.models import (
     blobs_table,
+    chat_messages_table,
+    composition_proposals_table,
     composition_states_table,
     guided_operation_events_table,
     guided_operations_table,
+    proposal_events_table,
 )
+from elspeth.web.sessions.protocol import CompositionStateData, GuidedOperationClaimed
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.routes._helpers import _SessionComposeLockRegistry
 from elspeth.web.sessions.service import SessionServiceImpl
@@ -693,49 +700,77 @@ class TestStep2IntraStep:
         accepted_source = next(iter(accepted.json()["composition_state"]["sources"].values()))
         assert accepted_source["options"]["path"] == str(source_path)
 
-    def test_target_only_revision_atomically_supersedes_old_and_publishes_successor(
+    @pytest.mark.parametrize("target_kind", ("source", "output"))
+    def test_source_output_back_edit_atomically_supersedes_proposal_without_planning(
         self,
         composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        target_kind: str,
     ) -> None:
         session_id = _create_session(composer_test_client)
         staged = self._stage_proposal(composer_test_client, session_id, filename="revise.jsonl")
         old_turn = staged["next_turn"]
         old_payload = old_turn["payload"]
         old_guided = _full_guided_session(staged)
-        target = old_payload["edit_targets"][0]
+        target = next(candidate for candidate in old_payload["edit_targets"] if candidate["kind"] == target_kind)
+        reviewed_key = "reviewed_sources" if target_kind == "source" else "reviewed_outputs"
+        reviewed_before = old_guided[reviewed_key][target["stable_id"]]
+        planner_calls = 0
+
+        async def forbidden_planner(**_kwargs):
+            nonlocal planner_calls
+            planner_calls += 1
+            raise AssertionError("source/output proposal back-edit must not call the planner")
+
+        monkeypatch.setattr(
+            composer_test_client.app.state.composer_service,
+            "plan_guided_pipeline",
+            forbidden_planner,
+        )
+        operation_id = str(uuid4())
+        request_payload = {
+            "operation_id": operation_id,
+            "turn_token": old_turn["turn_token"],
+            "proposal_id": old_payload["proposal_id"],
+            "draft_hash": old_payload["draft_hash"],
+            "edit_target": target,
+        }
 
         revised = composer_test_client.post(
             f"/api/sessions/{session_id}/guided/respond",
-            json={
-                "operation_id": str(uuid4()),
-                "turn_token": old_turn["turn_token"],
-                "proposal_id": old_payload["proposal_id"],
-                "draft_hash": old_payload["draft_hash"],
-                "edit_target": target,
-            },
+            json=request_payload,
         )
 
         assert revised.status_code == 200, revised.json()
         body = revised.json()
-        successor_turn = body["next_turn"]
-        assert successor_turn["type"] == "propose_pipeline"
-        successor = successor_turn["payload"]
-        assert successor["proposal_id"] != old_payload["proposal_id"]
-        assert successor["draft_hash"] != old_payload["draft_hash"]
+        assert planner_calls == 0
+        edit_turn = body["next_turn"]
+        assert edit_turn["type"] == "schema_form"
+        assert edit_turn["step_index"] == (0 if target_kind == "source" else 1)
         guided = _full_guided_session(body)
         assert guided["reviewed_sources"] == old_guided["reviewed_sources"]
         assert guided["reviewed_outputs"] == old_guided["reviewed_outputs"]
         assert guided["deferred_intents"] == old_guided["deferred_intents"]
-        assert guided["active_proposal"]["proposal_id"] == successor["proposal_id"]
-        assert guided["active_proposal"]["supersedes_proposal_id"] == old_payload["proposal_id"]
-        assert guided["active_proposal"]["supersedes_draft_hash"] == old_payload["draft_hash"]
+        assert guided["active_proposal"] is None
+        assert guided["active_edit_target"] == target
+        assert guided["step"] == ("step_1_source" if target_kind == "source" else "step_2_sink")
+        assert guided[reviewed_key][target["stable_id"]] == reviewed_before
+
+        reentered = _get_guided(composer_test_client, session_id)
+        assert reentered["next_turn"] == edit_turn
+        replayed = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json=request_payload,
+        )
+        assert replayed.status_code == 200, replayed.json()
+        assert replayed.json() == body
 
         proposals = {
             str(proposal.id): proposal
             for proposal in asyncio.run(composer_test_client.app.state.session_service.list_composition_proposals(UUID(session_id)))
         }
         assert proposals[old_payload["proposal_id"]].status == "rejected"
-        assert proposals[successor["proposal_id"]].status == "pending"
+        assert set(proposals) == {old_payload["proposal_id"]}
         events = asyncio.run(composer_test_client.app.state.session_service.list_proposal_events(UUID(session_id)))
         old_events = [event for event in events if str(event.proposal_id) == old_payload["proposal_id"]]
         assert [event.event_type for event in old_events] == ["proposal.created", "proposal.rejected"]
@@ -757,6 +792,38 @@ class TestStep2IntraStep:
             for proposal in asyncio.run(composer_test_client.app.state.session_service.list_composition_proposals(UUID(session_id)))
         }
         assert proposals_after[old_payload["proposal_id"]].status == "rejected"
+
+        continued = _respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "plugin": edit_turn["payload"]["plugin"],
+                "options": {key: value for key, value in edit_turn["payload"]["prefilled"].items() if value is not None},
+            },
+        )
+        expected_review_type = "inspect_and_confirm" if target_kind == "source" else "multi_select_with_custom"
+        assert continued["next_turn"]["type"] == expected_review_type
+        assert _get_guided(composer_test_client, session_id)["next_turn"] == continued["next_turn"]
+        if target_kind == "source":
+            reviewed = _respond(
+                composer_test_client,
+                session_id,
+                edited_values={"columns": reviewed_before["observed_columns"]},
+            )
+            policy_key = "on_validation_failure"
+        else:
+            reviewed = _respond(
+                composer_test_client,
+                session_id,
+                chosen=reviewed_before["required_fields"],
+                custom_inputs=[],
+            )
+            policy_key = "on_write_failure"
+        assert reviewed["next_turn"]["type"] == "review_components"
+        reviewed_after = _full_guided_session(reviewed)[reviewed_key][target["stable_id"]]
+        assert reviewed_after["name"] == reviewed_before["name"]
+        assert reviewed_after["plugin"] == reviewed_before["plugin"]
+        assert reviewed_after[policy_key] == reviewed_before[policy_key]
 
     def test_revision_rejects_non_null_edited_values_without_mutation(
         self,
@@ -786,6 +853,407 @@ class TestStep2IntraStep:
         proposals = asyncio.run(composer_test_client.app.state.session_service.list_composition_proposals(UUID(session_id)))
         assert len(proposals) == 1
         assert proposals[0].status == "pending"
+
+    def test_component_back_edit_rejects_stale_target_without_mutation(
+        self,
+        composer_test_client: TestClient,
+    ) -> None:
+        session_id = _create_session(composer_test_client)
+        staged = self._stage_proposal(composer_test_client, session_id, filename="stale-target.jsonl")
+        turn = staged["next_turn"]
+        proposal = turn["payload"]
+        operation_id = str(uuid4())
+        target = next(candidate for candidate in proposal["edit_targets"] if candidate["kind"] == "source")
+
+        rejected = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "operation_id": operation_id,
+                "turn_token": turn["turn_token"],
+                "proposal_id": proposal["proposal_id"],
+                "draft_hash": proposal["draft_hash"],
+                "edit_target": {**target, "stable_id": str(uuid4())},
+            },
+        )
+
+        assert rejected.status_code == 409, rejected.json()
+        assert _get_guided(composer_test_client, session_id)["next_turn"] == turn
+        proposals = asyncio.run(composer_test_client.app.state.session_service.list_composition_proposals(UUID(session_id)))
+        assert len(proposals) == 1 and proposals[0].status == "pending"
+        with composer_test_client.app.state.session_engine.connect() as conn:
+            operation = conn.execute(
+                select(guided_operations_table.c.operation_id)
+                .where(guided_operations_table.c.session_id == session_id)
+                .where(guided_operations_table.c.operation_id == operation_id)
+            ).one_or_none()
+        assert operation is None
+
+    def test_component_back_edit_rejects_cross_session_proposal_binding_without_mutation(
+        self,
+        composer_test_client: TestClient,
+    ) -> None:
+        session_a = _create_session(composer_test_client)
+        session_b = _create_session(composer_test_client)
+        staged_a = self._stage_proposal(composer_test_client, session_a, filename="cross-a.jsonl")
+        staged_b = self._stage_proposal(composer_test_client, session_b, filename="cross-b.jsonl")
+        turn_a = staged_a["next_turn"]
+        proposal_a = turn_a["payload"]
+        proposal_b = staged_b["next_turn"]["payload"]
+        target_a = next(candidate for candidate in proposal_a["edit_targets"] if candidate["kind"] == "source")
+
+        rejected = composer_test_client.post(
+            f"/api/sessions/{session_a}/guided/respond",
+            json={
+                "operation_id": str(uuid4()),
+                "turn_token": turn_a["turn_token"],
+                "proposal_id": proposal_b["proposal_id"],
+                "draft_hash": proposal_b["draft_hash"],
+                "edit_target": target_a,
+            },
+        )
+
+        assert rejected.status_code == 409, rejected.json()
+        assert _get_guided(composer_test_client, session_a)["next_turn"] == turn_a
+        for session_id in (session_a, session_b):
+            proposals = asyncio.run(composer_test_client.app.state.session_service.list_composition_proposals(UUID(session_id)))
+            assert len(proposals) == 1 and proposals[0].status == "pending"
+
+    def test_component_back_edit_rejects_proposal_base_bound_to_older_head_atomically(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session_id = _create_session(composer_test_client)
+        session_uuid = UUID(session_id)
+        staged = self._stage_proposal(composer_test_client, session_id, filename="stale-base.jsonl")
+        turn = staged["next_turn"]
+        proposal = turn["payload"]
+        target = next(candidate for candidate in proposal["edit_targets"] if candidate["kind"] == "source")
+        service = composer_test_client.app.state.session_service
+        original_back_edit = service.back_edit_guided_pipeline_proposal
+        captured_commands = []
+
+        async def capture_without_settlement(command, *, payload_store=None):
+            del payload_store
+            captured_commands.append(command)
+            raise RuntimeError("capture command before settlement")
+
+        monkeypatch.setattr(service, "back_edit_guided_pipeline_proposal", capture_without_settlement)
+        captured = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "operation_id": str(uuid4()),
+                "turn_token": turn["turn_token"],
+                "proposal_id": proposal["proposal_id"],
+                "draft_hash": proposal["draft_hash"],
+                "edit_target": target,
+            },
+        )
+        assert captured.status_code == 500, captured.json()
+        assert len(captured_commands) == 1
+        command = captured_commands[0]
+
+        older_head = asyncio.run(service.get_current_state(session_uuid))
+        assert older_head is not None
+        later_head = asyncio.run(
+            service.save_composition_state(
+                session_uuid,
+                CompositionStateData(
+                    sources=older_head.sources,
+                    nodes=older_head.nodes,
+                    edges=older_head.edges,
+                    outputs=older_head.outputs,
+                    metadata_=older_head.metadata_,
+                    is_valid=older_head.is_valid,
+                    validation_errors=older_head.validation_errors,
+                    composer_meta=older_head.composer_meta,
+                ),
+                provenance="convergence_persist",
+            )
+        )
+        later_state = state_from_record(later_head)
+        assert later_state.guided_session is not None
+        assert later_state.guided_session.active_proposal is not None
+        assert later_state.guided_session.active_proposal.base.state_id == older_head.id
+        assert later_state.guided_session.active_proposal.base.state_id != later_head.id
+
+        operation_id = str(uuid4())
+        claimed = asyncio.run(
+            service.reserve_guided_operation(
+                session_id=session_uuid,
+                operation_id=operation_id,
+                kind="guided_respond",
+                request_hash="f" * 64,
+                actor="test_route",
+                lease_seconds=300,
+            )
+        )
+        assert isinstance(claimed, GuidedOperationClaimed)
+        stale_base_command = replace(
+            command,
+            fence=claimed.fence,
+            expected_current_state_id=later_head.id,
+            expected_current_state_version=later_head.version,
+            expected_current_content_hash=composition_content_hash(later_state),
+        )
+
+        engine = composer_test_client.app.state.session_engine
+        with engine.connect() as conn:
+            state_count_before = conn.execute(
+                select(func.count()).select_from(composition_states_table).where(composition_states_table.c.session_id == session_id)
+            ).scalar_one()
+            message_count_before = conn.execute(
+                select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.session_id == session_id)
+            ).scalar_one()
+            proposal_before = conn.execute(
+                select(composition_proposals_table.c.status, composition_proposals_table.c.audit_event_id).where(
+                    composition_proposals_table.c.id == proposal["proposal_id"]
+                )
+            ).one()
+            proposal_events_before = (
+                conn.execute(
+                    select(proposal_events_table.c.event_type).where(proposal_events_table.c.proposal_id == proposal["proposal_id"])
+                )
+                .scalars()
+                .all()
+            )
+
+        with pytest.raises(AuditIntegrityError, match="base"):
+            asyncio.run(
+                original_back_edit(
+                    stale_base_command,
+                    payload_store=composer_test_client.app.state.payload_store,
+                )
+            )
+
+        with engine.connect() as conn:
+            assert (
+                conn.execute(
+                    select(func.count()).select_from(composition_states_table).where(composition_states_table.c.session_id == session_id)
+                ).scalar_one()
+                == state_count_before
+            )
+            assert (
+                conn.execute(
+                    select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.session_id == session_id)
+                ).scalar_one()
+                == message_count_before
+            )
+            proposal_row = conn.execute(
+                select(composition_proposals_table.c.status, composition_proposals_table.c.audit_event_id).where(
+                    composition_proposals_table.c.id == proposal["proposal_id"]
+                )
+            ).one()
+            proposal_events_after = (
+                conn.execute(
+                    select(proposal_events_table.c.event_type).where(proposal_events_table.c.proposal_id == proposal["proposal_id"])
+                )
+                .scalars()
+                .all()
+            )
+            operation = conn.execute(
+                select(
+                    guided_operations_table.c.status,
+                    guided_operations_table.c.proposal_id,
+                    guided_operations_table.c.result_kind,
+                    guided_operations_table.c.result_state_id,
+                    guided_operations_table.c.response_hash,
+                )
+                .where(guided_operations_table.c.session_id == session_id)
+                .where(guided_operations_table.c.operation_id == operation_id)
+            ).one()
+            messages = (
+                conn.execute(select(chat_messages_table.c.tool_calls).where(chat_messages_table.c.session_id == session_id)).scalars().all()
+            )
+            operation_events = (
+                conn.execute(
+                    select(guided_operation_events_table.c.event_kind)
+                    .where(guided_operation_events_table.c.session_id == session_id)
+                    .where(guided_operation_events_table.c.operation_id == operation_id)
+                    .order_by(guided_operation_events_table.c.sequence)
+                )
+                .scalars()
+                .all()
+            )
+        assert proposal_row == proposal_before
+        assert proposal_row.status == "pending"
+        assert proposal_events_before == ["proposal.created"]
+        assert proposal_events_after == proposal_events_before
+        assert operation.status == "in_progress"
+        assert operation.proposal_id is None
+        assert operation.result_kind is None
+        assert operation.result_state_id is None
+        assert operation.response_hash is None
+        assert operation_events == ["claimed"]
+        assert all(payload.payload_id not in repr(messages) for payload in stale_base_command.payloads)
+
+    @pytest.mark.parametrize(
+        "fault_point",
+        (
+            "state_insert",
+            "proposal_event",
+            "proposal_update",
+            "audit_insert",
+            "operation_bind",
+            "operation_complete",
+            "operation_event",
+        ),
+    )
+    def test_component_back_edit_fault_rolls_back_every_settlement_surface(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        fault_point: str,
+    ) -> None:
+        session_id = _create_session(composer_test_client)
+        staged = self._stage_proposal(composer_test_client, session_id, filename=f"back-edit-{fault_point}.jsonl")
+        turn = staged["next_turn"]
+        proposal_payload = turn["payload"]
+        target = next(candidate for candidate in proposal_payload["edit_targets"] if candidate["kind"] == "source")
+        operation_id = str(uuid4())
+        engine = composer_test_client.app.state.session_engine
+        service = composer_test_client.app.state.session_service
+        original = service.back_edit_guided_pipeline_proposal
+        captured_commands = []
+
+        async def capture(command, *, payload_store=None):
+            captured_commands.append(command)
+            return await original(command, payload_store=payload_store)
+
+        monkeypatch.setattr(service, "back_edit_guided_pipeline_proposal", capture)
+        with engine.connect() as conn:
+            state_count_before = conn.execute(
+                select(func.count()).select_from(composition_states_table).where(composition_states_table.c.session_id == session_id)
+            ).scalar_one()
+
+        armed = True
+        observed_writes: set[str] = set()
+        operation_event_predecessors: set[str] | None = None
+
+        def inject_fault(_conn, _cursor, statement, _parameters, _context, _executemany):
+            nonlocal armed, operation_event_predecessors
+            if not armed:
+                return
+            normalized = " ".join(statement.lower().split())
+            if normalized.startswith("insert into composition_states"):
+                observed_writes.add("state_insert")
+            elif normalized.startswith("insert into proposal_events"):
+                observed_writes.add("proposal_event")
+            elif normalized.startswith("update composition_proposals"):
+                observed_writes.add("proposal_update")
+            elif normalized.startswith("insert into chat_messages"):
+                observed_writes.add("audit_insert")
+            elif normalized.startswith("update guided_operations") and " set originating_message_id" in normalized:
+                observed_writes.add("operation_bind")
+            elif normalized.startswith("update guided_operations") and " set status" in normalized:
+                observed_writes.add("operation_complete")
+            matched = (
+                (fault_point == "state_insert" and normalized.startswith("insert into composition_states"))
+                or (fault_point == "proposal_event" and normalized.startswith("insert into proposal_events"))
+                or (fault_point == "proposal_update" and normalized.startswith("update composition_proposals"))
+                or (fault_point == "audit_insert" and normalized.startswith("insert into chat_messages"))
+                or (
+                    fault_point == "operation_bind"
+                    and normalized.startswith("update guided_operations")
+                    and " set originating_message_id" in normalized
+                )
+                or (
+                    fault_point == "operation_complete"
+                    and normalized.startswith("update guided_operations")
+                    and " set status" in normalized
+                )
+                or (
+                    fault_point == "operation_event"
+                    and "operation_complete" in observed_writes
+                    and normalized.startswith("insert into guided_operation_events")
+                )
+            )
+            if matched:
+                if fault_point == "operation_event":
+                    operation_event_predecessors = set(observed_writes)
+                armed = False
+                raise RuntimeError(f"injected {fault_point}")
+
+        event.listen(engine, "before_cursor_execute", inject_fault)
+        try:
+            failed = composer_test_client.post(
+                f"/api/sessions/{session_id}/guided/respond",
+                json={
+                    "operation_id": operation_id,
+                    "turn_token": turn["turn_token"],
+                    "proposal_id": proposal_payload["proposal_id"],
+                    "draft_hash": proposal_payload["draft_hash"],
+                    "edit_target": target,
+                },
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", inject_fault)
+
+        assert failed.status_code == 500, failed.json()
+        assert not armed, f"fault point {fault_point} was not reached"
+        if fault_point == "operation_event":
+            assert operation_event_predecessors is not None
+            assert {
+                "state_insert",
+                "proposal_event",
+                "proposal_update",
+                "audit_insert",
+                "operation_bind",
+                "operation_complete",
+            } <= operation_event_predecessors
+        assert len(captured_commands) == 1
+        prepared_payload_ids = {payload.payload_id for payload in captured_commands[0].payloads}
+        assert _get_guided(composer_test_client, session_id)["next_turn"] == turn
+        with engine.connect() as conn:
+            assert (
+                conn.execute(
+                    select(func.count()).select_from(composition_states_table).where(composition_states_table.c.session_id == session_id)
+                ).scalar_one()
+                == state_count_before
+            )
+            proposal = conn.execute(
+                select(composition_proposals_table.c.status, composition_proposals_table.c.audit_event_id).where(
+                    composition_proposals_table.c.id == proposal_payload["proposal_id"]
+                )
+            ).one()
+            events = conn.execute(
+                select(proposal_events_table.c.event_type).where(proposal_events_table.c.proposal_id == proposal_payload["proposal_id"])
+            ).all()
+            operation = conn.execute(
+                select(
+                    guided_operations_table.c.status,
+                    guided_operations_table.c.proposal_id,
+                    guided_operations_table.c.result_kind,
+                    guided_operations_table.c.result_state_id,
+                    guided_operations_table.c.response_hash,
+                    guided_operations_table.c.failure_code,
+                )
+                .where(guided_operations_table.c.session_id == session_id)
+                .where(guided_operations_table.c.operation_id == operation_id)
+            ).one()
+            messages = (
+                conn.execute(select(chat_messages_table.c.tool_calls).where(chat_messages_table.c.session_id == session_id)).scalars().all()
+            )
+            operation_events = (
+                conn.execute(
+                    select(guided_operation_events_table.c.event_kind)
+                    .where(guided_operation_events_table.c.session_id == session_id)
+                    .where(guided_operation_events_table.c.operation_id == operation_id)
+                    .order_by(guided_operation_events_table.c.sequence)
+                )
+                .scalars()
+                .all()
+            )
+        assert proposal.status == "pending"
+        assert [row.event_type for row in events] == ["proposal.created"]
+        assert operation.status == "failed"
+        assert operation.failure_code == "operation_failed"
+        assert operation.proposal_id is None
+        assert operation.result_kind is None
+        assert operation.result_state_id is None
+        assert operation.response_hash is None
+        assert operation_events == ["claimed", "renewed", "failed"]
+        assert all(payload_id not in repr(messages) for payload_id in prepared_payload_ids)
 
     def test_proposal_lifecycle_surfaces_never_expose_private_review_canaries(
         self,
@@ -821,19 +1289,7 @@ class TestStep2IntraStep:
         )
         assert revised.status_code == 200, revised.json()
         restored = _get_guided(composer_test_client, session_id)
-        successor_turn = revised.json()["next_turn"]
-        successor = successor_turn["payload"]
-        accepted = composer_test_client.post(
-            f"/api/sessions/{session_id}/guided/respond",
-            json={
-                "operation_id": str(uuid4()),
-                "turn_token": successor_turn["turn_token"],
-                "proposal_id": successor["proposal_id"],
-                "draft_hash": successor["draft_hash"],
-                "chosen": ["accept"],
-            },
-        )
-        assert accepted.status_code == 200, accepted.json()
+        assert revised.json()["next_turn"]["type"] == "schema_form"
         events = asyncio.run(composer_test_client.app.state.session_service.list_proposal_events(UUID(session_id)))
 
         rejected_session_id = _create_session(composer_test_client)
@@ -863,7 +1319,6 @@ class TestStep2IntraStep:
             staged,
             revised.json(),
             restored,
-            accepted.json(),
             rejected_stage,
             rejected.json(),
             rejected_restored,
@@ -1103,7 +1558,8 @@ class TestStep2IntraStep:
         payload = turn["payload"]
         target = payload["edit_targets"][0]
         planner_calls = 0
-        original_planner = composer_test_client.app.state.composer_service.plan_guided_pipeline
+        back_edit_calls = 0
+        original_back_edit = composer_test_client.app.state.session_service.back_edit_guided_pipeline_proposal
         revision_request = {
             "operation_id": str(uuid4()),
             "turn_token": turn["turn_token"],
@@ -1120,21 +1576,31 @@ class TestStep2IntraStep:
         }
 
         async def race():
-            nonlocal planner_calls
-            planner_entered = asyncio.Event()
-            release_planner = asyncio.Event()
+            nonlocal back_edit_calls
+            back_edit_entered = asyncio.Event()
+            release_back_edit = asyncio.Event()
 
-            async def blocking_planner(**kwargs):
+            async def forbidden_planner(**_kwargs):
                 nonlocal planner_calls
                 planner_calls += 1
-                planner_entered.set()
-                await release_planner.wait()
-                return await original_planner(**kwargs)
+                raise AssertionError("source/output proposal back-edit must not call the planner")
+
+            async def blocking_back_edit(command, *, payload_store=None):
+                nonlocal back_edit_calls
+                back_edit_calls += 1
+                back_edit_entered.set()
+                await release_back_edit.wait()
+                return await original_back_edit(command, payload_store=payload_store)
 
             monkeypatch.setattr(
                 composer_test_client.app.state.composer_service,
                 "plan_guided_pipeline",
-                blocking_planner,
+                forbidden_planner,
+            )
+            monkeypatch.setattr(
+                composer_test_client.app.state.session_service,
+                "back_edit_guided_pipeline_proposal",
+                blocking_back_edit,
             )
             async with AsyncClient(
                 transport=ASGITransport(app=composer_test_client.app),
@@ -1146,13 +1612,11 @@ class TestStep2IntraStep:
                         json=revision_request,
                     )
                 )
-                await asyncio.wait_for(planner_entered.wait(), timeout=5)
-                # Revision planning runs while both guided admission and the
-                # per-session compose lock are held. Reaching this point
-                # therefore fences accept behind revision publication; once
-                # released, accept must fail stale preflight rather than race
-                # the old pending row inside either settlement transaction.
-                during_planning = await composer_test_client.app.state.session_service.list_composition_proposals(UUID(session_id))
+                await asyncio.wait_for(back_edit_entered.wait(), timeout=5)
+                # The atomic back-edit settlement is invoked while guided
+                # admission and the per-session compose lock are held. Accept
+                # queues behind it and then fails stale preflight.
+                during_back_edit = await composer_test_client.app.state.session_service.list_composition_proposals(UUID(session_id))
                 accept_task = asyncio.create_task(
                     client.post(
                         f"/api/sessions/{session_id}/guided/respond",
@@ -1160,7 +1624,7 @@ class TestStep2IntraStep:
                     )
                 )
                 await asyncio.sleep(0)
-                release_planner.set()
+                release_back_edit.set()
                 revised, accepted = await asyncio.wait_for(
                     asyncio.gather(revision_task, accept_task),
                     timeout=10,
@@ -1169,33 +1633,31 @@ class TestStep2IntraStep:
                     f"/api/sessions/{session_id}/guided/respond",
                     json=revision_request,
                 )
-                return during_planning, revised, accepted, replayed
+                return during_back_edit, revised, accepted, replayed
 
-        during_planning, revised, accepted, replayed = asyncio.run(race())
-        assert len(during_planning) == 1
-        assert during_planning[0].status == "pending"
+        during_back_edit, revised, accepted, replayed = asyncio.run(race())
+        assert len(during_back_edit) == 1
+        assert during_back_edit[0].status == "pending"
 
         assert revised.status_code == 200, revised.json()
         assert accepted.status_code == 409, accepted.json()
         winner_body = revised.json()
-        successor_id = winner_body["next_turn"]["payload"]["proposal_id"]
+        assert winner_body["next_turn"]["type"] == "schema_form"
         proposals = {
             str(proposal.id): proposal
             for proposal in asyncio.run(composer_test_client.app.state.session_service.list_composition_proposals(UUID(session_id)))
         }
-        assert set(proposals) == {payload["proposal_id"], successor_id}
+        assert set(proposals) == {payload["proposal_id"]}
         assert proposals[payload["proposal_id"]].status == "rejected"
-        assert proposals[successor_id].status == "pending"
         events_before_replay = asyncio.run(composer_test_client.app.state.session_service.list_proposal_events(UUID(session_id)))
         assert [event.event_type for event in events_before_replay if str(event.proposal_id) == payload["proposal_id"]] == [
             "proposal.created",
             "proposal.rejected",
         ]
-        assert [event.event_type for event in events_before_replay if str(event.proposal_id) == successor_id] == ["proposal.created"]
-
         assert replayed.status_code == 200, replayed.json()
         assert replayed.json() == winner_body
-        assert planner_calls == 1
+        assert planner_calls == 0
+        assert back_edit_calls == 1
         events_after_replay = asyncio.run(composer_test_client.app.state.session_service.list_proposal_events(UUID(session_id)))
         assert events_after_replay == events_before_replay
 
@@ -1243,7 +1705,7 @@ class TestStep2IntraStep:
         accept_service = primary_app.state.session_service
         revise_service = peer_app.state.session_service
         original_accept = accept_service.accept_guided_pipeline_proposal
-        original_stage = revise_service.stage_guided_pipeline_proposal
+        original_back_edit = revise_service.back_edit_guided_pipeline_proposal
         original_accept_lock = accept_service._session_write_lock
         original_revise_lock = revise_service._session_write_lock
         accept_ready = asyncio.Event()
@@ -1270,16 +1732,17 @@ class TestStep2IntraStep:
             finally:
                 accept_armed.clear()
 
-        async def gated_stage(command, *, payload_store=None):
+        async def gated_back_edit(command, *, payload_store=None):
             revise_commands.append(command)
-            assert str(command.supersedes_proposal_id) == proposal_payload["proposal_id"]
+            assert str(command.proposal_id) == proposal_payload["proposal_id"]
+            assert command.edit_target.to_dict() == target
             revise_ready.set()
             await release_winner.wait()
             if db_winner != "revise":
                 assert await asyncio.to_thread(winner_db_locked.wait, 10)
             revise_armed.set()
             try:
-                return await original_stage(command, payload_store=payload_store)
+                return await original_back_edit(command, payload_store=payload_store)
             finally:
                 revise_armed.clear()
 
@@ -1316,7 +1779,7 @@ class TestStep2IntraStep:
                 yield
 
         monkeypatch.setattr(accept_service, "accept_guided_pipeline_proposal", gated_accept)
-        monkeypatch.setattr(revise_service, "stage_guided_pipeline_proposal", gated_stage)
+        monkeypatch.setattr(revise_service, "back_edit_guided_pipeline_proposal", gated_back_edit)
         monkeypatch.setattr(accept_service, "_session_write_lock", accept_db_lock)
         monkeypatch.setattr(revise_service, "_session_write_lock", revise_db_lock)
 
@@ -1452,16 +1915,12 @@ class TestStep2IntraStep:
             assert len(dispatches) == 1
             assert current["next_turn"]["type"] == "confirm_wiring"
         else:
-            successor_id = revise_response.json()["next_turn"]["payload"]["proposal_id"]
-            assert set(proposals) == {original_id, successor_id}
-            assert len(events) == 3
+            assert set(proposals) == {original_id}
+            assert len(events) == 2
             assert proposals[original_id].status == "rejected"
-            assert proposals[successor_id].status == "pending"
             assert original_events == ["proposal.created", "proposal.rejected"]
-            assert [event.event_type for event in events if str(event.proposal_id) == successor_id] == ["proposal.created"]
             assert dispatches == []
-            assert current["next_turn"]["type"] == "propose_pipeline"
-            assert current["next_turn"]["payload"]["proposal_id"] == successor_id
+            assert current["next_turn"]["type"] == "schema_form"
 
     def test_accept_atomically_commits_pipeline_consumes_coverage_and_advances_to_wire(
         self,

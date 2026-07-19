@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { useSessionStore } from "./sessionStore";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
+import { acquireGuidedRetry, GUIDED_RETRY_STORAGE_KEY } from "./guidedOperationRetry";
 import { resetStore } from "@/test/store-helpers";
 import type { GuidedSession, TurnPayload, TerminalState, GetGuidedResponse, GuidedRespondAction, GuidedRespondResponse, GuidedChatResponse } from "@/types/guided";
 
@@ -40,6 +41,7 @@ vi.mock("@/api/client", () => ({
   archiveSession: vi.fn(),
   getGuided: vi.fn(),
   startGuidedSession: vi.fn(),
+  reconcileGuidedStartOperation: vi.fn(),
   respondGuided: vi.fn(),
   GuidedResponseReceiptError: MockGuidedResponseReceiptError,
   reenterGuided: vi.fn(),
@@ -361,7 +363,9 @@ describe("sessionStore — guided-mode fields and actions", () => {
     await useSessionStore.getState().seedGuided(RETRY_SESSION_ID, "tutorial");
 
     expect(start).toHaveBeenCalledTimes(2);
-    expect(start.mock.calls[0]?.[2]).toBe(start.mock.calls[1]?.[2]);
+    expect(start.mock.calls[0]?.[1].operationId).toBe(
+      start.mock.calls[1]?.[1].operationId,
+    );
     expect(useSessionStore.getState().guidedSession).toEqual(
       sampleGetGuidedResponse.guided_session,
     );
@@ -383,34 +387,13 @@ describe("sessionStore — guided-mode fields and actions", () => {
     useSessionStore.setState({ activeSessionId: RETRY_SESSION_B });
 
     await expect(
-      useSessionStore.getState().seedGuided(RETRY_SESSION_B, "live"),
+      useSessionStore.getState().seedGuided(RETRY_SESSION_B, "tutorial"),
     ).rejects.toMatchObject({ error_type: "guided_operation_terminal_failure" });
-    await useSessionStore.getState().seedGuided(RETRY_SESSION_B, "live");
+    await useSessionStore.getState().seedGuided(RETRY_SESSION_B, "tutorial");
 
-    expect(start.mock.calls[0]?.[2]).not.toBe(start.mock.calls[1]?.[2]);
-  });
-
-  it("seedGuided: reports a conflicting profile without rejecting or sending another request", async () => {
-    const { startGuidedSession } = await import("@/api/client");
-    const start = startGuidedSession as ReturnType<typeof vi.fn>;
-    start.mockRejectedValue(new TypeError("response lost"));
-    useSessionStore.setState({ activeSessionId: RETRY_SESSION_ID });
-
-    await expect(
-      useSessionStore.getState().seedGuided(RETRY_SESSION_ID, "tutorial"),
-    ).rejects.toThrow("response lost");
-    await expect(
-      useSessionStore.getState().seedGuided(RETRY_SESSION_ID, "live"),
-    ).resolves.toBeUndefined();
-
-    expect(start).toHaveBeenCalledTimes(1);
-    expect(useSessionStore.getState().error).toMatch(/unsettled/i);
-
-    await expect(
-      useSessionStore.getState().seedGuided(RETRY_SESSION_ID, "tutorial"),
-    ).rejects.toThrow("response lost");
-    expect(start).toHaveBeenCalledTimes(2);
-    expect(start.mock.calls[1]?.[2]).toBe(start.mock.calls[0]?.[2]);
+    expect(start.mock.calls[0]?.[1].operationId).not.toBe(
+      start.mock.calls[1]?.[1].operationId,
+    );
   });
 
   it("seedGuided: retains the operation id when downstream response application fails", async () => {
@@ -429,7 +412,9 @@ describe("sessionStore — guided-mode fields and actions", () => {
     ).rejects.toThrow("interpretation refresh failed");
     await useSessionStore.getState().seedGuided(RETRY_SESSION_ID, "tutorial");
 
-    expect(start.mock.calls[0]?.[2]).toBe(start.mock.calls[1]?.[2]);
+    expect(start.mock.calls[0]?.[1].operationId).toBe(
+      start.mock.calls[1]?.[1].operationId,
+    );
   });
 
   it("seedGuided: clears a definitive response dropped by the stale-session guard", async () => {
@@ -457,7 +442,9 @@ describe("sessionStore — guided-mode fields and actions", () => {
     useSessionStore.setState({ activeSessionId: RETRY_SESSION_ID });
     await useSessionStore.getState().seedGuided(RETRY_SESSION_ID, "tutorial");
 
-    expect(start.mock.calls[0]?.[2]).not.toBe(start.mock.calls[1]?.[2]);
+    expect(start.mock.calls[0]?.[1].operationId).not.toBe(
+      start.mock.calls[1]?.[1].operationId,
+    );
   });
 
   // ── Test 4: respondGuided happy path ─────────────────────────────────────
@@ -2202,6 +2189,10 @@ describe("sessionStore — guided-mode fields and actions", () => {
   });
 
   describe("chatGuided", () => {
+    beforeEach(() => {
+      useSessionStore.setState({ compositionState: sampleCompositionState });
+    });
+
     it("throws when activeSessionId is null", async () => {
       await expect(
         useSessionStore.getState().chatGuided("What columns are available?"),
@@ -2226,6 +2217,414 @@ describe("sessionStore — guided-mode fields and actions", () => {
       await expect(
         useSessionStore.getState().chatGuided("What columns are available?"),
       ).rejects.toThrow("chatGuided called without a current unanswered turn");
+    });
+
+    it("starts a cold live session with the exact first ordinary message before any guided chat", async () => {
+      const { chatGuided, getGuided, startGuidedSession } = await import("@/api/client");
+      const start = startGuidedSession as ReturnType<typeof vi.fn>;
+      start.mockResolvedValueOnce(sampleGetGuidedResponse);
+      (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        sampleGetGuidedResponse,
+      );
+      useSessionStore.setState({
+        activeSessionId: RETRY_SESSION_ID,
+        guidedSession: sampleGuidedSession,
+        guidedNextTurn: null,
+        compositionState: null,
+      });
+
+      await useSessionStore.getState().chatGuided("Build the exact graph");
+
+      expect(start).toHaveBeenCalledWith(
+        RETRY_SESSION_ID,
+        {
+          profile: "live",
+          intent: "Build the exact graph",
+          operationId: expect.any(String),
+        },
+        undefined,
+      );
+      expect(getGuided).not.toHaveBeenCalled();
+      expect(chatGuided).not.toHaveBeenCalled();
+      expect(useSessionStore.getState().compositionState).toEqual(
+        sampleCompositionState,
+      );
+      expect(useSessionStore.getState().guidedChatPending).toBe(false);
+    });
+
+    it("cold cancel reconciles with a fresh signal, clears a failed attempt, and permits revised text", async () => {
+      const { reconcileGuidedStartOperation, startGuidedSession } = await import("@/api/client");
+      const start = startGuidedSession as ReturnType<typeof vi.fn>;
+      const reconcile = reconcileGuidedStartOperation as ReturnType<typeof vi.fn>;
+      start
+        .mockImplementationOnce(
+          (_sessionId: string, _body: unknown, signal?: AbortSignal) =>
+            new Promise((_resolve, reject) => {
+              signal?.addEventListener("abort", () => reject(signal.reason));
+            }),
+        )
+        .mockResolvedValueOnce(sampleGetGuidedResponse);
+      reconcile.mockResolvedValueOnce({ status: "failed", failure_code: "request_cancelled" });
+      useSessionStore.setState({
+        activeSessionId: RETRY_SESSION_ID,
+        guidedSession: sampleGuidedSession,
+        guidedNextTurn: null,
+        compositionState: null,
+      });
+      const controller = new AbortController();
+
+      const pending = useSessionStore.getState().chatGuided("Original prompt", controller.signal);
+      controller.abort("compose_user_cancel");
+      await pending;
+
+      expect(reconcile).toHaveBeenCalledTimes(1);
+      const reconcileSignal = reconcile.mock.calls[0]?.[2] as AbortSignal;
+      expect(reconcileSignal).not.toBe(controller.signal);
+      expect(reconcileSignal.aborted).toBe(false);
+      expect(useSessionStore.getState().error).toMatch(/stopped.*revise.*send it again/i);
+      expect(window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY) ?? "").not.toContain(
+        '"kind":"guided_start"',
+      );
+
+      await useSessionStore.getState().chatGuided("Revised prompt");
+      expect(start).toHaveBeenCalledTimes(2);
+      expect(start.mock.calls[1]?.[1]).toEqual(
+        expect.objectContaining({ intent: "Revised prompt" }),
+      );
+    });
+
+    it("cold cancel applies an authoritatively completed operation and clears custody", async () => {
+      const { getGuided, reconcileGuidedStartOperation, startGuidedSession } = await import("@/api/client");
+      const controller = new AbortController();
+      (startGuidedSession as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        (_sessionId: string, _body: unknown, signal?: AbortSignal) =>
+          new Promise((_resolve, reject) => {
+            signal?.addEventListener("abort", () => reject(signal.reason));
+          }),
+      );
+      (reconcileGuidedStartOperation as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        status: "completed",
+        composition_state_id: sampleCompositionState.id,
+      });
+      (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sampleGetGuidedResponse);
+      useSessionStore.setState({
+        activeSessionId: RETRY_SESSION_ID,
+        guidedSession: sampleGuidedSession,
+        guidedNextTurn: null,
+        compositionState: null,
+      });
+
+      const pending = useSessionStore.getState().chatGuided("Original prompt", controller.signal);
+      controller.abort("compose_user_cancel");
+      await pending;
+
+      expect(getGuided).toHaveBeenCalledWith(RETRY_SESSION_ID, expect.any(AbortSignal));
+      expect(useSessionStore.getState().compositionState).toEqual(sampleCompositionState);
+      expect(useSessionStore.getState().error).toBeNull();
+      expect(window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY) ?? "").not.toContain(
+        '"kind":"guided_start"',
+      );
+    });
+
+    it.each([
+      ["in_progress", { status: "in_progress" }],
+      ["unknown network state", new TypeError("reconciliation unavailable")],
+    ])("retains %s custody and sends no conflicting revised POST", async (_label, reconciliation) => {
+      const { reconcileGuidedStartOperation, startGuidedSession } = await import("@/api/client");
+      const reconcile = reconcileGuidedStartOperation as ReturnType<typeof vi.fn>;
+      (startGuidedSession as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new TypeError("response lost"));
+      if (reconciliation instanceof Error) {
+        reconcile.mockRejectedValue(reconciliation);
+      } else {
+        reconcile.mockResolvedValue(reconciliation);
+      }
+      useSessionStore.setState({
+        activeSessionId: RETRY_SESSION_ID,
+        guidedSession: sampleGuidedSession,
+        guidedNextTurn: null,
+        compositionState: null,
+      });
+
+      await useSessionStore.getState().chatGuided("Original prompt");
+      await useSessionStore.getState().chatGuided("Revised prompt");
+
+      expect(startGuidedSession).toHaveBeenCalledTimes(1);
+      expect(reconcile).toHaveBeenCalledTimes(2);
+      expect(window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY)).toContain(
+        '"kind":"guided_start"',
+      );
+      expect(useSessionStore.getState().error).toMatch(/confirm|running/i);
+    });
+
+    it("selectSession clears a failed cold-start descriptor without needing the lost prompt", async () => {
+      const {
+        fetchComposerPreferences,
+        fetchCompositionProposals,
+        fetchCompositionState,
+        fetchMessages,
+        getGuided,
+        reconcileGuidedStartOperation,
+      } = await import("@/api/client");
+      acquireGuidedRetry("guided_start", RETRY_SESSION_ID, ["live", "prompt no longer in memory"]);
+      (fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+      (fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+      (fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+      (fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+      (getGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce({ status: 400 });
+      (reconcileGuidedStartOperation as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        status: "failed",
+        failure_code: "request_cancelled",
+      });
+
+      await useSessionStore.getState().selectSession(RETRY_SESSION_ID);
+
+      expect(reconcileGuidedStartOperation).toHaveBeenCalledWith(
+        RETRY_SESSION_ID,
+        expect.any(String),
+        expect.any(AbortSignal),
+      );
+      expect(window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY) ?? "").not.toContain(
+        '"kind":"guided_start"',
+      );
+      expect(useSessionStore.getState().activeSessionId).toBe(RETRY_SESSION_ID);
+    });
+
+    it("recovers an ambiguous cold start through authoritative completion without another POST", async () => {
+      const { getGuided, reconcileGuidedStartOperation, startGuidedSession } = await import("@/api/client");
+      const start = startGuidedSession as ReturnType<typeof vi.fn>;
+      start.mockRejectedValueOnce(new TypeError("response lost"));
+      (reconcileGuidedStartOperation as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        status: "completed",
+        composition_state_id: sampleCompositionState.id,
+      });
+      (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        sampleGetGuidedResponse,
+      );
+      useSessionStore.setState({
+        activeSessionId: RETRY_SESSION_ID,
+        guidedSession: sampleGuidedSession,
+        guidedNextTurn: null,
+        compositionState: null,
+      });
+
+      await useSessionStore.getState().chatGuided("Build the exact graph");
+
+      expect(start).toHaveBeenCalledTimes(1);
+      expect(getGuided).toHaveBeenCalledTimes(1);
+      expect(useSessionStore.getState().compositionState).toEqual(sampleCompositionState);
+    });
+
+    it("selectSession retires cold-start custody after its fenced authoritative reload", async () => {
+      const {
+        fetchMessages,
+        fetchCompositionState,
+        fetchCompositionProposals,
+        fetchComposerPreferences,
+        getGuided,
+        reconcileGuidedStartOperation,
+        startGuidedSession,
+      } = await import("@/api/client");
+      const start = startGuidedSession as ReturnType<typeof vi.fn>;
+      start.mockRejectedValueOnce(new TypeError("response lost"));
+      useSessionStore.setState({
+        activeSessionId: RETRY_SESSION_ID,
+        guidedSession: sampleGuidedSession,
+        guidedNextTurn: null,
+        compositionState: null,
+      });
+
+      await useSessionStore.getState().chatGuided("Build the exact graph");
+      expect(window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY)).toContain(
+        '"kind":"guided_start"',
+      );
+
+      (fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+      (fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        sampleCompositionState,
+      );
+      (fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+      (fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+      (getGuided as ReturnType<typeof vi.fn>).mockResolvedValue(sampleGetGuidedResponse);
+      (reconcileGuidedStartOperation as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        status: "completed",
+        composition_state_id: sampleCompositionState.id,
+      });
+
+      await useSessionStore.getState().selectSession(RETRY_SESSION_ID);
+
+      expect(
+        window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY) ?? "",
+      ).not.toContain('"kind":"guided_start"');
+
+      start.mockResolvedValueOnce(sampleGetGuidedResponse);
+      useSessionStore.setState({
+        compositionState: null,
+        guidedNextTurn: null,
+      });
+      await useSessionStore.getState().chatGuided("Build a different graph");
+
+      expect(start).toHaveBeenCalledTimes(2);
+      expect(start.mock.calls[1]?.[1]).toEqual(
+        expect.objectContaining({ intent: "Build a different graph" }),
+      );
+      expect(useSessionStore.getState().error).toBeNull();
+    });
+
+    it("passes the caller abort signal through the cold guided-start POST", async () => {
+      const { startGuidedSession } = await import("@/api/client");
+      const start = startGuidedSession as ReturnType<typeof vi.fn>;
+      start.mockResolvedValueOnce(sampleGetGuidedResponse);
+      useSessionStore.setState({
+        activeSessionId: RETRY_SESSION_ID,
+        guidedSession: sampleGuidedSession,
+        guidedNextTurn: null,
+        compositionState: null,
+      });
+      const controller = new AbortController();
+
+      await useSessionStore
+        .getState()
+        .chatGuided("Build the exact graph", controller.signal);
+
+      expect(start).toHaveBeenCalledWith(
+        RETRY_SESSION_ID,
+        expect.objectContaining({ intent: "Build the exact graph" }),
+        controller.signal,
+      );
+    });
+
+    it("recovers a malformed committed response through authoritative reconciliation", async () => {
+      const { getGuided, reconcileGuidedStartOperation, startGuidedSession } = await import("@/api/client");
+      const start = startGuidedSession as ReturnType<typeof vi.fn>;
+      start.mockRejectedValueOnce(
+        new MockGuidedResponseReceiptError(new Error("invalid response")),
+      );
+      (reconcileGuidedStartOperation as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        status: "completed",
+        composition_state_id: sampleCompositionState.id,
+      });
+      (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sampleGetGuidedResponse);
+      useSessionStore.setState({
+        activeSessionId: RETRY_SESSION_ID,
+        guidedSession: sampleGuidedSession,
+        guidedNextTurn: null,
+        compositionState: null,
+      });
+
+      await useSessionStore.getState().chatGuided("Build the exact graph");
+
+      expect(start).toHaveBeenCalledTimes(1);
+      expect(useSessionStore.getState().compositionState).toEqual(sampleCompositionState);
+    });
+
+    it("retains cold start custody when canonical response application fails after commit", async () => {
+      const { getGuided, reconcileGuidedStartOperation, startGuidedSession } = await import("@/api/client");
+      const start = startGuidedSession as ReturnType<typeof vi.fn>;
+      start.mockResolvedValue(sampleGetGuidedResponse);
+      (getGuided as ReturnType<typeof vi.fn>).mockResolvedValue(
+        sampleGetGuidedResponse,
+      );
+      (reconcileGuidedStartOperation as ReturnType<typeof vi.fn>).mockResolvedValue({
+        status: "completed",
+        composition_state_id: sampleCompositionState.id,
+      });
+      const refreshAll = vi.fn().mockRejectedValue(
+        new Error("interpretation refresh failed"),
+      );
+      useInterpretationEventsStore.setState({ refreshAll } as never);
+      useSessionStore.setState({
+        activeSessionId: RETRY_SESSION_ID,
+        guidedSession: sampleGuidedSession,
+        guidedNextTurn: null,
+        compositionState: null,
+      });
+
+      await useSessionStore.getState().chatGuided("Build the exact graph");
+      expect(start).toHaveBeenCalledTimes(1);
+      expect(useSessionStore.getState().compositionState).toBeNull();
+      expect(useSessionStore.getState().guidedChatPending).toBe(false);
+      refreshAll.mockResolvedValue(undefined);
+      await useSessionStore.getState().chatGuided("Build the exact graph");
+
+      expect(start).toHaveBeenCalledTimes(1);
+      expect(useSessionStore.getState().compositionState).toEqual(sampleCompositionState);
+    });
+
+    it("does not publish an old cold-start response after selecting A to B to A", async () => {
+      const {
+        fetchComposerPreferences,
+        fetchCompositionProposals,
+        fetchCompositionState,
+        fetchMessages,
+        getGuided,
+        startGuidedSession,
+      } = await import("@/api/client");
+      const latestSession = { ...sampleGuidedSession, chat_turn_seq: 42 };
+      const latestState = { ...sampleCompositionState, version: 42 };
+      const latestA = {
+        ...sampleGetGuidedResponse,
+        guided_session: latestSession,
+        composition_state: latestState,
+      };
+      (fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ...sampleCompositionState,
+        session_id: RETRY_SESSION_B,
+      }).mockResolvedValueOnce(latestState);
+      (fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (getGuided as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce({
+          ...sampleGetGuidedResponse,
+          composition_state: {
+            ...sampleCompositionState,
+            session_id: RETRY_SESSION_B,
+          },
+        })
+        .mockResolvedValueOnce(latestA)
+        .mockResolvedValueOnce(sampleGetGuidedResponse);
+      let resolveStart!: (response: GetGuidedResponse) => void;
+      (startGuidedSession as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<GetGuidedResponse>((resolve) => {
+          resolveStart = resolve;
+        }),
+      );
+      useSessionStore.setState({
+        activeSessionId: RETRY_SESSION_ID,
+        guidedSession: sampleGuidedSession,
+        guidedNextTurn: null,
+        compositionState: null,
+      });
+
+      const coldStart = useSessionStore.getState().chatGuided("Build the exact graph");
+      await useSessionStore.getState().selectSession(RETRY_SESSION_B);
+      await useSessionStore.getState().selectSession(RETRY_SESSION_ID);
+      resolveStart(sampleGetGuidedResponse);
+      await coldStart;
+
+      expect(useSessionStore.getState().activeSessionId).toBe(RETRY_SESSION_ID);
+      expect(useSessionStore.getState().guidedSession).toEqual(latestSession);
+      expect(useSessionStore.getState().compositionState).toEqual(latestState);
+    });
+
+    it("clears stale error state after a successful cold start retry", async () => {
+      const { startGuidedSession } = await import("@/api/client");
+      (startGuidedSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        sampleGetGuidedResponse,
+      );
+      useSessionStore.setState({
+        activeSessionId: RETRY_SESSION_ID,
+        guidedSession: sampleGuidedSession,
+        guidedNextTurn: null,
+        compositionState: null,
+        error: "previous failure",
+        errorDetails: ["previous detail"],
+      });
+
+      await useSessionStore.getState().chatGuided("Build the exact graph");
+
+      expect(useSessionStore.getState().error).toBeNull();
+      expect(useSessionStore.getState().errorDetails).toBeNull();
     });
 
     it("sets pending while in flight and clears it on success", async () => {

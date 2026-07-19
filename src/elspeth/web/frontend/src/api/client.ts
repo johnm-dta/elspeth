@@ -46,12 +46,14 @@ import type {
   GuidedChatResponse,
   GuidedRespondRequest,
   GuidedRespondResponse,
+  GuidedStartOperationReconciliation,
   TutorialSampleResponse,
 } from "@/types/guided";
 import {
   decodeGetGuidedResponse,
   decodeGuidedChatResponse,
   decodeGuidedRespondResponse,
+  decodeGuidedStartOperationReconciliation,
 } from "./guidedDecoder";
 import type {
   InterpretationEvent,
@@ -813,17 +815,49 @@ export async function getTutorialSample(
  * Idempotent (D16): a second call for a session that already has a persisted
  * guided session returns the existing session unchanged.
  */
+type GuidedStartCommand =
+  | { profile: "live"; intent: string; operationId: string }
+  | { profile: "tutorial"; operationId: string };
+
 export async function startGuidedSession(
   sessionId: string,
-  profileKind: "live" | "tutorial",
-  operationId: string,
+  command: GuidedStartCommand,
+  signal?: AbortSignal,
 ): Promise<GetGuidedResponse> {
   const response = await fetch(`/api/sessions/${sessionId}/guided/start`, {
     method: "POST",
     headers: authHeaders("application/json"),
-    body: JSON.stringify({ profile: profileKind, operation_id: operationId }),
+    body: JSON.stringify({
+      profile: command.profile,
+      ...(command.profile === "live" ? { intent: command.intent } : {}),
+      operation_id: command.operationId,
+    }),
+    signal,
   });
-  return decodeGetGuidedResponse(await parseResponse<unknown>(response));
+  if (!response.ok) {
+    return parseResponse<never>(response);
+  }
+  try {
+    return decodeGetGuidedResponse(await parseResponse<unknown>(response));
+  } catch (cause) {
+    throw new GuidedResponseReceiptError(cause);
+  }
+}
+
+export async function reconcileGuidedStartOperation(
+  sessionId: string,
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<GuidedStartOperationReconciliation> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/guided/start/${operationId}/reconcile`,
+    {
+      method: "POST",
+      headers: authHeaders(),
+      signal,
+    },
+  );
+  return decodeGuidedStartOperationReconciliation(await parseResponse<unknown>(response));
 }
 
 /**

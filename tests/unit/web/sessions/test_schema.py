@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import QueuePool
 
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import SESSION_SCHEMA_EPOCH, blobs_table, metadata, sessions_table
+from elspeth.web.sessions.models import blobs_table, metadata, sessions_table
 from elspeth.web.sessions.schema import (
     SessionSchemaError,
     _stamp_schema_sentinels,
@@ -242,8 +242,8 @@ def test_initialize_session_schema_rejects_partial_stale_schema() -> None:
         initialize_session_schema(eng)
 
 
-def test_initialize_session_schema_rejects_prior_epoch_database() -> None:
-    """A valid full-schema DB stamped at the prior epoch fail-closes at boot.
+def test_initialize_session_schema_rejects_epoch_31_database() -> None:
+    """An epoch-31 DB without the current failure commitment fails at boot.
 
     Seed a complete current-schema DB, then re-stamp only the SQLite epoch.
     Because the SQL shape and cross-dialect identity row remain current, the
@@ -252,13 +252,17 @@ def test_initialize_session_schema_rejects_prior_epoch_database() -> None:
     eng = create_session_engine("sqlite:///:memory:")
     initialize_session_schema(eng)  # full schema + stamps the CURRENT epoch
     with eng.begin() as conn:
-        conn.execute(text(f"PRAGMA user_version = {SESSION_SCHEMA_EPOCH - 1}"))
-    with pytest.raises(SessionSchemaError, match="SESSION_SCHEMA_EPOCH"):
+        conn.execute(text("UPDATE elspeth_schema_identity SET schema_epoch = 31 WHERE store_kind = 'session'"))
+        conn.execute(text("PRAGMA user_version = 31"))
+    with pytest.raises(
+        SessionSchemaError,
+        match=r"Session DB schema version 31 does not match SESSION_SCHEMA_EPOCH=32.*Delete the session DB file and restart",
+    ):
         initialize_session_schema(eng)
 
 
 def test_epoch_30_database_without_schema_9_operation_contract_fails_closed_with_recreate_guidance(tmp_path) -> None:
-    """The epoch-30 operation CHECKs cannot be opened by epoch-31 code."""
+    """The epoch-30 operation CHECKs cannot be opened by epoch-32 code."""
     db_path = tmp_path / "epoch-30-without-guided-plan.db"
     engine = create_session_engine(f"sqlite:///{db_path}")
     initialize_session_schema(engine)
@@ -292,7 +296,7 @@ def test_epoch_30_database_without_schema_9_operation_contract_fails_closed_with
 
     with pytest.raises(
         SessionSchemaError,
-        match=r"Session DB schema version 30 does not match SESSION_SCHEMA_EPOCH=31.*"
+        match=r"Session DB schema version 30 does not match SESSION_SCHEMA_EPOCH=32.*"
         r"Delete the session DB file and restart",
     ):
         initialize_session_schema(stale_engine)

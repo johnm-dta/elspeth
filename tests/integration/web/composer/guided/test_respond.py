@@ -2522,6 +2522,15 @@ class TestStep2IntraStep:
         from tests.integration.web.composer.guided.test_wrong_stage_intent import _provider
 
         session_id = _create_session(composer_test_client)
+        started = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/start",
+            json={
+                "profile": "live",
+                "intent": "Begin guided authoring before refining topology requirements.",
+                "operation_id": str(uuid4()),
+            },
+        )
+        assert started.status_code == 200, started.json()
         current = _get_guided(composer_test_client, session_id)
         action = DeferredIntentAction(
             target_stage="topology",

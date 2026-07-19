@@ -55,6 +55,12 @@ from elspeth.web.sessions.guided_replay import (
 )
 from elspeth.web.sessions.protocol import (
     GuidedAuditEvidence,
+    GuidedCompositionStateResult,
+    GuidedOperationActive,
+    GuidedOperationCompleted,
+    GuidedOperationConflictError,
+    GuidedOperationFailed,
+    GuidedOriginatingUserMessageDraft,
     GuidedReplayTurn,
     GuidedResponseDescriptor,
     GuidedStateOperationCommand,
@@ -66,6 +72,11 @@ from elspeth.web.sessions.schemas import (
     ConvertGuidedRequest,
     EditComponentAction,
     FinishComponentsAction,
+    GuidedStartOperationAbsentResponse,
+    GuidedStartOperationCompletedResponse,
+    GuidedStartOperationFailedResponse,
+    GuidedStartOperationInProgressResponse,
+    GuidedStartOperationReconciliationResponse,
     ReenterGuidedRequest,
     RemoveComponentAction,
     ReorderComponentsAction,
@@ -1256,6 +1267,49 @@ async def post_guided_reenter(
         return _response_from_record(settlement.result_state)
 
 
+@router.post(
+    "/{session_id}/guided/start/{operation_id}/reconcile",
+    response_model=GuidedStartOperationReconciliationResponse,
+)
+async def reconcile_guided_start_operation(
+    session_id: UUID,
+    operation_id: UUID,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> GuidedStartOperationReconciliationResponse:
+    """Return authoritative cold-start custody without replaying request content."""
+    await _verify_session_ownership(session_id, user, request)
+    service: SessionServiceProtocol = request.app.state.session_service
+    compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
+    try:
+        async with compose_lock:
+            outcome = await service.reconcile_guided_start_operation(
+                session_id=session_id,
+                operation_id=str(operation_id),
+                actor="composer_route",
+            )
+    except GuidedOperationConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Operation id is already bound to a different guided action.",
+        ) from exc
+
+    if outcome is None:
+        return GuidedStartOperationAbsentResponse(status="absent")
+    if type(outcome) is GuidedOperationActive:
+        return GuidedStartOperationInProgressResponse(status="in_progress")
+    if type(outcome) is GuidedOperationFailed:
+        return GuidedStartOperationFailedResponse(status="failed", failure_code=outcome.failure_code)
+    if type(outcome) is GuidedOperationCompleted:
+        if type(outcome.result) is not GuidedCompositionStateResult or outcome.result.proposal_id is not None:
+            raise AuditIntegrityError("guided-start reconciliation found an invalid completed result locator")
+        return GuidedStartOperationCompletedResponse(
+            status="completed",
+            composition_state_id=outcome.result.state_id,
+        )
+    raise AuditIntegrityError("guided-start reconciliation returned an unsupported outcome")
+
+
 @router.post("/{session_id}/guided/start", response_model=GetGuidedResponse)
 async def post_guided_start(
     session_id: UUID,
@@ -1399,10 +1453,31 @@ async def post_guided_start(
             composition_state=_state_response(record, policy_catalog=catalog),
         )
 
+    async def _verify_start_root(record: CompositionStateRecord) -> None:
+        guided = _state_from_record(record).guided_session
+        if guided is None:
+            raise AuditIntegrityError("Guided start result state has no guided checkpoint")
+        if guided.profile != profile:
+            raise GuidedOperationSettlementConflictError()
+        if profile_kind is WorkflowProfileKind.TUTORIAL:
+            if guided.root_intent_message_id is not None:
+                raise AuditIntegrityError("Tutorial guided start unexpectedly owns a client root intent")
+            return
+        if guided.root_intent_message_id is None:
+            raise AuditIntegrityError("Live guided start is missing its durable root intent")
+        matches = [
+            message for message in await service.get_messages(session_id, limit=None) if str(message.id) == guided.root_intent_message_id
+        ]
+        if len(matches) != 1 or matches[0].role != "user" or matches[0].writer_principal != "route_user_message":
+            raise AuditIntegrityError("Live guided start root intent failed session/role/content custody")
+        if matches[0].content != body.intent:
+            raise GuidedOperationSettlementConflictError()
+
     async def _replay(result: object) -> GetGuidedResponse:
         if type(result) is not GuidedCompositionStateResult:
             raise AuditIntegrityError("Guided start replay has a non-state result locator")
         replay_record = await service.get_state_in_session(result.state_id, session_id)
+        await _verify_start_root(replay_record)
         return _response_from_record(replay_record)
 
     # Existing operations are immutable protocol facts. Resolve them before
@@ -1471,6 +1546,7 @@ async def post_guided_start(
                     current_state = _state_from_record(current_record)
                     if current_state.guided_session is None:
                         raise GuidedOperationSettlementConflictError()
+                    await _verify_start_root(current_record)
                     # A distinct start may have won after both requests
                     # preflighted an empty head. Settle the exact current guided
                     # checkpoint as an idempotent no-op; the service CAS prevents
@@ -1490,10 +1566,20 @@ async def post_guided_start(
                 if observed_head is not None:
                     raise AuditIntegrityError("Guided start head disappeared after preflight")
 
+                root_message = (
+                    GuidedOriginatingUserMessageDraft(message_id=uuid4(), content=body.intent)
+                    if profile_kind is WorkflowProfileKind.LIVE and body.intent is not None
+                    else None
+                )
                 new_state = _initial_composition_state_with_guided_session(profile=profile)
                 seeded_guided = new_state.guided_session
                 if seeded_guided is None:  # pragma: no cover - helper contract
                     raise InvariantError("post_guided_start: initial state has no guided_session")
+                if root_message is not None:
+                    seeded_guided = _replace(
+                        seeded_guided,
+                        root_intent_message_id=str(root_message.message_id),
+                    )
                 seed_turn = _build_get_guided_turn(new_state, seeded_guided, catalog=catalog)
                 if seed_turn is None:  # pragma: no cover - initial STEP_1 always emits
                     raise InvariantError("post_guided_start: initial guided session has no first turn")
@@ -1536,6 +1622,7 @@ async def post_guided_start(
                         response_hash_factory=lambda record: guided_response_hash(_response_from_record(record)),
                         payloads=(prepared_seed_turn,),
                         audit_evidence=seed_evidence,
+                        originating_message=root_message,
                         payload_store=request.app.state.payload_store,
                     )
                 )
@@ -2540,7 +2627,6 @@ async def post_guided_respond(
                                 raise AuditIntegrityError("guided proposal revision user-message lineage drifted")
                             message_ids = {
                                 *(intent.originating_message_id for intent in planning_guided.deferred_intents),
-                                *(() if planning_guided.root_intent_message_id is None else (planning_guided.root_intent_message_id,)),
                             }
                             messages_by_id: dict[str, Any] = {}
                             if message_ids:
@@ -2559,7 +2645,10 @@ async def post_guided_respond(
                                         raise AuditIntegrityError("guided deferred intent message content hash mismatch")
 
                             root_message = (
-                                messages_by_id[planning_guided.root_intent_message_id]
+                                await service.get_verified_guided_root_intent(
+                                    session_id=session_id,
+                                    root_message_id=UUID(planning_guided.root_intent_message_id),
+                                )
                                 if planning_guided.root_intent_message_id is not None
                                 else None
                             )
@@ -2973,7 +3062,6 @@ async def post_guided_respond(
 
                             message_ids = {
                                 *(intent.originating_message_id for intent in resulting_guided.deferred_intents),
-                                *(() if resulting_guided.root_intent_message_id is None else (resulting_guided.root_intent_message_id,)),
                             }
                             planner_messages_by_id: dict[str, Any] = {}
                             if message_ids:
@@ -2992,7 +3080,10 @@ async def post_guided_respond(
                                         raise AuditIntegrityError("guided deferred intent message content hash mismatch")
 
                             root_message = (
-                                planner_messages_by_id[resulting_guided.root_intent_message_id]
+                                await service.get_verified_guided_root_intent(
+                                    session_id=session_id,
+                                    root_message_id=UUID(resulting_guided.root_intent_message_id),
+                                )
                                 if resulting_guided.root_intent_message_id is not None
                                 else None
                             )

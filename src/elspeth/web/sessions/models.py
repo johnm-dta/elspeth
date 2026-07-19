@@ -153,7 +153,10 @@ from elspeth.core.schema_identity import create_schema_identity_table
 #   31 -> guided checkpoint schema 9 adds ``guided_plan``, the closed
 #        pipeline-proposal replay locator, and ``request_cancelled``. Schema 8
 #        and epoch 30 are rejected outright; no decoder or migration exists.
-SESSION_SCHEMA_EPOCH = 31
+#   32 -> every failed guided-operation event commits the exact ordered audit
+#        evidence cohort. Epoch 31 is rejected outright; no decoder, backfill,
+#        or migration exists.
+SESSION_SCHEMA_EPOCH = 32
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 _POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"
@@ -775,6 +778,9 @@ guided_operation_events_table = Table(
     Column("prior_attempt", Integer, nullable=True),
     Column("lease_expires_at", DateTime(timezone=True), nullable=True),
     Column("request_hash", String(64), nullable=False),
+    # SQL NULL means "not a failed event". JSON null is not an admissible
+    # second spelling, so preserve Python ``None`` as SQL NULL on both stores.
+    Column("failure_audit_cohort", JSON(none_as_null=True), nullable=True),
     Column("occurred_at", DateTime(timezone=True), nullable=False),
     PrimaryKeyConstraint("session_id", "operation_id", "sequence", name="pk_guided_operation_events"),
     ForeignKeyConstraint(
@@ -798,6 +804,10 @@ guided_operation_events_table = Table(
         "(event_kind = 'taken_over' AND prior_attempt IS NOT NULL AND prior_attempt = attempt - 1 AND lease_expires_at IS NOT NULL) OR "
         "(event_kind IN ('completed', 'failed') AND prior_attempt IS NULL AND lease_expires_at IS NULL)",
         name="ck_guided_operation_events_bundle",
+    ),
+    CheckConstraint(
+        "(event_kind = 'failed') = (failure_audit_cohort IS NOT NULL)",
+        name="ck_guided_operation_events_failure_audit_cohort",
     ),
 )
 

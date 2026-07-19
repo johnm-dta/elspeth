@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import delete, insert, inspect, text, update
 from sqlalchemy.exc import IntegrityError
 
+from elspeth.contracts.hashing import stable_hash
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     composition_proposals_table,
@@ -25,6 +26,15 @@ RESULT_SESSION_ID = "00000000-0000-4000-8000-000000000009"
 REQUEST_HASH = "a" * 64
 RESPONSE_HASH = "b" * 64
 NOW = datetime(2026, 7, 18, tzinfo=UTC)
+
+
+def _empty_failure_audit_cohort() -> dict[str, object]:
+    authority: dict[str, object] = {
+        "schema": "guided_failure_audit_cohort.v1",
+        "count": 0,
+        "rows": [],
+    }
+    return {**authority, "aggregate_digest": stable_hash(authority)}
 
 
 @pytest.fixture
@@ -123,6 +133,7 @@ def _event(**overrides: object) -> dict[str, object]:
         "prior_attempt": None,
         "lease_expires_at": NOW + timedelta(minutes=1),
         "request_hash": REQUEST_HASH,
+        "failure_audit_cohort": None,
         "occurred_at": NOW,
     }
     values.update(overrides)
@@ -138,6 +149,36 @@ def test_tables_and_composite_keys_are_current(engine) -> None:
         "operation_id",
         "sequence",
     ]
+    assert "failure_audit_cohort" in {column["name"] for column in inspector.get_columns("guided_operation_events")}
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        _event(event_kind="failed", lease_expires_at=None),
+        _event(failure_audit_cohort=_empty_failure_audit_cohort()),
+    ],
+    ids=["failed-without-commitment", "non-failed-with-commitment"],
+)
+def test_failure_event_commitment_presence_is_exact(engine, event: dict[str, object]) -> None:
+    with engine.begin() as connection:
+        connection.execute(insert(guided_operations_table).values(**_operation()))
+    with pytest.raises(IntegrityError, match="ck_guided_operation_events_failure_audit_cohort"), engine.begin() as connection:
+        connection.execute(insert(guided_operation_events_table).values(**event))
+
+
+def test_failed_event_accepts_exact_empty_commitment_storage_shape(engine) -> None:
+    with engine.begin() as connection:
+        connection.execute(insert(guided_operations_table).values(**_operation()))
+        connection.execute(
+            insert(guided_operation_events_table).values(
+                **_event(
+                    event_kind="failed",
+                    lease_expires_at=None,
+                    failure_audit_cohort=_empty_failure_audit_cohort(),
+                )
+            )
+        )
 
 
 @pytest.mark.parametrize(

@@ -159,6 +159,23 @@ export interface GetGuidedResponse {
   composition_state: CompositionState | null;
 }
 
+export type GuidedOperationFailureCode =
+  | "provider_unavailable"
+  | "provider_timeout"
+  | "invalid_provider_response"
+  | "stale_conflict"
+  | "integrity_error"
+  | "custody_error"
+  | "quota_exceeded"
+  | "operation_failed"
+  | "request_cancelled";
+
+export type GuidedStartOperationReconciliation =
+  | { status: "absent" }
+  | { status: "in_progress" }
+  | { status: "failed"; failure_code: GuidedOperationFailureCode }
+  | { status: "completed"; composition_state_id: string };
+
 export interface GuidedEditTarget {
   kind: "source" | "node" | "edge" | "output";
   stable_id: string;

@@ -73,7 +73,6 @@ from .._helpers import (
     _composer_progress_sink,
     _get_composer_progress_registry,
     _get_session_compose_lock_registry,
-    _initial_composition_state_with_guided_session,
     _is_client_disconnect_cancel,
     _publish_progress,
     _replace,
@@ -332,6 +331,13 @@ async def post_guided_chat_schema8(
     payload_store = request.app.state.payload_store
     compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
 
+    # A chat operation can only answer an already-durable guided checkpoint.
+    # Ordinary first intent belongs to /guided/start; GET is hydration-only.
+    # Reject before even looking up operation custody so a cold request cannot
+    # allocate retry state, call a provider, or write a chat row.
+    if await service.get_current_state(session_id) is None:
+        raise HTTPException(status_code=409, detail="Start the guided session before sending guided chat.")
+
     def response_from_record(record: CompositionStateRecord) -> GuidedChatResponse:
         descriptor = parse_guided_response_descriptor(record)
         if descriptor.kind != "guided_chat":
@@ -366,7 +372,9 @@ async def post_guided_chat_schema8(
 
     async def preflight() -> _ChatPreflight:
         state_record = await service.get_current_state(session_id)
-        state = _state_from_record(state_record) if state_record is not None else _initial_composition_state_with_guided_session()
+        if state_record is None:
+            raise AuditIntegrityError("Guided Chat durable checkpoint disappeared after admission")
+        state = _state_from_record(state_record)
         guided = state.guided_session
         if guided is None:
             raise HTTPException(status_code=400, detail="Session is not in guided mode. Use /api/sessions/{id}/messages.")
@@ -530,11 +538,9 @@ async def post_guided_chat_schema8(
                         and (current_record.id != frozen.state_record.id or current_record.version != frozen.state_record.version)
                     ):
                         raise GuidedOperationSettlementConflictError()
-                    current_state = (
-                        _state_from_record(current_record)
-                        if current_record is not None
-                        else _initial_composition_state_with_guided_session()
-                    )
+                    if current_record is None:
+                        raise AuditIntegrityError("Guided Chat durable checkpoint disappeared before settlement")
+                    current_state = _state_from_record(current_record)
                     if current_record is not None and composition_content_hash(current_state) != composition_content_hash(frozen.state):
                         raise AuditIntegrityError("Guided Chat current state content changed after provider work")
                     current_guided = current_state.guided_session

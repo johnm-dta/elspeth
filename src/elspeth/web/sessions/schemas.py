@@ -27,6 +27,7 @@ from elspeth.web.execution.schemas import DiscardSummary, RunAccounting
 from elspeth.web.sessions.protocol import (
     ComposerDensityDefault,
     ComposerTrustMode,
+    GuidedOperationFailureCode,
     ProposalEventType,
     ProposalLifecycleStatus,
     SessionRunStatus,
@@ -515,6 +516,33 @@ class GetGuidedResponse(_StrictResponse):
     next_turn: TurnPayloadResponse | None
     terminal: TerminalStateResponse | None
     composition_state: CompositionStateResponse | None
+
+
+class GuidedStartOperationAbsentResponse(_StrictResponse):
+    status: Literal["absent"]
+
+
+class GuidedStartOperationInProgressResponse(_StrictResponse):
+    status: Literal["in_progress"]
+
+
+class GuidedStartOperationFailedResponse(_StrictResponse):
+    status: Literal["failed"]
+    failure_code: GuidedOperationFailureCode
+
+
+class GuidedStartOperationCompletedResponse(_StrictResponse):
+    status: Literal["completed"]
+    composition_state_id: UUID
+
+
+GuidedStartOperationReconciliationResponse = Annotated[
+    GuidedStartOperationAbsentResponse
+    | GuidedStartOperationInProgressResponse
+    | GuidedStartOperationFailedResponse
+    | GuidedStartOperationCompletedResponse,
+    Field(discriminator="status"),
+]
 
 
 class TutorialSampleResponse(_StrictResponse):

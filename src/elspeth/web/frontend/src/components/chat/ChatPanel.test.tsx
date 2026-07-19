@@ -677,7 +677,7 @@ describe("ChatPanel mode discriminator", () => {
 
   it("renders the chat box at step_3 with NO proposal (per-stage transforms entry, not a panel-less fall-through)", () => {
     // STEP_3 begins with no server turn: the per-stage transforms prompt drives
-    // the build via /guided/chat (cold-start). The guided surface — crucially the
+    // the build via /guided/start (durable-root cold start). The guided surface — crucially the
     // chat box — MUST render so the operator can describe the transforms; a
     // missing turn must NOT fall through to the freeform body / loading flash.
     useSessionStore.setState({
@@ -2077,7 +2077,7 @@ describe("ChatPanel mode discriminator", () => {
     expect(media900![0]).toContain("order: -1;");
   });
 
-  it("invokes sessionStore.chatGuided when the guided ChatInput onSend fires", async () => {
+  it("delegates guided ChatInput sends to the retry-safe store action", async () => {
     const chatGuidedSpy = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
       activeSessionId: "session-guided",

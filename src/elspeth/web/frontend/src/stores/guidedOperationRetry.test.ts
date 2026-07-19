@@ -5,6 +5,7 @@ import {
   clearAllGuidedRetries,
   clearGuidedRetry,
   clearGuidedRetriesForSession,
+  findGuidedRetry,
   GUIDED_RETRY_STORAGE_KEY,
   isAmbiguousGuidedRetryFailure,
 } from "./guidedOperationRetry";
@@ -108,6 +109,18 @@ describe("guided operation retry custody", () => {
     expect(retry.operationId).toBe(first.operationId);
     expect(window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY)).toContain('"schema":"guided-operation-retries.v2"');
     expect(window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY)).toContain('"kind":"guided_plan"');
+  });
+
+  it("finds existing guided-start custody after the prompt is no longer in memory", () => {
+    const created = acquireHandle("guided_start", SESSION_A, ["prompt that must not persist"]);
+
+    const recovered = findGuidedRetry("guided_start", SESSION_A);
+
+    expect(recovered).toEqual(created);
+    expect(recovered).not.toBe(created);
+    expect(window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY)).not.toContain(
+      "prompt that must not persist",
+    );
   });
 
   it("does not read the retired v1 key or envelope", () => {

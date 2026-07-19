@@ -300,6 +300,14 @@ _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS = _tool_error_payloads.INVALID_TOOL_ARG
 
 _LLM_API_MAX_ATTEMPTS = 3
 _LLM_API_RETRY_BASE_DELAY_SECONDS = 1.0
+
+
+def _identity_pipeline_candidate(candidate: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return the canonical planner candidate unchanged."""
+
+    return candidate
+
+
 _ADVISOR_ARGUMENT_KEYS: Final[frozenset[str]] = frozenset(
     {
         "trigger",
@@ -2109,6 +2117,93 @@ class ComposerServiceImpl:
             on_settled=on_settled,
             progress=progress,
         )
+
+    async def plan_guided_full_pipeline(
+        self,
+        *,
+        intent: str,
+        current_state: CompositionState,
+        originating_message: PlannerOriginatingMessage,
+        base: PresentBase,
+        policy_catalog: PolicyCatalogView,
+        plugin_snapshot: PluginAvailabilitySnapshot,
+        recorder: BufferingRecorder,
+        operation_fence: GuidedOperationFence,
+        progress: ComposerProgressSink | None = None,
+    ) -> tuple[PipelinePlanResult, Mapping[str, frozenset[str]]]:
+        """Plan one ordinary guided-full proposal through the canonical core."""
+
+        from elspeth.web.sessions.protocol import GuidedOperationFence
+
+        if type(recorder) is not BufferingRecorder:
+            raise TypeError("recorder must be an exact BufferingRecorder")
+        if type(operation_fence) is not GuidedOperationFence:
+            raise TypeError("operation_fence must be an exact GuidedOperationFence")
+        if str(operation_fence.session_id) != originating_message.session_id:
+            raise AuditIntegrityError("guided-full planner operation fence targets a different session")
+        if policy_catalog.snapshot is not plugin_snapshot:
+            raise ValueError("plugin_snapshot_catalog_mismatch")
+        if not self._availability.available:
+            raise ComposerServiceError(self._availability.reason or "Composer is unavailable.")
+
+        plan = await plan_pipeline(
+            intent=intent,
+            current_state=current_state,
+            provider_current_state=current_state.to_dict(),
+            reviewed_facts={},
+            reviewed_planner_context={},
+            eligible_deferred_intent_ids=(),
+            claim_evaluator=None,
+            supersedes_draft_hash=None,
+            surface=PlannerSurface.GUIDED_FULL,
+            profile="ordinary",
+            policy_catalog=policy_catalog,
+            plugin_snapshot=plugin_snapshot,
+            originating_message=originating_message,
+            base=base,
+            model_config=PlannerModelConfig(
+                completion=_litellm_acompletion,
+                model_identifier=self._model,
+                provider=self._availability.provider or "unknown",
+                temperature=self._settings.composer_temperature,
+                seed=self._settings.composer_seed,
+                timeout_seconds=self._timeout_seconds,
+                max_composition_turns=self._max_composition_turns,
+                max_discovery_turns=self._max_discovery_turns,
+                max_tool_calls_per_turn=self._max_tool_calls_per_turn,
+                max_api_attempts=_LLM_API_MAX_ATTEMPTS,
+                api_retry_base_seconds=_LLM_API_RETRY_BASE_DELAY_SECONDS,
+            ),
+            rendered_skill=build_system_prompt(self._data_dir),
+            repair_budget=self._settings.composer_planner_repair_budget,
+            budget_policy=PlannerBudgetPolicy(
+                max_total_provider_calls=self._settings.composer_planner_max_provider_calls,
+                max_request_bytes=self._settings.composer_planner_max_request_bytes,
+                max_completion_tokens=self._settings.composer_planner_max_completion_tokens,
+                max_cumulative_provider_cost=self._settings.composer_planner_max_cumulative_provider_cost,
+            ),
+            custody_config=PlannerCustodyConfig(
+                data_dir=self._data_dir,
+                session_engine=self._session_engine,
+                max_storage_per_session=self._settings.max_blob_storage_per_session_bytes,
+                secret_service=self._secret_service,
+                runtime_preflight=None,
+                write_fence=BlobGuidedOperationWriteFence(
+                    session_id=operation_fence.session_id,
+                    operation_id=operation_fence.operation_id,
+                    lease_token=operation_fence.lease_token,
+                    attempt=operation_fence.attempt,
+                ),
+            ),
+            lifecycle=self._planner_request_lifecycle(progress),
+            recorder=recorder,
+            candidate_finalizer=_identity_pipeline_candidate,
+        )
+        return plan, {
+            "source": frozenset(item.name for item in policy_catalog.list_sources()),
+            "transform": frozenset(item.name for item in policy_catalog.list_transforms()),
+            "sink": frozenset(item.name for item in policy_catalog.list_sinks()),
+        }
 
     async def plan_guided_pipeline(
         self,

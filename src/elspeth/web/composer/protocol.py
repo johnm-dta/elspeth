@@ -15,11 +15,13 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 from uuid import UUID
 
 if TYPE_CHECKING:
+    from elspeth.web.catalog.policy_view import PolicyCatalogView
     from elspeth.web.composer.audit import BufferingRecorder
     from elspeth.web.composer.guided.state_machine import GuidedSession, TerminalState
     from elspeth.web.composer.pipeline_planner import PipelinePlanResult, PlannerOriginatingMessage
     from elspeth.web.composer.pipeline_proposal import PresentBase
     from elspeth.web.composer.service import AdvisorCheckpointVerdict
+    from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
     from elspeth.web.sessions.protocol import GuidedOperationFence
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation
@@ -813,6 +815,22 @@ class ComposerService(Protocol):
         progress: ComposerProgressSink | None = None,
     ) -> tuple[PipelinePlanResult, Mapping[str, frozenset[str]]]:
         """Run the shared planner once with split private/provider-safe facts."""
+        ...
+
+    async def plan_guided_full_pipeline(
+        self,
+        *,
+        intent: str,
+        current_state: CompositionState,
+        originating_message: PlannerOriginatingMessage,
+        base: PresentBase,
+        policy_catalog: PolicyCatalogView,
+        plugin_snapshot: PluginAvailabilitySnapshot,
+        recorder: BufferingRecorder,
+        operation_fence: GuidedOperationFence,
+        progress: ComposerProgressSink | None = None,
+    ) -> tuple[PipelinePlanResult, Mapping[str, frozenset[str]]]:
+        """Plan one ordinary guided-full proposal through the shared planner."""
         ...
 
     async def surface_pending_interpretation_reviews(

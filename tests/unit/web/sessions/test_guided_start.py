@@ -21,11 +21,13 @@ from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE
 from elspeth.web.composer.progress import ComposerProgressRegistry
 from elspeth.web.config import WebSettings
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
+from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import composition_states_table, guided_operation_events_table, guided_operations_table
 from elspeth.web.sessions.routes import create_session_router
@@ -515,7 +517,7 @@ async def test_guided_start_same_operation_surrogate_profile_does_not_mutate_ope
 
 
 @pytest.mark.asyncio
-async def test_guided_start_new_operation_returns_exact_existing_guided_head(tmp_path) -> None:
+async def test_guided_start_new_operation_rejects_existing_different_profile(tmp_path) -> None:
     app, service = _make_app(tmp_path)
     client = TestClient(app)
     session = await service.create_session("alice", "T", "local")
@@ -529,8 +531,14 @@ async def test_guided_start_new_operation_returns_exact_existing_guided_head(tmp
         json={"profile": "live", "intent": "Build a live pipeline", "operation_id": str(uuid.uuid4())},
     )
 
-    assert first.status_code == current.status_code == 200
-    assert current.json() == first.json()
+    assert first.status_code == 200
+    assert current.status_code == 409
+    assert current.json()["detail"]["failure_code"] == "stale_conflict"
+    persisted = await service.get_current_state(session.id)
+    assert persisted is not None
+    assert state_from_record(persisted).guided_session is not None
+    assert state_from_record(persisted).guided_session.profile == TUTORIAL_PROFILE
+    assert [message for message in await service.get_messages(session.id, limit=None) if message.role == "user"] == []
 
 
 @pytest.mark.asyncio

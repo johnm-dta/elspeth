@@ -6,6 +6,7 @@ import type {
   GuidedChatResponse,
   GuidedRespondResponse,
   GuidedSession,
+  GuidedStartOperationReconciliation,
   GuidedStep,
   GuidedEditTarget,
   InspectAndConfirmPayload,
@@ -1607,6 +1608,51 @@ function decodeStateEnvelope(value: unknown, path: string): GetGuidedResponse {
 
 export function decodeGetGuidedResponse(value: unknown): GetGuidedResponse {
   return decodeStateEnvelope(value, "response");
+}
+
+export function decodeGuidedStartOperationReconciliation(
+  value: unknown,
+): GuidedStartOperationReconciliation {
+  const base = record(value, "response");
+  const status = stringValue(base.status, "response.status");
+  switch (status) {
+    case "absent":
+      exactRecord(value, "response", ["status"]);
+      return { status };
+    case "in_progress":
+      exactRecord(value, "response", ["status"]);
+      return { status };
+    case "failed": {
+      const envelope = exactRecord(value, "response", ["status", "failure_code"]);
+      const failureCode = stringValue(envelope.failure_code, "response.failure_code");
+      switch (failureCode) {
+        case "provider_unavailable":
+        case "provider_timeout":
+        case "invalid_provider_response":
+        case "stale_conflict":
+        case "integrity_error":
+        case "custody_error":
+        case "quota_exceeded":
+        case "operation_failed":
+        case "request_cancelled":
+          return { status, failure_code: failureCode };
+        default:
+          return invalid("response.failure_code", "unknown guided operation failure code");
+      }
+    }
+    case "completed": {
+      const envelope = exactRecord(value, "response", ["status", "composition_state_id"]);
+      return {
+        status,
+        composition_state_id: canonicalUuid(
+          envelope.composition_state_id,
+          "response.composition_state_id",
+        ),
+      };
+    }
+    default:
+      return invalid("response.status", "unknown guided-start reconciliation status");
+  }
 }
 
 export function decodeGuidedRespondResponse(value: unknown): GuidedRespondResponse {

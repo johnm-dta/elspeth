@@ -79,6 +79,7 @@ from elspeth.web.interpretation_state import (
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.guided_audit import (
+    bind_guided_failure_audit_rows,
     is_authentic_guided_synthetic_invocation,
     prepare_guided_audit_rows,
     validate_guided_audit_payload_references,
@@ -86,6 +87,7 @@ from elspeth.web.sessions.guided_audit import (
 from elspeth.web.sessions.guided_payloads import verify_guided_json_payloads
 from elspeth.web.sessions.guided_replay import (
     guided_response_projection_hash,
+    project_composition_proposal,
     project_guided_response,
     response_json,
     validation_errors_for_composer_surface,
@@ -118,6 +120,7 @@ from elspeth.web.sessions.proposal_blob_refs import validate_proposal_blob_refer
 from elspeth.web.sessions.protocol import (
     AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST,
     AUDIT_GRADE_VIEW_WRITER_PRINCIPAL,
+    GUIDED_FAILURE_AUDIT_LINEAGE_KEY,
     GUIDED_OPERATION_FAILURE_CODE_VALUES,
     GUIDED_OPERATION_KIND_VALUES,
     LEGAL_RUN_TRANSITIONS,
@@ -141,7 +144,11 @@ from elspeth.web.sessions.protocol import (
     CompositionStateRecord,
     GuidedAuditEvidence,
     GuidedCompositionStateResult,
+    GuidedFailureAuditCohort,
+    GuidedFailureAuditLineage,
     GuidedForkSettlementCommand,
+    GuidedFullPipelineProposalStageCommand,
+    GuidedFullPipelineProposalStageSettlement,
     GuidedOperationActive,
     GuidedOperationClaimed,
     GuidedOperationCompleted,
@@ -156,6 +163,7 @@ from elspeth.web.sessions.protocol import (
     GuidedOperationResult,
     GuidedOperationSettlementConflictError,
     GuidedOperationTakenOver,
+    GuidedOriginatingUserMessageDraft,
     GuidedPendingProposalInvalidation,
     GuidedPipelineProposalAcceptCommand,
     GuidedPipelineProposalBackEditCommand,
@@ -3222,8 +3230,13 @@ class SessionServiceImpl:
         prior_attempt: int | None,
         lease_expires_at: datetime | None,
         request_hash: str,
+        failure_audit_cohort: GuidedFailureAuditCohort | None,
         occurred_at: datetime,
     ) -> None:
+        if event_kind == "failed" and type(failure_audit_cohort) is not GuidedFailureAuditCohort:
+            raise AuditIntegrityError("failed guided operation event must carry exactly one failure audit cohort commitment")
+        if event_kind != "failed" and failure_audit_cohort is not None:
+            raise AuditIntegrityError("non-failed guided operation event must not carry a failure audit cohort commitment")
         next_sequence = conn.execute(
             select(func.coalesce(func.max(guided_operation_events_table.c.sequence), 0) + 1).where(
                 guided_operation_events_table.c.session_id == session_id,
@@ -3241,6 +3254,7 @@ class SessionServiceImpl:
                 prior_attempt=prior_attempt,
                 lease_expires_at=lease_expires_at,
                 request_hash=request_hash,
+                failure_audit_cohort=(failure_audit_cohort.envelope() if failure_audit_cohort is not None else None),
                 occurred_at=occurred_at,
             )
         )
@@ -3474,6 +3488,7 @@ class SessionServiceImpl:
                         prior_attempt=None,
                         lease_expires_at=lease_expires_at,
                         request_hash=request_hash,
+                        failure_audit_cohort=None,
                         occurred_at=now,
                     )
                     return GuidedOperationClaimed(
@@ -3535,6 +3550,7 @@ class SessionServiceImpl:
                     prior_attempt=prior_attempt,
                     lease_expires_at=lease_expires_at,
                     request_hash=request_hash,
+                    failure_audit_cohort=None,
                     occurred_at=now,
                 )
                 return GuidedOperationTakenOver(
@@ -3588,6 +3604,100 @@ class SessionServiceImpl:
             if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
                 raise AuditIntegrityError("Tier 1: guided operation has an invalid attempt")
             return GuidedOperationActive(attempt=attempt, lease_expires_at=expiry, expired=expiry <= now)
+
+        return cast(
+            "GuidedOperationActive | GuidedOperationCompleted | GuidedOperationFailed | None",
+            await self._run_sync(_sync),
+        )
+
+    async def reconcile_guided_start_operation(
+        self,
+        *,
+        session_id: UUID,
+        operation_id: str,
+        actor: str,
+    ) -> GuidedOperationActive | GuidedOperationCompleted | GuidedOperationFailed | None:
+        """Read one guided-start outcome, abandoning an expired exact attempt."""
+        if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 128:
+            raise ValueError("guided operation id must be a non-empty string of at most 128 characters")
+        self._validate_guided_actor(actor)
+        sid = str(session_id)
+
+        def _sync() -> GuidedOperationActive | GuidedOperationCompleted | GuidedOperationFailed | None:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                now = self._guided_database_now(conn)
+                row = (
+                    conn.execute(
+                        select(guided_operations_table).where(
+                            guided_operations_table.c.session_id == sid,
+                            guided_operations_table.c.operation_id == operation_id,
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if row is None:
+                    return None
+                self._validate_guided_operation_row(
+                    row,
+                    expected_session_id=sid,
+                    expected_operation_id=operation_id,
+                )
+                if row["kind"] != "guided_start":
+                    raise self._guided_conflict(session_id=session_id, operation_id=operation_id)
+                if row["status"] in {"completed", "failed"}:
+                    return self._guided_terminal_outcome(row)
+                if row["status"] != "in_progress":
+                    raise AuditIntegrityError("Tier 1: guided operation has an invalid status")
+                expiry = self._guided_in_progress_expiry(row)
+                attempt = row["attempt"]
+                if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+                    raise AuditIntegrityError("Tier 1: guided operation has an invalid attempt")
+                if expiry > now:
+                    return GuidedOperationActive(attempt=attempt, lease_expires_at=expiry)
+
+                lease_token = row["lease_token"]
+                assert isinstance(lease_token, str)
+                changed = conn.execute(
+                    update(guided_operations_table)
+                    .where(
+                        guided_operations_table.c.session_id == sid,
+                        guided_operations_table.c.operation_id == operation_id,
+                        guided_operations_table.c.status == "in_progress",
+                        guided_operations_table.c.lease_token == lease_token,
+                        guided_operations_table.c.attempt == attempt,
+                        guided_operations_table.c.lease_expires_at <= now,
+                    )
+                    .values(
+                        status="failed",
+                        lease_token=None,
+                        lease_expires_at=None,
+                        proposal_id=None,
+                        result_kind=None,
+                        result_state_id=None,
+                        result_session_id=None,
+                        response_hash=None,
+                        failure_code="request_cancelled",
+                        settled_at=now,
+                        updated_at=now,
+                    )
+                ).rowcount
+                if changed != 1:
+                    raise AuditIntegrityError("Guided operation reconciliation lost its locked compare-and-swap")
+                self._insert_guided_operation_event(
+                    conn,
+                    session_id=sid,
+                    operation_id=operation_id,
+                    event_kind="failed",
+                    actor=actor,
+                    attempt=attempt,
+                    prior_attempt=None,
+                    lease_expires_at=None,
+                    request_hash=row["request_hash"],
+                    failure_audit_cohort=GuidedFailureAuditCohort.empty(),
+                    occurred_at=now,
+                )
+                return GuidedOperationFailed(failure_code="request_cancelled")
 
         return cast(
             "GuidedOperationActive | GuidedOperationCompleted | GuidedOperationFailed | None",
@@ -3668,6 +3778,7 @@ class SessionServiceImpl:
                     prior_attempt=None,
                     lease_expires_at=lease_expires_at,
                     request_hash=row["request_hash"],
+                    failure_audit_cohort=None,
                     occurred_at=now,
                 )
                 return fence
@@ -3901,6 +4012,7 @@ class SessionServiceImpl:
             prior_attempt=None,
             lease_expires_at=None,
             request_hash=row["request_hash"],
+            failure_audit_cohort=None,
             occurred_at=now,
         )
         return GuidedOperationCompleted(result=normalized, response_hash=response_hash)
@@ -3934,6 +4046,7 @@ class SessionServiceImpl:
         *,
         failure_code: GuidedOperationFailureCode,
         actor: str,
+        failure_audit_cohort: GuidedFailureAuditCohort,
     ) -> GuidedOperationFailed:
         """Clear partial locators and settle one closed safe failure atomically."""
         self._validate_guided_actor(actor)
@@ -3976,6 +4089,7 @@ class SessionServiceImpl:
             prior_attempt=None,
             lease_expires_at=None,
             request_hash=row["request_hash"],
+            failure_audit_cohort=failure_audit_cohort,
             occurred_at=now,
         )
         return GuidedOperationFailed(failure_code=failure_code)
@@ -3996,6 +4110,7 @@ class SessionServiceImpl:
                     fence,
                     failure_code=failure_code,
                     actor=actor,
+                    failure_audit_cohort=GuidedFailureAuditCohort.empty(),
                 )
 
         return cast("GuidedOperationFailed", await self._run_sync(_sync))
@@ -4018,21 +4133,28 @@ class SessionServiceImpl:
 
         def _sync() -> GuidedOperationFailed:
             with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                audit_records: tuple[ChatMessageRecord, ...] = ()
                 if audit_rows:
+                    operation, _database_now = self.require_guided_operation_fence_on_connection(conn, command.fence)
+                    lineage = GuidedFailureAuditLineage.from_authority(
+                        session_id=command.fence.session_id,
+                        operation_id=command.fence.operation_id,
+                        attempt=command.fence.attempt,
+                        request_hash=operation["request_hash"],
+                    )
+                    bound_audit_rows = bind_guided_failure_audit_rows(audit_rows, lineage=lineage)
                     current_state_id = conn.execute(
                         select(composition_states_table.c.id)
                         .where(composition_states_table.c.session_id == sid)
                         .order_by(desc(composition_states_table.c.version))
                         .limit(1)
                     ).scalar_one_or_none()
-                    if current_state_id is None:
-                        raise AuditIntegrityError("guided operation failure evidence has no current checkpoint")
-                    sequence_no = self._reserve_sequence_range(conn, sid, count=len(audit_rows))
-                    self._insert_prepared_guided_audit_rows_on_connection(
+                    sequence_no = self._reserve_sequence_range(conn, sid, count=len(bound_audit_rows))
+                    audit_records = self._insert_prepared_guided_audit_rows_on_connection(
                         conn,
                         session_id=sid,
-                        composition_state_id=UUID(current_state_id),
-                        audit_rows=audit_rows,
+                        composition_state_id=UUID(current_state_id) if current_state_id is not None else None,
+                        audit_rows=bound_audit_rows,
                         sequence_no=sequence_no,
                         created_at=now,
                     )
@@ -4042,6 +4164,7 @@ class SessionServiceImpl:
                     command.fence,
                     failure_code=command.failure_code,
                     actor=command.actor,
+                    failure_audit_cohort=GuidedFailureAuditCohort.from_records(audit_records),
                 )
 
         return cast("GuidedOperationFailed", await self._run_sync(_sync))
@@ -7052,6 +7175,78 @@ class SessionServiceImpl:
             parent_assistant_id=parent_assistant_id,
         )
 
+    def _verify_guided_failure_audit_cohort(
+        self,
+        message_rows: Sequence[Any],
+        failed_event_rows: Sequence[Any],
+    ) -> None:
+        """Fail closed unless every failed event commits its exact evidence cohort."""
+
+        event_commitments: dict[GuidedFailureAuditLineage, list[GuidedFailureAuditCohort]] = {}
+        for event in failed_event_rows:
+            try:
+                lineage = GuidedFailureAuditLineage.from_authority(
+                    session_id=UUID(event.session_id),
+                    operation_id=event.operation_id,
+                    attempt=event.attempt,
+                    request_hash=event.request_hash,
+                )
+            except (TypeError, ValueError, AuditIntegrityError) as exc:
+                raise AuditIntegrityError("guided failure audit lineage has malformed terminal-event authority") from exc
+            try:
+                commitment = GuidedFailureAuditCohort.from_envelope(event.failure_audit_cohort)
+            except (TypeError, ValueError, AuditIntegrityError) as exc:
+                raise AuditIntegrityError("guided failure audit cohort has malformed terminal-event commitment") from exc
+            event_commitments.setdefault(lineage, []).append(commitment)
+
+        records_by_lineage: dict[GuidedFailureAuditLineage, list[ChatMessageRecord]] = {}
+        for row in message_rows:
+            try:
+                content = json.loads(row.content)
+            except (TypeError, ValueError):
+                content = None
+            content_has_lineage = type(content) is dict and GUIDED_FAILURE_AUDIT_LINEAGE_KEY in content
+            tool_calls = row.tool_calls
+            envelope_has_lineage = type(tool_calls) is list and any(
+                type(envelope) is dict and GUIDED_FAILURE_AUDIT_LINEAGE_KEY in envelope for envelope in tool_calls
+            )
+            if not content_has_lineage and not envelope_has_lineage:
+                continue
+            if (
+                row.role != "audit"
+                or row.writer_principal != "compose_loop"
+                or type(content) is not dict
+                or type(tool_calls) is not list
+                or len(tool_calls) != 1
+                or type(tool_calls[0]) is not dict
+                or GUIDED_FAILURE_AUDIT_LINEAGE_KEY not in content
+                or GUIDED_FAILURE_AUDIT_LINEAGE_KEY not in tool_calls[0]
+            ):
+                raise AuditIntegrityError("guided failure audit lineage is partial or attached to a malformed row")
+            content_lineage = GuidedFailureAuditLineage.from_envelope(content[GUIDED_FAILURE_AUDIT_LINEAGE_KEY])
+            envelope_lineage = GuidedFailureAuditLineage.from_envelope(tool_calls[0][GUIDED_FAILURE_AUDIT_LINEAGE_KEY])
+            if content_lineage != envelope_lineage:
+                raise AuditIntegrityError("guided failure audit lineage content and envelope disagree")
+            if content_lineage.session_id != UUID(row.session_id):
+                raise AuditIntegrityError("guided failure audit lineage names a different session")
+            if len(event_commitments.get(content_lineage, ())) != 1:
+                raise AuditIntegrityError(
+                    "guided failure audit lineage has absent or ambiguous terminal-event authority; "
+                    "guided failure audit cohort authority is not exact"
+                )
+            records_by_lineage.setdefault(content_lineage, []).append(self._row_to_chat_message_record(row))
+
+        for lineage, commitments in event_commitments.items():
+            if len(commitments) != 1:
+                raise AuditIntegrityError(
+                    "guided failure audit lineage has ambiguous terminal-event authority; "
+                    "guided failure audit cohort authority is not exact"
+                )
+            records = tuple(records_by_lineage.get(lineage, ()))
+            actual = GuidedFailureAuditCohort.from_records(records)
+            if actual != commitments[0]:
+                raise AuditIntegrityError("guided failure audit cohort does not match the exact durable evidence rows")
+
     def _row_to_chat_message_record(self, row: Any) -> ChatMessageRecord:
         return ChatMessageRecord(
             id=UUID(row.id),
@@ -7085,19 +7280,94 @@ class SessionServiceImpl:
         makes the new key total within a session.
         """
 
-        def _sync() -> Any:
+        def _sync() -> tuple[Sequence[Any], Sequence[Any], Sequence[Any]]:
             with self._engine.begin() as conn:
-                return conn.execute(
+                message_rows = conn.execute(
                     select(chat_messages_table)
                     .where(chat_messages_table.c.session_id == str(session_id))
                     .order_by(chat_messages_table.c.sequence_no)
                     .limit(limit)
                     .offset(offset)
                 ).fetchall()
+                verification_message_rows = conn.execute(
+                    select(chat_messages_table)
+                    .where(chat_messages_table.c.session_id == str(session_id))
+                    .order_by(chat_messages_table.c.sequence_no)
+                ).fetchall()
+                failed_event_rows = conn.execute(
+                    select(
+                        guided_operation_events_table.c.session_id,
+                        guided_operation_events_table.c.operation_id,
+                        guided_operation_events_table.c.attempt,
+                        guided_operation_events_table.c.request_hash,
+                        guided_operation_events_table.c.failure_audit_cohort,
+                    )
+                    .where(guided_operation_events_table.c.session_id == str(session_id))
+                    .where(guided_operation_events_table.c.event_kind == "failed")
+                ).fetchall()
+                return message_rows, verification_message_rows, failed_event_rows
 
-        rows = await self._run_sync(_sync)
+        rows, verification_message_rows, failed_event_rows = await self._run_sync(_sync)
+        self._verify_guided_failure_audit_cohort(verification_message_rows, failed_event_rows)
 
         return [self._row_to_chat_message_record(row) for row in rows]
+
+    async def get_verified_guided_root_intent(
+        self,
+        *,
+        session_id: UUID,
+        root_message_id: UUID,
+    ) -> ChatMessageRecord:
+        """Re-derive a live start hash before returning its private root row."""
+
+        from elspeth.web.composer.guided.profile import EMPTY_PROFILE
+        from elspeth.web.sessions.guided_operations import guided_operation_request_hash
+        from elspeth.web.sessions.schemas import StartGuidedRequest
+
+        sid = str(session_id)
+        mid = str(root_message_id)
+
+        def _sync() -> ChatMessageRecord:
+            with self._engine.begin() as conn:
+                message_row = conn.execute(
+                    select(chat_messages_table).where(chat_messages_table.c.session_id == sid).where(chat_messages_table.c.id == mid)
+                ).one_or_none()
+                if message_row is None or message_row.role != "user" or message_row.writer_principal != "route_user_message":
+                    raise AuditIntegrityError("guided root intent row failed session/role/writer custody")
+                operations = conn.execute(
+                    select(guided_operations_table)
+                    .where(guided_operations_table.c.session_id == sid)
+                    .where(guided_operations_table.c.kind == "guided_start")
+                    .where(guided_operations_table.c.status == "completed")
+                    .where(guided_operations_table.c.originating_message_id == mid)
+                    .where(guided_operations_table.c.result_kind == "composition_state")
+                ).fetchall()
+                if len(operations) != 1:
+                    raise AuditIntegrityError("guided root intent has absent or ambiguous start-operation authority")
+                operation = operations[0]
+                request = StartGuidedRequest.model_validate(
+                    {
+                        "operation_id": operation.operation_id,
+                        "profile": "live",
+                        "intent": message_row.content,
+                    },
+                    strict=True,
+                )
+                if guided_operation_request_hash(session_id=session_id, kind="guided_start", request=request) != operation.request_hash:
+                    raise AuditIntegrityError("guided root intent content no longer matches its start request hash")
+                state_row = conn.execute(
+                    select(composition_states_table)
+                    .where(composition_states_table.c.session_id == sid)
+                    .where(composition_states_table.c.id == operation.result_state_id)
+                ).one_or_none()
+                if state_row is None:
+                    raise AuditIntegrityError("guided root intent start result state is missing")
+                guided = state_from_record(self._row_to_state_record(state_row)).guided_session
+                if guided is None or guided.profile != EMPTY_PROFILE or guided.root_intent_message_id != mid:
+                    raise AuditIntegrityError("guided root intent differs from its live start checkpoint")
+                return self._row_to_chat_message_record(message_row)
+
+        return cast("ChatMessageRecord", await self._run_sync(_sync))
 
     def count_tool_responses_for_assistant(
         self,
@@ -8181,13 +8451,18 @@ class SessionServiceImpl:
         conn: Connection,
         *,
         session_id: str,
-        composition_state_id: UUID,
+        composition_state_id: UUID | None,
         audit_rows: tuple[PreparedGuidedAuditRow, ...],
         sequence_no: int | None,
         created_at: datetime,
     ) -> tuple[ChatMessageRecord, ...]:
         """Insert a prevalidated guided evidence cohort in the caller's transaction."""
 
+        self._assert_session_write_lock_held(
+            conn,
+            session_id,
+            caller="_insert_prepared_guided_audit_rows_on_connection",
+        )
         if audit_rows and sequence_no is None:
             raise AuditIntegrityError("Guided audit cohort has no reserved sequence")
         records: list[ChatMessageRecord] = []
@@ -8203,7 +8478,7 @@ class SessionServiceImpl:
                 tool_calls=[deep_thaw(audit_row.envelope)],
                 sequence_no=sequence_no,
                 writer_principal="compose_loop",
-                composition_state_id=str(composition_state_id),
+                composition_state_id=str(composition_state_id) if composition_state_id is not None else None,
                 tool_call_id=None,
                 parent_assistant_id=None,
                 created_at=created_at,
@@ -8235,6 +8510,7 @@ class SessionServiceImpl:
         response_hash_factory: Callable[[CompositionStateRecord], str],
         payloads: tuple[PreparedGuidedJsonPayload, ...] = (),
         audit_evidence: GuidedAuditEvidence | None = None,
+        originating_message: GuidedOriginatingUserMessageDraft | None = None,
         payload_store: PayloadStore | None = None,
     ) -> GuidedStartStateOutcome:
         """Atomically seed an empty session or settle its exact guided head.
@@ -8252,6 +8528,8 @@ class SessionServiceImpl:
         )
         sid = str(fence.session_id)
         now = self._now()
+        if originating_message is not None and type(originating_message) is not GuidedOriginatingUserMessageDraft:
+            raise TypeError("originating_message must be an exact GuidedOriginatingUserMessageDraft or None")
 
         def _sync() -> GuidedStartStateOutcome:
             with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
@@ -8272,8 +8550,26 @@ class SessionServiceImpl:
                     )
                     inserted_row = conn.execute(select(composition_states_table).where(composition_states_table.c.id == state_id)).one()
                     record = self._row_to_state_record(inserted_row)
-                    if audit_rows:
-                        sequence_no = self._reserve_sequence_range(conn, sid, count=len(audit_rows))
+                    row_count = len(audit_rows) + (1 if originating_message is not None else 0)
+                    if row_count:
+                        sequence_no = self._reserve_sequence_range(conn, sid, count=row_count)
+                        if originating_message is not None:
+                            self._insert_chat_message(
+                                conn,
+                                session_id=sid,
+                                role="user",
+                                content=originating_message.content,
+                                raw_content=None,
+                                tool_calls=None,
+                                sequence_no=sequence_no,
+                                writer_principal="route_user_message",
+                                composition_state_id=state_id,
+                                tool_call_id=None,
+                                parent_assistant_id=None,
+                                created_at=now,
+                                message_id=str(originating_message.message_id),
+                            )
+                            sequence_no += 1
                         self._insert_prepared_guided_audit_rows_on_connection(
                             conn,
                             session_id=sid,
@@ -8288,8 +8584,34 @@ class SessionServiceImpl:
                     record = self._row_to_state_record(current_row)
                     outcome = GuidedStartStateConverged(state=record)
 
+                if originating_message is not None:
+                    guided = state_from_record(record).guided_session
+                    if guided is None or guided.root_intent_message_id != str(originating_message.message_id):
+                        raise AuditIntegrityError("guided live start checkpoint does not bind its exact root intent")
+                    message_row = conn.execute(
+                        select(
+                            chat_messages_table.c.session_id,
+                            chat_messages_table.c.role,
+                            chat_messages_table.c.content,
+                            chat_messages_table.c.writer_principal,
+                        ).where(chat_messages_table.c.id == str(originating_message.message_id))
+                    ).one_or_none()
+                    if (
+                        message_row is None
+                        or message_row.session_id != sid
+                        or message_row.role != "user"
+                        or message_row.content != originating_message.content
+                        or message_row.writer_principal != "route_user_message"
+                    ):
+                        raise AuditIntegrityError("guided live start root intent row failed custody verification")
+
                 response_hash = response_hash_factory(record)
-                self.bind_guided_operation_on_connection(conn, fence, result_state_id=record.id)
+                self.bind_guided_operation_on_connection(
+                    conn,
+                    fence,
+                    originating_message_id=(originating_message.message_id if originating_message is not None else None),
+                    result_state_id=record.id,
+                )
                 self.complete_guided_operation_on_connection(
                     conn,
                     fence,
@@ -8628,6 +8950,229 @@ class SessionServiceImpl:
                 )
 
         return cast("GuidedStateOperationSettlement", await self._run_sync(_sync))
+
+    async def stage_guided_full_pipeline_proposal(
+        self,
+        command: GuidedFullPipelineProposalStageCommand,
+    ) -> GuidedFullPipelineProposalStageSettlement:
+        """Publish one guided-full proposal and its replay locator atomically."""
+
+        if type(command) is not GuidedFullPipelineProposalStageCommand:
+            raise TypeError("command must be an exact GuidedFullPipelineProposalStageCommand")
+        proposal = command.plan.proposal
+        if proposal.surface is not PlannerSurface.GUIDED_FULL:
+            raise AuditIntegrityError("guided-full stage requires a guided_full planner proposal")
+        if type(proposal.base) is not PresentBase or proposal.base.state_id != command.checkpoint_state_id:
+            raise AuditIntegrityError("guided-full proposal base must name its checkpoint")
+        checkpoint_content_hash = _composition_state_data_content_hash(command.state)
+        if proposal.base.composition_content_hash != checkpoint_content_hash:
+            raise AuditIntegrityError("guided-full proposal base hash differs from its checkpoint")
+        if command.expected_current_content_hash is not None and command.expected_current_content_hash != checkpoint_content_hash:
+            raise AuditIntegrityError("guided-full checkpoint content differs from the observed composition head")
+        if proposal.reviewed_anchor_hash != reviewed_anchor_hash({}):
+            raise AuditIntegrityError("guided-full proposal carries reviewed-stage authority")
+        if proposal.covered_deferred_intent_ids or proposal.supersedes_draft_hash is not None:
+            raise AuditIntegrityError("guided-full proposal carries staged-only authority")
+        expected_redacted = redact_tool_call_arguments(
+            "set_pipeline",
+            deep_thaw(proposal.pipeline),
+            telemetry=NoopRedactionTelemetry(),
+        )
+        if deep_thaw(command.arguments_redacted_json) != expected_redacted:
+            raise AuditIntegrityError("guided-full redacted arguments differ from the manifest projection")
+
+        normalized = _normalize_proposal_composer_provenance(
+            composer_model_identifier=command.plan.model_identifier,
+            composer_model_version=command.plan.model_version,
+            composer_provider=command.plan.provider,
+            composer_skill_hash=proposal.skill_hash,
+            tool_arguments_hash=stable_hash(proposal.pipeline),
+        )
+        assert all(value is not None for value in normalized.values())
+        creation_payload = _pipeline_created_payload(
+            plan=command.plan,
+            user_message_id=command.originating_message.message_id,
+            composer_model_identifier=cast(str, normalized["composer_model_identifier"]),
+            composer_model_version=cast(str, normalized["composer_model_version"]),
+            composer_provider=cast(str, normalized["composer_provider"]),
+            summary=command.summary,
+            rationale=command.rationale,
+            affects=command.affects,
+            arguments_redacted_json=command.arguments_redacted_json,
+            supersedes_proposal_id=None,
+        )
+        audit_rows = self._prepare_guided_audit_cohort(
+            audit_evidence=command.audit_evidence,
+            payloads=(),
+            payload_store=None,
+        )
+        sid = str(command.fence.session_id)
+        pid = str(command.proposal_id)
+        event_id = str(uuid.uuid4())
+        now = self._now()
+
+        def _sync() -> GuidedFullPipelineProposalStageSettlement:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                operation_row, _database_now = self.require_guided_operation_fence_on_connection(conn, command.fence)
+                if operation_row["kind"] != "guided_plan":
+                    raise AuditIntegrityError("guided-full stage requires a guided_plan operation")
+                current_row = conn.execute(
+                    select(composition_states_table)
+                    .where(composition_states_table.c.session_id == sid)
+                    .order_by(desc(composition_states_table.c.version))
+                    .limit(1)
+                ).one_or_none()
+                if command.expected_current_state_id is None:
+                    if current_row is not None:
+                        raise GuidedOperationSettlementConflictError()
+                else:
+                    if (
+                        current_row is None
+                        or current_row.id != str(command.expected_current_state_id)
+                        or current_row.version != command.expected_current_state_version
+                    ):
+                        raise GuidedOperationSettlementConflictError()
+                    current_record = self._row_to_state_record(current_row)
+                    if composition_content_hash(state_from_record(current_record)) != command.expected_current_content_hash:
+                        raise AuditIntegrityError("guided-full observed composition content changed before staging")
+
+                validate_proposal_blob_references(
+                    conn,
+                    session_id=sid,
+                    tool_name="set_pipeline",
+                    arguments=deep_thaw(proposal.pipeline),
+                )
+                checkpoint_id = self._insert_composition_state(
+                    conn,
+                    session_id=sid,
+                    payload=StatePayload(
+                        data=command.state,
+                        derived_from_state_id=(
+                            str(command.expected_current_state_id) if command.expected_current_state_id is not None else None
+                        ),
+                    ),
+                    provenance="convergence_persist",
+                    created_at=now,
+                    state_id=str(command.checkpoint_state_id),
+                )
+                checkpoint_row = conn.execute(select(composition_states_table).where(composition_states_table.c.id == checkpoint_id)).one()
+                checkpoint = self._row_to_state_record(checkpoint_row)
+
+                sequence_no = self._reserve_sequence_range(conn, sid, count=1 + len(audit_rows))
+                self._insert_chat_message(
+                    conn,
+                    session_id=sid,
+                    role="user",
+                    content=command.originating_message.content,
+                    raw_content=None,
+                    tool_calls=None,
+                    sequence_no=sequence_no,
+                    writer_principal="route_user_message",
+                    composition_state_id=checkpoint_id,
+                    tool_call_id=None,
+                    parent_assistant_id=None,
+                    created_at=now,
+                    message_id=str(command.originating_message.message_id),
+                )
+                originating_message = ChatMessageRecord(
+                    id=command.originating_message.message_id,
+                    session_id=command.fence.session_id,
+                    role="user",
+                    content=command.originating_message.content,
+                    raw_content=None,
+                    tool_calls=None,
+                    created_at=now,
+                    sequence_no=sequence_no,
+                    composition_state_id=checkpoint.id,
+                    writer_principal="route_user_message",
+                )
+                audit_messages = self._insert_prepared_guided_audit_rows_on_connection(
+                    conn,
+                    session_id=sid,
+                    composition_state_id=checkpoint.id,
+                    audit_rows=audit_rows,
+                    sequence_no=sequence_no + 1,
+                    created_at=now,
+                )
+                conn.execute(update(sessions_table).where(sessions_table.c.id == sid).values(updated_at=now))
+
+                conn.execute(
+                    insert(proposal_events_table).values(
+                        id=event_id,
+                        session_id=sid,
+                        proposal_id=pid,
+                        event_type="proposal.created",
+                        actor=command.actor,
+                        payload=creation_payload,
+                        created_at=now,
+                    )
+                )
+                conn.execute(
+                    insert(composition_proposals_table).values(
+                        id=pid,
+                        session_id=sid,
+                        tool_call_id=command.plan.tool_call_id,
+                        user_message_id=str(command.originating_message.message_id),
+                        composer_model_identifier=normalized["composer_model_identifier"],
+                        composer_model_version=normalized["composer_model_version"],
+                        composer_provider=normalized["composer_provider"],
+                        composer_skill_hash=normalized["composer_skill_hash"],
+                        tool_arguments_hash=normalized["tool_arguments_hash"],
+                        tool_name="set_pipeline",
+                        status="pending",
+                        summary=command.summary,
+                        rationale=command.rationale,
+                        affects=list(command.affects),
+                        arguments_json=deep_thaw(proposal.pipeline),
+                        arguments_redacted_json=deep_thaw(command.arguments_redacted_json),
+                        base_state_id=checkpoint_id,
+                        committed_state_id=None,
+                        audit_event_id=event_id,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                proposal_row = conn.execute(select(composition_proposals_table).where(composition_proposals_table.c.id == pid)).one()
+                stored = _proposal_record_from_row(proposal_row)
+                authority = AuthoritativePipelineProposal(
+                    row=stored,
+                    proposal=proposal,
+                    creation_event_id=UUID(event_id),
+                    custody_result=command.plan.custody_result,
+                    supersedes_proposal_id=None,
+                )
+                proposal_record = replace(stored, pipeline_metadata=_pipeline_public_metadata(authority))
+                response = project_composition_proposal(proposal_record)
+                projected_json = response_json(response)
+                response_hash = guided_response_projection_hash(response)
+                self.bind_guided_operation_on_connection(
+                    conn,
+                    command.fence,
+                    originating_message_id=command.originating_message.message_id,
+                )
+                self.complete_guided_operation_on_connection(
+                    conn,
+                    command.fence,
+                    result=GuidedPipelineProposalResult(
+                        proposal_id=command.proposal_id,
+                        checkpoint_state_id=checkpoint.id,
+                    ),
+                    response_hash=response_hash,
+                    actor=command.actor,
+                )
+                return GuidedFullPipelineProposalStageSettlement(
+                    checkpoint_state=checkpoint,
+                    proposal=proposal_record,
+                    originating_message=originating_message,
+                    audit_messages=audit_messages,
+                    response_json=projected_json,
+                    response_hash=response_hash,
+                )
+
+        settlement = cast("GuidedFullPipelineProposalStageSettlement", await self._run_sync(_sync))
+        _PIPELINE_PLANNER_COUNTER.add(1, {"surface": "guided_full", "result": "proposal_created"})
+        _PIPELINE_CUSTODY_COUNTER.add(1, {"surface": "guided_full", "result": command.plan.custody_result})
+        return settlement
 
     async def stage_guided_pipeline_proposal(
         self,

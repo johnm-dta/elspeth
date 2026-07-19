@@ -130,6 +130,53 @@ def composer_test_client(request: pytest.FixtureRequest, tmp_path: Path) -> Iter
     class _DeterministicGuidedPlanner:
         """Explicit test double for the shared planner route seam."""
 
+        async def plan_guided_full_pipeline(self, *, base, recorder, policy_catalog, **_kwargs):
+            pipeline = {
+                "sources": {
+                    "source": {
+                        "plugin": "csv",
+                        "options": {"path": "/data/input.csv"},
+                        "on_success": "results",
+                        "on_validation_failure": "discard",
+                    }
+                },
+                "nodes": [],
+                "edges": [],
+                "outputs": [
+                    {
+                        "sink_name": "results",
+                        "plugin": "json",
+                        "options": {"path": "/data/results.jsonl"},
+                        "on_write_failure": "discard",
+                    }
+                ],
+            }
+            proposal = PipelineProposal.create(
+                pipeline=pipeline,
+                base=base,
+                reviewed_facts={},
+                surface=PlannerSurface.GUIDED_FULL,
+                repair_count=0,
+                skill_hash=stable_hash("deterministic-guided-full-test-planner"),
+                covered_deferred_intent_ids=(),
+                supersedes_draft_hash=None,
+            )
+            return (
+                PipelinePlanResult(
+                    proposal=proposal,
+                    tool_call_id=f"guided-full-test-{proposal.draft_hash[:16]}",
+                    custody_result="not_required",
+                    model_identifier="deterministic-guided-full-test-planner",
+                    model_version="v1",
+                    provider="test",
+                ),
+                {
+                    "source": frozenset(item.name for item in policy_catalog.list_sources()),
+                    "transform": frozenset(item.name for item in policy_catalog.list_transforms()),
+                    "sink": frozenset(item.name for item in policy_catalog.list_sinks()),
+                },
+            )
+
         async def plan_guided_pipeline(self, *, guided, base, supersedes_draft_hash, recorder, **_kwargs):
             output_names = [guided.reviewed_outputs[stable_id].name for stable_id in guided.output_order]
             pipeline = {

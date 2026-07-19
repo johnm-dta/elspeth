@@ -58,7 +58,17 @@ def file_composer_test_client(composer_test_client: TestClient, tmp_path: Path) 
 def _create_session(client: TestClient) -> str:
     response = client.post("/api/sessions", json={"title": "schema-8 chat"})
     assert response.status_code == 201, response.json()
-    return response.json()["id"]
+    session_id = response.json()["id"]
+    start = client.post(
+        f"/api/sessions/{session_id}/guided/start",
+        json={
+            "profile": "live",
+            "intent": "Begin this guided chat session.",
+            "operation_id": str(uuid4()),
+        },
+    )
+    assert start.status_code == 200, start.json()
+    return session_id
 
 
 def _chat_body(turn: dict, *, operation_id: str | None = None, message: str = "Use CSV") -> dict[str, str]:
@@ -419,6 +429,7 @@ def test_same_operation_concurrent_callers_join_one_provider_result_outside_comp
     session_id = _create_session(client)
     turn = client.get(f"/api/sessions/{session_id}/guided").json()["next_turn"]
     body = _chat_body(turn)
+    initial_versions = asyncio.run(client.app.state.session_service.get_state_versions(UUID(session_id)))
     provider_calls = 0
 
     async def race() -> list[object]:
@@ -450,7 +461,7 @@ def test_same_operation_concurrent_callers_join_one_provider_result_outside_comp
     assert winner_response.json() == joined_response.json()
     assert provider_calls == 1
     assert _chat_operation_count(client, session_id) == 1
-    assert len(asyncio.run(client.app.state.session_service.get_state_versions(UUID(session_id)))) == 1
+    assert len(asyncio.run(client.app.state.session_service.get_state_versions(UUID(session_id)))) == len(initial_versions) + 1
 
 
 def test_settlement_failure_rolls_back_chat_state_and_evidence_and_replays_typed_failure(
@@ -461,6 +472,8 @@ def test_settlement_failure_rolls_back_chat_state_and_evidence_and_replays_typed
     turn = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["next_turn"]
     body = _chat_body(turn)
     service = composer_test_client.app.state.session_service
+    initial_versions = asyncio.run(service.get_state_versions(UUID(session_id)))
+    initial_messages = asyncio.run(service.get_messages(UUID(session_id), limit=None))
     secret_canary = "/private/operator/chat-settlement-secret.csv"
 
     async def fail_settlement(*_args: object, **_kwargs: object) -> None:
@@ -481,8 +494,8 @@ def test_settlement_failure_rolls_back_chat_state_and_evidence_and_replays_typed
     assert replay.json() == first.json()
     assert first.json()["detail"]["failure_code"] == "operation_failed"
     assert secret_canary not in first.text
-    assert asyncio.run(service.get_state_versions(UUID(session_id))) == []
-    assert asyncio.run(service.get_messages(UUID(session_id), limit=None)) == []
+    assert asyncio.run(service.get_state_versions(UUID(session_id))) == initial_versions
+    assert asyncio.run(service.get_messages(UUID(session_id), limit=None)) == initial_messages
     with composer_test_client.app.state.session_engine.connect() as connection:
         operation = (
             connection.execute(
@@ -508,6 +521,8 @@ def test_provider_head_drift_fails_closed_without_settling_chat(
     turn = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["next_turn"]
     body = _chat_body(turn)
     service = composer_test_client.app.state.session_service
+    initial_versions = asyncio.run(service.get_state_versions(UUID(session_id)))
+    initial_messages = asyncio.run(service.get_messages(UUID(session_id), limit=None))
 
     async def drifting_provider(**kwargs: object) -> GuidedChatProviderOutcome:
         state = kwargs["state"]
@@ -534,8 +549,8 @@ def test_provider_head_drift_fails_closed_without_settling_chat(
     assert response.status_code == replay.status_code == 409
     assert response.json() == replay.json()
     assert response.json()["detail"]["failure_code"] == "stale_conflict"
-    assert len(asyncio.run(service.get_state_versions(UUID(session_id)))) == 1
-    assert asyncio.run(service.get_messages(UUID(session_id), limit=None)) == []
+    assert len(asyncio.run(service.get_state_versions(UUID(session_id)))) == len(initial_versions) + 1
+    assert asyncio.run(service.get_messages(UUID(session_id), limit=None)) == initial_messages
 
 
 def test_exact_replay_fails_closed_when_current_turn_payload_is_tampered(
@@ -545,6 +560,7 @@ def test_exact_replay_fails_closed_when_current_turn_payload_is_tampered(
     session_id = _create_session(composer_test_client)
     turn = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["next_turn"]
     body = _chat_body(turn)
+    initial_versions = asyncio.run(composer_test_client.app.state.session_service.get_state_versions(UUID(session_id)))
     monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", _advisory_provider, raising=False)
     first = composer_test_client.post(f"/api/sessions/{session_id}/guided/chat", json=body)
     assert first.status_code == 200
@@ -562,7 +578,9 @@ def test_exact_replay_fails_closed_when_current_turn_payload_is_tampered(
         composer_test_client.post(f"/api/sessions/{session_id}/guided/chat", json=body)
 
     assert _chat_operation_count(composer_test_client, session_id) == 1
-    assert len(asyncio.run(composer_test_client.app.state.session_service.get_state_versions(UUID(session_id)))) == 1
+    assert (
+        len(asyncio.run(composer_test_client.app.state.session_service.get_state_versions(UUID(session_id)))) == len(initial_versions) + 1
+    )
 
 
 def test_expired_operation_takeover_fences_stale_worker_and_both_join_winner(
@@ -574,6 +592,7 @@ def test_expired_operation_takeover_fences_stale_worker_and_both_join_winner(
     turn = client.get(f"/api/sessions/{session_id}/guided").json()["next_turn"]
     body = _chat_body(turn)
     service = client.app.state.session_service
+    initial_versions = asyncio.run(service.get_state_versions(UUID(session_id)))
     engine = client.app.state.session_engine
     provider_calls = 0
 
@@ -634,4 +653,4 @@ def test_expired_operation_takeover_fences_stale_worker_and_both_join_winner(
         )
     assert operation["status"] == "completed"
     assert operation["attempt"] == 2
-    assert len(asyncio.run(service.get_state_versions(UUID(session_id)))) == 1
+    assert len(asyncio.run(service.get_state_versions(UUID(session_id)))) == len(initial_versions) + 1

@@ -137,7 +137,7 @@ from elspeth.web.sessions._guided_step_chat import (
 from elspeth.web.sessions.audit_story_models import RunAuditStoryResponse
 from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError, AuditStoryService
 from elspeth.web.sessions.converters import state_from_record as _state_from_record
-from elspeth.web.sessions.guided_replay import validation_errors_for_composer_surface
+from elspeth.web.sessions.guided_replay import project_composition_proposal, validation_errors_for_composer_surface
 from elspeth.web.sessions.models import composer_completion_events_table
 from elspeth.web.sessions.protocol import (
     AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST,
@@ -179,7 +179,6 @@ from elspeth.web.sessions.schemas import (
     ListInterpretationEventsResponse,
     MessageWithStateResponse,
     OptOutSummaryResponse,
-    PipelineProposalMetadataResponse,
     PluginPolicyFindingResponse,
     ProposalEventResponse,
     RejectProposalRequest,
@@ -363,37 +362,7 @@ def _composer_preferences_response(record: ComposerSessionPreferencesRecord) -> 
 
 
 def _composition_proposal_response(record: CompositionProposalRecord) -> CompositionProposalResponse:
-    pipeline_metadata = record.pipeline_metadata
-    return CompositionProposalResponse(
-        id=str(record.id),
-        session_id=str(record.session_id),
-        tool_call_id=record.tool_call_id,
-        tool_name=record.tool_name,
-        status=record.status,
-        summary=record.summary,
-        rationale=record.rationale,
-        affects=list(record.affects),
-        arguments_redacted_json=deep_thaw(record.arguments_redacted_json),
-        base_state_id=str(record.base_state_id) if record.base_state_id else None,
-        committed_state_id=str(record.committed_state_id) if record.committed_state_id else None,
-        audit_event_id=str(record.audit_event_id) if record.audit_event_id else None,
-        pipeline_metadata=(
-            PipelineProposalMetadataResponse(
-                surface=pipeline_metadata.surface,
-                draft_hash=pipeline_metadata.draft_hash,
-                base=deep_thaw(pipeline_metadata.base),
-                reviewed_anchor_hash=pipeline_metadata.reviewed_anchor_hash,
-                repair_count=pipeline_metadata.repair_count,
-                skill_hash=pipeline_metadata.skill_hash,
-                audit_payload_hash=pipeline_metadata.audit_payload_hash,
-                custody_result=pipeline_metadata.custody_result,
-            )
-            if pipeline_metadata is not None
-            else None
-        ),
-        created_at=record.created_at,
-        updated_at=record.updated_at,
-    )
+    return project_composition_proposal(record)
 
 
 def _proposal_event_response(record: ProposalEventRecord) -> ProposalEventResponse:

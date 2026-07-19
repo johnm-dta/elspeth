@@ -17,7 +17,12 @@ from elspeth.web.composer.audit_storage import redacted_tool_invocation_content_
 from elspeth.web.composer.guided.protocol import ControlSignal, GuidedStep, TurnType
 from elspeth.web.composer.guided.state_machine import TerminalReason
 from elspeth.web.composer.redaction import MANIFEST
-from elspeth.web.sessions.protocol import PreparedGuidedAuditRow, PreparedGuidedJsonPayload
+from elspeth.web.sessions.protocol import (
+    GUIDED_FAILURE_AUDIT_LINEAGE_KEY,
+    GuidedFailureAuditLineage,
+    PreparedGuidedAuditRow,
+    PreparedGuidedJsonPayload,
+)
 
 _GUIDED_SYNTHETIC_TOOLS = frozenset(
     {
@@ -215,6 +220,41 @@ def prepare_guided_audit_rows(
     return tuple(rows)
 
 
+def bind_guided_failure_audit_rows(
+    rows: tuple[PreparedGuidedAuditRow, ...],
+    *,
+    lineage: GuidedFailureAuditLineage,
+) -> tuple[PreparedGuidedAuditRow, ...]:
+    """Bind every sanitized failure-evidence row to one terminal event tuple."""
+
+    if type(rows) is not tuple or any(type(row) is not PreparedGuidedAuditRow for row in rows):
+        raise TypeError("rows must be an exact tuple[PreparedGuidedAuditRow, ...]")
+    if type(lineage) is not GuidedFailureAuditLineage:
+        raise TypeError("lineage must be an exact GuidedFailureAuditLineage")
+    bound: list[PreparedGuidedAuditRow] = []
+    lineage_envelope = lineage.envelope()
+    for row in rows:
+        try:
+            content = json.loads(row.content)
+        except (TypeError, ValueError) as exc:
+            raise AuditIntegrityError("guided failure audit content is not a JSON object") from exc
+        envelope = deep_thaw(row.envelope)
+        if type(content) is not dict or type(envelope) is not dict:
+            raise AuditIntegrityError("guided failure audit row must contain exact JSON objects")
+        if GUIDED_FAILURE_AUDIT_LINEAGE_KEY in content or GUIDED_FAILURE_AUDIT_LINEAGE_KEY in envelope:
+            raise AuditIntegrityError("guided failure audit evidence may not supply its own lineage")
+        content[GUIDED_FAILURE_AUDIT_LINEAGE_KEY] = lineage_envelope
+        envelope[GUIDED_FAILURE_AUDIT_LINEAGE_KEY] = lineage_envelope
+        bound.append(
+            PreparedGuidedAuditRow(
+                kind=row.kind,
+                content=json.dumps(content),
+                envelope=envelope,
+            )
+        )
+    return tuple(bound)
+
+
 def validate_guided_audit_payload_references(
     rows: tuple[PreparedGuidedAuditRow, ...],
     payloads: tuple[PreparedGuidedJsonPayload, ...],
@@ -248,4 +288,8 @@ def validate_guided_audit_payload_references(
             raise AuditIntegrityError("guided synthetic audit payload reference is absent or purpose-mismatched")
 
 
-__all__ = ["prepare_guided_audit_rows", "validate_guided_audit_payload_references"]
+__all__ = [
+    "bind_guided_failure_audit_rows",
+    "prepare_guided_audit_rows",
+    "validate_guided_audit_payload_references",
+]

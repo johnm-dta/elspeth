@@ -103,10 +103,13 @@ def test_reachable_surfaces_share_one_planner_implementation_boundary() -> None:
 
     service_tree = _module_tree("src/elspeth/web/composer/service.py")
     guided_route_tree = _module_tree("src/elspeth/web/sessions/routes/composer/guided.py")
+    guided_full_route_tree = _module_tree("src/elspeth/web/sessions/routes/composer/guided_plan.py")
     freeform = _named_scope(service_tree, "compose", owner="ComposerServiceImpl")
     freeform_planner = _named_scope(service_tree, "_plan_and_stage_empty_pipeline", owner="ComposerServiceImpl")
     guided = _named_scope(service_tree, "plan_guided_pipeline", owner="ComposerServiceImpl")
+    guided_full = _named_scope(service_tree, "plan_guided_full_pipeline", owner="ComposerServiceImpl")
     guided_route = _named_scope(guided_route_tree, "post_guided_respond")
+    guided_full_route = _named_scope(guided_full_route_tree, "post_guided_plan")
 
     # Freeform has one model-planner fallback. Guided-staged and tutorial use
     # the same reachable adapter for initial and revision branches; the adapter
@@ -116,9 +119,13 @@ def test_reachable_surfaces_share_one_planner_implementation_boundary() -> None:
     assert _call_count(freeform_planner, "plan_pipeline") == 1
     assert _call_count(guided_route, "plan_guided_pipeline") == 2
     assert _call_count(guided, "plan_pipeline") == 1
+    assert _call_count(guided_full_route, "plan_guided_full_pipeline") == 1
+    assert _call_count(guided_full_route, "plan_pipeline") == 0
+    assert _call_count(guided_full, "plan_pipeline") == 1
     guided_source = ast.unparse(guided)
     assert "PlannerSurface.GUIDED_STAGED" in guided_source
     assert "PlannerSurface.TUTORIAL_PROFILE" in guided_source
+    assert "PlannerSurface.GUIDED_FULL" in ast.unparse(guided_full)
 
 
 def test_reachable_surfaces_share_one_lock_assuming_commit_boundary() -> None:
@@ -132,8 +139,8 @@ def test_reachable_surfaces_share_one_lock_assuming_commit_boundary() -> None:
     assert _call_count(guided_route, "accept_guided_pipeline_proposal") == 1
 
 
-def test_guided_full_router_seam_is_late_bound_without_a_placeholder_controller() -> None:
-    """Schema 9 reserves a separate router without exposing Task-5 behavior."""
+def test_guided_full_router_seam_is_late_bound_with_one_production_controller() -> None:
+    """Guided-full stays isolated in the late-bound Task-5 route module."""
 
     guided_source = (_ROOT / "src/elspeth/web/sessions/routes/composer/guided.py").read_text(encoding="utf-8")
     guided_tree = _module_tree("src/elspeth/web/sessions/routes/composer/guided.py")
@@ -142,7 +149,7 @@ def test_guided_full_router_seam_is_late_bound_without_a_placeholder_controller(
     app.include_router(create_session_router())
 
     assert "PlannerSurface.GUIDED_FULL" not in guided_source
-    assert "/api/sessions/{session_id}/guided/plan" not in app.openapi()["paths"]
+    assert "/api/sessions/{session_id}/guided/plan" in app.openapi()["paths"]
     assert (
         next(node.name for node in reversed(guided_tree.body) if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef))
         == "post_guided_convert"
@@ -153,7 +160,12 @@ def test_guided_full_router_seam_is_late_bound_without_a_placeholder_controller(
     assert late_import.module == "guided_plan"
     assert [(alias.name, alias.asname) for alias in late_import.names] == [("router", "guided_plan_router")]
     assert ast.unparse(late_include) == "router.include_router(guided_plan_router)"
-    assert not any(isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef) for node in guided_plan_tree.body)
+    handlers = [
+        node.name
+        for node in guided_plan_tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and any(isinstance(decorator, ast.Call) for decorator in node.decorator_list)
+    ]
+    assert handlers == ["post_guided_plan"]
 
 
 def test_guided_route_handler_module_positions_remain_at_the_signed_layout() -> None:

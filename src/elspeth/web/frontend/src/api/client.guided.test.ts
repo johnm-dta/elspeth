@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { chatGuided, convertToGuided, forkFromMessage, ForkCommittedResponseError, getGuided, GuidedResponseReceiptError, reenterGuided, respondGuided, revertToVersion, startGuidedSession } from "./client";
+import { chatGuided, convertToGuided, forkFromMessage, ForkCommittedResponseError, getGuided, GuidedResponseReceiptError, reconcileGuidedStartOperation, reenterGuided, respondGuided, revertToVersion, startGuidedSession } from "./client";
 import type {
   GetGuidedResponse,
   GuidedChatRequest,
@@ -886,8 +886,10 @@ describe("api/client guided functions", () => {
 
       const result = await startGuidedSession(
         "sess-1",
-        "tutorial",
-        "00000000-0000-4000-8000-000000000001",
+        {
+          profile: "tutorial",
+          operationId: "00000000-0000-4000-8000-000000000001",
+        },
       );
 
       expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -902,6 +904,115 @@ describe("api/client guided functions", () => {
         operation_id: "00000000-0000-4000-8000-000000000001",
       });
       expect(result.guided_session.profile?.advisor_checkpoints).toBe(true);
+    });
+
+    it("includes the exact ordinary root intent for live start", async () => {
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => makeGetGuidedResponse(),
+      } as Response);
+
+      await startGuidedSession(
+        "sess-1",
+        {
+          profile: "live",
+          intent: "Build the exact graph",
+          operationId: "00000000-0000-4000-8000-000000000002",
+        },
+      );
+
+      const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(JSON.parse(init.body as string)).toEqual({
+        profile: "live",
+        intent: "Build the exact graph",
+        operation_id: "00000000-0000-4000-8000-000000000002",
+      });
+    });
+
+    it("passes the caller abort signal to the guided-start POST", async () => {
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => makeGetGuidedResponse(),
+      } as Response);
+      const controller = new AbortController();
+
+      await startGuidedSession(
+        "sess-1",
+        {
+          profile: "live",
+          intent: "Build the exact graph",
+          operationId: "00000000-0000-4000-8000-000000000003",
+        },
+        controller.signal,
+      );
+
+      const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(init.signal).toBe(controller.signal);
+    });
+
+    it("marks a malformed successful response as received but unusable", async () => {
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ guided_session: null }),
+      } as Response);
+
+      const error = await startGuidedSession(
+        "sess-1",
+        {
+          profile: "live",
+          intent: "Build the exact graph",
+          operationId: "00000000-0000-4000-8000-000000000004",
+        },
+      ).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(GuidedResponseReceiptError);
+      expect(error).toMatchObject({ received: true, cause: expect.any(Error) });
+    });
+  });
+
+  describe("reconcileGuidedStartOperation", () => {
+    it.each([
+      [{ status: "absent" }],
+      [{ status: "in_progress" }],
+      [{ status: "failed", failure_code: "request_cancelled" }],
+      [{ status: "completed", composition_state_id: "00000000-0000-4000-8000-000000000321" }],
+    ])("POSTs without request content and decodes the exact closed result %#", async (body) => {
+      fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => body } as Response);
+      const controller = new AbortController();
+
+      const result = await reconcileGuidedStartOperation(
+        "session-1",
+        "00000000-0000-4000-8000-000000000301",
+        controller.signal,
+      );
+
+      expect(result).toEqual(body);
+      const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe(
+        "/api/sessions/session-1/guided/start/00000000-0000-4000-8000-000000000301/reconcile",
+      );
+      expect(init).toMatchObject({ method: "POST", signal: controller.signal });
+      expect(init.body).toBeUndefined();
+    });
+
+    it.each([
+      { status: "unknown" },
+      { status: "in_progress", lease_token: "must-not-cross" },
+      { status: "failed", failure_code: "raw_provider_exception" },
+      { status: "completed", composition_state_id: "not-a-uuid" },
+      { status: "completed", composition_state_id: "00000000-0000-4000-8000-000000000321", request_hash: "a".repeat(64) },
+    ])("rejects non-closed or sensitive reconciliation body %#", async (body) => {
+      fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => body } as Response);
+
+      await expect(
+        reconcileGuidedStartOperation(
+          "session-1",
+          "00000000-0000-4000-8000-000000000301",
+        ),
+      ).rejects.toThrow("Invalid guided response");
     });
   });
 

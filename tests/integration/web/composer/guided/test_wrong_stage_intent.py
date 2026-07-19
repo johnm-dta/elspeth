@@ -213,6 +213,15 @@ def _guided(client: TestClient, session_id: str):
     return guided
 
 
+def _non_root_user_rows(client: TestClient, session_id: str) -> list[tuple[str, str]]:
+    """Return user rows created after the authoritative guided-start intent."""
+    guided = _guided(client, session_id)
+    root_message_id = guided.root_intent_message_id
+    assert root_message_id is not None
+    messages = asyncio.run(client.app.state.session_service.get_messages(UUID(session_id), limit=None))
+    return [(str(message.id), message.content) for message in messages if message.role == "user" and str(message.id) != root_message_id]
+
+
 def _topology_presence_action() -> DeferredIntentAction:
     return DeferredIntentAction(
         target_stage="topology",
@@ -293,6 +302,10 @@ def test_unique_future_catalog_intent_is_private_atomic_retryable_and_restart_du
     operation_id = str(uuid4())
     private_message = "Later use passthrough with customer-secret-needle in its private context."
     monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", _provider(_action()))
+    with client.app.state.session_engine.connect() as connection:
+        state_count_before = connection.execute(
+            select(func.count()).select_from(composition_states_table).where(composition_states_table.c.session_id == session_id)
+        ).scalar_one()
 
     first = _post(
         client,
@@ -320,8 +333,7 @@ def test_unique_future_catalog_intent_is_private_atomic_retryable_and_restart_du
     assert guided.chat_history[-2].content == "[Future-stage instruction submitted privately.]"
 
     messages = asyncio.run(client.app.state.session_service.get_messages(UUID(session_id), limit=None))
-    user_rows = [message for message in messages if message.role == "user"]
-    assert [(str(message.id), message.content) for message in user_rows] == [(intent.originating_message_id, private_message)]
+    assert _non_root_user_rows(client, session_id) == [(intent.originating_message_id, private_message)]
     assert all(private_message not in message.content for message in messages if message.role != "user")
     assert all(private_message not in repr(message.tool_calls) for message in messages if message.role != "user")
     audit_envelopes = [envelope for message in messages if message.role == "audit" for envelope in (message.tool_calls or ())]
@@ -344,7 +356,7 @@ def test_unique_future_catalog_intent_is_private_atomic_retryable_and_restart_du
             connection.execute(
                 select(func.count()).select_from(composition_states_table).where(composition_states_table.c.session_id == session_id)
             ).scalar_one()
-            == 1
+            == state_count_before + 1
         )
         assert (
             connection.execute(
@@ -353,6 +365,7 @@ def test_unique_future_catalog_intent_is_private_atomic_retryable_and_restart_du
                 .where(
                     chat_messages_table.c.session_id == session_id,
                     chat_messages_table.c.role == "user",
+                    chat_messages_table.c.id != _guided(client, session_id).root_intent_message_id,
                 )
             ).scalar_one()
             == 1
@@ -1099,7 +1112,7 @@ def test_real_route_malformed_future_action_keeps_raw_instruction_only_in_privat
     assert guided.chat_history[-1].content == repair_message
     assert len(guided.chat_history) == len(before["guided_session"]["chat_history"]) + 2
     messages = asyncio.run(client.app.state.session_service.get_messages(UUID(session_id), limit=None))
-    assert [(message.role, message.content) for message in messages if message.role == "user"] == [("user", private_message)]
+    assert [content for _message_id, content in _non_root_user_rows(client, session_id)] == [private_message]
     assert all(private_message not in message.content for message in messages if message.role != "user")
     assert all(private_message not in repr(message.tool_calls) for message in messages if message.role != "user")
     with client.app.state.session_engine.connect() as connection:
@@ -1179,7 +1192,7 @@ def test_real_route_rejects_free_form_option_literal_without_leaking_private_pro
     assert guided.deferred_intents == ()
     assert guided.chat_history[-2].content == "[Future-stage instruction submitted privately.]"
     messages = asyncio.run(client.app.state.session_service.get_messages(UUID(session_id), limit=None))
-    assert [(message.role, message.content) for message in messages if message.role == "user"] == [("user", private_message)]
+    assert [content for _message_id, content in _non_root_user_rows(client, session_id)] == [private_message]
     assert all(private_message not in message.content for message in messages if message.role != "user")
     assert all(private_message not in repr(message.tool_calls) for message in messages if message.role != "user")
     with client.app.state.session_engine.connect() as connection:
@@ -1225,7 +1238,7 @@ def test_exact_policy_denial_wins_over_same_name_visible_in_another_kind_at_each
     assert guided.deferred_intents == ()
     assert guided.chat_history[-2].content == "[Future-stage instruction submitted privately.]"
     messages = asyncio.run(client.app.state.session_service.get_messages(UUID(session_id), limit=None))
-    assert [(message.role, message.content) for message in messages if message.role == "user"] == [("user", private_message)]
+    assert [content for _message_id, content in _non_root_user_rows(client, session_id)] == [private_message]
     assert all(private_message not in message.content for message in messages if message.role != "user")
 
 
@@ -1433,6 +1446,11 @@ def test_catalog_schema_authority_corruption_fails_operation_without_publishing_
     monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", _provider(action))
     turn = client.get(f"/api/sessions/{session_id}/guided").json()["next_turn"]
     operation_id = str(uuid4())
+    with client.app.state.session_engine.connect() as connection:
+        states_before = connection.execute(
+            select(composition_states_table).where(composition_states_table.c.session_id == session_id)
+        ).all()
+        messages_before = connection.execute(select(chat_messages_table).where(chat_messages_table.c.session_id == session_id)).all()
 
     response = _post(
         client,
@@ -1459,8 +1477,8 @@ def test_catalog_schema_authority_corruption_fails_operation_without_publishing_
             .mappings()
             .one()
         )
-    assert states == []
-    assert messages == []
+    assert states == states_before
+    assert messages == messages_before
     assert operation["status"] == "failed"
     assert operation["failure_code"] == "integrity_error"
     assert operation["originating_message_id"] is None
@@ -1529,6 +1547,13 @@ def test_fault_at_each_settlement_boundary_rolls_back_intent_message_audit_state
     operation_id = str(uuid4())
     monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", _provider(_action()))
     engine = client.app.state.session_engine
+    with engine.connect() as connection:
+        state_count_before = connection.execute(
+            select(func.count()).select_from(composition_states_table).where(composition_states_table.c.session_id == session_id)
+        ).scalar_one()
+        message_count_before = connection.execute(
+            select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.session_id == session_id)
+        ).scalar_one()
     armed = True
     writes: list[str] = []
     chat_insert_count = 0
@@ -1577,13 +1602,13 @@ def test_fault_at_each_settlement_boundary_rolls_back_intent_message_audit_state
             connection.execute(
                 select(func.count()).select_from(composition_states_table).where(composition_states_table.c.session_id == session_id)
             ).scalar_one()
-            == 0
+            == state_count_before
         )
         assert (
             connection.execute(
                 select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.session_id == session_id)
             ).scalar_one()
-            == 0
+            == message_count_before
         )
         operation = (
             connection.execute(
@@ -1630,6 +1655,16 @@ def test_corrupt_origin_custody_is_an_integrity_failure_and_rolls_back_atomicall
             writer_principal="route_user_message",
         )
     )
+    with client.app.state.session_engine.connect() as connection:
+        target_state_count_before = connection.execute(
+            select(func.count()).select_from(composition_states_table).where(composition_states_table.c.session_id == target_session_id)
+        ).scalar_one()
+        target_message_count_before = connection.execute(
+            select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.session_id == target_session_id)
+        ).scalar_one()
+        other_message_count_before = connection.execute(
+            select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.session_id == other_session_id)
+        ).scalar_one()
     turn = client.get(f"/api/sessions/{target_session_id}/guided").json()["next_turn"]
     operation_id = str(uuid4())
     monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", _provider(_action()))
@@ -1673,17 +1708,17 @@ def test_corrupt_origin_custody_is_an_integrity_failure_and_rolls_back_atomicall
             connection.execute(
                 select(func.count()).select_from(composition_states_table).where(composition_states_table.c.session_id == target_session_id)
             ).scalar_one()
-            == 0
+            == target_state_count_before
         )
         assert (
             connection.execute(
                 select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.session_id == target_session_id)
             ).scalar_one()
-            == 0
+            == target_message_count_before
         )
         assert (
             connection.execute(
                 select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.session_id == other_session_id)
             ).scalar_one()
-            == 1
+            == other_message_count_before
         )

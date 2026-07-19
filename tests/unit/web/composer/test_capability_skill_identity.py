@@ -233,6 +233,37 @@ def test_manifest_uses_exact_ordered_advertised_tool_definitions() -> None:
     assert manifest.canonical_schema_hash == stable_hash(canonical_set_pipeline_schema())
 
 
+@pytest.mark.parametrize(
+    ("surface", "profile", "rendered_skill"),
+    (
+        (PlannerSurface.FREEFORM, "ordinary", build_system_prompt(None)),
+        (PlannerSurface.GUIDED_FULL, "ordinary", build_system_prompt(None)),
+        (
+            PlannerSurface.GUIDED_STAGED,
+            "ordinary",
+            load_step_planner_skill(GuidedStep.STEP_3_TRANSFORMS),
+        ),
+        (
+            PlannerSurface.TUTORIAL_PROFILE,
+            "tutorial",
+            load_step_planner_skill(GuidedStep.STEP_3_TRANSFORMS),
+        ),
+    ),
+)
+def test_every_runtime_surface_builds_the_same_capability_manifest_core(
+    surface: PlannerSurface,
+    profile: str,
+    rendered_skill: str,
+) -> None:
+    manifest = _manifest(rendered_skill, surface=surface, profile=profile)
+
+    assert manifest.surface is surface
+    assert manifest.profile == profile
+    assert manifest.capability_core_hash == hashlib.sha256(load_pipeline_capability_core().encode("utf-8")).hexdigest()
+    assert manifest.canonical_schema_hash == stable_hash(canonical_set_pipeline_schema())
+    assert manifest.effective_tool_hash == stable_hash(planner_tool_definitions())
+
+
 @pytest.mark.parametrize("mutation", ("missing_core", "duplicate_core", "reordered_tools", "mutated_schema"))
 def test_manifest_fails_closed_on_capability_identity_drift(mutation: str) -> None:
     core = load_pipeline_capability_core()

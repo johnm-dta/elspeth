@@ -1481,7 +1481,7 @@ export function ChatPanel({
   }
 
   // STEP_3 begins with NO proposal: the per-stage transforms prompt drives the
-  // build via /guided/chat (cold-start intent=body.message), so there is no
+  // build via /guided/start (intent=the first ordinary message), so there is no
   // server turn yet. Render the guided surface — crucially the chat box — even
   // without a next turn so the operator can describe the transforms; otherwise
   // the panel falls through to the "Preparing…" flash and the build never starts.
@@ -1528,9 +1528,10 @@ export function ChatPanel({
     // "press Send → confirm what it built" reading order is preserved by the
     // step-advance/type focus effect, which scrolls the just-built decision
     // (above) into view after a Send.
-    // It routes plain English through `chatGuided` (/guided/chat), which applies
-    // the phase config in place; the caption is keyed on the live step via
-    // GUIDED_CHAT_PLACEHOLDERS.
+    // It routes plain English through the store's `chatGuided` action. The
+    // first ordinary message uses /guided/start to establish the durable root;
+    // later messages use /guided/chat against an existing checkpoint. The
+    // caption is keyed on the live step via GUIDED_CHAT_PLACEHOLDERS.
     const stepComposer = (
       <section
         // The composer docks as a plain input strip under the conversation

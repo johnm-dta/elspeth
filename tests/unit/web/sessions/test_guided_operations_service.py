@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import json
 import logging
+import os
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,9 +16,11 @@ from uuid import UUID, uuid4
 import pytest
 import structlog
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import insert, select, update
+from sqlalchemy import delete, insert, select, update
 
+from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallStatus
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import stable_hash
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.guided_operations import guided_operation_request_hash
@@ -29,12 +34,14 @@ from elspeth.web.sessions.models import (
 )
 from elspeth.web.sessions.protocol import (
     CompositionStateData,
+    GuidedAuditEvidence,
     GuidedCompositionStateResult,
     GuidedOperationActive,
     GuidedOperationClaimed,
     GuidedOperationCompleted,
     GuidedOperationConflictError,
     GuidedOperationFailed,
+    GuidedOperationFailureCommand,
     GuidedOperationFence,
     GuidedOperationFenceLostError,
     GuidedOperationSettlementConflictError,
@@ -73,8 +80,82 @@ def file_engine(tmp_path: Path):
         engine.dispose()
 
 
+@pytest.fixture(params=("sqlite", "postgres"))
+def durable_engine(request: pytest.FixtureRequest, tmp_path: Path):
+    """Production-shaped SQLite plus opt-in PostgreSQL reconciliation races."""
+    if request.param == "postgres":
+        url = os.environ.get("ELSPETH_TEST_POSTGRES_URL")
+        if url is None:
+            pytest.skip("ELSPETH_TEST_POSTGRES_URL is required for guided reconciliation races")
+        engine = create_session_engine(url)
+    else:
+        engine = create_session_engine(f"sqlite:///{tmp_path / 'guided-reconciliation-races.db'}")
+    initialize_session_schema(engine)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
 async def _create_session(service: SessionServiceImpl) -> UUID:
     return (await service.create_session("alice", "Guided operation", "local")).id
+
+
+def _failed_llm_call(marker: str) -> ComposerLLMCall:
+    now = datetime.now(UTC)
+    return ComposerLLMCall(
+        model_requested="test/planner",
+        model_returned=None,
+        status=ComposerLLMCallStatus.API_ERROR,
+        prompt_tokens=None,
+        completion_tokens=None,
+        total_tokens=None,
+        latency_ms=1,
+        provider_request_id=None,
+        messages_hash=stable_hash({"marker": marker}),
+        tools_spec_hash=None,
+        declared_tool_names=(),
+        started_at=now,
+        finished_at=now,
+        error_class="ProviderFailure",
+        error_message=f"secret-{marker}",
+        temperature=None,
+        seed=None,
+    )
+
+
+def _failure_command(
+    claim: GuidedOperationClaimed,
+    *,
+    marker: str,
+    evidence_count: int = 1,
+) -> GuidedOperationFailureCommand:
+    return GuidedOperationFailureCommand(
+        fence=claim.fence,
+        failure_code="operation_failed",
+        actor=f"worker-{marker}",
+        audit_evidence=GuidedAuditEvidence(llm_calls=tuple(_failed_llm_call(f"{marker}-{index}") for index in range(evidence_count))),
+    )
+
+
+def _expected_failure_audit_cohort(messages) -> dict[str, object]:
+    rows: list[dict[str, object]] = []
+    for message in messages:
+        assert message.sequence_no is not None
+        rows.append(
+            {
+                "message_id": str(message.id),
+                "sequence_no": message.sequence_no,
+                "content_hash": stable_hash(message.content),
+                "tool_calls_hash": stable_hash(deep_thaw(message.tool_calls)),
+            }
+        )
+    authority: dict[str, object] = {
+        "schema": "guided_failure_audit_cohort.v1",
+        "count": len(rows),
+        "rows": rows,
+    }
+    return {**authority, "aggregate_digest": stable_hash(authority)}
 
 
 def test_fence_lost_error_never_retains_or_logs_lease_token(caplog: pytest.LogCaptureFixture) -> None:
@@ -277,6 +358,420 @@ async def test_claim_active_join_and_request_conflict_without_mutation(file_engi
     assert row.request_hash == request_hash
     assert row.attempt == 1
     assert [event.event_kind for event in events] == ["claimed"]
+
+
+@pytest.mark.asyncio
+async def test_two_empty_session_failures_have_exact_distinct_read_verified_lineage(file_engine) -> None:
+    service_a = _service(file_engine)
+    service_b = _service(file_engine)
+    session_id = await _create_session(service_a)
+    claims: list[GuidedOperationClaimed] = []
+    for operation_id, request_hash, service in (
+        ("failure-operation-a", "a" * 64, service_a),
+        ("failure-operation-b", "b" * 64, service_b),
+    ):
+        claim = await service.reserve_guided_operation(
+            session_id=session_id,
+            operation_id=operation_id,
+            kind="guided_plan",
+            request_hash=request_hash,
+            actor=f"claim-{operation_id}",
+            lease_seconds=30,
+        )
+        assert isinstance(claim, GuidedOperationClaimed)
+        claims.append(claim)
+
+    await asyncio.gather(
+        service_a.fail_guided_operation_with_audit(_failure_command(claims[0], marker="a")),
+        service_b.fail_guided_operation_with_audit(_failure_command(claims[1], marker="b")),
+    )
+
+    messages = await service_a.get_messages(session_id, limit=None)
+    assert len(messages) == 2
+    lineages = sorted(
+        (message.tool_calls[0]["_guided_failure_lineage"] for message in messages if message.tool_calls is not None),
+        key=lambda lineage: lineage["operation_id"],
+    )
+    assert lineages == [
+        {
+            "schema": "guided_failure_audit_lineage.v1",
+            "session_id": str(session_id),
+            "operation_id": "failure-operation-a",
+            "attempt": 1,
+            "request_hash": "a" * 64,
+            "cohort_id": stable_hash(
+                {
+                    "schema": "guided_failure_audit_lineage.v1",
+                    "session_id": str(session_id),
+                    "operation_id": "failure-operation-a",
+                    "attempt": 1,
+                    "request_hash": "a" * 64,
+                }
+            ),
+        },
+        {
+            "schema": "guided_failure_audit_lineage.v1",
+            "session_id": str(session_id),
+            "operation_id": "failure-operation-b",
+            "attempt": 1,
+            "request_hash": "b" * 64,
+            "cohort_id": stable_hash(
+                {
+                    "schema": "guided_failure_audit_lineage.v1",
+                    "session_id": str(session_id),
+                    "operation_id": "failure-operation-b",
+                    "attempt": 1,
+                    "request_hash": "b" * 64,
+                }
+            ),
+        },
+    ]
+    with file_engine.connect() as conn:
+        failed_events = conn.execute(
+            select(
+                guided_operation_events_table.c.session_id,
+                guided_operation_events_table.c.operation_id,
+                guided_operation_events_table.c.attempt,
+                guided_operation_events_table.c.request_hash,
+                guided_operation_events_table.c.failure_audit_cohort,
+            )
+            .where(guided_operation_events_table.c.event_kind == "failed")
+            .order_by(guided_operation_events_table.c.operation_id)
+        ).all()
+    messages_by_operation = {
+        lineage["operation_id"]: [
+            message
+            for message in messages
+            if message.tool_calls is not None
+            and message.tool_calls[0]["_guided_failure_lineage"]["operation_id"] == lineage["operation_id"]
+        ]
+        for lineage in lineages
+    }
+    assert [tuple(row[:4]) for row in failed_events] == [
+        (str(session_id), "failure-operation-a", 1, "a" * 64),
+        (str(session_id), "failure-operation-b", 1, "b" * 64),
+    ]
+    assert failed_events[0].failure_audit_cohort == _expected_failure_audit_cohort(messages_by_operation["failure-operation-a"])
+    assert failed_events[1].failure_audit_cohort == _expected_failure_audit_cohort(messages_by_operation["failure-operation-b"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tamper", ["missing", "partial", "attempt", "request_hash", "cross_swap", "ambiguous_event"])
+async def test_failure_audit_read_rejects_lineage_tamper(file_engine, tamper: str) -> None:
+    service = _service(file_engine)
+    session_id = await _create_session(service)
+    claims: list[GuidedOperationClaimed] = []
+    for operation_id, request_hash in (("tamper-a", "c" * 64), ("tamper-b", "d" * 64)):
+        claim = await service.reserve_guided_operation(
+            session_id=session_id,
+            operation_id=operation_id,
+            kind="guided_plan",
+            request_hash=request_hash,
+            actor=f"claim-{operation_id}",
+            lease_seconds=30,
+        )
+        assert isinstance(claim, GuidedOperationClaimed)
+        claims.append(claim)
+    await service.fail_guided_operation_with_audit(_failure_command(claims[0], marker="tamper-a"))
+    await service.fail_guided_operation_with_audit(_failure_command(claims[1], marker="tamper-b"))
+
+    with file_engine.begin() as conn:
+        rows = conn.execute(
+            select(
+                chat_messages_table.c.id,
+                chat_messages_table.c.content,
+                chat_messages_table.c.tool_calls,
+                chat_messages_table.c.sequence_no,
+            )
+            .where(chat_messages_table.c.session_id == str(session_id))
+            .order_by(chat_messages_table.c.sequence_no)
+        ).all()
+        first_envelope = dict(rows[0].tool_calls[0])
+        second_envelope = dict(rows[1].tool_calls[0])
+        if tamper == "missing":
+            first_envelope.pop("_guided_failure_lineage")
+        elif tamper == "partial":
+            first_envelope["_guided_failure_lineage"] = {
+                key: value for key, value in first_envelope["_guided_failure_lineage"].items() if key != "cohort_id"
+            }
+        elif tamper in {"attempt", "request_hash"}:
+            forged_lineage = dict(first_envelope["_guided_failure_lineage"])
+            forged_lineage[tamper] = 2 if tamper == "attempt" else "e" * 64
+            forged_lineage["cohort_id"] = stable_hash({key: value for key, value in forged_lineage.items() if key != "cohort_id"})
+            first_envelope["_guided_failure_lineage"] = forged_lineage
+            forged_content = json.loads(rows[0].content)
+            forged_content["_guided_failure_lineage"] = forged_lineage
+            conn.execute(
+                insert(chat_messages_table).values(
+                    id=str(uuid4()),
+                    session_id=str(session_id),
+                    role="audit",
+                    content=json.dumps(forged_content),
+                    raw_content=None,
+                    tool_calls=[first_envelope],
+                    tool_call_id=None,
+                    sequence_no=rows[-1].sequence_no + 1,
+                    writer_principal="compose_loop",
+                    created_at=datetime.now(UTC),
+                    composition_state_id=None,
+                    parent_assistant_id=None,
+                )
+            )
+        elif tamper == "cross_swap":
+            first_envelope = second_envelope
+        elif tamper == "ambiguous_event":
+            failed_event = conn.execute(
+                select(guided_operation_events_table)
+                .where(guided_operation_events_table.c.session_id == str(session_id))
+                .where(guided_operation_events_table.c.operation_id == "tamper-a")
+                .where(guided_operation_events_table.c.event_kind == "failed")
+            ).one()
+            conn.execute(
+                insert(guided_operation_events_table).values(
+                    session_id=failed_event.session_id,
+                    operation_id=failed_event.operation_id,
+                    sequence=failed_event.sequence + 1,
+                    event_kind="failed",
+                    actor="tamper",
+                    attempt=failed_event.attempt,
+                    prior_attempt=None,
+                    lease_expires_at=None,
+                    request_hash=failed_event.request_hash,
+                    failure_audit_cohort=failed_event.failure_audit_cohort,
+                    occurred_at=datetime.now(UTC),
+                )
+            )
+        if tamper not in {"attempt", "request_hash", "ambiguous_event"}:
+            conn.execute(update(chat_messages_table).where(chat_messages_table.c.id == rows[0].id).values(tool_calls=[first_envelope]))
+
+    with pytest.raises(AuditIntegrityError, match="guided failure audit lineage"):
+        await service.get_messages(session_id, limit=None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "content",
+        "tool_calls_error_class",
+        "extra_clone",
+        "missing_row",
+        "reordered_sequences",
+        "modified_event_commitment",
+        "duplicate_event_row_commitment",
+        "missing_event_commitment",
+        "ambiguous_event_commitment",
+    ],
+)
+async def test_failure_audit_read_rejects_exact_cohort_tamper(file_engine, tamper: str) -> None:
+    service = _service(file_engine)
+    session_id = await _create_session(service)
+    claim = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id="exact-cohort-tamper",
+        kind="guided_plan",
+        request_hash="2" * 64,
+        actor="claim-exact-cohort",
+        lease_seconds=30,
+    )
+    assert isinstance(claim, GuidedOperationClaimed)
+    await service.fail_guided_operation_with_audit(_failure_command(claim, marker="exact-cohort", evidence_count=2))
+    assert len(await service.get_messages(session_id, limit=None)) == 2
+
+    with file_engine.begin() as conn:
+        rows = conn.execute(
+            select(chat_messages_table)
+            .where(chat_messages_table.c.session_id == str(session_id))
+            .order_by(chat_messages_table.c.sequence_no)
+        ).all()
+        event = conn.execute(
+            select(guided_operation_events_table)
+            .where(guided_operation_events_table.c.session_id == str(session_id))
+            .where(guided_operation_events_table.c.operation_id == "exact-cohort-tamper")
+            .where(guided_operation_events_table.c.event_kind == "failed")
+        ).one()
+        if tamper == "content":
+            conn.exec_driver_sql("DROP TRIGGER trg_chat_messages_immutable_content")
+            content = json.loads(rows[0].content)
+            content["error_class"] = "ForgedFailure"
+            conn.execute(update(chat_messages_table).where(chat_messages_table.c.id == rows[0].id).values(content=json.dumps(content)))
+        elif tamper == "tool_calls_error_class":
+            tool_calls = copy.deepcopy(rows[0].tool_calls)
+            tool_calls[0]["call"]["error_class"] = "ForgedFailure"
+            conn.execute(update(chat_messages_table).where(chat_messages_table.c.id == rows[0].id).values(tool_calls=tool_calls))
+        elif tamper == "extra_clone":
+            conn.execute(
+                insert(chat_messages_table).values(
+                    id=str(uuid4()),
+                    session_id=str(session_id),
+                    role=rows[0].role,
+                    content=rows[0].content,
+                    raw_content=rows[0].raw_content,
+                    tool_calls=rows[0].tool_calls,
+                    tool_call_id=None,
+                    sequence_no=rows[-1].sequence_no + 1,
+                    writer_principal=rows[0].writer_principal,
+                    created_at=datetime.now(UTC),
+                    composition_state_id=None,
+                    parent_assistant_id=None,
+                )
+            )
+        elif tamper == "missing_row":
+            conn.exec_driver_sql("DROP TRIGGER trg_chat_messages_no_delete")
+            conn.execute(delete(chat_messages_table).where(chat_messages_table.c.id == rows[0].id))
+        elif tamper == "reordered_sequences":
+            temporary_sequence = rows[-1].sequence_no + 100
+            conn.execute(update(chat_messages_table).where(chat_messages_table.c.id == rows[0].id).values(sequence_no=temporary_sequence))
+            conn.execute(update(chat_messages_table).where(chat_messages_table.c.id == rows[1].id).values(sequence_no=rows[0].sequence_no))
+            conn.execute(update(chat_messages_table).where(chat_messages_table.c.id == rows[0].id).values(sequence_no=rows[1].sequence_no))
+        elif tamper in {
+            "modified_event_commitment",
+            "duplicate_event_row_commitment",
+            "missing_event_commitment",
+        }:
+            conn.exec_driver_sql("DROP TRIGGER trg_guided_operation_events_no_update")
+            conn.exec_driver_sql("PRAGMA ignore_check_constraints = ON")
+            if tamper == "missing_event_commitment":
+                commitment = None
+            elif tamper == "modified_event_commitment":
+                commitment = copy.deepcopy(event.failure_audit_cohort)
+                commitment["rows"][0]["content_hash"] = "f" * 64
+                commitment["aggregate_digest"] = stable_hash({key: value for key, value in commitment.items() if key != "aggregate_digest"})
+            else:
+                commitment = copy.deepcopy(event.failure_audit_cohort)
+                commitment["rows"].append(copy.deepcopy(commitment["rows"][0]))
+                commitment["count"] = len(commitment["rows"])
+                commitment["aggregate_digest"] = stable_hash({key: value for key, value in commitment.items() if key != "aggregate_digest"})
+            conn.execute(
+                update(guided_operation_events_table)
+                .where(guided_operation_events_table.c.session_id == event.session_id)
+                .where(guided_operation_events_table.c.operation_id == event.operation_id)
+                .where(guided_operation_events_table.c.sequence == event.sequence)
+                .values(failure_audit_cohort=commitment)
+            )
+        elif tamper == "ambiguous_event_commitment":
+            conn.execute(
+                insert(guided_operation_events_table).values(
+                    session_id=event.session_id,
+                    operation_id=event.operation_id,
+                    sequence=event.sequence + 1,
+                    event_kind="failed",
+                    actor="duplicate-event",
+                    attempt=event.attempt,
+                    prior_attempt=None,
+                    lease_expires_at=None,
+                    request_hash=event.request_hash,
+                    failure_audit_cohort=event.failure_audit_cohort,
+                    occurred_at=datetime.now(UTC),
+                )
+            )
+
+    with pytest.raises(AuditIntegrityError, match="guided failure audit cohort"):
+        await service.get_messages(session_id, limit=1)
+
+
+@pytest.mark.asyncio
+async def test_failure_without_evidence_writes_only_an_exact_terminal_event(file_engine) -> None:
+    service = _service(file_engine)
+    session_id = await _create_session(service)
+    claim = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id="zero-evidence",
+        kind="guided_plan",
+        request_hash="f" * 64,
+        actor="claim-zero",
+        lease_seconds=30,
+    )
+    assert isinstance(claim, GuidedOperationClaimed)
+
+    await service.fail_guided_operation_with_audit(
+        GuidedOperationFailureCommand(
+            fence=claim.fence,
+            failure_code="operation_failed",
+            actor="worker-zero",
+            audit_evidence=GuidedAuditEvidence(),
+        )
+    )
+
+    assert await service.get_messages(session_id, limit=None) == []
+    with file_engine.connect() as conn:
+        events = conn.execute(
+            select(
+                guided_operation_events_table.c.event_kind,
+                guided_operation_events_table.c.operation_id,
+                guided_operation_events_table.c.attempt,
+                guided_operation_events_table.c.request_hash,
+                guided_operation_events_table.c.failure_audit_cohort,
+            )
+            .where(guided_operation_events_table.c.session_id == str(session_id))
+            .order_by(guided_operation_events_table.c.sequence)
+        ).all()
+    assert [tuple(row) for row in events] == [
+        ("claimed", "zero-evidence", 1, "f" * 64, None),
+        (
+            "failed",
+            "zero-evidence",
+            1,
+            "f" * 64,
+            {
+                "schema": "guided_failure_audit_cohort.v1",
+                "count": 0,
+                "rows": [],
+                "aggregate_digest": stable_hash(
+                    {
+                        "schema": "guided_failure_audit_cohort.v1",
+                        "count": 0,
+                        "rows": [],
+                    }
+                ),
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_failure_event_fault_rolls_back_the_bound_audit_cohort(
+    file_engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(file_engine)
+    session_id = await _create_session(service)
+    claim = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id="rollback-bound-cohort",
+        kind="guided_plan",
+        request_hash="1" * 64,
+        actor="claim-rollback",
+        lease_seconds=30,
+    )
+    assert isinstance(claim, GuidedOperationClaimed)
+
+    def fail_after_audit_insert(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("injected terminal event failure")
+
+    monkeypatch.setattr(service, "fail_guided_operation_on_connection", fail_after_audit_insert)
+    with pytest.raises(RuntimeError, match="injected terminal event failure"):
+        await service.fail_guided_operation_with_audit(_failure_command(claim, marker="rollback"))
+
+    assert await service.get_messages(session_id, limit=None) == []
+    with file_engine.connect() as conn:
+        operation = conn.execute(
+            select(guided_operations_table.c.status)
+            .where(guided_operations_table.c.session_id == str(session_id))
+            .where(guided_operations_table.c.operation_id == "rollback-bound-cohort")
+        ).one()
+        events = (
+            conn.execute(
+                select(guided_operation_events_table.c.event_kind)
+                .where(guided_operation_events_table.c.session_id == str(session_id))
+                .where(guided_operation_events_table.c.operation_id == "rollback-bound-cohort")
+                .order_by(guided_operation_events_table.c.sequence)
+            )
+            .scalars()
+            .all()
+        )
+    assert operation.status == "in_progress"
+    assert events == ["claimed"]
 
 
 @pytest.mark.asyncio
@@ -570,6 +1065,179 @@ async def test_live_renewal_uses_same_fence_and_appends_evidence(file_engine) ->
 
 
 @pytest.mark.asyncio
+async def test_reconcile_guided_start_reports_absent_without_creating_operation(file_engine) -> None:
+    service = _service(file_engine)
+    session_id = await _create_session(service)
+
+    outcome = await service.reconcile_guided_start_operation(
+        session_id=session_id,
+        operation_id="missing-guided-start",
+        actor="reconciler",
+    )
+
+    assert outcome is None
+    with file_engine.connect() as conn:
+        assert conn.execute(select(guided_operations_table)).all() == []
+        assert conn.execute(select(guided_operation_events_table)).all() == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_guided_start_reports_unexpired_attempt_without_mutation(file_engine) -> None:
+    service = _service(file_engine)
+    session_id = await _create_session(service)
+    claimed = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id="live-guided-start",
+        kind="guided_start",
+        request_hash="6" * 64,
+        actor="worker",
+        lease_seconds=30,
+    )
+    assert isinstance(claimed, GuidedOperationClaimed)
+
+    outcome = await service.reconcile_guided_start_operation(
+        session_id=session_id,
+        operation_id="live-guided-start",
+        actor="reconciler",
+    )
+
+    assert outcome == GuidedOperationActive(attempt=1, lease_expires_at=claimed.lease_expires_at)
+    with file_engine.connect() as conn:
+        row = conn.execute(select(guided_operations_table)).one()
+        events = conn.execute(select(guided_operation_events_table).order_by(guided_operation_events_table.c.sequence)).all()
+    assert row.status == "in_progress"
+    assert row.lease_token == claimed.fence.lease_token
+    assert [event.event_kind for event in events] == ["claimed"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_guided_start_settles_expired_attempt_once_with_exact_empty_audit_cohort(file_engine) -> None:
+    service = _service(file_engine)
+    session_id = await _create_session(service)
+    claimed = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id="expired-guided-start",
+        kind="guided_start",
+        request_hash="7" * 64,
+        actor="worker",
+        lease_seconds=30,
+    )
+    assert isinstance(claimed, GuidedOperationClaimed)
+    _expire_operation(file_engine, session_id=session_id, operation_id="expired-guided-start")
+
+    first = await service.reconcile_guided_start_operation(
+        session_id=session_id,
+        operation_id="expired-guided-start",
+        actor="reconciler",
+    )
+    second = await service.reconcile_guided_start_operation(
+        session_id=session_id,
+        operation_id="expired-guided-start",
+        actor="reconciler-again",
+    )
+
+    assert first == second == GuidedOperationFailed(failure_code="request_cancelled")
+    with file_engine.connect() as conn:
+        row = conn.execute(select(guided_operations_table)).one()
+        events = conn.execute(select(guided_operation_events_table).order_by(guided_operation_events_table.c.sequence)).all()
+    assert row.status == "failed"
+    assert row.failure_code == "request_cancelled"
+    assert row.lease_token is None
+    assert row.lease_expires_at is None
+    assert row.settled_at is not None
+    assert [event.event_kind for event in events] == ["claimed", "failed"]
+    assert events[-1].attempt == claimed.fence.attempt
+    assert events[-1].actor == "reconciler"
+    assert events[-1].failure_audit_cohort == {
+        "schema": "guided_failure_audit_cohort.v1",
+        "count": 0,
+        "rows": [],
+        "aggregate_digest": stable_hash(
+            {
+                "schema": "guided_failure_audit_cohort.v1",
+                "count": 0,
+                "rows": [],
+            }
+        ),
+    }
+    assert await service.get_messages(session_id, limit=None) == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_guided_start_returns_existing_terminal_outcome(file_engine) -> None:
+    service = _service(file_engine)
+    session_id = await _create_session(service)
+    state_id = _seed_state(file_engine, session_id=session_id)
+    completed_claim = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id="completed-guided-start",
+        kind="guided_start",
+        request_hash="8" * 64,
+        actor="worker",
+        lease_seconds=30,
+    )
+    failed_claim = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id="failed-guided-start",
+        kind="guided_start",
+        request_hash="9" * 64,
+        actor="worker",
+        lease_seconds=30,
+    )
+    assert isinstance(completed_claim, GuidedOperationClaimed)
+    assert isinstance(failed_claim, GuidedOperationClaimed)
+    completed = await service.complete_guided_operation(
+        completed_claim.fence,
+        result=GuidedCompositionStateResult(state_id=state_id),
+        response_hash="a" * 64,
+        actor="worker",
+    )
+    failed = await service.fail_guided_operation(
+        failed_claim.fence,
+        failure_code="operation_failed",
+        actor="worker",
+    )
+
+    assert (
+        await service.reconcile_guided_start_operation(
+            session_id=session_id,
+            operation_id="completed-guided-start",
+            actor="reconciler",
+        )
+        == completed
+    )
+    assert (
+        await service.reconcile_guided_start_operation(
+            session_id=session_id,
+            operation_id="failed-guided-start",
+            actor="reconciler",
+        )
+        == failed
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_guided_start_rejects_operation_bound_to_another_kind(file_engine) -> None:
+    service = _service(file_engine)
+    session_id = await _create_session(service)
+    await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id="wrong-kind",
+        kind="guided_chat",
+        request_hash="b" * 64,
+        actor="worker",
+        lease_seconds=30,
+    )
+
+    with pytest.raises(GuidedOperationConflictError):
+        await service.reconcile_guided_start_operation(
+            session_id=session_id,
+            operation_id="wrong-kind",
+            actor="reconciler",
+        )
+
+
+@pytest.mark.asyncio
 async def test_connection_fence_helper_rejects_check_outside_session_write_lock(file_engine) -> None:
     service = _service(file_engine)
     session_id = await _create_session(service)
@@ -640,6 +1308,135 @@ async def test_file_backed_sqlite_concurrent_takeover_has_one_winner(file_engine
     with file_engine.connect() as conn:
         events = conn.execute(select(guided_operation_events_table).order_by(guided_operation_events_table.c.sequence)).all()
     assert [event.event_kind for event in events] == ["claimed", "taken_over", "completed"]
+
+
+@pytest.mark.asyncio
+async def test_expired_guided_start_reconciliation_race_with_takeover_has_one_authority(durable_engine) -> None:
+    reconcile_service = _service(durable_engine)
+    takeover_service = _service(durable_engine)
+    session_id = await _create_session(reconcile_service)
+    operation_id = f"reconcile-takeover-{uuid4()}"
+    request_hash = "e" * 64
+    claim = await reconcile_service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id=operation_id,
+        kind="guided_start",
+        request_hash=request_hash,
+        actor="worker-a",
+        lease_seconds=30,
+    )
+    assert isinstance(claim, GuidedOperationClaimed)
+    _expire_operation(durable_engine, session_id=session_id, operation_id=operation_id)
+    barrier = threading.Barrier(2)
+
+    def reconcile():
+        barrier.wait(timeout=5)
+        return asyncio.run(
+            reconcile_service.reconcile_guided_start_operation(
+                session_id=session_id,
+                operation_id=operation_id,
+                actor="reconciler",
+            )
+        )
+
+    def takeover():
+        barrier.wait(timeout=5)
+        return asyncio.run(
+            takeover_service.reserve_guided_operation(
+                session_id=session_id,
+                operation_id=operation_id,
+                kind="guided_start",
+                request_hash=request_hash,
+                actor="worker-b",
+                lease_seconds=30,
+            )
+        )
+
+    reconciled, reserved = await asyncio.gather(
+        asyncio.to_thread(reconcile),
+        asyncio.to_thread(takeover),
+    )
+
+    with durable_engine.connect() as conn:
+        events = conn.execute(
+            select(guided_operation_events_table)
+            .where(
+                guided_operation_events_table.c.session_id == str(session_id),
+                guided_operation_events_table.c.operation_id == operation_id,
+            )
+            .order_by(guided_operation_events_table.c.sequence)
+        ).all()
+    if isinstance(reconciled, GuidedOperationFailed):
+        assert reconciled.failure_code == "request_cancelled"
+        assert reserved == reconciled
+        assert [event.event_kind for event in events] == ["claimed", "failed"]
+    else:
+        assert isinstance(reconciled, GuidedOperationActive)
+        assert isinstance(reserved, GuidedOperationTakenOver)
+        assert reconciled.attempt == reserved.fence.attempt == 2
+        assert [event.event_kind for event in events] == ["claimed", "taken_over"]
+
+
+@pytest.mark.asyncio
+async def test_expired_guided_start_reconciliation_race_rejects_stale_completion(durable_engine) -> None:
+    reconcile_service = _service(durable_engine)
+    completion_service = _service(durable_engine)
+    session_id = await _create_session(reconcile_service)
+    state_id = _seed_state(durable_engine, session_id=session_id)
+    operation_id = f"reconcile-complete-{uuid4()}"
+    claim = await reconcile_service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id=operation_id,
+        kind="guided_start",
+        request_hash="f" * 64,
+        actor="worker-a",
+        lease_seconds=30,
+    )
+    assert isinstance(claim, GuidedOperationClaimed)
+    _expire_operation(durable_engine, session_id=session_id, operation_id=operation_id)
+    barrier = threading.Barrier(2)
+
+    def reconcile():
+        barrier.wait(timeout=5)
+        return asyncio.run(
+            reconcile_service.reconcile_guided_start_operation(
+                session_id=session_id,
+                operation_id=operation_id,
+                actor="reconciler",
+            )
+        )
+
+    def complete():
+        barrier.wait(timeout=5)
+        try:
+            return asyncio.run(
+                completion_service.complete_guided_operation(
+                    claim.fence,
+                    result=GuidedCompositionStateResult(state_id=state_id),
+                    response_hash="1" * 64,
+                    actor="stale-worker",
+                )
+            )
+        except GuidedOperationFenceLostError as exc:
+            return exc
+
+    reconciled, completed = await asyncio.gather(
+        asyncio.to_thread(reconcile),
+        asyncio.to_thread(complete),
+    )
+
+    assert reconciled == GuidedOperationFailed(failure_code="request_cancelled")
+    assert isinstance(completed, GuidedOperationFenceLostError)
+    with durable_engine.connect() as conn:
+        events = conn.execute(
+            select(guided_operation_events_table)
+            .where(
+                guided_operation_events_table.c.session_id == str(session_id),
+                guided_operation_events_table.c.operation_id == operation_id,
+            )
+            .order_by(guided_operation_events_table.c.sequence)
+        ).all()
+    assert [event.event_kind for event in events] == ["claimed", "failed"]
 
 
 @pytest.mark.asyncio

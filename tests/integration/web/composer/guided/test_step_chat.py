@@ -65,7 +65,17 @@ class _RaisingLiteLLMCompletion:
 def _create_session(client: TestClient) -> str:
     resp = client.post("/api/sessions", json={"title": "step-chat-test"})
     assert resp.status_code == 201, resp.json()
-    return resp.json()["id"]
+    session_id = resp.json()["id"]
+    start = client.post(
+        f"/api/sessions/{session_id}/guided/start",
+        json={
+            "profile": "live",
+            "intent": "Begin this guided chat session.",
+            "operation_id": str(uuid4()),
+        },
+    )
+    assert start.status_code == 200, start.json()
+    return session_id
 
 
 def _outputs_path(client: TestClient, filename: str) -> str:
@@ -76,20 +86,7 @@ def _outputs_path(client: TestClient, filename: str) -> str:
 
 
 def _seed_guided_session(client: TestClient, session_id: str) -> dict:
-    """Trigger initial guided turn so guided_session is attached + at step_1.
-
-    GET /guided is non-mutating on a fresh session (commit c4e2f69cd,
-    May 15 2026) — the latent step_1 turn is built in memory and returned
-    but no composition_state row is allocated.  The chat dispatcher
-    auto-seeds the TurnRecord on the first POST chat the same way the
-    respond endpoint does, so step_chat tests that only need a step_1
-    chat surface can rely on this helper as-is.
-
-    Tests that need the persisted composition_state row to exist
-    BEFORE the chat call (e.g. to overwrite ``composer_meta`` directly
-    via the service layer) must use :func:`_seed_persisted_state`
-    instead.
-    """
+    """Read the live-start checkpoint and its authoritative Step-1 turn."""
     resp = client.get(f"/api/sessions/{session_id}/guided")
     assert resp.status_code == 200, resp.json()
     return resp.json()
@@ -113,41 +110,10 @@ def _seed_persisted_state(client: TestClient, session_id: str) -> dict:
 
 
 def _seed_persisted_step1(client: TestClient, session_id: str) -> None:
-    """Persist the latent step_1 guided state via the service layer.
-
-    Unlike :func:`_seed_persisted_state`, this does NOT advance the
-    session past step_1 — it writes the same in-memory state that
-    ``_initial_composition_state_with_guided_session`` produces through
-    the route's lazy-create branches, allocating a real
-    composition_state v1 row.  Tests that need an existing
-    composition_state_id available on the audit row of a chat call that
-    happens at step_1_source (e.g. the InvariantError sanitization
-    coverage) must seed this way: the chat endpoint reads but does not
-    write state on the failure path, so the audit row's
-    composition_state_id needs to point at a pre-existing row.
-    """
-    from elspeth.web.composer.guided.state_machine import GuidedSession
-    from elspeth.web.sessions.protocol import CompositionStateData
-
-    initial_guided = GuidedSession.initial()
-    state_data = CompositionStateData(
-        source=None,
-        nodes=(),
-        edges=(),
-        outputs=(),
-        metadata_={"name": None, "description": None, "tags": ()},
-        is_valid=False,
-        validation_errors=None,
-        composer_meta={"guided_session": initial_guided.to_dict()},
-    )
-    service = client.app.state.session_service
-    asyncio.run(
-        service.save_composition_state(
-            UUID(session_id),
-            state_data,
-            provenance="session_seed",
-        )
-    )
+    """Assert that live start persisted the authoritative Step-1 checkpoint."""
+    response = client.get(f"/api/sessions/{session_id}/guided")
+    assert response.status_code == 200, response.json()
+    assert response.json()["composition_state"] is not None
 
 
 def _fake_llm_reply(text: str) -> SimpleNamespace:
@@ -521,7 +487,7 @@ class TestStep1SourceResolution:
         """A first Chat can answer only the current schema-8 plugin turn."""
         session_id = _create_session(composer_test_client)
         entry = _seed_guided_session(composer_test_client, session_id)
-        assert entry["composition_state"] is None
+        assert entry["composition_state"] is not None
         assert len(entry["guided_session"]["history"]) == 1
         assert entry["guided_session"]["history"][0]["response_hash"] is None
 

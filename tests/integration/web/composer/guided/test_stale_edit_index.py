@@ -54,7 +54,9 @@ class TestGetGuidedInvariantSanitisation:
     def test_get_guided_rebuild_invariant_error_returns_sanitised_500(self, composer_test_client: TestClient) -> None:
         """GET never returns Tier-1 invariant detail containing sample rows."""
         client = composer_test_client
-        session_id = _create_session(client)
+        created = client.post("/api/sessions", json={"title": "guided-get-invariant"})
+        assert created.status_code == 201, created.json()
+        session_id = created.json()["id"]
 
         secret_marker = "TIER3-SAMPLE-ROW-CONTENT"
         with patch(

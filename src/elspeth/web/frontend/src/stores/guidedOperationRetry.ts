@@ -283,6 +283,16 @@ export function clearGuidedRetry(handle: GuidedRetryHandle): void {
   );
 }
 
+export function findGuidedRetry(
+  kind: GuidedRetryKind,
+  sessionId: string,
+): GuidedRetryHandle | null {
+  const descriptor = readDescriptors().find(
+    (candidate) => candidate.kind === kind && candidate.sessionId === sessionId,
+  );
+  return descriptor === undefined ? null : { ...descriptor };
+}
+
 export function clearGuidedRetriesForSession(
   kind: GuidedRetryKind,
   sessionId: string,

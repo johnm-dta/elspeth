@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { chatGuided, convertToGuided, forkFromMessage, ForkCommittedResponseError, getGuided, reenterGuided, respondGuided, revertToVersion, startGuidedSession } from "./client";
+import { chatGuided, convertToGuided, forkFromMessage, ForkCommittedResponseError, getGuided, GuidedResponseReceiptError, reenterGuided, respondGuided, revertToVersion, startGuidedSession } from "./client";
 import type {
   GetGuidedResponse,
   GuidedChatRequest,
@@ -200,6 +200,89 @@ describe("api/client guided functions", () => {
   });
 
   describe("getGuided", () => {
+    it("decodes an exact stable-id component review projection", async () => {
+      const body = makeGetGuidedResponse();
+      body.next_turn = {
+        type: "review_components",
+        step_index: 0,
+        turn_token: "a".repeat(64),
+        payload: {
+          component_kind: "source",
+          items: [
+            {
+              stable_id: "00000000-0000-4000-8000-000000000101",
+              name: "customers",
+              plugin: "csv",
+              status: "reviewed",
+            },
+            {
+              stable_id: "00000000-0000-4000-8000-000000000102",
+              name: "orders",
+              plugin: "json",
+              status: "reviewed",
+            },
+          ],
+          allowed_actions: ["add", "edit", "remove", "reorder", "finish"],
+        },
+      };
+      fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => body } as Response);
+
+      const decoded = await getGuided("sess-review");
+
+      expect(decoded).toEqual(body);
+      expect(decoded.next_turn).not.toBe(body.next_turn);
+      if (decoded.next_turn?.type !== "review_components" || body.next_turn.type !== "review_components") {
+        throw new Error("component review fixture did not decode as review_components");
+      }
+      expect(decoded.next_turn.payload.items).not.toBe(body.next_turn.payload.items);
+    });
+
+    it.each([
+      ["duplicate stable id", (payload: Record<string, unknown>) => {
+        const items = payload.items as Array<Record<string, unknown>>;
+        items[1].stable_id = items[0].stable_id;
+      }],
+      ["unknown action", (payload: Record<string, unknown>) => {
+        payload.allowed_actions = ["add", "edit", "remove", "reorder", "finish", "execute"];
+      }],
+      ["missing closed action", (payload: Record<string, unknown>) => {
+        payload.allowed_actions = ["add", "edit", "remove", "finish"];
+      }],
+      ["unexpected private field", (payload: Record<string, unknown>) => {
+        const items = payload.items as Array<Record<string, unknown>>;
+        items[0].options = { path: "/private/input.csv" };
+      }],
+    ])("rejects component review with %s", async (_label, mutate) => {
+      const body = makeGetGuidedResponse() as unknown as Record<string, unknown>;
+      body.next_turn = {
+        type: "review_components",
+        step_index: 0,
+        turn_token: "a".repeat(64),
+        payload: {
+          component_kind: "source",
+          items: [
+            {
+              stable_id: "00000000-0000-4000-8000-000000000101",
+              name: "customers",
+              plugin: "csv",
+              status: "reviewed",
+            },
+            {
+              stable_id: "00000000-0000-4000-8000-000000000102",
+              name: "orders",
+              plugin: "json",
+              status: "reviewed",
+            },
+          ],
+          allowed_actions: ["add", "edit", "remove", "reorder", "finish"],
+        },
+      };
+      mutate((body.next_turn as Record<string, unknown>).payload as Record<string, unknown>);
+      fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => body } as Response);
+
+      await expect(getGuided("sess-invalid-review")).rejects.toThrow(/invalid guided response/i);
+    });
+
     it("calls GET /api/sessions/:id/guided and returns parsed body", async () => {
       const body = makeGetGuidedResponse();
       fetchSpy.mockResolvedValue({
@@ -753,6 +836,37 @@ describe("api/client guided functions", () => {
         status: 500,
         detail: "boom",
       });
+    });
+
+    it("marks malformed JSON from a successful response as received but unusable", async () => {
+      const cause = new SyntaxError("unexpected end of JSON input");
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => Promise.reject(cause),
+      } as unknown as Response);
+
+      const error = await respondGuided("sess-malformed", makeRespondRequest()).catch(
+        (caught: unknown) => caught,
+      );
+
+      expect(error).toBeInstanceOf(GuidedResponseReceiptError);
+      expect(error).toMatchObject({ received: true, cause });
+    });
+
+    it("marks a schema-invalid successful response as received but unusable", async () => {
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ ...makeRespondResponse(), unexpected: true }),
+      } as Response);
+
+      const error = await respondGuided("sess-invalid", makeRespondRequest()).catch(
+        (caught: unknown) => caught,
+      );
+
+      expect(error).toBeInstanceOf(GuidedResponseReceiptError);
+      expect(error).toMatchObject({ received: true, cause: expect.any(Error) });
     });
   });
 

@@ -1,4 +1,4 @@
-type GuidedRetryKind =
+export type GuidedRetryKind =
   | "guided_start"
   | "guided_respond"
   | "guided_chat"
@@ -21,6 +21,10 @@ export interface GuidedRetryHandle {
   requestFingerprint: string;
   operationId: string;
 }
+
+export type GuidedRetryAcquisition =
+  | { status: "acquired"; handle: GuidedRetryHandle }
+  | { status: "conflict"; existing: GuidedRetryHandle };
 
 export const GUIDED_RETRY_STORAGE_KEY = "elspeth_guided_operation_retries_v1";
 const STORAGE_SCHEMA = "guided-operation-retries.v1";
@@ -226,7 +230,7 @@ export function acquireGuidedRetry(
   kind: GuidedRetryKind,
   sessionId: string,
   requestIdentity: readonly unknown[],
-): GuidedRetryHandle {
+): GuidedRetryAcquisition {
   if (!SESSION_UUID_PATTERN.test(sessionId)) {
     throw new Error("guided retry sessionId must be a canonical UUID");
   }
@@ -234,13 +238,20 @@ export function acquireGuidedRetry(
     JSON.stringify(canonicalIdentity({ schema: "guided-operation-request-fingerprint.v1", kind, requestIdentity })),
   );
   const descriptors = readDescriptors();
-  const existing = descriptors.find(
+  const scoped = descriptors.filter(
     (descriptor) =>
       descriptor.kind === kind &&
-      descriptor.sessionId === sessionId &&
-      descriptor.requestFingerprint === fingerprint,
+      descriptor.sessionId === sessionId,
   );
-  if (existing !== undefined) return { ...existing };
+  const existing = scoped.find(
+    (descriptor) => descriptor.requestFingerprint === fingerprint,
+  );
+  if (existing !== undefined) {
+    return { status: "acquired", handle: { ...existing } };
+  }
+  if (scoped.length > 0) {
+    return { status: "conflict", existing: { ...scoped[0] } };
+  }
 
   const descriptor: GuidedRetryDescriptor = {
     kind,
@@ -250,10 +261,10 @@ export function acquireGuidedRetry(
     createdAt: Date.now(),
   };
   writeDescriptors([
-    ...descriptors.filter((candidate) => candidate.sessionId !== sessionId),
+    ...descriptors,
     descriptor,
   ]);
-  return { ...descriptor };
+  return { status: "acquired", handle: { ...descriptor } };
 }
 
 export function clearGuidedRetry(handle: GuidedRetryHandle): void {

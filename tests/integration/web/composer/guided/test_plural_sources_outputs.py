@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.web.composer.guided.state_machine import GuidedSession
-from elspeth.web.sessions.models import guided_operations_table
+from elspeth.web.sessions.models import composition_proposals_table, guided_operations_table, proposal_events_table
 from elspeth.web.sessions.routes.composer.guided_chat_atomic import _current_sink
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
@@ -59,9 +59,86 @@ def _output_path(client: TestClient, filename: str) -> str:
     return str(path)
 
 
+def _source_path(client: TestClient, filename: str) -> str:
+    path = Path(client.app.state.settings.data_dir) / "blobs" / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("id,label\n1,reviewed\n", encoding="utf-8")
+    return str(path)
+
+
 def _review_items(body: dict) -> list[dict]:
     assert body["next_turn"]["type"] == "review_components"
     return body["next_turn"]["payload"]["items"]
+
+
+def _stage_minimal_plural_proposal(client: TestClient, *, suffix: str) -> tuple[str, dict]:
+    """Stage a fresh ordered 2-source/2-output proposal through public HTTP."""
+
+    session_id = _create_session(client)
+    source_ids: list[str] = []
+    for index in (1, 2):
+        if index == 2:
+            _respond(client, session_id, component_action={"action": "add", "component_kind": "source"})
+        _respond(client, session_id, chosen=["csv"])
+        reviewed = _respond(
+            client,
+            session_id,
+            edited_values={
+                "plugin": "csv",
+                "options": {
+                    "path": f"{suffix}-input-{index}.csv",
+                    "schema": {"mode": "observed"},
+                    "on_validation_failure": "discard",
+                },
+            },
+        )
+        source_ids = [item["stable_id"] for item in _review_items(reviewed)]
+    _respond(
+        client,
+        session_id,
+        component_action={
+            "action": "reorder",
+            "component_kind": "source",
+            "stable_ids": list(reversed(source_ids)),
+        },
+    )
+    _respond(client, session_id, component_action={"action": "finish", "component_kind": "source"})
+
+    output_ids: list[str] = []
+    for index in (1, 2):
+        if index == 2:
+            _respond(client, session_id, component_action={"action": "add", "component_kind": "output"})
+        _respond(client, session_id, chosen=["json"])
+        _respond(
+            client,
+            session_id,
+            edited_values={
+                "plugin": "json",
+                "options": {
+                    "path": _output_path(client, f"{suffix}-output-{index}.jsonl"),
+                    "schema": {"mode": "observed"},
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                    "on_write_failure": "discard",
+                },
+            },
+        )
+        reviewed = _respond(client, session_id, control_signal="passthrough")
+        output_ids = [item["stable_id"] for item in _review_items(reviewed)]
+    _respond(
+        client,
+        session_id,
+        component_action={
+            "action": "reorder",
+            "component_kind": "output",
+            "stable_ids": list(reversed(output_ids)),
+        },
+    )
+    staged = _respond(client, session_id, component_action={"action": "finish", "component_kind": "output"})
+    proposal = staged["next_turn"]["payload"]
+    assert [item["stable_id"] for item in proposal["graph"]["sources"]] == list(reversed(source_ids))
+    assert [item["stable_id"] for item in proposal["outputs"]] == list(reversed(output_ids))
+    return session_id, staged
 
 
 def test_plural_sources_outputs_survive_hydration_and_stage_ordered_proposal(
@@ -69,6 +146,8 @@ def test_plural_sources_outputs_survive_hydration_and_stage_ordered_proposal(
 ) -> None:
     client = composer_test_client
     session_id = _create_session(client)
+    source_a_path = _source_path(client, "input-a.csv")
+    source_b_path = _source_path(client, "input-b.csv")
 
     # Source A resolves but remains in source review.
     _respond(client, session_id, chosen=["csv"])
@@ -78,7 +157,7 @@ def test_plural_sources_outputs_survive_hydration_and_stage_ordered_proposal(
         edited_values={
             "plugin": "csv",
             "options": {
-                "path": "input-a.csv",
+                "path": source_a_path,
                 "schema": {"mode": "observed"},
                 "on_validation_failure": "discard",
             },
@@ -112,7 +191,7 @@ def test_plural_sources_outputs_survive_hydration_and_stage_ordered_proposal(
         edited_values={
             "plugin": "csv",
             "options": {
-                "path": "input-b.csv",
+                "path": source_b_path,
                 "schema": {"mode": "observed"},
                 "on_validation_failure": "discard",
             },
@@ -153,14 +232,15 @@ def test_plural_sources_outputs_survive_hydration_and_stage_ordered_proposal(
         component_action={"action": "edit", "target": {"kind": "source", "stable_id": source_b}},
     )
     assert editing["next_turn"]["type"] == "schema_form"
-    assert editing["next_turn"]["payload"]["prefilled"]["path"] == "input-b.csv"
+    assert editing["next_turn"]["payload"]["prefilled"]["path"] == source_b_path
+    revised_source_b_path = _source_path(client, "input-b-revised.csv")
     source_review = _respond(
         client,
         session_id,
         edited_values={
             "plugin": "csv",
             "options": {
-                "path": "input-b-revised.csv",
+                "path": revised_source_b_path,
                 "schema": {"mode": "observed"},
                 "on_validation_failure": "discard",
             },
@@ -169,7 +249,7 @@ def test_plural_sources_outputs_survive_hydration_and_stage_ordered_proposal(
     hydrated_sources = _hydrate(client, session_id)
     assert hydrated_sources.source_order == (source_b, source_a)
     assert hydrated_sources.reviewed_sources[source_b].name == "source_2"
-    assert dict(hydrated_sources.reviewed_sources[source_b].options)["path"] == "input-b-revised.csv"
+    assert dict(hydrated_sources.reviewed_sources[source_b].options)["path"] == revised_source_b_path
     assert hydrated_sources.reviewed_sources[source_b].on_validation_failure == "discard"
     assert hydrated_sources.active_edit_target is None
 
@@ -181,13 +261,14 @@ def test_plural_sources_outputs_survive_hydration_and_stage_ordered_proposal(
     assert [item["stable_id"] for item in _review_items(source_review)] == [source_b]
     _respond(client, session_id, component_action={"action": "add", "component_kind": "source"})
     _respond(client, session_id, chosen=["csv"])
+    source_c_path = _source_path(client, "input-c.csv")
     source_review = _respond(
         client,
         session_id,
         edited_values={
             "plugin": "csv",
             "options": {
-                "path": "input-c.csv",
+                "path": source_c_path,
                 "schema": {"mode": "observed"},
                 "on_validation_failure": "discard",
             },
@@ -205,6 +286,7 @@ def test_plural_sources_outputs_survive_hydration_and_stage_ordered_proposal(
 
     # Repeat the same controller lifecycle for two outputs.
     _respond(client, session_id, chosen=["json"])
+    output_c_path = _output_path(client, "output-c.jsonl")
     _respond(
         client,
         session_id,
@@ -297,7 +379,7 @@ def test_plural_sources_outputs_survive_hydration_and_stage_ordered_proposal(
         edited_values={
             "plugin": "json",
             "options": {
-                "path": _output_path(client, "output-c.jsonl"),
+                "path": output_c_path,
                 "schema": {"mode": "observed"},
                 "mode": "write",
                 "collision_policy": "auto_increment",
@@ -320,6 +402,76 @@ def test_plural_sources_outputs_survive_hydration_and_stage_ordered_proposal(
     assert [item["stable_id"] for item in proposal_payload["graph"]["sources"]] == [source_b, source_c]
     assert [item["stable_id"] for item in proposal_payload["outputs"]] == [output_b, output_c]
     assert _hydrate(client, session_id).active_proposal is not None
+
+    accepted = _respond(
+        client,
+        session_id,
+        chosen=["accept"],
+        proposal_id=proposal_payload["proposal_id"],
+        draft_hash=proposal_payload["draft_hash"],
+    )
+    assert accepted["guided_session"]["step"] == "step_4_wire"
+    assert accepted["next_turn"]["type"] == "confirm_wiring"
+    assert _hydrate(client, session_id).active_proposal is None
+    assert [output["name"] for output in accepted["composition_state"]["outputs"]] == ["output_2", "output"]
+    assert [output["options"]["path"] for output in accepted["composition_state"]["outputs"]] == [
+        revised_path,
+        output_c_path,
+    ]
+    assert [output["sink_name"] for output in accepted["next_turn"]["payload"]["topology"]["outputs"]] == [
+        "output_2",
+        "output",
+    ]
+    authoritative = _get(client, session_id)
+    assert authoritative["guided_session"] == accepted["guided_session"]
+    assert authoritative["terminal"] == accepted["terminal"]
+    assert authoritative["composition_state"] == accepted["composition_state"]
+    assert [output["name"] for output in authoritative["composition_state"]["outputs"]] == [
+        "output_2",
+        "output",
+    ]
+    assert authoritative["next_turn"] == accepted["next_turn"]
+
+
+def test_rejected_plural_proposal_is_terminal_and_cannot_execute(composer_test_client: TestClient) -> None:
+    client = composer_test_client
+    session_id, staged = _stage_minimal_plural_proposal(client, suffix="reject-plural")
+    proposal_turn = staged["next_turn"]
+    proposal = proposal_turn["payload"]
+    before_state = staged["composition_state"]
+
+    rejected = _respond(
+        client,
+        session_id,
+        control_signal="reject",
+        proposal_id=proposal["proposal_id"],
+        draft_hash=proposal["draft_hash"],
+    )
+
+    assert rejected["next_turn"] is None
+    assert rejected["composition_state"]["id"] != before_state["id"]
+    assert rejected["composition_state"]["sources"] == before_state["sources"]
+    assert rejected["composition_state"]["outputs"] == before_state["outputs"]
+    assert _hydrate(client, session_id).active_proposal is None
+    with client.app.state.session_engine.connect() as connection:
+        assert (
+            connection.execute(
+                select(composition_proposals_table.c.status).where(composition_proposals_table.c.id == proposal["proposal_id"])
+            ).scalar_one()
+            == "rejected"
+        )
+        assert connection.execute(
+            select(proposal_events_table.c.event_type)
+            .where(proposal_events_table.c.proposal_id == proposal["proposal_id"])
+            .order_by(proposal_events_table.c.created_at)
+        ).scalars().all() == ["proposal.created", "proposal.rejected"]
+
+    cannot_execute = client.post(
+        f"/api/sessions/{session_id}/proposals/{proposal['proposal_id']}/accept",
+        json={"draft_hash": proposal["draft_hash"]},
+    )
+    assert cannot_execute.status_code == 409
+    assert _get(client, session_id)["composition_state"] == rejected["composition_state"]
 
 
 def test_blob_backed_source_edit_reinspects_exact_target_and_preserves_identity(

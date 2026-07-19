@@ -1517,6 +1517,97 @@
   outline-offset: 2px;
 }
 
+/* ---------------------------------------------------------------------------
+   ComponentReviewTurn — stable-id source/output collection controller.
+   --------------------------------------------------------------------------- */
+
+.guided-component-review-heading {
+  margin: 0 0 var(--space-md);
+  color: var(--color-text);
+  font-size: var(--font-size-lg);
+}
+
+.guided-component-review-list {
+  display: grid;
+  gap: var(--space-sm);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.guided-component-review-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-elevated);
+}
+
+.guided-component-review-summary,
+.guided-component-review-item-actions,
+.guided-component-review-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.guided-component-review-summary span {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.guided-component-review-actions {
+  margin-top: var(--space-md);
+}
+
+.guided-component-review-btn {
+  min-height: var(--size-control);
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+  font: inherit;
+}
+
+.guided-component-review-btn:hover:not(:disabled) {
+  border-color: var(--color-chip-border);
+  background-color: var(--color-highlight);
+}
+
+.guided-component-review-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.guided-component-review-btn:disabled {
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.guided-component-review-btn--remove {
+  border-color: var(--color-error-border);
+}
+
+.guided-component-review-btn--finish {
+  border-color: var(--color-accent);
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+}
+
+@media (max-width: 640px) {
+  .guided-component-review-item {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
 
 /* ---------------------------------------------------------------------------
    GuidedHistory (Task 7.9)

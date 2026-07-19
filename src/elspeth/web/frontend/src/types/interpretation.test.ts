@@ -85,13 +85,14 @@ describe("interpretation protocol types", () => {
     expect(isInterpretationKind(null)).toBe(false);
   });
 
-  it("TurnType union has 6 current values", () => {
+  it("TurnType union has 7 current values", () => {
     const _exact: Equals<
       TurnType,
       | "inspect_and_confirm"
       | "single_select"
       | "multi_select_with_custom"
       | "schema_form"
+      | "review_components"
       | "propose_pipeline"
       | "confirm_wiring"
     > = true;
@@ -100,11 +101,12 @@ describe("interpretation protocol types", () => {
       "single_select",
       "multi_select_with_custom",
       "schema_form",
+      "review_components",
       "propose_pipeline",
       "confirm_wiring",
     ];
     expect(_exact).toBe(true);
-    expect(all).toHaveLength(6);
+    expect(all).toHaveLength(7);
   });
 
   it("InterpretationEvent has the exhaustive 23-field shape (compile-time exact-keys check)", () => {

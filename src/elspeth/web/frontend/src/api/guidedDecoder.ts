@@ -1,6 +1,7 @@
 import type { CompositionState } from "@/types/index";
 import type {
   ChatTurn,
+  ComponentReviewPayload,
   GetGuidedResponse,
   GuidedChatResponse,
   GuidedRespondResponse,
@@ -32,8 +33,8 @@ const STEP_INDEX: Record<GuidedStep, number> = {
   step_4_wire: 3,
 };
 const LEGAL_TURNS: Record<GuidedStep, ReadonlySet<TurnType>> = {
-  step_1_source: new Set(["inspect_and_confirm", "single_select", "schema_form"]),
-  step_2_sink: new Set(["single_select", "multi_select_with_custom", "schema_form"]),
+  step_1_source: new Set(["inspect_and_confirm", "single_select", "schema_form", "review_components"]),
+  step_2_sink: new Set(["single_select", "multi_select_with_custom", "schema_form", "review_components"]),
   step_3_transforms: new Set(["propose_pipeline", "single_select", "schema_form"]),
   step_4_wire: new Set(["confirm_wiring"]),
 };
@@ -69,6 +70,7 @@ const POLICY_REASONS = new Set([
 ]);
 const CATALOG_PLUGIN_ID = /^[a-z][a-z0-9_]{0,63}$/;
 const MAX_PROPOSAL_COMPONENTS = 256;
+const MAX_REVIEWED_COMPONENTS_PER_KIND = 256;
 const MAX_PROPOSAL_EDGES = 1_024;
 const MAX_PROPOSAL_ALIASES = 64;
 type ComponentKind = "source" | "node" | "edge" | "output";
@@ -717,6 +719,7 @@ function decodeTurnType(value: unknown, path: string): TurnType {
     case "single_select":
     case "multi_select_with_custom":
     case "schema_form":
+    case "review_components":
     case "propose_pipeline":
     case "confirm_wiring":
       return type;
@@ -858,6 +861,70 @@ function decodeSchemaPayload(value: unknown, path: string): SchemaFormPayload {
     knobs: { fields },
     prefilled: jsonRecord(payload.prefilled, `${path}.prefilled`),
   };
+}
+
+function decodeComponentReviewPayload(
+  value: unknown,
+  path: string,
+): ComponentReviewPayload {
+  const payload = exactRecord(value, path, [
+    "component_kind",
+    "items",
+    "allowed_actions",
+  ]);
+  const componentKind = stringValue(payload.component_kind, `${path}.component_kind`);
+  if (componentKind !== "source" && componentKind !== "output") {
+    invalid(`${path}.component_kind`, "unknown reviewed component kind");
+  }
+  const rawItems = arrayValue(payload.items, `${path}.items`);
+  if (rawItems.length === 0 || rawItems.length > MAX_REVIEWED_COMPONENTS_PER_KIND) {
+    invalid(`${path}.items`, "expected 1 to 256 reviewed components");
+  }
+  const stableIds = new Set<string>();
+  const names = new Set<string>();
+  const items = rawItems.map((value, index) => {
+    const itemPath = `${path}.items[${index}]`;
+    const item = exactRecord(value, itemPath, ["stable_id", "name", "plugin", "status"]);
+    const stableId = canonicalUuid(item.stable_id, `${itemPath}.stable_id`);
+    const name = stringValue(item.name, `${itemPath}.name`);
+    const plugin = stringValue(item.plugin, `${itemPath}.plugin`);
+    const status = stringValue(item.status, `${itemPath}.status`);
+    if (name.trim() === "") invalid(`${itemPath}.name`, "expected non-empty name");
+    if (plugin.trim() === "") invalid(`${itemPath}.plugin`, "expected non-empty plugin");
+    if (status !== "reviewed") invalid(`${itemPath}.status`, "expected reviewed");
+    if (stableIds.has(stableId)) invalid(`${path}.items`, "duplicate stable id");
+    if (names.has(name)) invalid(`${path}.items`, "duplicate component name");
+    stableIds.add(stableId);
+    names.add(name);
+    return { stable_id: stableId, name, plugin, status: "reviewed" as const };
+  });
+
+  const actions = stringArray(payload.allowed_actions, `${path}.allowed_actions`).map(
+    (action, index): ComponentReviewPayload["allowed_actions"][number] => {
+      switch (action) {
+        case "add":
+        case "edit":
+        case "remove":
+        case "reorder":
+        case "finish":
+          return action;
+        default:
+          return invalid(`${path}.allowed_actions[${index}]`, "unknown component action");
+      }
+    },
+  );
+  if (new Set(actions).size !== actions.length) {
+    invalid(`${path}.allowed_actions`, "duplicate component action");
+  }
+  const expectedActions = new Set(["add", "edit", "reorder", "finish"]);
+  if (items.length > 1) expectedActions.add("remove");
+  if (
+    actions.length !== expectedActions.size ||
+    actions.some((action) => !expectedActions.has(action))
+  ) {
+    invalid(`${path}.allowed_actions`, "does not match the closed reviewed collection actions");
+  }
+  return { component_kind: componentKind, items, allowed_actions: actions };
 }
 
 function decodeEditTarget(value: unknown, path: string): GuidedEditTarget {
@@ -1215,6 +1282,8 @@ function decodeTurn(value: unknown, step: GuidedStep, path: string): TurnPayload
       return { type: turnType, step_index: stepIndex, turn_token: turnToken, payload: decodeMultiSelectPayload(turn.payload, payloadPath) };
     case "schema_form":
       return { type: turnType, step_index: stepIndex, turn_token: turnToken, payload: decodeSchemaPayload(turn.payload, payloadPath) };
+    case "review_components":
+      return { type: turnType, step_index: stepIndex, turn_token: turnToken, payload: decodeComponentReviewPayload(turn.payload, payloadPath) };
     case "propose_pipeline":
       return { type: turnType, step_index: stepIndex, turn_token: turnToken, payload: decodeProposalPayload(turn.payload, payloadPath) };
     case "confirm_wiring":

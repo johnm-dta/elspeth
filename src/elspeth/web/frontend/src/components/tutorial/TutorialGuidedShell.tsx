@@ -11,6 +11,7 @@ import {
 } from "@/stores/sessionStore";
 import {
   acquireGuidedRetry,
+  clearGuidedRetry,
   clearGuidedRetriesForSession,
 } from "@/stores/guidedOperationRetry";
 import type { GuidedStep } from "@/types/guided";
@@ -147,7 +148,10 @@ export function TutorialGuidedShell({
           return false;
         }
         try {
-          await exitStartedGuidedSession(sessionId);
+          const exit = await exitStartedGuidedSession(sessionId);
+          if (exit.status !== "complete") {
+            setError(exit.message);
+          }
         } catch (err) {
           console.error("[tutorial] startup exit-to-freeform failed:", err);
         }
@@ -293,18 +297,61 @@ function formatError(err: unknown): string {
   return "The guided tutorial could not be started.";
 }
 
-async function exitStartedGuidedSession(sessionId: string): Promise<void> {
+type TutorialExitResult =
+  | { status: "complete" }
+  | { status: "conflict"; message: string }
+  | { status: "refresh_required"; message: string };
+
+const TUTORIAL_EXIT_REFRESH_MESSAGE =
+  "The tutorial exit was accepted, but this view could not refresh. Refresh the page to continue.";
+
+async function applyTutorialExitWithResync(
+  sessionId: string,
+  response: Awaited<ReturnType<typeof getGuided>>,
+): Promise<boolean> {
+  try {
+    if (await useSessionStore.getState().applyGuidedResponse(sessionId, response)) {
+      return true;
+    }
+  } catch {
+    // The decoded response settled operation custody; recover from GET below.
+  }
+  try {
+    const authoritative = await getGuided(sessionId);
+    return await useSessionStore
+      .getState()
+      .applyGuidedResponse(sessionId, authoritative);
+  } catch {
+    return false;
+  }
+}
+
+async function exitStartedGuidedSession(sessionId: string): Promise<TutorialExitResult> {
   const current = useSessionStore.getState();
   if (
     current.activeSessionId === sessionId &&
     current.guidedSession?.terminal?.kind === "exited_to_freeform"
   ) {
     clearGuidedRetriesForSession("guided_respond", sessionId);
-    return;
+    return { status: "complete" };
   }
   if (current.activeSessionId === sessionId && current.guidedSession !== null) {
-    await current.exitToFreeform();
-    return;
+    const outcome = await current.exitToFreeform();
+    if (outcome.status === "applied") {
+      return { status: "complete" };
+    }
+    switch (outcome.reason) {
+      case "custody_conflict":
+        return { status: "conflict", message: outcome.message };
+      case "no_active_session":
+      case "no_current_turn":
+      case "pending":
+      case "stale":
+      case "unsettled":
+      case "rejected":
+      case "refresh_required":
+        return { status: "refresh_required", message: outcome.message };
+    }
   }
   // Not yet an active-with-loaded-guidedSession session (activeSessionId
   // may not even be bound to this session yet, or the store hasn't fetched
@@ -317,33 +364,46 @@ async function exitStartedGuidedSession(sessionId: string): Promise<void> {
   // the store instead of forking into a separately-maintained copy.
   const guided = await getGuided(sessionId);
   if (guided.terminal?.kind === "exited_to_freeform") {
-    const applied = await useSessionStore
-      .getState()
-      .applyGuidedResponse(sessionId, guided);
-    if (!applied) {
-      throw new Error("Cannot apply the authoritative guided tutorial exit to an inactive session");
-    }
     clearGuidedRetriesForSession("guided_respond", sessionId);
-    return;
+    try {
+      if (await useSessionStore.getState().applyGuidedResponse(sessionId, guided)) {
+        return { status: "complete" };
+      }
+    } catch {
+      // The authoritative terminal remains settled; surface refresh guidance.
+    }
+    return {
+      status: "refresh_required",
+      message: TUTORIAL_EXIT_REFRESH_MESSAGE,
+    };
   }
   const turnToken = guided.terminal === null ? guided.next_turn?.turn_token : null;
   if (guided.terminal === null && turnToken === undefined) {
     throw new Error("Cannot exit guided tutorial without a current turn token");
   }
-  const retry = acquireGuidedRetry("guided_respond", sessionId, [
+  const acquisition = acquireGuidedRetry("guided_respond", sessionId, [
     turnToken ?? "terminal",
     EXIT_TO_FREEFORM_ACTION,
   ]);
+  if (acquisition.status === "conflict") {
+    return {
+      status: "conflict",
+      message:
+        "A previous guided response is unsettled. Retry the same action before exiting the tutorial.",
+    };
+  }
+  const retry = acquisition.handle;
   const response = await respondGuided(sessionId, {
     ...EXIT_TO_FREEFORM_ACTION,
     operation_id: retry.operationId,
     turn_token: turnToken ?? null,
   });
-  const applied = await useSessionStore
-    .getState()
-    .applyGuidedResponse(sessionId, response);
-  if (!applied) {
-    throw new Error("Cannot apply the authoritative guided tutorial exit to an inactive session");
+  clearGuidedRetry(retry);
+  if (!(await applyTutorialExitWithResync(sessionId, response))) {
+    return {
+      status: "refresh_required",
+      message: TUTORIAL_EXIT_REFRESH_MESSAGE,
+    };
   }
-  clearGuidedRetriesForSession("guided_respond", sessionId);
+  return { status: "complete" };
 }

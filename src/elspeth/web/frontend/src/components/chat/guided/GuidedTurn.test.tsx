@@ -18,6 +18,7 @@
 //   inspect_and_confirm   -- "Looks right" button (inspect-view action)
 //   multi_select_with_custom -- payload.question text (legend text)
 //   schema_form           -- "Continue" button (submit action, present when canSubmit)
+//   review_components     -- ComponentReviewTurn review heading + stable-id actions
 //   propose_pipeline      -- ProposePipelineTurn review heading + accept action
 //   confirm_wiring        -- WireStageTurn review heading + "Confirm wiring" button
 // ============================================================================
@@ -32,6 +33,7 @@ import type {
   SingleSelectPayload,
   InspectAndConfirmPayload,
   MultiSelectWithCustomPayload,
+  ComponentReviewPayload,
   ProposePipelinePayload,
   SchemaFormPayload,
   WireStageData,
@@ -61,6 +63,19 @@ const MULTI_SELECT_PAYLOAD: MultiSelectWithCustomPayload = {
   ],
   default_chosen: ["csv"],
   escape_label: null,
+};
+
+const COMPONENT_REVIEW_PAYLOAD: ComponentReviewPayload = {
+  component_kind: "source",
+  items: [
+    {
+      stable_id: "00000000-0000-4000-8000-000000000111",
+      name: "customers",
+      plugin: "csv",
+      status: "reviewed",
+    },
+  ],
+  allowed_actions: ["add", "edit", "reorder", "finish"],
 };
 
 // SchemaFormTurn renders a "Continue" button (enabled when canSubmit=true).
@@ -215,6 +230,10 @@ function makeTurn(
   payload: SchemaFormPayload,
 ): TurnPayload;
 function makeTurn(
+  type: "review_components",
+  payload: ComponentReviewPayload,
+): TurnPayload;
+function makeTurn(
   type: "propose_pipeline",
   payload: ProposePipelinePayload,
 ): TurnPayload;
@@ -294,6 +313,17 @@ describe("GuidedTurn dispatcher — routing", () => {
     expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
   });
 
+  it("review_components: renders ComponentReviewTurn with server-authored collection", () => {
+    render(
+      <GuidedTurn
+        turn={makeTurn("review_components", COMPONENT_REVIEW_PAYLOAD)}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: "Review sources" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Edit customers" })).toBeEnabled();
+  });
+
   it("propose_pipeline: renders the current durable proposal renderer", () => {
     render(
       <GuidedTurn
@@ -330,6 +360,26 @@ describe("GuidedTurn dispatcher — routing", () => {
 // ── Suite 2: onSubmit forwarding ──────────────────────────────────────────────
 
 describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
+  it("review component action forwards the exact component body", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(
+      <GuidedTurn
+        turn={makeTurn("review_components", COMPONENT_REVIEW_PAYLOAD)}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Add source" }));
+
+    expect(onSubmit).toHaveBeenCalledWith({
+      ...nullResponse(),
+      chosen: null,
+      custom_inputs: null,
+      component_action: { action: "add", component_kind: "source" },
+    });
+  });
+
   it("click on option chip forwards onSubmit with the correct GuidedRespondRequest body", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();

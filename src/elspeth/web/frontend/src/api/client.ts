@@ -172,6 +172,17 @@ export function isForkCommittedResponseError(error: unknown): error is ForkCommi
   return error instanceof ForkCommittedResponseError;
 }
 
+export class GuidedResponseReceiptError extends Error {
+  readonly received = true;
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super("The guided response was received but could not be read.");
+    this.name = "GuidedResponseReceiptError";
+    this.cause = cause;
+  }
+}
+
 const CANONICAL_SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function decodeForkSessionLocator(value: unknown): { session_id: string } {
@@ -834,7 +845,14 @@ export async function respondGuided(
     body: JSON.stringify(body),
     signal,
   });
-  return decodeGuidedRespondResponse(await parseResponse<unknown>(response));
+  if (!response.ok) {
+    return parseResponse<never>(response);
+  }
+  try {
+    return decodeGuidedRespondResponse(await parseResponse<unknown>(response));
+  } catch (cause) {
+    throw new GuidedResponseReceiptError(cause);
+  }
 }
 
 /**

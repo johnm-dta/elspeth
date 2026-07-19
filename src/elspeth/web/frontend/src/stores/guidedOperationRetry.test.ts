@@ -8,6 +8,11 @@ import {
   GUIDED_RETRY_STORAGE_KEY,
   isAmbiguousGuidedRetryFailure,
 } from "./guidedOperationRetry";
+import type {
+  GuidedRetryAcquisition,
+  GuidedRetryHandle,
+  GuidedRetryKind,
+} from "./guidedOperationRetry";
 
 const SESSION_A = "00000000-0000-4000-8000-000000000201";
 const SESSION_B = "00000000-0000-4000-8000-000000000202";
@@ -16,6 +21,22 @@ function storedEnvelope(): { descriptors: unknown[] } {
   return JSON.parse(window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY) ?? "null") as {
     descriptors: unknown[];
   };
+}
+
+function expectAcquired(acquisition: GuidedRetryAcquisition): GuidedRetryHandle {
+  expect(acquisition.status).toBe("acquired");
+  if (acquisition.status === "conflict") {
+    throw new Error(`unexpected ${acquisition.existing.kind} retry conflict`);
+  }
+  return acquisition.handle;
+}
+
+function acquireHandle(
+  kind: GuidedRetryKind,
+  sessionId: string,
+  requestIdentity: readonly unknown[],
+): GuidedRetryHandle {
+  return expectAcquired(acquireGuidedRetry(kind, sessionId, requestIdentity));
 }
 
 describe("guided operation retry custody", () => {
@@ -29,10 +50,10 @@ describe("guided operation retry custody", () => {
   it("expires an ambiguous descriptor after 24 hours", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-18T00:00:00Z"));
-    const first = acquireGuidedRetry("guided_reenter", SESSION_A, []);
+    const first = acquireHandle("guided_reenter", SESSION_A, []);
 
     vi.setSystemTime(new Date("2026-07-19T00:00:00.001Z"));
-    const expired = acquireGuidedRetry("guided_reenter", SESSION_A, []);
+    const expired = acquireHandle("guided_reenter", SESSION_A, []);
 
     expect(expired.operationId).not.toBe(first.operationId);
     expect(storedEnvelope().descriptors).toHaveLength(1);
@@ -41,7 +62,7 @@ describe("guided operation retry custody", () => {
   it("caps descriptor count and serialized storage bytes", () => {
     for (let index = 0; index < 40; index += 1) {
       const suffix = (300 + index).toString().padStart(12, "0");
-      acquireGuidedRetry("guided_reenter", `00000000-0000-4000-8000-${suffix}`, []);
+      acquireHandle("guided_reenter", `00000000-0000-4000-8000-${suffix}`, []);
     }
 
     const encoded = window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY) ?? "";
@@ -58,14 +79,14 @@ describe("guided operation retry custody", () => {
       }),
     );
 
-    const handle = acquireGuidedRetry("guided_reenter", SESSION_A, []);
+    const handle = acquireHandle("guided_reenter", SESSION_A, []);
 
     expect(handle.operationId).toMatch(/^[0-9a-f-]{36}$/);
     expect(storedEnvelope().descriptors).toHaveLength(1);
   });
 
   it("stores only a fingerprint, never the raw request identity", () => {
-    acquireGuidedRetry("state_revert", SESSION_A, ["raw-state-id-must-not-survive"]);
+    acquireHandle("state_revert", SESSION_A, ["raw-state-id-must-not-survive"]);
 
     const encoded = window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY) ?? "";
     expect(encoded).not.toContain("raw-state-id-must-not-survive");
@@ -73,8 +94,8 @@ describe("guided operation retry custody", () => {
   });
 
   it("retains guided conversion custody without storing request content", () => {
-    const first = acquireGuidedRetry("guided_convert", SESSION_A, []);
-    const retry = acquireGuidedRetry("guided_convert", SESSION_A, []);
+    const first = acquireHandle("guided_convert", SESSION_A, []);
+    const retry = acquireHandle("guided_convert", SESSION_A, []);
 
     expect(retry.operationId).toBe(first.operationId);
     expect(window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY)).toContain('"kind":"guided_convert"');
@@ -82,8 +103,8 @@ describe("guided operation retry custody", () => {
 
   it("reuses one session fork operation without storing edited content", () => {
     const identity = ["00000000-0000-4000-8000-000000000301", "private edited request"];
-    const first = acquireGuidedRetry("session_fork", SESSION_A, identity);
-    const retry = acquireGuidedRetry("session_fork", SESSION_A, identity);
+    const first = acquireHandle("session_fork", SESSION_A, identity);
+    const retry = acquireHandle("session_fork", SESSION_A, identity);
 
     expect(retry.operationId).toBe(first.operationId);
     const encoded = window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY) ?? "";
@@ -93,19 +114,19 @@ describe("guided operation retry custody", () => {
 
   it("rehydrates a lost-response session fork operation after module reload", async () => {
     const identity = ["00000000-0000-4000-8000-000000000301", "private edited request"];
-    const first = acquireGuidedRetry("session_fork", SESSION_A, identity);
+    const first = acquireHandle("session_fork", SESSION_A, identity);
 
     vi.resetModules();
     const reloaded = await import("./guidedOperationRetry");
-    const retry = reloaded.acquireGuidedRetry("session_fork", SESSION_A, identity);
+    const retry = expectAcquired(reloaded.acquireGuidedRetry("session_fork", SESSION_A, identity));
 
     expect(retry.operationId).toBe(first.operationId);
   });
 
   it("reuses one guided chat operation for an ambiguous retry without storing the message", () => {
     const identity = ["a".repeat(64), "use the uploaded customer list"];
-    const first = acquireGuidedRetry("guided_chat", SESSION_A, identity);
-    const retry = acquireGuidedRetry("guided_chat", SESSION_A, identity);
+    const first = acquireHandle("guided_chat", SESSION_A, identity);
+    const retry = acquireHandle("guided_chat", SESSION_A, identity);
 
     expect(retry.operationId).toBe(first.operationId);
     const encoded = window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY) ?? "";
@@ -114,11 +135,11 @@ describe("guided operation retry custody", () => {
   });
 
   it("canonicalizes object key order before deriving retry identity", () => {
-    const first = acquireGuidedRetry("guided_respond", SESSION_A, [
+    const first = acquireHandle("guided_respond", SESSION_A, [
       "a".repeat(64),
       { chosen: ["csv"], edited_values: null },
     ]);
-    const retry = acquireGuidedRetry("guided_respond", SESSION_A, [
+    const retry = acquireHandle("guided_respond", SESSION_A, [
       "a".repeat(64),
       { edited_values: null, chosen: ["csv"] },
     ]);
@@ -133,10 +154,10 @@ describe("guided operation retry custody", () => {
         throw new Error("locale ordering must not participate");
       });
 
-    const first = acquireGuidedRetry("guided_respond", SESSION_A, [
+    const first = acquireHandle("guided_respond", SESSION_A, [
       { z: true, a: false },
     ]);
-    const retry = acquireGuidedRetry("guided_respond", SESSION_A, [
+    const retry = acquireHandle("guided_respond", SESSION_A, [
       { a: false, z: true },
     ]);
 
@@ -145,7 +166,7 @@ describe("guided operation retry custody", () => {
   });
 
   it("rejects non-plain objects that would collapse to an empty JSON record", () => {
-    expect(() => acquireGuidedRetry("guided_respond", SESSION_A, [new Date(0)])).toThrow(
+    expect(() => acquireHandle("guided_respond", SESSION_A, [new Date(0)])).toThrow(
       "plain records",
     );
   });
@@ -180,22 +201,28 @@ describe("guided operation retry custody", () => {
     ]);
   });
 
-  it("a different action evicts the prior same-kind session descriptor", () => {
-    const first = acquireGuidedRetry("state_revert", SESSION_A, ["state-a"]);
-    acquireGuidedRetry("state_revert", SESSION_A, ["state-b"]);
-    const stateAAgain = acquireGuidedRetry("state_revert", SESSION_A, ["state-a"]);
+  it("rejects a different action while preserving prior same-kind session custody", () => {
+    const first = acquireHandle("state_revert", SESSION_A, ["state-a"]);
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    const removeItem = vi.spyOn(Storage.prototype, "removeItem");
+    const conflict = acquireGuidedRetry("state_revert", SESSION_A, ["state-b"]);
 
-    expect(stateAAgain.operationId).not.toBe(first.operationId);
+    expect(conflict).toEqual({ status: "conflict", existing: first });
+    expect(setItem).not.toHaveBeenCalled();
+    expect(removeItem).not.toHaveBeenCalled();
+    const stateAAgain = acquireHandle("state_revert", SESSION_A, ["state-a"]);
+
+    expect(stateAAgain.operationId).toBe(first.operationId);
     expect(storedEnvelope().descriptors).toHaveLength(1);
   });
 
-  it("a different operation kind evicts prior custody for the same session", () => {
-    const revert = acquireGuidedRetry("state_revert", SESSION_A, ["state-a"]);
-    acquireGuidedRetry("guided_reenter", SESSION_A, []);
-    const revertAgain = acquireGuidedRetry("state_revert", SESSION_A, ["state-a"]);
+  it("keeps independent operation kinds in custody for the same session", () => {
+    const revert = acquireHandle("state_revert", SESSION_A, ["state-a"]);
+    acquireHandle("guided_reenter", SESSION_A, []);
+    const revertAgain = acquireHandle("state_revert", SESSION_A, ["state-a"]);
 
-    expect(revertAgain.operationId).not.toBe(revert.operationId);
-    expect(storedEnvelope().descriptors).toHaveLength(1);
+    expect(revertAgain.operationId).toBe(revert.operationId);
+    expect(storedEnvelope().descriptors).toHaveLength(2);
   });
 
   it("retains retry custody in bounded memory when sessionStorage writes fail", () => {
@@ -203,29 +230,34 @@ describe("guided operation retry custody", () => {
       throw new DOMException("quota", "QuotaExceededError");
     });
 
-    const first = acquireGuidedRetry("guided_reenter", SESSION_A, []);
-    const retry = acquireGuidedRetry("guided_reenter", SESSION_A, []);
+    const first = acquireHandle("guided_reenter", SESSION_A, []);
+    const retry = acquireHandle("guided_reenter", SESSION_A, []);
 
     expect(retry.operationId).toBe(first.operationId);
     setItem.mockRestore();
   });
 
   it("keeps the newer fallback authoritative when quota leaves a stale envelope readable", () => {
-    const stale = acquireGuidedRetry("state_revert", SESSION_A, ["state-a"]);
+    const stale = acquireHandle("state_revert", SESSION_A, ["state-a"]);
     const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new DOMException("quota", "QuotaExceededError");
     });
+    const removeItem = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      throw new DOMException("blocked", "SecurityError");
+    });
+    clearGuidedRetry(stale);
 
-    const replacement = acquireGuidedRetry("state_revert", SESSION_A, ["state-b"]);
-    const retry = acquireGuidedRetry("state_revert", SESSION_A, ["state-b"]);
+    const replacement = acquireHandle("state_revert", SESSION_A, ["state-b"]);
+    const retry = acquireHandle("state_revert", SESSION_A, ["state-b"]);
 
     expect(replacement.operationId).not.toBe(stale.operationId);
     expect(retry.operationId).toBe(replacement.operationId);
     setItem.mockRestore();
+    removeItem.mockRestore();
   });
 
   it("does not resurrect completed custody when removing stale storage fails", () => {
-    const completed = acquireGuidedRetry("guided_reenter", SESSION_A, []);
+    const completed = acquireHandle("guided_reenter", SESSION_A, []);
     const removeItem = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
       throw new DOMException("blocked", "SecurityError");
     });
@@ -233,30 +265,30 @@ describe("guided operation retry custody", () => {
     clearGuidedRetry(completed);
     expect(removeItem).toHaveBeenCalledWith(GUIDED_RETRY_STORAGE_KEY);
     expect(storedEnvelope().descriptors).toHaveLength(0);
-    const nextAction = acquireGuidedRetry("guided_reenter", SESSION_A, []);
+    const nextAction = acquireHandle("guided_reenter", SESSION_A, []);
 
     expect(nextAction.operationId).not.toBe(completed.operationId);
     removeItem.mockRestore();
   });
 
   it("hydrates fallback custody before a later sessionStorage read failure", async () => {
-    const stored = acquireGuidedRetry("guided_reenter", SESSION_A, []);
+    const stored = acquireHandle("guided_reenter", SESSION_A, []);
     vi.resetModules();
     const reloaded = await import("./guidedOperationRetry");
-    const hydrated = reloaded.acquireGuidedRetry("guided_reenter", SESSION_A, []);
+    const hydrated = expectAcquired(reloaded.acquireGuidedRetry("guided_reenter", SESSION_A, []));
     expect(hydrated.operationId).toBe(stored.operationId);
     const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new DOMException("blocked", "SecurityError");
     });
 
-    const retry = reloaded.acquireGuidedRetry("guided_reenter", SESSION_A, []);
+    const retry = expectAcquired(reloaded.acquireGuidedRetry("guided_reenter", SESSION_A, []));
 
     expect(retry.operationId).toBe(stored.operationId);
     getItem.mockRestore();
   });
 
   it("persists an empty generation when removal fails so reload cannot resurrect custody", async () => {
-    const completed = acquireGuidedRetry("guided_reenter", SESSION_A, []);
+    const completed = acquireHandle("guided_reenter", SESSION_A, []);
     const removeItem = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
       throw new DOMException("blocked", "SecurityError");
     });
@@ -265,13 +297,13 @@ describe("guided operation retry custody", () => {
     removeItem.mockRestore();
     vi.resetModules();
     const reloaded = await import("./guidedOperationRetry");
-    const nextAction = reloaded.acquireGuidedRetry("guided_reenter", SESSION_A, []);
+    const nextAction = expectAcquired(reloaded.acquireGuidedRetry("guided_reenter", SESSION_A, []));
 
     expect(nextAction.operationId).not.toBe(completed.operationId);
   });
 
   it("still removes stale custody when the empty-generation write fails", async () => {
-    const completed = acquireGuidedRetry("guided_reenter", SESSION_A, []);
+    const completed = acquireHandle("guided_reenter", SESSION_A, []);
     const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new DOMException("quota", "QuotaExceededError");
     });
@@ -283,17 +315,17 @@ describe("guided operation retry custody", () => {
     removeItem.mockRestore();
     vi.resetModules();
     const reloaded = await import("./guidedOperationRetry");
-    const nextAction = reloaded.acquireGuidedRetry("guided_reenter", SESSION_A, []);
+    const nextAction = expectAcquired(reloaded.acquireGuidedRetry("guided_reenter", SESSION_A, []));
 
     expect(nextAction.operationId).not.toBe(completed.operationId);
   });
 
   it("rejects non-canonical or oversized session ids", () => {
-    expect(() => acquireGuidedRetry("guided_reenter", "sess-1", [])).toThrow(
+    expect(() => acquireHandle("guided_reenter", "sess-1", [])).toThrow(
       "canonical UUID",
     );
     expect(() =>
-      acquireGuidedRetry("guided_reenter", `${SESSION_B}${"x".repeat(256)}`, []),
+      acquireHandle("guided_reenter", `${SESSION_B}${"x".repeat(256)}`, []),
     ).toThrow("canonical UUID");
   });
 

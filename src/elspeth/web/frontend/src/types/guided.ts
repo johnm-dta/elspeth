@@ -20,6 +20,7 @@ export type TurnType =
   | "single_select"
   | "multi_select_with_custom"
   | "schema_form"
+  | "review_components"
   | "propose_pipeline"
   | "confirm_wiring";
 
@@ -144,6 +145,7 @@ export type TurnPayload =
   | TurnPayloadEnvelope<"single_select", SingleSelectPayload>
   | TurnPayloadEnvelope<"multi_select_with_custom", MultiSelectWithCustomPayload>
   | TurnPayloadEnvelope<"schema_form", SchemaFormPayload>
+  | TurnPayloadEnvelope<"review_components", ComponentReviewPayload>
   | TurnPayloadEnvelope<"propose_pipeline", ProposePipelinePayload>
   | TurnPayloadEnvelope<"confirm_wiring", WireStageData>;
 
@@ -174,6 +176,24 @@ interface BoundProposalFields {
 }
 
 export type NonEmptyStringArray = [string, ...string[]];
+
+export type GuidedComponentKind = "source" | "output";
+
+export interface GuidedComponentTarget {
+  kind: GuidedComponentKind;
+  stable_id: string;
+}
+
+export type GuidedComponentAction =
+  | { action: "add"; component_kind: GuidedComponentKind }
+  | { action: "edit"; target: GuidedComponentTarget }
+  | { action: "remove"; target: GuidedComponentTarget }
+  | {
+      action: "reorder";
+      component_kind: GuidedComponentKind;
+      stable_ids: NonEmptyStringArray;
+    }
+  | { action: "finish"; component_kind: GuidedComponentKind };
 
 /** One exact legal response action before retry/turn identity is attached. */
 export type GuidedRespondAction =
@@ -227,6 +247,13 @@ export type GuidedRespondAction =
       custom_inputs: null;
       edit_target: GuidedEditTarget;
       control_signal: null;
+    })
+  | (UnboundProposalFields & {
+      chosen: null;
+      edited_values: null;
+      custom_inputs: null;
+      control_signal: null;
+      component_action: GuidedComponentAction;
     });
 
 /** Exact proposal control whose retry descriptor remains in local custody. */
@@ -423,6 +450,21 @@ export interface SchemaFormPayload {
   plugin: string;
   knobs: KnobSchema;
   prefilled: Record<string, unknown>;
+}
+
+export type ComponentReviewAction = GuidedComponentAction["action"];
+
+export interface ComponentReviewItem {
+  stable_id: string;
+  name: string;
+  plugin: string;
+  status: "reviewed";
+}
+
+export interface ComponentReviewPayload {
+  component_kind: GuidedComponentKind;
+  items: ComponentReviewItem[];
+  allowed_actions: ComponentReviewAction[];
 }
 
 /**

@@ -28,13 +28,14 @@ import type {
 type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 
 describe("guided protocol types", () => {
-  it("TurnType union has exactly 6 values", () => {
+  it("TurnType union has exactly 7 values", () => {
     const _exact: Equals<
       TurnType,
       | "inspect_and_confirm"
       | "single_select"
       | "multi_select_with_custom"
       | "schema_form"
+      | "review_components"
       | "propose_pipeline"
       | "confirm_wiring"
     > = true;
@@ -43,11 +44,12 @@ describe("guided protocol types", () => {
       "single_select",
       "multi_select_with_custom",
       "schema_form",
+      "review_components",
       "propose_pipeline",
       "confirm_wiring",
     ];
     expect(_exact).toBe(true);
-    expect(all).toHaveLength(6);
+    expect(all).toHaveLength(7);
   });
 
   it("ControlSignal union has 5 values (C-3: added back + passthrough, fixing pre-existing drift from protocol.py)", () => {

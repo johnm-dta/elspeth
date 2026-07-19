@@ -14,12 +14,16 @@ import {
 import {
   acquireGuidedRetry,
   clearAllGuidedRetries,
+  clearGuidedRetry,
 } from "@/stores/guidedOperationRetry";
 
 const seedGuidedMock = vi.fn();
+const startGuidedSessionMock = vi.fn();
 const getGuidedMock = vi.fn();
 const getTutorialSampleMock = vi.fn();
+const listInterpretationEventsMock = vi.fn();
 const respondGuidedMock = vi.fn();
+const realSeedGuided = useSessionStore.getState().seedGuided;
 const realApplyGuidedResponse = useSessionStore.getState().applyGuidedResponse;
 
 const SAMPLE_URLS = [
@@ -27,6 +31,15 @@ const SAMPLE_URLS = [
   "https://elspeth.example/tutorial-site/project-2.html",
   "https://elspeth.example/tutorial-site/project-3.html",
 ];
+
+function acquireRespondHandle(sessionId: string, identity: readonly unknown[]) {
+  const acquisition = acquireGuidedRetry("guided_respond", sessionId, identity);
+  expect(acquisition.status).toBe("acquired");
+  if (acquisition.status === "conflict") {
+    throw new Error("unexpected guided response retry conflict");
+  }
+  return acquisition.handle;
+}
 
 type TerminalKind = "completed" | "exited_to_freeform";
 
@@ -45,8 +58,11 @@ function guidedSessionPayload(terminalKind: TerminalKind | null): unknown {
 }
 
 vi.mock("@/api/client", () => ({
+  startGuidedSession: (...args: unknown[]) => startGuidedSessionMock(...args),
   getGuided: (...args: unknown[]) => getGuidedMock(...args),
   getTutorialSample: (...args: unknown[]) => getTutorialSampleMock(...args),
+  listInterpretationEvents: (...args: unknown[]) =>
+    listInterpretationEventsMock(...args),
   respondGuided: (...args: unknown[]) => respondGuidedMock(...args),
 }));
 
@@ -78,7 +94,7 @@ describe("TutorialGuidedShell", () => {
     window.sessionStorage.clear();
     clearAllGuidedRetries();
     seedGuidedMock.mockReset().mockResolvedValue(undefined);
-    getGuidedMock.mockReset().mockResolvedValue({
+    const activeGuidedResponse = {
       guided_session: guidedSessionPayload(null),
       next_turn: {
         type: "single_select",
@@ -88,10 +104,13 @@ describe("TutorialGuidedShell", () => {
       },
       terminal: null,
       composition_state: null,
-    });
+    };
+    startGuidedSessionMock.mockReset().mockResolvedValue(activeGuidedResponse);
+    getGuidedMock.mockReset().mockResolvedValue(activeGuidedResponse);
     getTutorialSampleMock
       .mockReset()
       .mockResolvedValue({ sample_urls: SAMPLE_URLS });
+    listInterpretationEventsMock.mockReset().mockResolvedValue([]);
     respondGuidedMock.mockReset().mockResolvedValue({
       guided_session: guidedSessionPayload("exited_to_freeform"),
       next_turn: null,
@@ -339,7 +358,7 @@ describe("TutorialGuidedShell", () => {
     expect(screen.queryByTestId("chat-panel-stub")).not.toBeInTheDocument();
   });
 
-  it("retains the exact exit operation through local apply failure and clears it only after retry apply succeeds", async () => {
+  it("clears a decoded exit before local apply and resyncs without a second POST", async () => {
     const sessionId = "00000000-0000-4000-8000-000000000702";
     const exitRequestedRef = { current: false };
     let resolveStart: (value: unknown) => void = () => undefined;
@@ -348,14 +367,43 @@ describe("TutorialGuidedShell", () => {
         resolveStart = resolve;
       }),
     );
-    const applyGuidedResponse = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("local interpretation refresh failed"))
-      .mockResolvedValueOnce(true);
+    const authoritative = {
+      guided_session: guidedSessionPayload("exited_to_freeform"),
+      next_turn: null,
+      terminal: {
+        kind: "exited_to_freeform",
+        reason: "user_pressed_exit",
+        pipeline_yaml: null,
+      },
+      composition_state: null,
+    };
+    getGuidedMock
+      .mockResolvedValueOnce({
+        guided_session: guidedSessionPayload(null),
+        next_turn: {
+          type: "single_select",
+          step_index: 0,
+          turn_token: "a".repeat(64),
+          payload: {},
+        },
+        terminal: null,
+        composition_state: null,
+      })
+      .mockResolvedValueOnce(authoritative);
+    let operationDuringFirstApply: string | null = null;
+    const applyGuidedResponse = vi.fn().mockImplementationOnce(async () => {
+      const replacement = acquireRespondHandle(sessionId, [
+        "a".repeat(64),
+        EXIT_TO_FREEFORM_ACTION,
+      ]);
+      operationDuringFirstApply = replacement.operationId;
+      clearGuidedRetry(replacement);
+      throw new Error("local interpretation refresh failed");
+    }).mockResolvedValueOnce(true);
     useSessionStore.setState({ applyGuidedResponse } as never);
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
-    const firstMount = render(
+    render(
       <TutorialGuidedShell
         sessionId={sessionId}
         onCompleted={vi.fn()}
@@ -365,33 +413,22 @@ describe("TutorialGuidedShell", () => {
     await waitFor(() => expect(seedGuidedMock).toHaveBeenCalledTimes(1));
     exitRequestedRef.current = true;
     resolveStart({});
-    await waitFor(() => expect(applyGuidedResponse).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(applyGuidedResponse).toHaveBeenCalledTimes(2));
     expect(respondGuidedMock).toHaveBeenCalledTimes(1);
     const firstOperationId = respondGuidedMock.mock.calls[0][1].operation_id;
-    firstMount.unmount();
-
-    render(
-      <TutorialGuidedShell
-        sessionId={sessionId}
-        onCompleted={vi.fn()}
-        exitRequestedRef={exitRequestedRef}
-      />,
+    expect(operationDuringFirstApply).not.toBe(firstOperationId);
+    expect(getGuidedMock).toHaveBeenCalledTimes(2);
+    expect(applyGuidedResponse).toHaveBeenLastCalledWith(
+      sessionId,
+      authoritative,
     );
-    await waitFor(() => expect(respondGuidedMock).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(applyGuidedResponse).toHaveBeenCalledTimes(2));
-    expect(respondGuidedMock.mock.calls[1][1].operation_id).toBe(firstOperationId);
-
-    const nextOperation = acquireGuidedRetry("guided_respond", sessionId, [
-      "a".repeat(64),
-      EXIT_TO_FREEFORM_ACTION,
-    ]);
-    expect(nextOperation.operationId).not.toBe(firstOperationId);
+    expect(consoleError).not.toHaveBeenCalled();
     consoleError.mockRestore();
   });
 
   it("applies an authoritative already-exited GET, clears custody, and does not POST again", async () => {
     const sessionId = "00000000-0000-4000-8000-000000000703";
-    const stale = acquireGuidedRetry("guided_respond", sessionId, ["stale-exit"]);
+    const stale = acquireRespondHandle(sessionId, ["stale-exit"]);
     const authoritative = {
       guided_session: guidedSessionPayload("exited_to_freeform"),
       next_turn: null,
@@ -403,7 +440,13 @@ describe("TutorialGuidedShell", () => {
       composition_state: null,
     };
     getGuidedMock.mockResolvedValueOnce(authoritative);
-    const applyGuidedResponse = vi.fn().mockResolvedValue(true);
+    let operationDuringApply: string | null = null;
+    const applyGuidedResponse = vi.fn().mockImplementationOnce(async () => {
+      const replacement = acquireRespondHandle(sessionId, ["stale-exit"]);
+      operationDuringApply = replacement.operationId;
+      clearGuidedRetry(replacement);
+      return true;
+    });
     useSessionStore.setState({ applyGuidedResponse } as never);
 
     render(
@@ -416,8 +459,130 @@ describe("TutorialGuidedShell", () => {
 
     await waitFor(() => expect(applyGuidedResponse).toHaveBeenCalledWith(sessionId, authoritative));
     expect(respondGuidedMock).not.toHaveBeenCalled();
-    const next = acquireGuidedRetry("guided_respond", sessionId, ["stale-exit"]);
-    expect(next.operationId).not.toBe(stale.operationId);
+    expect(operationDuringApply).not.toBe(stale.operationId);
+  });
+
+  it("retires decoded exit custody and renders refresh guidance when resync fails", async () => {
+    const sessionId = "00000000-0000-4000-8000-000000000705";
+    getGuidedMock
+      .mockResolvedValueOnce({
+        guided_session: guidedSessionPayload(null),
+        next_turn: {
+          type: "single_select",
+          step_index: 0,
+          turn_token: "a".repeat(64),
+          payload: {},
+        },
+        terminal: null,
+        composition_state: null,
+      })
+      .mockRejectedValueOnce(new Error("resync failed"));
+    const applyGuidedResponse = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("local apply failed"));
+    useSessionStore.setState({ applyGuidedResponse } as never);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    render(
+      <TutorialGuidedShell
+        sessionId={sessionId}
+        onCompleted={vi.fn()}
+        exitRequestedRef={{ current: true }}
+      />,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/accepted.*refresh/i);
+    expect(respondGuidedMock).toHaveBeenCalledTimes(1);
+    expect(getGuidedMock).toHaveBeenCalledTimes(2);
+    const retiredOperationId = respondGuidedMock.mock.calls[0][1].operation_id;
+    expect(acquireRespondHandle(sessionId, [
+      "a".repeat(64),
+      EXIT_TO_FREEFORM_ACTION,
+    ]).operationId).not.toBe(retiredOperationId);
+    expect(consoleError).not.toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
+  it("renders a custody conflict when startup exit would replace an unsettled response", async () => {
+    const sessionId = "00000000-0000-4000-8000-000000000704";
+    const priorIdentity = ["prior-turn", { chosen: ["csv"] }] as const;
+    const prior = acquireRespondHandle(sessionId, priorIdentity);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    render(
+      <TutorialGuidedShell
+        sessionId={sessionId}
+        onCompleted={vi.fn()}
+        exitRequestedRef={{ current: true }}
+      />,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/unsettled/i);
+    expect(respondGuidedMock).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+    expect(acquireRespondHandle(sessionId, priorIdentity).operationId).toBe(
+      prior.operationId,
+    );
+    consoleError.mockRestore();
+  });
+
+  it("renders a custody conflict from the loaded-session store exit outcome", async () => {
+    const sessionId = "00000000-0000-4000-8000-000000000711";
+    const priorIdentity = ["prior-turn", { chosen: ["csv"] }] as const;
+    const prior = acquireRespondHandle(sessionId, priorIdentity);
+    useSessionStore.setState({ seedGuided: realSeedGuided } as never);
+
+    render(
+      <TutorialGuidedShell
+        sessionId={sessionId}
+        onCompleted={vi.fn()}
+        exitRequestedRef={{ current: true }}
+      />,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/unsettled/i);
+    expect(startGuidedSessionMock).toHaveBeenCalledTimes(1);
+    expect(respondGuidedMock).not.toHaveBeenCalled();
+    expect(screen.queryByText("Preparing the tutorial's sample pages…")).toBeNull();
+    expect(acquireRespondHandle(sessionId, priorIdentity).operationId).toBe(
+      prior.operationId,
+    );
+  });
+
+  it("renders refresh guidance when a loaded-session decoded exit cannot apply or resync", async () => {
+    const sessionId = "00000000-0000-4000-8000-000000000712";
+    const authoritativeExit = {
+      guided_session: guidedSessionPayload("exited_to_freeform"),
+      next_turn: null,
+      terminal: {
+        kind: "exited_to_freeform",
+        reason: "user_pressed_exit",
+        pipeline_yaml: null,
+      },
+      composition_state: null,
+    };
+    useSessionStore.setState({ seedGuided: realSeedGuided } as never);
+    respondGuidedMock.mockResolvedValueOnce(authoritativeExit);
+    getGuidedMock.mockResolvedValueOnce(authoritativeExit);
+    listInterpretationEventsMock
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error("decoded response apply failed"))
+      .mockRejectedValueOnce(new Error("authoritative resync apply failed"));
+
+    render(
+      <TutorialGuidedShell
+        sessionId={sessionId}
+        onCompleted={vi.fn()}
+        exitRequestedRef={{ current: true }}
+      />,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/accepted.*refresh/i);
+    expect(startGuidedSessionMock).toHaveBeenCalledTimes(1);
+    expect(respondGuidedMock).toHaveBeenCalledTimes(1);
+    expect(getGuidedMock).toHaveBeenCalledTimes(1);
+    expect(listInterpretationEventsMock).toHaveBeenCalledTimes(3);
+    expect(screen.queryByText("Preparing the tutorial's sample pages…")).toBeNull();
   });
 
   it("clears stale completed guided state before starting a new tutorial session", async () => {

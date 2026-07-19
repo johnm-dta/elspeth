@@ -9,6 +9,7 @@
 //   "inspect_and_confirm"     -> InspectAndConfirmTurn
 //   "multi_select_with_custom"-> MultiSelectWithCustomTurn
 //   "schema_form"             -> SchemaFormTurn
+//   "review_components"       -> ComponentReviewTurn
 //   "propose_pipeline"        -> ProposePipelineTurn
 //   "confirm_wiring"          -> WireStageTurn
 //
@@ -25,6 +26,7 @@ import { MultiSelectWithCustomTurn } from "./MultiSelectWithCustomTurn";
 import { SchemaFormTurn } from "./SchemaFormTurn";
 import { WireStageTurn, type WireBlockerLink } from "./WireStageTurn";
 import { ProposePipelineTurn } from "./ProposePipelineTurn";
+import { ComponentReviewTurn } from "./ComponentReviewTurn";
 
 interface GuidedTurnProps {
   turn: TurnPayload;
@@ -114,6 +116,15 @@ export function GuidedTurn({
           onSubmit={guardedSubmit}
           disabled={disabled}
           isTutorial={isTutorial}
+        />
+      );
+    case "review_components":
+      return (
+        <ComponentReviewTurn
+          key={turnInstanceKey}
+          payload={turn.payload}
+          onSubmit={guardedSubmit}
+          disabled={disabled}
         />
       );
     case "propose_pipeline":

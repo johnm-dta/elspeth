@@ -12,6 +12,7 @@ import type {
 } from "@/types/api";
 import type { InterpretationEvent } from "@/types/interpretation";
 import { compositionStateAuthorityFields } from "@/test/composerFixtures";
+import { clearAllGuidedRetries } from "./guidedOperationRetry";
 
 const clearValidationMock = vi.hoisted(() => vi.fn());
 const validateMock = vi.hoisted(() => vi.fn());
@@ -163,6 +164,8 @@ function makeCompositionProposal(
 describe("sessionStore", () => {
   beforeEach(async () => {
     vi.resetAllMocks();
+    window.sessionStorage.clear();
+    clearAllGuidedRetries();
     resetStore(useSessionStore);
     // Phase 1B: keep existing createSession-touching tests on the pre-change
     // behaviour by pinning preferences to freeform-loaded. The new
@@ -2754,6 +2757,27 @@ describe("sessionStore", () => {
       const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
       expect(calls[0]?.[1]).toBe(calls[1]?.[1]);
       expect(calls[0]?.slice(2)).toEqual(["message-1", "edited"]);
+    });
+
+    it("reports conflicting fork content without rejecting or sending another request", async () => {
+      const apiClient = await import("@/api/client");
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>)
+        .mockRejectedValue(new TypeError("response lost"));
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      await useSessionStore.getState().forkFromMessage("message-1", "first edit");
+      await expect(
+        useSessionStore.getState().forkFromMessage("message-1", "different edit"),
+      ).resolves.toBeUndefined();
+
+      expect(apiClient.forkFromMessage).toHaveBeenCalledTimes(1);
+      expect(useSessionStore.getState().isComposing).toBe(false);
+      expect(useSessionStore.getState().error).toMatch(/unsettled/i);
+
+      await useSessionStore.getState().forkFromMessage("message-1", "first edit");
+      expect(apiClient.forkFromMessage).toHaveBeenCalledTimes(2);
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[1]?.[1]).toBe(calls[0]?.[1]);
     });
 
     it("reuses the exact operation id after a 5xx POST failure", async () => {

@@ -47,7 +47,8 @@ from elspeth.web.composer.pipeline_proposal import AbsentBase, PresentBase, Prop
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_from_dict, facts_to_dict
 
 # Schema 8 is a pre-release hard cut. There is no schema-7 decoder or
-# converter: session epoch 29 owns the corresponding store recreation.
+# converter: session epoch 30 owns the current store recreation boundary
+# (epoch 29 introduced schema 8; epoch 30 closes the quota failure-code CHECK).
 GUIDED_SESSION_SCHEMA_VERSION = 8
 GUIDED_MAX_COMPONENTS_PER_KIND = 256
 GUIDED_MAX_DEFERRED_INTENTS = 256

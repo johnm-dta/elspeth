@@ -3126,6 +3126,7 @@ class TestIDORProtection:
         resp = bob_client.post(
             f"/api/sessions/{session_id}/fork",
             json={
+                "operation_id": str(uuid.uuid4()),
                 "from_message_id": str(uuid.uuid4()),
                 "new_message_content": "hijacked",
             },

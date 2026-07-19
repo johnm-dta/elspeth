@@ -1126,7 +1126,9 @@ class ExecutionServiceImpl:
             session = await self._session_service.get_session(run.session_id)
         except SessionNotFoundError as exc:
             raise RunSessionIntegrityError(run_id=run_id, session_id=str(run.session_id)) from exc
-        return session.user_id == user.user_id and session.auth_provider_type == self._settings.auth_provider
+        return (
+            session.archived_at is None and session.user_id == user.user_id and session.auth_provider_type == self._settings.auth_provider
+        )
 
     async def cancel(self, run_id: UUID) -> None:
         """Cancel a run via the shutdown Event.

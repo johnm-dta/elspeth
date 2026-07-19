@@ -146,7 +146,11 @@ from elspeth.core.schema_identity import create_schema_identity_table
 #        proposal state and adds durable, fenced guided operation reservations
 #        plus their append-only lease/takeover event history. Pre-release
 #        policy remains delete-and-recreate for stale session databases.
-SESSION_SCHEMA_EPOCH = 29
+#   30 -> ``guided_operations.failure_code`` gains the closed
+#        ``quota_exceeded`` value so fork quota failures settle once and replay
+#        as a stable HTTP 413 instead of violating the epoch-29 CHECK.
+#        Pre-release policy remains delete-and-recreate; no migration exists.
+SESSION_SCHEMA_EPOCH = 30
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 _POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"
@@ -710,7 +714,7 @@ guided_operations_table = Table(
     ),
     CheckConstraint(
         "failure_code IS NULL OR failure_code IN ('provider_unavailable', 'provider_timeout', "
-        "'invalid_provider_response', 'stale_conflict', 'integrity_error', 'custody_error', 'operation_failed')",
+        "'invalid_provider_response', 'stale_conflict', 'integrity_error', 'custody_error', 'quota_exceeded', 'operation_failed')",
         name="ck_guided_operations_failure_code",
     ),
     CheckConstraint(

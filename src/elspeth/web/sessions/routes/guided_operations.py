@@ -45,6 +45,7 @@ _SAFE_FAILURES: dict[str, tuple[int, str]] = {
     "stale_conflict": (409, "The guided state changed before settlement. Reload the authoritative state."),
     "integrity_error": (500, "The operation failed an integrity check."),
     "custody_error": (500, "The operation could not establish result custody."),
+    "quota_exceeded": (413, "The operation exceeded the session storage quota."),
     "operation_failed": (500, "The operation failed."),
 }
 

@@ -574,6 +574,22 @@ async function fetchGuidedStateForSelect(
   }
 }
 
+function mergeAuthoritativeForkChild(
+  current: Session[],
+  authoritative: Session[],
+  childSessionId: string,
+): Session[] {
+  const child = authoritative.find((session) => session.id === childSessionId);
+  if (child === undefined) {
+    throw new Error("Fork result was absent from the authoritative session list");
+  }
+  // Preserve every intervening unrelated list mutation. A fetch started before
+  // a rename, create, or archive is authoritative only for the exact committed
+  // locator child. Put that fresh child first to preserve the backend's
+  // updated_at DESC contract without admitting stale values for other rows.
+  return [child, ...current.filter((session) => session.id !== childSessionId)];
+}
+
 function clearedRecoveryState(): Pick<
   SessionState,
   "recoveryError" | "recoveryStartedCompositionVersion"
@@ -1813,50 +1829,112 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
     clearComposerProgressPollTimer();
     clearInflightMessagesPollTimer();
+    const retry = acquireGuidedRetry("session_fork", activeSessionId, [
+      messageId,
+      newContent,
+    ]);
+    let responseReceived = false;
+    let childPublished = false;
     set({ isComposing: true, error: null });
     try {
       const result = await api.forkFromMessage(
         activeSessionId,
+        retry.operationId,
         messageId,
         newContent,
       );
-      // Clear validation for the new session
-      getExecutionStore().clearValidation();
+      responseReceived = true;
 
+      // The POST returns only a durable locator. Publish that exact child into
+      // the global list first, using a minimal merge that preserves concurrent
+      // list mutations. Hydrate into locals while the parent remains active;
+      // switch atomically only after every load-bearing child read succeeds.
+      const authoritativeSessions = await api.fetchSessions();
       set((state) => ({
-        sessions: [result.session, ...state.sessions],
-        activeSessionId: result.session.id,
-        messages: result.messages,
-        compositionState: result.composition_state,
-        compositionStateLoaded: true,
-        compositionProposals: [],
-        composerPreferences: null,
-        staleProposalIds: [],
-        proposalActionPendingIds: [],
-        composerProgress: null,
-        stateVersions: [],
-        isComposing: false,
-        selectedNodeId: null, // Clear selection for forked session
-        // Clear guided state synchronously — the fork is a new session context;
-        // the parent's guidedSession must not bleed into the fork's UI before
-        // startGuided resolves.  Mirrors selectSession.
-        ...clearedGuidedState(),
-        ...clearedRecoveryState(),
+        sessions: mergeAuthoritativeForkChild(
+          state.sessions,
+          authoritativeSessions,
+          result.session_id,
+        ),
+        sessionsLoaded: true,
       }));
+      childPublished = get().sessions.some((session) => session.id === result.session_id);
+      if (!childPublished) {
+        throw new Error("Fork result was not published to the session list");
+      }
+      if (get().activeSessionId !== activeSessionId) {
+        clearGuidedRetry(retry);
+        return;
+      }
 
-      // Fire-and-forget: refresh blob list for the NEW forked session
-      useBlobStore.getState().loadBlobs(result.session.id);
-
-      // Default-freeform: forked sessions surface freeform (same contract as
-      // selectSession / createSession).  Forks are a new conversation context;
-      // the user activates guided explicitly via the "Switch to guided"
-      // button in ChatPanel if they want the wizard surface back.
-    } catch {
-      set({
-        isComposing: false,
-        composerProgress: null,
-        error: "Failed to fork conversation. Please try again.",
+      const [messages, compositionState, compositionProposals, composerPreferences, guided] =
+        await Promise.all([
+          api.fetchMessages(result.session_id),
+          api.fetchCompositionState(result.session_id),
+          api.fetchCompositionProposals(result.session_id),
+          api.fetchComposerPreferences(result.session_id),
+          fetchGuidedStateForSelect(result.session_id, "throw"),
+        ]);
+      if (!get().sessions.some((session) => session.id === result.session_id)) {
+        throw new Error("Published fork result disappeared during hydration");
+      }
+      let activatedChild = false;
+      set((state) => {
+        if (state.activeSessionId !== activeSessionId) {
+          return {};
+        }
+        activatedChild = true;
+        getExecutionStore().clearValidation();
+        return {
+          activeSessionId: result.session_id,
+          messages,
+          compositionState,
+          compositionStateLoaded: true,
+          compositionProposals: compositionProposals ?? [],
+          composerPreferences: composerPreferences ?? null,
+          staleProposalIds: [],
+          proposalActionPendingIds: [],
+          composerProgress: null,
+          stateVersions: [],
+          isComposing: false,
+          error: null,
+          selectedNodeId: null,
+          ...clearedGuidedState(),
+          ...(guided !== null
+            ? {
+                guidedSession: guided.guided_session,
+                guidedNextTurn: guided.next_turn,
+                guidedTerminal: guided.terminal,
+                guidedProposalReview: proposalReviewForTurn(guided.next_turn),
+              }
+            : {}),
+          ...clearedRecoveryState(),
+        };
       });
+      clearGuidedRetry(retry);
+      if (!activatedChild) {
+        return;
+      }
+      useBlobStore.getState().loadBlobs(result.session_id);
+      void useInterpretationEventsStore.getState().refreshAll(result.session_id);
+    } catch (err) {
+      if (childPublished && get().activeSessionId !== activeSessionId) {
+        clearGuidedRetry(retry);
+      }
+      if (
+        !responseReceived &&
+        !api.isForkCommittedResponseError(err) &&
+        !isAmbiguousGuidedRetryFailure(err)
+      ) {
+        clearGuidedRetry(retry);
+      }
+      if (get().activeSessionId === activeSessionId) {
+        set({
+          isComposing: false,
+          composerProgress: null,
+          error: "Failed to fork conversation. Please try again.",
+        });
+      }
     }
   },
 

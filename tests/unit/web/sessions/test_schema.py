@@ -257,6 +257,47 @@ def test_initialize_session_schema_rejects_prior_epoch_database() -> None:
         initialize_session_schema(eng)
 
 
+def test_epoch_29_database_without_quota_failure_code_fails_closed_with_recreate_guidance(tmp_path) -> None:
+    """The epoch-29 failure-code CHECK cannot be opened by epoch-30 code."""
+    db_path = tmp_path / "epoch-29-without-quota.db"
+    engine = create_session_engine(f"sqlite:///{db_path}")
+    initialize_session_schema(engine)
+    with engine.begin() as connection:
+        guided_operations_sql = connection.execute(
+            text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'guided_operations'")
+        ).scalar_one()
+        assert "'quota_exceeded'" in guided_operations_sql
+        epoch_29_sql = guided_operations_sql.replace(", 'quota_exceeded'", "")
+        assert epoch_29_sql != guided_operations_sql
+        assert "'quota_exceeded'" not in epoch_29_sql
+        connection.execute(text("PRAGMA writable_schema = ON"))
+        connection.execute(
+            text("UPDATE sqlite_master SET sql = :sql WHERE type = 'table' AND name = 'guided_operations'"),
+            {"sql": epoch_29_sql},
+        )
+        connection.execute(text("UPDATE elspeth_schema_identity SET schema_epoch = 29 WHERE store_kind = 'session'"))
+        connection.execute(text("PRAGMA user_version = 29"))
+        schema_version = connection.execute(text("PRAGMA schema_version")).scalar_one()
+        connection.execute(text(f"PRAGMA schema_version = {schema_version + 1}"))
+        connection.execute(text("PRAGMA writable_schema = OFF"))
+    engine.dispose()
+
+    stale_engine = create_session_engine(f"sqlite:///{db_path}")
+    with stale_engine.connect() as connection:
+        assert connection.execute(text("PRAGMA user_version")).scalar_one() == 29
+        stored_sql = connection.execute(
+            text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'guided_operations'")
+        ).scalar_one()
+        assert "'quota_exceeded'" not in stored_sql
+
+    with pytest.raises(
+        SessionSchemaError,
+        match=r"Session DB schema version 29 does not match SESSION_SCHEMA_EPOCH=30.*"
+        r"Delete the session DB file and restart",
+    ):
+        initialize_session_schema(stale_engine)
+
+
 @pytest.mark.parametrize("renamed_column", ["singleton_id", "application_id", "store_kind", "schema_epoch"])
 def test_initialize_session_schema_rejects_identity_table_with_renamed_column(renamed_column: str) -> None:
     """A divergent identity-table shape fail-closes with the actionable error.

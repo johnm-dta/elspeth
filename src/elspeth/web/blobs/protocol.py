@@ -21,6 +21,10 @@ from elspeth.contracts.blobs import BlobFinalizationError as BlobFinalizationErr
 from elspeth.contracts.blobs import BlobFinalizationResult as BlobFinalizationResult
 from elspeth.contracts.blobs import BlobForkCleanupError as BlobForkCleanupError
 from elspeth.contracts.blobs import BlobForkCleanupResult as BlobForkCleanupResult
+from elspeth.contracts.blobs import BlobForkFenceLostError as BlobForkFenceLostError
+from elspeth.contracts.blobs import BlobForkPlanEntry as BlobForkPlanEntry
+from elspeth.contracts.blobs import BlobForkWriteFence as BlobForkWriteFence
+from elspeth.contracts.blobs import BlobInProgressForkError as BlobInProgressForkError
 from elspeth.contracts.blobs import BlobIntegrityError as BlobIntegrityError
 from elspeth.contracts.blobs import BlobNotFoundError as BlobNotFoundError
 from elspeth.contracts.blobs import BlobPendingProposalError as BlobPendingProposalError
@@ -33,3 +37,4 @@ from elspeth.contracts.blobs import BlobStateError as BlobStateError
 from elspeth.contracts.blobs import BlobStatus as BlobStatus
 from elspeth.contracts.blobs import FinalizeBlobStatus as FinalizeBlobStatus
 from elspeth.contracts.blobs import InlineCustodyRequest as InlineCustodyRequest
+from elspeth.contracts.blobs import fork_blob_id as fork_blob_id

@@ -4,7 +4,8 @@ type GuidedRetryKind =
   | "guided_chat"
   | "guided_convert"
   | "guided_reenter"
-  | "state_revert";
+  | "state_revert"
+  | "session_fork";
 
 interface GuidedRetryDescriptor {
   kind: GuidedRetryKind;
@@ -50,7 +51,8 @@ function isDescriptor(value: unknown): value is GuidedRetryDescriptor {
       record.kind === "guided_chat" ||
       record.kind === "guided_convert" ||
       record.kind === "guided_reenter" ||
-      record.kind === "state_revert") &&
+      record.kind === "state_revert" ||
+      record.kind === "session_fork") &&
     typeof record.sessionId === "string" &&
     SESSION_UUID_PATTERN.test(record.sessionId) &&
     typeof record.requestFingerprint === "string" &&

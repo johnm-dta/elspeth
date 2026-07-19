@@ -48,6 +48,7 @@ class _FakeSettings:
 class _FakeSession:
     user_id: str = _TEST_USER_ID
     auth_provider_type: str = "local"
+    archived_at: datetime | None = None
 
 
 @dataclass

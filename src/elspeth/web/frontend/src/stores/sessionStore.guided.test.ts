@@ -23,6 +23,8 @@ vi.mock("@/api/client", () => ({
   sendMessage: vi.fn(),
   recompose: vi.fn(),
   forkFromMessage: vi.fn(),
+  isForkCommittedResponseError: (error: unknown) =>
+    typeof error === "object" && error !== null && "committedSuccessResponse" in error,
   revertToVersion: vi.fn(),
   fetchStateVersions: vi.fn(),
   archiveSession: vi.fn(),
@@ -1804,36 +1806,37 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(state.error).toBeNull();
   });
 
-  // ── Test 11: forkFromMessage clears guided state (default-freeform) ──
-  //
-  // Default-freeform contract (post-Phase-A button-switch change):
-  // - The fork's guided state must start null (synchronous clear).
-  // - The fork must NOT auto-fetch GET /guided.  Forks open into the
-  //   freeform surface like create/select; the user opts into guided
-  //   by clicking "Switch to guided" in the header.
-  //
-  // Earlier revisions of this test required getGuided to be called for
-  // the fork session.  That invariant was deliberately removed when the
-  // operator asked for default-freeform sessions with a button-switch to
-  // guided; see _initial_composition_state_with_guided_session docstring
-  // and sessionStore.selectSession / .createSession / .forkFromMessage
-  // comments for the new contract.
+  it("forkFromMessage: loads the locator child authoritatively, including guided state", async () => {
+    const {
+      forkFromMessage,
+      fetchSessions,
+      fetchMessages,
+      fetchCompositionState,
+      fetchCompositionProposals,
+      fetchComposerPreferences,
+      getGuided,
+    } = await import("@/api/client");
+    const parentId = "00000000-0000-4000-8000-000000000701";
+    const childId = "00000000-0000-4000-8000-000000000702";
+    const child = { id: childId, title: "Fork", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" };
 
-  it("forkFromMessage: clears guided state and does NOT auto-fetch guided for fork (default-freeform)", async () => {
-    const { forkFromMessage, getGuided } = await import("@/api/client");
-
-    const forkResult = {
-      session: { id: "sess-fork", title: "Fork", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" },
-      messages: [],
-      composition_state: null,
-    };
-
-    (forkFromMessage as ReturnType<typeof vi.fn>).mockResolvedValueOnce(forkResult);
+    (forkFromMessage as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ session_id: childId });
+    (fetchSessions as ReturnType<typeof vi.fn>).mockResolvedValueOnce([child]);
+    (fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+    (fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sampleCompositionState);
+    (fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+    (fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      guided_session: sampleGuidedSession,
+      next_turn: sampleNextTurn,
+      terminal: null,
+      composition_state: sampleCompositionState,
+    });
 
     // Pre-seed: parent session has guided state that must NOT bleed into fork.
     useSessionStore.setState({
-      activeSessionId: "sess-parent",
-      sessions: [{ id: "sess-parent", title: "Parent", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }],
+      activeSessionId: parentId,
+      sessions: [{ id: parentId, title: "Parent", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }],
       guidedSession: sampleGuidedSession,
       guidedNextTurn: sampleNextTurn,
       guidedTerminal: null,
@@ -1842,15 +1845,12 @@ describe("sessionStore — guided-mode fields and actions", () => {
     const forkPromise = useSessionStore.getState().forkFromMessage("msg-1", "new content");
     await forkPromise;
 
-    // Guided state must be null immediately after the set() (synchronous clear).
     const state = useSessionStore.getState();
-    expect(state.activeSessionId).toBe("sess-fork");
-    expect(state.guidedSession).toBeNull();
-    expect(state.guidedNextTurn).toBeNull();
+    expect(state.activeSessionId).toBe(childId);
+    expect(state.guidedSession).toEqual(sampleGuidedSession);
+    expect(state.guidedNextTurn).toEqual(sampleNextTurn);
     expect(state.guidedTerminal).toBeNull();
-
-    // GET /guided must NOT be auto-called for the fork (default-freeform).
-    expect(getGuided).not.toHaveBeenCalled();
+    expect(getGuided).toHaveBeenCalledWith(childId);
   });
 
   describe("chatGuided", () => {

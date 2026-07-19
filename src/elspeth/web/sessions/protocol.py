@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, final, get_
 from uuid import UUID
 
 from elspeth.contracts.auth import AuthProviderType
+from elspeth.contracts.blobs import BlobForkPlanEntry
 from elspeth.contracts.blobs_inline import ResolvedBlobContent
 from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
 from elspeth.contracts.composer_interpretation import (
@@ -76,6 +77,7 @@ GuidedOperationFailureCode = Literal[
     "stale_conflict",
     "integrity_error",
     "custody_error",
+    "quota_exceeded",
     "operation_failed",
 ]
 # ``audit`` is an internal-only role for breadcrumb rows that have no real
@@ -294,6 +296,15 @@ class GuidedOperationFenceLostError(RuntimeError):
         self.operation_id = fence.operation_id
         self.attempt = fence.attempt
         super().__init__("Guided operation fence is no longer current")
+
+
+class SessionGuidedOperationInProgressError(RuntimeError):
+    """Archival is forbidden while a session owns a durable operation fence."""
+
+    def __init__(self, *, session_id: UUID, kind: GuidedOperationKind) -> None:
+        self.session_id = session_id
+        self.kind = kind
+        super().__init__(f"Session has an in-progress {kind} operation")
 
 
 # Legal run status transitions. Implementations MUST reject any
@@ -690,6 +701,66 @@ class CompositionStateRecord:
             non_none.append("composer_meta")
         if non_none:
             freeze_fields(self, *non_none)
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class StagedForkSession:
+    """Persisted child cohort returned by initial staging or takeover."""
+
+    session: SessionRecord
+    messages: tuple[ChatMessageRecord, ...]
+    state: CompositionStateRecord | None
+    blob_plan: tuple[BlobForkPlanEntry, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.session) is not SessionRecord or self.session.archived_at is None:
+            raise AuditIntegrityError("StagedForkSession.session must be an archived exact SessionRecord")
+        if type(self.messages) is not tuple or any(type(message) is not ChatMessageRecord for message in self.messages):
+            raise AuditIntegrityError("StagedForkSession.messages must be an exact ChatMessageRecord tuple")
+        if type(self.blob_plan) is not tuple or any(type(entry) is not BlobForkPlanEntry for entry in self.blob_plan):
+            raise AuditIntegrityError("StagedForkSession.blob_plan must be an exact BlobForkPlanEntry tuple")
+        if len({entry.source_blob_id for entry in self.blob_plan}) != len(self.blob_plan):
+            raise AuditIntegrityError("StagedForkSession.blob_plan must not repeat source blob ids")
+        if any(message.session_id != self.session.id for message in self.messages):
+            raise AuditIntegrityError("StagedForkSession messages must belong to the staged child")
+        if self.state is not None and (type(self.state) is not CompositionStateRecord or self.state.session_id != self.session.id):
+            raise AuditIntegrityError("StagedForkSession state must belong to the staged child")
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedForkSettlementCommand:
+    """Atomic staged-child rewrite, activation, and operation completion."""
+
+    fence: GuidedOperationFence
+    child_session_id: UUID
+    expected_current_state_id: UUID | None
+    edited_message_id: UUID
+    rewritten_state_id: UUID | None
+    rewritten_state: CompositionStateData | None
+    response_hash: str
+    actor: str
+
+    def __post_init__(self) -> None:
+        if type(self.fence) is not GuidedOperationFence:
+            raise AuditIntegrityError("GuidedForkSettlementCommand.fence must be exact")
+        for field_name in ("child_session_id", "edited_message_id"):
+            if type(getattr(self, field_name)) is not UUID:
+                raise AuditIntegrityError(f"GuidedForkSettlementCommand.{field_name} must be a UUID")
+        if self.expected_current_state_id is not None and type(self.expected_current_state_id) is not UUID:
+            raise AuditIntegrityError("GuidedForkSettlementCommand.expected_current_state_id must be a UUID or None")
+        if (self.rewritten_state_id is None) != (self.rewritten_state is None):
+            raise AuditIntegrityError("GuidedForkSettlementCommand rewritten state id and payload must be paired")
+        if self.rewritten_state_id is not None and type(self.rewritten_state_id) is not UUID:
+            raise AuditIntegrityError("GuidedForkSettlementCommand.rewritten_state_id must be a UUID or None")
+        if self.rewritten_state is not None and type(self.rewritten_state) is not CompositionStateData:
+            raise AuditIntegrityError("GuidedForkSettlementCommand.rewritten_state must be exact")
+        if self.rewritten_state is not None and self.expected_current_state_id is None:
+            raise AuditIntegrityError("Guided fork cannot rewrite an absent staged state")
+        _require_guided_sha256(self.response_hash, "GuidedForkSettlementCommand.response_hash")
+        if type(self.actor) is not str or not self.actor:
+            raise AuditIntegrityError("GuidedForkSettlementCommand.actor must be non-empty")
 
 
 GuidedJsonPayloadPurpose = Literal["turn", "turn_response"]
@@ -1532,8 +1603,6 @@ class SessionServiceProtocol(Protocol):
         user_id: str,
         title: str,
         auth_provider_type: AuthProviderType,
-        forked_from_session_id: UUID | None = None,
-        forked_from_message_id: UUID | None = None,
     ) -> SessionRecord: ...
 
     async def get_session(self, session_id: UUID) -> SessionRecord: ...
@@ -2177,30 +2246,22 @@ class SessionServiceProtocol(Protocol):
 
     async def fork_session(
         self,
-        source_session_id: UUID,
+        fence: GuidedOperationFence,
+        *,
         fork_message_id: UUID,
         new_message_content: str,
-        user_id: str,
-        auth_provider_type: AuthProviderType,
-    ) -> tuple[SessionRecord, list[ChatMessageRecord], CompositionStateRecord | None]:
-        """Fork a session from a specific user message.
+    ) -> StagedForkSession:
+        """Stage or resume the exact child bound to a fork operation.
 
-        Creates a new session with inherited history and state up to the
-        fork point. The original session is never mutated.
+        The child remains archived until ``settle_guided_fork_operation``.
         """
         ...
 
-    async def update_message_composition_state(
+    async def settle_guided_fork_operation(
         self,
-        message_id: UUID,
-        composition_state_id: UUID,
-    ) -> None:
-        """Re-point a message's composition_state_id to a different state.
-
-        Used after fork blob-remapping creates a replacement state so
-        the user message's provenance tracks the rewritten (self-contained)
-        state rather than the original copy.
-        """
+        command: GuidedForkSettlementCommand,
+    ) -> SessionRecord:
+        """Atomically rewrite, activate, and settle one staged fork child."""
         ...
 
     async def cancel_orphaned_runs(

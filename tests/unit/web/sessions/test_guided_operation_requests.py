@@ -28,6 +28,7 @@ _OPERATION_ID = "00000000-0000-4000-8000-000000000001"
         (ConvertGuidedRequest, {}),
         (ReenterGuidedRequest, {}),
         (RevertStateRequest, {"state_id": str(uuid4())}),
+        (ForkSessionRequest, {"from_message_id": uuid4(), "new_message_content": "Try this"}),
     ],
 )
 def test_mutating_composer_requests_require_operation_id(model_type, payload) -> None:
@@ -37,24 +38,11 @@ def test_mutating_composer_requests_require_operation_id(model_type, payload) ->
 
 @pytest.mark.parametrize(
     "model_type",
-    [StartGuidedRequest, ConvertGuidedRequest, ReenterGuidedRequest, RevertStateRequest],
+    [StartGuidedRequest, ConvertGuidedRequest, ReenterGuidedRequest, RevertStateRequest, ForkSessionRequest],
 )
 def test_mutating_composer_requests_are_strict_and_extra_forbid(model_type) -> None:
     assert model_type.model_config.get("strict") is True
     assert model_type.model_config.get("extra") == "forbid"
-
-
-@pytest.mark.parametrize(
-    ("model_type", "payload"),
-    [
-        (ForkSessionRequest, {"from_message_id": str(uuid4()), "new_message_content": "Try this"}),
-    ],
-)
-def test_pending_handlers_do_not_expose_unenforced_operation_id(model_type, payload) -> None:
-    request = model_type.model_validate(payload)
-
-    assert "operation_id" not in type(request).model_fields
-    assert type(request).model_config.get("strict") is not True
 
 
 def test_guided_chat_requires_strict_operation_and_turn_tokens() -> None:

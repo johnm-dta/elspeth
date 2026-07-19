@@ -6,8 +6,10 @@ single current schema that references canonical durable pipeline proposals.
 **Architecture:** Guided schema 8 persists reviewed facts, deferred intent, and
 a verified `GuidedProposalRef`; exact executable arguments remain in the
 existing private `composition_proposals` row. `PROPOSE_PIPELINE` carries only a
-redacted graph projection and stable edit targets. Session epoch 29 makes the
-pre-release replacement fail at startup instead of lazily inside one route.
+redacted graph projection and stable edit targets. Session epoch 30 is the
+current pre-release boundary: epoch 29 introduced guided schema 8 and durable
+operation fencing, while epoch 30 closes the `quota_exceeded` terminal failure
+code used for stable HTTP 413 fork replay.
 
 **Prerequisite:** Plans 01 and 02 pass. This is an atomic backend/frontend
 cutover: do not leave an active v7 decoder or a reachable chain proposal arm.
@@ -71,7 +73,7 @@ nullable or wildcard base.
   intent, completed/exited state, and process restart.
 - [x] Include multi-source/multi-output reordering and stable-id retention in
   the schema-8 round trip now. Plan 04 adds controller behavior over this final
-  shape; it must not alter persisted schema 8 after the epoch-29 cutover.
+  shape; it must not alter persisted schema 8 after the epoch-30 cutover.
 
 Run:
 
@@ -112,11 +114,13 @@ unsupported until Tasks 2 through 6 replace the schema-7 protocol.
 - Create: `tests/integration/web/composer/guided/test_guided_operations_schema.py`
 - Create: `tests/unit/docs/test_staging_session_recreation_policy.py`
 
-- [ ] First write a test that opens an epoch-28 session database and expects
+- [ ] First write a test that opens an epoch-29 session database whose guided
+  failure-code CHECK lacks `quota_exceeded` and expects
   the existing actionable stale-schema error.
-- [ ] Bump `SESSION_SCHEMA_EPOCH` from 28 to 29 and extend its history comment:
-  schema 29 invalidates guided v7 composer metadata and chain proposal state
-  and adds the guided-operation retry table below.
+- [ ] Preserve epoch 29's history entry for guided schema 8 and the durable
+  operation tables, then bump `SESSION_SCHEMA_EPOCH` from 29 to 30. The epoch-30
+  history entry identifies the closed `quota_exceeded` failure code and stable
+  HTTP 413 fork replay reason.
 - [ ] Add `guided_operations` to the session store with unique
   `(session_id, operation_id)`, a closed operation kind and status, normalized
   request hash, lease token/expiry, originating message id, optional
@@ -150,10 +154,10 @@ unsupported until Tasks 2 through 6 replace the schema-7 protocol.
 - [ ] Do not change `SQLITE_SCHEMA_EPOCH`; this feature does not alter the
   landscape/audit database.
 - [ ] Update exact epoch assertions in current tests and verify a fresh SQLite
-  and PostgreSQL session store reports epoch 29.
+  and PostgreSQL session store reports epoch 30.
 - [ ] Update the staging recreation runbook for both supported session-store
   shapes: drain/stop, resolve and confirm the exact session store, retain only
-  sanitized diagnostics when useful, recreate, restart, verify epoch 29 and an
+  sanitized diagnostics when useful, recreate, restart, verify epoch 30 and an
   empty session list, then start a fresh guided session.
 - [ ] Keep the existing pre-release policy: no in-place migration, old-source
   switch, compatibility reader, or supported database restore. If startup
@@ -162,7 +166,7 @@ unsupported until Tasks 2 through 6 replace the schema-7 protocol.
 - [ ] Add a docs test that rejects active restore/downgrade instructions and
   checks the epoch and guided-schema reason are current.
 - [ ] Update the active AWS ECS, Ansible Ubuntu, and pipeline-sharing documents
-  from session epoch 28 to 29 in the same change. Their schema probes and
+  from session epoch 28 to 30 in the same change. Their schema probes and
   troubleshooting instructions must agree with the current constant and the
   authoritative recreation runbook.
 
@@ -177,8 +181,8 @@ uv run pytest \
 uv run pytest tests/testcontainer/web/test_schema_probe_postgres.py -q
 ```
 
-Expected: PASS; epoch 28 fails before serving requests and a fresh store starts
-at epoch 29.
+Expected: PASS; epoch 29 fails before serving requests and a fresh store starts
+at epoch 30.
 
 ## Task 3: Replace the proposal protocol
 
@@ -448,7 +452,7 @@ git diff --check
 
 Expected: all commands exit 0.
 
-**Definition of done:** Only guided schema 8/session epoch 29 is current; the
+**Definition of done:** Only guided schema 8/session epoch 30 is current; the
 backend and frontend speak one `PROPOSE_PIPELINE` protocol backed by the
 existing proposal store; fork/revert cannot create cross-session proposal
 references; and the transform-only authoring path is unreachable.

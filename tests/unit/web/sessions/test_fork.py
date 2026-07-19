@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import threading
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -10,19 +14,28 @@ from unittest.mock import patch
 import pytest
 import structlog
 from fastapi import FastAPI
+from sqlalchemy import func, select, text, update
 from sqlalchemy.pool import StaticPool
 
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
+from elspeth.web.blobs.protocol import fork_blob_id
+from elspeth.web.blobs.routes import create_blobs_router
 from elspeth.web.blobs.service import BlobServiceImpl
 from elspeth.web.config import WebSettings
 from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.models import blobs_table, chat_messages_table, guided_operations_table, sessions_table
 from elspeth.web.sessions.protocol import (
     CompositionStateData,
+    GuidedForkSettlementCommand,
+    GuidedOperationClaimed,
+    GuidedOperationTakenOver,
     InvalidForkTargetError,
 )
 from elspeth.web.sessions.routes import create_session_router
+from elspeth.web.sessions.routes.guided_operations import guided_response_hash
 from elspeth.web.sessions.schema import initialize_session_schema
+from elspeth.web.sessions.schemas import ForkSessionResponse
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
@@ -158,6 +171,48 @@ def service(engine):
     )
 
 
+async def _fork_session(
+    service: SessionServiceImpl,
+    *,
+    source_session_id: uuid.UUID,
+    fork_message_id: uuid.UUID,
+    new_message_content: str,
+    user_id: str,
+    auth_provider_type: str,
+):
+    """Exercise the hard-cut staged service through atomic settlement."""
+    parent = await service.get_session(source_session_id)
+    assert parent.user_id == user_id
+    assert parent.auth_provider_type == auth_provider_type
+    reserved = await service.reserve_guided_operation(
+        session_id=source_session_id,
+        operation_id=str(uuid.uuid4()),
+        kind="session_fork",
+        request_hash="a" * 64,
+        actor="composer_route",
+        lease_seconds=300,
+    )
+    assert type(reserved) in {GuidedOperationClaimed, GuidedOperationTakenOver}
+    staged = await service.fork_session(
+        reserved.fence,
+        fork_message_id=fork_message_id,
+        new_message_content=new_message_content,
+    )
+    active = await service.settle_guided_fork_operation(
+        GuidedForkSettlementCommand(
+            fence=reserved.fence,
+            child_session_id=staged.session.id,
+            expected_current_state_id=staged.state.id if staged.state is not None else None,
+            edited_message_id=staged.messages[-1].id,
+            rewritten_state_id=None,
+            rewritten_state=None,
+            response_hash="b" * 64,
+            actor="composer_route",
+        )
+    )
+    return active, list(staged.messages), staged.state
+
+
 class TestForkSession:
     """Tests for SessionServiceImpl.fork_session."""
 
@@ -169,7 +224,8 @@ class TestForkSession:
         await service.add_message(session.id, "assistant", "Hi there", writer_principal="compose_loop")
         msg2 = await service.add_message(session.id, "user", "Do something", writer_principal="route_user_message")
 
-        new_session, _messages, _state = await service.fork_session(
+        new_session, _messages, _state = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=msg2.id,
             new_message_content="Do something else",
@@ -191,7 +247,8 @@ class TestForkSession:
         fork_msg = await service.add_message(session.id, "user", "Second", writer_principal="route_user_message")
         await service.add_message(session.id, "assistant", "Response 2", writer_principal="compose_loop")
 
-        _, messages, _ = await service.fork_session(
+        _, messages, _ = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=fork_msg.id,
             new_message_content="Second (edited)",
@@ -253,7 +310,8 @@ class TestForkSession:
         )
 
         # Fork from the user message — should get state v1, not v2
-        _, _, copied_state = await service.fork_session(
+        _, _, copied_state = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=fork_msg.id,
             new_message_content="Build a different pipeline",
@@ -291,7 +349,8 @@ class TestForkSession:
             writer_principal="route_user_message",
         )
 
-        _, _, copied_state = await service.fork_session(
+        _, _, copied_state = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=fork_msg.id,
             new_message_content="Build that",
@@ -347,7 +406,8 @@ class TestForkSession:
             raw.close()
 
         with pytest.raises(AuditIntegrityError, match="Tier 1 audit anomaly"):
-            await service.fork_session(
+            await _fork_session(
+                service,
                 source_session_id=session_b.id,
                 fork_message_id=fork_msg.id,
                 new_message_content="Fork me differently",
@@ -367,7 +427,8 @@ class TestForkSession:
 
         original_messages_before = await service.get_messages(session.id)
 
-        await service.fork_session(
+        await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=msg2.id,
             new_message_content="Universe",
@@ -387,7 +448,8 @@ class TestForkSession:
         await service.add_message(session.id, "user", "Hello", writer_principal="route_user_message")
 
         with pytest.raises(ValueError, match="not found"):
-            await service.fork_session(
+            await _fork_session(
+                service,
                 source_session_id=session.id,
                 fork_message_id=uuid.uuid4(),
                 new_message_content="Hi",
@@ -403,7 +465,8 @@ class TestForkSession:
         assistant_msg = await service.add_message(session.id, "assistant", "Hi", writer_principal="compose_loop")
 
         with pytest.raises(InvalidForkTargetError):
-            await service.fork_session(
+            await _fork_session(
+                service,
                 source_session_id=session.id,
                 fork_message_id=assistant_msg.id,
                 new_message_content="Hi",
@@ -418,7 +481,8 @@ class TestForkSession:
         first_msg = await service.add_message(session.id, "user", "First", writer_principal="route_user_message")
         await service.add_message(session.id, "assistant", "Response", writer_principal="compose_loop")
 
-        _, messages, _ = await service.fork_session(
+        _, messages, _ = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=first_msg.id,
             new_message_content="First (edited)",
@@ -437,7 +501,8 @@ class TestForkSession:
         session = await service.create_session("alice", "Test", "local")
         msg = await service.add_message(session.id, "user", "Hello", writer_principal="route_user_message")
 
-        new_session, _messages, state = await service.fork_session(
+        new_session, _messages, state = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=msg.id,
             new_message_content="Hello edited",
@@ -455,7 +520,8 @@ class TestForkSession:
         original_msg = await service.add_message(session.id, "user", "Hello", writer_principal="route_user_message")
         fork_msg = await service.add_message(session.id, "user", "World", writer_principal="route_user_message")
 
-        _, messages, _ = await service.fork_session(
+        _, messages, _ = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=fork_msg.id,
             new_message_content="Universe",
@@ -480,7 +546,8 @@ class TestForkSession:
         )
         fork_msg = await service.add_message(session.id, "user", "Try again", writer_principal="route_user_message")
 
-        _, messages, _ = await service.fork_session(
+        _, messages, _ = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=fork_msg.id,
             new_message_content="Try a different way",
@@ -508,7 +575,8 @@ class TestForkSession:
         await service.add_message(session.id, "assistant", "OK", writer_principal="compose_loop")
         fork_msg = await service.add_message(session.id, "user", "Try again", writer_principal="route_user_message")
 
-        new_session, _new_messages, _ = await service.fork_session(
+        new_session, _new_messages, _ = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=fork_msg.id,
             new_message_content="Different approach",
@@ -534,6 +602,7 @@ class TestForkSession:
             ("assistant", "compose_loop"),
             ("system", "session_fork"),
             ("user", "session_fork"),
+            ("audit", "session_fork"),
         ]
 
     @pytest.mark.asyncio
@@ -551,7 +620,8 @@ class TestForkSession:
         await service.add_message(session.id, "assistant", "4", writer_principal="compose_loop")
         fork_msg = await service.add_message(session.id, "user", "5", writer_principal="route_user_message")
 
-        new_session, _, _ = await service.fork_session(
+        new_session, _, _ = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=fork_msg.id,
             new_message_content="edit",
@@ -570,8 +640,8 @@ class TestForkSession:
                 .all()
             )
 
-        # 4 copied + system fork notice + new user message = 6 rows.
-        assert seqs == [1, 2, 3, 4, 5, 6]
+        # 4 copied + system notice + edited user + frozen plan audit row.
+        assert seqs == [1, 2, 3, 4, 5, 6, 7]
 
     @pytest.mark.asyncio
     async def test_fork_session_preserves_tool_call_id_and_parent(self, service) -> None:
@@ -594,7 +664,8 @@ class TestForkSession:
         )
         fork_msg = await service.add_message(session.id, "user", "again", writer_principal="route_user_message")
 
-        new_session, _, _ = await service.fork_session(
+        new_session, _, _ = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=fork_msg.id,
             new_message_content="retry",
@@ -667,7 +738,8 @@ class TestForkSession:
         service.get_messages = patched_get_messages  # type: ignore[method-assign]
         try:
             with pytest.raises(RuntimeError, match="fork slice excludes parent assistant"):
-                await service.fork_session(
+                await _fork_session(
+                    service,
                     source_session_id=session.id,
                     fork_message_id=fork_msg.id,
                     new_message_content="retry",
@@ -690,7 +762,8 @@ class TestForkSession:
         await service.add_message(session.id, "user", "admin annotation", writer_principal="admin_tool")
         fork_msg = await service.add_message(session.id, "user", "fork here", writer_principal="route_user_message")
 
-        new_session, _, _ = await service.fork_session(
+        new_session, _, _ = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=fork_msg.id,
             new_message_content="ok",
@@ -728,7 +801,8 @@ class TestForkSession:
         )
         fork_msg = await service.add_message(session.id, "user", "again", writer_principal="route_user_message")
 
-        new_session, new_messages, _ = await service.fork_session(
+        new_session, new_messages, _ = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=fork_msg.id,
             new_message_content="retry",
@@ -750,7 +824,8 @@ class TestForkSession:
                 .scalars()
                 .all()
             )
-        assert len(audit_rows) == 1
+        # Historical audit evidence plus this operation's strict blob plan.
+        assert len(audit_rows) == 2
 
     @pytest.mark.asyncio
     async def test_fork_remaps_all_guided_message_references_and_preserves_reviewed_facts(self, service) -> None:
@@ -793,7 +868,8 @@ class TestForkSession:
             writer_principal="route_user_message",
         )
 
-        _child, child_messages, copied_state = await service.fork_session(
+        _child, child_messages, copied_state = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=fork_msg.id,
             new_message_content="changed root request",
@@ -866,7 +942,8 @@ class TestForkSession:
             writer_principal="route_user_message",
         )
 
-        _, _, copied_state = await service.fork_session(
+        _, _, copied_state = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=fork_msg.id,
             new_message_content="retry",
@@ -926,7 +1003,8 @@ class TestForkSession:
             writer_principal="route_user_message",
         )
 
-        _, _, copied_state = await service.fork_session(
+        _, _, copied_state = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=fork_msg.id,
             new_message_content="retry",
@@ -969,7 +1047,8 @@ class TestForkSession:
             writer_principal="route_user_message",
         )
 
-        _, _, copied_state = await service.fork_session(
+        _, _, copied_state = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=fork_msg.id,
             new_message_content="retry",
@@ -1021,7 +1100,8 @@ class TestForkSession:
         )
 
         with pytest.raises(AuditIntegrityError, match="unanswered history"):
-            await service.fork_session(
+            await _fork_session(
+                service,
                 source_session_id=session.id,
                 fork_message_id=fork_msg.id,
                 new_message_content="retry",
@@ -1052,10 +1132,14 @@ class TestForkSession:
             CompositionStateData(is_valid=True, composer_meta={"guided_session": guided.to_dict()}),
             provenance="session_seed",
         )
-        await service.update_message_composition_state(fork_msg.id, state.id)
+        with service._engine.begin() as conn:
+            conn.execute(
+                update(chat_messages_table).where(chat_messages_table.c.id == str(fork_msg.id)).values(composition_state_id=str(state.id))
+            )
 
         with pytest.raises(AuditIntegrityError, match="outside copied slice"):
-            await service.fork_session(
+            await _fork_session(
+                service,
                 source_session_id=session.id,
                 fork_message_id=fork_msg.id,
                 new_message_content="retry",
@@ -1099,7 +1183,8 @@ class TestForkSession:
         )
 
         with pytest.raises(AuditIntegrityError, match="must identify user messages"):
-            await service.fork_session(
+            await _fork_session(
+                service,
                 source_session_id=session.id,
                 fork_message_id=fork_msg.id,
                 new_message_content="retry",
@@ -1146,7 +1231,8 @@ class TestForkSession:
         )
 
         with pytest.raises(AuditIntegrityError, match="content hash mismatch"):
-            await service.fork_session(
+            await _fork_session(
+                service,
                 source_session_id=session.id,
                 fork_message_id=fork_msg.id,
                 new_message_content="retry",
@@ -1174,7 +1260,8 @@ class TestForkSession:
 
         await service.create_run(session.id, state.id)
 
-        child_session, _, _ = await service.fork_session(
+        child_session, _, _ = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=msg.id,
             new_message_content="Universe",
@@ -1191,15 +1278,14 @@ class TestForkSession:
         assert child.forked_from_session_id == session.id
 
     @pytest.mark.asyncio
-    async def test_fork_and_delete_parent_session_no_durable_history(self, service) -> None:
-        """Archiving a fork parent without durable history physically deletes the parent."""
-        from elspeth.web.sessions.protocol import SessionNotFoundError
-
+    async def test_completed_outgoing_fork_retains_archived_parent_history(self, service) -> None:
+        """A completed outgoing fork is durable parent history."""
         session = await service.create_session("alice", "Original", "local")
         await service.add_message(session.id, "user", "Hello", writer_principal="route_user_message")
         msg = await service.add_message(session.id, "user", "World", writer_principal="route_user_message")
 
-        child_session, _, _ = await service.fork_session(
+        child_session, _, _ = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=msg.id,
             new_message_content="Universe",
@@ -1209,8 +1295,8 @@ class TestForkSession:
 
         await service.archive_session(session.id)
 
-        with pytest.raises(SessionNotFoundError):
-            await service.get_session(session.id)
+        archived_parent = await service.get_session(session.id)
+        assert archived_parent.archived_at is not None
 
         child = await service.get_session(child_session.id)
         assert child.forked_from_session_id == session.id
@@ -1267,7 +1353,8 @@ class TestForkSession:
             writer_principal="route_user_message",
         )
 
-        _, _, copied_state = await service.fork_session(
+        _, _, copied_state = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=fork_msg.id,
             new_message_content="Build something else",
@@ -1304,7 +1391,8 @@ class TestForkSession:
         fork_msg = await service.add_message(
             session.id, "user", "Build", composition_state_id=state.id, writer_principal="route_user_message"
         )
-        _, _, copied_state = await service.fork_session(
+        _, _, copied_state = await _fork_session(
+            service,
             source_session_id=session.id,
             fork_message_id=fork_msg.id,
             new_message_content="Build other",
@@ -1364,6 +1452,7 @@ def _make_fork_app(
 
     router = create_session_router()
     app.include_router(router)
+    app.include_router(create_blobs_router())
 
     return app, session_service, blob_service
 
@@ -1383,6 +1472,460 @@ class TestForkEndpoint:
     """Route-level tests for POST /api/sessions/{id}/fork."""
 
     @pytest.mark.asyncio
+    async def test_partial_copy_stale_worker_takeover_completes_without_stale_cleanup(self, tmp_path) -> None:
+        """A worker fenced after one copy joins the takeover winner without compensating it."""
+
+        app, service, blob_service = _make_fork_app(tmp_path)
+        parent = await service.create_session("alice", "Parent", "local")
+        source_blobs = [
+            await blob_service.create_blob(parent.id, f"source-{index}.csv", f"v\n{index}\n".encode(), "text/csv") for index in range(2)
+        ]
+        message = await service.add_message(
+            parent.id,
+            "user",
+            "fork",
+            writer_principal="route_user_message",
+        )
+        operation_id = str(uuid.uuid4())
+        body = {
+            "operation_id": operation_id,
+            "from_message_id": str(message.id),
+            "new_message_content": "edited",
+        }
+        client = TestClient(app, raise_server_exceptions=False)
+        original_copy = blob_service.copy_blobs_for_fork
+        original_cleanup = blob_service.cleanup_blobs_for_fork
+        partial_copied = threading.Barrier(2)
+        resume_stale = threading.Barrier(2)
+        call_guard = threading.Lock()
+        copy_calls = 0
+        cleanup_calls = 0
+
+        async def controlled_copy(*args: Any, **kwargs: Any):
+            nonlocal copy_calls
+            with call_guard:
+                copy_calls += 1
+                invocation = copy_calls
+            checkpoint = kwargs["checkpoint"]
+            checkpoint_count = 0
+
+            async def controlled_checkpoint() -> None:
+                nonlocal checkpoint_count
+                await checkpoint()
+                checkpoint_count += 1
+                if invocation == 1 and checkpoint_count == 3:
+                    await asyncio.to_thread(partial_copied.wait, 5)
+                    await asyncio.to_thread(resume_stale.wait, 5)
+
+            return await original_copy(*args, **{**kwargs, "checkpoint": controlled_checkpoint})
+
+        async def observed_cleanup(*args: Any, **kwargs: Any):
+            nonlocal cleanup_calls
+            cleanup_calls += 1
+            return await original_cleanup(*args, **kwargs)
+
+        with (
+            patch.object(blob_service, "copy_blobs_for_fork", new=controlled_copy),
+            patch.object(blob_service, "cleanup_blobs_for_fork", new=observed_cleanup),
+        ):
+            stale_task = asyncio.create_task(
+                asyncio.to_thread(
+                    client.post,
+                    f"/api/sessions/{parent.id}/fork",
+                    json=body,
+                )
+            )
+            await asyncio.to_thread(partial_copied.wait, 5)
+            with service._engine.connect() as conn:
+                operation = conn.execute(
+                    select(guided_operations_table).where(
+                        guided_operations_table.c.session_id == str(parent.id),
+                        guided_operations_table.c.operation_id == operation_id,
+                    )
+                ).one()
+                child_id = uuid.UUID(operation.result_session_id)
+                assert (
+                    conn.execute(
+                        select(func.count()).select_from(blobs_table).where(blobs_table.c.session_id == str(child_id))
+                    ).scalar_one()
+                    == 1
+                )
+            with service._engine.begin() as conn:
+                conn.execute(
+                    update(guided_operations_table)
+                    .where(
+                        guided_operations_table.c.session_id == str(parent.id),
+                        guided_operations_table.c.operation_id == operation_id,
+                    )
+                    .values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+                )
+
+            winner_response = await asyncio.to_thread(
+                client.post,
+                f"/api/sessions/{parent.id}/fork",
+                json=body,
+            )
+            await asyncio.to_thread(resume_stale.wait, 5)
+            stale_response = await stale_task
+
+        assert winner_response.status_code == stale_response.status_code == 201
+        assert winner_response.content == stale_response.content
+        assert winner_response.json() == {"session_id": str(child_id)}
+        assert copy_calls == 2
+        assert cleanup_calls == 0
+        child = await service.get_session(child_id)
+        assert child.archived_at is None
+        child_blob_ids = {item.id for item in await blob_service.list_blobs(child_id, limit=None)}
+        assert child_blob_ids == {fork_blob_id(target_session_id=child_id, source_blob_id=source_blob.id) for source_blob in source_blobs}
+        with service._engine.connect() as conn:
+            assert (
+                conn.execute(
+                    select(func.count()).select_from(sessions_table).where(sessions_table.c.forked_from_session_id == str(parent.id))
+                ).scalar_one()
+                == 1
+            )
+            operation = conn.execute(
+                select(guided_operations_table).where(
+                    guided_operations_table.c.session_id == str(parent.id),
+                    guided_operations_table.c.operation_id == operation_id,
+                )
+            ).one()
+            assert operation.status == "completed"
+            assert operation.attempt == 2
+            assert operation.result_session_id == str(child_id)
+
+    @pytest.mark.asyncio
+    async def test_successful_fork_lost_response_replays_exact_locator_and_rejects_hash_tamper(self, tmp_path) -> None:
+        """A committed response is byte-stable, copy-once, and hash-verified on replay."""
+
+        app, service, blob_service = _make_fork_app(tmp_path)
+        parent = await service.create_session("alice", "Parent", "local")
+        await blob_service.create_blob(parent.id, "source.csv", b"a,b\n1,2\n", "text/csv")
+        message = await service.add_message(
+            parent.id,
+            "user",
+            "fork",
+            writer_principal="route_user_message",
+        )
+        operation_id = str(uuid.uuid4())
+        body = {
+            "operation_id": operation_id,
+            "from_message_id": str(message.id),
+            "new_message_content": "edited",
+        }
+        original_copy = blob_service.copy_blobs_for_fork
+        copy_calls = 0
+
+        async def observed_copy(*args: Any, **kwargs: Any):
+            nonlocal copy_calls
+            copy_calls += 1
+            return await original_copy(*args, **kwargs)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        with patch.object(blob_service, "copy_blobs_for_fork", new=observed_copy):
+            first = client.post(f"/api/sessions/{parent.id}/fork", json=body)
+            replay = client.post(f"/api/sessions/{parent.id}/fork", json=body)
+
+        assert first.status_code == replay.status_code == 201
+        assert first.content == replay.content
+        child_id = uuid.UUID(first.json()["session_id"])
+        assert copy_calls == 1
+        expected_hash = guided_response_hash(ForkSessionResponse(session_id=child_id))
+        with service._engine.connect() as conn:
+            assert (
+                conn.execute(
+                    select(func.count()).select_from(sessions_table).where(sessions_table.c.forked_from_session_id == str(parent.id))
+                ).scalar_one()
+                == 1
+            )
+            operation = conn.execute(
+                select(guided_operations_table).where(
+                    guided_operations_table.c.session_id == str(parent.id),
+                    guided_operations_table.c.operation_id == operation_id,
+                )
+            ).one()
+            assert operation.response_hash == expected_hash
+
+        with service._engine.begin() as conn:
+            conn.execute(text("DROP TRIGGER trg_guided_operations_terminal_immutable"))
+            conn.execute(
+                update(guided_operations_table)
+                .where(
+                    guided_operations_table.c.session_id == str(parent.id),
+                    guided_operations_table.c.operation_id == operation_id,
+                )
+                .values(response_hash="f" * 64)
+            )
+        tampered = client.post(f"/api/sessions/{parent.id}/fork", json=body)
+        assert tampered.status_code == 500
+
+    @pytest.mark.asyncio
+    async def test_partial_copy_failure_cleans_exact_cohort_once_and_replays_terminal_failure(self, tmp_path) -> None:
+        """The fail-CAS winner cleans copied blobs once while retaining strict evidence."""
+
+        app, service, blob_service = _make_fork_app(tmp_path)
+        parent = await service.create_session("alice", "Parent", "local")
+        source_blobs = [
+            await blob_service.create_blob(parent.id, f"source-{index}.csv", f"v\n{index}\n".encode(), "text/csv") for index in range(2)
+        ]
+        message = await service.add_message(
+            parent.id,
+            "user",
+            "fork",
+            writer_principal="route_user_message",
+        )
+        operation_id = str(uuid.uuid4())
+        body = {
+            "operation_id": operation_id,
+            "from_message_id": str(message.id),
+            "new_message_content": "edited",
+        }
+        original_copy = blob_service.copy_blobs_for_fork
+        original_cleanup = blob_service.cleanup_blobs_for_fork
+        copy_calls = 0
+        cleanup_calls = 0
+        cleanup_results: list[Any] = []
+
+        async def fail_after_first_copy(*args: Any, **kwargs: Any):
+            nonlocal copy_calls
+            copy_calls += 1
+            checkpoint = kwargs["checkpoint"]
+            checkpoint_count = 0
+
+            async def failing_checkpoint() -> None:
+                nonlocal checkpoint_count
+                await checkpoint()
+                checkpoint_count += 1
+                if checkpoint_count == 3:
+                    raise RuntimeError("injected fault after first durable blob copy")
+
+            return await original_copy(*args, **{**kwargs, "checkpoint": failing_checkpoint})
+
+        async def observed_cleanup(*args: Any, **kwargs: Any):
+            nonlocal cleanup_calls
+            cleanup_calls += 1
+            result = await original_cleanup(*args, **kwargs)
+            cleanup_results.append(result)
+            return result
+
+        client = TestClient(app, raise_server_exceptions=False)
+        with (
+            patch.object(blob_service, "copy_blobs_for_fork", new=fail_after_first_copy),
+            patch.object(blob_service, "cleanup_blobs_for_fork", new=observed_cleanup),
+        ):
+            first = client.post(f"/api/sessions/{parent.id}/fork", json=body)
+            replay = client.post(f"/api/sessions/{parent.id}/fork", json=body)
+
+        assert first.status_code == replay.status_code == 500
+        assert first.content == replay.content
+        assert first.json()["detail"]["failure_code"] == "operation_failed"
+        assert copy_calls == cleanup_calls == 1
+        assert len(cleanup_results) == 1
+        with service._engine.connect() as conn:
+            operation = conn.execute(
+                select(guided_operations_table).where(
+                    guided_operations_table.c.session_id == str(parent.id),
+                    guided_operations_table.c.operation_id == operation_id,
+                )
+            ).one()
+            assert operation.status == "failed"
+            assert operation.failure_code == "operation_failed"
+            assert operation.result_session_id is None
+            child_id = uuid.UUID(
+                conn.execute(select(sessions_table.c.id).where(sessions_table.c.forked_from_session_id == str(parent.id))).scalar_one()
+            )
+            child = conn.execute(select(sessions_table).where(sessions_table.c.id == str(child_id))).one()
+            assert child.archived_at is not None
+            assert (
+                conn.execute(select(func.count()).select_from(blobs_table).where(blobs_table.c.session_id == str(child_id))).scalar_one()
+                == 0
+            )
+            plan_rows = conn.execute(
+                select(chat_messages_table.c.content).where(
+                    chat_messages_table.c.session_id == str(child_id),
+                    chat_messages_table.c.role == "audit",
+                    chat_messages_table.c.writer_principal == "session_fork",
+                )
+            ).all()
+        assert len(plan_rows) == 1
+        plan = json.loads(plan_rows[0].content)
+        assert plan["schema"] == "session-fork-blob-plan.v1"
+        assert plan["source_session_id"] == str(parent.id)
+        assert plan["child_session_id"] == str(child_id)
+        assert plan["operation_id"] == operation_id
+        assert {entry["source_blob_id"] for entry in plan["source_blobs"]} == {str(blob.id) for blob in source_blobs}
+        assert set(cleanup_results[0].deleted_ids) == {
+            fork_blob_id(target_session_id=child_id, source_blob_id=uuid.UUID(plan["source_blobs"][0]["source_blob_id"]))
+        }
+        assert cleanup_results[0].errors == ()
+
+    @pytest.mark.asyncio
+    async def test_staged_archived_child_is_404_through_session_and_blob_public_gates(self, tmp_path) -> None:
+        from fastapi import HTTPException
+
+        from elspeth.web.sessions.ownership import verify_session_ownership
+
+        app, service, blob_service = _make_fork_app(tmp_path)
+        parent = await service.create_session("alice", "Parent", "local")
+        fork_message = await service.add_message(
+            parent.id,
+            "user",
+            "fork",
+            writer_principal="route_user_message",
+        )
+        claimed = await service.reserve_guided_operation(
+            session_id=parent.id,
+            operation_id=str(uuid.uuid4()),
+            kind="session_fork",
+            request_hash="a" * 64,
+            actor="test",
+            lease_seconds=300,
+        )
+        assert isinstance(claimed, GuidedOperationClaimed)
+        staged = await service.fork_session(
+            claimed.fence,
+            fork_message_id=fork_message.id,
+            new_message_content="edited",
+        )
+        staged_blob = await blob_service.create_blob(
+            staged.session.id,
+            "staged.csv",
+            b"private staged bytes",
+            "text/csv",
+        )
+        client = TestClient(app)
+
+        listed = client.get("/api/sessions?include_archived=true")
+        assert listed.status_code == 200
+        assert str(staged.session.id) not in {item["id"] for item in listed.json()}
+        assert client.get(f"/api/sessions/{staged.session.id}").status_code == 404
+        assert client.get(f"/api/sessions/{staged.session.id}/messages").status_code == 404
+        assert client.get(f"/api/sessions/{staged.session.id}/blobs").status_code == 404
+        assert client.get(f"/api/sessions/{staged.session.id}/blobs/{staged_blob.id}").status_code == 404
+        assert client.delete(f"/api/sessions/{staged.session.id}/blobs/{staged_blob.id}").status_code == 404
+        with pytest.raises(HTTPException) as shared_gate:
+            await verify_session_ownership(
+                staged.session.id,
+                UserIdentity(user_id="alice", username="alice"),
+                type("RequestStub", (), {"app": app})(),
+            )
+        assert shared_gate.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_pending_inspection_review_fork_rewrites_custody_and_commits_from_child_blob(self, tmp_path) -> None:
+        from elspeth.contracts.freeze import deep_thaw
+        from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
+        from elspeth.web.composer.guided.stage_transitions import (
+            AnsweredTurn,
+            InspectionResponse,
+            transition_source_inspection_review,
+        )
+        from elspeth.web.composer.guided.state_machine import GuidedSession, SourceIntent, TurnRecord
+        from elspeth.web.composer.source_inspection import SourceInspectionFacts
+
+        app, service, blob_service = _make_fork_app(tmp_path)
+        parent = await service.create_session("alice", "Parent", "local")
+        root = await service.add_message(parent.id, "user", "root", writer_principal="route_user_message")
+        parent_blob = await blob_service.create_blob(parent.id, "orders.csv", b"id,name\n1,Ada\n", "text/csv")
+        stable_id = str(uuid.uuid4())
+        guided = GuidedSession(
+            step=GuidedStep.STEP_1_SOURCE,
+            history=(
+                TurnRecord(
+                    step=GuidedStep.STEP_1_SOURCE,
+                    turn_type=TurnType.INSPECT_AND_CONFIRM,
+                    payload_hash="a" * 64,
+                    response_hash=None,
+                    emitter="server",
+                ),
+            ),
+            source_order=(stable_id,),
+            pending_source_intents={
+                stable_id: SourceIntent(
+                    name="orders",
+                    phase="inspection_review",
+                    plugin="csv",
+                    options={
+                        "path": f"blob:{parent_blob.id}",
+                        "blob_ref": str(parent_blob.id),
+                        "on_validation_failure": "discard",
+                    },
+                    inspection_facts=SourceInspectionFacts(
+                        source_kind="csv",
+                        redacted_identity={
+                            "filename": "orders.csv",
+                            "mime_type": "text/csv",
+                            "blob_id": str(parent_blob.id),
+                        },
+                        byte_range_inspected=(0, parent_blob.size_bytes),
+                        sample_row_count=1,
+                        observed_headers=("id", "name"),
+                        inferred_types={"id": "int", "name": "str"},
+                        url_candidates=(),
+                        warnings=(),
+                    ),
+                    observed_columns=("id", "name"),
+                    sample_rows=({"id": 1, "name": "Ada"},),
+                )
+            },
+            root_intent_message_id=str(root.id),
+        )
+        state = await service.save_composition_state(
+            parent.id,
+            CompositionStateData(is_valid=True, composer_meta={"guided_session": guided.to_dict()}),
+            provenance="session_seed",
+        )
+        fork_message = await service.add_message(
+            parent.id,
+            "user",
+            "fork",
+            composition_state_id=state.id,
+            writer_principal="route_user_message",
+        )
+        response = TestClient(app).post(
+            f"/api/sessions/{parent.id}/fork",
+            json={
+                "operation_id": str(uuid.uuid4()),
+                "from_message_id": str(fork_message.id),
+                "new_message_content": "edited",
+            },
+        )
+        assert response.status_code == 201
+        child_id = uuid.UUID(response.json()["session_id"])
+        child_state = await service.get_current_state(child_id)
+        assert child_state is not None
+        child_guided = GuidedSession.from_dict(deep_thaw(child_state.composer_meta["guided_session"]))
+        child_intent = child_guided.pending_source_intents[stable_id]
+        child_blob_id = child_intent.inspection_facts.redacted_identity["blob_id"]
+        assert child_blob_id != str(parent_blob.id)
+        assert child_intent.options["blob_ref"] == child_blob_id
+        assert child_intent.options["path"] == f"blob:{child_blob_id}"
+        assert child_intent.sample_rows == ({"id": 1, "name": "Ada"},)
+        child_blob = await blob_service.get_blob(uuid.UUID(child_blob_id))
+        assert child_blob.session_id == child_id
+        assert await blob_service.read_blob_content(child_blob.id) == b"id,name\n1,Ada\n"
+
+        committed = transition_source_inspection_review(
+            child_guided,
+            target_id=stable_id,
+            turn=AnsweredTurn(history_index=0),
+            response=InspectionResponse(columns=("id", "name")),
+        )
+        assert stable_id not in committed.pending_source_intents
+        assert committed.reviewed_sources[stable_id].options["blob_ref"] == child_blob_id
+        assert str(parent_blob.id) not in str(committed.to_dict())
+        committed_state = await service.save_composition_state(
+            child_id,
+            CompositionStateData(is_valid=True, composer_meta={"guided_session": committed.to_dict()}),
+            provenance="post_compose",
+        )
+        reloaded = await service.get_state_in_session(committed_state.id, child_id)
+        reloaded_guided = GuidedSession.from_dict(deep_thaw(reloaded.composer_meta["guided_session"]))
+        assert stable_id not in reloaded_guided.pending_source_intents
+        assert reloaded_guided.reviewed_sources[stable_id].options["blob_ref"] == child_blob_id
+        assert str(parent_blob.id) not in str(reloaded_guided.to_dict())
+
+    @pytest.mark.asyncio
     async def test_fork_endpoint_creates_session(self, tmp_path) -> None:
         app, service, _ = _make_fork_app(tmp_path)
         client = TestClient(app)
@@ -1393,6 +1936,7 @@ class TestForkEndpoint:
         response = client.post(
             f"/api/sessions/{session.id}/fork",
             json={
+                "operation_id": str(uuid.uuid4()),
                 "from_message_id": str(msg.id),
                 "new_message_content": "Hello universe",
             },
@@ -1400,14 +1944,17 @@ class TestForkEndpoint:
 
         assert response.status_code == 201
         body = response.json()
-        assert body["session"]["forked_from_session_id"] == str(session.id)
-        assert body["session"]["forked_from_message_id"] == str(msg.id)
-        assert "(fork)" in body["session"]["title"]
+        assert set(body) == {"session_id"}
+        child_id = uuid.UUID(body["session_id"])
+        child = await service.get_session(child_id)
+        assert child.forked_from_session_id == session.id
+        assert child.forked_from_message_id == msg.id
+        assert "(fork)" in child.title
 
         # New session should have system + edited user messages
-        msgs = body["messages"]
-        assert any(m["role"] == "system" for m in msgs)
-        assert any(m["content"] == "Hello universe" for m in msgs)
+        msgs = await service.get_messages(child_id, limit=None)
+        assert any(message.role == "system" for message in msgs)
+        assert any(message.content == "Hello universe" for message in msgs)
 
     @pytest.mark.asyncio
     async def test_fork_blob_rewrite_persists_session_fork_provenance(self, tmp_path) -> None:
@@ -1449,17 +1996,15 @@ class TestForkEndpoint:
         response = client.post(
             f"/api/sessions/{session.id}/fork",
             json={
+                "operation_id": str(uuid.uuid4()),
                 "from_message_id": str(msg.id),
                 "new_message_content": "Process that instead",
             },
         )
 
         assert response.status_code == 201
-        fork_session_id = response.json()["session"]["id"]
-        assert _read_composition_state_provenances(service, fork_session_id) == [
-            "session_fork",
-            "session_fork",
-        ]
+        fork_session_id = response.json()["session_id"]
+        assert _read_composition_state_provenances(service, fork_session_id) == ["session_fork"]
 
     @pytest.mark.asyncio
     async def test_fork_endpoint_idor_protection(self, tmp_path) -> None:
@@ -1475,6 +2020,7 @@ class TestForkEndpoint:
         response = client.post(
             f"/api/sessions/{bob_session.id}/fork",
             json={
+                "operation_id": str(uuid.uuid4()),
                 "from_message_id": str(msg.id),
                 "new_message_content": "Hi",
             },
@@ -1493,6 +2039,7 @@ class TestForkEndpoint:
         response = client.post(
             f"/api/sessions/{session.id}/fork",
             json={
+                "operation_id": str(uuid.uuid4()),
                 "from_message_id": str(uuid.uuid4()),
                 "new_message_content": "Hi",
             },
@@ -1516,6 +2063,7 @@ class TestForkEndpoint:
         client.post(
             f"/api/sessions/{session.id}/fork",
             json={
+                "operation_id": str(uuid.uuid4()),
                 "from_message_id": str(msg2.id),
                 "new_message_content": "Second edited",
             },
@@ -1543,13 +2091,14 @@ class TestForkEndpoint:
         response = client.post(
             f"/api/sessions/{session.id}/fork",
             json={
+                "operation_id": str(uuid.uuid4()),
                 "from_message_id": str(msg.id),
                 "new_message_content": "Process that instead",
             },
         )
 
         assert response.status_code == 201
-        new_session_id = uuid.UUID(response.json()["session"]["id"])
+        new_session_id = uuid.UUID(response.json()["session_id"])
 
         # Verify blob was copied to new session
         new_blobs = await blob_service.list_blobs(new_session_id)
@@ -1607,13 +2156,14 @@ class TestForkEndpoint:
         response = client.post(
             f"/api/sessions/{session.id}/fork",
             json={
+                "operation_id": str(uuid.uuid4()),
                 "from_message_id": str(msg.id),
                 "new_message_content": "Process that instead",
             },
         )
 
         assert response.status_code == 201
-        new_session_id = uuid.UUID(response.json()["session"]["id"])
+        new_session_id = uuid.UUID(response.json()["session_id"])
 
         copied_blobs = await blob_service.list_blobs(new_session_id)
         assert len(copied_blobs) == 1
@@ -1684,13 +2234,14 @@ class TestForkEndpoint:
         response = client.post(
             f"/api/sessions/{session.id}/fork",
             json={
+                "operation_id": str(uuid.uuid4()),
                 "from_message_id": str(msg.id),
                 "new_message_content": "Process that instead",
             },
         )
 
         assert response.status_code == 201
-        new_session_id = uuid.UUID(response.json()["session"]["id"])
+        new_session_id = uuid.UUID(response.json()["session_id"])
         copied_blob = (await blob_service.list_blobs(new_session_id))[0]
 
         copied_state = await service.get_current_state(new_session_id)
@@ -1746,22 +2297,17 @@ class TestForkEndpoint:
             writer_principal="route_user_message",
         )
 
-        from elspeth.contracts.errors import AuditIntegrityError
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            f"/api/sessions/{session.id}/fork",
+            json={
+                "operation_id": str(uuid.uuid4()),
+                "from_message_id": str(msg.id),
+                "new_message_content": "Process that instead",
+            },
+        )
 
-        client = TestClient(app)
-        with pytest.raises(AuditIntegrityError) as exc_info:
-            client.post(
-                f"/api/sessions/{session.id}/fork",
-                json={
-                    "from_message_id": str(msg.id),
-                    "new_message_content": "Process that instead",
-                },
-            )
-
-        message = str(exc_info.value)
-        assert "Tier 1" in message
-        assert str(missing_blob_id) in message
-        assert "source blob was not copied" in message
+        assert response.status_code == 500
 
         sessions = await service.list_sessions("alice", "local")
         assert len(sessions) == 1
@@ -1781,6 +2327,7 @@ class TestForkEndpoint:
         response = client.post(
             f"/api/sessions/{session.id}/fork",
             json={
+                "operation_id": str(uuid.uuid4()),
                 "from_message_id": str(msg2.id),
                 "new_message_content": "Second edited",
             },
@@ -1803,6 +2350,7 @@ class TestForkEndpoint:
         response = client.post(
             f"/api/sessions/{session.id}/fork",
             json={
+                "operation_id": str(uuid.uuid4()),
                 "from_message_id": str(assistant_msg.id),
                 "new_message_content": "Hi",
             },
@@ -1812,7 +2360,7 @@ class TestForkEndpoint:
 
     @pytest.mark.asyncio
     async def test_fork_blob_quota_exceeded_returns_413(self, tmp_path) -> None:
-        """Fork returns 413 and cleans up when blob quota is exceeded."""
+        """Fork returns and replays the same closed, safe 413 quota failure."""
         # Create blob service with very small quota
         from sqlalchemy.pool import StaticPool
 
@@ -1873,17 +2421,38 @@ class TestForkEndpoint:
         app.state.blob_service = tight_blob_service
         msg = await session_service.add_message(session.id, "user", "Go", writer_principal="route_user_message")
 
+        operation_id = str(uuid.uuid4())
         response = client.post(
             f"/api/sessions/{session.id}/fork",
             json={
+                "operation_id": operation_id,
+                "from_message_id": str(msg.id),
+                "new_message_content": "Go edited",
+            },
+        )
+        replay = client.post(
+            f"/api/sessions/{session.id}/fork",
+            json={
+                "operation_id": operation_id,
                 "from_message_id": str(msg.id),
                 "new_message_content": "Go edited",
             },
         )
 
-        assert response.status_code == 413
+        assert response.status_code == replay.status_code == 413
+        assert (
+            response.json()
+            == replay.json()
+            == {
+                "detail": {
+                    "error_type": "guided_operation_terminal_failure",
+                    "failure_code": "quota_exceeded",
+                    "detail": "The operation exceeded the session storage quota.",
+                }
+            }
+        )
 
-        # The partially created session should have been cleaned up
+        # The staged child remains hidden as integrity evidence.
         sessions = await session_service.list_sessions("alice", "local")
         assert len(sessions) == 1  # Only the original remains
 
@@ -1898,8 +2467,9 @@ class TestForkEndpoint:
         the remap would leave the forked session's blob_ref pointing at the
         source session's blob (cross-session reference, audit-contradictory).
 
-        The fork-rollback machinery in ``fork_from_message`` must archive
-        the partially-created fork session so no orphan artifacts remain.
+        The fork coordinator must fail the operation, retain its already
+        archived child and frozen plan as evidence, and compensate only any
+        copied child blobs. The partial child must remain hidden from users.
         """
         app, service, blob_service = _make_fork_app(tmp_path)
 
@@ -1937,32 +2507,19 @@ class TestForkEndpoint:
             "text/csv",
         )
 
-        # raise_server_exceptions=True (default) lets us inspect the actual
-        # exception object so we can verify diagnostic content and cause chain.
-        from elspeth.contracts.errors import AuditIntegrityError
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            f"/api/sessions/{session.id}/fork",
+            json={
+                "operation_id": str(uuid.uuid4()),
+                "from_message_id": str(msg.id),
+                "new_message_content": "Hello edited",
+            },
+        )
+        assert response.status_code == 500
 
-        client = TestClient(app)
-        with pytest.raises(AuditIntegrityError) as exc_info:
-            client.post(
-                f"/api/sessions/{session.id}/fork",
-                json={
-                    "from_message_id": str(msg.id),
-                    "new_message_content": "Hello edited",
-                },
-            )
-
-        # Diagnostic names the tier, the offending value, and both state ids
-        # so operators can locate the corrupted record.
-        message = str(exc_info.value)
-        assert "Tier 1" in message
-        assert "blob_ref" in message
-        assert "not-a-valid-uuid" in message
-
-        # Cause chain preserves the original ValueError for forensics.
-        assert isinstance(exc_info.value.__cause__, ValueError)
-
-        # Fork-rollback archived the partially-created fork session — only
-        # the original session remains visible to the owner.
+        # The failed archived child is retained as evidence but stays hidden;
+        # only the original remains visible to the owner.
         sessions = await service.list_sessions("alice", "local")
         assert len(sessions) == 1
 
@@ -2002,24 +2559,16 @@ class TestForkEndpoint:
             "text/csv",
         )
 
-        from elspeth.contracts.errors import AuditIntegrityError
-
-        client = TestClient(app)
-        with pytest.raises(AuditIntegrityError) as exc_info:
-            client.post(
-                f"/api/sessions/{session.id}/fork",
-                json={
-                    "from_message_id": str(msg.id),
-                    "new_message_content": "Hello edited",
-                },
-            )
-
-        message = str(exc_info.value)
-        assert "Tier 1" in message
-        assert "blob_ref" in message
-        assert "int" in message
-        assert "UUID string" in message
-        assert exc_info.value.__cause__ is None
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            f"/api/sessions/{session.id}/fork",
+            json={
+                "operation_id": str(uuid.uuid4()),
+                "from_message_id": str(msg.id),
+                "new_message_content": "Hello edited",
+            },
+        )
+        assert response.status_code == 500
 
         sessions = await service.list_sessions("alice", "local")
         assert len(sessions) == 1
@@ -2029,8 +2578,9 @@ class TestForkEndpoint:
         """Non-quota blob failures during fork must archive the new session.
 
         copy_blobs_for_fork can fail for reasons other than quota (missing
-        blob row, filesystem error, DB disconnect).  The fork route must
-        compensate by archiving the partially-created session.
+        blob row, filesystem error, DB disconnect). The fork route must fail
+        the operation, retain its hidden archived child and frozen plan, and
+        compensate only copied child blobs.
         """
         app, service, blob_service = _make_fork_app(tmp_path)
 
@@ -2053,6 +2603,7 @@ class TestForkEndpoint:
             response = client.post(
                 f"/api/sessions/{session.id}/fork",
                 json={
+                    "operation_id": str(uuid.uuid4()),
                     "from_message_id": str(msg.id),
                     "new_message_content": "Go edited",
                 },
@@ -2060,7 +2611,7 @@ class TestForkEndpoint:
 
         assert response.status_code == 500
 
-        # The fork session must have been cleaned up
+        # The retained failed child is hidden from the public list.
         sessions = await service.list_sessions("alice", "local")
         assert len(sessions) == 1  # Only the original remains
 
@@ -2068,9 +2619,9 @@ class TestForkEndpoint:
     async def test_fork_state_rewrite_failure_archives_session(self, tmp_path) -> None:
         """Failure during state rewrite after blob copy must archive the fork.
 
-        If save_composition_state fails after fork_session and blob copy
-        have both committed, the fork session (and copied blobs) must be
-        cleaned up so users don't see an orphaned half-initialised fork.
+        If settlement fails after staging and blob copy, the copied blobs must
+        be compensated while the hidden archived child and frozen plan remain
+        as failure evidence.
         """
         app, service, blob_service = _make_fork_app(tmp_path)
 
@@ -2109,17 +2660,18 @@ class TestForkEndpoint:
         # HTTP response rather than propagated as a Python exception.
         client = TestClient(app, raise_server_exceptions=False)
 
-        async def fail_save_composition_state(*args: Any, **kwargs: Any) -> None:
+        async def fail_settle_guided_fork_operation(*args: Any, **kwargs: Any) -> None:
             raise RuntimeError("DB write failed")
 
         with patch.object(
             service,
-            "save_composition_state",
-            new=fail_save_composition_state,
+            "settle_guided_fork_operation",
+            new=fail_settle_guided_fork_operation,
         ):
             response = client.post(
                 f"/api/sessions/{session.id}/fork",
                 json={
+                    "operation_id": str(uuid.uuid4()),
                     "from_message_id": str(msg.id),
                     "new_message_content": "Go edited",
                 },
@@ -2127,19 +2679,18 @@ class TestForkEndpoint:
 
         assert response.status_code == 500
 
-        # The fork session must have been cleaned up
+        # The retained failed child is hidden from the public list.
         sessions = await service.list_sessions("alice", "local")
         assert len(sessions) == 1  # Only the original remains
 
     @pytest.mark.asyncio
     async def test_fork_cleanup_failure_preserves_primary_exception_with_note(self, tmp_path) -> None:
-        """archive_session failure during rollback must not mask the real cause.
+        """Fork-blob compensation failure must not mask the real cause.
 
-        If copy_blobs_for_fork raises and the compensating archive_session
-        ALSO fails (e.g. shutil.rmtree on a locked blob dir), the operator
-        must still see the original blob-copy failure as the headline.  A
-        RecoveryFailed[...] note flags that the fork session row is now an
-        orphan that needs manual cleanup.
+        If copy_blobs_for_fork raises and cleanup_blobs_for_fork also fails,
+        the operator must still see the original blob-copy failure as the
+        headline. A RecoveryFailed[...] note identifies copied blob residue
+        on the retained archived evidence child for manual cleanup.
 
         Without this guarantee, a rare cleanup failure would replace the
         true root cause in tracebacks, sending operators down the wrong
@@ -2161,7 +2712,7 @@ class TestForkEndpoint:
         async def fail_copy_blobs_for_fork(*args: Any, **kwargs: Any) -> None:
             raise primary
 
-        async def fail_archive_session(*args: Any, **kwargs: Any) -> None:
+        async def fail_cleanup_blobs_for_fork(*args: Any, **kwargs: Any) -> None:
             raise cleanup
 
         with (
@@ -2171,30 +2722,27 @@ class TestForkEndpoint:
                 new=fail_copy_blobs_for_fork,
             ),
             patch.object(
-                service,
-                "archive_session",
-                new=fail_archive_session,
+                blob_service,
+                "cleanup_blobs_for_fork",
+                new=fail_cleanup_blobs_for_fork,
             ),
-            pytest.raises(RuntimeError) as exc_info,
         ):
-            client.post(
+            response = client.post(
                 f"/api/sessions/{session.id}/fork",
                 json={
+                    "operation_id": str(uuid.uuid4()),
                     "from_message_id": str(msg.id),
                     "new_message_content": "Go edited",
                 },
             )
 
-        # Identity check: the propagated exception is the original primary,
-        # not a re-wrap and not the cleanup OSError.
-        assert exc_info.value is primary
+        assert response.status_code == 500
 
-        # RecoveryFailed[...] note attached for orphan-session visibility.
+        # RecoveryFailed[...] note identifies residual copied-blob custody.
         notes = getattr(primary, "__notes__", [])
         assert any("RecoveryFailed[OSError]" in note for note in notes), f"expected RecoveryFailed[OSError] note, got: {notes!r}"
         assert any("permission denied removing blob dir" in note for note in notes)
-        # Note must identify the orphan session id so operators can clean up.
-        assert any("manual cleanup" in note.lower() for note in notes)
+        assert any("fork blob cleanup failed" in note.lower() for note in notes)
 
     @pytest.mark.asyncio
     async def test_fork_top_level_blob_ref_without_copied_blob_fails_closed(self, tmp_path) -> None:
@@ -2209,8 +2757,8 @@ class TestForkEndpoint:
 
         The fork must fail-closed with AuditIntegrityError rather than
         silently carrying the stale cross-session blob_ref into the forked
-        session.  The archive/rollback machinery must clean up the partial
-        fork so the session list remains unchanged.
+        session. The failed archived child and plan remain hidden evidence,
+        and the visible session list stays unchanged.
         """
         app, service, _blob_service = _make_fork_app(tmp_path)
 
@@ -2244,21 +2792,16 @@ class TestForkEndpoint:
             writer_principal="route_user_message",
         )
 
-        from elspeth.contracts.errors import AuditIntegrityError
-
-        client = TestClient(app)
-        with pytest.raises(AuditIntegrityError) as exc_info:
-            client.post(
-                f"/api/sessions/{session.id}/fork",
-                json={
-                    "from_message_id": str(msg.id),
-                    "new_message_content": "Process that instead",
-                },
-            )
-
-        message = str(exc_info.value)
-        assert "Tier 1" in message
-        assert "source blob was not copied" in message
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            f"/api/sessions/{session.id}/fork",
+            json={
+                "operation_id": str(uuid.uuid4()),
+                "from_message_id": str(msg.id),
+                "new_message_content": "Process that instead",
+            },
+        )
+        assert response.status_code == 500
 
         # The partial fork session must have been archived so the list
         # length is unchanged.

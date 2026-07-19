@@ -5222,7 +5222,7 @@ class TestVerifyRunOwnership:
         svc, session_svc = idor_service
         session_id = uuid4()
         run = SimpleNamespace(session_id=session_id)
-        session = SimpleNamespace(user_id="alice", auth_provider_type="local")
+        session = SimpleNamespace(user_id="alice", auth_provider_type="local", archived_at=None)
         session_svc.get_run.return_value = run
         session_svc.get_session.return_value = session
 
@@ -5234,7 +5234,7 @@ class TestVerifyRunOwnership:
         """Wrong user_id → access denied."""
         svc, session_svc = idor_service
         run = SimpleNamespace(session_id=uuid4())
-        session = SimpleNamespace(user_id="alice", auth_provider_type="local")
+        session = SimpleNamespace(user_id="alice", auth_provider_type="local", archived_at=None)
         session_svc.get_run.return_value = run
         session_svc.get_session.return_value = session
 
@@ -5252,7 +5252,23 @@ class TestVerifyRunOwnership:
         svc, session_svc = idor_service
         run = SimpleNamespace(session_id=uuid4())
         # Session was created under OIDC, but server is now configured for "local"
-        session = SimpleNamespace(user_id="alice", auth_provider_type="oidc")
+        session = SimpleNamespace(user_id="alice", auth_provider_type="oidc", archived_at=None)
+        session_svc.get_run.return_value = run
+        session_svc.get_session.return_value = session
+
+        user = SimpleNamespace(user_id="alice")
+        assert await svc.verify_run_ownership(user, str(uuid4())) is False
+
+    @pytest.mark.asyncio
+    async def test_archived_session_returns_false_for_websocket_gate(self, idor_service) -> None:
+        """A run's matching principal cannot observe an archived session over WebSocket."""
+        svc, session_svc = idor_service
+        run = SimpleNamespace(session_id=uuid4())
+        session = SimpleNamespace(
+            user_id="alice",
+            auth_provider_type="local",
+            archived_at=datetime.now(UTC),
+        )
         session_svc.get_run.return_value = run
         session_svc.get_session.return_value = session
 
@@ -5305,7 +5321,7 @@ class TestVerifyRunOwnership:
         svc, session_svc = idor_service
         run = SimpleNamespace(session_id=uuid4())
         user_uuid = uuid4()
-        session = SimpleNamespace(user_id=user_uuid, auth_provider_type="local")
+        session = SimpleNamespace(user_id=user_uuid, auth_provider_type="local", archived_at=None)
         session_svc.get_run.return_value = run
         session_svc.get_session.return_value = session
 

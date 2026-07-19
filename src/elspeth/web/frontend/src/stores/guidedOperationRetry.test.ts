@@ -80,6 +80,28 @@ describe("guided operation retry custody", () => {
     expect(window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY)).toContain('"kind":"guided_convert"');
   });
 
+  it("reuses one session fork operation without storing edited content", () => {
+    const identity = ["00000000-0000-4000-8000-000000000301", "private edited request"];
+    const first = acquireGuidedRetry("session_fork", SESSION_A, identity);
+    const retry = acquireGuidedRetry("session_fork", SESSION_A, identity);
+
+    expect(retry.operationId).toBe(first.operationId);
+    const encoded = window.sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY) ?? "";
+    expect(encoded).toContain('"kind":"session_fork"');
+    expect(encoded).not.toContain(identity[1]);
+  });
+
+  it("rehydrates a lost-response session fork operation after module reload", async () => {
+    const identity = ["00000000-0000-4000-8000-000000000301", "private edited request"];
+    const first = acquireGuidedRetry("session_fork", SESSION_A, identity);
+
+    vi.resetModules();
+    const reloaded = await import("./guidedOperationRetry");
+    const retry = reloaded.acquireGuidedRetry("session_fork", SESSION_A, identity);
+
+    expect(retry.operationId).toBe(first.operationId);
+  });
+
   it("reuses one guided chat operation for an ambiguous retry without storing the message", () => {
     const identity = ["a".repeat(64), "use the uploaded customer list"];
     const first = acquireGuidedRetry("guided_chat", SESSION_A, identity);

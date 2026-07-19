@@ -157,6 +157,37 @@ interface ParseResponseOptions {
   logoutOnUnauthorized?: boolean;
 }
 
+export class ForkCommittedResponseError extends Error {
+  readonly committedSuccessResponse = true;
+  readonly cause: unknown;
+
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = "ForkCommittedResponseError";
+    this.cause = cause;
+  }
+}
+
+export function isForkCommittedResponseError(error: unknown): error is ForkCommittedResponseError {
+  return error instanceof ForkCommittedResponseError;
+}
+
+const CANONICAL_SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function decodeForkSessionLocator(value: unknown): { session_id: string } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("fork locator must be an exact object");
+  }
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).length !== 1 || !Object.prototype.hasOwnProperty.call(record, "session_id")) {
+    throw new Error("fork locator must contain exactly session_id");
+  }
+  if (typeof record.session_id !== "string" || !CANONICAL_SESSION_UUID.test(record.session_id)) {
+    throw new Error("fork locator session_id must be a canonical UUID");
+  }
+  return { session_id: record.session_id };
+}
+
 export async function parseResponse<T>(
   response: Response,
   options: ParseResponseOptions = {},
@@ -881,26 +912,27 @@ export async function chatGuided(
 /** Fork a session from a specific user message. */
 export async function forkFromMessage(
   sessionId: string,
+  operationId: string,
   fromMessageId: string,
   newMessageContent: string,
-): Promise<{
-  session: Session;
-  messages: ChatMessage[];
-  composition_state: CompositionState | null;
-}> {
+): Promise<{ session_id: string }> {
   const response = await fetch(`/api/sessions/${sessionId}/fork`, {
     method: "POST",
     headers: authHeaders("application/json"),
     body: JSON.stringify({
+      operation_id: operationId,
       from_message_id: fromMessageId,
       new_message_content: newMessageContent,
     }),
   });
-  return parseResponse<{
-    session: Session;
-    messages: ChatMessage[];
-    composition_state: CompositionState | null;
-  }>(response);
+  if (!response.ok) {
+    return parseResponse<{ session_id: string }>(response);
+  }
+  try {
+    return decodeForkSessionLocator(await response.json());
+  } catch (cause) {
+    throw new ForkCommittedResponseError("Fork succeeded but its result locator could not be decoded", cause);
+  }
 }
 
 // ── Composition State ───────────────────────────────────────────────────────

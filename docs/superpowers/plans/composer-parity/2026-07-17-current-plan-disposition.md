@@ -15,8 +15,11 @@ Do not execute the seven plans dated 2026-07-13. They are preserved under
 
 - The reviewed code baseline was `a1b2b5a39`; this review found the release
   branch 140 commits beyond that baseline.
-- The current constants are `SESSION_SCHEMA_EPOCH = 28`,
-  `GUIDED_SESSION_SCHEMA_VERSION = 7`, and `SQLITE_SCHEMA_EPOCH = 28`. The old
+- The current constants are `SESSION_SCHEMA_EPOCH = 30`,
+  `GUIDED_SESSION_SCHEMA_VERSION = 8`, and `SQLITE_SCHEMA_EPOCH = 28`. Epoch 29
+  introduced guided schema 8 and durable operation fencing; epoch 30 closes
+  the `quota_exceeded` terminal failure code used by stable HTTP 413 fork
+  replay. The old
   plans assign epoch numbers that have already been consumed.
 - Durable sink-effect and coalesce-effect ledgers now own recovery and artifact
   identity. Plan 01's proposed parallel operation-parent lifecycle would
@@ -53,9 +56,9 @@ The current plan implements the required re-plan in this dependency order:
    policy/profile contracts, and the guided chain path.
 2. Introduce the shared planner/commit seam by extending existing proposal
    persistence; first route a freeform vertical slice without a schema change.
-3. Replace guided state, protocol, backend, and frontend atomically. Allocate a
-   new session epoch only if the persisted schema changes; derive it from the
-   live constant and recreate state rather than migrating it.
+3. Replace guided state, protocol, backend, and frontend atomically under the
+   session-epoch-30 recreation boundary; recreate state rather than migrating
+   it.
 4. Add the real-path parity corpus, wrong-stage intent tests, tutorial identity
    tests, and a refreshed colour-pipeline proof.
 5. Run deterministic, generated, frontend, and live staging proofs before

@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { chatGuided, convertToGuided, getGuided, reenterGuided, respondGuided, revertToVersion, startGuidedSession } from "./client";
+import { chatGuided, convertToGuided, forkFromMessage, ForkCommittedResponseError, getGuided, reenterGuided, respondGuided, revertToVersion, startGuidedSession } from "./client";
 import type {
   GetGuidedResponse,
   GuidedChatRequest,
@@ -792,6 +792,56 @@ describe("api/client guided functions", () => {
   });
 
   describe("retry-safe mutations", () => {
+    it("sends the explicit operation id and accepts only a fork locator", async () => {
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 201,
+        json: async () => ({ session_id: "00000000-0000-4000-8000-000000000009" }),
+      } as Response);
+
+      const result = await forkFromMessage(
+        "sess-1",
+        "00000000-0000-4000-8000-000000000008",
+        "message-1",
+        "edited",
+      );
+
+      const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("/api/sessions/sess-1/fork");
+      expect(JSON.parse(init.body as string)).toEqual({
+        operation_id: "00000000-0000-4000-8000-000000000008",
+        from_message_id: "message-1",
+        new_message_content: "edited",
+      });
+      expect(result).toEqual({ session_id: "00000000-0000-4000-8000-000000000009" });
+    });
+
+    it.each([
+      ["missing", {}],
+      ["extra legacy fields", { session_id: "00000000-0000-4000-8000-000000000009", title: "legacy" }],
+      ["non-string", { session_id: 9 }],
+      ["noncanonical", { session_id: "{00000000-0000-4000-8000-000000000009}" }],
+    ])("rejects a %s 2xx fork locator as committed-response ambiguity", async (_label, body) => {
+      fetchSpy.mockResolvedValue({ ok: true, status: 201, json: async () => body } as Response);
+
+      await expect(
+        forkFromMessage("sess-1", "00000000-0000-4000-8000-000000000008", "message-1", "edited"),
+      ).rejects.toBeInstanceOf(ForkCommittedResponseError);
+    });
+
+    it("tags a truncated 2xx fork body as committed-response ambiguity", async () => {
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 201,
+        json: async () => {
+          throw new SyntaxError("truncated JSON");
+        },
+      } as unknown as Response);
+
+      await expect(
+        forkFromMessage("sess-1", "00000000-0000-4000-8000-000000000008", "message-1", "edited"),
+      ).rejects.toBeInstanceOf(ForkCommittedResponseError);
+    });
     it("sends the store-owned operation id for guided conversion", async () => {
       const body = makeGetGuidedResponse();
       fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => body } as Response);

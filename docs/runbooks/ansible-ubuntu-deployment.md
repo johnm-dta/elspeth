@@ -2926,8 +2926,8 @@ and crashes the service with an actionable error if it diverges from the
 constant the running code expects:
 
 ```text
-SessionSchemaError: Session DB schema version 27 does not match
-SESSION_SCHEMA_EPOCH=28. Pre-release ELSPETH does not migrate session
+SessionSchemaError: Session DB schema version 29 does not match
+SESSION_SCHEMA_EPOCH=30. Pre-release ELSPETH does not migrate session
 databases. Delete the session DB file and restart.
 ```
 
@@ -2940,12 +2940,13 @@ some other application entirely.
 The "schema-incompatible upgrade" decision is *not* a judgement call —
 the running code asserts it on startup. The deploy procedure should:
 
-1. Snapshot `sessions.db` (per the standard snapshot task above).
+1. Archive `sessions.db` as evidence (per the standard snapshot task above).
 2. Restart the service (the role's standard restart-and-verify gate
    already covers this).
 3. If the restart fails with `SessionSchemaError`, the error message
    itself is the actionable instruction: delete the file, restart again.
-   The snapshot is the rollback aid; the live DB is disposable.
+   The archive is diagnostic evidence, not a downgrade database; recreate the
+   live DB with the current release.
 
 **What happens if you skip the delete.**
 The service refuses to start at all. There is no partial-functionality
@@ -2964,7 +2965,10 @@ exhausts and the unit goes into `failed` state.
 | 4 | `composer_completion_events_table` added (Phase 6A — `mark_ready_for_review`, `export_yaml`). |
 | 5 | Per-event-type partial CHECK constraints on `composer_completion_events` (Phase 6A post-merge hardening). |
 | 26 | 0.7.0 schema; includes guided Composer state, local auth/email-verification support, and first-run tutorial resume fields. |
-| 27 | 0.7.1 current schema; adds the account-wide freeform-primer dismissal preference. |
+| 27 | Adds the account-wide freeform-primer dismissal preference. |
+| 28 | Adds the cross-dialect application/store/epoch identity proof. |
+| 29 | Adds guided schema 8 and durable fenced guided-operation reservations. |
+| 30 | Current schema; adds the closed `quota_exceeded` failure code for stable HTTP 413 fork replay. |
 
 The constant should be the authoritative reference; this table is a
 durability aid for operators reading the runbook in isolation.

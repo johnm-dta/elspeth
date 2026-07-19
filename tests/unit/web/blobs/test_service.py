@@ -14,10 +14,12 @@ import asyncio
 import contextlib
 import hashlib
 import importlib
+import json
 import multiprocessing
 import os
+import threading
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -35,9 +37,14 @@ from elspeth.web.blobs.protocol import (
     BlobActiveRunError,
     BlobForkCleanupError,
     BlobForkCleanupResult,
+    BlobForkFenceLostError,
+    BlobForkPlanEntry,
+    BlobForkWriteFence,
+    BlobInProgressForkError,
     BlobIntegrityError,
     BlobNotFoundError,
     BlobQuotaExceededError,
+    fork_blob_id,
 )
 from elspeth.web.blobs.service import (
     BlobServiceImpl,
@@ -45,7 +52,13 @@ from elspeth.web.blobs.service import (
     sanitize_filename,
 )
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import blobs_table, chat_messages_table, composition_proposals_table, sessions_table
+from elspeth.web.sessions.models import (
+    blobs_table,
+    chat_messages_table,
+    composition_proposals_table,
+    guided_operations_table,
+    sessions_table,
+)
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.telemetry import _FakeCounter
 
@@ -2216,6 +2229,148 @@ class TestInlineCustody:
 class TestCopyBlobsForFork:
     """Fork copies converge on deterministic rows and clean up explicitly."""
 
+    @staticmethod
+    async def _checkpoint() -> None:
+        return None
+
+    @classmethod
+    async def _plan(
+        cls,
+        service: BlobServiceImpl,
+        source_session_id: UUID,
+        target_session_id: UUID,
+    ) -> tuple[BlobForkPlanEntry, ...]:
+        ready = [blob for blob in await service.list_blobs(source_session_id, limit=None) if blob.status == "ready"]
+        return tuple(
+            BlobForkPlanEntry(
+                source_blob_id=blob.id,
+                target_blob_id=fork_blob_id(target_session_id=target_session_id, source_blob_id=blob.id),
+                content_hash=blob.content_hash,
+                size_bytes=blob.size_bytes,
+            )
+            for blob in sorted(ready, key=lambda blob: str(blob.id))
+        )
+
+    @classmethod
+    async def _copy(cls, service: BlobServiceImpl, source_session_id, target_session_id):
+        if type(source_session_id) is UUID and type(target_session_id) is UUID and source_session_id != target_session_id:
+            plan = await cls._plan(service, source_session_id, target_session_id)
+            write_fence = cls._authorize_copy(service, source_session_id, target_session_id, plan)
+        else:
+            plan = ()
+            write_fence = object()
+        return await service.copy_blobs_for_fork(
+            source_session_id,
+            target_session_id,
+            plan,
+            write_fence,  # type: ignore[arg-type]
+            checkpoint=cls._checkpoint,
+        )
+
+    @staticmethod
+    def _authorize_copy(
+        service: BlobServiceImpl,
+        source_session_id: UUID,
+        target_session_id: UUID,
+        plan: tuple[BlobForkPlanEntry, ...],
+    ) -> BlobForkWriteFence:
+        operation_id = f"test-fork-{target_session_id}"
+        lease_token = f"test-lease-{target_session_id}"
+        now = datetime.now(UTC)
+        with service._engine.begin() as conn:
+            if conn.execute(select(sessions_table.c.id).where(sessions_table.c.id == str(target_session_id))).one_or_none() is None:
+                return BlobForkWriteFence(
+                    source_session_id=source_session_id,
+                    target_session_id=target_session_id,
+                    operation_id=operation_id,
+                    lease_token=lease_token,
+                    attempt=1,
+                )
+            conn.execute(sessions_table.update().where(sessions_table.c.id == str(target_session_id)).values(archived_at=now))
+            operation = conn.execute(
+                select(guided_operations_table.c.operation_id).where(
+                    guided_operations_table.c.session_id == str(source_session_id),
+                    guided_operations_table.c.operation_id == operation_id,
+                )
+            ).one_or_none()
+            if operation is None:
+                conn.execute(
+                    guided_operations_table.insert().values(
+                        session_id=str(source_session_id),
+                        operation_id=operation_id,
+                        kind="session_fork",
+                        status="in_progress",
+                        request_hash="a" * 64,
+                        lease_token=lease_token,
+                        lease_expires_at=now + timedelta(hours=1),
+                        attempt=1,
+                        result_session_id=str(target_session_id),
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                conn.execute(
+                    chat_messages_table.insert().values(
+                        id=str(uuid4()),
+                        session_id=str(target_session_id),
+                        role="audit",
+                        content=json.dumps(
+                            {
+                                "schema": "session-fork-blob-plan.v1",
+                                "source_session_id": str(source_session_id),
+                                "child_session_id": str(target_session_id),
+                                "operation_id": operation_id,
+                                "source_blobs": [
+                                    {
+                                        "source_blob_id": str(entry.source_blob_id),
+                                        "target_blob_id": str(entry.target_blob_id),
+                                        "content_hash": entry.content_hash,
+                                        "size_bytes": entry.size_bytes,
+                                    }
+                                    for entry in plan
+                                ],
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        sequence_no=1,
+                        writer_principal="session_fork",
+                        created_at=now,
+                    )
+                )
+        return BlobForkWriteFence(
+            source_session_id=source_session_id,
+            target_session_id=target_session_id,
+            operation_id=operation_id,
+            lease_token=lease_token,
+            attempt=1,
+        )
+
+    @staticmethod
+    def _fail_fork(service: BlobServiceImpl, source_session_id: UUID, target_session_id: UUID) -> str:
+        operation_id = f"test-fork-{target_session_id}"
+        now = datetime.now(UTC)
+        with service._engine.begin() as conn:
+            changed = conn.execute(
+                guided_operations_table.update()
+                .where(
+                    guided_operations_table.c.session_id == str(source_session_id),
+                    guided_operations_table.c.operation_id == operation_id,
+                    guided_operations_table.c.status == "in_progress",
+                )
+                .values(
+                    status="failed",
+                    lease_token=None,
+                    lease_expires_at=None,
+                    result_session_id=None,
+                    failure_code="operation_failed",
+                    settled_at=now,
+                    updated_at=now,
+                )
+            ).rowcount
+        assert changed == 1
+        return operation_id
+
     @pytest.fixture()
     def target_session_id(self, db_engine, session_id: UUID) -> UUID:
         """Second session for the fork target."""
@@ -2230,6 +2385,7 @@ class TestCopyBlobsForFork:
                     title="Forked Session",
                     created_at=now,
                     updated_at=now,
+                    archived_at=now,
                     forked_from_session_id=str(session_id),
                 )
             )
@@ -2254,6 +2410,7 @@ class TestCopyBlobsForFork:
                     title="Test Session",
                     created_at=now,
                     updated_at=now,
+                    archived_at=now if forked_from_session_id is not None else None,
                     forked_from_session_id=(str(forked_from_session_id) if forked_from_session_id is not None else None),
                 )
             )
@@ -2263,21 +2420,21 @@ class TestCopyBlobsForFork:
         target = UUID("11111111-1111-4111-8111-111111111111")
         source = UUID("22222222-2222-4222-8222-222222222222")
 
-        expected = blob_service_module._fork_blob_id(
+        expected = fork_blob_id(
             target_session_id=target,
             source_blob_id=source,
         )
 
         assert expected == UUID("7db1b79c-2cad-5fc0-87c8-45652bd6cfd4")
         assert (
-            blob_service_module._fork_blob_id(
+            fork_blob_id(
                 target_session_id=UUID("33333333-3333-4333-8333-333333333333"),
                 source_blob_id=source,
             )
             != expected
         )
         assert (
-            blob_service_module._fork_blob_id(
+            fork_blob_id(
                 target_session_id=target,
                 source_blob_id=UUID("44444444-4444-4444-8444-444444444444"),
             )
@@ -2301,7 +2458,7 @@ class TestCopyBlobsForFork:
             target = str(target)
 
         with pytest.raises(TypeError, match=f"{invalid_argument}_session_id must be UUID"):
-            await blob_service.copy_blobs_for_fork(source, target)  # type: ignore[arg-type]
+            await self._copy(blob_service, source, target)  # type: ignore[arg-type]
 
     @pytest.mark.asyncio
     async def test_copy_rejects_source_as_its_own_target(
@@ -2310,7 +2467,7 @@ class TestCopyBlobsForFork:
         session_id: UUID,
     ) -> None:
         with pytest.raises(ValueError, match="source and target sessions must differ"):
-            await blob_service.copy_blobs_for_fork(session_id, session_id)
+            await self._copy(blob_service, session_id, session_id)
 
     @pytest.mark.asyncio
     async def test_copy_rejects_unrelated_target_before_blob_work(
@@ -2321,7 +2478,15 @@ class TestCopyBlobsForFork:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         unrelated_target = self._insert_session(db_engine)
-        await blob_service.create_blob(session_id, "source.csv", b"source", "text/csv")
+        source = await blob_service.create_blob(session_id, "source.csv", b"source", "text/csv")
+        plan = (
+            BlobForkPlanEntry(
+                source_blob_id=source.id,
+                target_blob_id=fork_blob_id(target_session_id=unrelated_target, source_blob_id=source.id),
+                content_hash=source.content_hash,
+                size_bytes=source.size_bytes,
+            ),
+        )
 
         async def _unexpected_blob_list(*_args, **_kwargs):
             pytest.fail("fork custody must be verified before listing blobs")
@@ -2329,7 +2494,13 @@ class TestCopyBlobsForFork:
         monkeypatch.setattr(blob_service, "list_blobs", _unexpected_blob_list)
 
         with pytest.raises(AuditIntegrityError, match="not a fork child"):
-            await blob_service.copy_blobs_for_fork(session_id, unrelated_target)
+            await blob_service.copy_blobs_for_fork(
+                session_id,
+                unrelated_target,
+                plan,
+                self._authorize_copy(blob_service, session_id, unrelated_target, plan),
+                checkpoint=self._checkpoint,
+            )
 
         with db_engine.connect() as conn:
             assert (
@@ -2348,7 +2519,7 @@ class TestCopyBlobsForFork:
         await blob_service.create_blob(session_id, "source.csv", b"source", "text/csv")
 
         with pytest.raises(AuditIntegrityError, match=r"target session .* does not exist"):
-            await blob_service.copy_blobs_for_fork(session_id, uuid4())
+            await self._copy(blob_service, session_id, uuid4())
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -2372,7 +2543,7 @@ class TestCopyBlobsForFork:
         await blob_service.create_blob(session_id, "source.csv", b"source", "text/csv")
 
         with pytest.raises(AuditIntegrityError, match="principal does not match"):
-            await blob_service.copy_blobs_for_fork(session_id, target)
+            await self._copy(blob_service, session_id, target)
 
         assert await blob_service.list_blobs(target, limit=None) == []
 
@@ -2398,8 +2569,8 @@ class TestCopyBlobsForFork:
             created_by="user",
         )
 
-        first_result = await blob_service.copy_blobs_for_fork(session_id, target_session_id)
-        second_result = await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+        first_result = await self._copy(blob_service, session_id, target_session_id)
+        second_result = await self._copy(blob_service, session_id, target_session_id)
 
         assert set(first_result) == {first.id, second.id}
         assert {source_id: record.id for source_id, record in first_result.items()} == {
@@ -2409,6 +2580,87 @@ class TestCopyBlobsForFork:
         assert len(await blob_service.list_blobs(target_session_id, limit=None)) == 2
 
     @pytest.mark.asyncio
+    async def test_copy_runs_checkpoint_before_plan_or_quota_reads(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+        target_session_id: UUID,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source = await blob_service.create_blob(session_id, "source.csv", b"source", "text/csv")
+        plan = await self._plan(blob_service, session_id, target_session_id)
+
+        def _unexpected_custody(*_args, **_kwargs):
+            pytest.fail("expired fence must stop before plan/quota reads")
+
+        async def _lost_fence() -> None:
+            raise RuntimeError("fence lost")
+
+        monkeypatch.setattr(blob_service_module, "_verify_fork_child_custody", _unexpected_custody)
+        with pytest.raises(RuntimeError, match="fence lost"):
+            await blob_service.copy_blobs_for_fork(
+                session_id,
+                target_session_id,
+                plan,
+                self._authorize_copy(blob_service, session_id, target_session_id, plan),
+                checkpoint=_lost_fence,
+            )
+        assert source.id not in {blob.id for blob in await blob_service.list_blobs(target_session_id, limit=None)}
+
+    @pytest.mark.asyncio
+    async def test_copy_uses_frozen_plan_and_ignores_newly_finalized_parent_blob(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+        target_session_id: UUID,
+    ) -> None:
+        frozen = await blob_service.create_blob(session_id, "frozen.csv", b"frozen", "text/csv")
+        plan = await self._plan(blob_service, session_id, target_session_id)
+        late = await blob_service.create_blob(session_id, "late.csv", b"late", "text/csv")
+
+        copied = await blob_service.copy_blobs_for_fork(
+            session_id,
+            target_session_id,
+            plan,
+            self._authorize_copy(blob_service, session_id, target_session_id, plan),
+            checkpoint=self._checkpoint,
+        )
+
+        assert set(copied) == {frozen.id}
+        assert late.id not in copied
+
+    @pytest.mark.asyncio
+    async def test_delete_rejects_blob_frozen_by_in_progress_session_fork(
+        self,
+        blob_service: BlobServiceImpl,
+        db_engine,
+        session_id: UUID,
+    ) -> None:
+        source = await blob_service.create_blob(session_id, "source.csv", b"source", "text/csv")
+        now = datetime.now(UTC)
+        operation_id = str(uuid4())
+        with db_engine.begin() as conn:
+            conn.execute(
+                guided_operations_table.insert().values(
+                    session_id=str(session_id),
+                    operation_id=operation_id,
+                    kind="session_fork",
+                    status="in_progress",
+                    request_hash="a" * 64,
+                    lease_token="lease",
+                    lease_expires_at=now.replace(year=now.year + 1),
+                    attempt=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+        with pytest.raises(BlobInProgressForkError, match=operation_id):
+            await blob_service.delete_blob(source.id)
+
+        assert await blob_service.read_blob_content(source.id) == b"source"
+
+    @pytest.mark.asyncio
     async def test_partial_prior_success_resumes_without_duplicate(
         self,
         blob_service: BlobServiceImpl,
@@ -2416,10 +2668,10 @@ class TestCopyBlobsForFork:
         target_session_id: UUID,
     ) -> None:
         first = await blob_service.create_blob(session_id, "first.csv", b"first", "text/csv")
-        first_pass = await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+        first_pass = await self._copy(blob_service, session_id, target_session_id)
         second = await blob_service.create_blob(session_id, "second.csv", b"second", "text/csv")
 
-        resumed = await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+        resumed = await self._copy(blob_service, session_id, target_session_id)
 
         assert resumed[first.id].id == first_pass[first.id].id
         assert set(resumed) == {first.id, second.id}
@@ -2436,10 +2688,10 @@ class TestCopyBlobsForFork:
     ) -> None:
         first = await blob_service.create_blob(session_id, "first.csv", b"first", "text/csv")
         quota_service = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=11)
-        first_pass = await quota_service.copy_blobs_for_fork(session_id, target_session_id)
+        first_pass = await self._copy(quota_service, session_id, target_session_id)
         second = await blob_service.create_blob(session_id, "second.csv", b"second", "text/csv")
 
-        resumed = await quota_service.copy_blobs_for_fork(session_id, target_session_id)
+        resumed = await self._copy(quota_service, session_id, target_session_id)
 
         assert resumed[first.id].id == first_pass[first.id].id
         assert second.id in resumed
@@ -2455,10 +2707,10 @@ class TestCopyBlobsForFork:
     ) -> None:
         high_quota = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=100)
         source = await high_quota.create_blob(session_id, "source.csv", b"source", "text/csv")
-        first = await high_quota.copy_blobs_for_fork(session_id, target_session_id)
+        first = await self._copy(high_quota, session_id, target_session_id)
         low_quota = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=1)
 
-        replay = await low_quota.copy_blobs_for_fork(session_id, target_session_id)
+        replay = await self._copy(low_quota, session_id, target_session_id)
 
         assert replay[source.id].id == first[source.id].id
         assert [blob.id for blob in await low_quota.list_blobs(target_session_id, limit=None)] == [first[source.id].id]
@@ -2473,7 +2725,7 @@ class TestCopyBlobsForFork:
         for index in range(51):
             await blob_service.create_blob(session_id, f"item-{index}.csv", str(index).encode(), "text/csv")
 
-        result = await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+        result = await self._copy(blob_service, session_id, target_session_id)
 
         assert len(result) == 51
         assert len(await blob_service.list_blobs(target_session_id, limit=None)) == 51
@@ -2488,7 +2740,7 @@ class TestCopyBlobsForFork:
         ready = await blob_service.create_blob(session_id, "ready.csv", b"ready", "text/csv")
         await blob_service.create_pending_blob(session_id, "pending.csv", "text/csv")
 
-        result = await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+        result = await self._copy(blob_service, session_id, target_session_id)
 
         assert set(result) == {ready.id}
 
@@ -2503,7 +2755,7 @@ class TestCopyBlobsForFork:
         Path(source.storage_path).write_bytes(b"tampered")
 
         with pytest.raises(BlobIntegrityError):
-            await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+            await self._copy(blob_service, session_id, target_session_id)
 
         assert await blob_service.list_blobs(target_session_id, limit=None) == []
 
@@ -2515,7 +2767,7 @@ class TestCopyBlobsForFork:
         target_session_id: UUID,
     ) -> None:
         """No blobs in source session → empty mapping, no errors."""
-        result = await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+        result = await self._copy(blob_service, session_id, target_session_id)
         assert result == {}
 
     @pytest.mark.asyncio
@@ -2539,7 +2791,7 @@ class TestCopyBlobsForFork:
         small_quota = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=10)
 
         with pytest.raises(BlobQuotaExceededError):
-            await small_quota.copy_blobs_for_fork(session_id, target_session_id)
+            await self._copy(small_quota, session_id, target_session_id)
 
         target_blobs = await blob_service.list_blobs(target_session_id)
         assert target_blobs == []
@@ -2552,10 +2804,11 @@ class TestCopyBlobsForFork:
         target_session_id: UUID,
     ) -> None:
         source = await blob_service.create_blob(session_id, "first.csv", b"first", "text/csv")
-        copied = await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+        copied = await self._copy(blob_service, session_id, target_session_id)
+        operation_id = self._fail_fork(blob_service, session_id, target_session_id)
 
-        first = await blob_service.cleanup_blobs_for_fork(session_id, target_session_id)
-        second = await blob_service.cleanup_blobs_for_fork(session_id, target_session_id)
+        first = await blob_service.cleanup_blobs_for_fork(session_id, target_session_id, operation_id)
+        second = await blob_service.cleanup_blobs_for_fork(session_id, target_session_id, operation_id)
 
         assert type(first) is BlobForkCleanupResult
         assert type(first.deleted_ids) is tuple
@@ -2576,66 +2829,33 @@ class TestCopyBlobsForFork:
     ) -> None:
         wrong_parent = self._insert_session(db_engine)
         source = await blob_service.create_blob(session_id, "source.csv", b"source", "text/csv")
-        copied = await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+        copied = await self._copy(blob_service, session_id, target_session_id)
+        operation_id = self._fail_fork(blob_service, session_id, target_session_id)
 
         with pytest.raises(AuditIntegrityError, match="not a fork child"):
-            await blob_service.cleanup_blobs_for_fork(wrong_parent, target_session_id)
+            await blob_service.cleanup_blobs_for_fork(wrong_parent, target_session_id, operation_id)
 
         assert [blob.id for blob in await blob_service.list_blobs(target_session_id, limit=None)] == [copied[source.id].id]
 
     @pytest.mark.asyncio
-    async def test_cleanup_fails_closed_when_snapshot_id_is_rebound_to_another_session(
+    async def test_cleanup_rejects_active_completed_child_and_preserves_blobs(
         self,
         blob_service: BlobServiceImpl,
         db_engine,
         session_id: UUID,
         target_session_id: UUID,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         await blob_service.create_blob(session_id, "source.csv", b"source", "text/csv")
-        await blob_service.copy_blobs_for_fork(session_id, target_session_id)
-        stale_snapshot = await blob_service.list_blobs(target_session_id, limit=None)
-        stale_blob = stale_snapshot[0]
-        await blob_service.delete_blob(stale_blob.id)
-        unrelated_session = self._insert_session(db_engine)
-        rebound_path = tmp_path.resolve() / "blobs" / str(unrelated_session) / f"{stale_blob.id}_{stale_blob.filename}"
-        rebound_path.parent.mkdir(parents=True, exist_ok=True)
-        rebound_path.write_bytes(b"source")
+        await self._copy(blob_service, session_id, target_session_id)
+        operation_id = self._fail_fork(blob_service, session_id, target_session_id)
+        before = await blob_service.list_blobs(target_session_id, limit=None)
         with db_engine.begin() as conn:
-            conn.execute(
-                blobs_table.insert().values(
-                    id=str(stale_blob.id),
-                    session_id=str(unrelated_session),
-                    filename=stale_blob.filename,
-                    mime_type=stale_blob.mime_type,
-                    size_bytes=stale_blob.size_bytes,
-                    content_hash=stale_blob.content_hash,
-                    storage_path=str(rebound_path),
-                    created_at=stale_blob.created_at,
-                    created_by=stale_blob.created_by,
-                    source_description=stale_blob.source_description,
-                    status=stale_blob.status,
-                    creation_modality=stale_blob.creation_modality.value,
-                    created_from_message_id=stale_blob.created_from_message_id,
-                    creating_model_identifier=stale_blob.creating_model_identifier,
-                    creating_model_version=stale_blob.creating_model_version,
-                    creating_provider=stale_blob.creating_provider,
-                    creating_composer_skill_hash=stale_blob.creating_composer_skill_hash,
-                    creating_arguments_hash=stale_blob.creating_arguments_hash,
-                )
-            )
+            conn.execute(sessions_table.update().where(sessions_table.c.id == str(target_session_id)).values(archived_at=None))
 
-        async def _stale_list(*_args, **_kwargs):
-            return stale_snapshot
+        with pytest.raises(AuditIntegrityError, match="not an archived staged fork child"):
+            await blob_service.cleanup_blobs_for_fork(session_id, target_session_id, operation_id)
 
-        monkeypatch.setattr(blob_service, "list_blobs", _stale_list)
-        with pytest.raises(AuditIntegrityError, match="rebound outside target session"):
-            await blob_service.cleanup_blobs_for_fork(session_id, target_session_id)
-
-        rebound = await blob_service.get_blob(stale_blob.id)
-        assert rebound.session_id == unrelated_session
-        assert rebound_path.exists()
+        assert await blob_service.list_blobs(target_session_id, limit=None) == before
 
     @pytest.mark.asyncio
     async def test_cleanup_treats_already_missing_snapshot_row_as_success(
@@ -2646,17 +2866,13 @@ class TestCopyBlobsForFork:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         await blob_service.create_blob(session_id, "first.csv", b"first", "text/csv")
-        await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+        await self._copy(blob_service, session_id, target_session_id)
         stale_snapshot = await blob_service.list_blobs(target_session_id, limit=None)
         await blob_service.delete_blob(stale_snapshot[0].id)
+        operation_id = self._fail_fork(blob_service, session_id, target_session_id)
+        result = await blob_service.cleanup_blobs_for_fork(session_id, target_session_id, operation_id)
 
-        async def _stale_list(*_args, **_kwargs):
-            return stale_snapshot
-
-        monkeypatch.setattr(blob_service, "list_blobs", _stale_list)
-        result = await blob_service.cleanup_blobs_for_fork(session_id, target_session_id)
-
-        assert tuple(result.deleted_ids) == (stale_snapshot[0].id,)
+        assert tuple(result.deleted_ids) == ()
         assert tuple(result.errors) == ()
 
     @pytest.mark.asyncio
@@ -2669,21 +2885,22 @@ class TestCopyBlobsForFork:
     ) -> None:
         await blob_service.create_blob(session_id, "first.csv", b"first", "text/csv")
         await blob_service.create_blob(session_id, "second.csv", b"second", "text/csv")
-        await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+        await self._copy(blob_service, session_id, target_session_id)
+        operation_id = self._fail_fork(blob_service, session_id, target_session_id)
         target = await blob_service.list_blobs(target_session_id, limit=None)
         failing_id = target[0].id
 
         orphan_counter = _FakeCounter()
         monkeypatch.setattr(blob_service_module, "_BLOB_COPY_FORK_ORPHAN_ROWS_COUNTER", orphan_counter)
-        original_delete = blob_service._delete_fork_child_blob
+        original_delete = blob_service._delete_blob_row_locked
 
-        async def _fail_one(source_session_id: UUID, target_session_id: UUID, blob_id: UUID) -> None:
-            if blob_id == failing_id:
+        def _fail_one(conn, *, row, blob_id_str: str) -> None:
+            if blob_id_str == str(failing_id):
                 raise OSError(5, "cleanup failed")
-            await original_delete(source_session_id, target_session_id, blob_id)
+            original_delete(conn, row=row, blob_id_str=blob_id_str)
 
-        monkeypatch.setattr(blob_service, "_delete_fork_child_blob", _fail_one)
-        result = await blob_service.cleanup_blobs_for_fork(session_id, target_session_id)
+        monkeypatch.setattr(blob_service, "_delete_blob_row_locked", _fail_one)
+        result = await blob_service.cleanup_blobs_for_fork(session_id, target_session_id, operation_id)
 
         assert type(result) is BlobForkCleanupResult
         assert set(result.deleted_ids) == {record.id for record in target if record.id != failing_id}
@@ -2705,7 +2922,7 @@ class TestCopyBlobsForFork:
         assert context is None
 
     @pytest.mark.asyncio
-    async def test_mid_copy_failure_with_successful_cleanup_leaves_no_target_rows_or_files(
+    async def test_mid_copy_failure_retains_partial_rows_for_exact_plan_takeover(
         self,
         blob_service: BlobServiceImpl,
         session_id: UUID,
@@ -2729,14 +2946,14 @@ class TestCopyBlobsForFork:
         monkeypatch.setattr(blob_service_module, "_persist_blob_content", _fail_second_target_copy)
 
         with pytest.raises(RuntimeError, match="mid-copy failure"):
-            await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+            await self._copy(blob_service, session_id, target_session_id)
 
-        assert await blob_service.list_blobs(target_session_id, limit=None) == []
+        assert len(await blob_service.list_blobs(target_session_id, limit=None)) == 1
         target_dir = tmp_path.resolve() / "blobs" / str(target_session_id)
-        assert not target_dir.exists() or list(target_dir.iterdir()) == []
+        assert len(list(target_dir.iterdir())) == 1
 
     @pytest.mark.asyncio
-    async def test_copy_failure_preserves_primary_exception_and_attaches_cleanup_notes(
+    async def test_copy_failure_does_not_invoke_automatic_cleanup(
         self,
         blob_service: BlobServiceImpl,
         session_id: UUID,
@@ -2746,7 +2963,6 @@ class TestCopyBlobsForFork:
         await blob_service.create_blob(session_id, "first.csv", b"first", "text/csv")
         await blob_service.create_blob(session_id, "second.csv", b"second", "text/csv")
         original_persist = blob_service_module._persist_blob_content
-        original_delete = blob_service._delete_fork_child_blob
         target_copy_calls = 0
 
         def _fail_second_target_copy(**kwargs):
@@ -2757,20 +2973,49 @@ class TestCopyBlobsForFork:
                     raise RuntimeError("primary copy failure")
             return original_persist(**kwargs)
 
-        async def _fail_cleanup(_source_session_id: UUID, _target_session_id: UUID, _blob_id: UUID) -> None:
-            raise OSError(5, "cleanup recovery failed")
+        async def _unexpected_cleanup(*_args, **_kwargs) -> None:
+            pytest.fail("copy service must leave cleanup ownership to the fail-CAS winner")
 
         monkeypatch.setattr(blob_service_module, "_persist_blob_content", _fail_second_target_copy)
-        monkeypatch.setattr(blob_service, "_delete_fork_child_blob", _fail_cleanup)
+        monkeypatch.setattr(blob_service, "cleanup_blobs_for_fork", _unexpected_cleanup)
 
         with pytest.raises(RuntimeError, match="primary copy failure") as exc_info:
-            await blob_service.copy_blobs_for_fork(session_id, target_session_id)
+            await self._copy(blob_service, session_id, target_session_id)
 
         assert type(exc_info.value) is RuntimeError
-        notes = getattr(exc_info.value, "__notes__", [])
-        assert any("RecoveryFailed[OSError]" in note for note in notes)
-        assert any(str(target_session_id) in note for note in notes)
-        monkeypatch.setattr(blob_service, "_delete_fork_child_blob", original_delete)
+        assert getattr(exc_info.value, "__notes__", []) == []
+        assert len(await blob_service.list_blobs(target_session_id, limit=None)) == 1
+
+    @pytest.mark.asyncio
+    async def test_fail_cleanup_wins_pause_before_persist_and_stale_writer_leaves_no_blob(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+        target_session_id: UUID,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        await blob_service.create_blob(session_id, "source.csv", b"source", "text/csv")
+        reached_persist = threading.Event()
+        release_persist = threading.Event()
+        original_persist = blob_service_module._persist_blob_content
+
+        def _pause_before_persist(**kwargs):
+            reached_persist.set()
+            if not release_persist.wait(timeout=5):
+                raise TimeoutError("test did not release paused fork writer")
+            return original_persist(**kwargs)
+
+        monkeypatch.setattr(blob_service_module, "_persist_blob_content", _pause_before_persist)
+        copy_task = asyncio.create_task(self._copy(blob_service, session_id, target_session_id))
+        assert await asyncio.to_thread(reached_persist.wait, 5)
+        operation_id = self._fail_fork(blob_service, session_id, target_session_id)
+        cleanup = await blob_service.cleanup_blobs_for_fork(session_id, target_session_id, operation_id)
+        assert cleanup.errors == ()
+        release_persist.set()
+
+        with pytest.raises(BlobForkFenceLostError):
+            await copy_task
+        assert await blob_service.list_blobs(target_session_id, limit=None) == []
 
 
 # ---------------------------------------------------------------------------

@@ -11,14 +11,15 @@ down instead of importing upward from L3.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import ClassVar, Literal, Protocol, get_args, runtime_checkable
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.freeze import freeze_fields
+from elspeth.contracts.hashing import canonical_json
 
 AllowedMimeType = Literal[
     "text/csv",
@@ -45,6 +46,70 @@ BLOB_STATUSES: frozenset[str] = frozenset(get_args(BlobStatus))
 FINALIZE_BLOB_STATUSES: frozenset[str] = frozenset(get_args(FinalizeBlobStatus))
 BLOB_CREATORS: frozenset[str] = frozenset(get_args(BlobCreator))
 BLOB_RUN_LINK_DIRECTIONS: frozenset[str] = frozenset(get_args(BlobRunLinkDirection))
+
+_FORK_BLOB_NAMESPACE = UUID("d9e427b4-6f14-59ba-9f45-2ad41a923fb7")
+_FORK_BLOB_SCHEMA = "elspeth.session-fork-blob.v1"
+
+
+def fork_blob_id(*, target_session_id: UUID, source_blob_id: UUID) -> UUID:
+    """Return the public deterministic identity for one forked blob."""
+    if type(target_session_id) is not UUID:
+        raise TypeError(f"target_session_id must be UUID, got {type(target_session_id).__name__}")
+    if type(source_blob_id) is not UUID:
+        raise TypeError(f"source_blob_id must be UUID, got {type(source_blob_id).__name__}")
+    return uuid5(
+        _FORK_BLOB_NAMESPACE,
+        canonical_json(
+            {
+                "schema": _FORK_BLOB_SCHEMA,
+                "target_session_id": str(target_session_id),
+                "source_blob_id": str(source_blob_id),
+            }
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class BlobForkPlanEntry:
+    """One exact source-to-child blob custody item frozen at fork staging."""
+
+    source_blob_id: UUID
+    target_blob_id: UUID
+    content_hash: str
+    size_bytes: int
+
+    def __post_init__(self) -> None:
+        if type(self.source_blob_id) is not UUID or type(self.target_blob_id) is not UUID:
+            raise TypeError("BlobForkPlanEntry ids must be exact UUID values")
+        if (
+            type(self.content_hash) is not str
+            or len(self.content_hash) != 64
+            or any(character not in "0123456789abcdef" for character in self.content_hash)
+        ):
+            raise ValueError("BlobForkPlanEntry.content_hash must be lowercase SHA-256")
+        if type(self.size_bytes) is not int or self.size_bytes < 0:
+            raise TypeError("BlobForkPlanEntry.size_bytes must be a non-negative exact integer")
+
+
+@dataclass(frozen=True, slots=True)
+class BlobForkWriteFence:
+    """Exact guided-operation lease authorizing staged-child blob writes."""
+
+    source_session_id: UUID
+    target_session_id: UUID
+    operation_id: str
+    lease_token: str
+    attempt: int
+
+    def __post_init__(self) -> None:
+        if type(self.source_session_id) is not UUID or type(self.target_session_id) is not UUID:
+            raise TypeError("BlobForkWriteFence session ids must be exact UUID values")
+        if type(self.operation_id) is not str or not 1 <= len(self.operation_id) <= 128:
+            raise ValueError("BlobForkWriteFence.operation_id must be a non-empty bounded string")
+        if type(self.lease_token) is not str or not 1 <= len(self.lease_token) <= 256:
+            raise ValueError("BlobForkWriteFence.lease_token must be a non-empty bounded string")
+        if type(self.attempt) is not int or self.attempt < 1:
+            raise TypeError("BlobForkWriteFence.attempt must be a positive exact integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +230,34 @@ class BlobPendingProposalError(BlobError):
         super().__init__(f"Blob {blob_id} is referenced by pending proposal {proposal_id} and cannot be deleted")
         self.blob_id = blob_id
         self.proposal_id = proposal_id
+
+    def __setattr__(self, name: str, value: object) -> None:
+        _guard_frozen_attr(self, name, value)
+
+
+class BlobInProgressForkError(BlobError):
+    """Raised when deletion would invalidate a frozen session-fork plan."""
+
+    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"blob_id", "operation_id"})
+
+    def __init__(self, blob_id: str, *, operation_id: str) -> None:
+        super().__init__(f"Blob {blob_id} is frozen by in-progress session fork {operation_id} and cannot be deleted")
+        self.blob_id = blob_id
+        self.operation_id = operation_id
+
+    def __setattr__(self, name: str, value: object) -> None:
+        _guard_frozen_attr(self, name, value)
+
+
+class BlobForkFenceLostError(BlobError):
+    """Raised before a staged-child blob write when its exact lease is no longer live."""
+
+    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"operation_id", "attempt"})
+
+    def __init__(self, operation_id: str, *, attempt: int) -> None:
+        super().__init__(f"Session fork {operation_id} attempt {attempt} no longer owns its blob-write fence")
+        self.operation_id = operation_id
+        self.attempt = attempt
 
     def __setattr__(self, name: str, value: object) -> None:
         _guard_frozen_attr(self, name, value)
@@ -390,11 +483,15 @@ class BlobServiceProtocol(Protocol):
         self,
         source_session_id: UUID,
         target_session_id: UUID,
+        plan: tuple[BlobForkPlanEntry, ...],
+        write_fence: BlobForkWriteFence,
+        *,
+        checkpoint: Callable[[], Awaitable[None]],
     ) -> dict[UUID, BlobRecord]:
-        """Copy all ready blobs from source to target session.
+        """Copy exactly the frozen plan from source to target session.
 
-        Returns old blob ID to new record mappings so callers can remap
-        source references in forked state.
+        ``checkpoint`` is awaited around each potentially long content copy so
+        the caller can renew and verify its guided-operation fence.
         """
         ...
 
@@ -402,6 +499,7 @@ class BlobServiceProtocol(Protocol):
         self,
         source_session_id: UUID,
         target_session_id: UUID,
+        operation_id: str,
     ) -> BlobForkCleanupResult:
         """Clean blobs from the named source's same-principal fork child."""
         ...

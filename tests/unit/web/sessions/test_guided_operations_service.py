@@ -25,6 +25,7 @@ from elspeth.web.sessions.models import (
     composition_states_table,
     guided_operation_events_table,
     guided_operations_table,
+    sessions_table,
 )
 from elspeth.web.sessions.protocol import (
     CompositionStateData,
@@ -658,14 +659,11 @@ async def test_terminal_replay_uses_closed_per_kind_locator(file_engine, kind: s
     session_id = await _create_session(service)
     state_id = _seed_state(file_engine, session_id=session_id)
     proposal_id = _seed_proposal(file_engine, session_id=session_id)
-    child_session_id = (
-        await service.create_session(
-            "alice",
-            "Fork result",
-            "local",
-            forked_from_session_id=session_id,
+    child_session_id = (await service.create_session("alice", "Fork result", "local")).id
+    with file_engine.begin() as conn:
+        conn.execute(
+            update(sessions_table).where(sessions_table.c.id == str(child_session_id)).values(forked_from_session_id=str(session_id))
         )
-    ).id
     result = {
         "state": GuidedCompositionStateResult(state_id=state_id),
         "state_with_proposal": GuidedCompositionStateResult(state_id=state_id, proposal_id=proposal_id),
@@ -710,19 +708,15 @@ async def test_fork_completion_rejects_target_without_exact_lineage_and_principa
         target = await service.create_session("alice", "Ordinary", "local")
     elif target_kind == "unrelated":
         other_parent = await service.create_session("alice", "Other parent", "local")
-        target = await service.create_session(
-            "alice",
-            "Wrong lineage",
-            "local",
-            forked_from_session_id=other_parent.id,
-        )
+        target = await service.create_session("alice", "Wrong lineage", "local")
+        with file_engine.begin() as conn:
+            conn.execute(
+                update(sessions_table).where(sessions_table.c.id == str(target.id)).values(forked_from_session_id=str(other_parent.id))
+            )
     else:
-        target = await service.create_session(
-            "bob",
-            "Cross-user child",
-            "local",
-            forked_from_session_id=parent_id,
-        )
+        target = await service.create_session("bob", "Cross-user child", "local")
+        with file_engine.begin() as conn:
+            conn.execute(update(sessions_table).where(sessions_table.c.id == str(target.id)).values(forked_from_session_id=str(parent_id)))
     claimed = await service.reserve_guided_operation(
         session_id=parent_id,
         operation_id=f"operation-fork-{target_kind}",

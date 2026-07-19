@@ -30,6 +30,8 @@ vi.mock("@/api/client", () => ({
   acceptCompositionProposal: vi.fn(),
   rejectCompositionProposal: vi.fn(),
   forkFromMessage: vi.fn(),
+  isForkCommittedResponseError: (error: unknown) =>
+    typeof error === "object" && error !== null && "committedSuccessResponse" in error,
   revertToVersion: vi.fn(),
   fetchStateVersions: vi.fn(),
   archiveSession: vi.fn(),
@@ -2008,11 +2010,14 @@ describe("sessionStore", () => {
       (apiClient.fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValue(
         makeCompositionState(1),
       );
+      (apiClient.fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValue(null);
       (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mockResolvedValue({
-        session,
-        messages: [],
-        composition_state: makeCompositionState(1),
+        session_id: "00000000-0000-4000-8000-000000000702",
       });
+      (apiClient.fetchSessions as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { ...session, id: "00000000-0000-4000-8000-000000000702" },
+      ]);
       (apiClient.getGuided as ReturnType<typeof vi.fn>).mockResolvedValue({
         guided_session: null,
         next_turn: null,
@@ -2022,7 +2027,7 @@ describe("sessionStore", () => {
 
       const seedRecovery = () =>
         useSessionStore.setState({
-          activeSessionId: "session-1",
+          activeSessionId: "00000000-0000-4000-8000-000000000701",
           recoveryError: makeRecoveryError(),
           recoveryStartedCompositionVersion: 1,
         });
@@ -2036,7 +2041,7 @@ describe("sessionStore", () => {
       expect(useSessionStore.getState().recoveryError).toBeNull();
 
       seedRecovery();
-      await useSessionStore.getState().archiveSession("session-1");
+      await useSessionStore.getState().archiveSession("00000000-0000-4000-8000-000000000701");
       expect(useSessionStore.getState().recoveryError).toBeNull();
 
       seedRecovery();
@@ -2722,6 +2727,283 @@ describe("sessionStore", () => {
       expect(enterGuided).not.toHaveBeenCalled();
       expect(useSessionStore.getState().activeSessionId).toBe("sess-existing");
       expect(useSessionStore.getState().error).toBeNull();
+    });
+  });
+
+  describe("session fork retry custody", () => {
+    const parentId = "00000000-0000-4000-8000-000000000701";
+    const childId = "00000000-0000-4000-8000-000000000702";
+    const child = {
+      id: childId,
+      title: "Fork",
+      created_at: "2026-07-19T00:00:00Z",
+      updated_at: "2026-07-19T00:00:00Z",
+      forked_from_session_id: parentId,
+    };
+
+    it("reuses the exact operation id after an ambiguous POST failure", async () => {
+      const apiClient = await import("@/api/client");
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+        .mockRejectedValueOnce(new TypeError("Failed to fetch"));
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).toBe(calls[1]?.[1]);
+      expect(calls[0]?.slice(2)).toEqual(["message-1", "edited"]);
+    });
+
+    it("reuses the exact operation id after a 5xx POST failure", async () => {
+      const apiClient = await import("@/api/client");
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce({ status: 503 })
+        .mockRejectedValueOnce({ status: 503 });
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).toBe(calls[1]?.[1]);
+    });
+
+    it("retires operation custody after a definitive 4xx failure", async () => {
+      const apiClient = await import("@/api/client");
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce({ status: 409 })
+        .mockRejectedValueOnce({ status: 409 });
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).not.toBe(calls[1]?.[1]);
+    });
+
+    it("keeps the operation id after locator success until authoritative child refresh succeeds", async () => {
+      const apiClient = await import("@/api/client");
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mockResolvedValue({
+        session_id: childId,
+      });
+      (apiClient.fetchSessions as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new TypeError("refresh failed"))
+        .mockResolvedValueOnce([child]);
+      (apiClient.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiClient.fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiClient.getGuided as ReturnType<typeof vi.fn>).mockResolvedValue({
+        guided_session: null,
+        next_turn: null,
+        terminal: null,
+        composition_state: null,
+      });
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      expect(useSessionStore.getState().activeSessionId).toBe(parentId);
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).toBe(calls[1]?.[1]);
+      expect(useSessionStore.getState().activeSessionId).toBe(childId);
+      expect(useSessionStore.getState().sessions).toEqual([child]);
+      expect(useSessionStore.getState().error).toBeNull();
+    });
+
+    it("keeps parent active and reuses the operation id when a child read fails after the locator", async () => {
+      const apiClient = await import("@/api/client");
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mockResolvedValue({ session_id: childId });
+      (apiClient.fetchSessions as ReturnType<typeof vi.fn>).mockResolvedValue([child]);
+      (apiClient.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchCompositionState as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new TypeError("child state failed"))
+        .mockResolvedValueOnce(null);
+      (apiClient.fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiClient.getGuided as ReturnType<typeof vi.fn>).mockResolvedValue({
+        guided_session: null, next_turn: null, terminal: null, composition_state: null,
+      });
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      expect(useSessionStore.getState().activeSessionId).toBe(parentId);
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).toBe(calls[1]?.[1]);
+      expect(useSessionStore.getState().activeSessionId).toBe(childId);
+    });
+
+    it("keeps parent active and reuses the operation id when guided hydration returns 503", async () => {
+      const apiClient = await import("@/api/client");
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mockResolvedValue({ session_id: childId });
+      (apiClient.fetchSessions as ReturnType<typeof vi.fn>).mockResolvedValue([child]);
+      (apiClient.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiClient.fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiClient.getGuided as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce({ status: 503 })
+        .mockResolvedValueOnce({ guided_session: null, next_turn: null, terminal: null, composition_state: null });
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      expect(useSessionStore.getState().activeSessionId).toBe(parentId);
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).toBe(calls[1]?.[1]);
+      expect(useSessionStore.getState().activeSessionId).toBe(childId);
+    });
+
+    it("retains retry custody for malformed 2xx fork responses", async () => {
+      const apiClient = await import("@/api/client");
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce({ committedSuccessResponse: true })
+        .mockRejectedValueOnce({ committedSuccessResponse: true });
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).toBe(calls[1]?.[1]);
+    });
+
+    it("publishes the child without clobbering intervening rename, create, or archive mutations", async () => {
+      const apiClient = await import("@/api/client");
+      const delayedSessions = deferred<Array<Record<string, unknown>>>();
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mockResolvedValue({ session_id: childId });
+      (apiClient.fetchSessions as ReturnType<typeof vi.fn>).mockReturnValue(delayedSessions.promise);
+      (apiClient.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiClient.fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiClient.getGuided as ReturnType<typeof vi.fn>).mockResolvedValue({
+        guided_session: null, next_turn: null, terminal: null, composition_state: null,
+      });
+      const renamedParent = { ...child, id: parentId, title: "Renamed while hydrating" };
+      const archivedElsewhere = { ...child, id: "session-archived", title: "Archived elsewhere" };
+      const createdElsewhere = { ...child, id: "session-created", title: "Created elsewhere" };
+      useSessionStore.setState({ activeSessionId: parentId, sessions: [renamedParent, archivedElsewhere] });
+
+      const pending = useSessionStore.getState().forkFromMessage("message-1", "edited");
+      useSessionStore.setState({
+        sessions: [{ ...renamedParent, title: "Newest title" }, createdElsewhere],
+      });
+      delayedSessions.resolve([
+        { ...renamedParent, title: "Stale parent title" },
+        archivedElsewhere,
+        child,
+      ]);
+      await pending;
+
+      const state = useSessionStore.getState();
+      expect(state.activeSessionId).toBe(childId);
+      expect(state.sessions.map((session) => session.id)).toEqual([
+        childId,
+        parentId,
+        "session-created",
+      ]);
+      expect(state.sessions[1]?.title).toBe("Newest title");
+    });
+
+    it("keeps a pre-locator user selection sovereign while publishing the committed child", async () => {
+      const apiClient = await import("@/api/client");
+      const delayedLocator = deferred<{ session_id: string }>();
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce(delayedLocator.promise)
+        .mockRejectedValueOnce(new TypeError("lost retry response"));
+      (apiClient.fetchSessions as ReturnType<typeof vi.fn>).mockResolvedValue([child]);
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      const forkPromise = useSessionStore.getState().forkFromMessage("message-1", "edited");
+      useSessionStore.setState({
+        activeSessionId: "00000000-0000-4000-8000-000000000703",
+        isComposing: false,
+        error: null,
+      });
+      delayedLocator.resolve({ session_id: childId });
+      await forkPromise;
+
+      expect(useSessionStore.getState().activeSessionId).toBe(
+        "00000000-0000-4000-8000-000000000703",
+      );
+      expect(useSessionStore.getState().sessions).toEqual([child]);
+      expect(useSessionStore.getState().error).toBeNull();
+      expect(apiClient.fetchMessages).not.toHaveBeenCalled();
+
+      useSessionStore.setState({ activeSessionId: parentId });
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).not.toBe(calls[1]?.[1]);
+    });
+
+    it("keeps a mid-hydration user selection sovereign while publishing the committed child", async () => {
+      const apiClient = await import("@/api/client");
+      const delayedMessages = deferred<ChatMessage[]>();
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce({ session_id: childId })
+        .mockRejectedValueOnce(new TypeError("second request"));
+      (apiClient.fetchSessions as ReturnType<typeof vi.fn>).mockResolvedValue([child]);
+      (apiClient.fetchMessages as ReturnType<typeof vi.fn>).mockReturnValue(delayedMessages.promise);
+      (apiClient.fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiClient.fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiClient.getGuided as ReturnType<typeof vi.fn>).mockResolvedValue({
+        guided_session: null, next_turn: null, terminal: null, composition_state: null,
+      });
+      useSessionStore.setState({ activeSessionId: parentId, sessions: [] });
+
+      const pending = useSessionStore.getState().forkFromMessage("message-1", "edited");
+      await vi.waitFor(() => expect(apiClient.fetchMessages).toHaveBeenCalledWith(childId));
+      useSessionStore.setState({
+        activeSessionId: "00000000-0000-4000-8000-000000000704",
+        messages: [{ id: "selected-message" } as ChatMessage],
+        isComposing: false,
+        error: null,
+      });
+      delayedMessages.resolve([]);
+      await pending;
+
+      const state = useSessionStore.getState();
+      expect(state.activeSessionId).toBe("00000000-0000-4000-8000-000000000704");
+      expect(state.messages).toEqual([{ id: "selected-message" }]);
+      expect(state.sessions).toEqual([child]);
+
+      useSessionStore.setState({ activeSessionId: parentId });
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).not.toBe(calls[1]?.[1]);
+    });
+
+    it("retains parent-scoped retry custody when child publication fails after a user switch", async () => {
+      const apiClient = await import("@/api/client");
+      const delayedLocator = deferred<{ session_id: string }>();
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce(delayedLocator.promise)
+        .mockRejectedValueOnce(new TypeError("lost retry response"));
+      (apiClient.fetchSessions as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new TypeError("publication failed"),
+      );
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      const pending = useSessionStore.getState().forkFromMessage("message-1", "edited");
+      useSessionStore.setState({ activeSessionId: "selected-session", error: null });
+      delayedLocator.resolve({ session_id: childId });
+      await pending;
+
+      expect(useSessionStore.getState().activeSessionId).toBe("selected-session");
+      expect(useSessionStore.getState().sessions).toEqual([]);
+      useSessionStore.setState({ activeSessionId: parentId });
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).toBe(calls[1]?.[1]);
     });
   });
 });

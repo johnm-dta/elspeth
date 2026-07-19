@@ -378,7 +378,7 @@ reports only `not_required` or `ready` and never guesses created versus reused.
   recomputable from exact arguments or already anchored in the state/checkpoint.
 - [x] Version the event payload explicitly. During Plan 02 readers accept the
   exact legacy creation shape or the new pipeline-metadata shape; pipeline
-  reconstruction requires the latter. After the epoch-29 recreation, every new
+  reconstruction requires the latter. After the epoch-30 recreation, every new
   canonical pipeline proposal must carry the new shape. Do not silently reinterpret
   an old event as current metadata.
 - [x] Implement a service helper that reconstructs and verifies a

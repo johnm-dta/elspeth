@@ -21,13 +21,14 @@ from uuid import UUID
 
 import structlog
 from opentelemetry import metrics
-from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, func, insert, select, update
+from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, exists, func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 
 from elspeth.contracts.auth import AuthProviderType
+from elspeth.contracts.blobs import BlobForkPlanEntry, fork_blob_id
 from elspeth.contracts.blobs_inline import ResolvedBlobContent
 from elspeth.contracts.composer_audit import ComposerToolStatus, PipelineDispatchAuditPayload
 from elspeth.contracts.composer_interpretation import (
@@ -39,7 +40,7 @@ from elspeth.contracts.composer_interpretation import (
 )
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
-from elspeth.contracts.hashing import stable_hash
+from elspeth.contracts.hashing import canonical_json, stable_hash
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.composer.pipeline_commit import PipelineDispatchAuditBinding
 from elspeth.web.composer.pipeline_planner import PipelinePlanResult
@@ -95,6 +96,7 @@ from elspeth.web.sessions.locking import (
 from elspeth.web.sessions.models import (
     audit_access_log_table,
     blob_inline_resolutions_table,
+    blobs_table,
     chat_messages_table,
     composer_completion_events_table,
     composition_proposals_table,
@@ -135,6 +137,7 @@ from elspeth.web.sessions.protocol import (
     CompositionStateRecord,
     GuidedAuditEvidence,
     GuidedCompositionStateResult,
+    GuidedForkSettlementCommand,
     GuidedOperationActive,
     GuidedOperationClaimed,
     GuidedOperationCompleted,
@@ -171,10 +174,12 @@ from elspeth.web.sessions.protocol import (
     RunAlreadyActiveError,
     RunEventRecord,
     RunRecord,
+    SessionGuidedOperationInProgressError,
     SessionNotFoundError,
     SessionRecord,
     SessionRunEventType,
     SessionRunStatus,
+    StagedForkSession,
     StaleComposeStateError,
     ToolCallIDMismatchError,
 )
@@ -1021,6 +1026,200 @@ def _strip_guided_profile_in_meta(
     )
     thawed["guided_session"] = forked_guided.to_dict()
     return thawed
+
+
+_FORK_BLOB_PLAN_SCHEMA = "session-fork-blob-plan.v1"
+
+
+def _fork_blob_plan_content(
+    *,
+    source_session_id: UUID,
+    child_session_id: UUID,
+    operation_id: str,
+    entries: tuple[BlobForkPlanEntry, ...],
+) -> str:
+    return canonical_json(
+        {
+            "schema": _FORK_BLOB_PLAN_SCHEMA,
+            "source_session_id": str(source_session_id),
+            "child_session_id": str(child_session_id),
+            "operation_id": operation_id,
+            "source_blobs": [
+                {
+                    "source_blob_id": str(entry.source_blob_id),
+                    "target_blob_id": str(entry.target_blob_id),
+                    "content_hash": entry.content_hash,
+                    "size_bytes": entry.size_bytes,
+                }
+                for entry in entries
+            ],
+        }
+    )
+
+
+def _fork_blob_plan_from_content(
+    content: str,
+    *,
+    expected_source_session_id: UUID,
+    expected_child_session_id: UUID,
+    expected_operation_id: str,
+) -> tuple[BlobForkPlanEntry, ...]:
+    try:
+        raw = json.loads(content)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise AuditIntegrityError("staged fork blob plan is not valid JSON") from exc
+    if type(raw) is not dict or set(raw) != {
+        "schema",
+        "source_session_id",
+        "child_session_id",
+        "operation_id",
+        "source_blobs",
+    }:
+        raise AuditIntegrityError("staged fork blob plan has malformed keys")
+    if (
+        raw["schema"] != _FORK_BLOB_PLAN_SCHEMA
+        or raw["source_session_id"] != str(expected_source_session_id)
+        or raw["child_session_id"] != str(expected_child_session_id)
+        or raw["operation_id"] != expected_operation_id
+    ):
+        raise AuditIntegrityError("staged fork blob plan has malformed custody binding")
+    source_blobs = raw["source_blobs"]
+    if type(source_blobs) is not list:
+        raise AuditIntegrityError("staged fork blob plan source_blobs must be a list")
+    entries: list[BlobForkPlanEntry] = []
+    for item in source_blobs:
+        if type(item) is not dict or set(item) != {"source_blob_id", "target_blob_id", "content_hash", "size_bytes"}:
+            raise AuditIntegrityError("staged fork blob plan entry has malformed keys")
+        try:
+            raw_source_blob_id = item["source_blob_id"]
+            raw_target_blob_id = item["target_blob_id"]
+            if type(raw_source_blob_id) is not str or type(raw_target_blob_id) is not str:
+                raise TypeError("fork blob ids must be exact strings")
+            source_blob_id = UUID(raw_source_blob_id)
+            target_blob_id = UUID(raw_target_blob_id)
+        except (TypeError, ValueError) as exc:
+            raise AuditIntegrityError("staged fork blob plan entry has malformed blob id") from exc
+        if str(source_blob_id) != raw_source_blob_id or str(target_blob_id) != raw_target_blob_id:
+            raise AuditIntegrityError("staged fork blob plan entry has non-canonical blob id")
+        if target_blob_id != fork_blob_id(
+            target_session_id=expected_child_session_id,
+            source_blob_id=source_blob_id,
+        ):
+            raise AuditIntegrityError("staged fork blob plan entry has a non-deterministic target blob id")
+        try:
+            entry = BlobForkPlanEntry(
+                source_blob_id=source_blob_id,
+                target_blob_id=target_blob_id,
+                content_hash=item["content_hash"],
+                size_bytes=item["size_bytes"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise AuditIntegrityError("staged fork blob plan entry is malformed") from exc
+        entries.append(entry)
+    result = tuple(entries)
+    if tuple(sorted(result, key=lambda entry: str(entry.source_blob_id))) != result:
+        raise AuditIntegrityError("staged fork blob plan entries are not in canonical id order")
+    if len({entry.source_blob_id for entry in result}) != len(result):
+        raise AuditIntegrityError("staged fork blob plan repeats a source blob id")
+    return result
+
+
+def _settlement_fork_blob_plan(
+    conn: Connection,
+    *,
+    parent_session_id: UUID,
+    child_session_id: UUID,
+    operation_id: str,
+) -> tuple[BlobForkPlanEntry, ...]:
+    candidates: list[tuple[BlobForkPlanEntry, ...]] = []
+    for row in conn.execute(
+        select(chat_messages_table.c.content).where(
+            chat_messages_table.c.session_id == str(child_session_id),
+            chat_messages_table.c.role == "audit",
+            chat_messages_table.c.writer_principal == "session_fork",
+        )
+    ).all():
+        try:
+            decoded = json.loads(row.content)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if (
+            type(decoded) is dict
+            and decoded.get("schema") == _FORK_BLOB_PLAN_SCHEMA
+            and decoded.get("child_session_id") == str(child_session_id)
+            and decoded.get("operation_id") == operation_id
+        ):
+            candidates.append(
+                _fork_blob_plan_from_content(
+                    row.content,
+                    expected_source_session_id=parent_session_id,
+                    expected_child_session_id=child_session_id,
+                    expected_operation_id=operation_id,
+                )
+            )
+    if len(candidates) != 1:
+        raise AuditIntegrityError("Guided fork settlement requires exactly one retained frozen blob plan")
+    return candidates[0]
+
+
+def _value_references_parent_blob(value: Any, forbidden: frozenset[str]) -> bool:
+    if type(value) is str:
+        return value in forbidden or (value.startswith("blob:") and value.removeprefix("blob:") in forbidden)
+    if isinstance(value, Mapping):
+        return any(_value_references_parent_blob(item, forbidden) for item in value.values())
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(_value_references_parent_blob(item, forbidden) for item in value)
+    return False
+
+
+def _verify_fork_settlement_blob_custody(
+    conn: Connection,
+    *,
+    parent_session_id: UUID,
+    child_session_id: UUID,
+    operation_id: str,
+    state_payload: Mapping[str, Any],
+) -> None:
+    plan = _settlement_fork_blob_plan(
+        conn,
+        parent_session_id=parent_session_id,
+        child_session_id=child_session_id,
+        operation_id=operation_id,
+    )
+    actual_rows = conn.execute(
+        select(
+            blobs_table.c.id,
+            blobs_table.c.status,
+            blobs_table.c.content_hash,
+            blobs_table.c.size_bytes,
+        ).where(blobs_table.c.session_id == str(child_session_id))
+    ).all()
+    actual = {row.id: row for row in actual_rows}
+    expected_ids = {str(entry.target_blob_id) for entry in plan}
+    if set(actual) != expected_ids:
+        raise AuditIntegrityError("Guided fork settlement child blob ids do not exactly match the frozen plan")
+    for entry in plan:
+        row = actual[str(entry.target_blob_id)]
+        if row.status != "ready" or row.content_hash != entry.content_hash or row.size_bytes != entry.size_bytes:
+            raise AuditIntegrityError("Guided fork settlement child blob status, hash, or size does not match the frozen plan")
+    planned_parent_rows = (
+        conn.execute(
+            select(blobs_table.c.id, blobs_table.c.storage_path).where(
+                blobs_table.c.session_id == str(parent_session_id),
+                blobs_table.c.id.in_([str(entry.source_blob_id) for entry in plan]),
+            )
+        ).all()
+        if plan
+        else []
+    )
+    if len(planned_parent_rows) != len(plan):
+        raise AuditIntegrityError("Guided fork settlement parent blob custody no longer matches the frozen plan")
+    parent_rows = conn.execute(
+        select(blobs_table.c.id, blobs_table.c.storage_path).where(blobs_table.c.session_id == str(parent_session_id))
+    ).all()
+    forbidden = frozenset(item for row in parent_rows for item in (row.id, row.storage_path))
+    if _value_references_parent_blob(state_payload, forbidden):
+        raise AuditIntegrityError("Guided fork settlement state retains parent blob custody")
 
 
 def _current_adr019_counter_subsets_hold(
@@ -2489,6 +2688,20 @@ class SessionServiceImpl:
         with process_session_lock(self._engine, session_id), self._engine.begin() as conn:
             yield conn
 
+    @contextlib.contextmanager
+    def _session_pair_locked_begin(self, first_session_id: str, second_session_id: str) -> Iterator[Connection]:
+        """Acquire two session locks in global UUID order before DB work."""
+        if first_session_id == second_session_id:
+            raise AuditIntegrityError("paired session transaction requires two distinct session ids")
+        ordered = tuple(sorted((first_session_id, second_session_id)))
+        with contextlib.ExitStack() as process_stack:
+            for session_id in ordered:
+                process_stack.enter_context(process_session_lock(self._engine, session_id))
+            with self._engine.begin() as conn, contextlib.ExitStack() as transaction_stack:
+                for session_id in ordered:
+                    transaction_stack.enter_context(self._session_write_lock(conn, session_id))
+                yield conn
+
     def _assert_session_write_lock_held(
         self,
         conn: Connection,
@@ -2797,6 +3010,11 @@ class SessionServiceImpl:
                 )
                 lease_expires_at = now + timedelta(seconds=lease_seconds)
                 if row is None:
+                    parent = conn.execute(
+                        select(sessions_table.c.id, sessions_table.c.archived_at).where(sessions_table.c.id == sid)
+                    ).one_or_none()
+                    if parent is None or parent.archived_at is not None:
+                        raise SessionNotFoundError(session_id)
                     lease_token = uuid.uuid4().hex
                     conn.execute(
                         insert(guided_operations_table).values(
@@ -2839,6 +3057,11 @@ class SessionServiceImpl:
                     return self._guided_terminal_outcome(row)
                 if row["status"] != "in_progress":
                     raise AuditIntegrityError("Tier 1: guided operation has an invalid status")
+                parent = conn.execute(
+                    select(sessions_table.c.id, sessions_table.c.archived_at).where(sessions_table.c.id == sid)
+                ).one_or_none()
+                if parent is None or parent.archived_at is not None:
+                    raise AuditIntegrityError("Tier 1: in-progress guided operation lost its active parent custody")
                 prior_expiry = self._guided_in_progress_expiry(row)
                 prior_attempt = row["attempt"]
                 if not isinstance(prior_attempt, int) or isinstance(prior_attempt, bool) or prior_attempt < 1:
@@ -3959,8 +4182,6 @@ class SessionServiceImpl:
         user_id: str,
         title: str,
         auth_provider_type: AuthProviderType,
-        forked_from_session_id: UUID | None = None,
-        forked_from_message_id: UUID | None = None,
     ) -> SessionRecord:
         """Create a new session and return its record."""
         session_id = uuid.uuid4()
@@ -3976,8 +4197,6 @@ class SessionServiceImpl:
                         title=title,
                         created_at=now,
                         updated_at=now,
-                        forked_from_session_id=str(forked_from_session_id) if forked_from_session_id else None,
-                        forked_from_message_id=str(forked_from_message_id) if forked_from_message_id else None,
                     )
                 )
 
@@ -3991,8 +4210,21 @@ class SessionServiceImpl:
             created_at=now,
             updated_at=now,
             archived_at=None,
-            forked_from_session_id=forked_from_session_id,
-            forked_from_message_id=forked_from_message_id,
+            forked_from_session_id=None,
+            forked_from_message_id=None,
+        )
+
+    def _row_to_session_record(self, row: Any) -> SessionRecord:
+        return SessionRecord(
+            id=UUID(row.id),
+            user_id=row.user_id,
+            auth_provider_type=row.auth_provider_type,
+            title=row.title,
+            created_at=self._ensure_utc(row.created_at),
+            updated_at=self._ensure_utc(row.updated_at),
+            archived_at=self._ensure_utc(row.archived_at) if row.archived_at else None,
+            forked_from_session_id=UUID(row.forked_from_session_id) if row.forked_from_session_id else None,
+            forked_from_message_id=UUID(row.forked_from_message_id) if row.forked_from_message_id else None,
         )
 
     async def get_session(self, session_id: UUID) -> SessionRecord:
@@ -4007,17 +4239,7 @@ class SessionServiceImpl:
         if row is None:
             raise SessionNotFoundError(session_id)
 
-        return SessionRecord(
-            id=UUID(row.id),
-            user_id=row.user_id,
-            auth_provider_type=row.auth_provider_type,
-            title=row.title,
-            created_at=self._ensure_utc(row.created_at),
-            updated_at=self._ensure_utc(row.updated_at),
-            archived_at=self._ensure_utc(row.archived_at) if row.archived_at else None,
-            forked_from_session_id=UUID(row.forked_from_session_id) if row.forked_from_session_id else None,
-            forked_from_message_id=UUID(row.forked_from_message_id) if row.forked_from_message_id else None,
-        )
+        return self._row_to_session_record(row)
 
     async def update_session_title(self, session_id: UUID, title: str) -> SessionRecord:
         """Update a session title and return the refreshed record."""
@@ -4059,6 +4281,16 @@ class SessionServiceImpl:
                 conditions: list[ColumnElement[bool]] = [
                     sessions_table.c.user_id == user_id,
                     sessions_table.c.auth_provider_type == auth_provider_type,
+                    or_(
+                        sessions_table.c.forked_from_session_id.is_(None),
+                        exists(
+                            select(guided_operations_table.c.operation_id).where(
+                                guided_operations_table.c.kind == "session_fork",
+                                guided_operations_table.c.status == "completed",
+                                guided_operations_table.c.result_session_id == sessions_table.c.id,
+                            )
+                        ),
+                    ),
                 ]
                 if not include_archived:
                     conditions.append(sessions_table.c.archived_at.is_(None))
@@ -4094,27 +4326,49 @@ class SessionServiceImpl:
         sid = str(session_id)
 
         def _sync() -> None:
-            blob_dir: Path | None = None
-            staged_blob_dir: Path | None = None
-            if self._data_dir is not None:
-                blob_dir = self._data_dir / "blobs" / sid
-                if blob_dir.is_dir():
-                    staged_blob_dir = self._data_dir / ".archive_quarantine" / sid
-                    staged_blob_dir.parent.mkdir(parents=True, exist_ok=True)
-                    if staged_blob_dir.exists():
-                        raise OSError(
-                            f"archive_session({sid}): quarantine path {staged_blob_dir} already exists. "
-                            "Manual cleanup of the stale staged blob directory is required before archive can proceed."
-                        )
-                    blob_dir.rename(staged_blob_dir)
+            blob_dir = self._data_dir / "blobs" / sid if self._data_dir is not None else None
+            staged_blob_dir = self._data_dir / ".archive_quarantine" / sid if self._data_dir is not None else None
 
             try:
-                with self._engine.begin() as conn:
+                with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                    active_guided_kind = conn.execute(
+                        select(guided_operations_table.c.kind)
+                        .where(
+                            guided_operations_table.c.session_id == sid,
+                            guided_operations_table.c.status == "in_progress",
+                        )
+                        .limit(1)
+                    ).scalar_one_or_none()
+                    if active_guided_kind is not None:
+                        raise SessionGuidedOperationInProgressError(
+                            session_id=session_id,
+                            kind=cast("GuidedOperationKind", active_guided_kind),
+                        )
                     durable_history_exists = (
                         conn.execute(select(runs_table.c.id).where(runs_table.c.session_id == sid).limit(1)).first() is not None
                         or conn.execute(
                             select(composer_completion_events_table.c.id)
                             .where(composer_completion_events_table.c.session_id == sid)
+                            .limit(1)
+                        ).first()
+                        is not None
+                        or conn.execute(
+                            select(guided_operations_table.c.operation_id)
+                            .where(
+                                guided_operations_table.c.session_id == sid,
+                                guided_operations_table.c.kind == "session_fork",
+                                guided_operations_table.c.status.in_(["completed", "failed"]),
+                            )
+                            .limit(1)
+                        ).first()
+                        is not None
+                        or conn.execute(
+                            select(guided_operations_table.c.operation_id)
+                            .where(
+                                guided_operations_table.c.kind == "session_fork",
+                                guided_operations_table.c.status == "completed",
+                                guided_operations_table.c.result_session_id == sid,
+                            )
                             .limit(1)
                         ).first()
                         is not None
@@ -4126,15 +4380,26 @@ class SessionServiceImpl:
                         )
                         if result.rowcount == 0:
                             raise SessionNotFoundError(session_id)
-                        if staged_blob_dir is not None and blob_dir is not None and staged_blob_dir.exists():
-                            blob_dir.parent.mkdir(parents=True, exist_ok=True)
-                            staged_blob_dir.rename(blob_dir)
                         return
+                    # The DB guard above and filesystem quarantine happen while
+                    # the same session lock is held. A fork cannot freeze plan
+                    # bytes and then race an archive that temporarily removes
+                    # them before the in-progress operation is observed.
+                    if blob_dir is not None and staged_blob_dir is not None and blob_dir.is_dir():
+                        staged_blob_dir.parent.mkdir(parents=True, exist_ok=True)
+                        if staged_blob_dir.exists():
+                            raise OSError(
+                                f"archive_session({sid}): quarantine path {staged_blob_dir} already exists. "
+                                "Manual cleanup of the stale staged blob directory is required before archive can proceed."
+                            )
+                        blob_dir.rename(staged_blob_dir)
                     # Session archival is the only supported transcript purge:
                     # delete the parent row and let the schema-owned cascades
                     # remove session-scoped children. Direct chat-message
                     # deletes are blocked by trg_chat_messages_no_delete.
-                    conn.execute(delete(sessions_table).where(sessions_table.c.id == sid))
+                    deleted = conn.execute(delete(sessions_table).where(sessions_table.c.id == sid))
+                    if deleted.rowcount != 1:
+                        raise SessionNotFoundError(session_id)
             except Exception as primary_exc:
                 if blob_dir is not None and staged_blob_dir is not None and staged_blob_dir.exists():
                     try:
@@ -6328,6 +6593,22 @@ class SessionServiceImpl:
             parent_assistant_id=parent_assistant_id,
         )
 
+    def _row_to_chat_message_record(self, row: Any) -> ChatMessageRecord:
+        return ChatMessageRecord(
+            id=UUID(row.id),
+            session_id=UUID(row.session_id),
+            role=row.role,
+            content=row.content,
+            raw_content=row.raw_content,
+            tool_calls=row.tool_calls,
+            created_at=self._ensure_utc(row.created_at),
+            sequence_no=row.sequence_no,
+            composition_state_id=UUID(row.composition_state_id) if row.composition_state_id else None,
+            writer_principal=row.writer_principal,
+            tool_call_id=row.tool_call_id,
+            parent_assistant_id=UUID(row.parent_assistant_id) if row.parent_assistant_id else None,
+        )
+
     async def get_messages(
         self,
         session_id: UUID,
@@ -6357,23 +6638,7 @@ class SessionServiceImpl:
 
         rows = await self._run_sync(_sync)
 
-        return [
-            ChatMessageRecord(
-                id=UUID(row.id),
-                session_id=UUID(row.session_id),
-                role=row.role,
-                content=row.content,
-                raw_content=row.raw_content,
-                tool_calls=row.tool_calls,
-                created_at=self._ensure_utc(row.created_at),
-                sequence_no=row.sequence_no,
-                composition_state_id=UUID(row.composition_state_id) if row.composition_state_id else None,
-                writer_principal=row.writer_principal,
-                tool_call_id=row.tool_call_id,
-                parent_assistant_id=UUID(row.parent_assistant_id) if row.parent_assistant_id else None,
-            )
-            for row in rows
-        ]
+        return [self._row_to_chat_message_record(row) for row in rows]
 
     def count_tool_responses_for_assistant(
         self,
@@ -8800,31 +9065,119 @@ class SessionServiceImpl:
 
         return cast(int, await self._run_sync(_sync))
 
-    async def fork_session(
+    def _load_staged_fork_on_connection(
         self,
-        source_session_id: UUID,
+        conn: Connection,
+        *,
+        parent_session_id: UUID,
+        child_session_id: UUID,
+        operation_id: str,
         fork_message_id: UUID,
         new_message_content: str,
-        user_id: str,
-        auth_provider_type: AuthProviderType,
-    ) -> tuple[SessionRecord, list[ChatMessageRecord], CompositionStateRecord | None]:
-        """Fork a session from a specific user message.
+    ) -> StagedForkSession:
+        parent_row = conn.execute(
+            select(sessions_table.c.user_id, sessions_table.c.auth_provider_type).where(sessions_table.c.id == str(parent_session_id))
+        ).one_or_none()
+        child_row = conn.execute(select(sessions_table).where(sessions_table.c.id == str(child_session_id))).one_or_none()
+        if (
+            child_row is None
+            or child_row.archived_at is None
+            or child_row.forked_from_session_id != str(parent_session_id)
+            or child_row.forked_from_message_id != str(fork_message_id)
+            or parent_row is None
+            or child_row.user_id != parent_row.user_id
+            or child_row.auth_provider_type != parent_row.auth_provider_type
+        ):
+            raise AuditIntegrityError("Guided fork bound child failed archived lineage, principal, or fork message validation")
 
-        All writes happen in a single transaction — if anything fails,
-        the entire fork is rolled back with no partial state.
+        rows = conn.execute(
+            select(chat_messages_table)
+            .where(chat_messages_table.c.session_id == str(child_session_id))
+            .order_by(chat_messages_table.c.sequence_no)
+        ).all()
+        plan_candidates: list[tuple[BlobForkPlanEntry, ...]] = []
+        public_messages: list[ChatMessageRecord] = []
+        for row in rows:
+            if row.role == "audit" and row.writer_principal == "session_fork":
+                try:
+                    decoded = json.loads(row.content)
+                except (TypeError, json.JSONDecodeError):
+                    decoded = None
+                if (
+                    type(decoded) is dict
+                    and decoded.get("schema") == _FORK_BLOB_PLAN_SCHEMA
+                    and decoded.get("child_session_id") == str(child_session_id)
+                    and decoded.get("operation_id") == operation_id
+                ):
+                    plan_candidates.append(
+                        _fork_blob_plan_from_content(
+                            row.content,
+                            expected_source_session_id=parent_session_id,
+                            expected_child_session_id=child_session_id,
+                            expected_operation_id=operation_id,
+                        )
+                    )
+            if row.role != "audit":
+                public_messages.append(self._row_to_chat_message_record(row))
+        if len(plan_candidates) != 1:
+            raise AuditIntegrityError("Guided fork bound child must retain exactly one strict blob plan audit row")
+        if not public_messages:
+            raise AuditIntegrityError("Guided fork bound child has no public messages")
+        edited_message = public_messages[-1]
+        if (
+            edited_message.role != "user"
+            or edited_message.writer_principal != "session_fork"
+            or edited_message.content != new_message_content
+        ):
+            raise AuditIntegrityError("Guided fork bound child edited message validation failed")
 
-        Creates a new session containing:
+        state_row = conn.execute(
+            select(composition_states_table)
+            .where(composition_states_table.c.session_id == str(child_session_id))
+            .order_by(composition_states_table.c.version.desc())
+            .limit(1)
+        ).one_or_none()
+        state = self._row_to_state_record(state_row) if state_row is not None else None
+        if edited_message.composition_state_id != (state.id if state is not None else None):
+            raise AuditIntegrityError("Guided fork bound child edited message does not reference its staged current state")
+        return StagedForkSession(
+            session=self._row_to_session_record(child_row),
+            messages=tuple(public_messages),
+            state=state,
+            blob_plan=plan_candidates[0],
+        )
+
+    async def fork_session(
+        self,
+        fence: GuidedOperationFence,
+        *,
+        fork_message_id: UUID,
+        new_message_content: str,
+    ) -> StagedForkSession:
+        """Stage or resume the exact child bound to a fenced fork operation.
+
+        Initial staging atomically creates and binds one archived child with a
+        frozen blob plan. Repeated calls under the current fence, including an
+        expired-lease takeover, reload that same hidden cohort. Blob realization
+        and final activation happen later at the route/coordinator settlement
+        boundary; a failed operation retains the archived child and plan as
+        integrity evidence while compensating only authorized partial blobs.
+
+        The staged child contains:
         1. Composition state copied from the fork message's pre-send state
         2. All messages BEFORE the fork message (with NULL state provenance)
         3. A synthetic system message noting the fork
         4. The new edited user message (provenance = copied state, not source)
 
-        Returns (new_session, new_messages, copied_state_or_none).
+        Returns a ``StagedForkSession`` with the child, public messages, copied
+        state when present, and the immutable plan used by later blob custody.
         """
         from elspeth.web.sessions.protocol import InvalidForkTargetError
 
         # Load source data (read-only, outside the write transaction)
-        source_session = await self.get_session(source_session_id)
+        if type(fence) is not GuidedOperationFence:
+            raise TypeError("fork_session fence must be an exact GuidedOperationFence")
+        source_session_id = fence.session_id
         source_messages = await self.get_messages(source_session_id, limit=None)
 
         # Find the fork message — must be a user message
@@ -8856,8 +9209,6 @@ class SessionServiceImpl:
         new_session_id = uuid.uuid4()
         new_session_id_str = str(new_session_id)
         now = self._now()
-        title = f"{source_session.title} (fork)"
-
         # Prepare state copy if needed
         copied_state_id = uuid.uuid4() if source_state_record is not None else None
         copied_state_id_str = str(copied_state_id) if copied_state_id else None
@@ -8968,49 +9319,100 @@ class SessionServiceImpl:
             }
         )
 
-        def _sync() -> int | None:
-            """Single atomic transaction for the entire fork."""
-            with self._session_process_locked_begin(new_session_id_str) as conn:
-                # 1. Create session
+        def _sync() -> StagedForkSession:
+            """Create+bind or reload exactly one child under the parent fence."""
+            parent_session_id_str = str(source_session_id)
+            with self._session_process_locked_begin(parent_session_id_str) as conn, self._session_write_lock(conn, parent_session_id_str):
+                operation, _database_now = self.require_guided_operation_fence_on_connection(conn, fence)
+                if operation["kind"] != "session_fork":
+                    raise AuditIntegrityError("fork_session fence is not bound to session_fork")
+                bound_child_id = operation["result_session_id"]
+                if bound_child_id is not None:
+                    if operation["originating_message_id"] != str(fork_message_id):
+                        raise AuditIntegrityError("Guided fork bound child has a different fork message binding")
+                    return self._load_staged_fork_on_connection(
+                        conn,
+                        parent_session_id=source_session_id,
+                        child_session_id=UUID(bound_child_id),
+                        operation_id=fence.operation_id,
+                        fork_message_id=fork_message_id,
+                        new_message_content=new_message_content,
+                    )
+
+                parent_row = conn.execute(select(sessions_table).where(sessions_table.c.id == parent_session_id_str)).one_or_none()
+                fork_row = conn.execute(
+                    select(chat_messages_table).where(
+                        chat_messages_table.c.id == str(fork_message_id),
+                        chat_messages_table.c.session_id == parent_session_id_str,
+                    )
+                ).one_or_none()
+                if parent_row is None or parent_row.archived_at is not None:
+                    raise AuditIntegrityError("Guided fork parent failed active custody validation")
+                if (
+                    fork_row is None
+                    or fork_row.role != "user"
+                    or fork_row.composition_state_id != (str(source_state_record.id) if source_state_record is not None else None)
+                ):
+                    raise AuditIntegrityError("Guided fork message changed before staging")
+
+                plan = tuple(
+                    BlobForkPlanEntry(
+                        source_blob_id=UUID(row.id),
+                        target_blob_id=fork_blob_id(
+                            target_session_id=new_session_id,
+                            source_blob_id=UUID(row.id),
+                        ),
+                        content_hash=row.content_hash,
+                        size_bytes=row.size_bytes,
+                    )
+                    for row in conn.execute(
+                        select(blobs_table.c.id, blobs_table.c.content_hash, blobs_table.c.size_bytes)
+                        .where(
+                            blobs_table.c.session_id == parent_session_id_str,
+                            blobs_table.c.status == "ready",
+                        )
+                        .order_by(blobs_table.c.id)
+                    ).all()
+                )
+                plan_message = {
+                    "id": str(uuid.uuid4()),
+                    "session_id": new_session_id_str,
+                    "role": "audit",
+                    "content": _fork_blob_plan_content(
+                        source_session_id=source_session_id,
+                        child_session_id=new_session_id,
+                        operation_id=fence.operation_id,
+                        entries=plan,
+                    ),
+                    "raw_content": None,
+                    "tool_calls": None,
+                    "tool_call_id": None,
+                    "parent_assistant_id": None,
+                    "writer_principal": "session_fork",
+                    "created_at": now,
+                    "composition_state_id": None,
+                }
+                rows_to_insert = [dict(record) for record in msg_records_data]
+                rows_to_insert.append(plan_message)
+
                 conn.execute(
                     insert(sessions_table).values(
                         id=new_session_id_str,
-                        user_id=user_id,
-                        auth_provider_type=auth_provider_type,
-                        title=title,
+                        user_id=parent_row.user_id,
+                        auth_provider_type=parent_row.auth_provider_type,
+                        title=f"{parent_row.title} (fork)",
                         created_at=now,
                         updated_at=now,
-                        forked_from_session_id=str(source_session_id),
+                        archived_at=now,
+                        forked_from_session_id=parent_session_id_str,
                         forked_from_message_id=str(fork_message_id),
                     )
                 )
-
-                # 2. Copy composition state + reserve chat sequence range +
-                # batch-insert chat rows. All under one ``_session_write_lock``
-                # context so state-version and chat-sequence allocation share
-                # the same SQLite/PostgreSQL serialization boundary. The new
-                # session id was minted seconds ago and no other writer can
-                # know it yet, so the lock is technically uncontended; we
-                # acquire it because the helpers' precondition contract
-                # requires it.
-                state_version: int | None = None
                 with self._session_write_lock(conn, new_session_id_str):
                     if source_state_record is not None and copied_state_id_str is not None:
                         self._insert_composition_state(
                             conn,
                             session_id=new_session_id_str,
-                            # B1: no ``version=`` kwarg. The helper allocates
-                            # ``COALESCE(MAX(version), 0) + 1`` under the held
-                            # lock. For a freshly minted session this is always
-                            # 1, but the contract is per-session monotonicity,
-                            # not "always 1" — so the literal ``state_version =
-                            # 1`` below is correct because of the freshness
-                            # invariant, not because the helper is hard-coded.
-                            #
-                            # State + lineage are bundled into a single
-                            # ``StatePayload`` rather than passed as two
-                            # separate kwargs (see ``_insert_composition_state``
-                            # docstring for rationale).
                             payload=StatePayload(
                                 data=CompositionStateData(
                                     sources=source_state_record.sources,
@@ -9025,113 +9427,190 @@ class SessionServiceImpl:
                                 derived_from_state_id=None,
                             ),
                             provenance="session_fork",
-                            created_at=now,  # cross-table timestamp consistency
+                            created_at=now,
                             state_id=copied_state_id_str,
                         )
-                        state_version = 1
+                    base_seq = self._reserve_sequence_range(conn, new_session_id_str, count=len(rows_to_insert))
+                    for sequence_offset, record in enumerate(rows_to_insert):
+                        record["sequence_no"] = base_seq + sequence_offset
+                    conn.execute(insert(chat_messages_table), rows_to_insert)
 
-                    # 3. Reserve the chat sequence range and assign sequence_no
-                    # to every row in list order before the batch insert.
-                    # ``msg_records_data`` already encodes the intended chat
-                    # ordering — copied messages first (in source order), then
-                    # the system fork notice, then the new user message.
-                    if msg_records_data:
-                        base_seq = self._reserve_sequence_range(conn, new_session_id_str, count=len(msg_records_data))
-                        for sequence_offset, record in enumerate(msg_records_data):
-                            record["sequence_no"] = base_seq + sequence_offset
-                        conn.execute(insert(chat_messages_table), msg_records_data)
-
-                return state_version
-
-        state_version = await self._run_sync(_sync)
-
-        # Build return records from the pre-computed data
-        new_session = SessionRecord(
-            id=new_session_id,
-            user_id=user_id,
-            auth_provider_type=auth_provider_type,
-            title=title,
-            created_at=now,
-            updated_at=now,
-            forked_from_session_id=source_session_id,
-            forked_from_message_id=fork_message_id,
-        )
-
-        # §14.6 backstop: copied ``role="audit"`` rows live in the DB for
-        # audit fidelity, but the fork response payload is the user-facing
-        # ``new_messages`` list and must exclude them. Filter at the
-        # response boundary; the underlying batch insert above still
-        # persisted them.
-        new_messages = [
-            ChatMessageRecord(
-                id=UUID(d["id"]),
-                session_id=new_session_id,
-                role=d["role"],
-                content=d["content"],
-                raw_content=d["raw_content"],
-                tool_calls=d["tool_calls"],
-                created_at=d["created_at"],
-                sequence_no=d["sequence_no"],
-                composition_state_id=UUID(d["composition_state_id"]) if d["composition_state_id"] else None,
-                writer_principal=d["writer_principal"],
-                tool_call_id=d["tool_call_id"],
-                parent_assistant_id=UUID(d["parent_assistant_id"]) if d["parent_assistant_id"] else None,
-            )
-            for d in msg_records_data
-            if d["role"] != "audit"
-        ]
-
-        copied_state: CompositionStateRecord | None = None
-        if source_state_record is not None and copied_state_id is not None and state_version is not None:
-            copied_state = CompositionStateRecord(
-                id=copied_state_id,
-                session_id=new_session_id,
-                version=state_version,
-                source=None,
-                sources=source_state_record.sources,
-                nodes=source_state_record.nodes,
-                edges=source_state_record.edges,
-                outputs=source_state_record.outputs,
-                metadata_=source_state_record.metadata_,
-                is_valid=source_state_record.is_valid,
-                validation_errors=source_state_record.validation_errors,
-                created_at=now,
-                derived_from_state_id=None,
-                composer_meta=forked_composer_meta,
-            )
-
-        return new_session, new_messages, copied_state
-
-    async def update_message_composition_state(
-        self,
-        message_id: UUID,
-        composition_state_id: UUID,
-    ) -> None:
-        """Re-point a message's composition_state_id to a different state.
-
-        Enforces same-session ownership: the target state must belong to
-        the same session as the message. Cross-session re-pointing is a
-        caller bug and raises RuntimeError.
-        """
-        mid = str(message_id)
-        csid = str(composition_state_id)
-
-        def _sync() -> None:
-            with self._engine.begin() as conn:
-                message_session_id = conn.execute(select(chat_messages_table.c.session_id).where(chat_messages_table.c.id == mid)).scalar()
-                if message_session_id is None:
-                    raise ValueError(f"Message {message_id} not found")
-
-                _assert_state_in_session(
+                self.bind_guided_operation_on_connection(
                     conn,
-                    state_id=csid,
-                    expected_session_id=str(message_session_id),
-                    caller="update_message_composition_state",
+                    fence,
+                    originating_message_id=fork_message_id,
+                    result_session_id=new_session_id,
+                )
+                return self._load_staged_fork_on_connection(
+                    conn,
+                    parent_session_id=source_session_id,
+                    child_session_id=new_session_id,
+                    operation_id=fence.operation_id,
+                    fork_message_id=fork_message_id,
+                    new_message_content=new_message_content,
                 )
 
-                conn.execute(update(chat_messages_table).where(chat_messages_table.c.id == mid).values(composition_state_id=csid))
+        return cast("StagedForkSession", await self._run_sync(_sync))
 
-        await self._run_sync(_sync)
+    async def settle_guided_fork_operation(
+        self,
+        command: GuidedForkSettlementCommand,
+    ) -> SessionRecord:
+        """Atomically rewrite, activate, and complete one staged fork."""
+        if type(command) is not GuidedForkSettlementCommand:
+            raise TypeError("settle_guided_fork_operation command must be exact")
+        parent_session_id_str = str(command.fence.session_id)
+        child_session_id_str = str(command.child_session_id)
+
+        def _sync() -> SessionRecord:
+            with self._session_pair_locked_begin(parent_session_id_str, child_session_id_str) as conn:
+                operation, now = self.require_guided_operation_fence_on_connection(conn, command.fence)
+                if operation["kind"] != "session_fork" or operation["result_session_id"] != child_session_id_str:
+                    raise AuditIntegrityError("Guided fork settlement child is not bound to the exact operation fence")
+                parent = conn.execute(
+                    select(
+                        sessions_table.c.user_id,
+                        sessions_table.c.auth_provider_type,
+                    ).where(sessions_table.c.id == parent_session_id_str)
+                ).one_or_none()
+                if parent is None:
+                    raise AuditIntegrityError("Guided fork settlement parent is missing")
+
+                child = conn.execute(
+                    select(sessions_table).where(sessions_table.c.id == child_session_id_str).with_for_update()
+                ).one_or_none()
+                if (
+                    child is None
+                    or child.archived_at is None
+                    or child.forked_from_session_id != parent_session_id_str
+                    or child.forked_from_message_id != operation["originating_message_id"]
+                    or child.user_id != parent.user_id
+                    or child.auth_provider_type != parent.auth_provider_type
+                ):
+                    raise AuditIntegrityError("Guided fork settlement child failed staged custody validation")
+
+                current_state_row = conn.execute(
+                    select(composition_states_table)
+                    .where(composition_states_table.c.session_id == child_session_id_str)
+                    .order_by(composition_states_table.c.version.desc())
+                    .limit(1)
+                    .with_for_update()
+                ).one_or_none()
+                current_state_id = UUID(current_state_row.id) if current_state_row is not None else None
+                if current_state_id != command.expected_current_state_id:
+                    raise AuditIntegrityError("Guided fork settlement staged current state changed")
+
+                edited_message = conn.execute(
+                    select(chat_messages_table)
+                    .where(
+                        chat_messages_table.c.id == str(command.edited_message_id),
+                        chat_messages_table.c.session_id == child_session_id_str,
+                    )
+                    .with_for_update()
+                ).one_or_none()
+                if (
+                    edited_message is None
+                    or edited_message.role != "user"
+                    or edited_message.writer_principal != "session_fork"
+                    or edited_message.composition_state_id
+                    != (str(command.expected_current_state_id) if command.expected_current_state_id is not None else None)
+                ):
+                    raise AuditIntegrityError("Guided fork settlement edited message failed staged custody validation")
+
+                if command.rewritten_state is not None:
+                    settlement_state: Mapping[str, Any] = {
+                        "sources": deep_thaw(command.rewritten_state.sources),
+                        "nodes": deep_thaw(command.rewritten_state.nodes),
+                        "edges": deep_thaw(command.rewritten_state.edges),
+                        "outputs": deep_thaw(command.rewritten_state.outputs),
+                        "metadata": deep_thaw(command.rewritten_state.metadata_),
+                        "composer_meta": deep_thaw(command.rewritten_state.composer_meta),
+                    }
+                elif current_state_row is not None:
+                    settlement_state = {
+                        "source": current_state_row.source,
+                        "sources": current_state_row.sources,
+                        "nodes": current_state_row.nodes,
+                        "edges": current_state_row.edges,
+                        "outputs": current_state_row.outputs,
+                        "metadata": current_state_row.metadata_,
+                        "composer_meta": current_state_row.composer_meta,
+                    }
+                else:
+                    settlement_state = {}
+                _verify_fork_settlement_blob_custody(
+                    conn,
+                    parent_session_id=command.fence.session_id,
+                    child_session_id=command.child_session_id,
+                    operation_id=command.fence.operation_id,
+                    state_payload=settlement_state,
+                )
+
+                if command.rewritten_state is not None and command.rewritten_state_id is not None:
+                    detached = conn.execute(
+                        update(chat_messages_table)
+                        .where(
+                            chat_messages_table.c.id == str(command.edited_message_id),
+                            chat_messages_table.c.session_id == child_session_id_str,
+                            chat_messages_table.c.composition_state_id == str(command.expected_current_state_id),
+                        )
+                        .values(composition_state_id=None)
+                    )
+                    if detached.rowcount != 1:
+                        raise AuditIntegrityError("Guided fork settlement lost edited-message compare-and-swap")
+                    removed_staged_state = conn.execute(
+                        delete(composition_states_table).where(
+                            composition_states_table.c.id == str(command.expected_current_state_id),
+                            composition_states_table.c.session_id == child_session_id_str,
+                        )
+                    )
+                    if removed_staged_state.rowcount != 1:
+                        raise AuditIntegrityError("Guided fork settlement could not remove superseded staged state")
+                    self._insert_composition_state(
+                        conn,
+                        session_id=child_session_id_str,
+                        payload=StatePayload(
+                            data=command.rewritten_state,
+                            derived_from_state_id=None,
+                        ),
+                        provenance="session_fork",
+                        created_at=now,
+                        state_id=str(command.rewritten_state_id),
+                    )
+                    repointed = conn.execute(
+                        update(chat_messages_table)
+                        .where(
+                            chat_messages_table.c.id == str(command.edited_message_id),
+                            chat_messages_table.c.session_id == child_session_id_str,
+                            chat_messages_table.c.composition_state_id.is_(None),
+                        )
+                        .values(composition_state_id=str(command.rewritten_state_id))
+                    )
+                    if repointed.rowcount != 1:
+                        raise AuditIntegrityError("Guided fork settlement could not bind replacement state")
+
+                activated = conn.execute(
+                    update(sessions_table)
+                    .where(
+                        sessions_table.c.id == child_session_id_str,
+                        sessions_table.c.archived_at.is_not(None),
+                    )
+                    .values(archived_at=None, updated_at=now)
+                )
+                if activated.rowcount != 1:
+                    raise AuditIntegrityError("Guided fork settlement lost archived-to-active compare-and-swap")
+
+                self.complete_guided_operation_on_connection(
+                    conn,
+                    command.fence,
+                    result=GuidedSessionResult(session_id=command.child_session_id),
+                    response_hash=command.response_hash,
+                    actor=command.actor,
+                )
+                settled_row = conn.execute(select(sessions_table).where(sessions_table.c.id == child_session_id_str)).one()
+                return self._row_to_session_record(settled_row)
+
+        return cast("SessionRecord", await self._run_sync(_sync))
 
     def _row_to_run_record(self, row: Any) -> RunRecord:
         """Convert a SQLAlchemy row to a RunRecord."""

@@ -301,7 +301,7 @@ class CompositionStateResponse(_StrictResponse):
     plugin_policy_findings: list[PluginPolicyFindingResponse] = pydantic.Field(default_factory=list)
 
 
-class ForkSessionRequest(_RequestModel):
+class ForkSessionRequest(_GuidedOperationRequest):
     """Request body for POST /api/sessions/{id}/fork."""
 
     from_message_id: UUID
@@ -329,11 +329,9 @@ class ForkSessionRequest(_RequestModel):
 
 
 class ForkSessionResponse(_StrictResponse):
-    """Response for POST /api/sessions/{id}/fork."""
+    """Immutable replay locator for POST /api/sessions/{id}/fork."""
 
-    session: SessionResponse
-    messages: list[ChatMessageResponse]
-    composition_state: CompositionStateResponse | None = None
+    session_id: UUID
 
 
 class RevertStateRequest(_GuidedOperationRequest):

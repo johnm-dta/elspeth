@@ -40,10 +40,11 @@ React/TypeScript, Vitest, Playwright, pytest, Hypothesis, LiteLLM.
 - Guided still persists `ChainProposal`, emits `PROPOSE_CHAIN`, asks a
   transform-only solver for `steps`, and materializes fixed `chain_in` / `main`
   wiring in `handle_step_3_chain_accept()`.
-- Current schema constants are `GUIDED_SESSION_SCHEMA_VERSION = 7`,
-  `SESSION_SCHEMA_EPOCH = 28`, and `SQLITE_SCHEMA_EPOCH = 28`. The guided
-  replacement therefore uses guided schema 8 and session epoch 29. It does not
-  change the landscape epoch.
+- Current schema constants are `GUIDED_SESSION_SCHEMA_VERSION = 8`,
+  `SESSION_SCHEMA_EPOCH = 30`, and `SQLITE_SCHEMA_EPOCH = 28`. Epoch 29
+  introduced the guided schema-8/durable-operation replacement; epoch 30 adds
+  the closed `quota_exceeded` failure code required for stable HTTP 413 fork
+  replay. The replacement does not change the landscape epoch.
 - The repository has live and tutorial workflow profiles; it has no deployed
   `guided_full` endpoint. The endpoint is implementation work, not an assumed
   existing surface.
@@ -59,7 +60,7 @@ React/TypeScript, Vitest, Playwright, pytest, Hypothesis, LiteLLM.
 
 1. Extend the existing proposal row and lifecycle; do not add a parallel
    proposal table, receipt sidecar, sink-effect operation-parent ledger, or
-   plan manifest. The epoch-29 guided-operation table is limited to durable
+   plan manifest. The guided-operation table introduced at epoch 29 is limited to durable
    HTTP retry identity and lease fencing for guided mutations: start, respond,
    chat, convert, re-enter, revert, and fork.
 2. Land a freeform validate-before-review slice first, without changing a
@@ -97,7 +98,7 @@ React/TypeScript, Vitest, Playwright, pytest, Hypothesis, LiteLLM.
    adds custody-safe `PipelineProposal`, one planner, and one commit adapter over
    the existing proposal service and acceptance route.
 3. [Plan 03 — Guided schema and protocol replacement](2026-07-17-composer-capability-parity-plan-03-guided-replacement.md)
-   performs the schema-8/session-29 cutover and deletes the transform-only
+   performs the schema-8/session-30 cutover and deletes the transform-only
    protocol atomically.
 4. [Plan 04 — Guided authoring and shared capability](2026-07-17-composer-capability-parity-plan-04-guided-authoring.md)
    adds plural reviewed facts, stage deferral/back-edit, guided-full, staged and

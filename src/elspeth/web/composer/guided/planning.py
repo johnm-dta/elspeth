@@ -26,16 +26,16 @@ from elspeth.web.composer.guided.protocol import (
     validate_payload,
     validate_proposal_catalog_refs,
 )
-from elspeth.web.composer.guided.state_machine import (
+from elspeth.web.composer.guided.stage_subjects import (
     ComponentCountConstraint,
     EdgeRouteConstraint,
     FailureRouteConstraint,
-    GuidedSession,
     OptionValueConstraint,
     PluginSubject,
     StableSubject,
     SubjectPresenceConstraint,
 )
+from elspeth.web.composer.guided.state_machine import GuidedSession
 from elspeth.web.composer.pipeline_proposal import PipelineProposal
 from elspeth.web.composer.state import CompositionState, NodeSpec
 

@@ -23,12 +23,11 @@ from elspeth.web.composer.guided.planning import (
 )
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SourceResolved
+from elspeth.web.composer.guided.stage_subjects import OptionValueConstraint, StableSubject
 from elspeth.web.composer.guided.state_machine import (
     DeferredStageIntent,
     GuidedProposalRef,
     GuidedSession,
-    OptionValueConstraint,
-    StableSubject,
     TurnRecord,
 )
 from elspeth.web.composer.pipeline_planner import PipelinePlanResult

@@ -19,12 +19,8 @@ from elspeth.web.composer.guided.planning import (
 )
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SourceResolved
-from elspeth.web.composer.guided.state_machine import (
-    DeferredStageIntent,
-    GuidedSession,
-    OptionValueConstraint,
-    StableSubject,
-)
+from elspeth.web.composer.guided.stage_subjects import OptionValueConstraint, StableSubject
+from elspeth.web.composer.guided.state_machine import DeferredStageIntent, GuidedSession
 from elspeth.web.composer.pipeline_planner import plan_pipeline, prepare_pipeline_plan
 from elspeth.web.composer.pipeline_proposal import PipelineProposal, PlannerSurface, PresentBase
 from elspeth.web.composer.state import CompositionState, PipelineMetadata

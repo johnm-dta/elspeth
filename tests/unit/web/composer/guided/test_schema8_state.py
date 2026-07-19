@@ -15,25 +15,27 @@ from uuid import UUID
 
 import pytest
 
-from elspeth.web.composer.guided import state_machine
+from elspeth.web.composer.guided import stage_subjects, state_machine
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, GuidedStep, TurnType
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SourceResolved
-from elspeth.web.composer.guided.state_machine import (
-    GUIDED_SESSION_SCHEMA_VERSION,
+from elspeth.web.composer.guided.stage_subjects import (
     ComponentCountConstraint,
-    ComponentTarget,
-    DeferredStageIntent,
     EdgeRouteConstraint,
     FailureRouteConstraint,
-    GuidedProposalRef,
-    GuidedSession,
     OptionValueConstraint,
     PluginSubject,
-    SinkIntent,
-    SourceIntent,
     StableSubject,
     SubjectPresenceConstraint,
+)
+from elspeth.web.composer.guided.state_machine import (
+    GUIDED_SESSION_SCHEMA_VERSION,
+    ComponentTarget,
+    DeferredStageIntent,
+    GuidedProposalRef,
+    GuidedSession,
+    SinkIntent,
+    SourceIntent,
     TerminalKind,
     TerminalReason,
     TerminalState,
@@ -1183,7 +1185,7 @@ def test_from_dict_rejects_total_deferred_constraints_before_child_decoder(monke
 
 
 def test_deferred_from_dict_rejects_constraint_count_before_child_decoder(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(state_machine, "_constraint_from_dict", lambda _value: pytest.fail("constraint decoder ran"))
+    monkeypatch.setattr(stage_subjects, "constraint_from_dict", lambda _value: pytest.fail("constraint decoder ran"))
     encoded = _deferred().to_dict()
     encoded["constraints"] = [{}] * 65
 
